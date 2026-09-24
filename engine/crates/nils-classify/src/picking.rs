@@ -788,6 +788,12 @@ pub struct PersonPick<'a> {
     pub why: &'a str,
     /// The principal, as every provenance writer names it.
     pub actor: &'a str,
+    /// The campaign the pick was closed from (record 42 S1's column).
+    pub campaign: Option<i64>,
+    /// The occasion the pick must be on, subject and day, when the caller
+    /// asked about one (a pick campaign's item): stacks of another are
+    /// refused before anything is written.
+    pub occasion: Option<(i64, &'a str)>,
 }
 
 /// What a person's pick wrote.
@@ -916,6 +922,13 @@ pub fn set_person(
     };
     let day = *day;
     let day_text = day.to_string();
+    if let Some((want_subject, want_day)) = p.occasion
+        && (want_subject != subject || want_day != day_text)
+    {
+        return Err(refused(format!(
+            "the stacks are on subject {subject}'s occasion of {day_text}, and the pick was asked of subject {want_subject}'s of {want_day}"
+        )));
+    }
     let now = now_iso();
     let scheme_json = serde_json::to_string(scheme).unwrap_or_default();
 
@@ -963,6 +976,7 @@ pub fn set_person(
                     "decided_at",
                     "why",
                     "parts",
+                    "campaign_id",
                 ],
             )
             .returning(&["id"]),
@@ -989,6 +1003,7 @@ pub fn set_person(
                     })
                     .to_string(),
                 ),
+                p.campaign.map_or(Param::Null, Param::Int),
             ]],
         )?;
         let id = written
@@ -1072,6 +1087,7 @@ pub fn set_person(
                 "pick": picked.id, "model": picked.model, "role": picked.role,
                 "subject_id": picked.subject_id, "stacks": picked.stacks,
                 "overruled": picked.overruled, "replaced": picked.replaced,
+                "campaign": p.campaign,
             }),
             policy: None,
             job_id: None,

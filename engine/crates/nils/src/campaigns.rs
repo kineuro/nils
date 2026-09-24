@@ -366,12 +366,18 @@ pub(crate) fn route(
             }
             ["api", "campaigns", which, "close"] if post => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let pack = doors
+                    .pack_dir
+                    .as_ref()
+                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
+                let picks = pick_writer(pack);
                 let closed = campaign::close(
                     registry,
                     &Close {
                         campaign: c.id,
                         who: principal,
                         author_kind: kind_of(caller),
+                        picks: Some(&picks),
                     },
                     &now,
                 )
@@ -1075,6 +1081,12 @@ pub(crate) enum CampaignCommand {
     /// nothing, as the campaign says; every answer stays
     Close {
         campaign: String,
+        /// Where the pack a pick campaign's picks are written under is
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// The pack a pick campaign's picks are written under
+        #[arg(long, default_value = "mri")]
+        pack: String,
         #[arg(long)]
         json: bool,
     },
@@ -1273,6 +1285,41 @@ fn require_export(registry: &mut Registry, dir: &Path) -> Result<(), Exit> {
         .map_err(|r| fail(r.message))
 }
 
+/// Record 42 S3's person-pick writer, through which a pick campaign closes:
+/// the pick the served pack declares for the role, on the occasion the item
+/// names under the campaign's scheme, left standing by a pick run, naming
+/// its campaign. Without a pack a pick cannot be written, and each item
+/// says so.
+fn pick_writer(
+    pack: Option<nils_pack::Pack>,
+) -> impl Fn(&mut Registry, &campaign::PickAsk<'_>) -> Result<i64, String> {
+    move |registry, ask| {
+        let Some(pack) = &pack else {
+            return Err("no pack is served, and a pick is the pack's".into());
+        };
+        let scheme = match ask.scheme {
+            "default" | "day" => nils_registry::session::Scheme::default(),
+            name => crate::stored_scheme(registry, name).map_err(|e| e.message)?,
+        };
+        nils_classify::picking::set_person(
+            registry,
+            pack,
+            &scheme,
+            &nils_classify::picking::PersonPick {
+                role: ask.role,
+                stacks: ask.stacks,
+                model: None,
+                why: ask.why,
+                actor: ask.who,
+                campaign: Some(ask.campaign),
+                occasion: Some((ask.subject_id, ask.session_day)),
+            },
+        )
+        .map(|picked| picked.id)
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// The values an axis takes in the pack, for an axis question or an import
 /// that names none.
 fn pack_values(home: &Home, dir: Option<PathBuf>, pack: &str, axis: &str) -> Vec<String> {
@@ -1444,17 +1491,24 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
         }
         CampaignCommand::Close {
             campaign: which,
+            pack_dir,
+            pack,
             json,
         } => {
             let mut registry = crate::open(home)?;
             let c = campaign::find(registry.store(), &which).map_err(cerr)?;
             let principal = who();
+            let pack = crate::pack_dir(home, pack_dir)
+                .ok()
+                .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
+            let picks = pick_writer(pack);
             let closed = campaign::close(
                 &mut registry,
                 &Close {
                     campaign: c.id,
                     who: &principal,
                     author_kind: "person",
+                    picks: Some(&picks),
                 },
                 &now,
             )

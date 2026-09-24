@@ -2994,6 +2994,8 @@ fn routed(
                     model: doc["pick"].as_str(),
                     why,
                     actor: principal,
+                    campaign: None,
+                    occasion: None,
                 },
             )
             .map_err(pick_err)?;

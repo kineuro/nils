@@ -6388,6 +6388,8 @@ fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
             model: args.pick.as_deref(),
             why: &args.why,
             actor: &who,
+            campaign: None,
+            occasion: None,
         },
     )
     .map_err(|e| match e {

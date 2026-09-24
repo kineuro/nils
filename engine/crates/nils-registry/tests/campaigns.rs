@@ -345,6 +345,7 @@ fn two_raters_share_the_items_and_an_expired_lease_returns_one() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(20),
         )
@@ -463,6 +464,7 @@ fn three_raters_who_disagree_give_one_adjudicator_and_one_decision() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(4),
         )
@@ -583,6 +585,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(5),
         )
@@ -673,6 +676,7 @@ fn a_campaign_adopts_review_items_and_one_campaign_asks_each() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(2),
         )
@@ -728,6 +732,7 @@ fn a_label_set_is_the_decisions_in_force_and_its_bytes_follow_them() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(9),
         )
@@ -981,6 +986,7 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(9),
         )
@@ -1028,7 +1034,12 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
 }
 
 /// S6: a pick question is asked of sessions and closes into a person's
-/// pick of the role, the standing pick withdrawn and never deleted.
+/// pick of the role through the writer the engine passes in, which is
+/// record 42 S3's (`nils_classify::picking::set_person`, proved in the
+/// engine's own tests): the close hands it the role, the scheme, the
+/// item's occasion, the stacks, the person and the campaign, and keeps the
+/// pick it answers on the item. A close without a writer, or an answer
+/// that is not a person's, leaves the item unresolved and says why.
 #[test]
 fn a_pick_campaign_closes_into_a_persons_pick() {
     for mut l in labs() {
@@ -1045,19 +1056,6 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
         })[0]
             .int(0)
             .unwrap();
-        // the automatic pick that stood before
-        let old = row(
-            reg.store(),
-            "pick",
-            &[
-                ("model", Param::from("main_qc")),
-                ("role", Param::from("t1w")),
-                ("subject_id", Param::Int(subject)),
-                ("session_day", Param::from("2026-01-01")),
-                ("scheme", Param::from("default")),
-                ("author_kind", Param::from("agent")),
-            ],
-        );
         let q = json!({"kind": "pick", "role": "t1w"});
         let adj = json!({"when": "never"});
         // a pick is asked of sessions, not stacks
@@ -1069,51 +1067,108 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
             .is_err(),
             "{name}"
         );
-        let c = campaign::create(
-            reg,
-            &new(
-                "main",
-                &q,
-                &adj,
-                Items::Sessions(vec![(subject, "2026-01-01".into())]),
-                1,
-                "pick",
-            ),
-        )
-        .unwrap();
-        assert_eq!(c.grain, "session", "{name}");
-        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
-            .unwrap()
+        let ask = |reg: &mut Registry, c: &str| {
+            let made = campaign::create(
+                reg,
+                &new(
+                    c,
+                    &q,
+                    &adj,
+                    Items::Sessions(vec![(subject, "2026-01-01".into())]),
+                    1,
+                    "pick",
+                ),
+            )
             .unwrap();
-        assert_eq!(a.item.subject_id, Some(subject), "{name}");
-        let pick = format!("{},{}", ids[1], ids[0]);
-        campaign::answer(reg, &give(a.assignment.id, "anna@lab", &pick), &at(1)).unwrap();
+            assert_eq!(made.grain, "session", "{name}");
+            let a = campaign::claim(reg, made.id, "anna@lab", Role::Rater, &at(0))
+                .unwrap()
+                .unwrap();
+            assert_eq!(a.item.subject_id, Some(subject), "{name}");
+            let pick = format!("{},{}", ids[1], ids[0]);
+            campaign::answer(reg, &give(a.assignment.id, "anna@lab", &pick), &at(1)).unwrap();
+            made
+        };
+
+        // without a writer the item stays unresolved, and says why
+        let c = ask(reg, "first");
         let closed = campaign::close(
             reg,
             &Close {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                picks: None,
             },
             &at(2),
         )
         .unwrap();
-        assert_eq!(closed.picks.len(), 1, "{name}");
-        let made = closed.picks[0];
-        let rows = select(reg, |s| {
-            format!(
-                "SELECT id, author_kind, actor, campaign_id, withdrawn_at IS NULL FROM {} ORDER BY id",
-                s.qualified("pick")
-            )
-        });
-        assert_eq!(rows.len(), 2, "{name}: the old pick stays");
-        assert_eq!(rows[0].int(0).unwrap(), old, "{name}");
-        assert_eq!(rows[0].int(4).unwrap(), 0, "{name}: withdrawn");
-        assert_eq!(rows[1].int(0).unwrap(), made, "{name}");
-        assert_eq!(rows[1].text(1).unwrap(), "person", "{name}");
-        assert_eq!(rows[1].text(2).unwrap(), "cleo@lab", "{name}");
-        assert_eq!(rows[1].opt_int(3).unwrap(), Some(c.id), "{name}");
-        assert_eq!(count(reg, "pick_stack", ""), 2, "{name}");
+        assert!(closed.picks.is_empty(), "{name}");
+        assert_eq!(closed.unresolved, 1, "{name}");
+        assert!(closed.refused[0].1.contains("pick writer"), "{name}");
+
+        // an agent closing is refused a pick: an agent's answer is evidence
+        let c = ask(reg, "second");
+        let never = |_: &mut Registry, _: &campaign::PickAsk<'_>| -> Result<i64, String> {
+            panic!("an agent's close never reaches the writer")
+        };
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "bot@lab",
+                author_kind: "agent",
+                picks: Some(&never),
+            },
+            &at(2),
+        )
+        .unwrap();
+        assert!(closed.picks.is_empty(), "{name}");
+        assert!(
+            closed.refused[0].1.contains("a pick is a person's"),
+            "{name}"
+        );
+
+        // with the writer, the pick it wrote is the item's
+        let c = ask(reg, "third");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let writer = |_: &mut Registry, a: &campaign::PickAsk<'_>| -> Result<i64, String> {
+            asked.borrow_mut().push(json!({
+                "role": a.role, "scheme": a.scheme, "subject": a.subject_id,
+                "day": a.session_day, "stacks": a.stacks, "who": a.who,
+                "why": a.why, "campaign": a.campaign,
+            }));
+            Ok(4242)
+        };
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+                picks: Some(&writer),
+            },
+            &at(2),
+        )
+        .unwrap();
+        assert_eq!(closed.picks, [4242], "{name}: {closed:?}");
+        assert_eq!(closed.resolved, 1, "{name}");
+        let asked = asked.into_inner();
+        assert_eq!(asked.len(), 1, "{name}");
+        let a = &asked[0];
+        assert_eq!(a["role"], "t1w", "{name}");
+        assert_eq!(a["scheme"], "default", "{name}");
+        assert_eq!(a["subject"], subject, "{name}");
+        assert_eq!(a["day"], "2026-01-01", "{name}");
+        let mut want = vec![ids[0], ids[1]];
+        want.sort_unstable();
+        assert_eq!(a["stacks"], json!(want), "{name}");
+        assert_eq!(a["who"], "cleo@lab", "{name}");
+        assert_eq!(a["campaign"], c.id, "{name}");
+        assert!(a["why"].as_str().unwrap().contains("third"), "{name}: {a}");
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.pick_id, Some(4242), "{name}");
+        assert_eq!(it.state, "resolved", "{name}");
         assert_eq!(
             count(reg, "decision", ""),
             0,

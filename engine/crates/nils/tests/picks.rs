@@ -368,3 +368,166 @@ fn a_person_s_pick_survives_a_run_on_postgres_too() {
     round(&registry(Some((dsn.clone(), schema.to_string()))));
     drop();
 }
+
+/// Record 42 S6 on S3: a pick campaign closes through the person's pick
+/// writer. A rater answers an occasion's stacks, the close writes a
+/// person's pick naming the campaign, the run's pick on the occasion stops
+/// applying and points at it, and the next `nils pick run` leaves it
+/// standing. A pick of stacks on another occasion than the item's is
+/// refused and the item stays unresolved.
+#[test]
+fn a_pick_campaign_closes_through_the_person_s_pick_writer() {
+    let home = registry(None);
+    let p = packs();
+    home.ok(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let doc = home.dir.path().join("visits.json");
+    std::fs::write(
+        &doc,
+        serde_json::json!({
+            "ast_version": 1,
+            "sets": {"visits": {"grain": "session"}},
+            "out": {"set": "visits", "level": "record"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    home.ok(&[
+        "ask",
+        "selections",
+        "save",
+        "--name",
+        "visits",
+        "--file",
+        doc.to_str().unwrap(),
+        "--pack-dir",
+        &p,
+    ]);
+    let made = home.json(&[
+        "campaign",
+        "create",
+        "visits",
+        "--pick-role",
+        "t1w",
+        "--select",
+        "selection:visits@1",
+        "--closes-into",
+        "pick",
+        "--pack-dir",
+        &p,
+        "--json",
+    ]);
+    let campaign = made["id"].as_i64().unwrap();
+    let items = made["items"].as_array().unwrap();
+    assert!(items.len() >= 2, "{made}");
+
+    // The run's standing pick on an occasion, by its subject and day.
+    let mut store = home.store();
+    let run_pick = |store: &mut Store, subject: i64, day: &str| -> Option<(i64, Vec<i64>)> {
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT id FROM {} WHERE role = 't1w' AND subject_id = {subject} \
+                     AND session_day = '{day}' AND withdrawn_at IS NULL",
+                    store.qualified("pick")
+                ),
+                &[],
+            )
+            .unwrap();
+        let id = rows.first()?.int(0).unwrap();
+        let stacks = store
+            .query(
+                &format!(
+                    "SELECT stack_id FROM {} WHERE pick_id = {id} ORDER BY stack_id",
+                    store.qualified("pick_stack")
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        Some((id, stacks))
+    };
+
+    // The first item: the rater picks the stacks the run picked, which is a
+    // person's judgement all the same. The second: stacks of the first
+    // item's occasion, which are not the second's.
+    let mut answered: Vec<(i64, i64, String, i64, Vec<i64>)> = Vec::new();
+    for _ in 0..2 {
+        let claimed = home.json(&["campaign", "claim", "visits", "--json"]);
+        let item = &claimed["item"];
+        let subject = item["subject_id"].as_i64().unwrap();
+        let day = item["session_day"].as_str().unwrap()[..10].to_string();
+        let a = claimed["assignment"]["id"].as_i64().unwrap();
+        let stacks = match answered.first() {
+            None => {
+                let (id, stacks) = run_pick(&mut store, subject, &day)
+                    .unwrap_or_else(|| panic!("a run's pick on {subject} {day}"));
+                answered.push((a, subject, day.clone(), id, stacks.clone()));
+                stacks
+            }
+            Some((_, first_subject, first_day, _, stacks)) => {
+                assert!(
+                    (*first_subject, first_day.as_str()) != (subject, day.as_str()),
+                    "two items of one occasion"
+                );
+                stacks.clone()
+            }
+        };
+        let value = stacks
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        home.ok(&["campaign", "answer", &a.to_string(), "--value", &value]);
+    }
+    let closed = home.json(&["campaign", "close", "visits", "--pack-dir", &p, "--json"]);
+    let picks = closed["picks"].as_array().unwrap();
+    assert_eq!(picks.len(), 1, "{closed}");
+    let person = picks[0].as_i64().unwrap();
+    let refused = closed["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{closed}");
+    assert!(
+        refused[0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("the pick was asked of subject"),
+        "{closed}"
+    );
+
+    // The pick is a person's, of the closer, naming its campaign, and the
+    // run's pick it overruled points at it.
+    let (_, subject, day, run, stacks) = &answered[0];
+    let row = store
+        .query(
+            &format!(
+                "SELECT author_kind, actor, campaign_id, why, subject_id FROM {} WHERE id = {person}",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(row[0].text(0).unwrap(), "person");
+    assert_eq!(row[0].text(1).unwrap(), "anna@ward-3");
+    assert_eq!(row[0].opt_int(2).unwrap(), Some(campaign));
+    assert!(row[0].text(3).unwrap().contains("campaign visits"));
+    assert_eq!(row[0].int(4).unwrap(), *subject);
+    let over = store
+        .query(
+            &format!(
+                "SELECT overruled_by, withdrawn_at IS NOT NULL FROM {} WHERE id = {run}",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(over[0].opt_int(0).unwrap(), Some(person));
+    assert_eq!(over[0].int(1).unwrap(), 1);
+    assert_eq!(run_pick(&mut store, *subject, day).unwrap().1, *stacks);
+
+    // A run leaves it standing.
+    let again = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert_eq!(again["standing"], 1, "{again}");
+    let still = run_pick(&mut store, *subject, day).unwrap();
+    assert_eq!(still.0, person, "the person's pick still applies");
+}

@@ -2393,13 +2393,50 @@ pub fn cohen_kappa(pairs: &[(String, String)]) -> Option<f64> {
 
 // ------------------------------------------------------------ closing
 
-/// Who closes, and what.
+/// A person's pick a pick campaign's item came to: the stacks that stand
+/// for the role on the item's occasion.
 #[derive(Debug, Clone)]
+pub struct PickAsk<'a> {
+    pub role: &'a str,
+    /// The scheme the campaign's occasions are under, by name.
+    pub scheme: &'a str,
+    pub subject_id: i64,
+    pub session_day: &'a str,
+    pub stacks: &'a [i64],
+    /// The person whose pick it is: the adjudicator, or the one closing.
+    pub who: &'a str,
+    /// Why, in words: the campaign, the item and its answers.
+    pub why: &'a str,
+    pub campaign: i64,
+}
+
+/// Writes a person's pick and answers its id, or why it was refused. It is
+/// record 42 S3's writer, the one `nils pick set` and `POST /api/picks`
+/// use, which a pick run leaves standing; it needs the served pack and the
+/// scheme, which this crate does not read, so the engine passes it in.
+pub type PickWriter<'a> = &'a dyn Fn(&mut Registry, &PickAsk<'_>) -> Result<i64, String>;
+
+/// Who closes, and what.
+#[derive(Clone)]
 pub struct Close<'a> {
     pub campaign: i64,
     /// The verified principal closing it, and the kind its actor is.
     pub who: &'a str,
     pub author_kind: &'a str,
+    /// The person's pick writer a pick campaign closes through; a pick
+    /// campaign closed without one leaves its items unresolved and says so.
+    pub picks: Option<PickWriter<'a>>,
+}
+
+impl std::fmt::Debug for Close<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Close")
+            .field("campaign", &self.campaign)
+            .field("who", &self.who)
+            .field("author_kind", &self.author_kind)
+            .field("picks", &self.picks.is_some())
+            .finish()
+    }
 }
 
 /// What a close did.
@@ -2550,23 +2587,46 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                     out.unresolved += 1;
                     continue;
                 };
-                let store = registry.store();
-                let pick = write_person_pick(
-                    store,
-                    &PersonPick {
+                // a pick is a person's (record 42 S3): an agent's or a
+                // model's answer is evidence, never a pick
+                if kind != "person" {
+                    out.refused.push((
+                        it.id,
+                        format!("a pick is a person's; {who} answered as a {kind}"),
+                    ));
+                    out.unresolved += 1;
+                    continue;
+                }
+                let Some(write) = cl.picks else {
+                    out.refused.push((
+                        it.id,
+                        "a pick campaign closes through the person's pick writer, and none was given"
+                            .into(),
+                    ));
+                    out.unresolved += 1;
+                    continue;
+                };
+                let pick = match write(
+                    registry,
+                    &PickAsk {
                         role,
                         scheme,
                         subject_id: subject,
                         session_day: day,
                         stacks: &stacks,
                         who: &who,
-                        author_kind: &kind,
-                        reference: &format!("campaign:{}", c.id),
-                        pack_version: c.pack_version.as_deref(),
-                        campaign: Some(c.id),
-                        now,
+                        why: &path,
+                        campaign: c.id,
                     },
-                )?;
+                ) {
+                    Ok(pick) => pick,
+                    Err(why) => {
+                        out.refused.push((it.id, why));
+                        out.unresolved += 1;
+                        continue;
+                    }
+                };
+                let store = registry.store();
                 finish_review_item(
                     store,
                     it.review_item_id,
@@ -2708,122 +2768,6 @@ fn finish_review_item(
         ],
     )?;
     Ok(())
-}
-
-/// A person's pick, as a pick campaign closes into it.
-#[derive(Debug, Clone)]
-pub struct PersonPick<'a> {
-    pub role: &'a str,
-    pub scheme: &'a str,
-    pub subject_id: i64,
-    pub session_day: &'a str,
-    pub stacks: &'a [i64],
-    pub who: &'a str,
-    pub author_kind: &'a str,
-    pub reference: &'a str,
-    pub pack_version: Option<&'a str>,
-    /// The campaign the pick was closed from (record 42 S1's column).
-    pub campaign: Option<i64>,
-    pub now: &'a str,
-}
-
-/// Write a pick a person made: the standing pick of the role and occasion
-/// is withdrawn, never deleted, and the new one names its stacks.
-///
-/// Record 42 S3 gives person picks their own writer and the rule that a
-/// pick run leaves them standing; this is the smallest writer a pick
-/// campaign needs, and the integration of the wave puts S3's in its place.
-pub fn write_person_pick(store: &mut Store, p: &PersonPick<'_>) -> Result<i64, StoreError> {
-    let d = store.dialect();
-    let (pack, version) = match p.pack_version.and_then(|v| v.split_once('@')) {
-        Some((name, v)) => (name.to_string(), v.to_string()),
-        None => (
-            String::new(),
-            p.pack_version.unwrap_or_default().to_string(),
-        ),
-    };
-    store.begin()?;
-    let done = (|| -> Result<i64, StoreError> {
-        store.execute(
-            &format!(
-                "UPDATE {} SET withdrawn_at = {} WHERE role = {} AND subject_id = {} AND session_day = {} \
-                 AND scheme = {} AND withdrawn_at IS NULL",
-                store.qualified("pick"),
-                d.param(1, Type::Timestamp),
-                d.param(2, Type::Text),
-                d.param(3, Type::Int),
-                d.param(4, Type::Date),
-                d.param(5, Type::Text)
-            ),
-            &[
-                Param::from(p.now),
-                Param::from(p.role),
-                Param::Int(p.subject_id),
-                Param::from(p.session_day),
-                Param::from(p.scheme),
-            ],
-        )?;
-        let id = store
-            .insert(
-                &Insert::new(
-                    table("pick"),
-                    &[
-                        "model",
-                        "role",
-                        "subject_id",
-                        "session_day",
-                        "scheme",
-                        "reference",
-                        "pack",
-                        "pack_version",
-                        "actor",
-                        "author_kind",
-                        "decided_at",
-                        "campaign_id",
-                    ],
-                )
-                .returning(&["id"]),
-                &[vec![
-                    Param::from("person"),
-                    Param::from(p.role),
-                    Param::Int(p.subject_id),
-                    Param::from(p.session_day),
-                    Param::from(p.scheme),
-                    Param::from(p.reference),
-                    Param::from(pack),
-                    Param::from(version),
-                    Param::from(p.who),
-                    Param::from(p.author_kind),
-                    Param::from(p.now),
-                    p.campaign.map_or(Param::Null, Param::Int),
-                ]],
-            )?
-            .first()
-            .ok_or_else(|| StoreError::Message("the pick was not written back".into()))?
-            .int(0)?;
-        let rows: Vec<Vec<Param>> = p
-            .stacks
-            .iter()
-            .map(|s| vec![Param::Int(id), Param::Int(*s)])
-            .collect();
-        if !rows.is_empty() {
-            store.insert(
-                &Insert::new(table("pick_stack"), &["pick_id", "stack_id"]),
-                &rows,
-            )?;
-        }
-        Ok(id)
-    })();
-    match done {
-        Ok(id) => {
-            store.commit()?;
-            Ok(id)
-        }
-        Err(e) => {
-            store.rollback().ok();
-            Err(e)
-        }
-    }
 }
 
 /// A campaign's counts by item state, and its assignments by state.
