@@ -1437,7 +1437,9 @@ fn routed(
         return r;
     }
     // record 43: the pipeline catalog and its runs
-    if let Some(r) = crate::pipelines::route(registry, get, &segs, query) {
+    // a run names a unit by its subject or session only at detail quasi
+    let quasi = caller.allowed(path, need, Detail::Quasi).is_ok();
+    if let Some(r) = crate::pipelines::route(registry, quasi, get, &segs, query) {
         return r;
     }
     // record 42: the campaigns and the label sets

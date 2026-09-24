@@ -1057,12 +1057,12 @@ paths:
   /api/pipeline-runs:
     get:
       summary: The pipeline runs, newest first (record 43 S2; nils pipeline runs)
-      description: "Each as GET /api/pipeline-runs/{id} answers it. pipelines:see."
+      description: "Each as GET /api/pipeline-runs/{id} answers it. pipelines:see. A caller below detail quasi reads no unit named by its subject or session (`sub-<s>`, `sub-<s>_ses-<t>`): each such text is null, in this listing and in one run."
       parameters:
         - {name: pipeline, in: query, schema: {type: integer}, description: One catalog entry's runs, by its id}
-        - {name: limit, in: query, schema: {type: integer, default: 50}}
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 500}, description: "At most 500 a page"}
       responses:
-        "200": {description: "{runs: [...]}"}
+        "200": {description: "{runs: [...], limit}"}
   /api/pipeline-runs/{id}:
     get:
       summary: One pipeline run (record 43 S2; nils pipeline runs <id>)

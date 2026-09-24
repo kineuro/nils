@@ -145,24 +145,59 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
 /// A run as the doors and `--json` answer it: the row, the pipeline by its
 /// label, and the derivatives it made.
 pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
-    let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
-    v["pipeline"] = json!(
-        rows::get(store, r.pipeline_id)
-            .ok()
-            .flatten()
-            .map(|p| p.label())
-    );
-    let made = derivative::list(
-        store,
-        &derivative::Filter {
-            run_id: Some(r.id),
-            limit: 10_000,
-            ..derivative::Filter::default()
-        },
-    )
-    .unwrap_or_default();
-    v["derivatives"] = json!(made.iter().map(|d| d.id).rev().collect::<Vec<_>>());
-    v
+    runs_docs(store, std::slice::from_ref(r))
+        .pop()
+        .unwrap_or(Value::Null)
+}
+
+/// The most runs one page of `GET /api/pipeline-runs` answers.
+pub(crate) const RUNS_PAGE_MAX: usize = 500;
+
+/// Many runs as the doors answer them, the catalog and the derivatives
+/// they made read once for all of them, not once per run.
+pub(crate) fn runs_docs(store: &mut Store, runs: &[Run]) -> Vec<Value> {
+    let labels: BTreeMap<i64, String> = rows::list(store)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.id, p.label()))
+        .collect();
+    let mut made: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for chunk in runs.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT run_id, id FROM {} WHERE run_id IN ({list}) ORDER BY id",
+            store.qualified("derivative")
+        );
+        for r in store.query(&sql, &[]).unwrap_or_default() {
+            if let (Ok(run), Ok(id)) = (r.int(0), r.int(1)) {
+                made.entry(run).or_default().push(id);
+            }
+        }
+    }
+    runs.iter()
+        .map(|r| {
+            let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
+            v["pipeline"] = json!(labels.get(&r.pipeline_id));
+            v["derivatives"] = json!(made.get(&r.id).cloned().unwrap_or_default());
+            v
+        })
+        .collect()
+}
+
+/// A run read at detail plain (record 43 review): a unit named by its
+/// subject or session, `sub-<s>` or `sub-<s>_ses-<t>`, is quasi
+/// identifying, so every such text in the document is left out.
+pub(crate) fn plain(v: &mut Value) {
+    match v {
+        Value::String(t) if t.starts_with("sub-") => *v = Value::Null,
+        Value::Array(items) => items.iter_mut().for_each(plain),
+        Value::Object(map) => map.values_mut().for_each(plain),
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------- the doors
@@ -170,6 +205,7 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
 /// The reading doors: the catalog and the runs.
 pub(crate) fn route(
     registry: &mut Registry,
+    quasi: bool,
     get: bool,
     segs: &[&str],
     query: &std::collections::HashMap<String, String>,
@@ -206,19 +242,26 @@ pub(crate) fn route(
                 .map_err(|_| Reply::error(400, "pipeline is a pipeline's id"))?;
             let limit = query
                 .get("limit")
-                .and_then(|l| l.parse().ok())
-                .unwrap_or(50);
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(50)
+                .clamp(1, RUNS_PAGE_MAX);
             let list = rows::runs(registry.store(), pipeline, limit).map_err(err)?;
-            let store = registry.store();
-            let docs: Vec<Value> = list.iter().map(|r| run_doc(store, r)).collect();
-            Ok(Reply::ok(json!({ "runs": docs })))
+            let mut docs = runs_docs(registry.store(), &list);
+            if !quasi {
+                docs.iter_mut().for_each(plain);
+            }
+            Ok(Reply::ok(json!({ "runs": docs, "limit": limit })))
         })(),
         ["api", "pipeline-runs", id] => (|| {
             let id = id_of(id, "run")?;
             let r = rows::run(registry.store(), id)
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
-            Ok(Reply::ok(run_doc(registry.store(), &r)))
+            let mut doc = run_doc(registry.store(), &r);
+            if !quasi {
+                plain(&mut doc);
+            }
+            Ok(Reply::ok(doc))
         })(),
         _ => return None,
     })
@@ -657,8 +700,7 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 ),
             };
             let list = rows::runs(registry.store(), pid, limit)?;
-            let store = registry.store();
-            let docs: Vec<Value> = list.iter().map(|r| run_doc(store, r)).collect();
+            let docs = runs_docs(registry.store(), &list);
             if json {
                 return print(&json!(docs));
             }
@@ -2587,4 +2629,29 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
     files.sort();
     files.dedup();
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The review of record 43: at detail plain a run's document says no
+    /// unit by its subject or session, and keeps everything else.
+    #[test]
+    fn a_run_read_at_plain_detail_names_no_subject_or_session() {
+        let mut doc = json!({
+            "id": 3, "selection": "selection:every@1",
+            "summary": {"refused_files": [
+                {"unit": "sub-P1_ses-20220115", "why": "not its own"},
+                {"unit": "stack-12", "why": "a link out"},
+                {"unit": "sub-P2", "file": "sub-P2/x.nii.gz"},
+            ], "units": {"total": 3}},
+        });
+        plain(&mut doc);
+        let refused = doc["summary"]["refused_files"].as_array().unwrap();
+        assert!(refused[0]["unit"].is_null() && refused[2]["file"].is_null());
+        assert_eq!(refused[1]["unit"], "stack-12");
+        assert_eq!(doc["summary"]["units"]["total"], 3);
+        assert!(!doc.to_string().contains("sub-"), "{doc}");
+    }
 }
