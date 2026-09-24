@@ -318,7 +318,11 @@ values:
   # A statistic over a series rather than an image of the person. Its
   # disposition and its exclusion are not changed here; what changes is that
   # it no longer wears the name of the images it was computed from.
+  # Except in an ASL series: Siemens writes `TTEST` on the perfusion-weighted
+  # image of its 3D GRASE ASL, the label-control subtraction that is the
+  # series' own image, and 249 of them were a t test map (record 41).
   TTestMap:
+    requires: {not: is_asl}
     detection:
       exclusive: is_ttest
   Magnitude:

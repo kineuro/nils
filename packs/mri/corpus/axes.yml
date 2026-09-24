@@ -489,3 +489,18 @@ cases:
       text_series_description: 'sag t2 tse'
     axes:
       modifier: FlowComp
+
+  # Siemens writes `TTEST` on the perfusion-weighted image of its 3D GRASE
+  # ASL, which is the label-control subtraction and the image an ASL series
+  # exists for: 249 of them were a t test map. The token keeps its meaning
+  # everywhere else.
+  - name: the perfusion-weighted image of an ASL series is not a t test map
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\ND\NORM\SUB\TTEST\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*tgse3d1_3000'
+      text_series_description: 'Ax ASL 3D_PERFUSION_WEIGHTED'
+    axes:
+      technique: ASL
+      construct: ND

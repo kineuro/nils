@@ -28,6 +28,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - The MRI pack takes flow compensation from ScanOptions and not from a name. `FlowComp` was also reached by the words `flow comp`, `flowcomp`, `gmn` and `fc` anywhere in the text, and a 3D SPACE protocol named `... 0 flow comp`, whose printout says flow compensation is off and whose ScanOptions hold only `PFP`, was FlowComp on 87 acquired stacks and 125 reformats of them. The value now comes from the scan option `FC` alone; a site whose names are reliable can still give it words through an overlay (`lists.modifier.FlowComp`).
 
+- The perfusion-weighted image of an ASL series is not a t test map. Siemens writes `TTEST` in the image type of the perfusion-weighted image its 3D GRASE ASL computes, which is the label-control subtraction and the image the series exists for, and the construct `TTestMap` took the token at its word on 249 of them. `TTestMap` now requires the stack not to be ASL, and means a statistic over a series everywhere else.
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
