@@ -19,8 +19,8 @@
     },
     "kind": {
       "type": "string",
-      "description": "What was found: `<area>.<what>` for an engine stage, `<axis>:<reason>` for the classifier.",
-      "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|conflict|decision|vote))$"
+      "description": "What was found: `<area>.<what>` for an engine stage, `<axis>:<reason>` for the classifier, and `pipeline:qc` for a unit of a pipeline run no one can vouch for (record 43).",
+      "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|conflict|decision|vote)|pipeline:qc)$"
     },
     "scope": {
       "type": "string",

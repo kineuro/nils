@@ -51,6 +51,22 @@
 # 3; closing a campaign writes decisions, so it needs review:work beside
 # campaigns:work.
 #
+# Pipelines make derivatives (record 43 S1 to S3, added to version 7 in
+# place before its release). GET /api/pipelines and GET /api/pipelines/{id}
+# read the catalog of descriptors (contracts/job/v1), each image pinned by
+# its registry manifest digest; GET /api/pipeline-runs and GET
+# /api/pipeline-runs/{id} read the runs, each with every parameter, the
+# runtime and its version, the host and the device, the handle it pinned,
+# its summary and the derivatives it made; all under pipelines:see. A run is
+# queued at POST /api/jobs as `run <pipeline> --select selection:<name>@<v>`
+# under pipelines:work at detail quasi, since a pipeline reads pixels, and
+# runs as a job of kind pipeline, one at a time. capabilities.pipelines says
+# whether a runtime and a working place turn them on. The derivative doors
+# list a run's files (`run`), and the content door answers, when asked with
+# transport=share and the place declares a share path, with the path a
+# client that shares the volume reads the file at, gated and audited as the
+# bytes are.
+#
 # Nothing else changes, and a caller pinned to version 6 meets the engine it
 # already knew, but for the model's answer, which version 6 took as free
 # text.
@@ -86,7 +102,7 @@ paths:
   /api/capabilities:
     get:
       summary: What this engine is and speaks (C26)
-      description: "The engine version, the contract versions (openapi, review-item, pack, suite, mcp and, since version 7, model), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name), and since version 7 `derivatives` (record 42: `enabled`, the working `place` new derivatives go into or the `reason` they are off, the `kinds`, the `grants` and `upload_max_bytes`)."
+      description: "The engine version, the contract versions (openapi, review-item, pack, suite, mcp and, since version 7, model), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name), and since version 7 `derivatives` (record 42: `enabled`, the working `place` new derivatives go into or the `reason` they are off, the `kinds`, the `grants` and `upload_max_bytes`) and `pipelines` (record 43: `enabled`, true when a container runtime and a working place are both there, else false with the `reason` that names the cure and never an error; the `runtime` taken with its `name`, `version` and `gpu`, the operator's `choice` (auto, podman, apptainer, docker or off; docker is taken only when chosen), what was `looked` at, the `place`, the count of `pipelines` in the catalog, the job `contract`, and the `grants`: see, run and the detail a run needs, quasi)."
       responses:
         "200": {description: The capabilities}
   /api/summary:
@@ -129,7 +145,7 @@ paths:
         "200": {description: "{count, jobs}"}
     post:
       summary: Queue a command line for a worker, and the chain after it (nils jobs enqueue, nils bring-in)
-      description: "The one way anything heavy runs through the door. The verb is one the door queues, such as digest, classify, release or backup; the caller's principal is carried to the verb. A tree is named as `@name` or `@name/relative`, a registered ingest location and never a path; since version 5 `@name` is the pseudonymised tree of the dataset declared on the location (the folder itself where none is), and `@name/originals` its originals, which a digest is refused (409) since the registry never points at an identified file. A backup goes to the directory --backup-dir names and takes --keep N and --rehearse; verify NAME checks one archive there and takes --rehearse. The door needs one of the verbs' grants, and each verb its own: digest, linkage import and ask promote data:work (linkage with detail sensitive; a promotion is a cohort act since version 5, record 26 section 9); pseudonymize data:work with detail sensitive, since it reads the identifiers it replaces; release and handover release:work; ask run query:work; fingerprint, classify, pick, session and pyramid pipelines:work; backup and verify database:work. Another ask verb is refused. The job records the caller's detail, actor and grants, and a job that records no detail runs as plain. A digest of a dataset that feeds a cohort (record 26 section 8) opens a membership interval for every subject it creates, and for one it meets whose membership is not open, with source digest and the batch, makes the cohort on first use, and its report carries `joined {cohort, subjects, met, created}` or the refusal. Record 26: `pseudonymize @dataset [--name N] [--workers N] [--held] [--dry-run]` rewrites an identified dataset's originals into its pseudonymised tree and takes the dataset as `@name` alone; a dataset that arrives de-identified or coded is refused by the verb, since its tree is read in place. `then` is the chain: command lines, each a list of words (or one string), queued one after another by the worker when the job before ends done, under the principal, grants and detail recorded on this job; each is a verb the door queues (never bring-in), located now, its grant checked when its turn comes, and a step the recorded grants do not reach ends the chain with `result.chain_stopped {step, why}` on the job before it. `bring-in @dataset [--name N] [--pack P]` is sugar: it queues `pseudonymize @dataset --name N` with `then` digest, fingerprint and classify for an identified dataset, or `digest @dataset --name N` with the rest for any other; the digest shares the pseudonymise step's name, so the two batches are one thread; the name is the dataset's and today's date unless given. When the identified dataset's pseudonymised tree holds files no digest has read (a v0 folder on its first bring-in), a digest of the tree goes first, so the pseudonymiser knows what the tree holds and leaves an original the tree holds already as it is; the answer and the job's `args.digest_first {files, why}` say so. Record 26 section 1: `place originals <dataset> --vault --into PLACE --why TEXT` and `place originals <dataset> --purge --why TEXT` are queued too, under data:work at detail sensitive, as a job of kind `originals`, which is the kind the queued row carries as well as the running one; no other place verb is queued, and the dataset is named by its name, so `@name` stays a name for this verb as it does for pseudonymize."
+      description: "The one way anything heavy runs through the door. The verb is one the door queues, such as digest, classify, release or backup; the caller's principal is carried to the verb. A tree is named as `@name` or `@name/relative`, a registered ingest location and never a path; since version 5 `@name` is the pseudonymised tree of the dataset declared on the location (the folder itself where none is), and `@name/originals` its originals, which a digest is refused (409) since the registry never points at an identified file. A backup goes to the directory --backup-dir names and takes --keep N and --rehearse; verify NAME checks one archive there and takes --rehearse. The door needs one of the verbs' grants, and each verb its own: digest, linkage import and ask promote data:work (linkage with detail sensitive; a promotion is a cohort act since version 5, record 26 section 9); pseudonymize data:work with detail sensitive, since it reads the identifiers it replaces; release and handover release:work; since version 7, run pipelines:work with detail quasi (record 43: `run <pipeline> --select selection:<name>@<v> | --handle <id> [--param id=value]... [--model <model>]... [--labels <id>] [--pack <pack>]` and no other flag, the deployment's pack directory added, a job of kind `pipeline`); ask run query:work; fingerprint, classify, pick, session and pyramid pipelines:work; backup and verify database:work. Another ask verb is refused. The job records the caller's detail, actor and grants, and a job that records no detail runs as plain. A digest of a dataset that feeds a cohort (record 26 section 8) opens a membership interval for every subject it creates, and for one it meets whose membership is not open, with source digest and the batch, makes the cohort on first use, and its report carries `joined {cohort, subjects, met, created}` or the refusal. Record 26: `pseudonymize @dataset [--name N] [--workers N] [--held] [--dry-run]` rewrites an identified dataset's originals into its pseudonymised tree and takes the dataset as `@name` alone; a dataset that arrives de-identified or coded is refused by the verb, since its tree is read in place. `then` is the chain: command lines, each a list of words (or one string), queued one after another by the worker when the job before ends done, under the principal, grants and detail recorded on this job; each is a verb the door queues (never bring-in), located now, its grant checked when its turn comes, and a step the recorded grants do not reach ends the chain with `result.chain_stopped {step, why}` on the job before it. `bring-in @dataset [--name N] [--pack P]` is sugar: it queues `pseudonymize @dataset --name N` with `then` digest, fingerprint and classify for an identified dataset, or `digest @dataset --name N` with the rest for any other; the digest shares the pseudonymise step's name, so the two batches are one thread; the name is the dataset's and today's date unless given. When the identified dataset's pseudonymised tree holds files no digest has read (a v0 folder on its first bring-in), a digest of the tree goes first, so the pseudonymiser knows what the tree holds and leaves an original the tree holds already as it is; the answer and the job's `args.digest_first {files, why}` say so. Record 26 section 1: `place originals <dataset> --vault --into PLACE --why TEXT` and `place originals <dataset> --purge --why TEXT` are queued too, under data:work at detail sensitive, as a job of kind `originals`, which is the kind the queued row carries as well as the running one; no other place verb is queued, and the dataset is named by its name, so `@name` stays a name for this verb as it does for pseudonymize."
       requestBody:
         content:
           application/json:
@@ -971,6 +987,7 @@ paths:
         - {name: kind, in: query, schema: {type: string, enum: [mask, embedding, pyramid, output]}}
         - {name: stack, in: query, schema: {type: integer}}
         - {name: subject, in: query, schema: {type: integer}}
+        - {name: run, in: query, schema: {type: integer}, description: "Only the files one pipeline run made (record 43)"}
         - {name: limit, in: query, schema: {type: integer, default: 50}}
       responses:
         "200": {description: "{derivatives: [...], capability}"}
@@ -998,21 +1015,56 @@ paths:
   /api/derivatives/{id}:
     get:
       summary: One derivative (record 42 S4; nils derivative show)
-      description: "{id, kind, scope (stack, series, session or subject), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from)}. pipelines:see."
+      description: "{id, kind, scope (stack, series, session or subject), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from), transports (record 43 S3: `door`, and `share` where its place declares a share path)}. `run_id` names the pipeline run that made it, null for an upload. pipelines:see."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: The derivative}
         "404": {description: No such derivative}
   /api/derivatives/{id}/content:
     get:
-      summary: The bytes of one derivative (record 42 S4)
-      description: "The file as it was registered, streamed with its media type, `X-Nils-Sha256` and `X-Nils-Derivative`. A mask or an embedding is drawn from the pixels, so the door needs pipelines:see at detail quasi. A file whose size is not the registered one is not served. Every read is audited as derivative.read, which does not move the epoch."
-      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      summary: The bytes of one derivative, or the shared path it is read at (record 42 S4, record 43 S3)
+      description: "The file as it was registered, streamed with its media type, `X-Nils-Sha256` and `X-Nils-Derivative`. A mask or an embedding is drawn from the pixels, so the door needs pipelines:see at detail quasi. A file whose size is not the registered one is not served. Every read is audited as derivative.read, which does not move the epoch. Since record 43, `transport=share` asks for the second transport of decision record 07: where the derivative's place declares `share` in its guarantees (the absolute path at which the clients that share its volume reach the place's folder), the answer is JSON, `{derivative, transport: share, path, place, bytes, sha256, media_type}`, the path the file is read at on that volume, gated and audited as the bytes are, with `transport` in the audit row's details; where it declares none the door answers 409 and the bytes come by `transport=door`, the default."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: transport, in: query, schema: {type: string, enum: [door, share], default: door}}
       responses:
-        "200": {description: The file}
+        "200": {description: "The file, or with transport=share the path it is read at"}
+        "400": {description: A transport that is neither door nor share}
         "403": {description: No pipelines:see, or below detail quasi}
         "404": {description: No such derivative, or its file is not in its place}
-        "409": {description: "Its place is retired or gone, or its file is not the size registered"}
+        "409": {description: "Its place is retired or gone, its file is not the size registered, or transport=share and its place declares no share path"}
+  /api/pipelines:
+    get:
+      summary: The pipeline catalog, by name and version (record 43 S1; nils pipeline list)
+      description: "Each entry: {id, name, version, label (name@version), tool_version, description, image (repository@sha256:<hex>), image_digest, descriptor_digest (sha256 of the descriptor's canonical JSON), layout (bids or stacks), level (participant, session or stack), state (active or retired), added_by, added_at, parameters, inputs, outputs, needs, proposals, descriptor}, the descriptor as contracts/job/v1 fixes it and as it was added, and `capability` as the capabilities answer it. An entry is added at the command line, nils pipeline add <nils.job.yml>, which refuses an image not pinned by its registry manifest digest; the same descriptor added again is the version it is, and one that differs is its name's next. pipelines:see."
+      responses:
+        "200": {description: "{pipelines: [...], capability}"}
+        "403": {description: No pipelines:see}
+  /api/pipelines/{id}:
+    get:
+      summary: One catalog entry (record 43 S1; nils pipeline show)
+      description: "As GET /api/pipelines lists it. pipelines:see."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The entry}
+        "404": {description: No such pipeline}
+  /api/pipeline-runs:
+    get:
+      summary: The pipeline runs, newest first (record 43 S2; nils pipeline runs)
+      description: "Each as GET /api/pipeline-runs/{id} answers it. pipelines:see."
+      parameters:
+        - {name: pipeline, in: query, schema: {type: integer}, description: One catalog entry's runs, by its id}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200": {description: "{runs: [...]}"}
+  /api/pipeline-runs/{id}:
+    get:
+      summary: One pipeline run (record 43 S2; nils pipeline runs <id>)
+      description: "{id, pipeline_id, pipeline (name@version), job_id, handle_id (the frozen stacks, pinned while the run's row stands), selection, params (every declared parameter, the defaults filled), runtime (podman, apptainer or docker), runtime_version, host, device (cpu or cuda:<name>), model_ids, label_set_id, status (running, done, failed or cancelled), started_at, finished_at, exit_code, results_digest (sha256 of the units, their statuses and their files' digests, and the proposals, as the engine read them, so a re-run that makes the same files has the same digest), place_id, output (the run's folder under the working place, derivatives/<pipeline>/<run>), input_release_id (the release that materialised a bids input, with the picks applied), summary {units {total, succeeded, failed, skipped, unreported}, derivatives, bytes, refused_files, review_items (the pipeline:qc items raised), proposals {given, declared, undeclared, taken}, results, log}, principal, actor, error, derivatives (the ids of the files it made)}. pipelines:see."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The run}
+        "404": {description: No such run}
   /api/instances/{stack}/manifest:
     get:
       summary: The viewing pyramid of a stack, as its manifest (Wave 5 section 12.7)

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/stacks.schema.json",
+  "title": "NILS stack manifest (stacks.json)",
+  "description": "The stacks layout (record 43 S2, D9's stack work unit for tools that read DICOM): /input/stacks.json names every stack of the run with its files, each under a source place mounted read-only at /source/<n>, and for a multi-frame file the frames that are the stack's. Nothing is converted or copied.",
+  "type": "object",
+  "required": ["contract", "sources", "stacks"],
+  "properties": {
+    "contract": {"const": "job/v1"},
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "mount"],
+        "properties": {
+          "id": {"type": "integer", "minimum": 0},
+          "mount": {"type": "string", "pattern": "^/source/[0-9]+$"}
+        }
+      }
+    },
+    "stacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["unit", "stack_id", "files"],
+        "properties": {
+          "unit": {"type": "string", "pattern": "^stack-[0-9]+$"},
+          "stack_id": {"type": "integer"},
+          "series_id": {"type": "integer"},
+          "subject_id": {"type": "integer"},
+          "modality": {"type": "string"},
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["source", "path"],
+              "properties": {
+                "source": {"type": "integer", "minimum": 0},
+                "path": {"type": "string", "description": "Under the source's mount"},
+                "frames": {"type": ["string", "null"], "description": "The frames of a multi-frame file that are this stack's, from one, as ranges (1-4,9); null for every frame"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

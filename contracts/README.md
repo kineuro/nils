@@ -11,7 +11,7 @@ The interfaces that other software builds against, each versioned on its own and
 | `mcp/` | The MCP door: the operation vocabulary, the input schema per operation, the result envelope, the paging and the policy fields (D11, C43) | version 2 (grants in the policy fields); version 1 written down in Wave 4c slice A7 |
 | `suite/` | The vocabulary every part of the suite shares: grants and detail, headers and the actor, purposes and content classes, the deployment capabilities document, app registry entries, station manifests, the trust list and grants vectors (Wave 4c §4.5) | version 3 (the model registry's and the campaigns' grants, record 42 R7); version 2 (grants and detail in place of entitlements); version 1 written down in Wave 4c slice A7 |
 | `model/` | A registered model's card and lifecycle, the one idea the engine's model registry and Kvasir's both keep (D15, record 42) | version 1 |
-| `job/` | `nils.job.yml`, the pipeline job description (D9) | Wave 5 |
+| `job/` | `nils.job.yml`, the pipeline descriptor, with the stack manifest a runner hands a pipeline and the results it hands back (D9, record 43) | version 1 (record 43 S1) |
 | `federation/` | The request, disclosure and result protocol between nodes (D27, D28, D29) | Wave 7 |
 
 Each contract directory carries a `VERSION` file and one `vN/` directory per

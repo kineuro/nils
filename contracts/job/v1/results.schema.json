@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/results.schema.json",
+  "title": "NILS pipeline results (results.json)",
+  "description": "What a pipeline says of its run, written to /output/results.json: v0's schema (one entry per work unit with its status, its files, its metrics and its error) and the proposals. The runner reads it after the container exits. Without it, a unit whose declared outputs are found is taken as succeeded and one whose outputs are missing as failed. A unit the file does not name is failed, a file outside /output is refused, and a proposal is passed to the review spine, never written as a fact.",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": "1"},
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["unit_id", "status"],
+        "properties": {
+          "unit_id": {"type": "string", "description": "The unit as /inputs/manifest.json names it: sub-<s>, sub-<s>_ses-<t> or stack-<id> (sub-<s>/ses-<t> and a bare stack id are read too)"},
+          "work_unit": {"enum": ["participant", "session", "stack", "subject"]},
+          "status": {"enum": ["succeeded", "failed", "skipped"]},
+          "derivatives": {"type": "array", "items": {"type": "string", "pattern": "^[^/]"}, "description": "Files under /output, relative to it"},
+          "metrics": {"type": "object"},
+          "error": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["axis", "value"],
+        "properties": {
+          "axis": {"type": "string"},
+          "value": {"type": "string"},
+          "stack_id": {"type": "integer"},
+          "unit_id": {"type": "string"},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      },
+      "description": "Values the pipeline proposes, each on an axis the descriptor declares; the review spine takes them as a model's evidence (record 43 S6)"
+    }
+  }
+}
