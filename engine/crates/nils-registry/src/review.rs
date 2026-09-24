@@ -25,13 +25,16 @@ use crate::time::now_iso;
 pub enum Error {
     Store(StoreError),
     Refused(String),
+    /// The caller's kind may not do it: an agent or a model where only a
+    /// person may.
+    Forbidden(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Refused(m) => f.write_str(m),
+            Error::Refused(m) | Error::Forbidden(m) => f.write_str(m),
         }
     }
 }
@@ -444,7 +447,9 @@ pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, E
         .as_ref()
         .map(|m| m.version.as_str())
         .or(a.author.version);
-    let stage = a.stage || model.is_some();
+    // R6, which the wave's ruling extends to agents: a model's or an
+    // agent's answer is evidence until a person commits it.
+    let stage = a.stage || model.is_some() || a.author.kind != "person";
     let epoch = registry.meta().epoch;
     let store = registry.store();
     let Some(it) = item(store, a.item)? else {
@@ -1155,16 +1160,44 @@ pub fn commit_where(
 /// Withdraw a decision, staged or committed: it stops being in force, the
 /// items it closed open again, and nothing is deleted.
 pub fn withdraw(registry: &mut Registry, decision: i64, who: &str) -> Result<i64, Error> {
+    withdraw_as(registry, decision, who, "person")
+}
+
+/// [`withdraw`], by a withdrawer of a kind. A person withdraws any
+/// decision; an agent or a model only one its own principal staged as that
+/// kind and nobody put in force, since a decision in force is a person's
+/// to take back (record 42 R6).
+pub fn withdraw_as(
+    registry: &mut Registry,
+    decision: i64,
+    who: &str,
+    kind: &str,
+) -> Result<i64, Error> {
     let store = registry.store();
     let d = store.dialect();
     let sql = format!(
-        "SELECT withdrawn_at IS NOT NULL FROM {} WHERE id = {}",
+        "SELECT withdrawn_at IS NOT NULL, author_kind, actor, \
+         CASE WHEN staged_at IS NOT NULL AND committed_at IS NULL THEN 1 ELSE 0 END \
+         FROM {} WHERE id = {}",
         store.qualified("decision"),
         d.param(1, Type::Int)
     );
     let Some(row) = store.query_opt(&sql, &[Param::Int(decision)])? else {
         return Err(refused(format!("no decision {decision}")));
     };
+    if kind != "person" {
+        let own = row.opt_text(1)? == Some(kind) && row.opt_text(2)? == Some(who);
+        if !own || row.int(3)? != 1 {
+            return Err(Error::Forbidden(format!(
+                "decision {decision} is withdrawn by a person; {} withdraws only a decision it staged itself and nobody put in force",
+                if kind == "agent" {
+                    "an agent"
+                } else {
+                    "a model"
+                }
+            )));
+        }
+    }
     if row.int(0)? != 0 {
         return Err(refused(format!("decision {decision} is already withdrawn")));
     }

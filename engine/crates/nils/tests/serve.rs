@@ -4979,7 +4979,7 @@ fn the_author_of_a_decision_is_the_verified_actor_never_the_body() {
     let home = registry();
     let server = Server::start(
         &home,
-        9,
+        10,
         &[
             "--auth",
             "oidc",
@@ -5117,6 +5117,14 @@ fn the_author_of_a_decision_is_the_verified_actor_never_the_body() {
         Some(&person),
     );
     assert_eq!(status, 200, "{doc}");
+    // the agent does not withdraw the person's decision in force
+    let (status, doc) = server.request(
+        "POST",
+        &format!("/api/decisions/{staged}/withdraw"),
+        None,
+        Some(&agent),
+    );
+    assert_eq!(status, 403, "{doc}");
     server.finish();
 
     let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
@@ -5133,10 +5141,13 @@ fn the_author_of_a_decision_is_the_verified_actor_never_the_body() {
     assert_eq!(rows[0].text(0).unwrap(), a.to_string());
     assert_eq!(rows[0].text(1).unwrap(), "agent");
     assert_eq!(rows[0].text(2).unwrap(), "bo@id.example.org");
-    assert_eq!(rows[0].text(3).unwrap(), "bo@id.example.org");
+    // an agent's answer is staged, whatever the body asked (R6)
+    assert_eq!(rows[0].opt_text(3).unwrap(), None, "not committed");
+    assert_eq!(rows[0].int(5).unwrap(), 1, "staged");
     assert_eq!(detail(0)["name"], "ask-help");
     assert_eq!(rows[1].text(0).unwrap(), b.to_string());
     assert_eq!(rows[1].text(1).unwrap(), "agent", "never a person");
+    assert_eq!(rows[1].int(5).unwrap(), 1, "staged");
     assert_eq!(detail(1)["name"], "nils-assistant");
     assert_eq!(rows[2].text(1).unwrap(), "person");
     assert_eq!(rows[2].int(5).unwrap(), 1, "staged");

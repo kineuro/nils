@@ -2933,7 +2933,8 @@ fn routed(
         ["api", "decisions", _, "withdraw"] if post => {
             let id = id_at(2)?;
             let reopened =
-                nils_registry::review::withdraw(registry, id, principal).map_err(review_err)?;
+                nils_registry::review::withdraw_as(registry, id, principal, author_of(caller).0)
+                    .map_err(review_err)?;
             Ok(Reply::ok(
                 serde_json::json!({ "withdrawn": id, "reopened": reopened }),
             ))
@@ -3619,6 +3620,7 @@ fn pick_err(e: nils_classify::picking::PersonError) -> Reply {
 fn review_err(e: nils_registry::review::Error) -> Reply {
     match e {
         nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
+        nils_registry::review::Error::Forbidden(m) => Reply::error(403, m),
         other => Reply::error(500, other.to_string()),
     }
 }

@@ -5424,3 +5424,83 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
         serde_json::json!([{ "name": "base-head", "version": "2", "digest": b }])
     );
 }
+
+/// Record 42 R6 for agents at the keyboard: an agent's decision is staged
+/// whatever the verb asked, a person commits it, and an agent withdraws
+/// only a decision it staged itself and nobody put in force, never a
+/// person's.
+#[test]
+fn an_agent_stages_and_withdraws_only_its_own_staged_decision() {
+    let home = home();
+    let dir = tree();
+    let packs = packs_dir();
+    let pack_dir = packs.to_str().unwrap();
+    let run = |args: &[&str], agent: bool| -> std::process::Output {
+        let mut cmd = nils();
+        cmd.arg("--registry")
+            .arg(home.path())
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3");
+        if agent {
+            cmd.env("NILS_ACTOR", r#"{"kind": "agent", "name": "a-worker"}"#);
+        }
+        cmd.output().unwrap()
+    };
+    let ok = |args: &[&str], agent: bool| -> String {
+        let out = run(args, agent);
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    ok(
+        &["digest", "--name", "t", dir.path().to_str().unwrap()],
+        false,
+    );
+    ok(&["fingerprint"], false);
+    ok(
+        &["classify", "--review-below", "1.0", "--pack-dir", pack_dir],
+        false,
+    );
+    let items: serde_json::Value = serde_json::from_str(&ok(
+        &["review", "list", "--json", "--status", "open"],
+        false,
+    ))
+    .unwrap();
+    let open: Vec<(String, String)> = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["evidence"]["value"].is_string() && i["scope"] == "group")
+        .map(|i| {
+            (
+                i["id"].as_i64().unwrap().to_string(),
+                i["evidence"]["value"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(!open.is_empty(), "{items:#}");
+    let (item, value) = &open[0];
+    let apply = |kind: &str| -> serde_json::Value {
+        serde_json::from_str(&ok(
+            &[
+                "review", "apply", item, "--as", kind, "--value", value, "--json",
+            ],
+            false,
+        ))
+        .unwrap()
+    };
+    // an agent's answer asked in force is staged, and an agent withdraws
+    // it, since it staged it and nobody put it in force
+    let said = apply("agent");
+    assert_eq!(said["staged"], true, "{said}");
+    let own = said["decision"].as_i64().unwrap().to_string();
+    ok(&["review", "withdraw", &own], true);
+    // a person's in force decision is not the agent's to withdraw
+    let person = apply("person");
+    assert_eq!(person["staged"], false, "{person}");
+    let theirs = person["decision"].as_i64().unwrap().to_string();
+    let out = run(&["review", "withdraw", &theirs], true);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(stderr(&out).contains("a person"), "{}", stderr(&out));
+    ok(&["review", "withdraw", &theirs], false);
+}

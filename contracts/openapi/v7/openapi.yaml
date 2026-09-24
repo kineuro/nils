@@ -263,7 +263,7 @@ paths:
   /api/review/{id}/apply:
     post:
       summary: Apply a decision to an item (nils review apply), the one verb of the spine (Wave 4a section 10.2)
-      description: "The author is the verified actor, never the body (record 42 S1): X-Nils-Actor as the token allows it, and a person when there is none. Since version 7 a model's answer names the registered model in the actor, {kind: model, model: <id, sha256 digest or name@version>}, and is refused with 404 when no model answers to it and 409 unless the model is admitted or promoted; it is staged whether or not the body says so, because a model's answer is evidence until a person commits it (record 42 R6), and the decision keeps the model as author with its id. The decision names who put it in force: its author when it is written in force, the person who commits it when it is staged."
+      description: "The author is the verified actor, never the body (record 42 S1): X-Nils-Actor as the token allows it, and a person when there is none. Since version 7 a model's answer names the registered model in the actor, {kind: model, model: <id, sha256 digest or name@version>}, and is refused with 404 when no model answers to it and 409 unless the model is admitted or promoted; it is staged whether or not the body says so, because a model's answer is evidence until a person commits it (record 42 R6), and the decision keeps the model as author with its id. An agent's answer is staged the same way, since the wave's ruling extends R6 to agents; only a person's is written in force. The decision names who put it in force: its author when it is written in force, the person who commits it when it is staged."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       requestBody:
         content:
@@ -310,6 +310,7 @@ paths:
   /api/decisions/{id}/withdraw:
     post:
       summary: Take a decision out of force and reopen what it closed (nils review withdraw)
+      description: "A person withdraws any decision. An agent or a model acting (X-Nils-Actor) withdraws only a decision its principal staged as that kind and nobody put in force; anything else is refused with 403, because a decision in force is a person's to take back (record 42 R6)."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: "{withdrawn, reopened}"}

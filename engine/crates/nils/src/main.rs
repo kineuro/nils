@@ -4669,8 +4669,9 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         }
         ReviewCommand::Withdraw { id } => {
             drop(columns);
-            let reopened = nils_registry::review::withdraw(&mut registry, id, &actor())
-                .map_err(|e| fail(e.to_string()))?;
+            let reopened =
+                nils_registry::review::withdraw_as(&mut registry, id, &actor(), actor_kind())
+                    .map_err(|e| fail(e.to_string()))?;
             println!("withdrew decision {id}; {reopened} item(s) open again");
             Ok(())
         }
