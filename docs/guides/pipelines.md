@@ -169,19 +169,11 @@ The job's result counts what it built, skipped and failed, with why for each fai
 
 ## Let a certified sample train
 
-A sealed sample trains nothing until the certificate it was drawn for is recorded.
+A sealed sample trains nothing until the certificate it was drawn for is recorded. Both acts are a person's, at the engine's door with the person's own token, so the two people involved are told apart by the identity the engine verified. The keyboard refuses both.
 
-1. Record what the certification measured. `result.json` names `sample`, `sample_digest` (as `nils labels seal --json` gave it), `risk`, `n` and `errors`:
+1. Record what the certification measured with `POST /api/certificates`: `{sample, models, result}`, where the result names `sample`, `sample_digest` (as `nils labels seal --json` gave it), `risk`, `n` and `errors`.
 
-   ```sh
-   nils labels certificate --sample selection:cert-draw@1 --model <model> --result result.json
-   ```
-
-2. Another person unseals the sample by that certificate. The seal's rows stay, naming the certificate:
-
-   ```sh
-   nils labels unseal selection:cert-draw@1 --certificate <id>
-   ```
+2. Another person unseals the sample with `POST /api/certificates/{id}/unseal`. The seal's rows stay, naming the certificate.
 
 3. Write the development labels a training tool reads: every person's decision in force, and nothing of a sample still sealed:
 

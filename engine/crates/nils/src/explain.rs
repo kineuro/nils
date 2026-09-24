@@ -195,6 +195,9 @@ pub(crate) fn document(
         "review_items": review_items,
         "review": review,
         "axes": axes_doc,
+        // record 48 R2: the door answers a stack read blind with this true
+        // and nothing a system said; this reading is never blind
+        "blind": false,
     })))
 }
 

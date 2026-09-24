@@ -328,6 +328,31 @@ fn a_reading_is_timed_and_a_certificate_unseals(
     )?;
     add_columns(store, "campaign_item", &["held_back"])?;
     add_columns(store, "campaign", &["hold_back", "hold_back_seed"])?;
+    // every campaign from before draws a seed of its own now, a secret
+    // nothing derives from its id
+    if !table_exists(store, "campaign")? {
+        return add_tables(store, kind, &["certificate"]);
+    }
+    let c = store.qualified("campaign");
+    let ids: Vec<i64> = store
+        .query(
+            &format!("SELECT id FROM {c} WHERE hold_back_seed IS NULL"),
+            &[],
+        )?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    for id in ids {
+        store.update_by_id(
+            schema::table("campaign"),
+            &[(
+                "hold_back_seed",
+                Param::from(uuid::Uuid::new_v4().to_string()),
+            )],
+            "id",
+            id,
+        )?;
+    }
     add_columns(store, "campaign_assignment", &["leased_ms"])?;
     add_columns(
         store,

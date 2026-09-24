@@ -327,7 +327,11 @@ pub(crate) fn why(
     stack: i64,
     pack: Option<&nils_pack::Pack>,
     quasi: bool,
+    hidden: bool,
 ) -> Result<Option<Value>, StoreError> {
+    if hidden {
+        return blind_doc(store, stack, quasi).map(Some);
+    }
     let d = store.dialect();
     let sql = format!(
         "SELECT pack, pack_version FROM {} WHERE stack_id = {}",
@@ -382,9 +386,8 @@ pub(crate) fn why(
     let voters = voters(store)?;
     let votes = votes_of(store, &voters, stack)?;
     let decisions = crate::explain::decisions_of(store, stack)?;
-    // a stack of a sample sealed now is read blind: nothing of System 1's
-    let blind = blind(store, stack)?;
-    let asked = if blind { None } else { asked_of(store, stack)? };
+    let blind = false;
+    let asked = asked_of(store, stack)?;
     let mut head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
     // the sequence name is quasi-identifying text (catalogue.md): below
     // detail quasi it is not shown, in the header, a clause's or the line
@@ -606,6 +609,121 @@ fn id_list(ids: &[i64]) -> String {
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The header values a blind reader is shown: the physics, the sequence
+/// type tokens and the geometry, raw, with the sequence name only at detail
+/// quasi.
+const BLIND_HEADER: &[&str] = &[
+    "repetition_time",
+    "echo_time",
+    "inversion_time",
+    "flip_angle",
+    "image_type",
+    "scanning_sequence",
+    "sequence_variant",
+    "scan_options",
+    "mr_acquisition_type",
+    "text_sequence_name",
+    "orientation",
+    "n_slices",
+    "n_instances",
+    "slice_thickness",
+    "spacing_between_slices",
+];
+
+/// Record 48 R2: what a blind reader of a stack is shown: the pictures'
+/// references and the raw header values, and nothing a system said of it:
+/// no value in force, no rule, no vote, no line, no author, nothing of
+/// System 1's.
+pub(crate) fn blind_doc(store: &mut Store, stack: i64, quasi: bool) -> Result<Value, StoreError> {
+    let head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
+    let shown: serde_json::Map<String, Value> = BLIND_HEADER
+        .iter()
+        .filter(|f| quasi || !HASHED_ONLY.contains(f))
+        .filter_map(|f| {
+            head.get(*f)
+                .filter(|v| !v.is_null())
+                .map(|v| (f.to_string(), v.clone()))
+        })
+        .collect();
+    Ok(json!({
+        "stack": stack,
+        "blind": true,
+        "detail": if quasi { "quasi" } else { "plain" },
+        "header": shown,
+        "pictures": {"instances": format!("/api/instances/{stack}")},
+    }))
+}
+
+/// Record 48 R2: the stacks, of these, a caller reads blind. A stack is
+/// read blind while it is of a sample sealed now and an open campaign asks
+/// it, by the campaign's raters (an assignment as a rater, or named as one)
+/// and by anyone who is neither an adjudicator of it nor a holder of
+/// review:work; an adjudicator or a holder of review:work who rates in no
+/// such campaign reads it as usual.
+pub(crate) fn hidden_stacks(
+    store: &mut Store,
+    stacks: &[i64],
+    principal: &str,
+    review_work: bool,
+) -> Result<BTreeSet<i64>, StoreError> {
+    let (sealed, _) = nils_registry::labels::sealed_now(store, stacks, &[])
+        .map_err(|e| StoreError::Message(e.to_string()))?;
+    let mut out = BTreeSet::new();
+    if sealed.is_empty() {
+        return Ok(out);
+    }
+    let list: Vec<i64> = sealed.into_iter().collect();
+    let mut asked: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
+    for chunk in list.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT i.stack_id, i.campaign_id FROM {} i JOIN {} c ON c.id = i.campaign_id \
+             WHERE c.status IN ('open', 'closing') AND i.stack_id IN ({})",
+            store.qualified("campaign_item"),
+            store.qualified("campaign"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            asked.entry(r.int(1)?).or_default().insert(r.int(0)?);
+        }
+    }
+    let d = store.dialect();
+    for (campaign, stacks) in asked {
+        let Some(c) =
+            campaign::get(store, campaign).map_err(|e| StoreError::Message(e.to_string()))?
+        else {
+            continue;
+        };
+        let sql = format!(
+            "SELECT role FROM {} WHERE campaign_id = {} AND principal = {}",
+            store.qualified("campaign_assignment"),
+            d.param(1, Type::Int),
+            d.param(2, Type::Text)
+        );
+        let roles: BTreeSet<String> = store
+            .query(&sql, &[Param::Int(campaign), Param::from(principal)])?
+            .iter()
+            .filter_map(|r| r.text(0).ok().map(str::to_string))
+            .collect();
+        let rater = roles.contains("rater") || c.raters().iter().any(|p| p == principal);
+        let adjudicator =
+            roles.contains("adjudicator") || c.adjudicators().iter().any(|p| p == principal);
+        if rater || !(review_work || adjudicator) {
+            out.extend(stacks);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether one stack is read blind by a caller ([`hidden_stacks`]).
+pub(crate) fn hidden(
+    store: &mut Store,
+    stack: i64,
+    principal: &str,
+    review_work: bool,
+) -> Result<bool, StoreError> {
+    Ok(!hidden_stacks(store, &[stack], principal, review_work)?.is_empty())
 }
 
 /// The rules' values of stacks' axes, as the pack names them, five hundred
@@ -891,6 +1009,7 @@ pub(crate) fn batches(
             ));
         }
     }
+    let seed = campaign::hold_back_seed(store, c.id).map_err(|e| (500, e.to_string()))?;
     let none = Vec::new();
     let mut out = Batches {
         open: open.len(),
@@ -938,7 +1057,10 @@ pub(crate) fn batches(
             .map(|f| (f.clone(), head.get(f).map(rounded).unwrap_or(Value::Null)))
             .collect();
         let hashed = json!({"rules": decided, "header": hv});
-        let key_text = json!({"signature": hashed, "suggested": suggested}).to_string();
+        // salted with the campaign's secret seed, so a key names no
+        // signature a caller could work out
+        let key_text =
+            json!({"seed": seed, "signature": hashed, "suggested": suggested}).to_string();
         let key = crate::campaigns::sha256(key_text.as_bytes())[..16].to_string();
         groups
             .entry(key.clone())

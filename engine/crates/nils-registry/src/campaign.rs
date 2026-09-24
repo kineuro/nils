@@ -1752,11 +1752,21 @@ pub fn hold_back_seed(store: &mut Store, campaign: i64) -> Result<String, Error>
         store.qualified("campaign"),
         store.dialect().param(1, Type::Int)
     );
-    Ok(store
+    if let Some(seed) = store
         .query_opt(&sql, &[Param::Int(campaign)])?
         .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-        // a campaign from before the seed: its id and name, fixed
-        .unwrap_or_else(|| format!("campaign:{campaign}")))
+    {
+        return Ok(seed);
+    }
+    // none drawn yet: draw one now and keep it
+    let seed = uuid::Uuid::new_v4().to_string();
+    store.update_by_id(
+        table("campaign"),
+        &[("hold_back_seed", Param::from(seed.as_str()))],
+        "id",
+        campaign,
+    )?;
+    Ok(seed)
 }
 
 /// Record 48 R1: hold items of a campaign back from every batch, to be
@@ -2258,6 +2268,15 @@ pub fn worth(
     Ok(out)
 }
 
+/// A place from 0 to a million drawn from a seed and an item: where a
+/// sealed item falls among the confidences, the same for one seed.
+fn drawn(seed: &str, item: i64) -> i64 {
+    let d = ring::digest::digest(&ring::digest::SHA256, format!("{seed}:{item}").as_bytes());
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&d.as_ref()[..8]);
+    (u64::from_be_bytes(b) % 1_000_000) as i64
+}
+
 /// The key [`Order::Value`] sorts by: disagreement first, then the least
 /// confident, then the position.
 fn by_value(w: Option<&Worth>, position: i64) -> (u8, i64, i64) {
@@ -2359,9 +2378,16 @@ pub fn claim_in(
                     Order::Value => {
                         let stacks: Vec<i64> = open.iter().filter_map(|(.., s)| *s).collect();
                         let worth = worth(store, &stacks, &axes_of(&c.question()?))?;
+                        // record 48 R2: a stack of a sample sealed now is
+                        // never ranked by what the systems said of it; it
+                        // takes a place drawn from the campaign's seed
+                        let (sealed, _) = crate::labels::sealed_now(store, &stacks, &[])
+                            .map_err(|e| StoreError::Message(e.to_string()))?;
+                        let seed = hold_back_seed(store, c.id)?;
                         open.iter()
-                            .min_by_key(|(_, position, stack)| {
-                                by_value(stack.and_then(|s| worth.get(&s)), *position)
+                            .min_by_key(|(id, position, stack)| match stack {
+                                Some(s) if sealed.contains(s) => (1, drawn(&seed, *id), *position),
+                                _ => by_value(stack.and_then(|s| worth.get(&s)), *position),
                             })
                             .map(|(id, ..)| *id)
                     }

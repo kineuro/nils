@@ -456,14 +456,27 @@ pub(crate) fn route(
                 // a session is named by its subject and its day
                 caller.allowed("a campaign of sessions", Need::Any, Detail::Quasi)?;
                 let role = c.question["role"].as_str().map(str::to_string);
-                Ok(Reply::ok(candidates(
-                    registry.store(),
-                    c.id,
-                    item,
-                    subject,
-                    &day,
-                    role.as_deref(),
-                )?))
+                let mut doc =
+                    candidates(registry.store(), c.id, item, subject, &day, role.as_deref())?;
+                // record 48 R2: what the classifier says of a stack read
+                // blind is left out
+                let stacks: Vec<i64> = doc["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["stack_id"].as_i64())
+                    .collect();
+                let hidden = blind_among(registry.store(), caller, &stacks)?;
+                for cand in doc["candidates"].as_array_mut().into_iter().flatten() {
+                    if cand["stack_id"]
+                        .as_i64()
+                        .is_some_and(|s| hidden.contains(&s))
+                    {
+                        cand["axes"] = json!({});
+                        cand["blind"] = json!(true);
+                    }
+                }
+                Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "claim"] if post => {
                 let doc = json_body(body)?;
@@ -639,11 +652,16 @@ pub(crate) fn route(
             ["api", "stacks", stack, "why"] if get => {
                 let stack = id_of(stack)?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
-                crate::reader::why(registry.store(), stack, pack.as_deref(), !plain(caller))?
-                    .map(Reply::ok)
-                    .ok_or_else(|| {
-                        Reply::error(404, format!("stack {stack} has not been classified"))
-                    })
+                let hidden = blind_to(registry.store(), caller, stack)?;
+                crate::reader::why(
+                    registry.store(),
+                    stack,
+                    pack.as_deref(),
+                    !plain(caller),
+                    hidden,
+                )?
+                .map(Reply::ok)
+                .ok_or_else(|| Reply::error(404, format!("stack {stack} has not been classified")))
             }
             ["api", "campaigns", which, "items", item, "why"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -660,18 +678,26 @@ pub(crate) fn route(
                 })?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let q = c.question().map_err(campaign_err)?;
-                let mut doc =
-                    crate::reader::why(registry.store(), stack, pack.as_deref(), !plain(caller))?
-                        .unwrap_or_else(|| json!({"stack": stack, "axes": []}));
-                let suggested =
-                    crate::reader::suggestion(registry.store(), stack, &q, pack.as_deref())?;
+                // record 48 R2: a stack of a sealed sample that an open
+                // campaign asks is read blind by its raters
+                let blind = blind_to(registry.store(), caller, stack)?;
+                let mut doc = crate::reader::why(
+                    registry.store(),
+                    stack,
+                    pack.as_deref(),
+                    !plain(caller),
+                    blind,
+                )?
+                .unwrap_or_else(|| json!({"stack": stack, "axes": [], "blind": false}));
+                let suggested = if blind {
+                    None
+                } else {
+                    crate::reader::suggestion(registry.store(), stack, &q, pack.as_deref())?
+                };
                 let mut s = json!(suggested);
                 axes_value(&c.question, &mut s);
                 doc["item"] = json!(item);
                 doc["suggested"] = s;
-                // a sealed item is read blind: nothing of System 1's, and no
-                // suggestion (record 48 R2)
-                let blind = doc["blind"].as_bool().unwrap_or(false);
                 doc["worth"] = if blind {
                     Value::Null
                 } else {
@@ -830,7 +856,7 @@ pub(crate) fn route(
                 })))
             }
             ["api", "certificates"] if post => {
-                person_only(caller, "recording a certificate")?;
+                person_only(doors, caller, "recording a certificate")?;
                 let doc = json_body(body)?;
                 let sample = doc["sample"].as_str().ok_or_else(|| {
                     Reply::error(
@@ -863,7 +889,7 @@ pub(crate) fn route(
                 Ok(Reply::created(cert.as_json()))
             }
             ["api", "certificates", id, "unseal"] if post => {
-                person_only(caller, "unsealing a certified sample")?;
+                person_only(doors, caller, "unsealing a certified sample")?;
                 let id = id_of(id)?;
                 let cert = labels::certificate(registry.store(), id)
                     .map_err(labels_err)?
@@ -1127,9 +1153,43 @@ pub(crate) fn route(
     })())
 }
 
+/// Record 48 R2: whether the caller reads a stack blind: it is of a sample
+/// sealed now, an open campaign asks it, and the caller rates in that
+/// campaign or is neither its adjudicator nor a holder of review:work.
+pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result<bool, Reply> {
+    Ok(crate::reader::hidden(
+        store,
+        stack,
+        &caller.principal,
+        caller.access.holds("review:work"),
+    )?)
+}
+
+/// Record 48 R2: the stacks of these a caller reads blind.
+pub(crate) fn blind_among(
+    store: &mut Store,
+    caller: &Caller,
+    stacks: &[i64],
+) -> Result<std::collections::BTreeSet<i64>, Reply> {
+    Ok(crate::reader::hidden_stacks(
+        store,
+        stacks,
+        &caller.principal,
+        caller.access.holds("review:work"),
+    )?)
+}
+
 /// Record 48 R2: a certificate and the unseal are a person's acts; an
 /// agent's or a model's token is refused, whatever grants it holds.
-fn person_only(caller: &Caller, act: &str) -> Result<(), Reply> {
+fn person_only(doors: &Doors, caller: &Caller, act: &str) -> Result<(), Reply> {
+    // two people are told apart by the identity the engine verified,
+    // never by a local user name
+    if !doors.identity_verified() {
+        return Err(Reply::error(
+            403,
+            format!("{act} needs a verified identity; this engine runs with --auth off"),
+        ));
+    }
     let kind = kind_of(caller);
     if kind != "person" {
         return Err(Reply::error(
@@ -2274,8 +2334,8 @@ pub(crate) enum LabelsCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Record what a certification measured on a sealed sample: the models
-    /// it certified and the result, a JSON object (record 48)
+    /// Refused at the keyboard: a certificate is recorded at the engine's
+    /// door, POST /api/certificates, by a person's token (record 48)
     Certificate {
         /// The sealed sample, as seal named it: selection:NAME@V or handle:ID
         #[arg(long, value_name = "SAMPLE")]
@@ -2294,10 +2354,9 @@ pub(crate) enum LabelsCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Unseal a sealed sample once the certificate it was drawn for is
-    /// recorded, so its labels train the next model; the seal stays as
-    /// history. Names the sample (selection:NAME@V or handle:ID) or a label
-    /// set drawn from it
+    /// Refused at the keyboard: a certified sample is unsealed at the
+    /// engine's door, POST /api/certificates/{id}/unseal, by another
+    /// person's token than the one who recorded the certificate (record 48)
     Unseal {
         /// The sample, or a label set's id
         which: String,
@@ -3043,50 +3102,11 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
             }
             Ok(())
         }
-        LabelsCommand::Certificate {
-            sample,
-            models,
-            result,
-            json,
-        } => {
-            let text = std::fs::read_to_string(&result)
-                .map_err(|e| usage(format!("--result {}: {e}", result.display())))?;
-            let result: Value = serde_json::from_str(&text)
-                .map_err(|e| usage(format!("--result {}: {e}", result.display())))?;
-            let mut registry = crate::open(home)?;
-            let mut ids = Vec::new();
-            for m in &models {
-                let found = nils_registry::model::resolve(registry.store(), m)
-                    .map_err(|e| fail(e.to_string()))?
-                    .ok_or_else(|| usage(format!("no registered model answers to {m}")))?;
-                ids.push(found.id);
-            }
-            let cert = labels::record_certificate(
-                &mut registry,
-                &sample,
-                &ids,
-                &result,
-                &who(),
-                crate::actor_kind(),
-            )
-            .map_err(lerr)?;
-            if json {
-                print(&cert.as_json());
-            } else {
-                println!(
-                    "certificate {} of {}, for model(s) {}; nils labels unseal {} --certificate {} lets its labels train",
-                    cert.id,
-                    cert.sample,
-                    ids.iter()
-                        .map(i64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    cert.sample,
-                    cert.id
-                );
-            }
-            Ok(())
-        }
+        // record 48 R2: two people are told apart by the identity the
+        // engine verified at its door, never by a local user name
+        LabelsCommand::Certificate { .. } => Err(usage(
+            "a certificate is recorded at the engine's door by a person's token, POST /api/certificates, so the two people of a certificate are told apart by a verified identity",
+        )),
         LabelsCommand::Certificates { json } => {
             let mut registry = crate::open(home)?;
             let list = labels::certificates(registry.store()).map_err(lerr)?;
@@ -3120,59 +3140,9 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
             }
             Ok(())
         }
-        LabelsCommand::Unseal {
-            which,
-            certificate,
-            json,
-        } => {
-            let mut registry = crate::open(home)?;
-            // a label set names its samples; the certificate says which
-            let sample = match which.parse::<i64>() {
-                Ok(id) => {
-                    let set = labels::get(registry.store(), id)
-                        .map_err(lerr)?
-                        .ok_or_else(|| usage(format!("no label set {id}")))?;
-                    let samples = labels::samples_of_set(registry.store(), &set).map_err(lerr)?;
-                    let cert = labels::certificate(registry.store(), certificate)
-                        .map_err(lerr)?
-                        .ok_or_else(|| {
-                            usage(format!(
-                                "no certificate {certificate}: a sample is unsealed only once its certificate is recorded (nils labels certificate)"
-                            ))
-                        })?;
-                    if !samples.contains(&cert.sample) {
-                        return Err(usage(format!(
-                            "label set {id} holds nothing of {}, the sample certificate {certificate} measured; it holds {}",
-                            cert.sample,
-                            if samples.is_empty() {
-                                "no sealed sample".to_string()
-                            } else {
-                                samples.join(", ")
-                            }
-                        )));
-                    }
-                    cert.sample
-                }
-                Err(_) => which.clone(),
-            };
-            let done = labels::unseal(
-                &mut registry,
-                &sample,
-                certificate,
-                &who(),
-                crate::actor_kind(),
-            )
-            .map_err(lerr)?;
-            if json {
-                print(&done.as_json());
-            } else {
-                println!(
-                    "unsealed {} by certificate {}: {} stack(s), {} unsealed before; its labels may train the next model",
-                    done.sample, done.certificate, done.stacks, done.already
-                );
-            }
-            Ok(())
-        }
+        LabelsCommand::Unseal { .. } => Err(usage(
+            "a certified sample is unsealed at the engine's door by another person's token, POST /api/certificates/{id}/unseal, never at the keyboard",
+        )),
         LabelsCommand::Seal {
             select,
             handle,

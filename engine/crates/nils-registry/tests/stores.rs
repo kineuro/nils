@@ -2045,6 +2045,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
 fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends() {
     for (name, _guard, mut store) in stores() {
         migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let cp = store.qualified("campaign");
         let (a, s, c, meta) = (
             store.qualified("campaign_answer"),
             store.qualified("sealed_stack"),
@@ -2070,6 +2071,8 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
             "DROP TABLE {c};
              INSERT INTO {s} (sample, stack_id, subject_id, sealed_by, sealed_at) \
              VALUES ('selection:cert@1', 7, 3, 'op', '2026-09-24T00:00:00Z');
+             INSERT INTO {cp} (name, owner, status, question, grain, source, epoch, raters_per_item, adjudication, closes_into, lease_seconds, created_at) \
+             VALUES ('old', 'op', 'open', '{{}}', 'stack', '{{}}', 1, 1, '{{}}', 'none', 60, '2026-09-24T00:00:00Z');
              UPDATE {meta} SET value = '62' WHERE key = 'schema_version'"
         ));
         store.batch(&sql).unwrap();
@@ -2095,6 +2098,19 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         assert!(
             migrate::table_exists(&mut store, "certificate").unwrap(),
             "{name}"
+        );
+        // a campaign from before draws a seed of its own
+        let seeds = store
+            .query(&format!("SELECT hold_back_seed FROM {cp}"), &[])
+            .unwrap();
+        let seed = seeds[0]
+            .opt_text(0)
+            .unwrap()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            seed.len() >= 32 && !seed.contains("campaign"),
+            "{name}: {seed}"
         );
         // the stack sealed before is sealed still: nothing was unsealed
         let rows = store

@@ -328,6 +328,25 @@ fn claims_in_order_of_value_take_disagreement_then_doubt_first() {
             .unwrap();
         assert_eq!(first.item.stack_id, Some(ids[0]), "{name}");
         assert!(Order::parse("sideways").is_err());
+        // record 48 R2: a sealed stack is never ranked by what the systems
+        // said of it: once stack 2 is sealed its disagreement no longer
+        // puts it first, and stack 0, whose rules now disagree, comes first
+        labels::seal(reg, "selection:s@1", None, &ids[2..3], "op@lab").unwrap();
+        row(
+            reg.store(),
+            "classification_vote",
+            &[
+                ("stack_id", Param::Int(ids[0])),
+                ("phase", Param::from("disposition")),
+                ("votes", Param::from(json!([[b, "spine"]]).to_string())),
+            ],
+        );
+        let c3 =
+            campaign::create(reg, &new("sealed", &q, &adj, Items::Stacks(ids.clone()), 1)).unwrap();
+        let first = campaign::claim_in(reg, c3.id, "z@lab", Role::Rater, Order::Value, &at(3, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.item.stack_id, Some(ids[0]), "{name}");
     }
 }
 

@@ -123,7 +123,8 @@ impl Server {
             format!("{CURATOR}=cleo@lab:reviewer,campaigns:work,places:work,models:work,audit:see"),
             // raters hold the campaign's grant alone, at detail plain
             format!("{ANNA}=anna@lab:campaigns:work"),
-            format!("{BO}=bo@lab:campaigns:work"),
+            // bo rates and reads the queue too
+            format!("{BO}=bo@lab:campaigns:work,review:see"),
             // a reader of the queue at detail plain
             format!("{RITA}=rita@lab:review:see"),
             // a second person who works the model registry
@@ -312,6 +313,13 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     let plain = server.ok("GET", &format!("/api/stacks/{stack}/why"), None, RITA);
     assert_eq!(plain["detail"], "plain", "{plain}");
     assert!(words_in(&plain).is_empty(), "{plain}");
+    // and the explanation keeps no matched words below quasi either
+    let explained = server.ok("GET", &format!("/api/explain/{stack}"), None, RITA);
+    assert!(
+        !explained.to_string().contains("\"matched\""),
+        "{explained}"
+    );
+    assert_eq!(explained["blind"], false, "{explained}");
     // the sequence name is quasi-identifying text: never below quasi, never
     // in a batch's signature
     let seq = "*tir2d1rr99";
@@ -532,6 +540,54 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     assert_eq!(sealed_why["blind"], true, "{sealed_why}");
     assert!(sealed_why["suggested"].is_null(), "{sealed_why}");
     assert!(sealed_why["asked"].is_null(), "{sealed_why}");
+    // truly blind while the campaign is open: the pictures and the raw
+    // header, and nothing any system said of the stack
+    for key in ["axes", "line", "set_by", "voted", "decided"] {
+        assert!(sealed_why.get(key).is_none(), "{key}: {sealed_why}");
+    }
+    assert!(
+        sealed_why["pictures"]["instances"].is_string(),
+        "{sealed_why}"
+    );
+    assert!(sealed_why["header"].is_object(), "{sealed_why}");
+    let seen = |token: &str| {
+        let why = server.ok("GET", &format!("/api/stacks/{stack}/why"), None, token);
+        let explained = server.ok("GET", &format!("/api/explain/{stack}"), None, token);
+        let review = items[0]["review_item_id"].as_i64().unwrap();
+        let item = server.ok("GET", &format!("/api/review/{review}"), None, token);
+        let list = server.ok("GET", "/api/review?status=open", None, token);
+        let listed = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == review)
+            .cloned()
+            .unwrap_or(Value::Null);
+        (why, explained, item, listed)
+    };
+    // a rater of the campaign, and a reader who neither adjudicates nor
+    // holds review:work, read it blind at every door
+    for token in [BO, RITA] {
+        let (why, explained, item, listed) = seen(token);
+        assert_eq!(why["blind"], true, "{why}");
+        assert!(why.get("axes").is_none(), "{why}");
+        assert_eq!(explained["blind"], true, "{explained}");
+        assert!(
+            explained["axes"].as_array().unwrap().is_empty(),
+            "{explained}"
+        );
+        assert_eq!(item["blind"], true, "{item}");
+        assert!(item["evidence"].get("value").is_none(), "{item}");
+        if !listed.is_null() {
+            assert_eq!(listed["blind"], true, "{listed}");
+        }
+    }
+    // a holder of review:work who rates in no campaign asking it sees it
+    let (why, explained, item, _) = seen(CURATOR);
+    assert_eq!(why["blind"], false, "{why}");
+    assert!(!why["axes"].as_array().unwrap().is_empty(), "{why}");
+    assert_eq!(explained["blind"], false, "{explained}");
+    assert!(item.get("blind").is_none(), "{item}");
     let sealed = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert!(sealed["groups"].as_array().unwrap().is_empty(), "{sealed}");
     assert_eq!(sealed["sealed"], sealed["open"], "{sealed}");
@@ -580,12 +636,29 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     };
     assert!(training_of(&server).starts_with("refused"));
     let sample = format!("handle:{handle}");
-    let (ok, _, _) = cli(
+    // the keyboard neither records a certificate nor unseals: both are a
+    // person's acts at the door, by verified identities
+    let (ok, _, err) = cli(
         &home,
         "op@lab",
-        &["labels", "unseal", &sample, "--certificate", "999"],
+        &["labels", "unseal", &sample, "--certificate", "1"],
     );
-    assert!(!ok, "no certificate, no unseal");
+    assert!(!ok && err.contains("/api/certificates"), "{err}");
+    let (ok, _, err) = cli(
+        &home,
+        "op@lab",
+        &[
+            "labels",
+            "certificate",
+            "--sample",
+            &sample,
+            "--model",
+            "1",
+            "--result",
+            "r.json",
+        ],
+    );
+    assert!(!ok && err.contains("/api/certificates"), "{err}");
     let digest = format!("sha256:{}", "e".repeat(64));
     let model = server.ok(
         "POST",
@@ -651,6 +724,9 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     assert!(done["stacks"].as_i64().unwrap() >= 4, "{done}");
     let open = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert_eq!(open["sealed"], 0, "{open}");
+    // unsealed, it is read as usual again
+    let (why, ..) = seen(RITA);
+    assert_eq!(why["blind"], false, "{why}");
     assert!(training_of(&server).starts_with("allowed"));
     // the development labels at the keyboard: every person's decision in
     // force, nothing sealed now
