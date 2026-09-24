@@ -673,7 +673,10 @@ one grain is on the order of 7 to 10 KB. The policy this wave applies:
   group of at least 5 scans (k = 5, D27's federation default, applied to
   measures alone); a smaller group's are null. A count or an existence
   answered over a set filtered on a measure is shown for none or for 5 and
-  more, and withheld between. D51 stands for everything else: the ask does
+  more, and withheld between. A list of the rows of a set filtered on a measure
+  (a record or aggregate answer over stacks, sessions or subjects) is
+  refused, since the list itself says each member's measure against the
+  bound; only the totals the k rule holds are answered over it. D51 stands for everything else: the ask does
   no cell suppression of other fields inside the site.
 - **A measure's value is its unit's newest run of the pipeline's current
   version** (the newest active version; any version where none has

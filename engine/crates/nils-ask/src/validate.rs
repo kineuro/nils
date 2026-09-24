@@ -553,6 +553,7 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     }
 
     measures_within_detail(ask, scope, &mut issues);
+    rows_within_detail(ask, scope, &mut issues);
     out.small_cells = small_cells(ask, scope);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
@@ -1825,8 +1826,59 @@ fn small_cells(ask: &Ask, scope: &Scope) -> BTreeSet<String> {
     if scope.classes.contains(&Class::QuasiIdentifying) {
         return out;
     }
-    // a set is filtered on a measure where it, or a set it reads, reads one
-    // outside a group's totals
+    let filtered = measure_filtered(ask);
+    for (name, set) in &ask.sets {
+        if set.grain != Grain::Group {
+            continue;
+        }
+        let totals = set
+            .bind
+            .0
+            .iter()
+            .any(|(_, c)| serde_json::to_value(c).is_ok_and(|v| reads_measure(&v)));
+        let over_filtered = set.group.as_ref().is_some_and(|g| filtered.contains(&g.of));
+        if totals || over_filtered {
+            out.insert(name.clone());
+        }
+    }
+    // a count or an existence answered over a filtered set
+    if matches!(ask.out.level, Level::Count | Level::Boolean) && filtered.contains(&ask.out.set) {
+        out.insert(ask.out.set.clone());
+    }
+    out
+}
+
+/// Nima's ruling after record 49's review: below detail quasi, the rows of
+/// a set filtered on a measure are never listed, since the list says each
+/// member's measure against the bound; only the totals the k rule holds
+/// (a group's, a count, an existence) are answered over it.
+fn rows_within_detail(ask: &Ask, scope: &Scope, issues: &mut Vec<Issue>) {
+    if scope.classes.contains(&Class::QuasiIdentifying) {
+        return;
+    }
+    let Some(set) = ask.sets.get(&ask.out.set) else {
+        return;
+    };
+    if set.grain == Grain::Group
+        || !matches!(ask.out.level, Level::Record | Level::Aggregate)
+        || !measure_filtered(ask).contains(&ask.out.set)
+    {
+        return;
+    }
+    issues.push(issue(
+        Code::ForbiddenField,
+        "out.level",
+        format!(
+            "the set {} is filtered on a measure, and a list of its rows would say each one's measure against the bound; at this detail the ask answers only its count, or totals over groups of 5 scans or more (record 49 R4)",
+            ask.out.set
+        ),
+        "ask for level count, or group the set, or ask for detail quasi",
+    ));
+}
+
+/// The sets filtered on a measure: a set that reads one outside a group's
+/// totals, or that reads such a set.
+fn measure_filtered(ask: &Ask) -> BTreeSet<String> {
     let mut filtered: BTreeSet<String> = BTreeSet::new();
     loop {
         let before = filtered.len();
@@ -1855,25 +1907,7 @@ fn small_cells(ask: &Ask, scope: &Scope) -> BTreeSet<String> {
             break;
         }
     }
-    for (name, set) in &ask.sets {
-        if set.grain != Grain::Group {
-            continue;
-        }
-        let totals = set
-            .bind
-            .0
-            .iter()
-            .any(|(_, c)| serde_json::to_value(c).is_ok_and(|v| reads_measure(&v)));
-        let over_filtered = set.group.as_ref().is_some_and(|g| filtered.contains(&g.of));
-        if totals || over_filtered {
-            out.insert(name.clone());
-        }
-    }
-    // a count or an existence answered over a filtered set
-    if matches!(ask.out.level, Level::Count | Level::Boolean) && filtered.contains(&ask.out.set) {
-        out.insert(ask.out.set.clone());
-    }
-    out
+    filtered
 }
 
 /// Pin every bare `selection:<name>` to its current version (§8.2), inside

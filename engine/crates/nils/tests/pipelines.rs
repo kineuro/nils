@@ -3742,6 +3742,32 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
         assert_eq!(cell(&rows[0], "subjects"), want, "{rows:?}");
     }
 
+    // a plain list of the scans a measure filter keeps is refused below
+    // detail quasi: the list itself says each one's measure against the
+    // bound (Nima's ruling after review)
+    let listed = json!({
+        "ast_version": 1,
+        "sets": {"s": {"grain": "stack", "where": [
+            [">", {}, ["field", {}, "measure.volumes.brain_volume"], 0.0]]}},
+        "out": {"set": "s", "level": "record", "columns": [["field", {}, "id"]]},
+    });
+    let file = ask_file(&lab, "listed", &listed);
+    let out = lab
+        .command(&lab.path)
+        .env("NILS_JOB_DETAIL", "plain")
+        .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+        .output()
+        .unwrap();
+    let err_text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a list over a measure filter is refused"
+    );
+    assert!(err_text.contains("filtered on a measure"), "{err_text}");
+    // at detail quasi the same list is answered
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    assert_eq!(exported(&lab, &answer["handle"]).len(), 4);
+
     // a newer run's value is the one the ask reads, and names that run
     let again = lab.json(&[
         "run",

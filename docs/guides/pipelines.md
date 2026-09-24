@@ -217,7 +217,7 @@ A table output (`kind: table`) is a file of numbers a unit or a run writes, with
     "out": {"set": "g", "level": "aggregate", "columns": [["field", {}, "subject.sex"], ["field", {}, "mean"]]}}
    ```
 
-> **Warning:** a measure is quasi identifying. Below detail quasi the ask refuses it in a column, an order, a group's key and any binding but a total (count, distinct, sum, avg, min or max) of a group set, and allows it in a predicate. A group's totals of a measure, its `_rows` and its `_subjects` show below detail quasi only for a group of 5 scans or more, and so does a count of scans filtered on a measure (other than none); a smaller group's are withheld.
+> **Warning:** a measure is quasi identifying. Below detail quasi the ask refuses it in a column, an order, a group's key and any binding but a total (count, distinct, sum, avg, min or max) of a group set, and allows it in a predicate. A group's totals of a measure, its `_rows` and its `_subjects` show below detail quasi only for a group of 5 scans or more, and so does a count of scans filtered on a measure (other than none); a smaller group's are withheld. A list of the scans a measure filter keeps is refused below detail quasi.
 
 A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metric, op, value}`. Each unit that succeeded is held to them, the metric read from its `results.json` metrics or else from its tables; a breach is one `pipeline:qc` review item, status `breach`, whose error names the metric, its value and the check. A breach does not make a run partial. A metric a check reads from `results.json` is kept as a measure too.
 
