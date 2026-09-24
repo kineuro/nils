@@ -237,11 +237,12 @@ paths:
                 member: {type: integer, description: One member of a grouped item, a stack id}
                 scope: {type: string, enum: [stack, series, subject, origin], default: stack}
                 stage: {type: boolean, default: false}
-                author_kind: {type: string, enum: [person, agent, model], default: person}
-                model_version: {type: string}
+                author_kind: {type: string, enum: [person, agent, model], description: "Record 42 S1: the author is the verified actor (X-Nils-Actor as the token allows it; a person when there is none), never the body. A body may still say it, for an older client; one that says something else is refused with 403"}
+                model_version: {type: string, description: "A model's version is the actor's version in X-Nils-Actor; a body that says another, or says one when no model acts, is refused with 403"}
                 why: {type: string}
       responses:
         "200": {description: "{decision, axis, scope, ref, closed, members, staged}"}
+        "403": {description: "The body names an author the verified actor is not, or the header asks for more than the token proves: a token acting for an agent cannot be made a person"}
         "409": {description: Refused, with why}
   /api/review/{id}/accept:
     post:

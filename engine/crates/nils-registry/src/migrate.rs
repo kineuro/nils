@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 52;
+pub const SCHEMA_VERSION: i64 = 53;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +262,47 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 52,
         apply: every_rule_votes,
     },
+    Migration {
+        version: 53,
+        apply: an_answer_names_its_model_and_its_committer,
+    },
 ];
+
+/// Record 42 S1: a decision, a piece of evidence and a pick name the
+/// registered model a model's answer came from and the campaign it was given
+/// in, and a decision names who put it in force. A registry from before
+/// gains the columns empty: no answer before it came from a registered model
+/// or a campaign, since neither existed. A decision written without staging
+/// was put in force by its own author as it was written, so its committer is
+/// its actor; one that was staged and committed later says nothing, because
+/// who committed it was never recorded on the row, and guessing would be a
+/// claim nobody made (the audit log holds the commit).
+fn an_answer_names_its_model_and_its_committer(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "decision",
+        &["model_id", "campaign_id", "committed_by"],
+    )?;
+    add_columns(
+        store,
+        "classification_evidence",
+        &["model_id", "campaign_id"],
+    )?;
+    add_columns(store, "pick", &["model_id", "campaign_id"])?;
+    if table_exists(store, "decision")? {
+        store.execute(
+            &format!(
+                "UPDATE {} SET committed_by = actor WHERE committed_by IS NULL AND staged_at IS NULL",
+                store.qualified("decision")
+            ),
+            &[],
+        )?;
+    }
+    Ok(())
+}
 
 /// Record 41 S2: every rule's vote. A registry from before gains the two
 /// tables empty, and the next `nils classify` fills them; until then

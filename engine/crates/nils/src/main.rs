@@ -4703,9 +4703,11 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                 who: &who,
                 kind: &author_kind,
                 version: model_version.as_deref(),
+                model: None,
             },
             stage,
             why: why.as_deref(),
+            campaign: None,
         },
     )
     .map_err(|e| match e {

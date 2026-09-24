@@ -579,6 +579,30 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
                 "X-Nils-Actor is a JSON object with a kind: person, agent or model",
             ));
         }
+        // Record 42 S1: what the token proves the header cannot raise. A
+        // token that acts for an agent (its `act` claim) may name the agent
+        // or a model it runs, and never a person, nor leave the actor absent,
+        // which is read as a person at a keyboard.
+        let mut value = value;
+        if let Some(proven @ ("agent" | "model")) = caller.actor["kind"].as_str() {
+            let asked = value["kind"].as_str().unwrap_or("");
+            let rank = nils_registry::review::rank;
+            if !matches!(asked, "agent" | "model") || rank(asked) > rank(proven) {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "the token acts for {}; X-Nils-Actor cannot make it {}",
+                        with_article(proven),
+                        with_article(asked)
+                    ),
+                ));
+            }
+            if value.get("name").is_none()
+                && let Some(name) = caller.actor.get("name").cloned()
+            {
+                value["name"] = name;
+            }
+        }
         caller.actor = value;
     }
     if let Some(ceiling) = header("X-Nils-Ceiling") {
@@ -2723,7 +2747,7 @@ fn routed(
             if value.is_none() && !nothing {
                 return Err(Reply::error(400, "value, or nothing: true"));
             }
-            let kind = doc["author_kind"].as_str().unwrap_or("person");
+            let (kind, version) = author_at_apply(caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
                 &nils_registry::review::Apply {
@@ -2734,10 +2758,12 @@ fn routed(
                     author: nils_registry::review::Author {
                         who: principal,
                         kind,
-                        version: doc["model_version"].as_str(),
+                        version,
+                        model: None,
                     },
                     stage: doc["stage"].as_bool().unwrap_or(false),
                     why: doc["why"].as_str(),
+                    campaign: None,
                 },
             )
             .map_err(review_err)?;
@@ -3076,6 +3102,52 @@ fn author_of(caller: &Caller) -> (&str, Option<&str>) {
         _ => "person",
     };
     (kind, caller.actor["version"].as_str())
+}
+
+/// Record 42 S1: the author of a decision is the verified actor, never the
+/// body. The kind (and a model's version) come from `X-Nils-Actor` as the
+/// token allows it (`narrow`), a person at a keyboard when there is none. A
+/// body from an older client may still say `author_kind` and
+/// `model_version`; where it agrees with the actor it is taken, where it
+/// says something else the call is refused rather than recorded under a
+/// name the caller did not prove.
+fn author_at_apply<'a>(
+    caller: &'a Caller,
+    doc: &'a serde_json::Value,
+) -> Result<(&'a str, Option<&'a str>), Reply> {
+    let (kind, version) = author_of(caller);
+    if let Some(said) = doc.get("author_kind").filter(|v| !v.is_null())
+        && said.as_str() != Some(kind)
+    {
+        return Err(Reply::error(
+            403,
+            format!(
+                "this call acts as {}, as X-Nils-Actor and the token say; a body that says author_kind {said} is refused, because the author is the verified actor and never the body",
+                with_article(kind)
+            ),
+        ));
+    }
+    if let Some(said) = doc.get("model_version").filter(|v| !v.is_null())
+        && (kind != "model" || said.as_str() != version)
+    {
+        return Err(Reply::error(
+            403,
+            format!(
+                "model_version {said} is not what X-Nils-Actor says ({}); a model's version is the actor's, never the body's",
+                version.unwrap_or("none")
+            ),
+        ));
+    }
+    Ok((kind, version))
+}
+
+/// An author kind as a sentence names it.
+fn with_article(kind: &str) -> String {
+    match kind {
+        "agent" => "an agent".to_string(),
+        "absent" | "" => "nobody in particular".to_string(),
+        other => format!("a {other}"),
+    }
 }
 
 /// Wave 4c §6.6: an overlay from a body, rehearsed over a scope. The pack

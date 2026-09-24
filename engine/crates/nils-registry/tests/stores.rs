@@ -1401,3 +1401,84 @@ fn the_audit_log_is_a_table_and_the_epoch_moves_with_a_judgement() {
             .unwrap();
     }
 }
+
+/// Record 42 S1, migration 53, on both backends: a registry from before
+/// gains `model_id` and `campaign_id` on decisions, evidence and picks, and
+/// `committed_by` on decisions. A decision written in force names its own
+/// actor as its committer; one staged and committed later names nobody,
+/// since nobody was recorded; twice is the same as once.
+#[test]
+fn migration_53_names_the_model_the_campaign_and_the_committer() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let q = |store: &Store, t: &str| store.qualified(t);
+        let (decision, evidence, pick, meta) = (
+            q(&store, "decision"),
+            q(&store, "classification_evidence"),
+            q(&store, "pick"),
+            q(&store, "registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {decision} DROP COLUMN model_id;
+                 ALTER TABLE {decision} DROP COLUMN campaign_id;
+                 ALTER TABLE {decision} DROP COLUMN committed_by;
+                 ALTER TABLE {evidence} DROP COLUMN model_id;
+                 ALTER TABLE {evidence} DROP COLUMN campaign_id;
+                 ALTER TABLE {pick} DROP COLUMN model_id;
+                 ALTER TABLE {pick} DROP COLUMN campaign_id;
+                 UPDATE {meta} SET value = '52' WHERE key = 'schema_version';
+                 INSERT INTO {decision} (scope, ref, axis, value, actor, author_kind, decided_at, committed_at)
+                   VALUES ('stack', '1', 'base', 'T1w', 'anna@ward-3', 'person', '2026-09-01T10:00:00Z', '2026-09-01T10:00:00Z');
+                 INSERT INTO {decision} (scope, ref, axis, value, actor, author_kind, decided_at, staged_at, committed_at)
+                   VALUES ('stack', '2', 'base', 'T2w', 'bot@ward-3', 'agent', '2026-09-01T10:00:00Z', '2026-09-01T10:00:00Z', '2026-09-02T10:00:00Z')"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(52),
+            "{name}"
+        );
+        let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+        assert_eq!(applied.first(), Some(&53), "{name}: {applied:?}");
+        for (t, c) in [
+            ("decision", "model_id"),
+            ("decision", "campaign_id"),
+            ("decision", "committed_by"),
+            ("classification_evidence", "model_id"),
+            ("classification_evidence", "campaign_id"),
+            ("pick", "model_id"),
+            ("pick", "campaign_id"),
+        ] {
+            assert!(
+                migrate::column_exists(&mut store, t, c).unwrap(),
+                "{name}: {t}.{c}"
+            );
+        }
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT ref, committed_by, model_id, campaign_id FROM {decision} ORDER BY id"
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows[0].opt_text(1).unwrap(), Some("anna@ward-3"), "{name}");
+        assert_eq!(rows[1].opt_text(1).unwrap(), None, "{name}: not recorded");
+        assert_eq!(rows[0].opt_int(2).unwrap(), None, "{name}");
+        assert_eq!(rows[0].opt_int(3).unwrap(), None, "{name}");
+        // once more, by hand: nothing moves
+        let version = migrate::MIGRATIONS
+            .iter()
+            .find(|m| m.version == 53)
+            .unwrap();
+        store.begin().unwrap();
+        (version.apply)(&mut store, Kind::Registry).unwrap();
+        store.commit().unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Current,
+            "{name}"
+        );
+    }
+}

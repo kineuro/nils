@@ -1038,6 +1038,11 @@ fn build_registry() -> Vec<Table> {
                 // not sit where a rule's answer belongs and look the same.
                 col("author", Type::Text),
                 col("author_kind", Type::Text),
+                // Record 42 S1: the registered model a model's answer came
+                // from, and the campaign an answer was given in. Null when
+                // neither.
+                col("model_id", Type::Int),
+                col("campaign_id", Type::Int),
             ],
         )
         .index(&["stack_id"]),
@@ -1121,6 +1126,13 @@ fn build_registry() -> Vec<Table> {
                 // A decision a later person withdrew stays, and stops
                 // applying: nothing about a human's judgement is deleted.
                 col("withdrawn_at", Type::Timestamp),
+                // Record 42 S1: the registered model that answered, when the
+                // author is a model (D15); the campaign the answer closed;
+                // and who put it in force, which for a staged answer is the
+                // person who committed it and not its author.
+                col("model_id", Type::Int),
+                col("campaign_id", Type::Int),
+                col("committed_by", Type::Text),
             ],
         )
         .index(&["scope", "ref", "axis"]),
@@ -1173,6 +1185,10 @@ fn build_registry() -> Vec<Table> {
                 req("decided_at", Type::Timestamp),
                 // A pick a person overruled stays and stops applying.
                 col("withdrawn_at", Type::Timestamp),
+                // Record 42 S1: the registered model and the campaign, as on
+                // a decision.
+                col("model_id", Type::Int),
+                col("campaign_id", Type::Int),
             ],
         )
         .index(&["role", "subject_id", "session_day"]),

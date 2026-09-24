@@ -640,9 +640,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "anna@ward-3",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: Some("checked both"),
+                campaign: None,
             },
         )
         .unwrap();
@@ -703,9 +705,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "bot@ward-3",
                     kind: "agent",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -738,9 +742,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "anna@ward-3",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -762,9 +768,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "bot@ward-3",
                     kind: "agent",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         );
         assert!(
@@ -792,9 +800,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "anna@ward-3",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: true,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();

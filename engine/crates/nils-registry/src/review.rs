@@ -289,6 +289,8 @@ pub struct Author<'a> {
     /// `person`, `agent` or `model`.
     pub kind: &'a str,
     pub version: Option<&'a str>,
+    /// The registered model, when the author is a model (record 42, D15).
+    pub model: Option<i64>,
 }
 
 /// The one verb (§10.2): a decision applied to an item.
@@ -307,6 +309,9 @@ pub struct Apply<'a> {
     /// Written but not in force until committed.
     pub stage: bool,
     pub why: Option<&'a str>,
+    /// The campaign whose answer this is, when one closed into it (record
+    /// 42 S1).
+    pub campaign: Option<i64>,
 }
 
 /// What an apply did.
@@ -516,6 +521,9 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                         "staged_at",
                         "committed_at",
                         "epoch_staged",
+                        "model_id",
+                        "campaign_id",
+                        "committed_by",
                     ],
                 )
                 .returning(&["id"]),
@@ -545,6 +553,14 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                     } else {
                         Param::Null
                     },
+                    a.author.model.map_or(Param::Null, Param::Int),
+                    a.campaign.map_or(Param::Null, Param::Int),
+                    // Written in force, it is in force by its own author.
+                    if a.stage {
+                        Param::Null
+                    } else {
+                        Param::from(a.author.who)
+                    },
                 ]],
             )?
             .first()
@@ -556,6 +572,8 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             "actor": a.author.who,
             "author_kind": a.author.kind,
             "model_version": a.author.version,
+            "model_id": a.author.model,
+            "campaign_id": a.campaign,
             "actor_detail": actor_detail,
             "why": a.why,
             "decision": decision,
@@ -662,7 +680,8 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             job_id: None,
             details: Some(serde_json::json!({
                 "value": a.value, "author_kind": a.author.kind,
-                "model_version": a.author.version, "why": a.why, "staged": a.stage,
+                "model_version": a.author.version, "model_id": a.author.model,
+                "campaign_id": a.campaign, "why": a.why, "staged": a.stage,
             })),
         },
     )?;
@@ -776,7 +795,10 @@ pub fn commit(
         for (id, _) in &staged {
             store.update_by_id(
                 table("decision"),
-                &[("committed_at", Param::from(now.as_str()))],
+                &[
+                    ("committed_at", Param::from(now.as_str())),
+                    ("committed_by", Param::from(who)),
+                ],
                 "id",
                 *id,
             )?;

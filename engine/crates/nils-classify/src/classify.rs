@@ -390,6 +390,10 @@ pub struct Author {
     pub kind: String,
     /// A model's version. Null for anything else (D15).
     pub version: Option<String>,
+    /// The registered model, when a model answered (record 42).
+    pub model: Option<i64>,
+    /// The campaign the answer closed, when one did.
+    pub campaign: Option<i64>,
 }
 
 /// Which stack a fingerprint row belongs to, and to what. Read only when a
@@ -420,7 +424,7 @@ impl Decisions {
     /// later one, which is the order they are read in.
     fn load(store: &mut Store) -> Result<Decisions, Error> {
         let sql = format!(
-            "SELECT scope, ref, axis, value, actor, author_kind, author_version, id FROM {} \
+            "SELECT scope, ref, axis, value, actor, author_kind, author_version, id, model_id, campaign_id FROM {} \
              WHERE withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) \
              ORDER BY id",
             store.qualified("decision")
@@ -458,6 +462,8 @@ impl Decisions {
                 who: r.text(4)?.to_string(),
                 kind: r.opt_text(5)?.unwrap_or("person").to_string(),
                 version: r.opt_text(6)?.map(str::to_string),
+                model: r.opt_int(8)?,
+                campaign: r.opt_int(9)?,
             };
             let value = Decided {
                 value: r.opt_text(3)?.map(str::to_string),
@@ -1038,6 +1044,8 @@ fn run(
                     },
                     Param::Null,
                     Param::Null,
+                    Param::Null,
+                    Param::Null,
                 ]);
             }
             for (axis, value, d) in &authored {
@@ -1056,6 +1064,8 @@ fn run(
                     },
                     Param::from(d.author.who.as_str()),
                     Param::from(d.author.kind.as_str()),
+                    d.author.model.map_or(Param::Null, Param::Int),
+                    d.author.campaign.map_or(Param::Null, Param::Int),
                 ]);
             }
             report.evidence += (verdict.evidence.len() + authored.len()) as i64;
@@ -1189,6 +1199,8 @@ fn run(
                             "matched",
                             "author",
                             "author_kind",
+                            "model_id",
+                            "campaign_id",
                         ],
                     ),
                     &evidence,
