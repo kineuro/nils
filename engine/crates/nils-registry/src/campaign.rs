@@ -3368,8 +3368,18 @@ fn close_items(
                     now,
                 );
                 match written {
-                    Ok(Ok(decided)) => {
+                    Ok(Ok((decided, skipped))) => {
                         registry.store().commit()?;
+                        if !skipped.is_empty() {
+                            out.skipped.push((
+                                it.id,
+                                format!(
+                                    "{} of stack {} decided while the campaign was open; that decision stands",
+                                    skipped.join(", "),
+                                    it.stack_id.unwrap_or_default()
+                                ),
+                            ));
+                        }
                         for (id, staged) in decided {
                             if staged {
                                 staged_ones.push(id);
@@ -3671,14 +3681,20 @@ struct Author<'a> {
     model: Option<i64>,
 }
 
+/// What an axes item's close wrote: each decision with whether it is
+/// staged, and the axes it skipped.
+type AxesClosed = (Vec<(i64, bool)>, Vec<String>);
+
 /// Close one axes item inside the transaction the caller holds (record 45
 /// E4): one decision per axis, each through [`review::apply_within`], so
 /// rank, withdrawal, the audit and the epoch are the spine's. The decision
 /// on an axis answers the adopted item that asks it: a group's member, or a
 /// stack's own question, which the apply closes; with none, it is written
-/// on the item's own review item for that axis. Answers each decision and
-/// whether it is staged, or why the item was refused (the caller rolls
-/// back).
+/// on the item's own review item for that axis. An axis whose adopted
+/// question on this stack someone decided while the campaign was open keeps
+/// that decision and is skipped, as a group's member item is (wave 43's
+/// fix). Answers each decision and whether it is staged, with the axes
+/// skipped, or why the item was refused (the caller rolls back).
 #[allow(clippy::too_many_arguments)]
 fn close_axes(
     registry: &mut Registry,
@@ -3690,30 +3706,50 @@ fn close_axes(
     stage: bool,
     path: &str,
     now: &str,
-) -> Result<Result<Vec<(i64, bool)>, String>, Error> {
+) -> Result<Result<AxesClosed, String>, Error> {
     let Some(stack) = it.stack_id else {
         return Ok(Err("an axes item names its stack".into()));
     };
     let own = review::item(registry.store(), it.review_item_id)
         .map_err(|e| invalid(e.to_string()))?
         .ok_or_else(|| Error::NotFound(format!("no review item {}", it.review_item_id)))?;
-    // the adopted items this one answers, still waiting for an answer
+    // the adopted items this one answers, still waiting for an answer, and
+    // the axes whose adopted question on this stack was decided meanwhile
     let mut adopted: Vec<review::Item> = Vec::new();
+    let mut decided_meanwhile: BTreeSet<String> = BTreeSet::new();
     for id in own.evidence["asks"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_i64)
     {
-        if let Some(x) = review::item(registry.store(), id).map_err(|e| invalid(e.to_string()))?
-            && matches!(x.status.as_str(), "open" | "staged")
+        let Some(x) = review::item(registry.store(), id).map_err(|e| invalid(e.to_string()))?
+        else {
+            continue;
+        };
+        let waits = matches!(x.status.as_str(), "open" | "staged");
+        let member_decided = x.scope == "group"
+            && review::members(registry.store(), x.id)
+                .map_err(|e| invalid(e.to_string()))?
+                .iter()
+                .any(|m| m.stack_id == stack && m.decided_at.is_some());
+        if (!waits || member_decided)
+            && let Some(axis) = x.evidence["axis"].as_str()
         {
+            decided_meanwhile.insert(axis.to_string());
+        }
+        if waits {
             adopted.push(x);
         }
     }
     let mut decided: Vec<(i64, bool)> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut by_axis = serde_json::Map::new();
     for axis in axes {
+        if decided_meanwhile.contains(axis) {
+            skipped.push(axis.clone());
+            continue;
+        }
         let values = joint.get(axis).cloned().unwrap_or_default();
         let value = (!values.is_empty()).then(|| values.join(","));
         // the adopted question about this axis on this stack, if any: a
@@ -3779,6 +3815,9 @@ fn close_axes(
     mark_review_item(store, own.id, "resolved")?;
     let mut outcome = it.outcome.clone();
     outcome["decisions"] = Value::Object(by_axis);
+    if !skipped.is_empty() {
+        outcome["skipped"] = json!(skipped);
+    }
     store.update_by_id(
         table("campaign_item"),
         &[
@@ -3790,7 +3829,7 @@ fn close_axes(
         "id",
         it.id,
     )?;
-    Ok(Ok(decided))
+    Ok(Ok((decided, skipped)))
 }
 
 /// Close a review item with what the campaign made of it, when `apply` did

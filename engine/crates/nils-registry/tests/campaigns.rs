@@ -2845,3 +2845,160 @@ fn a_member_decided_while_the_campaign_was_open_is_skipped_at_close() {
         assert_eq!(r.status, "accepted", "{name}");
     }
 }
+
+/// Wave 43's fix and record 45 together: an axis question asks a grouped
+/// review item one item per undecided member, an axes question over the same
+/// group asks each stack once, one open campaign asks the group at a time,
+/// and a member someone decided while an axes campaign was open keeps that
+/// decision, its axis skipped at the close and the stack's other axes
+/// written.
+#[test]
+fn a_grouped_item_is_asked_once_per_stack_by_an_axis_or_an_axes_campaign() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let now = nils_registry::time::now_iso();
+        let store = reg.store();
+        let mut groups = Vec::new();
+        for g in ["g1", "g2"] {
+            let group = row(
+                store,
+                "review_item",
+                &[
+                    ("kind", Param::from("base:low_confidence")),
+                    ("scope", Param::from("group")),
+                    ("ref", Param::from(json!({"group": g}).to_string())),
+                    (
+                        "evidence",
+                        Param::from(json!({"axis": "base", "confidence": 0.4}).to_string()),
+                    ),
+                    ("status", Param::from("open")),
+                    ("created_at", Param::from(now.as_str())),
+                    ("members", Param::Int(2)),
+                ],
+            );
+            for s in &ids {
+                row(
+                    store,
+                    "review_member",
+                    &[("item_id", Param::Int(group)), ("stack_id", Param::Int(*s))],
+                );
+            }
+            groups.push(group);
+        }
+        let adj = json!({"when": "never"});
+        let base = json!({"kind": "axis", "axis": "base", "values": ["T1w", "T2w", "PDw"]});
+        let c1 = campaign::create(
+            reg,
+            &new(
+                "by-member",
+                &base,
+                &adj,
+                Items::Review(vec![groups[0]]),
+                1,
+                "decision",
+            ),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c1.id).unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.stack_id).collect::<Vec<_>>(),
+            ids.iter().copied().map(Some).collect::<Vec<_>>(),
+            "{name}: one item per member"
+        );
+        // an axes campaign may not ask the group the open one asks
+        let q = axes_question();
+        assert!(
+            campaign::create(
+                reg,
+                &new(
+                    "twice",
+                    &q,
+                    &adj,
+                    Items::Review(vec![groups[0]]),
+                    1,
+                    "decision"
+                )
+            )
+            .is_err(),
+            "{name}"
+        );
+        // over the other group, and the first again through it: each stack once
+        let c2 = campaign::create(
+            reg,
+            &new(
+                "axes-once",
+                &q,
+                &adj,
+                Items::Review(vec![groups[1]]),
+                1,
+                "decision",
+            ),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c2.id).unwrap();
+        assert_eq!(items.len(), 2, "{name}: one item per stack");
+        for _ in 0..2 {
+            let a = campaign::claim(reg, c2.id, "anna@lab", Role::Rater, &at(0))
+                .unwrap()
+                .unwrap();
+            campaign::answer(
+                reg,
+                &give(
+                    a.assignment.id,
+                    "anna@lab",
+                    r#"{"base": "T2w", "technique": "TSE", "modifier": null}"#,
+                ),
+                &at(1),
+            )
+            .unwrap();
+        }
+        // a person decides the first stack's base through the group meanwhile
+        nils_registry::review::apply(
+            reg,
+            &nils_registry::review::Apply {
+                item: groups[1],
+                member: Some(ids[0]),
+                scope: "stack",
+                value: Some("PDw"),
+                author: nils_registry::review::Author {
+                    who: "dora@lab",
+                    kind: "person",
+                    version: None,
+                    model: None,
+                },
+                stage: false,
+                why: Some("looked myself"),
+                campaign: None,
+            },
+        )
+        .unwrap();
+        let closed = campaign::close(reg, &person_closes(c2.id), &at(2)).unwrap();
+        assert_eq!(closed.resolved, 2, "{name}: {closed:?}");
+        assert_eq!(closed.skipped.len(), 1, "{name}: {closed:?}");
+        assert!(
+            closed.skipped[0].1.starts_with("base of stack"),
+            "{name}: {closed:?}"
+        );
+        // the first stack: technique and modifier; the second: every axis
+        assert_eq!(closed.decisions.len(), 5, "{name}: {closed:?}");
+        let standing = select(reg, |s| {
+            format!(
+                "SELECT value FROM {} WHERE scope = 'stack' AND ref = '{}' AND axis = 'base' AND withdrawn_at IS NULL",
+                s.qualified("decision"),
+                ids[0]
+            )
+        });
+        assert_eq!(standing.len(), 1, "{name}");
+        assert_eq!(
+            standing[0].text(0).unwrap(),
+            "PDw",
+            "{name}: the person's stands"
+        );
+        let g = nils_registry::review::item(reg.store(), groups[1])
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.status, "accepted", "{name}: both members decided");
+    }
+}
