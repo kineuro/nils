@@ -90,9 +90,10 @@ pub struct Invocation {
     /// Pass the host's GPU.
     pub gpu: bool,
     pub env: Vec<(String, String)>,
-    /// The uid and gid the process runs as: the engine's user. Docker and
-    /// podman are told with `--user`; podman's `--userns keep-id` maps the
-    /// user to the same ids inside, and `--user` makes the process that
+    /// The uid and gid the process runs as: the engine's user (for podman
+    /// the engine process's own uid and gid, the ids keep-id maps). Docker
+    /// and podman are told with `--user`; podman's `--userns keep-id` maps
+    /// the user to the same ids inside, and `--user` makes the process that
     /// user even where the image names a `USER` of its own (wave 43's
     /// proof: `USER 65534` won over keep-id, the outputs belonged to a
     /// sub-uid, and the next run could not hard-link them). Apptainer runs

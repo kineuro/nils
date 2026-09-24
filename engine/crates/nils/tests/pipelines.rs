@@ -415,6 +415,40 @@ impl Lab {
     }
 }
 
+/// This process's own uid and gid, which podman's `--user` names.
+fn this_account() -> (u32, u32) {
+    let id = |flag: &str| -> u32 {
+        let out = Command::new("id").arg(flag).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    };
+    (id("-u"), id("-g"))
+}
+
+/// Make a folder setgid to a group this account belongs to that is not its
+/// own, as a shared working place is, so what is made in it takes that
+/// group; answers the group, or none where the account has no other.
+fn shared_group(dir: &Path) -> Option<u32> {
+    let own = this_account().1;
+    let out = Command::new("id").arg("-G").output().ok()?;
+    let other: u32 = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|g| g.parse().ok())
+        .find(|g| *g != own)?;
+    let done = Command::new("chgrp")
+        .arg(other.to_string())
+        .arg(dir)
+        .status()
+        .ok()?
+        .success()
+        && Command::new("chmod")
+            .arg("g+s")
+            .arg(dir)
+            .status()
+            .ok()?
+            .success();
+    done.then_some(other)
+}
+
 fn pair(words: &[String], a: &str, b: &str) -> bool {
     words.windows(2).any(|w| w[0] == a && w[1] == b)
 }
@@ -580,6 +614,12 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
         return;
     }
     let lab = Lab::new("pipelines-stacks");
+    // a working place shared by a group, setgid: its folders take the
+    // group, and the container must still run as this account's own
+    let shared = shared_group(lab.work.path());
+    if shared.is_none() {
+        eprintln!("this account has one group; the setgid working place is not tried");
+    }
     lab.add_descriptor(
         "stack-echo",
         &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
@@ -639,13 +679,22 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
     assert!(pair(words, "--network", "none"), "{words:?}");
     assert!(pair(words, "--userns", "keep-id"), "{words:?}");
     // wave 43's proof: an image's own USER beat keep-id; --user names the
-    // engine's user, which keep-id maps to itself
-    let me = {
+    // engine's own account, which keep-id maps to itself, and never the
+    // group of a shared (setgid) working place, which it does not map
+    let (uid, gid) = this_account();
+    assert!(pair(words, "--user", &format!("{uid}:{gid}")), "{words:?}");
+    if let Some(g) = shared {
         use std::os::unix::fs::MetadataExt;
-        let m = std::fs::metadata(lab.work.path()).unwrap();
-        format!("{}:{}", m.uid(), m.gid())
-    };
-    assert!(pair(words, "--user", &me), "{words:?}");
+        let out = lab
+            .work
+            .path()
+            .join(format!("derivatives/stack-echo/{run1}"));
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().gid(),
+            g,
+            "the place is shared"
+        );
+    }
     assert!(pair(words, "--cap-drop", "all"), "{words:?}");
     let input = format!("{}/runs/{run1}/input:/input:ro", lab.work.path().display());
     assert!(pair(words, "--volume", &input), "{words:?}");
@@ -1332,7 +1381,7 @@ container-image:
   image: "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
 command-line: >-
   sh -c 'for u in $(sed -n "s/.*\"unit\": *\"\(stack-[0-9]*\)\".*/\1/p" [Manifest]); do
-  mkdir -p [OutputLocation]/$u; id -u > [OutputLocation]/$u/uid.txt;
+  mkdir -p [OutputLocation]/$u; id -u > [OutputLocation]/$u/uid.txt; id -g > [OutputLocation]/$u/gid.txt;
   if wget -q -T 2 -O /dev/null http://example.com 2>/dev/null; then echo net > [OutputLocation]/$u/net.txt; fi;
   done'
 x-nils:
@@ -1398,6 +1447,8 @@ fn real_containers_run_n4_rootless_with_no_network() {
         return;
     }
     let lab = Lab::new("pipelines-real");
+    // a working place shared by a group, setgid, as a site's often is
+    let shared = shared_group(lab.work.path());
     // the stand-in is not on this search path
     let path = std::env::var_os("PATH").unwrap_or_default();
     // rootless podman maps the user it runs as by name, so the real
@@ -1461,6 +1512,15 @@ fn real_containers_run_n4_rootless_with_no_network() {
             .unwrap();
         assert_eq!(uid, me, "the container's process is this user, not root");
         assert_ne!(uid, 0);
+        // and in this account's own group, whatever group the place has
+        if runtime == "podman" {
+            let gid: u32 = std::fs::read_to_string(dir.join("gid.txt"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(gid, this_account().1, "shared group {shared:?}");
+        }
         use std::os::unix::fs::MetadataExt;
         assert_eq!(std::fs::metadata(dir.join("uid.txt")).unwrap().uid(), me);
         assert!(

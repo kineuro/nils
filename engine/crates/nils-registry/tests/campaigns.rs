@@ -2203,3 +2203,120 @@ fn a_campaign_asks_a_grouped_review_item_stack_by_stack() {
         assert_eq!(r.status, "accepted", "{name}");
     }
 }
+
+/// The review of wave 43's fixes: a member of a group a campaign asks,
+/// which a person decided on their own while the campaign was open, keeps
+/// that person's decision; the close skips it and says so, as it refuses
+/// a stack item whose review item was closed meanwhile.
+#[test]
+fn a_member_decided_while_the_campaign_was_open_is_skipped_at_close() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let now = nils_registry::time::now_iso();
+        let store = reg.store();
+        let group = row(
+            store,
+            "review_item",
+            &[
+                ("kind", Param::from("body_part:model")),
+                ("scope", Param::from("group")),
+                ("ref", Param::from(json!({"band": "0.5-0.7"}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part", "value": "brain"}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+                ("members", Param::Int(2)),
+            ],
+        );
+        for s in &ids {
+            row(
+                store,
+                "review_member",
+                &[
+                    ("item_id", Param::Int(group)),
+                    ("stack_id", Param::Int(*s)),
+                    (
+                        "evidence",
+                        Param::from(json!({"value": "brain"}).to_string()),
+                    ),
+                ],
+            );
+        }
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let c = campaign::create(
+            reg,
+            &new("race", &q, &adj, Items::Review(vec![group]), 1, "decision"),
+        )
+        .unwrap();
+        for minute in 0..2 {
+            let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(minute))
+                .unwrap()
+                .unwrap();
+            campaign::answer(
+                reg,
+                &give(a.assignment.id, "anna@lab", "spine"),
+                &at(minute),
+            )
+            .unwrap();
+        }
+        // a person decides the first member on their own meanwhile
+        nils_registry::review::apply(
+            reg,
+            &nils_registry::review::Apply {
+                item: group,
+                member: Some(ids[0]),
+                scope: "stack",
+                value: Some("neck"),
+                author: nils_registry::review::Author {
+                    who: "dora@lab",
+                    kind: "person",
+                    version: None,
+                    model: None,
+                },
+                stage: false,
+                why: Some("looked myself"),
+                campaign: None,
+            },
+        )
+        .unwrap();
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+                model: None,
+                picks: None,
+            },
+            &at(5),
+        )
+        .unwrap();
+        assert_eq!(closed.decisions.len(), 1, "{name}: {closed:?}");
+        assert_eq!(closed.skipped.len(), 1, "{name}: {closed:?}");
+        assert!(
+            closed.skipped[0].1.contains("decided"),
+            "{name}: {closed:?}"
+        );
+        assert_eq!(closed.as_json()["skipped"].as_array().unwrap().len(), 1);
+        // the person's value stands on the first member
+        let standing = select(reg, |s| {
+            format!(
+                "SELECT value FROM {} WHERE scope = 'stack' AND ref = '{}' AND withdrawn_at IS NULL",
+                s.qualified("decision"),
+                ids[0]
+            )
+        });
+        assert_eq!(standing.len(), 1, "{name}");
+        assert_eq!(standing[0].text(0).unwrap(), "neck", "{name}");
+        // and the group is closed, its last member decided by the campaign
+        let r = nils_registry::review::item(reg.store(), group)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.status, "accepted", "{name}");
+    }
+}

@@ -2614,6 +2614,10 @@ pub struct Closed {
     pub unresolved: i64,
     /// Items a decision could not be written for, with why.
     pub refused: Vec<(i64, String)>,
+    /// Items asked of a group's member that someone decided on their own
+    /// while the campaign was open: that decision stands and the item is
+    /// skipped, with why.
+    pub skipped: Vec<(i64, String)>,
     /// Whether it staged anything: every decision of a campaign that closes
     /// into `stage`, and any a model's answer settled or an agent or a
     /// model closed (record 42 R6).
@@ -2629,6 +2633,7 @@ impl Closed {
             "resolved": self.resolved,
             "unresolved": self.unresolved,
             "refused": self.refused.iter().map(|(i, why)| json!({"item": i, "why": why})).collect::<Vec<_>>(),
+            "skipped": self.skipped.iter().map(|(i, why)| json!({"item": i, "why": why})).collect::<Vec<_>>(),
             "staged": self.staged,
             "agreement": self.agreement,
         })
@@ -2803,6 +2808,25 @@ fn close_items(
             }
             _ => None,
         };
+        // A member someone decided on their own while the campaign was
+        // open keeps that decision: the close skips it and says so, as it
+        // refuses a stack item whose review item was closed meanwhile.
+        if let Some(stack) = member
+            && matches!(c.closes_into.as_str(), "decision" | "stage")
+            && review::members(registry.store(), it.review_item_id)
+                .map_err(|e| invalid(e.to_string()))?
+                .iter()
+                .any(|m| m.stack_id == stack && m.decided_at.is_some())
+        {
+            out.skipped.push((
+                it.id,
+                format!(
+                    "stack {stack} of review item {} was decided while the campaign was open; that decision stands",
+                    it.review_item_id
+                ),
+            ));
+            continue;
+        }
         match c.closes_into.as_str() {
             "decision" | "stage" => {
                 let value = it.outcome["value"].as_str().map(str::to_string);
@@ -3069,7 +3093,7 @@ fn close_items(
             details: Some(json!({
                 "closes_into": c.closes_into, "decisions": out.decisions.len(),
                 "picks": out.picks.len(), "resolved": out.resolved,
-                "unresolved": out.unresolved, "refused": out.refused.len(),
+                "unresolved": out.unresolved, "refused": out.refused.len(), "skipped": out.skipped.len(),
                 "agreement": out.agreement,
             })),
         },

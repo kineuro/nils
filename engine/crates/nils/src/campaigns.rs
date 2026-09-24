@@ -1723,6 +1723,9 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             for (item, why) in &closed.refused {
                 println!("  item {item}: {why}");
             }
+            for (item, why) in &closed.skipped {
+                println!("  item {item} skipped: {why}");
+            }
             println!("  agreement {}", closed.agreement);
             Ok(())
         }

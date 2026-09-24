@@ -1848,11 +1848,20 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         s
     };
     let argv = d.argv(x.params, &participants)?;
+    // who the process is: for podman the engine's own account, which
+    // `--userns keep-id` maps to itself, never the group of a shared
+    // (setgid) working place, which keep-id does not map and which would
+    // put the outputs on a sub-gid or keep the container from starting;
+    // for docker, whose daemon maps nothing, the output folder's owner
     let user = {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(&out).ok().map(|m| (m.uid(), m.gid()))
+            if x.runtime.name() == "podman" {
+                Some(this_account())
+            } else {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(&out).ok().map(|m| (m.uid(), m.gid()))
+            }
         }
         #[cfg(not(unix))]
         {
@@ -2447,6 +2456,18 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             Some(error),
         ))
     }
+}
+
+/// The engine process's own uid and gid, the ids podman's `--userns
+/// keep-id` maps to themselves.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "getuid and getgid read this process and cannot fail"
+)]
+fn this_account() -> (u32, u32) {
+    // SAFETY: neither call takes a pointer, touches memory, or can fail.
+    unsafe { (libc::getuid(), libc::getgid()) }
 }
 
 /// A run's seeds, as the runner kept them: the document of its derivative
