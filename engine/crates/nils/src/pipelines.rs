@@ -1054,20 +1054,34 @@ fn materialise_stacks(
     }
     let _ = d;
     // one bind per folder that holds a file of the selection, or the roots
-    let folder = |path: &str| -> String {
-        Path::new(path)
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default()
+    let folder = |root: &str, path: &str| -> Result<String, String> {
+        bind_folder(root, path).ok_or_else(|| {
+            format!(
+                "the source place {root} holds a ':' or a ',' in its path, which a runtime's mount syntax splits on"
+            )
+        })
     };
     let mut folders: BTreeMap<(i64, String), (String, String)> = BTreeMap::new();
     let mut roots: BTreeMap<i64, String> = BTreeMap::new();
+    let (mut widened, mut at_root) = (0usize, 0usize);
     for files in files_of.values() {
         for (so, root, path, _) in files {
             roots.entry(*so).or_insert_with(|| root.clone());
-            folders
-                .entry((*so, folder(path)))
-                .or_insert_with(|| (root.clone(), folder(path)));
+            let dir = folder(root, path)?;
+            if let std::collections::btree_map::Entry::Vacant(e) = folders.entry((*so, dir.clone()))
+            {
+                let own = Path::new(path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if dir != own {
+                    widened += 1;
+                }
+                if dir.is_empty() {
+                    at_root += 1;
+                }
+                e.insert((root.clone(), dir));
+            }
         }
     }
     let by_folder = folders.len() <= MAX_BINDS;
@@ -1112,12 +1126,17 @@ fn materialise_stacks(
                 continue;
             }
             let (n, rel) = if by_folder {
-                let n = index[&(so, folder(&path))];
-                let name = Path::new(&path)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                (n, name)
+                let root = &roots[&so];
+                let dir = folder(root, &path)?;
+                let n = index[&(so, dir.clone())];
+                let rel = if dir.is_empty() {
+                    path.clone()
+                } else {
+                    path.strip_prefix(&format!("{dir}/"))
+                        .unwrap_or(&path)
+                        .to_string()
+                };
+                (n, rel)
             } else {
                 (index[&(so, String::new())], path.clone())
             };
@@ -1156,7 +1175,17 @@ fn materialise_stacks(
     )
     .map_err(|e| format!("the run's input: {e}"))?;
     let scope = if by_folder {
-        json!({"sources": "folders", "binds": mounts.len()})
+        let mut s = json!({"sources": "folders", "binds": mounts.len()});
+        // a folder bound wider than its own, and a source root bound whole,
+        // are said (record 43 second review)
+        if widened > 0 || at_root > 0 {
+            s["widened"] = json!(widened);
+            s["roots"] = json!(at_root);
+            s["why"] = json!(format!(
+                "{widened} folder(s) bound through an ancestor, since their names hold a ':' or a ',' that a runtime's mount syntax splits on, and {at_root} source root(s) bound whole, since files lie directly in them"
+            ));
+        }
+        s
     } else {
         json!({
             "sources": "roots", "binds": mounts.len(), "folders": folders.len(),
@@ -2420,6 +2449,29 @@ fn model_artifact(
         .map_err(|e| e.to_string())
 }
 
+/// The folder, relative to its source root, a file is bound through: its
+/// own, or where that path holds a ':' or a ',', which the runtimes' mount
+/// syntax splits on, its nearest ancestor that holds neither; the root
+/// itself, `""`, for a file directly in it. None when the root's own path
+/// holds one.
+fn bind_folder(root: &str, path: &str) -> Option<String> {
+    let bad = |p: &str| p.contains(':') || p.contains(',');
+    if bad(root) {
+        return None;
+    }
+    let mut dir = Path::new(path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    loop {
+        let text = dir.to_string_lossy().into_owned();
+        if !bad(&text) {
+            return Some(text);
+        }
+        dir = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+    }
+}
+
 /// The live derivatives of the working place each derivative input of a
 /// descriptor takes, over the selection's stacks, read a few hundred
 /// stacks at a time.
@@ -2706,6 +2758,18 @@ mod tests {
         assert_eq!(refused[1]["unit"], "stack-12");
         assert_eq!(doc["summary"]["units"]["total"], 3);
         assert!(!doc.to_string().contains("sub-"), "{doc}");
+    }
+
+    /// The second review of record 43: a folder whose name the runtimes'
+    /// mount syntax would split is bound through an ancestor, not refused,
+    /// and a file directly in its source root binds that root.
+    #[test]
+    fn a_folder_a_mount_would_misread_is_bound_through_its_parent() {
+        assert_eq!(bind_folder("/data", "P1/1/f.dcm").as_deref(), Some("P1/1"));
+        assert_eq!(bind_folder("/data", "P1/a:b/f.dcm").as_deref(), Some("P1"));
+        assert_eq!(bind_folder("/data", "x,y/a:b/f.dcm").as_deref(), Some(""));
+        assert_eq!(bind_folder("/data", "f.dcm").as_deref(), Some(""));
+        assert_eq!(bind_folder("/da:ta", "P1/f.dcm"), None);
     }
 
     /// The second review of record 43: linking an input twice, or a file

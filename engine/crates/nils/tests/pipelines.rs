@@ -171,6 +171,11 @@ x-nils:
 /// Two people, one session each, a 3D T1 and a FLAIR with real pixels, so
 /// a converter reads them and a pick chooses among them.
 fn tree() -> TempDir {
+    tree_at(|patient, n, slice| format!("{patient}/{n}/{slice}"))
+}
+
+/// [`tree`] with each file where `at` puts it.
+fn tree_at(at: impl Fn(&str, &str, u32) -> String) -> TempDir {
     let dir = TempDir::new("pipelines-src");
     let people = [
         ("P1", "20220115", "1.2.826.0.1.3680043.8.498.71"),
@@ -229,7 +234,7 @@ fn tree() -> TempDir {
                     synth::bytes(tags::PIXEL_DATA, VR::OW, pixels),
                 ]);
                 dir.file(
-                    &format!("{patient}/{n}/{slice}"),
+                    &at(patient, n, slice),
                     &synth::part10(&MetaFields::mr(&sop), &e, true),
                 );
             }
@@ -251,11 +256,15 @@ struct Lab {
 
 impl Lab {
     fn new(name: &str) -> Lab {
+        Lab::with_tree(name, tree())
+    }
+
+    fn with_tree(name: &str, src: TempDir) -> Lab {
         let lab = Lab {
             home: TempDir::new(&format!("{name}-home")),
             work: TempDir::new(&format!("{name}-work")),
             bin: TempDir::new(&format!("{name}-bin")),
-            _src: tree(),
+            _src: src,
             path: OsString::new(),
         };
         let fake = lab.bin.file("podman", FAKE_PODMAN.as_bytes());
@@ -2064,4 +2073,43 @@ fn a_hostile_output_folder_is_refused_file_by_file_and_never_followed() {
             "{d}"
         );
     }
+}
+
+/// The second review of record 43: a folder whose name holds a ':' is
+/// bound through its parent rather than failing the run, and files lying
+/// directly in the source root bind that root, which the run's scope says.
+#[test]
+fn odd_folder_names_and_files_at_the_root_are_bound_and_said() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let src = tree_at(|patient, n, slice| match (patient, n) {
+        ("P1", "1") => format!("P1/t1:mprage/{slice}"),
+        ("P1", _) => format!("flair-{slice}"),
+        _ => format!("{patient}/{n}/{slice}"),
+    });
+    let lab = Lab::with_tree("pipelines-odd", src);
+    lab.add_descriptor(
+        "stack-echo",
+        &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+    );
+    let v = lab.json(&[
+        "run",
+        "stack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "done", "{v}");
+    let scope = &v["summary"]["scope"];
+    assert_eq!(
+        (&scope["widened"], &scope["roots"]),
+        (&json!(1), &json!(1)),
+        "{v}"
+    );
+    let words = lab.podman_runs().pop().unwrap();
+    assert!(!words.iter().any(|w| w.contains("t1:mprage")), "{words:?}");
 }
