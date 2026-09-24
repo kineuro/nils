@@ -297,6 +297,182 @@ pub(crate) fn plain(v: &mut Value) {
     }
 }
 
+/// The fewest scans a count below detail quasi stands for (record 49 R4b,
+/// the ask's own k): a count of 1 to 4 is withheld, none is still none.
+const SCANS_K: usize = nils_ask::validate::MEASURE_K as usize;
+
+/// What says that something was left out below detail quasi.
+const WITHHELD: &str = "withheld below detail quasi";
+
+/// A count of scans below detail quasi, under `key`: the count, or null
+/// and marked withheld when it stands for 1 to 4 scans.
+fn held(key: &str, n: usize) -> Value {
+    if n == 0 || n >= SCANS_K {
+        json!({ key: n })
+    } else {
+        json!({ key: null, "withheld": true })
+    }
+}
+
+/// Counts under their names, each held to [`SCANS_K`], as a list.
+fn held_list(name: &str, key: &str, counts: BTreeMap<String, usize>) -> Vec<Value> {
+    counts
+        .into_iter()
+        .map(|(what, n)| {
+            let mut v = held(key, n);
+            v[name] = json!(what);
+            v
+        })
+        .collect()
+}
+
+/// A run's summary read below detail quasi (record 49 R4 and R4b, after
+/// the assistant's review): its checks and its failures as counts by check
+/// and by reason, each count held to 5 scans, and no unit, no scan's value
+/// and no error text a tool wrote. What was held is named in `withheld`.
+pub(crate) fn summary_totals_only(s: &mut Value) {
+    if !s.is_object() {
+        return;
+    }
+    let mut withheld: Vec<&str> = Vec::new();
+    // the breaches: a unit and its values become counts by check
+    let mut by_check: BTreeMap<String, usize> = BTreeMap::new();
+    let mut metric_of: BTreeMap<String, Value> = BTreeMap::new();
+    for u in s["breaches"].as_array().into_iter().flatten() {
+        for b in u["breaches"].as_array().into_iter().flatten() {
+            let check = b["check"]
+                .as_str()
+                .or_else(|| b["metric"].as_str())
+                .unwrap_or("a check")
+                .to_string();
+            *by_check.entry(check.clone()).or_default() += 1;
+            metric_of
+                .entry(check)
+                .or_insert_with(|| b["metric"].clone());
+        }
+    }
+    let mut checks = held_list("check", "units", by_check);
+    for c in &mut checks {
+        c["metric"] = metric_of
+            .get(c["check"].as_str().unwrap_or_default())
+            .cloned()
+            .unwrap_or(Value::Null);
+    }
+    s["breaches"] = json!([]);
+    s["breaches_by_check"] = json!(checks);
+    if let Some(n) = s["numbers"]["checks"]["breaches"].as_u64()
+        && held("n", n as usize)["withheld"] == true
+    {
+        s["numbers"]["checks"]["breaches"] = Value::Null;
+        withheld.push("numbers.checks.breaches");
+    }
+    // a cell a table could not read is said as its value: counted by column
+    if let Some(list) = s["numbers"]["tables"]["refused_values"].as_array() {
+        let mut by_column: BTreeMap<String, usize> = BTreeMap::new();
+        for v in list {
+            let t = v.as_str().unwrap_or_default();
+            // `output: column: value`, the value dropped
+            let column = t.splitn(3, ": ").take(2).collect::<Vec<_>>().join(": ");
+            *by_column.entry(column).or_default() += 1;
+        }
+        s["numbers"]["tables"]["refused_values"] = json!(held_list("column", "values", by_column));
+    }
+    // the failures: counted by reason, never a unit or a tool's words
+    let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
+    for reason in ["failed", "unreported"] {
+        let n = s["units"][reason].as_u64().unwrap_or(0) as usize;
+        if n > 0 {
+            by_reason.insert(reason.to_string(), n);
+        }
+    }
+    let mut refused_units = std::collections::BTreeSet::new();
+    if let Some(list) = s["refused_files"].as_array_mut() {
+        // a refusal of a unit's file names the unit and its file; one of
+        // the run's own, a model's output, names neither and stays
+        list.retain(|r| match r["unit"].as_str() {
+            Some(u) => {
+                refused_units.insert(u.to_string());
+                false
+            }
+            None => true,
+        });
+    }
+    if !refused_units.is_empty() {
+        by_reason.insert("refused".into(), refused_units.len());
+    }
+    // a count of failed units held, and the count of those that succeeded
+    // with it, since the total less it says the same number
+    let mut held_units = false;
+    for reason in ["failed", "unreported"] {
+        if let Some(n) = s["units"][reason].as_u64()
+            && held("n", n as usize)["withheld"] == true
+        {
+            s["units"][reason] = Value::Null;
+            held_units = true;
+        }
+    }
+    if held_units && s["units"]["succeeded"].is_u64() {
+        s["units"]["succeeded"] = Value::Null;
+    }
+    if held_units {
+        withheld.push("units");
+    }
+    s["failures_by_reason"] = json!(held_list("reason", "units", by_reason));
+    s["detail"] = json!("totals");
+    s["withheld"] = json!(withheld);
+}
+
+/// A run's document read below detail quasi: its summary as
+/// [`summary_totals_only`] says, no unit's own row, and no error text.
+pub(crate) fn run_totals_only(doc: &mut Value) {
+    summary_totals_only(&mut doc["summary"]);
+    if doc.get("units_run").is_some() {
+        doc["units_run"] = json!([]);
+    }
+    if doc["error"].is_string() {
+        doc["error"] = json!(WITHHELD);
+    }
+    plain(doc);
+}
+
+/// A job read below detail quasi: a pipeline run's result and error as its
+/// run's (record 49 R4, after review).
+pub(crate) fn job_totals_only(job: &mut Value) {
+    let a_run = job["kind"] == "pipeline" || job["result"]["run"].is_i64();
+    if !a_run {
+        return;
+    }
+    if job["result"]["summary"].is_object() {
+        summary_totals_only(&mut job["result"]["summary"]);
+    }
+    if job["error"].is_string() {
+        job["error"] = json!(WITHHELD);
+    }
+    plain(&mut job["result"]);
+}
+
+/// A `pipeline:qc` review item read below detail quasi: the run, the
+/// pipeline and the item's status, and not the unit, its ids, its values
+/// or the tool's words. Other kinds are left as they are.
+pub(crate) fn qc_item_totals_only(item: &mut Value) {
+    if item["kind"] != nils_registry::review::PIPELINE_QC_KIND {
+        return;
+    }
+    let run = item["ref"]["run_id"].clone();
+    if item.get("ref").is_some() {
+        item["ref"] = json!({"run_id": run, "pipeline": item["ref"]["pipeline"]});
+    }
+    item["evidence"] = json!({"status": item["evidence"]["status"], "withheld": WITHHELD});
+    if item.get("group_key").is_some() {
+        item["group_key"] = run
+            .as_i64()
+            .map_or(Value::Null, |r| json!(format!("run:{r}")));
+    }
+    if item.get("about").is_some() {
+        item["about"] = json!(WITHHELD);
+    }
+}
+
 // ---------------------------------------------------------------- the doors
 
 /// The reading doors: the catalog and the runs.
@@ -345,7 +521,7 @@ pub(crate) fn route(
             let list = rows::runs(registry.store(), pipeline, limit).map_err(err)?;
             let mut docs = runs_docs(registry.store(), &list);
             if !quasi {
-                docs.iter_mut().for_each(plain);
+                docs.iter_mut().for_each(run_totals_only);
             }
             Ok(Reply::ok(json!({ "runs": docs, "limit": limit })))
         })(),
@@ -356,7 +532,7 @@ pub(crate) fn route(
                 .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
             let mut doc = run_doc(registry.store(), &r);
             if !quasi {
-                plain(&mut doc);
+                run_totals_only(&mut doc);
             }
             Ok(Reply::ok(doc))
         })(),
@@ -4927,6 +5103,117 @@ mod tests {
         assert_eq!(refused[1]["unit"], "stack-12");
         assert_eq!(doc["summary"]["units"]["total"], 3);
         assert!(!doc.to_string().contains("sub-"), "{doc}");
+    }
+
+    /// Record 49 R4 and R4b, after the assistant's review: below detail
+    /// quasi a run's checks and failures are counts by check and by reason,
+    /// a count of 1 to 4 scans withheld, and no unit, value or tool's words.
+    #[test]
+    fn a_run_read_below_quasi_says_counts_by_check_and_reason_and_no_scan() {
+        let breach = |unit: &str, check: &str, metric: &str, value: f64| {
+            json!({"unit": unit, "breaches": [
+                {"metric": metric, "value": value, "check": check, "op": ">=", "threshold": 8},
+            ]})
+        };
+        let mut breaches: Vec<Value> = (1..=6)
+            .map(|i| breach(&format!("stack-{i}"), "snr >= 8", "snr", 3.25 + i as f64))
+            .collect();
+        breaches.push(breach("sub-P7_ses-1", "holes <= 200", "holes", 251.5));
+        let mut doc = json!({
+            "id": 9, "status": "partial",
+            "error": "the tool said: sub-P9 has no /data/raw/P9/x.dcm",
+            "unit_states": {"over": 12},
+            "units_run": [{"unit": "stack-1", "state": "over", "status": "failed", "exit_code": 3}],
+            "summary": {
+                "units": {"total": 12, "succeeded": 10, "failed": 2, "skipped": 0, "unreported": 0},
+                "numbers": {
+                    "tables": {"refused_values": ["volumes: brain_volume: 12.75x", "volumes: brain_volume: 13.5x"]},
+                    "checks": {"declared": 2, "breaches": 7, "unchecked": 0},
+                },
+                "breaches": breaches,
+                "refused_files": [
+                    {"unit": "stack-11", "file": "stack-11/x.nii.gz", "why": "a link out"},
+                    {"output": "model", "why": "the run wrote no model"},
+                ],
+                "review_items": [1, 2, 3],
+            },
+        });
+        run_totals_only(&mut doc);
+        let s = &doc["summary"];
+        assert_eq!(s["breaches"], json!([]), "{doc}");
+        assert_eq!(
+            s["breaches_by_check"],
+            json!([
+                {"check": "holes <= 200", "metric": "holes", "units": null, "withheld": true},
+                {"check": "snr >= 8", "metric": "snr", "units": 6},
+            ]),
+            "{doc}"
+        );
+        assert_eq!(
+            s["numbers"]["checks"]["breaches"], 7,
+            "7 breaches stand for 7 scans"
+        );
+        assert_eq!(
+            s["failures_by_reason"],
+            json!([
+                {"reason": "failed", "units": null, "withheld": true},
+                {"reason": "refused", "units": null, "withheld": true},
+            ]),
+            "{doc}"
+        );
+        // a count held is held where the run's totals would say it again
+        assert!(s["units"]["failed"].is_null() && s["units"]["succeeded"].is_null());
+        assert_eq!(s["units"]["total"], 12);
+        assert_eq!(
+            s["numbers"]["tables"]["refused_values"],
+            json!([{"column": "volumes: brain_volume", "values": null, "withheld": true}])
+        );
+        assert_eq!(
+            s["refused_files"],
+            json!([{"output": "model", "why": "the run wrote no model"}])
+        );
+        assert_eq!(doc["units_run"], json!([]));
+        assert_eq!(doc["unit_states"]["over"], 12);
+        assert_eq!(s["detail"], "totals");
+        let text = doc.to_string();
+        for leak in [
+            "stack-",
+            "sub-",
+            "3.25",
+            "4.25",
+            "251.5",
+            "12.75",
+            "/data/raw",
+        ] {
+            assert!(!text.contains(leak), "{leak} in {text}");
+        }
+
+        // a job's result is its run's summary; a pipeline:qc item says its
+        // status and run alone
+        let mut job = json!({
+            "kind": "pipeline", "error": "stack-3 failed: /data/raw/P3",
+            "result": {"run": 9, "summary": {"breaches": [breach("stack-3", "snr >= 8", "snr", 4.5)],
+                        "numbers": {"checks": {"breaches": 1}}}},
+        });
+        job_totals_only(&mut job);
+        assert!(job["result"]["summary"]["numbers"]["checks"]["breaches"].is_null());
+        assert!(!job.to_string().contains("stack-3") && !job.to_string().contains("4.5"));
+        let mut item = json!({
+            "id": 4, "kind": "pipeline:qc", "group_key": "run:9|unit:sub-P1",
+            "ref": {"run_id": 9, "pipeline": "volumes@1", "unit": "stack-3", "stack_id": 3,
+                    "subject_id": 1, "session_day": "2022-01-15"},
+            "evidence": {"status": "breach", "error": "snr is 4.5, and the check is snr >= 8",
+                         "metrics": {"breaches": [{"value": 4.5}], "metrics": {"snr": 4.5}}},
+        });
+        qc_item_totals_only(&mut item);
+        assert_eq!(item["ref"], json!({"run_id": 9, "pipeline": "volumes@1"}));
+        assert_eq!(item["evidence"]["status"], "breach");
+        assert_eq!(item["group_key"], "run:9");
+        let text = item.to_string();
+        assert!(!text.contains("4.5") && !text.contains("sub-") && !text.contains("2022"));
+        let mut other = json!({"kind": "classify:conflict", "evidence": {"axis": "a"}});
+        qc_item_totals_only(&mut other);
+        assert_eq!(other["evidence"]["axis"], "a");
     }
 
     /// The second review of record 43: a folder whose name the runtimes'

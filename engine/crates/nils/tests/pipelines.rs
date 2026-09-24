@@ -1140,6 +1140,8 @@ impl Drop for Server {
 const OPERATOR: &str = "an-operator-token-of-length";
 const PLAIN: &str = "a-plain-pipelines-token-long";
 const READER: &str = "a-reader-token-of-its-length";
+/// Record 49 R4's review: a reader of runs and of review items at plain.
+const PLAIN_REVIEW: &str = "a-plain-review-token-of-lens";
 
 impl Server {
     fn start(lab: &Lab) -> Server {
@@ -1151,6 +1153,7 @@ impl Server {
             format!("{OPERATOR}=ops@lab:operator"),
             format!("{PLAIN}=pat@lab:pipelines:work,pipelines:see"),
             format!("{READER}=lou@lab:reader"),
+            format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
         ]
         .join(",");
         let mut child = lab
@@ -3613,6 +3616,99 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
         "{evidence}"
     );
     drop(store);
+
+    // record 49 R4, after the assistant's review: below detail quasi every
+    // door that shows the run says its checks as counts by check, a count
+    // of fewer than 5 scans withheld, and no unit, value or tool's words
+    let server = Server::start(&lab);
+    let unit = format!("stack-{low}");
+    let (status, full) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+    assert_eq!(status, 200, "{full}");
+    assert_eq!(
+        full["summary"]["breaches"][0]["unit"],
+        unit.as_str(),
+        "{full}"
+    );
+    assert_eq!(full["summary"]["breaches"][0]["breaches"][0]["value"], 3.5);
+    let quiet = |doc: &Value| {
+        let text = doc.to_string();
+        assert!(!text.contains(&unit), "{unit} below quasi: {text}");
+        assert!(!text.contains("3.5"), "a value below quasi: {text}");
+        assert!(
+            !text.contains("the check is"),
+            "a breach's words below quasi: {text}"
+        );
+    };
+    for token in [PLAIN, PLAIN_REVIEW] {
+        let (status, doc) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, token);
+        assert_eq!(status, 200, "{doc}");
+        quiet(&doc);
+        let s = &doc["summary"];
+        assert_eq!(s["detail"], "totals", "{doc}");
+        assert_eq!(s["breaches"], json!([]), "{doc}");
+        assert_eq!(
+            s["breaches_by_check"],
+            json!([{"check": "snr >= 8", "metric": "snr", "units": null, "withheld": true}]),
+            "one breach stands for one scan: {doc}"
+        );
+        assert!(s["numbers"]["checks"]["breaches"].is_null(), "{doc}");
+        assert_eq!(s["numbers"]["checks"]["declared"], 2, "{doc}");
+        assert_eq!(s["units"]["total"], 4, "{doc}");
+        assert_eq!(doc["units_run"], json!([]), "{doc}");
+        let (status, list) = server.call("GET", "/api/pipeline-runs", None, token);
+        assert_eq!(status, 200, "{list}");
+        quiet(&list);
+        if let Some(job) = doc["job_id"].as_i64() {
+            let (status, j) = server.call("GET", &format!("/api/jobs/{job}"), None, token);
+            assert_eq!(status, 200, "{j}");
+            quiet(&j);
+            let (status, all) = server.call("GET", "/api/jobs?all=1", None, token);
+            assert_eq!(status, 200, "{all}");
+            quiet(&all);
+        }
+    }
+    let (status, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, PLAIN_REVIEW);
+    assert_eq!(status, 200, "{items}");
+    assert_eq!(items["count"], 1, "{items}");
+    quiet(&items);
+    let item = &items["items"][0];
+    assert_eq!(item["evidence"]["status"], "breach", "{item}");
+    assert_eq!(item["ref"]["run_id"], run, "{item}");
+    assert!(item["ref"]["stack_id"].is_null(), "{item}");
+    let (status, one) = server.call(
+        "GET",
+        &format!("/api/review/{}", item["id"]),
+        None,
+        PLAIN_REVIEW,
+    );
+    assert_eq!(status, 200, "{one}");
+    quiet(&one);
+    let (status, why) = server.call("GET", &format!("/api/explain/{low}"), None, PLAIN_REVIEW);
+    assert!(status == 200 || status == 404, "{why}");
+    quiet(&why);
+    // at detail quasi the review item still names the unit and the value
+    let (_, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, OPERATOR);
+    assert_eq!(items["items"][0]["ref"]["unit"], unit.as_str(), "{items}");
+    assert_eq!(
+        items["items"][0]["evidence"]["metrics"]["breaches"][0]["value"],
+        3.5
+    );
+    // the pre-flight door reads its pipeline's name decoded, as a query
+    // is: `volumes@1` sent as `volumes%401`
+    for path in [
+        "/api/pipelines/volumes%401/preflight",
+        "/api/pipelines/volumes@1/preflight",
+    ] {
+        let (status, pre) = server.call(
+            "POST",
+            path,
+            Some(json!({"select": "selection:every@1"})),
+            PLAIN,
+        );
+        assert_eq!(status, 200, "{path}: {pre}");
+        assert_eq!(pre["units"]["total"], 4, "{path}: {pre}");
+    }
+    drop(server);
 
     // the ask reads the run's numbers as fields of the stack, with the run
     let packs = packs();

@@ -1506,7 +1506,12 @@ fn routed(
     // record 43: the pipeline catalog and its runs
     // a run names a unit by its subject or session only at detail quasi
     let quasi = caller.allowed(path, need, Detail::Quasi).is_ok();
-    if let Some(r) = crate::pipelines::route(registry, quasi, get, &segs, query) {
+    // a pipeline is named by its id or `name@version`, which a client may
+    // send percent-encoded (`volumes%401`): its segments are decoded once
+    // here, as the query is
+    let decoded_segs: Vec<String> = segs.iter().map(|s| decoded(s)).collect();
+    let pipeline_segs: Vec<&str> = decoded_segs.iter().map(String::as_str).collect();
+    if let Some(r) = crate::pipelines::route(registry, quasi, get, &pipeline_segs, query) {
         return r;
     }
     // record 49 A3: the pre-flight of a run
@@ -1516,7 +1521,7 @@ fn routed(
         registry,
         quasi,
         post,
-        &segs,
+        &pipeline_segs,
         body,
     ) {
         return r;
@@ -1740,6 +1745,10 @@ fn routed(
                 Some(mut doc) => {
                     // the words a rule matched are text a stack carried
                     if caller.access.detail < Detail::Quasi {
+                        // record 49 R4: a pipeline's item as its totals
+                        for r in doc["review"].as_array_mut().into_iter().flatten() {
+                            crate::pipelines::qc_item_totals_only(r);
+                        }
                         for a in doc["axes"].as_array_mut().into_iter().flatten() {
                             for e in a["evidence"].as_array_mut().into_iter().flatten() {
                                 if let Some(m) = e.as_object_mut() {
@@ -2562,9 +2571,14 @@ fn routed(
                 .into_iter()
                 .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
                 .collect();
+            let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+            // record 49 R4: a run's result below detail quasi is its totals
+            if !quasi {
+                docs.iter_mut().for_each(crate::pipelines::job_totals_only);
+            }
             Ok(Reply::ok(serde_json::json!({
                 "count": jobs.len(),
-                "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
+                "jobs": docs,
             })))
         }
         ["api", "jobs"] if post => {
@@ -2718,7 +2732,13 @@ fn routed(
         ["api", "jobs", _] if get => {
             let id = id_at(2)?;
             match nils_registry::job::show(registry.store(), id).map_err(job_err)? {
-                Some(j) => Ok(Reply::ok(j.as_json())),
+                Some(j) => {
+                    let mut doc = j.as_json();
+                    if !quasi {
+                        crate::pipelines::job_totals_only(&mut doc);
+                    }
+                    Ok(Reply::ok(doc))
+                }
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
@@ -2944,6 +2964,12 @@ fn routed(
                 rows.truncate(limit.max(1));
             }
             blind_review(registry.store(), caller, &mut rows)?;
+            // record 49 R4: a pipeline's item below detail quasi names no
+            // unit and says no value
+            if !quasi {
+                rows.iter_mut()
+                    .for_each(crate::pipelines::qc_item_totals_only);
+            }
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
             ))
@@ -2982,6 +3008,9 @@ fn routed(
                 "member_stacks": members,
             });
             blind_review(registry.store(), caller, std::slice::from_mut(&mut doc))?;
+            if !quasi {
+                crate::pipelines::qc_item_totals_only(&mut doc);
+            }
             Ok(Reply::ok(doc))
         }
         ["api", "review", _, "apply"] if post && json_body(body)?["values"].is_object() => {
@@ -4125,9 +4154,13 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
             .into_iter()
             .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
             .collect();
+        let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+        if caller.access.detail < Detail::Quasi {
+            docs.iter_mut().for_each(crate::pipelines::job_totals_only);
+        }
         let data = serde_json::json!({
             "epoch": registry.meta().epoch,
-            "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
+            "jobs": docs,
         });
         if writer
             .write_all(format!("event: jobs\ndata: {data}\n\n").as_bytes())
