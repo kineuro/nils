@@ -494,7 +494,8 @@ pub(crate) fn route(
                 no_sealed_flag(&doc)?;
                 // blind through the export too: every answer of an open
                 // campaign is for those who read them all at the answers door
-                if matches!(of, Of::Answers) && !sees_all(registry.store(), caller, principal, &c)? {
+                if matches!(of, Of::Answers) && !sees_all(registry.store(), caller, principal, &c)?
+                {
                     return Err(Reply::error(
                         403,
                         format!(
@@ -616,8 +617,8 @@ pub(crate) fn route(
                 if set.kind == Of::Answers.name()
                     && let Some(cid) = set.campaign_id
                 {
-                    let c = campaign::find(registry.store(), &cid.to_string())
-                        .map_err(campaign_err)?;
+                    let c =
+                        campaign::find(registry.store(), &cid.to_string()).map_err(campaign_err)?;
                     if !sees_all(registry.store(), caller, principal, &c)? {
                         return Ok(Reply::ok(set_json(&set, None)));
                     }

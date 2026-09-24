@@ -1260,7 +1260,11 @@ fn an_axes_campaign_at_the_door_is_held_to_the_pack_and_closes_axis_by_axis() {
         String::from_utf8_lossy(&refused.stderr)
     );
     let out = asked(true, packs().to_str().unwrap());
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let raised: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(raised["checked_against_pack"], true, "{raised}");
     let item = raised["review_item"].as_i64().unwrap();

@@ -905,7 +905,11 @@ pub fn render_jpeg(
 ) -> Result<Vec<u8>, String> {
     // a width below one (0 from a header, or a caller's) is one: a narrower
     // window would divide into NaN or infinity and render black
-    let wwidth = if wwidth.is_finite() { wwidth.max(1.0) } else { 1.0 };
+    let wwidth = if wwidth.is_finite() {
+        wwidth.max(1.0)
+    } else {
+        1.0
+    };
     let lo = center - wwidth / 2.0;
     let scale = 255.0 / wwidth;
     let mut gray = Vec::with_capacity(pixels.len());
@@ -1031,8 +1035,7 @@ pub fn build_many(
                 .and_then(|v| {
                     build(&v, stack, &root, workers, pack_version.clone())
                         .map_err(|why| reason_of(&why, false))
-                })
-            {
+                }) {
                 Ok(m) => {
                     out.bytes += m.bytes_per_level.iter().sum::<u64>();
                     out.built.push(stack);
@@ -1575,7 +1578,10 @@ mod tests {
         let px = [100u16, 101, 99, 100];
         let grey = |w: f64| {
             let jpeg = render_jpeg(2, 2, &px, 1.0, 0.0, 100.0, w, false).unwrap();
-            image::load_from_memory(&jpeg).unwrap().to_luma8().into_raw()
+            image::load_from_memory(&jpeg)
+                .unwrap()
+                .to_luma8()
+                .into_raw()
         };
         for w in [0.0, -5.0] {
             let g = grey(w);

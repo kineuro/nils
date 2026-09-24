@@ -274,10 +274,9 @@ fn a_selection_s_pyramids_build_once_and_an_oblique_stack_reports_its_orientatio
     assert_eq!(first["failures"][0]["reason"], "unreadable", "{first}");
     assert!(first["failures"][0].get("why").is_none(), "{first}");
     let src = lab._src.path().to_str().unwrap().to_string();
-    for text in [first.to_string()] {
-        assert!(!text.contains(&src), "{text}");
-        assert!(!text.contains("1.2.3.C"), "{text}");
-    }
+    let text = first.to_string();
+    assert!(!text.contains(&src), "{text}");
+    assert!(!text.contains("1.2.3.C"), "{text}");
     let second: Value = serde_json::from_str(ok(&lab.home, &args).trim()).unwrap();
     assert_eq!(second["built"], 0, "{second}");
     assert_eq!(second["skipped"], 2, "{second}");
@@ -299,7 +298,12 @@ fn a_selection_s_pyramids_build_once_and_an_oblique_stack_reports_its_orientatio
     // the class again, never the path
     let (good, _, err) = run(
         &lab.home,
-        &["pyramid", "build", "--stack", &first["failures"][0]["stack"].to_string()],
+        &[
+            "pyramid",
+            "build",
+            "--stack",
+            &first["failures"][0]["stack"].to_string(),
+        ],
     );
     assert!(!good);
     assert!(err.contains("unreadable"), "{err}");

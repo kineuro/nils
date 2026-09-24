@@ -3830,9 +3830,13 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             let not_built = |why: String, reading: bool| {
                 let class = crate::pyramid::reason_of(&why, reading);
                 if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                    fail(format!("stack {stack}: its pyramid was not built ({class}): {why}"))
+                    fail(format!(
+                        "stack {stack}: its pyramid was not built ({class}): {why}"
+                    ))
                 } else {
-                    fail(format!("stack {stack}: its pyramid was not built ({class})"))
+                    fail(format!(
+                        "stack {stack}: its pyramid was not built ({class})"
+                    ))
                 }
             };
             let volume = crate::pyramid::read_volume(registry.store(), stack)
