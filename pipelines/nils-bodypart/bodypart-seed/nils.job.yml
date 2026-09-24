@@ -16,8 +16,7 @@
 # `orientation` and `slices`); a stack without a body part is in the
 # zero-shot pool.
 #
-# The image digest is a placeholder until CI publishes the image (see
-# bodypart-embed/nils.job.yml).
+# The image is pinned as bodypart-embed/nils.job.yml says.
 name: bodypart-seed
 schema-version: "0.5"
 tool-version: "0.1.0"
@@ -28,7 +27,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-bodypart@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:37a4efedc1d56b24a00570d8467e23ee6b25f975c29be104fa7d9d5ce0f7a268"
 
 inputs:
   - id: categories
