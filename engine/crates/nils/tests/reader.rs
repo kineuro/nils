@@ -40,6 +40,7 @@ fn registry() -> TempDir {
         e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
         // the FLAIR's physics, which its deciding clause reads
         if description == "flair axial" {
+            e.push(synth::text(tags::SEQUENCE_NAME, VR::SH, "*tir2d1rr99"));
             e.push(synth::text(tags::ECHO_TIME, VR::DS, "100"));
             e.push(synth::text(tags::REPETITION_TIME, VR::DS, "9000"));
             e.push(synth::text(tags::INVERSION_TIME, VR::DS, "2500"));
@@ -112,6 +113,7 @@ const CURATOR: &str = "curator-token-of-length";
 const ANNA: &str = "anna-rater-token-of-length";
 const BO: &str = "bo-rater-token-of-length";
 const RITA: &str = "rita-reader-token-of-length";
+const OTTO: &str = "otto-certifier-token-of-length";
 
 impl Server {
     fn start(home: &TempDir) -> Server {
@@ -124,6 +126,8 @@ impl Server {
             format!("{BO}=bo@lab:campaigns:work"),
             // a reader of the queue at detail plain
             format!("{RITA}=rita@lab:review:see"),
+            // a second person who works the model registry
+            format!("{OTTO}=otto@lab:models:work"),
         ]
         .join(",");
         let mut child = nils()
@@ -158,10 +162,22 @@ impl Server {
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Value) {
+        self.call_with(method, path, body, token, "")
+    }
+
+    /// A call with headers of its own, each line ending in CRLF.
+    fn call_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        token: &str,
+        extra: &str,
+    ) -> (u16, Value) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let mut head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\nAuthorization: Bearer {token}\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\nAuthorization: Bearer {token}\r\n{extra}",
             body.len()
         );
         if !body.is_empty() {
@@ -265,6 +281,7 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
             "raters_per_item": 1,
             "adjudication": {"when": "never"},
             "closes_into": "stage",
+            "hold_back": 0.5,
         })),
         CURATOR,
     );
@@ -295,6 +312,18 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     let plain = server.ok("GET", &format!("/api/stacks/{stack}/why"), None, RITA);
     assert_eq!(plain["detail"], "plain", "{plain}");
     assert!(words_in(&plain).is_empty(), "{plain}");
+    // the sequence name is quasi-identifying text: never below quasi, never
+    // in a batch's signature
+    let seq = "*tir2d1rr99";
+    for s in items.iter().filter_map(|i| i["stack_id"].as_i64()) {
+        let p = server.ok("GET", &format!("/api/stacks/{s}/why"), None, RITA);
+        assert!(!p.to_string().contains(seq), "{p}");
+        assert!(!p.to_string().contains("\"text_sequence_name\":"), "{p}");
+        let q = server.ok("GET", &format!("/api/stacks/{s}/why"), None, CURATOR);
+        if q["header"]["echo_time"] == 100.0 {
+            assert_eq!(q["header"]["text_sequence_name"], seq, "{q}");
+        }
+    }
     // a rater reads it through the campaign's item, never the whole archive
     let (status, _) = server.call("GET", &format!("/api/stacks/{stack}/why"), None, ANNA);
     assert_eq!(status, 403);
@@ -356,31 +385,61 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     assert!(pair["signature"]["rules"].is_object(), "{pair}");
     assert!(pair["signature"]["header"].is_object(), "{pair}");
     let key = pair["key"].as_str().unwrap().to_string();
-    // a share outside 0 to 1 is refused
+    let every = server.ok("GET", "/api/campaigns/bases/batches", None, CURATOR);
+    assert!(!every.to_string().contains("*tir2d1rr99"), "{every}");
+    // what is held back is the campaign's: a caller's share or seed is
+    // refused, and a maker's share below a tenth too
+    for body in [json!({"hold_back": 0}), json!({"seed": "fixed"})] {
+        let (status, _) = server.call(
+            "POST",
+            &format!("/api/campaigns/bases/batches/{key}/accept"),
+            Some(body),
+            ANNA,
+        );
+        assert_eq!(status, 400);
+    }
     let (status, _) = server.call(
         "POST",
-        &format!("/api/campaigns/bases/batches/{key}/accept"),
-        Some(json!({"hold_back": 2})),
-        ANNA,
+        "/api/campaigns",
+        Some(
+            json!({"name": "loose", "question": {"kind": "axis", "axis": "base"},
+            "source": {"selection": "every-stack@1"}, "hold_back": 0.01}),
+        ),
+        CURATOR,
     );
     assert_eq!(status, 400);
+    // naming one item of the batch still holds back the share of the whole
+    let one = pair["sample"][0].as_i64().unwrap();
     let accepted = server.ok(
         "POST",
         &format!("/api/campaigns/bases/batches/{key}/accept"),
-        Some(json!({"hold_back": 0.5, "seed": "fixed"})),
+        Some(json!({"items": [one]})),
         ANNA,
-    );
-    assert_eq!(
-        accepted["accepted"].as_array().unwrap().len(),
-        1,
-        "{accepted}"
     );
     assert_eq!(
         accepted["held_back"].as_array().unwrap().len(),
         1,
         "{accepted}"
     );
+    let named_held = accepted["held_back"][0] == one;
+    assert_eq!(
+        accepted["accepted"].as_array().unwrap().len(),
+        usize::from(!named_held),
+        "{accepted}"
+    );
     let held = accepted["held_back"][0].as_i64().unwrap();
+    // with the named item held back, the rest of the batch is accepted
+    // whole; a batch of one holds none back
+    if named_held {
+        let rest = server.ok(
+            "POST",
+            &format!("/api/campaigns/bases/batches/{key}/accept"),
+            Some(json!({})),
+            ANNA,
+        );
+        assert_eq!(rest["accepted"].as_array().unwrap().len(), 1, "{rest}");
+        assert!(rest["held_back"].as_array().unwrap().is_empty(), "{rest}");
+    }
     // the held item is read alone: no batch takes it now
     let again = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert!(
@@ -448,16 +507,31 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     assert_eq!(stats["all"]["batched"], 1, "{stats}");
     let mine = server.ok("GET", "/api/campaigns/bases/stats", None, ANNA);
     assert_eq!(mine["blind"], true, "{mine}");
+    assert!(mine.get("all").is_none(), "{mine}");
     assert_eq!(mine["raters"].as_array().unwrap().len(), 1, "{mine}");
     assert_eq!(mine["raters"][0]["principal"], "anna@lab", "{mine}");
 
     // ------------------------------------------------ sealed, certified
-    let (ok, _, err) = cli(
+    let (ok, sealed_out, err) = cli(
         &home,
         "op@lab",
-        &["labels", "seal", "--handle", &handle.to_string()],
+        &["labels", "seal", "--handle", &handle.to_string(), "--json"],
     );
     assert!(ok, "{err}");
+    let sample_digest = serde_json::from_str::<Value>(&sealed_out).unwrap()["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // a sealed item is read blind: no suggestion, nothing of System 1's
+    let sealed_why = server.ok(
+        "GET",
+        &format!("/api/campaigns/bases/items/{item0}/why"),
+        None,
+        BO,
+    );
+    assert_eq!(sealed_why["blind"], true, "{sealed_why}");
+    assert!(sealed_why["suggested"].is_null(), "{sealed_why}");
+    assert!(sealed_why["asked"].is_null(), "{sealed_why}");
     let sealed = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert!(sealed["groups"].as_array().unwrap().is_empty(), "{sealed}");
     assert_eq!(sealed["sealed"], sealed["open"], "{sealed}");
@@ -519,33 +593,60 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         Some(json!({"name": "an-encoder", "version": "1", "kind": "encoder", "digest": digest, "task": "encoder"})),
         CURATOR,
     );
+    let n = items.len();
+    let result = json!({"sample": sample, "sample_digest": sample_digest, "risk": 0.05, "n": n, "errors": 1});
     let (status, _) = server.call(
         "POST",
         "/api/certificates",
-        Some(json!({"sample": "handle:424242", "models": [model["id"]], "result": {"coverage": 0.9}})),
+        Some(json!({"sample": "handle:424242", "models": [model["id"]], "result": result})),
         CURATOR,
     );
     assert_eq!(status, 404);
     let (status, _) = server.call(
         "POST",
         "/api/certificates",
-        Some(json!({"sample": sample, "models": [model["id"]], "result": {"coverage": 0.9}})),
+        Some(json!({"sample": sample, "models": [model["id"]], "result": result})),
         ANNA,
     );
     assert_eq!(status, 403);
+    // an empty result is no certificate
+    let (status, _) = server.call(
+        "POST",
+        "/api/certificates",
+        Some(json!({"sample": sample, "models": [model["id"]], "result": {}})),
+        CURATOR,
+    );
+    assert_eq!(status, 400);
+    // an agent's token is refused, whatever it holds
+    let (status, doc) = server.call_with(
+        "POST",
+        "/api/certificates",
+        Some(json!({"sample": sample, "models": [digest], "result": result})),
+        CURATOR,
+        "X-Nils-Actor: {\"kind\": \"agent\", \"name\": \"certifier\"}\r\n",
+    );
+    assert_eq!(status, 403, "{doc}");
     let cert = server.ok(
         "POST",
         "/api/certificates",
-        Some(json!({"sample": sample, "models": [digest], "result": {"coverage": 0.9}})),
+        Some(json!({"sample": sample, "models": [digest], "result": result})),
         CURATOR,
     );
+    // who recorded it does not unseal it
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/certificates/{}/unseal", cert["id"]),
+        None,
+        CURATOR,
+    );
+    assert_eq!(status, 409);
     let listed = server.ok("GET", "/api/certificates", None, CURATOR);
     assert_eq!(listed["count"], 1, "{listed}");
     let done = server.ok(
         "POST",
         &format!("/api/certificates/{}/unseal", cert["id"]),
         None,
-        CURATOR,
+        OTTO,
     );
     assert!(done["stacks"].as_i64().unwrap() >= 4, "{done}");
     let open = server.ok("GET", "/api/campaigns/bases/batches", None, BO);

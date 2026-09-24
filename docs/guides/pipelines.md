@@ -159,7 +159,7 @@ The job's result counts what it built, skipped and failed, with why for each fai
 
 2. Read the evidence of the item's stack, one line per axis: the value in force and who set it, the rule and clause that decided, the header values that clause read, the other rules and what they said, and System 1's candidates where it asked. `GET /api/campaigns/{id}/items/{item}/why` answers it with the suggested answer; the words a rule matched show only at detail quasi or above.
 
-3. Accept like stacks in one move. `GET /api/campaigns/{id}/batches` groups the open items by the physics that decided them and the suggested answer. `POST /api/campaigns/{id}/batches/{key}/accept` answers every item of a batch with the suggestion, one answer per item, and holds back a share (a tenth unless `hold_back` says otherwise) to be read alone. An item of a sealed sample is never in a batch.
+3. Accept like stacks in one move. `GET /api/campaigns/{id}/batches` groups the open items by the physics that decided them and the suggested answer. `POST /api/campaigns/{id}/batches/{key}/accept` answers every item of a batch with the suggestion, one answer per item, and holds back the campaign's share (a tenth unless its maker set `hold_back` higher) to be read alone. An item of a sealed sample is never in a batch, and is read blind, without a suggestion.
 
 4. See how fast it goes. Every answer keeps the seconds from its claim, the suggestion and whether it was changed:
 
@@ -171,13 +171,13 @@ The job's result counts what it built, skipped and failed, with why for each fai
 
 A sealed sample trains nothing until the certificate it was drawn for is recorded.
 
-1. Record what the certification measured:
+1. Record what the certification measured. `result.json` names `sample`, `sample_digest` (as `nils labels seal --json` gave it), `risk`, `n` and `errors`:
 
    ```sh
    nils labels certificate --sample selection:cert-draw@1 --model <model> --result result.json
    ```
 
-2. Unseal the sample by that certificate. The seal's rows stay, naming the certificate:
+2. Another person unseals the sample by that certificate. The seal's rows stay, naming the certificate:
 
    ```sh
    nils labels unseal selection:cert-draw@1 --certificate <id>

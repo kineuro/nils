@@ -809,7 +809,13 @@ pub struct New<'a> {
     pub lease_seconds: i64,
     /// Seeds and pre-segmentations per item, by the item's key.
     pub inputs: BTreeMap<String, Vec<i64>>,
+    /// Record 48 R1: the share of each batch held back to be read alone,
+    /// from [`HOLD_BACK_MIN`] to one; [`HOLD_BACK_MIN`] when none is given.
+    pub hold_back: Option<f64>,
 }
+
+/// Record 48 R1: the least share of a batch held back to be read alone.
+pub const HOLD_BACK_MIN: f64 = 0.1;
 
 /// A campaign as read.
 #[derive(Debug, Clone, PartialEq)]
@@ -834,6 +840,8 @@ pub struct Campaign {
     pub closed_at: Option<String>,
     pub closed_by: Option<String>,
     pub agreement: Value,
+    /// Record 48 R1: the share of each batch held back to be read alone.
+    pub hold_back: f64,
 }
 
 impl Campaign {
@@ -885,6 +893,7 @@ impl Campaign {
             "closed_at": self.closed_at,
             "closed_by": self.closed_by,
             "agreement": self.agreement,
+            "hold_back": self.hold_back,
         })
     }
 }
@@ -912,7 +921,7 @@ fn json_at(r: &Row, i: usize) -> Result<Value, StoreError> {
         .unwrap_or(Value::Null))
 }
 
-const CAMPAIGN_COLUMNS: [&str; 20] = [
+const CAMPAIGN_COLUMNS: [&str; 21] = [
     "id",
     "name",
     "owner",
@@ -933,6 +942,7 @@ const CAMPAIGN_COLUMNS: [&str; 20] = [
     "closed_at",
     "closed_by",
     "agreement",
+    "hold_back",
 ];
 
 fn campaign_of(r: &Row) -> Result<Campaign, StoreError> {
@@ -957,6 +967,7 @@ fn campaign_of(r: &Row) -> Result<Campaign, StoreError> {
         closed_at: r.opt_text(17)?.map(str::to_string),
         closed_by: r.opt_text(18)?.map(str::to_string),
         agreement: json_at(r, 19)?,
+        hold_back: r.opt_double(20)?.unwrap_or(HOLD_BACK_MIN),
     })
 }
 
@@ -1115,6 +1126,12 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
     if n.lease_seconds < 1 {
         return Err(invalid("lease_seconds is one or more"));
     }
+    let hold_back = n.hold_back.unwrap_or(HOLD_BACK_MIN);
+    if !(HOLD_BACK_MIN..=1.0).contains(&hold_back) {
+        return Err(invalid(format!(
+            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1"
+        )));
+    }
     let grain = match (&n.items, &question) {
         (Items::Sessions(_), Question::Axis { .. } | Question::Axes { .. }) => {
             return Err(invalid(
@@ -1216,6 +1233,8 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         "closes_into",
                         "lease_seconds",
                         "created_at",
+                        "hold_back",
+                        "hold_back_seed",
                     ],
                 )
                 .returning(&["id"]),
@@ -1236,6 +1255,8 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                     Param::from(n.closes_into),
                     Param::Int(n.lease_seconds),
                     Param::from(now.as_str()),
+                    Param::Double(hold_back),
+                    Param::from(uuid::Uuid::new_v4().to_string()),
                 ]],
             )?
             .first()
@@ -1721,6 +1742,21 @@ pub fn open_for(
         .iter()
         .map(item_of)
         .collect::<Result<_, _>>()?)
+}
+
+/// Record 48 R1: the seed the engine drew when the campaign was made, from
+/// which the items a batch holds back are chosen. Never returned by a door.
+pub fn hold_back_seed(store: &mut Store, campaign: i64) -> Result<String, Error> {
+    let sql = format!(
+        "SELECT hold_back_seed FROM {} WHERE id = {}",
+        store.qualified("campaign"),
+        store.dialect().param(1, Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(campaign)])?
+        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+        // a campaign from before the seed: its id and name, fixed
+        .unwrap_or_else(|| format!("campaign:{campaign}")))
 }
 
 /// Record 48 R1: hold items of a campaign back from every batch, to be
@@ -2918,142 +2954,22 @@ pub fn answer_with(
                 a.id
             )));
         }
-        // to the millisecond where the lease kept its instant, else to the
-        // second of its stamp
-        let seconds = if t.batch {
-            None
-        } else {
-            let from_ms = store
-                .query_opt(
-                    &format!(
-                        "SELECT leased_ms FROM {} WHERE id = {}",
-                        store.qualified("campaign_assignment"),
-                        store.dialect().param(1, Type::Int)
-                    ),
-                    &[Param::Int(a.id)],
-                )?
-                .and_then(|r| r.opt_int(0).ok().flatten())
-                .map(|m| m as u64)
-                .or_else(|| a.leased_at.as_deref().and_then(secs_of).map(|s| s * 1000));
-            from_ms
-                .zip(crate::time::millis_at(now))
-                .map(|(from, to)| to.saturating_sub(from) as f64 / 1000.0)
-        };
-        let id = store
-            .insert(
-                &Insert::new(
-                    table("campaign_answer"),
-                    &[
-                        "campaign_id",
-                        "item_id",
-                        "assignment_id",
-                        "principal",
-                        "role",
-                        "round",
-                        "author_kind",
-                        "value",
-                        "form",
-                        "derivative_id",
-                        "why",
-                        "actor_detail",
-                        "answered_at",
-                        "model_id",
-                        "seconds",
-                        "suggested",
-                        "changed",
-                        "via",
-                    ],
-                )
-                .returning(&["id"]),
-                &[vec![
-                    Param::Int(c.id),
-                    Param::Int(a.item_id),
-                    Param::Int(a.id),
-                    Param::from(g.principal),
-                    Param::from(a.role.as_str()),
-                    Param::Int(a.round),
-                    Param::from(g.author_kind),
-                    stored_value.clone().map_or(Param::Null, Param::from),
-                    g.form.map_or(Param::Null, |f| Param::from(f.to_string())),
-                    g.derivative_id.map_or(Param::Null, Param::Int),
-                    g.why.map_or(Param::Null, Param::from),
-                    Param::from(actor_detail.to_string()),
-                    Param::from(now),
-                    g.model.map_or(Param::Null, Param::Int),
-                    seconds.map_or(Param::Null, Param::Double),
-                    suggested.clone().map_or(Param::Null, Param::from),
-                    changed.map_or(Param::Null, |c| Param::Int(i64::from(c))),
-                    Param::from(if t.batch { "batch" } else { "claim" }),
-                ]],
-            )?
-            .first()
-            .ok_or_else(|| StoreError::Message("the answer was not written back".into()))?
-            .int(0)?;
-        store.update_by_id(
-            table("campaign_assignment"),
-            &[
-                ("state", Param::from("submitted")),
-                ("ended_at", Param::from(now)),
-            ],
-            "id",
-            a.id,
-        )?;
-        let it = item(store, a.item_id)?
-            .ok_or_else(|| Error::NotFound(format!("no campaign item {}", a.item_id)))?;
-        let all = answers_of_item(store, it.id)?;
-        let mut opened = None;
-        let state = if a.role == "adjudicator" {
-            let settled = all.last().expect("the answer just written");
-            let agreement = share_agreeing(&question, &all, settled);
-            let mut outcome = outcome_of(&question, std::slice::from_ref(settled));
-            per_axis(&question, &all, settled, &mut outcome);
-            set_item(
-                store,
-                it.id,
-                "adjudicated",
-                2,
-                agreement,
-                Some(&outcome),
-                now,
-            )?;
-            "adjudicated".to_string()
-        } else {
-            let raters: Vec<&Answer> = all.iter().filter(|x| x.role == "rater").collect();
-            if (raters.len() as i64) < c.raters_per_item {
-                it.state.clone()
-            } else {
-                let keys: Vec<Option<String>> =
-                    raters.iter().map(|x| question.comparable(x)).collect();
-                let agree = keys.iter().all(|k| k.is_some() && *k == keys[0]);
-                let next = match (adjudication.when, adjudication.metric) {
-                    (When::Always, _) => "needs_adjudication",
-                    (_, Metric::External) => "awaiting_metric",
-                    (_, _) if agree => "agreed",
-                    (When::Disagree, _) => "needs_adjudication",
-                    (When::Never, _) if keys.iter().all(Option::is_none) => "agreed",
-                    (When::Never, _) => "disagreed",
-                };
-                let owned: Vec<Answer> = raters.iter().map(|x| (*x).clone()).collect();
-                match next {
-                    "agreed" => {
-                        let mut outcome = outcome_of(&question, &owned);
-                        per_axis(&question, &all, &owned[0], &mut outcome);
-                        set_item(store, it.id, "agreed", 1, Some(1.0), Some(&outcome), now)?;
-                    }
-                    "needs_adjudication" => {
-                        opened = Some(adjudicate(store, &c, &it, &owned, now)?);
-                    }
-                    other => set_item(store, it.id, other, 1, None, None, now)?,
-                }
-                next.to_string()
-            }
-        };
-        Ok(Answered {
-            answer: id,
-            item: it.id,
-            state,
-            adjudication: opened,
-        })
+        write_answer(
+            store,
+            &c,
+            &Written {
+                question: &question,
+                adjudication: &adjudication,
+                assignment: &a,
+                given: g,
+                stored_value: stored_value.as_deref(),
+                suggested: suggested.as_deref(),
+                changed,
+                batch: t.batch,
+                actor_detail: &actor_detail,
+            },
+            now,
+        )
     })();
     let answered = match done {
         Ok(x) => x,
@@ -3096,11 +3012,174 @@ pub fn answer_with(
     Ok(answered)
 }
 
-/// Record 48 R1: answer one item of a batch a rater accepted in one move.
-/// The item is leased to the rater as a claim would lease it, if it still
-/// wants a rater and was never given to this one, and answered at once
-/// with `g`'s value, marked as given to a batch; it is still its own item,
-/// closed into its own decision. `g.assignment` is not read.
+/// What [`write_answer`] writes.
+struct Written<'a> {
+    question: &'a Question,
+    adjudication: &'a Adjudication,
+    assignment: &'a Assignment,
+    given: &'a Given<'a>,
+    stored_value: Option<&'a str>,
+    suggested: Option<&'a str>,
+    changed: Option<bool>,
+    batch: bool,
+    actor_detail: &'a Value,
+}
+
+/// Write an answer on a leased assignment and move its item on, inside the
+/// caller's transaction under the campaign's lock.
+fn write_answer(
+    store: &mut Store,
+    c: &Campaign,
+    w: &Written<'_>,
+    now: &str,
+) -> Result<Answered, Error> {
+    let a = w.assignment;
+    // to the millisecond where the lease kept its instant, else to the
+    // second of its stamp
+    let seconds = if w.batch {
+        None
+    } else {
+        let from_ms = store
+            .query_opt(
+                &format!(
+                    "SELECT leased_ms FROM {} WHERE id = {}",
+                    store.qualified("campaign_assignment"),
+                    store.dialect().param(1, Type::Int)
+                ),
+                &[Param::Int(a.id)],
+            )?
+            .and_then(|r| r.opt_int(0).ok().flatten())
+            .map(|m| m as u64)
+            .or_else(|| a.leased_at.as_deref().and_then(secs_of).map(|s| s * 1000));
+        from_ms
+            .zip(crate::time::millis_at(now))
+            .map(|(from, to)| to.saturating_sub(from) as f64 / 1000.0)
+    };
+    let id = store
+        .insert(
+            &Insert::new(
+                table("campaign_answer"),
+                &[
+                    "campaign_id",
+                    "item_id",
+                    "assignment_id",
+                    "principal",
+                    "role",
+                    "round",
+                    "author_kind",
+                    "value",
+                    "form",
+                    "derivative_id",
+                    "why",
+                    "actor_detail",
+                    "answered_at",
+                    "model_id",
+                    "seconds",
+                    "suggested",
+                    "changed",
+                    "via",
+                ],
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::Int(c.id),
+                Param::Int(a.item_id),
+                Param::Int(a.id),
+                Param::from(w.given.principal),
+                Param::from(a.role.as_str()),
+                Param::Int(a.round),
+                Param::from(w.given.author_kind),
+                w.stored_value
+                    .map(str::to_string)
+                    .map_or(Param::Null, Param::from),
+                w.given
+                    .form
+                    .map_or(Param::Null, |f| Param::from(f.to_string())),
+                w.given.derivative_id.map_or(Param::Null, Param::Int),
+                w.given.why.map_or(Param::Null, Param::from),
+                Param::from(w.actor_detail.to_string()),
+                Param::from(now),
+                w.given.model.map_or(Param::Null, Param::Int),
+                seconds.map_or(Param::Null, Param::Double),
+                w.suggested
+                    .map(str::to_string)
+                    .map_or(Param::Null, Param::from),
+                w.changed.map_or(Param::Null, |c| Param::Int(i64::from(c))),
+                Param::from(if w.batch { "batch" } else { "claim" }),
+            ]],
+        )?
+        .first()
+        .ok_or_else(|| StoreError::Message("the answer was not written back".into()))?
+        .int(0)?;
+    store.update_by_id(
+        table("campaign_assignment"),
+        &[
+            ("state", Param::from("submitted")),
+            ("ended_at", Param::from(now)),
+        ],
+        "id",
+        a.id,
+    )?;
+    let it = item(store, a.item_id)?
+        .ok_or_else(|| Error::NotFound(format!("no campaign item {}", a.item_id)))?;
+    let all = answers_of_item(store, it.id)?;
+    let mut opened = None;
+    let state = if a.role == "adjudicator" {
+        let settled = all.last().expect("the answer just written");
+        let agreement = share_agreeing(w.question, &all, settled);
+        let mut outcome = outcome_of(w.question, std::slice::from_ref(settled));
+        per_axis(w.question, &all, settled, &mut outcome);
+        set_item(
+            store,
+            it.id,
+            "adjudicated",
+            2,
+            agreement,
+            Some(&outcome),
+            now,
+        )?;
+        "adjudicated".to_string()
+    } else {
+        let raters: Vec<&Answer> = all.iter().filter(|x| x.role == "rater").collect();
+        if (raters.len() as i64) < c.raters_per_item {
+            it.state.clone()
+        } else {
+            let keys: Vec<Option<String>> =
+                raters.iter().map(|x| w.question.comparable(x)).collect();
+            let agree = keys.iter().all(|k| k.is_some() && *k == keys[0]);
+            let next = match (w.adjudication.when, w.adjudication.metric) {
+                (When::Always, _) => "needs_adjudication",
+                (_, Metric::External) => "awaiting_metric",
+                (_, _) if agree => "agreed",
+                (When::Disagree, _) => "needs_adjudication",
+                (When::Never, _) if keys.iter().all(Option::is_none) => "agreed",
+                (When::Never, _) => "disagreed",
+            };
+            let owned: Vec<Answer> = raters.iter().map(|x| (*x).clone()).collect();
+            match next {
+                "agreed" => {
+                    let mut outcome = outcome_of(w.question, &owned);
+                    per_axis(w.question, &all, &owned[0], &mut outcome);
+                    set_item(store, it.id, "agreed", 1, Some(1.0), Some(&outcome), now)?;
+                }
+                "needs_adjudication" => {
+                    opened = Some(adjudicate(store, c, &it, &owned, now)?);
+                }
+                other => set_item(store, it.id, other, 1, None, None, now)?,
+            }
+            next.to_string()
+        }
+    };
+    Ok(Answered {
+        answer: id,
+        item: it.id,
+        state,
+        adjudication: opened,
+    })
+}
+
+/// Record 48 R1: answer one item of a batch a rater accepted in one move
+/// ([`accept_many`] with one item); refused where the item was.
 pub fn accept(
     registry: &mut Registry,
     campaign: i64,
@@ -3109,6 +3188,38 @@ pub fn accept(
     suggested: Option<&str>,
     now: &str,
 ) -> Result<Answered, Error> {
+    let mut done = accept_many(registry, campaign, &[item_id], g, suggested, now)?;
+    if let Some((_, why)) = done.refused.pop() {
+        return Err(refused(why));
+    }
+    done.accepted
+        .pop()
+        .ok_or_else(|| refused(format!("item {item_id} was not accepted")))
+}
+
+/// What [`accept_many`] did: the answers written, and the items it left
+/// with why.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Accepted {
+    pub accepted: Vec<Answered>,
+    pub refused: Vec<(i64, String)>,
+}
+
+/// Record 48 R1: answer the items of a batch a rater accepted in one move,
+/// in one transaction under the campaign's lock. Each item still wanting a
+/// rater, never given to this one, is leased to the rater as a claim would
+/// lease it and answered at once with `g`'s value, marked as given to a
+/// batch; it is still its own item, closed into its own decision. An item
+/// that no longer asks raters, has its raters or was the rater's already is
+/// left, with why. `g.assignment` is not read.
+pub fn accept_many(
+    registry: &mut Registry,
+    campaign: i64,
+    items: &[i64],
+    g: &Given<'_>,
+    suggested: Option<&str>,
+    now: &str,
+) -> Result<Accepted, Error> {
     let c = get(registry.store(), campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     if c.status != "open" {
@@ -3121,127 +3232,183 @@ pub fn accept(
             c.name, g.principal
         )));
     }
-    c.question()?.check(g)?;
+    if !["person", "agent", "model"].contains(&g.author_kind) {
+        return Err(invalid(format!(
+            "an author is a person, an agent or a model, not {}",
+            g.author_kind
+        )));
+    }
+    if (g.author_kind == "model") != g.model.is_some() {
+        return Err(invalid(
+            "a model's answer names the registered model that answered, and only a model's does (D15)",
+        ));
+    }
+    let question = c.question()?;
+    question.check(g)?;
+    let adjudication = c.adjudication()?;
+    let stored_value = g.value.map(|v| kept_value(&question, v)).transpose()?;
+    let suggested = suggested
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| kept_value(&question, v).ok());
+    let changed = suggested
+        .as_ref()
+        .map(|s| stored_value.as_deref() != Some(s.as_str()));
+    let actor_detail = crate::actor::current();
+    let until = plus_seconds(now, c.lease_seconds);
+    let leased_ms = crate::time::millis_at(now);
     let store = registry.store();
     let d = store.dialect();
     store.begin()?;
-    let leased = (|| -> Result<i64, Error> {
+    let done = (|| -> Result<(Accepted, Vec<i64>), Error> {
         lock(store, campaign)?;
+        let status = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
+        if status != "open" {
+            return Err(refused(format!("campaign {} is {status}", c.name)));
+        }
         expire_in(store, campaign, now)?;
-        let it = item(store, item_id)?
-            .filter(|it| it.campaign_id == campaign)
-            .ok_or_else(|| Error::NotFound(format!("campaign {} has no item {item_id}", c.name)))?;
-        if it.state != "open" || it.round != 1 {
-            return Err(refused(format!(
-                "item {item_id} is {}, and no longer asks raters",
-                it.state
-            )));
+        let mut out = Accepted::default();
+        let mut assignments = Vec::new();
+        let a_t = store.qualified("campaign_assignment");
+        for &item_id in items {
+            let Some(it) = item(store, item_id)?.filter(|it| it.campaign_id == campaign) else {
+                out.refused.push((
+                    item_id,
+                    format!("campaign {} has no item {item_id}", c.name),
+                ));
+                continue;
+            };
+            if it.state != "open" || it.round != 1 {
+                out.refused.push((
+                    item_id,
+                    format!("item {item_id} is {}, and no longer asks raters", it.state),
+                ));
+                continue;
+            }
+            let sql = format!(
+                "SELECT SUM(CASE WHEN role = 'rater' AND state IN ('leased', 'submitted') THEN 1 ELSE 0 END), \
+                        SUM(CASE WHEN principal = {} THEN 1 ELSE 0 END) \
+                 FROM {a_t} WHERE item_id = {}",
+                d.param(1, Type::Text),
+                d.param(2, Type::Int),
+            );
+            let r = store.query_opt(&sql, &[Param::from(g.principal), Param::Int(item_id)])?;
+            let count = |i: usize| -> i64 {
+                r.as_ref()
+                    .and_then(|r| {
+                        r.opt_int(i)
+                            .ok()
+                            .flatten()
+                            .or_else(|| r.opt_double(i).ok().flatten().map(|x| x as i64))
+                            .or_else(|| {
+                                r.opt_text(i)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|t| t.split('.').next()?.parse().ok())
+                            })
+                    })
+                    .unwrap_or(0)
+            };
+            if count(1) > 0 {
+                out.refused.push((
+                    item_id,
+                    format!("{} was given item {item_id} already", g.principal),
+                ));
+                continue;
+            }
+            if count(0) >= c.raters_per_item {
+                out.refused
+                    .push((item_id, format!("item {item_id} has the raters it wants")));
+                continue;
+            }
+            let id = store
+                .insert(
+                    &Insert::new(
+                        table("campaign_assignment"),
+                        &[
+                            "campaign_id",
+                            "item_id",
+                            "principal",
+                            "role",
+                            "round",
+                            "state",
+                            "created_at",
+                            "leased_at",
+                            "lease_until",
+                            "leased_ms",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::Int(campaign),
+                        Param::Int(item_id),
+                        Param::from(g.principal),
+                        Param::from("rater"),
+                        Param::Int(1),
+                        Param::from("leased"),
+                        Param::from(now),
+                        Param::from(now),
+                        Param::from(until.as_str()),
+                        leased_ms.map_or(Param::Null, |m| Param::Int(m as i64)),
+                    ]],
+                )?
+                .first()
+                .ok_or_else(|| StoreError::Message("the assignment was not written back".into()))?
+                .int(0)?;
+            let a = assignment(store, id)?
+                .ok_or_else(|| Error::NotFound(format!("no assignment {id}")))?;
+            let answered = write_answer(
+                store,
+                &c,
+                &Written {
+                    question: &question,
+                    adjudication: &adjudication,
+                    assignment: &a,
+                    given: g,
+                    stored_value: stored_value.as_deref(),
+                    suggested: suggested.as_deref(),
+                    changed,
+                    batch: true,
+                    actor_detail: &actor_detail,
+                },
+                now,
+            )?;
+            assignments.push(id);
+            out.accepted.push(answered);
         }
-        let a = store.qualified("campaign_assignment");
-        let sql = format!(
-            "SELECT COUNT(*) FROM {a} \
-             WHERE item_id = {} AND role = 'rater' AND state IN ('leased', 'submitted')",
-            d.param(1, Type::Int),
-        );
-        let taken = store
-            .query_opt(&sql, &[Param::Int(item_id)])?
-            .map(|r| r.int(0))
-            .transpose()?
-            .unwrap_or(0);
-        let sql = format!(
-            "SELECT COUNT(*) FROM {a} WHERE item_id = {} AND principal = {}",
-            d.param(1, Type::Int),
-            d.param(2, Type::Text),
-        );
-        let mine = store
-            .query_opt(&sql, &[Param::Int(item_id), Param::from(g.principal)])?
-            .map(|r| r.int(0))
-            .transpose()?
-            .unwrap_or(0);
-        if mine > 0 {
-            return Err(refused(format!(
-                "{} was given item {item_id} already",
-                g.principal
-            )));
-        }
-        if taken >= c.raters_per_item {
-            return Err(refused(format!("item {item_id} has the raters it wants")));
-        }
-        let until = plus_seconds(now, c.lease_seconds);
-        Ok(store
-            .insert(
-                &Insert::new(
-                    table("campaign_assignment"),
-                    &[
-                        "campaign_id",
-                        "item_id",
-                        "principal",
-                        "role",
-                        "round",
-                        "state",
-                        "created_at",
-                        "leased_at",
-                        "lease_until",
-                        "leased_ms",
-                    ],
-                )
-                .returning(&["id"]),
-                &[vec![
-                    Param::Int(campaign),
-                    Param::Int(item_id),
-                    Param::from(g.principal),
-                    Param::from("rater"),
-                    Param::Int(1),
-                    Param::from("leased"),
-                    Param::from(now),
-                    Param::from(now),
-                    Param::from(until.as_str()),
-                    crate::time::millis_at(now).map_or(Param::Null, |m| Param::Int(m as i64)),
-                ]],
-            )?
-            .first()
-            .ok_or_else(|| StoreError::Message("the assignment was not written back".into()))?
-            .int(0)?)
+        Ok((out, assignments))
     })();
-    let assignment_id = match leased {
-        Ok(id) => id,
+    let (out, assignments) = match done {
+        Ok(x) => x,
         Err(e) => {
             store.rollback().ok();
             return Err(e);
         }
     };
     store.commit()?;
-    let given = Given {
-        assignment: assignment_id,
-        ..g.clone()
-    };
-    match answer_with(
-        registry,
-        &given,
-        &Timing {
-            suggested,
-            batch: true,
-        },
-        now,
-    ) {
-        Ok(done) => Ok(done),
-        Err(e) => {
-            // the lease was the batch's own: give the item back
-            registry
-                .store()
-                .update_by_id(
-                    table("campaign_assignment"),
-                    &[
-                        ("state", Param::from("released")),
-                        ("ended_at", Param::from(now)),
-                    ],
-                    "id",
-                    assignment_id,
-                )
-                .ok();
-            Err(e)
-        }
+    let shown = matches!(question, Question::Axis { .. } | Question::Axes { .. })
+        .then(|| stored_value.clone())
+        .flatten();
+    for (answered, assignment) in out.accepted.iter().zip(&assignments) {
+        audit::record(
+            registry,
+            &Entry {
+                principal: g.principal,
+                action: Action::CampaignAnswer,
+                scope: json!({
+                    "campaign": c.id, "item": answered.item, "assignment": assignment,
+                    "answer": answered.answer,
+                }),
+                policy: None,
+                job_id: None,
+                details: Some(json!({
+                    "role": "rater", "round": 1, "value": shown,
+                    "author_kind": g.author_kind, "item_state": answered.state,
+                    "adjudication": answered.adjudication, "via": "batch", "changed": changed,
+                })),
+            },
+        )?;
     }
+    Ok(out)
 }
 
 /// The median of some numbers, none when there are none.

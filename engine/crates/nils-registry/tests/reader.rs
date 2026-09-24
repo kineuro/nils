@@ -207,6 +207,10 @@ fn votes(reg: &mut Registry, stack: i64, pairs: &[(i64, &str)]) {
     );
 }
 
+fn sha256(text: &str) -> String {
+    hex::encode(ring::digest::digest(&ring::digest::SHA256, text.as_bytes()).as_ref())
+}
+
 fn body_part() -> serde_json::Value {
     json!({"kind": "axis", "axis": "body_part", "values": ["brain", "spine", "neck"]})
 }
@@ -234,6 +238,7 @@ fn new<'a>(
         closes_into: "decision",
         lease_seconds: 600,
         inputs: Default::default(),
+        hold_back: None,
     }
 }
 
@@ -496,7 +501,9 @@ fn a_certificate_unseals_its_sample_and_only_then_its_labels_train() {
         let drawn: Vec<labels::Label> = ids.iter().map(|s| label(*s)).collect();
         // the set is written while its items are sealed
         let dir = TempDir::new("reader-set");
-        std::fs::write(dir.path().join("labels.tsv"), labels::tsv(&drawn)).unwrap();
+        let text = labels::tsv(&drawn);
+        std::fs::write(dir.path().join("labels.tsv"), &text).unwrap();
+        let digest = sha256(&text);
         let path = dir.path().display().to_string();
         let was_sealed = labels::sealed_among(reg.store(), &drawn).unwrap();
         let set = labels::record(
@@ -513,7 +520,7 @@ fn a_certificate_unseals_its_sample_and_only_then_its_labels_train() {
                 scheme_digest: None,
                 sealed: was_sealed,
                 rows: 3,
-                digest: "d",
+                digest: &digest,
                 place_id: None,
                 path: Some(&path),
                 created_by: "cleo@lab",
@@ -535,33 +542,94 @@ fn a_certificate_unseals_its_sample_and_only_then_its_labels_train() {
 
         // no certificate, no unseal
         assert!(
-            labels::unseal(reg, "selection:cert@1", 999, "op@lab").is_err(),
+            labels::unseal(reg, "selection:cert@1", 999, "bo@lab", "person").is_err(),
             "{name}"
         );
-        // a certificate measures a sample somebody sealed, by registered models
-        let result = json!({"coverage": 0.93, "risk": 0.05});
+        // a certificate names the sample it measured, its digest, the risk,
+        // the size read and the errors found
+        let digest = labels::seal(reg, "selection:cert@1", None, &ids[..2], "op@lab")
+            .unwrap()
+            .digest;
+        assert!(digest.starts_with("sha256:"), "{name}");
+        let result = |sample: &str, digest: &str| json!({"sample": sample, "sample_digest": digest, "risk": 0.05, "n": 2, "errors": 0});
+        let good = result("selection:cert@1", &digest);
+        let record = |reg: &mut Registry,
+                      sample: &str,
+                      models: &[i64],
+                      r: &serde_json::Value,
+                      who: &str,
+                      kind: &str| {
+            labels::record_certificate(reg, sample, models, r, who, kind)
+        };
         assert!(
-            labels::record_certificate(reg, "selection:never@1", &[model], &result, "op@lab")
-                .is_err()
+            record(
+                reg,
+                "selection:never@1",
+                &[model],
+                &good,
+                "op@lab",
+                "person"
+            )
+            .is_err()
         );
         assert!(
-            labels::record_certificate(reg, "selection:cert@1", &[model + 99], &result, "op@lab")
-                .is_err()
+            record(
+                reg,
+                "selection:cert@1",
+                &[model + 99],
+                &good,
+                "op@lab",
+                "person"
+            )
+            .is_err()
         );
-        assert!(
-            labels::record_certificate(reg, "selection:cert@1", &[], &result, "op@lab").is_err()
-        );
-        let cert = labels::record_certificate(reg, "selection:cert@1", &[model], &result, "op@lab")
-            .unwrap();
+        assert!(record(reg, "selection:cert@1", &[], &good, "op@lab", "person").is_err());
+        // an empty result, a wrong digest, another sample's name, no risk,
+        // more stacks than the sample holds or more errors than read: refused
+        for bad in [
+            json!({}),
+            result("selection:cert@1", "sha256:00"),
+            result("selection:other@1", &digest),
+            json!({"sample": "selection:cert@1", "sample_digest": digest, "n": 2, "errors": 0}),
+            json!({"sample": "selection:cert@1", "sample_digest": digest, "risk": 0.05, "n": 9, "errors": 0}),
+            json!({"sample": "selection:cert@1", "sample_digest": digest, "risk": 0.05, "n": 2, "errors": 3}),
+        ] {
+            assert!(
+                record(reg, "selection:cert@1", &[model], &bad, "op@lab", "person").is_err(),
+                "{name}: {bad}"
+            );
+        }
+        // an agent's or a model's act is refused
+        for kind in ["agent", "model"] {
+            assert!(record(reg, "selection:cert@1", &[model], &good, "op@lab", kind).is_err());
+        }
+        let cert = record(reg, "selection:cert@1", &[model], &good, "op@lab", "person").unwrap();
         assert_eq!(cert.model_ids, vec![model], "{name}");
-        assert_eq!(cert.result["coverage"], 0.93, "{name}");
+        assert_eq!(cert.result["risk"], 0.05, "{name}");
         // a certificate of another sample unseals nothing here
-        labels::seal(reg, "selection:other@1", None, &ids[2..], "op@lab").unwrap();
-        let other =
-            labels::record_certificate(reg, "selection:other@1", &[model], &result, "op@lab")
-                .unwrap();
+        let other_digest = labels::seal(reg, "selection:other@1", None, &ids[2..], "op@lab")
+            .unwrap()
+            .digest;
+        let other = record(
+            reg,
+            "selection:other@1",
+            &[model],
+            &json!({"sample": "selection:other@1", "sample_digest": other_digest, "risk": 0.05, "n": 1, "errors": 0}),
+            "op@lab",
+            "person",
+        )
+        .unwrap();
         assert!(
-            labels::unseal(reg, "selection:cert@1", other.id, "op@lab").is_err(),
+            labels::unseal(reg, "selection:cert@1", other.id, "bo@lab", "person").is_err(),
+            "{name}"
+        );
+        // who recorded it does not unseal, nor does an agent
+        assert!(
+            labels::unseal(reg, "selection:cert@1", cert.id, "op@lab", "person").is_err(),
+            "{name}"
+        );
+        assert!(
+            labels::unseal(reg, "selection:cert@1", cert.id, "bo@lab", "agent").is_err(),
             "{name}"
         );
         assert!(
@@ -569,7 +637,7 @@ fn a_certificate_unseals_its_sample_and_only_then_its_labels_train() {
             "{name}"
         );
 
-        let done = labels::unseal(reg, "selection:cert@1", cert.id, "op@lab").unwrap();
+        let done = labels::unseal(reg, "selection:cert@1", cert.id, "bo@lab", "person").unwrap();
         assert_eq!((done.stacks, done.already), (2, 0), "{name}");
         assert!(
             !labels::sealed_among(reg.store(), &drawn[..2]).unwrap(),
@@ -580,13 +648,29 @@ fn a_certificate_unseals_its_sample_and_only_then_its_labels_train() {
             labels::usable_for_training(reg.store(), set.id).is_err(),
             "{name}"
         );
-        labels::unseal(reg, "selection:other@1", other.id, "op@lab").unwrap();
+        labels::unseal(reg, "selection:other@1", other.id, "bo@lab", "person").unwrap();
         let usable = labels::usable_for_training(reg.store(), set.id).unwrap();
+        // a file that is not the one its digest names is not trusted
+        std::fs::write(
+            dir.path().join("labels.tsv"),
+            text.replace("brain", "spine"),
+        )
+        .unwrap();
+        assert!(
+            labels::usable_for_training(reg.store(), set.id).is_err(),
+            "{name}"
+        );
+        // nor is a set whose file is gone and which was written sealed
+        std::fs::remove_file(dir.path().join("labels.tsv")).unwrap();
+        assert!(
+            labels::usable_for_training(reg.store(), set.id).is_err(),
+            "{name}"
+        );
         // the set keeps the flag it was written under, as history
         assert!(usable.sealed, "{name}");
         // the rows stay, naming the certificate
         let sql = format!(
-            "SELECT COUNT(*) FROM {} WHERE certificate_id = {} AND unsealed_by = 'op@lab'",
+            "SELECT COUNT(*) FROM {} WHERE certificate_id = {} AND unsealed_by = 'bo@lab'",
             reg.store().qualified("sealed_stack"),
             cert.id
         );
@@ -596,7 +680,7 @@ fn a_certificate_unseals_its_sample_and_only_then_its_labels_train() {
             "{name}"
         );
         // unsealing again changes nothing
-        let again = labels::unseal(reg, "selection:cert@1", cert.id, "op@lab").unwrap();
+        let again = labels::unseal(reg, "selection:cert@1", cert.id, "bo@lab", "person").unwrap();
         assert_eq!((again.stacks, again.already), (0, 2), "{name}");
         assert_eq!(
             labels::certificates(reg.store()).unwrap().len(),
@@ -668,15 +752,17 @@ fn the_development_labels_are_every_person_decision_not_sealed_now() {
             "model",
             &[("digest", Param::from(format!("sha256:{}", "d".repeat(64))))],
         );
+        let digest = labels::sample_digest(reg.store(), "selection:cert@1").unwrap();
         let cert = labels::record_certificate(
             reg,
             "selection:cert@1",
             &[model],
-            &json!({"ok": true}),
+            &json!({"sample": "selection:cert@1", "sample_digest": digest, "risk": 0.1, "n": 1, "errors": 0}),
             "op@lab",
+            "person",
         )
         .unwrap();
-        labels::unseal(reg, "selection:cert@1", cert.id, "op@lab").unwrap();
+        labels::unseal(reg, "selection:cert@1", cert.id, "bo@lab", "person").unwrap();
         let (rows, left) = labels::training_labels(reg.store(), None, None, &[], None).unwrap();
         assert_eq!((rows.len(), left), (3, 0), "{name}");
     }
@@ -706,5 +792,99 @@ fn an_answer_given_now_is_timed_finer_than_the_second() {
             .unwrap();
         assert!((0.1..5.0).contains(&seconds), "{name}: {seconds}");
         assert!(seconds.fract() != 0.0, "{name}: {seconds}");
+    }
+}
+
+/// R2: a set whose labels.tsv is gone is never usable by default: one that
+/// pins no list says nothing, one that pins a list of stacks is held to the
+/// seals on those stacks.
+#[test]
+fn a_set_whose_file_is_gone_is_held_to_what_the_registry_knows() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let set = |reg: &mut Registry, handle: Option<i64>, n: i64| {
+            labels::record(
+                reg,
+                &labels::NewSet {
+                    name: "gone",
+                    version: n,
+                    kind: "decisions",
+                    what: "body_part",
+                    source: json!({}),
+                    campaign_id: None,
+                    handle_id: handle,
+                    pack_version: None,
+                    scheme_digest: None,
+                    sealed: false,
+                    rows: 2,
+                    digest: "0",
+                    place_id: None,
+                    path: Some("/nonexistent/labels/gone"),
+                    created_by: "cleo@lab",
+                },
+            )
+            .unwrap()
+        };
+        let bare = set(reg, None, 1);
+        assert!(
+            labels::usable_for_training(reg.store(), bare.id).is_err(),
+            "{name}"
+        );
+        let handle = row(
+            reg.store(),
+            "handle",
+            &[("grain", Param::from("stack")), ("ask", Param::from("{}"))],
+        );
+        for (i, s) in ids.iter().enumerate() {
+            row(
+                reg.store(),
+                "handle_member",
+                &[
+                    ("handle_id", Param::Int(handle)),
+                    ("position", Param::Int(i as i64)),
+                    ("key", Param::Int(*s)),
+                ],
+            );
+        }
+        let pinned = set(reg, Some(handle), 2);
+        assert!(
+            labels::usable_for_training(reg.store(), pinned.id).is_ok(),
+            "{name}"
+        );
+        labels::seal(reg, "selection:s@1", None, &ids[..1], "op@lab").unwrap();
+        assert!(
+            labels::usable_for_training(reg.store(), pinned.id).is_err(),
+            "{name}"
+        );
+    }
+}
+
+/// R1: a campaign holds back what its maker set, at least a tenth.
+#[test]
+fn a_campaign_holds_back_what_its_maker_set_and_no_less_than_a_tenth() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let mut n = new("low", &q, &adj, Items::Stacks(ids.clone()), 1);
+        n.hold_back = Some(0.0);
+        assert!(campaign::create(reg, &n).is_err(), "{name}");
+        n.hold_back = Some(0.25);
+        let c = campaign::create(reg, &n).unwrap();
+        assert_eq!(c.hold_back, 0.25, "{name}");
+        assert!(c.as_json().get("hold_back_seed").is_none(), "{name}");
+        let seed = campaign::hold_back_seed(reg.store(), c.id).unwrap();
+        assert!(seed.len() >= 32, "{name}");
+        let d = campaign::create(reg, &new("default", &q, &adj, Items::Stacks(ids), 1)).unwrap();
+        assert_eq!(d.hold_back, campaign::HOLD_BACK_MIN, "{name}");
+        assert_ne!(
+            campaign::hold_back_seed(reg.store(), d.id).unwrap(),
+            seed,
+            "{name}"
+        );
     }
 }

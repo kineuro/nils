@@ -2023,6 +2023,12 @@ fn build_registry() -> Vec<Table> {
                 // What the close measured over the whole campaign: the share
                 // of items the raters agreed on, Cohen's and Fleiss' kappa.
                 col("agreement", Type::Json),
+                // Record 48 R1: the share of each batch accepted in one move
+                // that is held back to be read alone, which the campaign's
+                // maker sets, and the seed the engine drew for the choice,
+                // which no door returns.
+                col("hold_back", Type::Double),
+                col("hold_back_seed", Type::Text),
             ],
         )
         .unique(&["name"]),

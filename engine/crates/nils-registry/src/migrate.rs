@@ -327,6 +327,7 @@ fn a_reading_is_timed_and_a_certificate_unseals(
         &["seconds", "suggested", "changed", "via"],
     )?;
     add_columns(store, "campaign_item", &["held_back"])?;
+    add_columns(store, "campaign", &["hold_back", "hold_back_seed"])?;
     add_columns(store, "campaign_assignment", &["leased_ms"])?;
     add_columns(
         store,

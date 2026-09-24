@@ -2060,6 +2060,8 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
             sql.push_str(&drop_column(&s, col));
         }
         sql.push_str(&drop_column(&store.qualified("campaign_item"), "held_back"));
+        sql.push_str(&drop_column(&store.qualified("campaign"), "hold_back"));
+        sql.push_str(&drop_column(&store.qualified("campaign"), "hold_back_seed"));
         sql.push_str(&drop_column(
             &store.qualified("campaign_assignment"),
             "leased_ms",
@@ -2083,6 +2085,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
             ("sealed_stack", "certificate_id"),
             ("campaign_item", "held_back"),
             ("campaign_assignment", "leased_ms"),
+            ("campaign", "hold_back_seed"),
         ] {
             assert!(
                 migrate::column_exists(&mut store, t, col).unwrap(),

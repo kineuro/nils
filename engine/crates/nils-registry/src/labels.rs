@@ -933,23 +933,95 @@ pub fn by_digest(store: &mut Store, digest: &str) -> Result<Vec<LabelSet>, Error
 /// again, and stays refused.
 pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error> {
     let set = get(store, id)?.ok_or_else(|| Error::NotFound(format!("no label set {id}")))?;
-    let now_sealed = match set.path.as_deref() {
-        Some(p) => match std::fs::read_to_string(std::path::Path::new(p).join("labels.tsv")) {
-            Ok(text) => Some(sealed_among(store, &keys_of_tsv(&text))?),
-            Err(_) => None,
-        },
-        None => None,
+    let refuse = |why: String| {
+        Err(Error::Refused(format!(
+            "label set {id} {why}, and is not training data (records 40 R3 and 48 R2)"
+        )))
     };
-    let refused = match now_sealed {
-        Some(sealed) => sealed,
-        None => set.sealed,
+    let text = set
+        .path
+        .as_deref()
+        .and_then(|p| std::fs::read(std::path::Path::new(p).join("labels.tsv")).ok());
+    let now_sealed = match text {
+        // the file is read only where it is the one the set recorded
+        Some(bytes) => {
+            if sha256_hex(&bytes) != set.digest.trim_start_matches("sha256:") {
+                return refuse("has a labels.tsv that is not the one its digest names".into());
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
+                return refuse("has a labels.tsv that does not read".into());
+            };
+            let rows = keys_of_tsv(&text);
+            if text.lines().next() != Some(COLUMNS.join("\t").as_str())
+                || rows.len() as i64 != set.rows
+                || rows
+                    .iter()
+                    .any(|l| l.stack_id.is_none() && l.subject_id.is_none())
+            {
+                return refuse("has a labels.tsv that does not read as its rows".into());
+            }
+            sealed_among(store, &rows)?
+        }
+        // gone: the seal it was written under stands, and the stacks of the
+        // frozen list it pinned are held to the seals in force; with
+        // neither, nothing says it is clear
+        None => {
+            if set.sealed {
+                return refuse(
+                    "was written from a sealed sample and its labels.tsv is gone, so it cannot be read again".into(),
+                );
+            }
+            match set.handle_id {
+                Some(h) => {
+                    let stacks = handle_stacks(store, h)?;
+                    if stacks.is_empty() {
+                        return refuse(
+                            "pins a list that keeps no stacks, and its labels.tsv is gone".into(),
+                        );
+                    }
+                    !sealed_now(store, &stacks, &[])?.0.is_empty()
+                }
+                None => {
+                    return refuse(
+                        "has no labels.tsv where it was written and pins no list, so nothing says it holds no sealed item".into(),
+                    );
+                }
+            }
+        }
     };
-    if refused {
-        return Err(Error::Refused(format!(
-            "label set {id} holds items of a sealed certification sample, which is never training data until its certificate is recorded and the sample unsealed (records 40 R3 and 48 R2)"
-        )));
+    if now_sealed {
+        return refuse(
+            "holds items of a sealed certification sample until its certificate is recorded and the sample unsealed".into(),
+        );
     }
     Ok(set)
+}
+
+/// The stacks a handle of stacks keeps; none for a handle of another grain.
+fn handle_stacks(store: &mut Store, handle: i64) -> Result<Vec<i64>, Error> {
+    let grain = store
+        .query_opt(
+            &format!(
+                "SELECT grain FROM {} WHERE id = {}",
+                store.qualified("handle"),
+                store.dialect().param(1, Type::Int)
+            ),
+            &[Param::Int(handle)],
+        )?
+        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string));
+    if grain.as_deref() != Some("stack") {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT key FROM {} WHERE handle_id = {} ORDER BY position",
+        store.qualified("handle_member"),
+        store.dialect().param(1, Type::Int)
+    );
+    Ok(store
+        .query(&sql, &[Param::Int(handle)])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?)
 }
 
 /// The stack and subject of each row of a `labels.tsv`.
@@ -975,6 +1047,8 @@ fn keys_of_tsv(text: &str) -> Vec<Label> {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sealed {
     pub sample: String,
+    /// Record 48 R2: the sample's digest, which a certificate names.
+    pub digest: String,
     /// Stacks sealed now, and stacks the sample held sealed already.
     pub stacks: i64,
     pub already: i64,
@@ -982,7 +1056,7 @@ pub struct Sealed {
 
 impl Sealed {
     pub fn as_json(&self) -> Value {
-        json!({"sample": self.sample, "stacks": self.stacks, "already": self.already})
+        json!({"sample": self.sample, "digest": self.digest, "stacks": self.stacks, "already": self.already})
     }
 }
 
@@ -1072,11 +1146,12 @@ pub fn seal(
         }
         Ok(Sealed {
             sample: sample.to_string(),
+            digest: String::new(),
             stacks: rows.len() as i64,
             already: (subject_of.len() - rows.len()) as i64,
         })
     })();
-    let sealed = match done {
+    let mut sealed = match done {
         Ok(s) => s,
         Err(e) => {
             store.rollback().ok();
@@ -1084,6 +1159,7 @@ pub fn seal(
         }
     };
     store.commit()?;
+    sealed.digest = sample_digest(registry.store(), &sealed.sample)?;
     audit::record(
         registry,
         &Entry {
@@ -1340,6 +1416,27 @@ pub fn sample_counts(store: &mut Store, sample: &str) -> Result<(i64, i64), Erro
     Ok((out[0], out[1]))
 }
 
+/// Record 48 R2: the digest of a sealed sample, `sha256:` over its stack
+/// ids in order, one a line: what a certificate's result names, so the
+/// result is held to the very stacks that were sealed.
+pub fn sample_digest(store: &mut Store, sample: &str) -> Result<String, Error> {
+    let sql = format!(
+        "SELECT stack_id FROM {} WHERE sample = {} ORDER BY stack_id",
+        store.qualified("sealed_stack"),
+        store.dialect().param(1, Type::Text)
+    );
+    let mut text = String::new();
+    for r in store.query(&sql, &[Param::from(sample)])? {
+        text.push_str(&r.int(0)?.to_string());
+        text.push('\n');
+    }
+    Ok(format!("sha256:{}", sha256_hex(text.as_bytes())))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+
 /// Record 48 R2: record what a certification measured on a sealed sample:
 /// the models it certified and the result as the certifying tool gave it.
 /// Refused for a sample nobody sealed, and for a model not registered.
@@ -1349,7 +1446,13 @@ pub fn record_certificate(
     model_ids: &[i64],
     result: &Value,
     who: &str,
+    author_kind: &str,
 ) -> Result<Certificate, Error> {
+    if author_kind != "person" {
+        return Err(Error::Refused(format!(
+            "a certificate is a person's act, and {who} acts as a {author_kind}"
+        )));
+    }
     let sample = sample.trim();
     if sample.is_empty() {
         return Err(Error::Invalid(
@@ -1377,6 +1480,42 @@ pub fn record_certificate(
         if crate::model::get(store, *id)?.is_none() {
             return Err(Error::NotFound(format!("no registered model {id}")));
         }
+    }
+    // the result names what it measured and what it found: the sample and
+    // its digest, the risk it certifies, how many it read and how many of
+    // those the models got wrong
+    if result["sample"].as_str() != Some(sample) {
+        return Err(Error::Invalid(format!(
+            "result.sample names the sealed sample it measured, {sample}"
+        )));
+    }
+    let digest = sample_digest(store, sample)?;
+    if result["sample_digest"].as_str() != Some(digest.as_str()) {
+        return Err(Error::Invalid(format!(
+            "result.sample_digest is the digest of the sealed sample's stacks, as nils labels seal gave it; {sample}'s is not the one given"
+        )));
+    }
+    if !result["risk"].as_f64().is_some_and(|r| r > 0.0 && r < 1.0) {
+        return Err(Error::Invalid(
+            "result.risk: the risk the certificate holds the models to, between 0 and 1".into(),
+        ));
+    }
+    let n = result["n"].as_i64().filter(|n| *n > 0).ok_or_else(|| {
+        Error::Invalid("result.n: how many stacks of the sample were read".into())
+    })?;
+    if n > sealed + unsealed {
+        return Err(Error::Invalid(format!(
+            "result.n is {n}, and {sample} holds {} stacks",
+            sealed + unsealed
+        )));
+    }
+    if !result["errors"]
+        .as_i64()
+        .is_some_and(|e| (0..=n).contains(&e))
+    {
+        return Err(Error::Invalid(
+            "result.errors: how many of those the models got wrong, from 0 to n".into(),
+        ));
     }
     let now = now_iso();
     let id = store
@@ -1484,13 +1623,24 @@ pub fn unseal(
     sample: &str,
     certificate_id: i64,
     who: &str,
+    author_kind: &str,
 ) -> Result<Unsealed, Error> {
+    if author_kind != "person" {
+        return Err(Error::Refused(format!(
+            "unsealing a certified sample is a person's act, and {who} acts as a {author_kind}"
+        )));
+    }
     let store = registry.store();
     let cert = certificate(store, certificate_id)?.ok_or_else(|| {
         Error::Refused(format!(
             "no certificate {certificate_id}: a sealed sample is unsealed only once the certificate it was drawn for is recorded"
         ))
     })?;
+    if cert.created_by == who {
+        return Err(Error::Refused(format!(
+            "{who} recorded certificate {certificate_id}; another person unseals its sample"
+        )));
+    }
     if cert.sample != sample.trim() {
         return Err(Error::Refused(format!(
             "certificate {certificate_id} measured {}, not {}; a certificate unseals only its own sample",

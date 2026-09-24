@@ -669,19 +669,27 @@ pub(crate) fn route(
                 axes_value(&c.question, &mut s);
                 doc["item"] = json!(item);
                 doc["suggested"] = s;
-                doc["worth"] = campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
-                    .map_err(campaign_err)?
-                    .get(&stack)
-                    .map(campaign::Worth::as_json)
-                    .unwrap_or(Value::Null);
+                // a sealed item is read blind: nothing of System 1's, and no
+                // suggestion (record 48 R2)
+                let blind = doc["blind"].as_bool().unwrap_or(false);
+                doc["worth"] = if blind {
+                    Value::Null
+                } else {
+                    campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
+                        .map_err(campaign_err)?
+                        .get(&stack)
+                        .map(campaign::Worth::as_json)
+                        .unwrap_or(Value::Null)
+                };
                 Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "batches"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let found =
-                    crate::reader::batches(registry.store(), &c, principal, pack.as_deref())
+                    crate::reader::batches(registry.store(), &c, principal, pack.as_deref(), None)
                         .map_err(|(st, m)| Reply::error(st, m))?;
+                crate::reader::remember(c.id, principal, &found);
                 let sample = query
                     .get("sample")
                     .and_then(|n| n.parse::<usize>().ok())
@@ -694,107 +702,106 @@ pub(crate) fn route(
             }
             ["api", "campaigns", which, "batches", key, "accept"] if post => {
                 let doc = json_body(body)?;
+                // record 48 R1: what is held back is the campaign's, set by
+                // its maker, and chosen by a seed the engine drew; never the
+                // caller's to say
+                for held in ["hold_back", "seed"] {
+                    if doc.get(held).is_some() {
+                        return Err(Reply::error(
+                            400,
+                            format!(
+                                "{held} is not the caller's to say: the share a batch holds back is the campaign's (hold_back, set when it is made), and the engine draws the seed"
+                            ),
+                        ));
+                    }
+                }
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
-                let share = match &doc["hold_back"] {
-                    Value::Null => 0.1,
-                    v => v
-                        .as_f64()
-                        .filter(|x| (0.0..=1.0).contains(x))
-                        .ok_or_else(|| {
-                            Reply::error(
-                                400,
-                                "hold_back: the share held back to be read alone, from 0 to 1",
-                            )
-                        })?,
-                };
-                let seed = doc["seed"]
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| now.clone());
-                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
-                let found =
-                    crate::reader::batches(registry.store(), &c, principal, pack.as_deref())
-                        .map_err(|(st, m)| Reply::error(st, m))?;
-                let batch = found.groups.iter().find(|g| g.key == *key).ok_or_else(|| {
-                    Reply::error(
-                        409,
-                        format!("campaign {} has no batch {key} open to {principal} now; list the batches again", c.name),
-                    )
-                })?;
-                // a few named items of it, or the whole batch
-                let chosen: Vec<i64> = match &doc["items"] {
-                    Value::Null => batch.items.clone(),
+                let named: Option<Vec<i64>> = match &doc["items"] {
+                    Value::Null => None,
                     Value::Array(list) => {
                         let ids: Vec<i64> = list.iter().filter_map(Value::as_i64).collect();
                         if ids.len() != list.len() {
                             return Err(Reply::error(400, "items: a list of item ids"));
                         }
-                        // an item of a sealed sample is never accepted in one move
-                        let stacks = item_stacks(registry.store(), c.id, &ids)?;
-                        let (sealed, _) = labels::sealed_now(registry.store(), &stacks, &[])
-                            .map_err(labels_err)?;
-                        if !sealed.is_empty() {
-                            return Err(Reply::error(
-                                409,
-                                format!(
-                                    "{} of these items are of a sealed certification sample, and each is read alone, never accepted in a batch",
-                                    sealed.len()
-                                ),
-                            ));
-                        }
-                        if let Some(x) = ids.iter().find(|i| !batch.items.contains(i)) {
-                            return Err(Reply::error(
-                                409,
-                                format!("item {x} is not in batch {key} now"),
-                            ));
-                        }
-                        ids
+                        Some(ids)
                     }
                     _ => return Err(Reply::error(400, "items: a list of item ids")),
                 };
-                // the batch was drawn without a sealed item; held to it again
-                let stacks = item_stacks(registry.store(), c.id, &chosen)?;
-                let (sealed, _) =
-                    labels::sealed_now(registry.store(), &stacks, &[]).map_err(labels_err)?;
-                if !sealed.is_empty() {
-                    return Err(Reply::error(
-                        409,
-                        "the batch holds items of a sealed certification sample, which are read alone",
-                    ));
-                }
-                let held = crate::reader::held_back(&chosen, share, &seed);
-                let held_list: Vec<i64> = held.iter().copied().collect();
-                campaign::hold_back(registry.store(), c.id, &held_list).map_err(campaign_err)?;
-                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
-                let mut accepted = Vec::new();
-                let mut refused = Vec::new();
-                for item in chosen.iter().filter(|i| !held.contains(i)) {
-                    let given = Given {
-                        assignment: 0,
-                        principal,
-                        author_kind: kind_of(caller),
-                        model: acting,
-                        value: Some(&batch.suggested),
-                        form: None,
-                        derivative_id: None,
-                        why: None,
-                    };
-                    match campaign::accept(
-                        registry,
-                        c.id,
-                        *item,
-                        &given,
-                        Some(&batch.suggested),
-                        &now,
-                    ) {
-                        Ok(done) => accepted.push(
-                            json!({"item": done.item, "answer": done.answer, "state": done.state}),
-                        ),
-                        Err(e) => refused.push(json!({"item": item, "why": e.to_string()})),
+                // an item of a sealed sample is never accepted in one move
+                if let Some(ids) = &named {
+                    let stacks = item_stacks(registry.store(), c.id, ids)?;
+                    let (sealed, _) =
+                        labels::sealed_now(registry.store(), &stacks, &[]).map_err(labels_err)?;
+                    if !sealed.is_empty() {
+                        return Err(Reply::error(
+                            409,
+                            format!(
+                                "{} of these items are of a sealed certification sample, and each is read alone, never accepted in a batch",
+                                sealed.len()
+                            ),
+                        ));
                     }
                 }
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let batch =
+                    crate::reader::batch_now(registry.store(), &c, principal, pack.as_deref(), key)
+                        .map_err(|(st, m)| Reply::error(st, m))?
+                        .ok_or_else(|| {
+                            Reply::error(
+                                409,
+                                format!("campaign {} has no batch {key} open to {principal} now; list the batches again", c.name),
+                            )
+                        })?;
+                if let Some(x) = named.iter().flatten().find(|i| !batch.items.contains(i)) {
+                    return Err(Reply::error(
+                        409,
+                        format!("item {x} is not in batch {key} now"),
+                    ));
+                }
+                // the share is held back over the whole batch, whatever the
+                // caller names
+                let seed =
+                    campaign::hold_back_seed(registry.store(), c.id).map_err(campaign_err)?;
+                let held = crate::reader::held_back(&batch.items, c.hold_back, &seed);
+                let held_list: Vec<i64> = held.iter().copied().collect();
+                campaign::hold_back(registry.store(), c.id, &held_list).map_err(campaign_err)?;
+                let chosen: Vec<i64> = named
+                    .unwrap_or_else(|| batch.items.clone())
+                    .into_iter()
+                    .filter(|i| !held.contains(i))
+                    .collect();
+                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
+                let given = Given {
+                    assignment: 0,
+                    principal,
+                    author_kind: kind_of(caller),
+                    model: acting,
+                    value: Some(&batch.suggested),
+                    form: None,
+                    derivative_id: None,
+                    why: None,
+                };
+                let done = campaign::accept_many(
+                    registry,
+                    c.id,
+                    &chosen,
+                    &given,
+                    Some(&batch.suggested),
+                    &now,
+                )
+                .map_err(campaign_err)?;
+                let accepted: Vec<Value> = done
+                    .accepted
+                    .iter()
+                    .map(|d| json!({"item": d.item, "answer": d.answer, "state": d.state}))
+                    .collect();
+                let refused: Vec<Value> = done
+                    .refused
+                    .iter()
+                    .map(|(item, why)| json!({"item": item, "why": why}))
+                    .collect();
                 Ok(Reply::ok(json!({
-                    "campaign": c.id, "batch": key, "hold_back": share,
+                    "campaign": c.id, "batch": key, "hold_back": c.hold_back,
                     "accepted": accepted, "held_back": held_list, "refused": refused,
                 })))
             }
@@ -805,6 +812,10 @@ pub(crate) fn route(
                 if !sees_all(registry.store(), caller, principal, &c)? {
                     if let Some(list) = doc["raters"].as_array_mut() {
                         list.retain(|r| r["principal"] == principal);
+                    }
+                    // the totals would give away the other raters' counts
+                    if let Some(m) = doc.as_object_mut() {
+                        m.remove("all");
                     }
                     doc["blind"] = json!(true);
                 }
@@ -819,6 +830,7 @@ pub(crate) fn route(
                 })))
             }
             ["api", "certificates"] if post => {
+                person_only(caller, "recording a certificate")?;
                 let doc = json_body(body)?;
                 let sample = doc["sample"].as_str().ok_or_else(|| {
                     Reply::error(
@@ -839,18 +851,25 @@ pub(crate) fn route(
                         })?;
                     ids.push(found.id);
                 }
-                let cert =
-                    labels::record_certificate(registry, sample, &ids, &doc["result"], principal)
-                        .map_err(labels_err)?;
+                let cert = labels::record_certificate(
+                    registry,
+                    sample,
+                    &ids,
+                    &doc["result"],
+                    principal,
+                    kind_of(caller),
+                )
+                .map_err(labels_err)?;
                 Ok(Reply::created(cert.as_json()))
             }
             ["api", "certificates", id, "unseal"] if post => {
+                person_only(caller, "unsealing a certified sample")?;
                 let id = id_of(id)?;
                 let cert = labels::certificate(registry.store(), id)
                     .map_err(labels_err)?
                     .ok_or_else(|| Reply::error(404, format!("no certificate {id}")))?;
-                let done =
-                    labels::unseal(registry, &cert.sample, id, principal).map_err(labels_err)?;
+                let done = labels::unseal(registry, &cert.sample, id, principal, kind_of(caller))
+                    .map_err(labels_err)?;
                 Ok(Reply::ok(done.as_json()))
             }
             ["api", "label-sets"] if get => {
@@ -1106,6 +1125,19 @@ pub(crate) fn route(
             )),
         }
     })())
+}
+
+/// Record 48 R2: a certificate and the unseal are a person's acts; an
+/// agent's or a model's token is refused, whatever grants it holds.
+fn person_only(caller: &Caller, act: &str) -> Result<(), Reply> {
+    let kind = kind_of(caller);
+    if kind != "person" {
+        return Err(Reply::error(
+            403,
+            format!("{act} is a person's act, and this caller acts as a {kind}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Record 48 R2: whether a set trains now, under the seals in force: a set
@@ -1488,6 +1520,23 @@ fn strings(v: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Record 48 R1: the share of a batch a campaign holds back, as its maker
+/// gives it; the engine's least when none is.
+fn hold_back_of(v: &Value) -> Result<Option<f64>, Reply> {
+    match v {
+        Value::Null => Ok(None),
+        v => v.as_f64().map(Some).ok_or_else(|| {
+            Reply::error(
+                400,
+                format!(
+                    "hold_back: the share of a batch read alone, from {} to 1",
+                    campaign::HOLD_BACK_MIN
+                ),
+            )
+        }),
+    }
+}
+
 fn inputs_of(v: &Value) -> BTreeMap<String, Vec<i64>> {
     v.as_object()
         .map(|m| {
@@ -1593,6 +1642,7 @@ fn create_at_door(
             closes_into: doc["closes_into"].as_str().unwrap_or("none"),
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
             inputs: inputs_of(&doc["inputs"]),
+            hold_back: hold_back_of(&doc["hold_back"])?,
         },
     )
     .map_err(campaign_err)?;
@@ -2177,6 +2227,10 @@ pub(crate) struct CreateArgs {
     closes_into: String,
     #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
     lease_seconds: i64,
+    /// The share of each batch accepted in one move that is held back to
+    /// be read alone, from 0.1 to 1 (record 48)
+    #[arg(long, value_name = "SHARE")]
+    hold_back: Option<f64>,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
     #[arg(long, default_value = "mri")]
@@ -2860,6 +2914,7 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
             closes_into: &a.closes_into,
             lease_seconds: a.lease_seconds,
             inputs: BTreeMap::new(),
+            hold_back: a.hold_back,
         },
     )
     .map_err(cerr)?;
@@ -3006,8 +3061,15 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                     .ok_or_else(|| usage(format!("no registered model answers to {m}")))?;
                 ids.push(found.id);
             }
-            let cert = labels::record_certificate(&mut registry, &sample, &ids, &result, &who())
-                .map_err(lerr)?;
+            let cert = labels::record_certificate(
+                &mut registry,
+                &sample,
+                &ids,
+                &result,
+                &who(),
+                crate::actor_kind(),
+            )
+            .map_err(lerr)?;
             if json {
                 print(&cert.as_json());
             } else {
@@ -3093,7 +3155,14 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                 }
                 Err(_) => which.clone(),
             };
-            let done = labels::unseal(&mut registry, &sample, certificate, &who()).map_err(lerr)?;
+            let done = labels::unseal(
+                &mut registry,
+                &sample,
+                certificate,
+                &who(),
+                crate::actor_kind(),
+            )
+            .map_err(lerr)?;
             if json {
                 print(&done.as_json());
             } else {

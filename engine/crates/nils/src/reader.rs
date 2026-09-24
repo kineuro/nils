@@ -382,8 +382,15 @@ pub(crate) fn why(
     let voters = voters(store)?;
     let votes = votes_of(store, &voters, stack)?;
     let decisions = crate::explain::decisions_of(store, stack)?;
-    let asked = asked_of(store, stack)?;
-    let head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
+    // a stack of a sample sealed now is read blind: nothing of System 1's
+    let blind = blind(store, stack)?;
+    let asked = if blind { None } else { asked_of(store, stack)? };
+    let mut head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
+    // the sequence name is quasi-identifying text (catalogue.md): below
+    // detail quasi it is not shown, in the header, a clause's or the line
+    if !quasi {
+        head.retain(|f, _| !HASHED_ONLY.contains(&f.as_str()));
+    }
 
     let mut out_axes = Vec::new();
     for (axis, (values, confidence, tier)) in &axes {
@@ -583,6 +590,7 @@ pub(crate) fn why(
         "pack": pack_name,
         "version": pack_version,
         "detail": if quasi { "quasi" } else { "plain" },
+        "blind": blind,
         "header": core,
         "asked": asked.map(|(id, ev)| json!({
             "item": id, "confidence": ev["confidence"], "agree": ev["agree"],
@@ -592,45 +600,95 @@ pub(crate) fn why(
     })))
 }
 
-/// The rules' values of a stack's axes, as the pack names them.
+/// The ids as a list for `IN (...)`.
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The rules' values of stacks' axes, as the pack names them, five hundred
+/// stacks a query.
 fn rules_values(
     store: &mut Store,
-    stack: i64,
+    stacks: &[i64],
     pack: Option<&nils_pack::Pack>,
-) -> Result<BTreeMap<String, Vec<String>>, StoreError> {
-    let sql = format!(
-        "SELECT axis, value FROM {} WHERE stack_id = {} ORDER BY axis, value",
-        store.qualified("classification_axis"),
-        store.dialect().param(1, Type::Int)
-    );
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for r in store.query(&sql, &[Param::Int(stack)])? {
-        let axis = r.text(0)?.to_string();
-        let names = crate::campaigns::value_names(pack, Some(&axis));
-        let e = out.entry(axis).or_default();
-        if let Some(v) = r.opt_text(1)?.filter(|v| !v.is_empty()) {
-            e.push(named(&names, v));
+) -> Result<BTreeMap<i64, BTreeMap<String, Vec<String>>>, StoreError> {
+    let mut names: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut out: BTreeMap<i64, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        let sql = format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({}) ORDER BY stack_id, axis, value",
+            store.qualified("classification_axis"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            let axis = r.text(1)?.to_string();
+            let n = names
+                .entry(axis.clone())
+                .or_insert_with(|| crate::campaigns::value_names(pack, Some(&axis)));
+            let e = out.entry(r.int(0)?).or_default().entry(axis).or_default();
+            if let Some(v) = r.opt_text(2)?.filter(|v| !v.is_empty()) {
+                e.push(named(n, v));
+            }
         }
     }
     Ok(out)
 }
 
-/// The answer the engine suggests for a stack under a question (record 48
-/// R1), as an answer to it says it: the rules' value where System 1 has not
-/// asked about the stack, the value both agree on where it has, and none
-/// where they disagree or the question is not about axes.
-pub(crate) fn suggestion(
+/// System 1's open questions on stacks, by stack: the item and its
+/// evidence.
+fn asked_many(
     store: &mut Store,
-    stack: i64,
+    stacks: &[i64],
+) -> Result<BTreeMap<i64, (i64, Value)>, StoreError> {
+    let t = table("review_item");
+    let d = store.dialect();
+    let mut out = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        let keys = chunk
+            .iter()
+            .map(|s| format!("'{}'", nils_registry::asked::key(*s)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, group_key, {} FROM {} WHERE kind = '{}' AND status = 'open' AND group_key IN ({keys}) ORDER BY id",
+            d.text_of(t.column("evidence").expect("evidence")),
+            store.qualified("review_item"),
+            nils_registry::asked::KIND,
+        );
+        for r in store.query(&sql, &[])? {
+            let Some(stack) = r
+                .opt_text(1)?
+                .and_then(|k| k.rsplit(':').next())
+                .and_then(|n| n.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            let ev = r
+                .opt_text(2)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(Value::Null);
+            out.insert(stack, (r.int(0)?, ev));
+        }
+    }
+    Ok(out)
+}
+
+/// The answer the rules and System 1 suggest, from what was read of a
+/// stack: the rules' value where System 1 has not asked, the value both
+/// agree on where it has, none where they disagree or the question is not
+/// about axes.
+fn suggest_from(
+    rules: &BTreeMap<String, Vec<String>>,
+    asked: Option<&Value>,
     question: &Question,
-    pack: Option<&nils_pack::Pack>,
-) -> Result<Option<String>, StoreError> {
-    let rules = rules_values(store, stack, pack)?;
-    let asked = asked_of(store, stack)?.map(|(_, ev)| ev);
+) -> Option<String> {
     // System 1's first candidate, on the axes the question asks, where it
     // asked about all of them
     let asks = campaign::axes_of(question);
-    let top: Option<serde_json::Map<String, Value>> = asked.as_ref().and_then(|ev| {
+    let top: Option<serde_json::Map<String, Value>> = asked.and_then(|ev| {
         let covered: Vec<&str> = ev["axes"]
             .as_array()
             .into_iter()
@@ -647,12 +705,12 @@ pub(crate) fn suggestion(
                 .collect(),
         )
     });
-    Ok(match question {
+    match question {
         Question::Axis { axis, .. } => {
             let mut mine = rules.get(axis).cloned().unwrap_or_default();
             mine.sort();
             if mine.is_empty() {
-                return Ok(None);
+                return None;
             }
             let text = mine.join(",");
             match top {
@@ -665,13 +723,9 @@ pub(crate) fn suggestion(
                 .iter()
                 .map(|a| (a.clone(), json!(rules.get(a).cloned().unwrap_or_default())))
                 .collect();
-            let Ok(joint) = campaign::joint_of(axes, constraints, &Value::Object(obj).to_string())
-            else {
-                return Ok(None);
-            };
-            if campaign::legal(constraints, &joint).is_err() {
-                return Ok(None);
-            }
+            let joint =
+                campaign::joint_of(axes, constraints, &Value::Object(obj).to_string()).ok()?;
+            campaign::legal(constraints, &joint).ok()?;
             let mine = campaign::canonical_joint(constraints, &joint);
             match top {
                 Some(t) => {
@@ -685,7 +739,38 @@ pub(crate) fn suggestion(
             }
         }
         _ => None,
-    })
+    }
+}
+
+/// Whether a stack is of a sample sealed now: it is read blind (record 48
+/// R1 and R2), with no suggestion and no candidate of System 1's, so the
+/// reference labels a certificate grades a model by are not anchored to
+/// the model graded.
+pub(crate) fn blind(store: &mut Store, stack: i64) -> Result<bool, StoreError> {
+    nils_registry::labels::sealed_now(store, &[stack], &[])
+        .map(|(s, _)| !s.is_empty())
+        .map_err(|e| StoreError::Message(e.to_string()))
+}
+
+/// The answer the engine suggests for a stack under a question (record 48
+/// R1), as an answer to it says it ([`suggest_from`]); none for a stack of
+/// a sample sealed now, which is read blind.
+pub(crate) fn suggestion(
+    store: &mut Store,
+    stack: i64,
+    question: &Question,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Option<String>, StoreError> {
+    if blind(store, stack)? {
+        return Ok(None);
+    }
+    let rules = rules_values(store, &[stack], pack)?
+        .remove(&stack)
+        .unwrap_or_default();
+    let asked = asked_many(store, &[stack])?
+        .remove(&stack)
+        .map(|(_, ev)| ev);
+    Ok(suggest_from(&rules, asked.as_ref(), question))
 }
 
 /// Round a header value for a signature, so a TR of 2300 and 2300.0001 are
@@ -697,11 +782,17 @@ fn rounded(v: &Value) -> Value {
     }
 }
 
+/// The fields a batch's signature is hashed with and never returned, since
+/// they are quasi-identifying text (the sequence name, `catalogue.md`).
+const HASHED_ONLY: &[&str] = &["text_sequence_name"];
+
 /// One batch: like stacks suggested one answer.
 #[derive(Debug, Clone)]
 pub(crate) struct Batch {
     pub(crate) key: String,
     pub(crate) suggested: String,
+    /// What is returned of the signature: the rules and the header values,
+    /// without the fields hashed only.
     pub(crate) signature: Value,
     pub(crate) items: Vec<i64>,
 }
@@ -721,13 +812,17 @@ pub(crate) struct Batches {
 /// The batches of a campaign for a rater (record 48 R1): the items the rater
 /// could still be given, of stacks that share the signature of the deciding
 /// physics and the suggested answer. An axis or an axes question only.
+/// `only`, when given, narrows the items looked at to those: the accept
+/// door checks a batch's own items again without working out every batch.
+/// Everything is read five hundred stacks a query, never a stack at a time.
 pub(crate) fn batches(
     store: &mut Store,
     c: &Campaign,
     principal: &str,
     pack: Option<&nils_pack::Pack>,
+    only: Option<&BTreeSet<i64>>,
 ) -> Result<Batches, (u16, String)> {
-    let e500 = |e: String| (500, e);
+    let e500 = |e: StoreError| (500, e.to_string());
     let question = c.question().map_err(|e| (400, e.to_string()))?;
     if !matches!(question, Question::Axis { .. } | Question::Axes { .. }) {
         return Err((
@@ -741,16 +836,62 @@ pub(crate) fn batches(
     }
     let axes = campaign::axes_of(&question);
     let open: Vec<(i64, i64)> = campaign::open_for(store, c, principal)
-        .map_err(|e| e500(e.to_string()))?
+        .map_err(|e| (500, e.to_string()))?
         .into_iter()
+        .filter(|it| only.is_none_or(|o| o.contains(&it.id)))
         .filter_map(|it| it.stack_id.map(|s| (it.id, s)))
         .collect();
     let stacks: Vec<i64> = open.iter().map(|(_, s)| *s).collect();
     let (sealed, _) =
-        nils_registry::labels::sealed_now(store, &stacks, &[]).map_err(|e| e500(e.to_string()))?;
-    let heads = header(store, &stacks).map_err(|e| e500(e.to_string()))?;
-    let voters = voters(store).map_err(|e| e500(e.to_string()))?;
-    let same_version = |p: &nils_pack::Pack, v: &str| p.version.to_string() == v;
+        nils_registry::labels::sealed_now(store, &stacks, &[]).map_err(|e| (500, e.to_string()))?;
+    let heads = header(store, &stacks).map_err(e500)?;
+    let voters = voters(store).map_err(e500)?;
+    let rules = rules_values(store, &stacks, pack).map_err(e500)?;
+    let asked = asked_many(store, &stacks).map_err(e500)?;
+    let mut votes: BTreeMap<i64, Vec<Said>> = BTreeMap::new();
+    let mut versions: BTreeMap<i64, String> = BTreeMap::new();
+    let mut deciding: BTreeMap<i64, Vec<(String, String, String, String)>> = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        let ids = id_list(chunk);
+        let sql = format!(
+            "SELECT stack_id, votes FROM {} WHERE stack_id IN ({ids}) ORDER BY stack_id, phase",
+            store.qualified("classification_vote")
+        );
+        for r in store.query(&sql, &[]).map_err(e500)? {
+            let pairs: Vec<(i64, String)> =
+                serde_json::from_str(r.text(1).map_err(e500)?).unwrap_or_default();
+            let list = votes.entry(r.int(0).map_err(e500)?).or_default();
+            for (id, value) in pairs {
+                if let Some(v) = voters.get(&id) {
+                    list.push((v.clone(), value));
+                }
+            }
+        }
+        let sql = format!(
+            "SELECT stack_id, pack_version FROM {} WHERE stack_id IN ({ids})",
+            store.qualified("classification")
+        );
+        for r in store.query(&sql, &[]).map_err(e500)? {
+            versions.insert(
+                r.int(0).map_err(e500)?,
+                r.text(1).map_err(e500)?.to_string(),
+            );
+        }
+        let sql = format!(
+            "SELECT stack_id, axis, rule_set, rule, tier FROM {} \
+             WHERE stack_id IN ({ids}) AND author_kind IS NULL ORDER BY stack_id, axis, id",
+            store.qualified("classification_evidence")
+        );
+        for r in store.query(&sql, &[]).map_err(e500)? {
+            deciding.entry(r.int(0).map_err(e500)?).or_default().push((
+                r.text(1).map_err(e500)?.to_string(),
+                r.text(2).map_err(e500)?.to_string(),
+                r.text(3).map_err(e500)?.to_string(),
+                r.text(4).map_err(e500)?.to_string(),
+            ));
+        }
+    }
+    let none = Vec::new();
     let mut out = Batches {
         open: open.len(),
         ..Batches::default()
@@ -761,74 +902,58 @@ pub(crate) fn batches(
             out.sealed += 1;
             continue;
         }
-        let Some(suggested) =
-            suggestion(store, *stack, &question, pack).map_err(|e| e500(e.to_string()))?
-        else {
+        let Some(suggested) = suggest_from(
+            rules.get(stack).unwrap_or(&BTreeMap::new()),
+            asked.get(stack).map(|(_, ev)| ev),
+            &question,
+        ) else {
             out.unsuggested += 1;
             continue;
         };
         // the deciding rule of each axis asked, and what its clause read
-        let votes = votes_of(store, &voters, *stack).map_err(|e| e500(e.to_string()))?;
-        let version = store
-            .query_opt(
-                &format!(
-                    "SELECT pack_version FROM {} WHERE stack_id = {}",
-                    store.qualified("classification"),
-                    store.dialect().param(1, Type::Int)
-                ),
-                &[Param::Int(*stack)],
-            )
-            .map_err(|e| e500(e.to_string()))?
-            .and_then(|r| r.text(0).ok().map(str::to_string))
-            .unwrap_or_default();
-        let sql = format!(
-            "SELECT axis, value, rule_set, rule, tier FROM {} WHERE stack_id = {} AND author_kind IS NULL ORDER BY axis, id",
-            store.qualified("classification_evidence"),
-            store.dialect().param(1, Type::Int)
-        );
-        let rows = store
-            .query(&sql, &[Param::Int(*stack)])
-            .map_err(|e| e500(e.to_string()))?;
-        let mut rules: BTreeMap<String, String> = BTreeMap::new();
+        let said = votes.get(stack).unwrap_or(&none);
+        let version = versions.get(stack).cloned().unwrap_or_default();
+        let mut decided: BTreeMap<String, String> = BTreeMap::new();
         let mut fields: BTreeSet<String> = SAME_SEQUENCE.iter().map(|f| f.to_string()).collect();
-        for r in &rows {
-            let axis = r.text(0).map_err(|e| e500(e.to_string()))?.to_string();
-            if !axes.contains(&axis) || rules.contains_key(&axis) {
+        for (axis, set, rule, tier) in deciding.get(stack).into_iter().flatten() {
+            if !axes.contains(axis) || decided.contains_key(axis) {
                 continue;
             }
-            let (set, rule, tier) = (
-                r.text(2).map_err(|e| e500(e.to_string()))?.to_string(),
-                r.text(3).map_err(|e| e500(e.to_string()))?.to_string(),
-                r.text(4).map_err(|e| e500(e.to_string()))?.to_string(),
-            );
-            let clause = votes
+            let clause = said
                 .iter()
-                .filter(|(v, _)| v.axis == axis && v.rule_set == set && v.rule == rule)
-                .min_by_key(|(v, _)| (v.tier != tier, v.clause))
+                .filter(|(v, _)| v.axis == *axis && v.rule_set == *set && v.rule == *rule)
+                .min_by_key(|(v, _)| (v.tier != *tier, v.clause))
                 .map(|(v, _)| v.clause);
             if let (Some(p), Some(cl)) = (pack, clause)
-                && same_version(p, &version)
-                && let Some(reads) = nils_pack::reads::clause_reads(p, &set, &rule, cl as usize)
+                && p.version.to_string() == version
+                && let Some(reads) = nils_pack::reads::clause_reads(p, set, rule, cl as usize)
             {
                 fields.extend(reads.fields.into_iter().filter(|f| shown(f).is_some()));
             }
-            rules.insert(axis, format!("{set}/{rule}"));
+            decided.insert(axis.clone(), format!("{set}/{rule}"));
         }
         let head = heads.get(stack).cloned().unwrap_or_default();
         let hv: serde_json::Map<String, Value> = fields
             .iter()
             .map(|f| (f.clone(), head.get(f).map(rounded).unwrap_or(Value::Null)))
             .collect();
-        let signature = json!({"rules": rules, "header": hv});
-        let key_text = json!({"signature": signature, "suggested": suggested}).to_string();
+        let hashed = json!({"rules": decided, "header": hv});
+        let key_text = json!({"signature": hashed, "suggested": suggested}).to_string();
         let key = crate::campaigns::sha256(key_text.as_bytes())[..16].to_string();
         groups
             .entry(key.clone())
-            .or_insert_with(|| Batch {
-                key,
-                suggested: suggested.clone(),
-                signature,
-                items: Vec::new(),
+            .or_insert_with(|| {
+                let shown: serde_json::Map<String, Value> = hv
+                    .iter()
+                    .filter(|(f, _)| !HASHED_ONLY.contains(&f.as_str()))
+                    .map(|(f, v)| (f.clone(), v.clone()))
+                    .collect();
+                Batch {
+                    key,
+                    suggested: suggested.clone(),
+                    signature: json!({"rules": decided, "header": shown}),
+                    items: Vec::new(),
+                }
             })
             .items
             .push(*item);
@@ -837,6 +962,47 @@ pub(crate) fn batches(
     list.sort_by(|a, b| b.items.len().cmp(&a.items.len()).then(a.key.cmp(&b.key)));
     out.groups = list;
     Ok(out)
+}
+
+/// The batches a rater listed last, by campaign, rater and key: the accept
+/// door checks the items of the one batch named again rather than work out
+/// every batch of the campaign.
+type Listed = BTreeMap<(i64, String, String), Vec<i64>>;
+
+fn listed() -> &'static std::sync::Mutex<Listed> {
+    static LISTED: std::sync::OnceLock<std::sync::Mutex<Listed>> = std::sync::OnceLock::new();
+    LISTED.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Keep what a rater was shown, for the accept door.
+pub(crate) fn remember(campaign: i64, principal: &str, found: &Batches) {
+    if let Ok(mut held) = listed().lock() {
+        held.retain(|(c, p, _), _| !(*c == campaign && p == principal));
+        for g in &found.groups {
+            held.insert(
+                (campaign, principal.to_string(), g.key.clone()),
+                g.items.clone(),
+            );
+        }
+    }
+}
+
+/// One batch as it stands now: the items a rater was shown under the key,
+/// looked at again, or every batch worked out where the rater listed none.
+pub(crate) fn batch_now(
+    store: &mut Store,
+    c: &Campaign,
+    principal: &str,
+    pack: Option<&nils_pack::Pack>,
+    key: &str,
+) -> Result<Option<Batch>, (u16, String)> {
+    let shown = listed().lock().ok().and_then(|h| {
+        h.get(&(c.id, principal.to_string(), key.to_string()))
+            .cloned()
+    });
+    let only: Option<BTreeSet<i64>> = shown.map(|v| v.into_iter().collect());
+    let found = batches(store, c, principal, pack, only.as_ref())?;
+    Ok(found.groups.into_iter().find(|g| g.key == key))
 }
 
 impl Batches {
