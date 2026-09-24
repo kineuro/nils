@@ -616,8 +616,8 @@ pub(crate) struct SetupArgs {
     /// setup never writes anywhere
     #[arg(long, value_name = "FILE", requires = "model_server")]
     model_key_file: Option<PathBuf>,
-    /// With --model-server: the model the stations use, where not the first
-    /// one the server lists as proven
+    /// With --model-server: the model the stations use; asked where there
+    /// is a terminal, and needed where there is none
     #[arg(long, value_name = "ID", requires = "model_server")]
     model_server_model: Option<String>,
 }
@@ -6452,8 +6452,8 @@ fn questions(
         ));
     }
     // A model server named with the flags is what the stations use, and no
-    // model is asked for; the model on it is asked where none was named and
-    // the server lists none as proven (record 47).
+    // model is asked for; the model on it is asked where none was named, and
+    // with nobody to ask the run stops before anything is placed (record 47).
     let mut model_server = model_server_of(args).map_err(usage)?;
     if model_server.is_some() && !parts.contains(&Part::Assistant) {
         return Err(usage(
@@ -6502,12 +6502,15 @@ fn questions(
         });
         answers.model = Some(chosen);
     } else if let Some(server) = &mut model_server {
-        if server.model.is_none() && console.interactive() && !args.print {
-            server.model = ask_server_model(console, server)?;
+        if server.model.is_none() && !args.print {
+            if !console.interactive() {
+                return Err(usage(unnamed_server_model(server)).into());
+            }
+            server.model = Some(ask_server_model(console, server)?);
         }
         console.said(&format!(
             "{} at {}",
-            server.model.as_deref().unwrap_or("a proven model"),
+            server.model.as_deref().unwrap_or("a model not named yet"),
             server.url
         ));
     } else {
@@ -6855,6 +6858,13 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
                 .and_then(|was| was.model.clone());
         }
         plan.model_server = Some(server);
+    }
+    // an update asks nothing, so the model is named or the update stops here
+    if let Some(server) = &plan.model_server
+        && server.model.is_none()
+        && !args.print
+    {
+        return Err(usage(unnamed_server_model(server)));
     }
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
@@ -11647,10 +11657,26 @@ fn model_server_row(server: &ModelServer) -> String {
         "{}, its key read from {} and sealed in Kvasir; the stations on {}",
         server.url,
         server.key_file.display(),
-        server
-            .model
-            .as_deref()
-            .unwrap_or("the first model it lists as proven")
+        server.model.as_deref().unwrap_or("a model not named yet")
+    )
+}
+
+/// Why a run with nobody to ask stops where a model server's model was not
+/// named, with the models the server offers as this machine reads them.
+fn unnamed_server_model(server: &ModelServer) -> String {
+    let key = read_model_key(&server.key_file);
+    let offered: Vec<String> = server_offer(&server.url, key.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_string))
+        .collect();
+    let from = if offered.is_empty() {
+        format!("{} did not list its models from here", server.url)
+    } else {
+        format!("{} offers {}", server.url, offered.join(", "))
+    };
+    format!(
+        "nothing was changed: name the model the stations use with --model-server-model; {from}"
     )
 }
 
@@ -11671,16 +11697,6 @@ fn server_offer(url: &str, key: Option<&str>) -> Option<Vec<serde_json::Value>> 
     answer["data"].as_array().cloned()
 }
 
-/// The first model a server lists as proven for the stations, as its own
-/// entry says or as the specs Kvasir read from it say.
-fn first_proven(models: &[serde_json::Value]) -> Option<String> {
-    models
-        .iter()
-        .find(|m| m["proven"] == true || m["spec"]["proven"] == true)
-        .and_then(|m| m["id"].as_str())
-        .map(str::to_string)
-}
-
 /// What a person reads beside a model a server offers: whether it is
 /// loaded, and how long a context it takes.
 fn offer_words(model: &serde_json::Value) -> String {
@@ -11695,10 +11711,9 @@ fn offer_words(model: &serde_json::Value) -> String {
 }
 
 /// The model the stations use on a model server, where the flags named
-/// none: the first one the server lists as proven, else the one a person
-/// picks from its list. `None` where the server does not answer from here,
-/// and Kvasir's own reading of the list decides once it runs.
-fn ask_server_model(console: &mut Console, server: &ModelServer) -> Result<Option<String>, Stop> {
+/// none: the one a person picks from the server's list, or names where the
+/// server does not list its models from here.
+fn ask_server_model(console: &mut Console, server: &ModelServer) -> Result<String, Stop> {
     let key = read_model_key(&server.key_file);
     let url = server.url.clone();
     let listed = console.probe(
@@ -11707,15 +11722,16 @@ fn ask_server_model(console: &mut Console, server: &ModelServer) -> Result<Optio
     );
     let Some(models) = listed.filter(|m| !m.is_empty()) else {
         console.note(&format!(
-            "{url} did not list its models from here, so Kvasir takes the first it lists as \
-             proven once it runs"
+            "{url} did not list its models from here; name the one the stations use"
         ));
-        return Ok(None);
+        loop {
+            let named = console.ask_line("The model's name, as the server lists it", "")?;
+            if !named.trim().is_empty() {
+                return Ok(named.trim().to_string());
+            }
+            console.note("a model's name is needed, for example qwen38-27b");
+        }
     };
-    if let Some(proven) = first_proven(&models) {
-        console.note(&format!("{url} lists {proven} as proven for the stations"));
-        return Ok(Some(proven));
-    }
     let shown: Vec<(String, String)> = models
         .iter()
         .take(12)
@@ -11726,7 +11742,7 @@ fn ask_server_model(console: &mut Console, server: &ModelServer) -> Result<Optio
         .map(|(id, words)| (id.as_str(), words.as_str()))
         .collect();
     let at = console.ask_choice("Which model do the stations use?", &options, 0)?;
-    Ok(shown.get(at).map(|(id, _)| id.clone()))
+    Ok(shown.get(at).map(|(id, _)| id.clone()).unwrap_or_default())
 }
 
 /// The name Kvasir holds a model server under where it holds none for it
@@ -12957,7 +12973,7 @@ const SERVER_WAIT_SECONDS: u64 = 3_600;
 /// mapped to that model. The key is read from its file here and goes to
 /// Kvasir's credential door alone; it is never said or written. A key that
 /// cannot be read, a model the server does not offer or that does not
-/// answer, and no model named or proven, leave the stations with no model,
+/// answer, and no model named, leave the stations with no model,
 /// which stops an install and is said on an update.
 fn use_model_server(
     plan: &Plan,
@@ -13037,30 +13053,30 @@ fn use_model_server(
     };
     let ids: Vec<&str> = offered.iter().filter_map(|m| m["id"].as_str()).collect();
     let model = match &server.model {
-        Some(name) => {
-            if !offered.iter().any(|m| named(m, name)) {
+        // by the id the server gives it, where it was named by an alias,
+        // as Kvasir reports it
+        Some(name) => match offered
+            .iter()
+            .find(|m| named(m, name))
+            .and_then(|m| m["id"].as_str())
+        {
+            Some(id) => id.to_string(),
+            None => {
                 console.say(&format!("it offers {}", ids.join(", ")));
                 return console.broken(&format!(
                     "{url} offers no model named {name}, so the stations have no model"
                 ));
             }
-            name.clone()
-        }
-        None => match first_proven(&offered) {
-            Some(proven) => {
-                console.note(&format!("{url} lists {proven} as proven for the stations"));
-                proven
-            }
-            None => {
-                console.say(&format!(
-                    "name the one the stations use with --model-server-model, from {}",
-                    ids.join(", ")
-                ));
-                return console.broken(&format!(
-                    "{url} lists no model as proven, so the stations have no model"
-                ));
-            }
         },
+        None => {
+            console.say(&format!(
+                "name the one the stations use with --model-server-model; it offers {}",
+                ids.join(", ")
+            ));
+            return console.broken(&format!(
+                "no model was named for {url}, so the stations have no model"
+            ));
+        }
     };
     // admitted on the server's one backend: asked one short question, which
     // loads a cold model on the server first, and put through the suite
@@ -19093,13 +19109,13 @@ mod tests {
     }
 
     /// What a model server offers: the default is not the model the
-    /// stations were proven on, which the server marks.
+    /// stations use.
     fn offered_by_the_card() -> Vec<serde_json::Value> {
         vec![
             serde_json::json!({"id": "flash-next", "default": true, "status": "loaded",
                                "context_length": 262_144}),
             serde_json::json!({"id": "qwen38-27b", "aliases": ["qwen38-27b-fast"], "status": "cold",
-                               "context_length": 262_144, "spec": {"proven": true}}),
+                               "context_length": 262_144}),
         ]
     }
 
@@ -19152,14 +19168,14 @@ mod tests {
         plan.model_server = Some(ModelServer {
             url: "https://models.example.org/v1".to_string(),
             key_file: key_file.clone(),
-            model: None,
+            model: Some("qwen38-27b-fast".to_string()),
         });
         let console = Console::new(true);
         console.strict.set(true);
 
-        // with no model named, the one the server lists as proven: the key
-        // sealed under the backend's name, the model admitted, and each of
-        // the stations' purposes mapped to it
+        // the model named, by its alias: the key sealed under the backend's
+        // name, the model admitted, and each of the stations' purposes
+        // mapped to it
         assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
         let seen = calls.lock().unwrap().clone();
         assert_eq!(
@@ -19239,7 +19255,7 @@ mod tests {
         );
 
         // a model the server does not offer, one that does not pass
-        // admission, one that does not answer, none named and none proven,
+        // admission, one that does not answer, none named,
         // and a key that is not there, each stop an install
         for (model, offered, said) in [
             (
@@ -19260,7 +19276,7 @@ mod tests {
             (
                 None,
                 vec![json!({"id": "flash-next", "default": true})],
-                "lists no model as proven",
+                "no model was named for",
             ),
         ] {
             held.lock().unwrap().offered = offered;
@@ -19324,7 +19340,10 @@ mod tests {
         assert_eq!(back.model_server.as_ref(), Some(&server));
         // and so does the plan a print shows, which an update makes from it
         let row = model_server_row(&server);
-        assert!(row.contains("the first model it lists as proven"), "{row}");
+        assert!(
+            row.contains("the stations on a model not named yet"),
+            "{row}"
+        );
         assert!(!row.contains(SECRET), "{row}");
         let mut from_record = plan(Runtime::Machine);
         from_record.model_server = back.model_server.clone();
@@ -19378,8 +19397,6 @@ mod tests {
             "https%3A%2F%2Fa.b%2Fv1%3Fx%3D1%20y"
         );
         let offered = offered_by_the_card();
-        assert_eq!(first_proven(&offered).as_deref(), Some("qwen38-27b"));
-        assert_eq!(first_proven(&offered[..1]), None);
         assert_eq!(offer_words(&offered[0]), "loaded, 262144 tokens of context");
     }
 

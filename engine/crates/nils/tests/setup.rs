@@ -2638,6 +2638,39 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
         refused.stderr
     );
     assert!(!dir.exists());
+    // with nobody to ask, an install that names no model stops before it
+    // places anything
+    let refused = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine,desk,assistant",
+            "--runtime",
+            "machine",
+            "--no-service",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--model-server",
+            "http://127.0.0.1:9/v1",
+            "--model-key-file",
+            key_arg,
+        ],
+    );
+    assert!(!refused.ok, "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("--model-server-model"),
+        "{}",
+        refused.stderr
+    );
+    clean(&refused);
+    assert!(
+        !dir.exists(),
+        "an install that stopped made {}",
+        dir.display()
+    );
+    assert!(!config.path().join("nils").join("setup.toml").exists());
 
     // an update's plan: the server named now, then the one on record
     std::fs::create_dir_all(config.path().join("nils")).unwrap();
@@ -2666,9 +2699,41 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
     o.says("Updating");
     o.says(&format!(
         "https://models.example.org/v1, its key read from {key_arg} and sealed in Kvasir; the \
-         stations on the first model it lists as proven"
+         stations on a model not named yet"
     ));
     clean(&o);
+    // for real, an update asks nothing, so a model not named stops it with
+    // nothing changed, naming what the server offers where it answers
+    let record_now =
+        std::fs::read_to_string(config.path().join("nils").join("setup.toml")).unwrap();
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--update",
+            "--channel",
+            &channel,
+            "--model-server",
+            "http://127.0.0.1:9/v1",
+            "--model-key-file",
+            key_arg,
+        ],
+    );
+    assert!(!o.ok, "{}", o.stdout);
+    assert!(
+        o.stderr.contains(
+            "nothing was changed: name the model the stations use with --model-server-model"
+        ) && o
+            .stderr
+            .contains("http://127.0.0.1:9/v1 did not list its models from here"),
+        "{}",
+        o.stderr
+    );
+    clean(&o);
+    assert_eq!(
+        std::fs::read_to_string(config.path().join("nils").join("setup.toml")).unwrap(),
+        record_now
+    );
     let with_server = format!(
         "{record}\n[model_server]\nurl = \"https://models.example.org/v1\"\nkey_file = \"{key_arg}\"\nmodel = \"qwen38-27b\"\n"
     );
