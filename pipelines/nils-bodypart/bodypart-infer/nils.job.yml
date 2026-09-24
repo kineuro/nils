@@ -36,8 +36,21 @@ inputs:
     command-line-flag: --threshold
     default-value: 0.70
     optional: true
+  - id: allow_pickle
+    name: Trust a pickled head
+    type: String
+    description: >-
+      A forest or an SVM head is a joblib pickle, which runs code when it is
+      loaded. true loads it, and only after its bytes match the digest its
+      card names; false (the default) refuses it. A logistic-regression head
+      is JSON and needs neither.
+    value-key: "[ALLOWPICKLE]"
+    command-line-flag: --allow-pickle
+    value-choices: ["true", "false"]
+    default-value: "false"
+    optional: true
 
-command-line: "nils-bodypart infer --stacks [Manifest] --head [Inputs]/head --embeddings [Inputs]/embeddings --output [OutputLocation] [THRESHOLD]"
+command-line: "nils-bodypart infer --stacks [Manifest] --head [Inputs]/head --embeddings [Inputs]/embeddings --output [OutputLocation] [THRESHOLD] [ALLOWPICKLE]"
 
 output-files:
   - id: answer

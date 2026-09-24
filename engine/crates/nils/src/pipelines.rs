@@ -89,7 +89,9 @@ fn detect_cached(registry: &mut Registry) -> Detected {
         return d.clone();
     }
     let d = runtime::detect(chosen, std::env::var_os("PATH").as_deref());
-    *cache = Some((Instant::now(), chosen, d.clone()));
+    // a runtime that did not answer in time is not a finding to keep: the
+    // next read looks again (wave 43's proof)
+    *cache = (!d.unknown).then(|| (Instant::now(), chosen, d.clone()));
     d
 }
 
@@ -2251,11 +2253,42 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         .as_bytes(),
     );
 
-    // the units no one can vouch for become review items
+    // the units no one can vouch for become review items; a container
+    // that failed as a whole, with no results.json to say more, is one
+    // item of the run, not one per unit (wave 43's proof: three failed
+    // runs left 2,023 items, each run for a single cause)
     let mut items: Vec<i64> = Vec::new();
     let label = p.label();
+    let whole = reported.is_none() && (exit_code != Some(0) || unreadable.is_some());
+    if whole && !m.units.is_empty() {
+        let error = outcomes
+            .first()
+            .and_then(|(_, o)| o.error.clone())
+            .unwrap_or_else(|| "the run failed".into());
+        let id = nils_registry::review::raise_pipeline_qc(
+            registry.store(),
+            &nils_registry::review::PipelineQc {
+                run_id: x.run_id,
+                pipeline: &label,
+                unit: "run",
+                stack_id: None,
+                subject_id: None,
+                session_day: None,
+                status: "failed",
+                error: Some(&error),
+                metrics: &json!({
+                    "units": m.units.len(), "exit_code": exit_code,
+                    "log": format!("{RUNS}/{}/log.txt", x.run_id),
+                }),
+                job_id: Some(x.job_id),
+            },
+            &now,
+        )
+        .map_err(|e| e.to_string())?;
+        items.push(id);
+    }
     for (i, o) in &outcomes {
-        if o.status != "failed" && o.status != "unreported" {
+        if whole || (o.status != "failed" && o.status != "unreported") {
             continue;
         }
         let u = &m.units[*i];
@@ -2386,12 +2419,26 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         let status = if short { "partial" } else { "done" };
         Ok((status, summary, Some(results_digest), exit_code, None))
     } else {
-        let error = format!(
+        let mut error = format!(
             "the container exited {}; its log is {RUNS}/{}/log.txt in the working place {}",
             exit_code.map_or("by a signal".to_string(), |c| c.to_string()),
             x.run_id,
             x.place.name
         );
+        // 125 is podman's and docker's own failure, as when the image is
+        // not in the store it looked in: say which store (wave 43's proof:
+        // a scratch HOME has an empty store of its own)
+        if exit_code == Some(125) && matches!(x.runtime.name(), "podman" | "docker") {
+            error.push_str(&format!(
+                "; 125 is {}'s own failure, as when it cannot find or pull {}: it looked in the image store {}{}",
+                x.runtime.name(),
+                p.image,
+                x.runtime.store().as_deref().unwrap_or("it could not name"),
+                std::env::var("HOME")
+                    .map(|h| format!(" (HOME is {h}; a HOME of its own has a store of its own)"))
+                    .unwrap_or_default()
+            ));
+        }
         Ok((
             "failed",
             summary,

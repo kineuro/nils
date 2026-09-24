@@ -56,9 +56,12 @@ RUN pip install --no-deps /src \
     && pip freeze > /opt/nils-bodypart/pip-freeze.txt \
     && python -m nils_bodypart.bake verify
 
-# Not root: a runner maps its own user in (podman --userns keep-id), and
-# anything else runs as nobody. Nothing in the image is written at run time.
+# Not root: anything run by hand runs as nobody. The engine's runner names
+# its own user with --user (with podman's --userns keep-id beside it), which
+# overrides this line, so a run's outputs belong to the engine's user.
+# Nothing in the image is written at run time.
 USER 65534:65534
 WORKDIR /tmp
-ENTRYPOINT ["nils-bodypart"]
-CMD ["--help"]
+# No ENTRYPOINT: each descriptor's command line names the program
+# (`nils-bodypart embed ...`) and replaces this CMD whole.
+CMD ["nils-bodypart", "--help"]

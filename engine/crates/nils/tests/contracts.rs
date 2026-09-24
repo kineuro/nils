@@ -398,6 +398,15 @@ fn the_job_contract_is_the_runner_s() {
     for key in ["models", "seeds", "selection"] {
         assert!(results["properties"].get(key).is_some(), "{key}");
     }
+    // the image's ENTRYPOINT, when it has one, runs before each command line
+    let dockerfile =
+        std::fs::read_to_string(contracts().join("../pipelines/nils-bodypart/Dockerfile")).unwrap();
+    let entrypoint: Vec<String> = dockerfile
+        .lines()
+        .filter_map(|l| l.strip_prefix("ENTRYPOINT"))
+        .map(|rest| serde_json::from_str(rest.trim()).unwrap())
+        .next_back()
+        .unwrap_or_default();
     // every descriptor of the body-part image checks, as the catalog takes it
     for entry in ["embed", "seed", "train", "infer"] {
         let text = std::fs::read_to_string(contracts().join(format!(
@@ -407,6 +416,17 @@ fn the_job_contract_is_the_runner_s() {
         let d = descriptor::parse(&text).unwrap_or_else(|e| panic!("bodypart-{entry}: {e}"));
         assert_eq!(d.name, format!("bodypart-{entry}"));
         assert_eq!(d.layout, descriptor::Layout::Stacks);
+        // wave 43's proof: the image's ENTRYPOINT and a command line that
+        // named the program too ran `nils-bodypart nils-bodypart embed`;
+        // what the container runs names the program once, then the entry
+        let argv = d.argv(&d.resolve(&[]).unwrap(), &[]).unwrap();
+        let runs: Vec<&str> = entrypoint.iter().chain(&argv).map(String::as_str).collect();
+        assert_eq!(runs[..2], ["nils-bodypart", entry], "{runs:?}");
+        assert_eq!(
+            runs.iter().filter(|w| **w == "nils-bodypart").count(),
+            1,
+            "{runs:?}"
+        );
         if entry == "train" {
             let model = d.outputs.iter().find(|o| o.kind == "model").unwrap();
             assert!(model.run_level && model.card.is_some());

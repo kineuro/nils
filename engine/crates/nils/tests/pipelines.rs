@@ -62,11 +62,14 @@ a = sys.argv[1:]
 if not a or a[0] == "--version":
     print("podman version 9.9.9-test"); sys.exit(0)
 if a[0] == "info":
-    print("true"); sys.exit(0)
+    print("/fake/containers/storage" if "GraphRoot" in a[-1] else "true"); sys.exit(0)
 if a[0] != "run":
     sys.exit(0)
 with open(os.environ["FAKE_PODMAN_ARGS"], "a") as log:
     log.write(json.dumps(a) + "\n")
+if os.environ.get("FAKE_PODMAN_EXIT"):
+    print("Error: the image is not known here", file=sys.stderr)
+    sys.exit(int(os.environ["FAKE_PODMAN_EXIT"]))
 mounts, env, i = {}, {}, 1
 while i < len(a):
     w = a[i]
@@ -635,6 +638,14 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
     let words = &runs[0];
     assert!(pair(words, "--network", "none"), "{words:?}");
     assert!(pair(words, "--userns", "keep-id"), "{words:?}");
+    // wave 43's proof: an image's own USER beat keep-id; --user names the
+    // engine's user, which keep-id maps to itself
+    let me = {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(lab.work.path()).unwrap();
+        format!("{}:{}", m.uid(), m.gid())
+    };
+    assert!(pair(words, "--user", &me), "{words:?}");
     assert!(pair(words, "--cap-drop", "all"), "{words:?}");
     let input = format!("{}/runs/{run1}/input:/input:ro", lab.work.path().display());
     assert!(pair(words, "--volume", &input), "{words:?}");
@@ -841,6 +852,50 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
     assert_eq!(crashed["exit_code"], 3);
     assert_eq!(crashed["summary"]["derivatives"], 0);
     assert_eq!(crashed["summary"]["units"]["failed"], 4);
+    // wave 43's proof: a container that fails as a whole is one review
+    // item of the run, not one per unit
+    let raised = crashed["summary"]["review_items"].as_array().unwrap();
+    assert_eq!(raised.len(), 1, "{crashed}");
+    let listed = lab.json(&["review", "list", "--kind", "pipeline:qc", "--json"]);
+    let of_run: Vec<&Value> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["ref"]["run_id"] == crashed["id"])
+        .collect();
+    assert_eq!(of_run.len(), 1, "{listed}");
+    assert_eq!(of_run[0]["ref"]["unit"], "run", "{listed}");
+    assert_eq!(of_run[0]["evidence"]["metrics"]["units"], 4, "{listed}");
+    assert!(
+        of_run[0]["evidence"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("exited 3"),
+        "{listed}"
+    );
+
+    // wave 43's proof: podman's own failure (125, an image it cannot find)
+    // names the image store it looked in
+    let failed125 = lab
+        .command(&lab.path)
+        .args([
+            "run",
+            "stack-echo",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ])
+        .env("FAKE_PODMAN_EXIT", "125")
+        .output()
+        .unwrap();
+    assert!(!failed125.status.success());
+    let err = String::from_utf8_lossy(&failed125.stderr);
+    assert!(err.contains("the container exited 125"), "{err}");
+    assert!(
+        err.contains("image store /fake/containers/storage"),
+        "{err}"
+    );
+    assert!(err.contains("HOME is"), "{err}");
 
     // a parameter out of its choices, and one not declared, are refused
     let (good, _, err) = lab.run(
@@ -874,7 +929,7 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
         .unwrap()[0]
         .int(0)
         .unwrap();
-    assert_eq!(jobs, 6);
+    assert_eq!(jobs, 7);
     let audited: i64 = store
         .query(
             "SELECT COUNT(*) FROM audit WHERE action = 'pipeline.run'",
@@ -883,7 +938,7 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
         .unwrap()[0]
         .int(0)
         .unwrap();
-    assert_eq!(audited, 6);
+    assert_eq!(audited, 7);
     let shown = lab.ok(&["pipeline", "runs", &run1.to_string()], None);
     assert!(shown.contains("4 succeeded, 0 failed"), "{shown}");
 }
@@ -1289,6 +1344,45 @@ x-nils:
       path-template: "stack-{stack}/uid.txt"
 "#;
 
+/// An image that names a `USER` of its own, as the body-part image does:
+/// busybox run as nobody unless the runner says otherwise.
+const NOBODY_IMAGE: &str = "FROM docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e\nUSER 65534:65534\n";
+
+/// An embedder on [`NOBODY_IMAGE`], as `bodypart-embed` is one: it takes
+/// the embeddings the cache holds as an optional input, skips a stack it
+/// has one for, and writes a one-value embedding for each other stack, with
+/// its encoder's card. `kept.txt` says how many it was given.
+fn emb_nobody(image: &str) -> String {
+    let enc = format!("sha256:{}", "d".repeat(64));
+    format!(
+        r#"name: emb-nobody
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "{image}"
+command-line: >-
+  sh -c 'e={enc}; o=[OutputLocation]; mkdir -p $o/emb; us=""; k=0;
+  for s in $(sed -n "s/.*\"unit\": *\"stack-\([0-9]*\)\".*/\1/p" [Manifest]); do
+  if [ -n "$(find [Inputs]/embeddings -name $s.emb 2>/dev/null)" ]; then k=$((k+1)); st=skipped; d="";
+  else h="{{\"format\":\"nils-embedding\",\"dtype\":\"<f4\",\"stack_id\":$s,\"encoder\":\"$e\",\"preprocess_version\":\"v1\",\"rows\":1,\"dim\":1,\"slices\":[ 0 ]}}";
+  n=${{#h}}; p=$(( (12+n+63)/64*64-12-n ));
+  {{ printf NILSEMB1; printf "\\$(printf %03o $((n%256)))\\$(printf %03o $((n/256)))\\000\\000"; printf %s "$h"; head -c $p /dev/zero; head -c 4 /dev/zero; }} > $o/emb/$s.emb;
+  st=succeeded; d="\"emb/$s.emb\""; fi;
+  us="$us${{us:+,}}{{\"unit_id\":\"stack-$s\",\"status\":\"$st\",\"derivatives\":[ $d ]}}"; done;
+  echo $k > $o/kept.txt;
+  echo "{{\"schema_version\":\"1\",\"units\":[ $us ],\"models\":[ {{\"name\":\"nobody-encoder\",\"version\":\"1\",\"kind\":\"encoder\",\"digest\":\"$e\",\"task\":\"encoder\"}} ]}}" > $o/results.json'
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  inputs:
+    - {{id: embeddings, type: "derivative:embedding", optional: true}}
+  outputs:
+    - {{id: emb, kind: embedding, path-template: "emb/{{stack}}.emb", media-type: application/vnd.nils.embedding, encoders: ["{enc}"]}}
+"#
+    )
+}
+
 #[test]
 fn real_containers_run_n4_rootless_with_no_network() {
     let Some(runtime) = real_runtime() else {
@@ -1426,6 +1520,83 @@ fn real_containers_run_n4_rootless_with_no_network() {
         seen, "4 yes",
         "four probe files and the label set's labels.tsv"
     );
+
+    // wave 43's proof: an image with a USER of its own ran as that user
+    // despite keep-id, its outputs belonged to a sub-uid, and the next run
+    // could not hard-link the cached embeddings (EPERM). Built here from
+    // busybox with USER 65534, run twice: the second run is given the
+    // first's embeddings, and every file is this user's.
+    if runtime == "podman" {
+        let ctx = lab.work.path().join("nobody-image");
+        std::fs::create_dir_all(&ctx).unwrap();
+        std::fs::write(ctx.join("Containerfile"), NOBODY_IMAGE).unwrap();
+        let built = Command::new("podman")
+            .args(["build", "-q", "-t", "localhost/nils-test-nobody", "-f"])
+            .arg(ctx.join("Containerfile"))
+            .arg(&ctx)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let digest = Command::new("podman")
+            .args([
+                "image",
+                "inspect",
+                "--format",
+                "{{.Digest}}",
+                "localhost/nils-test-nobody",
+            ])
+            .output()
+            .unwrap();
+        let digest = String::from_utf8_lossy(&digest.stdout).trim().to_string();
+        assert!(digest.starts_with("sha256:"), "{digest}");
+        let file = lab.work.path().join("emb-nobody.yml");
+        std::fs::write(
+            &file,
+            emb_nobody(&format!("localhost/nils-test-nobody@{digest}")),
+        )
+        .unwrap();
+        ok(&["pipeline", "add", file.to_str().unwrap()]);
+        let owner = |p: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(p).unwrap().uid()
+        };
+        let first = ok(&[
+            "run",
+            "emb-nobody",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(first["status"], "done", "{first}");
+        assert_eq!(first["summary"]["embeddings"]["registered"], 4, "{first}");
+        let out = lab.work.path().join(first["output"].as_str().unwrap());
+        for e in std::fs::read_dir(out.join("emb")).unwrap() {
+            let e = e.unwrap().path();
+            assert_eq!(owner(&e), me, "{} is this user's", e.display());
+        }
+        let second = ok(&[
+            "run",
+            "emb-nobody",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(second["status"], "done", "{second}");
+        assert_eq!(second["summary"]["units"]["skipped"], 4, "{second}");
+        let out = lab.work.path().join(second["output"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(out.join("kept.txt"))
+                .unwrap()
+                .trim(),
+            "4",
+            "the second run was given the first's four embeddings"
+        );
+        assert_eq!(owner(&out.join("kept.txt")), me);
+    }
 
     // N4 over the frozen selection: one derivative per session, and the
     // same digests again

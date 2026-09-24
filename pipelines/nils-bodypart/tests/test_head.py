@@ -80,8 +80,10 @@ def test_auto_tune_chooses_pca_by_cross_validation():
     X, y = overconfident_set(n=120, d=80, seed=3)
     head = fit_head(X, y, TrainConfig(auto_tune=True))
     rep = head.tune_report
-    assert rep["grid"] and rep["best_pca"] in {None, 64, 80}
-    assert all(g["pca"] in (None, 64, 80) for g in rep["grid"])
+    # 120 samples: outer folds of 96, nested splits of 76, so 80 (all of D)
+    # no longer fits, and with 64 alone of v0's sizes, 16 and 32 join it
+    assert rep["grid"] and rep["best_pca"] in {None, 16, 32, 64}
+    assert {g["pca"] for g in rep["grid"]} == {None, 16, 32, 64}
 
 
 @pytest.mark.parametrize("classes,pca", [(3, 16), (2, None)])
@@ -98,3 +100,29 @@ def test_the_json_head_answers_as_the_fitted_one(classes, pca):
 def test_too_few_classes_are_refused():
     with pytest.raises(ValueError):
         fit_head(np.zeros((5, 4)), np.array(["brain"] * 5, dtype=object))
+
+
+@pytest.mark.parametrize("n", [40, 60, 85, 99])
+def test_auto_tune_fits_a_label_set_under_a_hundred(n):
+    """Wave 43's proof: with 85 labels the tuning took PCA 64, which fits
+    an outer fold's 68 samples, and the temperature was then fitted on a
+    nested split of 54, where 64 components do not fit. Every PCA size the
+    grid offers fits the smallest split any fit sees."""
+    X, y = overconfident_set(n=n, d=150, seed=5)
+    head = fit_head(X, y, TrainConfig(auto_tune=True))
+    assert head.metrics["folds"] >= 2 and "calibrated" in head.metrics
+    rep = head.tune_report
+    smallest = rep["smallest_fit"]
+    assert smallest < n
+    assert all(g["pca"] is None or g["pca"] <= smallest for g in rep["grid"])
+    # a label set this small still has sizes to choose between
+    assert len({g["pca"] for g in rep["grid"]}) >= 2
+
+
+def test_a_fixed_pca_is_clamped_to_the_smallest_split():
+    """auto_tune off, and a PCA larger than the nested split holds: clamped,
+    not a failure."""
+    X, y = overconfident_set(n=85, d=150, seed=6)
+    head = fit_head(X, y, TrainConfig(auto_tune=False, pca_components=128))
+    assert head.n_components is not None and head.n_components < 68
+    assert "calibrated" in head.metrics

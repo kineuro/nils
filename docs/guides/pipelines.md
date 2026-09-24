@@ -16,7 +16,16 @@ A pipeline is a container image that takes a frozen selection and writes files t
    nils pipeline runtime
    ```
 
-   Rootless podman is taken first, then apptainer. With neither, pipelines are off and the command says why; nothing else is an error.
+   Rootless podman is taken first, then apptainer. With neither, pipelines are off and the command says why; nothing else is an error. A runtime that does not answer within 30 seconds, as `podman info` can be slow on a busy host, is reported as unknown for now rather than as not rootless: run the command again.
+
+> **Warning:** rootless podman keeps its images under the invoking user's `HOME` (`~/.local/share/containers/storage`). A process that runs with another `HOME`, as a test or a lab with a scratch `HOME` does, sees an empty store of its own, so an image built or pulled by the user is not found there. Link the real store into the scratch `HOME`, or point podman at it with `CONTAINERS_STORAGE_CONF`:
+>
+> ```sh
+> mkdir -p "$HOME/.local/share"
+> ln -s /home/<user>/.local/share/containers "$HOME/.local/share/containers"
+> ```
+>
+> A run that podman itself refuses exits 125, and the run's error names the image store it looked in and the `HOME` it ran with.
 
 > **Warning:** docker's daemon is root on the host, so docker is never found on its own. An operator who accepts that chooses it:
 >
@@ -125,14 +134,14 @@ What a run does, in order:
 | step | what |
 |---|---|
 | input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session. `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
-| container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and docker with `--user`, so the process is the engine's user on the host |
+| container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
 | GPU | passed through CDI (podman), `--nv` (apptainer) or `--gpus` (docker) where the descriptor needs one and the host has one; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |
 | results | `/output/results.json`, one entry per unit; without it, a unit's files are the ones the descriptor's path templates find, and a container that exits with an error registers nothing |
 | derivatives | every file hashed by the engine and registered, naming the run; a file outside `/output`, one reached through a link out of it, or one a unit's own templates do not name is refused and raised as a `pipeline:qc` item. An embedding is kept under its stack, encoder and preprocessing version, and a file for a key the registry holds already is not registered again |
 | run-level outputs | a file of the whole run (`level: run`). A `model` output is registered as a model in state registered from the card beside it: the card must name the artifact's digest, it is trained on the label set the run was given, and its encoders are the card's |
 | seeds | the `seeds` and `selection` of `results.json`, kept as the run's one derivative of kind `seeds`, never as proposals |
 | proposals | on the axes the descriptor declares, grouped into `<axis>:model` review items and staged at the model card's threshold, or refused whole when the file says what the contract does not |
-| review | a unit that failed, or that `results.json` did not name, is one `pipeline:qc` review item |
+| review | a unit that failed, or that `results.json` did not name, is one `pipeline:qc` review item. A container that failed as a whole, exiting with an error and no `results.json`, or writing one that does not read, is one item of the run (unit `run`), not one per unit |
 | run | every parameter, the runtime and its version, the host, the device, the models, the label set, the handle, the summary and a digest of the results, which a re-run that makes the same files repeats. A run whose container exited 0 is `done`, or `partial` when units failed or went unreported or a file it made was refused |
 
 A bids input's release is marked as the run's input and left out of `nils release --history`; `--runs` lists it.

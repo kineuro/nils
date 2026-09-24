@@ -52,11 +52,27 @@ inputs:
   - id: auto_tune
     name: Cross-validated tuning
     type: String
-    description: Choose PCA and the regularisation by stratified cross-validation (at 20 samples or more).
+    description: >-
+      Choose PCA and the regularisation by stratified cross-validation (at
+      20 samples or more), over sizes that fit the label set's smallest
+      split; false takes pca_components.
     value-key: "[AUTOTUNE]"
     command-line-flag: --auto-tune
     value-choices: ["true", "false"]
     default-value: "true"
+    optional: true
+  - id: pca_components
+    name: PCA components
+    type: Number
+    integer: true
+    minimum: 2
+    maximum: 4096
+    description: >-
+      The PCA size when auto_tune is false (128 when not given). Either way
+      it is clamped to the smallest split a fit sees, the nested one the
+      temperature is fitted on, so a small label set trains.
+    value-key: "[PCACOMPONENTS]"
+    command-line-flag: --pca-components
     optional: true
   - id: min_per_class
     name: Samples per class
@@ -94,7 +110,7 @@ inputs:
     default-value: 0
     optional: true
 
-command-line: "nils-bodypart train --stacks [Manifest] --labels [Inputs]/labels --embeddings [Inputs]/embeddings --output [OutputLocation] [ESTIMATOR] [CLASSES] [AUTOTUNE] [MINPERCLASS] [THRESHOLD] [NAME] [RANDOM]"
+command-line: "nils-bodypart train --stacks [Manifest] --labels [Inputs]/labels --embeddings [Inputs]/embeddings --output [OutputLocation] [ESTIMATOR] [CLASSES] [AUTOTUNE] [PCACOMPONENTS] [MINPERCLASS] [THRESHOLD] [NAME] [RANDOM]"
 
 output-files:
   - id: head

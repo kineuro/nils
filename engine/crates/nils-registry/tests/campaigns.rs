@@ -2019,3 +2019,187 @@ fn a_v0_import_reads_what_stands_inside_its_transaction() {
         assert!(done.decisions.is_empty(), "{name}");
     }
 }
+
+/// Wave 43's proof: a campaign made from the model's grouped review items
+/// had 3 items for 239 stacks, so a rater answered a confidence band, not
+/// a stack. A group is asked member by member: one item per stack not yet
+/// decided, each closing into that member's decision, and the group stays
+/// open until its last member is decided.
+#[test]
+fn a_campaign_asks_a_grouped_review_item_stack_by_stack() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let now = nils_registry::time::now_iso();
+        let store = reg.store();
+        let group = row(
+            store,
+            "review_item",
+            &[
+                ("kind", Param::from("body_part:model")),
+                ("scope", Param::from("group")),
+                ("ref", Param::from(json!({"band": "0.5-0.7"}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part", "value": "brain"}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+                ("members", Param::Int(3)),
+            ],
+        );
+        for s in &ids[..3] {
+            row(
+                store,
+                "review_member",
+                &[
+                    ("item_id", Param::Int(group)),
+                    ("stack_id", Param::Int(*s)),
+                    (
+                        "evidence",
+                        Param::from(json!({"value": "brain", "p": 0.6}).to_string()),
+                    ),
+                ],
+            );
+        }
+        let single = row(
+            store,
+            "review_item",
+            &[
+                ("kind", Param::from("body_part:conflict")),
+                ("scope", Param::from("stack")),
+                ("ref", Param::from(json!({"stack_id": ids[3]}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part"}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+            ],
+        );
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let found = campaign::review_items(
+            reg.store(),
+            &campaign::ReviewQuery {
+                kind_prefix: Some("body_part:".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(found, vec![group, single], "{name}");
+        let c = campaign::create(
+            reg,
+            &new("bands", &q, &adj, Items::Review(found), 1, "decision"),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(items.len(), 4, "one item per stack: {name}");
+        let of_group: Vec<&campaign::Item> =
+            items.iter().filter(|i| i.review_item_id == group).collect();
+        assert_eq!(
+            of_group
+                .iter()
+                .map(|i| i.stack_id.unwrap())
+                .collect::<Vec<_>>(),
+            ids[..3].to_vec(),
+            "{name}"
+        );
+        assert_eq!(
+            of_group[0].key,
+            format!("review:{group}:stack:{}", ids[0]),
+            "{name}"
+        );
+        // every item answered but one member of the group, whose lease bo
+        // holds and leaves to run
+        let mut left = None;
+        let mut minute = 0;
+        while left.is_none() {
+            let a = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(minute))
+                .unwrap()
+                .unwrap();
+            if a.item.review_item_id == group {
+                left = a.item.stack_id;
+            } else {
+                campaign::answer(reg, &give(a.assignment.id, "bo@lab", "spine"), &at(minute))
+                    .unwrap();
+            }
+            minute += 1;
+        }
+        while let Some(a) =
+            campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(minute)).unwrap()
+        {
+            campaign::answer(
+                reg,
+                &give(a.assignment.id, "anna@lab", "spine"),
+                &at(minute),
+            )
+            .unwrap();
+            minute += 1;
+        }
+        let left = left.unwrap();
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+                model: None,
+                picks: None,
+            },
+            &at(5),
+        )
+        .unwrap();
+        assert_eq!((closed.resolved, closed.unresolved), (3, 1), "{name}");
+        assert_eq!(closed.decisions.len(), 3, "{name}");
+        // one decision per answered member, at its stack
+        let decided = count(
+            reg,
+            "decision",
+            " WHERE scope = 'stack' AND value = 'spine' AND committed_at IS NOT NULL",
+        );
+        assert_eq!(decided, 3, "{name}");
+        // the group waits for its last member
+        let r = nils_registry::review::item(reg.store(), group)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.status, "open", "{name}");
+        let undecided: Vec<i64> = nils_registry::review::members(reg.store(), group)
+            .unwrap()
+            .iter()
+            .filter(|m| m.decided_at.is_none())
+            .map(|m| m.stack_id)
+            .collect();
+        assert_eq!(undecided, vec![left], "{name}");
+        // a later campaign asks only the member left, and closes the group
+        let c2 = campaign::create(
+            reg,
+            &new("rest", &q, &adj, Items::Review(vec![group]), 1, "decision"),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c2.id).unwrap();
+        assert_eq!(items.len(), 1, "{name}");
+        assert_eq!(items[0].stack_id, Some(left), "{name}");
+        let a = campaign::claim(reg, c2.id, "anna@lab", Role::Rater, &at(10))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(10)).unwrap();
+        campaign::close(
+            reg,
+            &Close {
+                campaign: c2.id,
+                who: "cleo@lab",
+                author_kind: "person",
+                model: None,
+                picks: None,
+            },
+            &at(11),
+        )
+        .unwrap();
+        let r = nils_registry::review::item(reg.store(), group)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.status, "accepted", "{name}");
+    }
+}
