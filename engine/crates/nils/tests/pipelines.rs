@@ -2740,10 +2740,13 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let pgid = child.id();
-    Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
+    // `--` before the group: procps 4.0.4 (Ubuntu 24.04) reads a bare
+    // `-<pgid>` after the signal as something else, kills nothing and says 0
+    let killed = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
         .status()
         .unwrap();
+    assert!(killed.success(), "the engine's group was not killed");
     let _ = child.wait();
     let over_before: Vec<String> = lab
         .store()
@@ -2768,15 +2771,36 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
     assert_eq!(derivatives_before, over_before.len() as i64);
 
     // the pipeline lane's worker takes it up again by itself
-    let mut worker = lab.command(&lab.path);
-    worker
+    // bounded: a worker that never ends fails here, not in the job's timeout
+    let said = lab.work.path().join("worker-stderr");
+    let mut worker = lab
+        .command(&lab.path)
         .args(["jobs", "work", "--lane", "pipelines", "--once"])
-        .env("LANE_TRACE", &t);
-    let out = worker.output().unwrap();
+        .env("LANE_TRACE", &t)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = worker.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed().as_secs() >= 180 {
+            let _ = worker.kill();
+            let _ = worker.wait();
+            panic!(
+                "the lane's worker did not end within 180 s: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     assert!(
-        out.status.success(),
+        status.success(),
         "{}",
-        String::from_utf8_lossy(&out.stderr)
+        std::fs::read_to_string(&said).unwrap_or_default()
     );
     let run: Value =
         serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
