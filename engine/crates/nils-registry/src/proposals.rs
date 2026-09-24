@@ -30,11 +30,14 @@
 //! in force, is not asked again: it is counted, and left out.
 //!
 //! A newer run of a model supersedes what its earlier runs proposed on the
-//! same axis and nobody took: their `<axis>:model` items still open or
-//! staged are closed as `superseded`, and the staged decisions nobody
-//! committed are withdrawn, so stale proposals do not pile up. A decision a
-//! person committed stays, and so does an item an unfinished campaign
-//! asks.
+//! same axis, on the stacks it proposes again, and nobody took: their
+//! `<axis>:model` items still open or staged are closed as `superseded`,
+//! and the staged decisions nobody committed are withdrawn, so stale
+//! proposals do not pile up. A stack the new run does not propose keeps its
+//! earlier proposal: where it shared a group with stacks proposed again, it
+//! is carried into an item of its own, staged again where the group was. A
+//! decision a person committed stays, and so does an item an unfinished
+//! campaign asks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -181,6 +184,9 @@ pub struct Ingested {
     /// superseded, and the staged decisions of theirs withdrawn.
     pub superseded: i64,
     pub withdrawn: i64,
+    /// Items made for the members of a superseded group the run did not
+    /// propose again, which keep their earlier proposal.
+    pub carried: i64,
 }
 
 impl Ingested {
@@ -194,6 +200,7 @@ impl Ingested {
             "not_staged": self.not_staged,
             "superseded": self.superseded,
             "withdrawn": self.withdrawn,
+            "carried": self.carried,
             "groups": self.groups.iter().map(|g| json!({
                 "item": g.item, "axis": g.axis, "value": g.value, "model_id": g.model_id,
                 "band": g.band, "members": g.members, "confidence": g.confidence,
@@ -445,6 +452,16 @@ pub fn ingest(
         );
     }
     let mut out = Ingested::default();
+    // the stacks the run proposes again, per axis and model, which is what
+    // it supersedes of the model's earlier runs
+    let mut again: BTreeMap<(String, i64), BTreeSet<i64>> = BTreeMap::new();
+    for (i, m) in &resolved {
+        let p = &proposals[*i];
+        again
+            .entry((p.axis.clone(), m.id))
+            .or_default()
+            .insert(p.stack_id);
+    }
     // (axis, model, value, band) -> members
     let mut groups: BTreeMap<(String, i64, String, String), Gathered> = BTreeMap::new();
     let mut models: BTreeMap<i64, Model> = BTreeMap::new();
@@ -476,7 +493,15 @@ pub fn ingest(
         models.insert(m.id, m);
     }
     registry.store().begin()?;
-    match write(registry, run, &thresholds, groups, &models, &mut out) {
+    match write(
+        registry,
+        run,
+        &thresholds,
+        &again,
+        groups,
+        &models,
+        &mut out,
+    ) {
         Ok(()) => {
             registry.store().commit()?;
             Ok(out)
@@ -493,18 +518,18 @@ fn write(
     registry: &mut Registry,
     run: &Run<'_>,
     thresholds: &BTreeMap<i64, Option<f64>>,
+    again: &BTreeMap<(String, i64), BTreeSet<i64>>,
     groups: BTreeMap<(String, i64, String, String), Gathered>,
     models: &BTreeMap<i64, Model>,
     out: &mut Ingested,
 ) -> Result<(), Error> {
     let now = now_iso();
     let mut refusals: BTreeSet<String> = BTreeSet::new();
-    let pairs: BTreeSet<(String, i64)> =
-        groups.keys().map(|(a, m, _, _)| (a.clone(), *m)).collect();
-    for (axis, model_id) in &pairs {
-        let (items, decisions) = supersede(registry.store(), run, axis, *model_id, &now)?;
-        out.superseded += items;
-        out.withdrawn += decisions;
+    for ((axis, model_id), stacks) in again {
+        let done = supersede(registry, run, axis, *model_id, stacks, &now)?;
+        out.superseded += done.0;
+        out.withdrawn += done.1;
+        out.carried += done.2;
     }
     for ((axis, model_id, value, band), mut g) in groups {
         let m = &models[&model_id];
@@ -642,23 +667,32 @@ fn write(
     Ok(())
 }
 
-/// Close what a model's earlier runs proposed on an axis and nobody took:
-/// items open or staged become `superseded`, and their staged decisions
-/// that nobody committed are withdrawn. Answers the items and decisions.
-/// An item an unfinished campaign asks is left to the campaign.
+/// Close what a model's earlier runs proposed on an axis, on `stacks`, and
+/// nobody took: an item open or staged holding any of them becomes
+/// `superseded`, and its staged decision that nobody committed is
+/// withdrawn. Its members the run does not propose again, and no person
+/// decided on their own, are carried into a new item under the earlier
+/// run's key, staged by the model again where the item was staged and the
+/// model still answers. An item an unfinished campaign asks is left to the
+/// campaign. Answers the items superseded, the decisions withdrawn and the
+/// items carried.
 fn supersede(
-    store: &mut Store,
+    registry: &mut Registry,
     run: &Run<'_>,
     axis: &str,
     model_id: i64,
+    stacks: &BTreeSet<i64>,
     now: &str,
-) -> Result<(i64, i64), Error> {
+) -> Result<(i64, i64, i64), Error> {
+    let store = registry.store();
     let d = store.dialect();
+    let t = table("review_item");
     let sql = format!(
-        "SELECT id, decision_id FROM {ri} WHERE kind = {} AND status IN ('open', 'staged') \
-         AND group_key LIKE {} AND group_key NOT LIKE {} \
+        "SELECT id, decision_id, status, group_key, {}, job_id FROM {ri} WHERE kind = {} \
+         AND status IN ('open', 'staged') AND group_key LIKE {} AND group_key NOT LIKE {} \
          AND id NOT IN (SELECT ci.review_item_id FROM {ci} ci JOIN {c} c ON c.id = ci.campaign_id \
          WHERE c.status IN ('open', 'closing'))",
+        d.text_of(t.column("evidence").expect("evidence")),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
         d.param(3, Type::Text),
@@ -675,10 +709,41 @@ fn supersede(
         ],
     )?;
     let why = json!({"superseded_by": {"run_id": run.id, "model_id": model_id}});
-    let (mut items, mut decisions) = (0i64, 0i64);
+    let (mut items, mut decisions, mut carried) = (0i64, 0i64, 0i64);
     for r in &stale {
         let (item, decision) = (r.int(0)?, r.opt_int(1)?);
+        let staged = r.text(2)? == "staged";
+        let key = r.text(3)?.to_string();
+        let evidence: Value = r
+            .opt_text(4)?
+            .and_then(|e| serde_json::from_str(e).ok())
+            .unwrap_or(Value::Null);
+        let job_id = r.opt_int(5)?;
+        let members = review::members(registry.store(), item)?;
+        if !members.iter().any(|m| stacks.contains(&m.stack_id)) {
+            continue;
+        }
+        // a staged group marks every member decided; an open one only the
+        // members a person answered on their own, which are theirs
+        let kept: Vec<&review::Member> = members
+            .iter()
+            .filter(|m| !stacks.contains(&m.stack_id) && (staged || m.decided_at.is_none()))
+            .collect();
+        let store = registry.store();
+        // who staged it, so a carried decision is the same author's
+        let mut author = run.principal.to_string();
         if let Some(decision) = decision {
+            if let Some(row) = store.query_opt(
+                &format!(
+                    "SELECT actor FROM {} WHERE id = {}",
+                    store.qualified("decision"),
+                    d.param(1, Type::Int)
+                ),
+                &[Param::Int(decision)],
+            )? && let Some(a) = row.opt_text(0)?
+            {
+                author = a.to_string();
+            }
             decisions += store.execute(
                 &format!(
                     "UPDATE {} SET withdrawn_at = {} WHERE id = {} AND withdrawn_at IS NULL \
@@ -707,8 +772,110 @@ fn supersede(
                 Param::Int(item),
             ],
         )? as i64;
+        if kept.is_empty() {
+            continue;
+        }
+        // the members not proposed again keep their proposal, in an item of
+        // their own under the earlier run's key
+        let tail = format!("|model:{model_id}");
+        let carried_key = format!(
+            "{}|carried:{item}{tail}",
+            key.strip_suffix(&tail).unwrap_or(&key)
+        );
+        let confidences: Vec<f64> = kept
+            .iter()
+            .filter_map(|m| m.evidence["confidence"].as_f64())
+            .collect();
+        let mut ev = evidence.clone();
+        ev["members"] = json!(kept.len());
+        ev["group"] = json!(carried_key);
+        ev["carried_from"] = json!(item);
+        if !confidences.is_empty() {
+            ev["confidence"] = json!(confidences.iter().copied().fold(f64::INFINITY, f64::min));
+            ev["mean_confidence"] =
+                json!(confidences.iter().sum::<f64>() / confidences.len() as f64);
+        }
+        let reference = json!({"group": carried_key, "run_id": evidence["run_id"]});
+        let new = store
+            .insert(
+                &Insert::new(
+                    table("review_item"),
+                    &[
+                        "kind",
+                        "scope",
+                        "ref",
+                        "evidence",
+                        "status",
+                        "created_at",
+                        "job_id",
+                        "members",
+                        "group_key",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from(format!("{axis}:model")),
+                    Param::from("group"),
+                    Param::from(reference.to_string()),
+                    Param::from(ev.to_string()),
+                    Param::from("open"),
+                    Param::from(now),
+                    job_id.map_or(Param::Null, Param::Int),
+                    Param::Int(kept.len() as i64),
+                    Param::from(carried_key.as_str()),
+                ]],
+            )?
+            .first()
+            .ok_or_else(|| StoreError::Message("the carried item was not written back".into()))?
+            .int(0)?;
+        let rows: Vec<Vec<Param>> = kept
+            .iter()
+            .map(|m| {
+                vec![
+                    Param::Int(new),
+                    Param::Int(m.stack_id),
+                    Param::from(m.evidence.to_string()),
+                ]
+            })
+            .collect();
+        for chunk in rows.chunks(500) {
+            store.insert(
+                &Insert::new(table("review_member"), &["item_id", "stack_id", "evidence"]),
+                chunk,
+            )?;
+        }
+        carried += 1;
+        // staged again only where it was and the model still answers;
+        // otherwise the carried item stays open for a person
+        if staged
+            && let Some(value) = evidence["value"].as_str()
+            && model::author(registry.store(), model_id).is_ok()
+        {
+            let why = format!(
+                "carried from review item {item}: run {} did not propose these stacks again",
+                run.id
+            );
+            review::apply_within(
+                registry,
+                &Apply {
+                    item: new,
+                    member: None,
+                    scope: "stack",
+                    value: Some(value),
+                    author: Author {
+                        who: &author,
+                        kind: "model",
+                        version: None,
+                        model: Some(model_id),
+                    },
+                    stage: true,
+                    why: Some(why.as_str()),
+                    campaign: None,
+                },
+            )?;
+        }
     }
-    Ok((items, decisions))
+    Ok((items, decisions, carried))
 }
 
 #[cfg(test)]

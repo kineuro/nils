@@ -85,7 +85,7 @@ curl -X POST http://127.0.0.1:8437/api/jobs \
    nils review commit --min-confidence 0.95
    ```
 
-   A proposal is never in force until a person commits it. A newer run of the same model supersedes what its earlier runs left untaken.
+   A proposal is never in force until a person commits it. A newer run of the same model supersedes what its earlier runs left untaken on the stacks it proposes again; every other stack keeps its earlier proposal.
 
 ## Curate a run's seeds
 

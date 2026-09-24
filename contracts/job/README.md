@@ -48,7 +48,7 @@ uid. A GPU is passed where the descriptor asks for one and the host has it
 3. The bids layout is a release with the picks applied (record 43 R4): a BIDS App meets one image per role and session.
 4. A unit is `sub-<s>`, `sub-<s>_ses-<t>` or `stack-<id>`, as `/inputs/manifest.json` names it. A failed unit, and a unit `results.json` does not name, is one `pipeline:qc` review item.
 5. A file is registered as a derivative only from under `/output`, hashed by the engine. Without `results.json`, a unit's files are the ones its declared path templates find.
-6. A proposal is evidence for the review spine, never a fact, and only on an axis the descriptor declares. It is staged as the model's decision at or above the threshold on the model's card, which a run may raise and never lower; a newer run of the model supersedes what its earlier runs left untaken.
+6. A proposal is evidence for the review spine, never a fact, and only on an axis the descriptor declares. It is staged as the model's decision at or above the threshold on the model's card, which a run may raise and never lower; a newer run of the model supersedes what its earlier runs left untaken on the stacks it proposes again, and every other stack keeps its earlier proposal.
 7. A run whose container exits 0 while units failed or went unreported is `partial`, not `done`; those units are `pipeline:qc` review items.
 8. A run-level model output is registered as a model, in state registered, from its card: the card names the artifact's digest, the label set is the one the run was given, and the encoders are the card's.
 9. Seeds and a suggested selection are kept as the run's one derivative of kind `seeds`; `nils pipeline seeds <run> --save <name>` makes the selection a campaign starts from.

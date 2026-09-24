@@ -972,9 +972,10 @@ fn a_model_s_card_sets_its_threshold_and_a_run_may_only_raise_it() {
 }
 
 /// Record 43's ruling: a newer run of a model withdraws what its earlier
-/// runs staged on the axis and nobody committed, and closes their items,
-/// so stale proposals do not pile up. What a person committed stays, and
-/// so does another model's.
+/// runs staged and nobody committed on the stacks it proposes again, and
+/// closes their items, so stale proposals do not pile up. A stack outside
+/// the new run keeps its earlier proposal, staged where it was; what a
+/// person committed stays, and so does another model's.
 #[test]
 fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
     for mut l in labs() {
@@ -1024,10 +1025,18 @@ fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
         let second =
             proposals::ingest(reg, &run(2), &[proposal(ids[0], "brain", 0.97, a.id)], None)
                 .unwrap();
-        assert_eq!(second.superseded, 2, "{name}: {second:?}");
+        // run 2 proposes stack 0 again, and neither 1 nor 2: the group of
+        // 0 and 1 is superseded, 1 carried into an item of its own, still
+        // staged; the open item of stack 2 is left as it was
+        assert_eq!(second.superseded, 1, "{name}: {second:?}");
         assert_eq!(second.withdrawn, 1, "{name}");
+        assert_eq!(second.carried, 1, "{name}");
         assert_eq!(status(reg, brain.item), "superseded", "{name}");
-        assert_eq!(status(reg, below.item), "superseded", "{name}");
+        assert_eq!(
+            status(reg, below.item),
+            "open",
+            "{name}: not proposed again"
+        );
         assert_eq!(
             status(reg, sure.item),
             "accepted",
@@ -1049,7 +1058,8 @@ fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
         assert!(!withdrawn(reg, sure.staged.unwrap()), "{name}");
         assert!(!withdrawn(reg, other.groups[0].staged.unwrap()), "{name}");
         assert!(!withdrawn(reg, second.groups[0].staged.unwrap()), "{name}");
-        // what is staged of model a now is run 2's alone
+        // what is staged of model a: run 2's stack, and the stack of run 1
+        // it did not propose again
         let staged: Vec<i64> = labels::decision_labels(
             reg.store(),
             &DecisionQuery {
@@ -1066,9 +1076,86 @@ fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
         .collect();
         let mut staged = staged;
         staged.sort();
-        let mut want = vec![ids[0], ids[3], ids[4]];
+        let mut want = vec![ids[0], ids[1], ids[3], ids[4]];
         want.sort();
         assert_eq!(staged, want, "{name}");
+    }
+}
+
+/// The same ruling, stated from the stack outside: a run over part of the
+/// stacks leaves the earlier staged proposal of every other stack alone.
+#[test]
+fn a_stack_outside_the_newer_run_keeps_its_earlier_staged_proposal() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let a = head(reg, "1", '1', Some(0.8));
+        let run = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+        };
+        let whole: Vec<proposals::Proposal> = ids[..4]
+            .iter()
+            .map(|s| proposal(*s, "brain", 0.95, a.id))
+            .collect();
+        let first = proposals::ingest(reg, &run(1), &whole, None).unwrap();
+        assert_eq!(first.staged_members, 4, "{name}");
+        let part = proposals::ingest(reg, &run(2), &[proposal(ids[0], "brain", 0.96, a.id)], None)
+            .unwrap();
+        assert_eq!(
+            (part.superseded, part.withdrawn, part.carried),
+            (1, 1, 1),
+            "{name}"
+        );
+        let staged = |reg: &mut Registry| -> Vec<(i64, Option<i64>)> {
+            let mut v: Vec<(i64, Option<i64>)> = labels::decision_labels(
+                reg.store(),
+                &DecisionQuery {
+                    axis: "body_part",
+                    stacks: None,
+                    authors: &["model".to_string()],
+                    campaign: None,
+                    staged_too: true,
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.stack_id.unwrap(), l.model_id))
+            .collect();
+            v.sort();
+            v
+        };
+        let got = staged(reg);
+        assert_eq!(
+            got.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            ids[..4].to_vec(),
+            "{name}: every stack still has its staged proposal"
+        );
+        assert!(got.iter().all(|(_, m)| *m == Some(a.id)), "{name}");
+        // a run of the rest moves every stack to the newest runs, and the
+        // carried item is superseded like any other
+        let rest: Vec<proposals::Proposal> = ids[1..4]
+            .iter()
+            .map(|s| proposal(*s, "brain", 0.97, a.id))
+            .collect();
+        let third = proposals::ingest(reg, &run(3), &rest, None).unwrap();
+        assert_eq!(
+            (third.superseded, third.carried),
+            (1, 0),
+            "{name}: {third:?}"
+        );
+        assert_eq!(staged(reg).len(), 4, "{name}");
+        assert_eq!(
+            count(
+                reg,
+                "review_item",
+                " WHERE kind = 'body_part:model' AND status = 'staged'"
+            ),
+            2,
+            "{name}: run 2's and run 3's"
+        );
     }
 }
 
