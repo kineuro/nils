@@ -480,6 +480,15 @@ fn checked_slot(store: &mut Store, card: &Value) -> Result<String, Error> {
     Ok(slot)
 }
 
+fn labels_err(e: crate::labels::Error) -> Error {
+    match e {
+        crate::labels::Error::Store(s) => Error::Store(s),
+        crate::labels::Error::Invalid(m) => Error::Invalid(m),
+        crate::labels::Error::NotFound(m) => Error::Unknown(m),
+        crate::labels::Error::Refused(m) => Error::Refused(m),
+    }
+}
+
 /// Register a model from its card. Refused when the digest is registered
 /// already, or the name and version are taken, or a head names no
 /// registered encoder.
@@ -537,6 +546,21 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
         None => None,
     };
     let trained_on = card["trained_on"]["label_set"].as_str().map(str::to_string);
+    // Record 40 R3 and 42 S7: the labels a model was fitted on are a label
+    // set this registry wrote, and none drawn from a sealed certification
+    // sample, since a model fitted on the sample that certifies it
+    // certifies nothing.
+    if let Some(digest) = &trained_on {
+        let sets = crate::labels::by_digest(store, digest).map_err(labels_err)?;
+        if sets.is_empty() {
+            return Err(Error::Unknown(format!(
+                "no label set has the digest {digest}; a model is trained on a set this registry wrote (nils labels export)"
+            )));
+        }
+        for set in &sets {
+            crate::labels::usable_for_training(store, set.id).map_err(labels_err)?;
+        }
+    }
     let pack_version = card["pack_version"].as_str().map(str::to_string);
     let now = now_iso();
     let mut stored = card.clone();

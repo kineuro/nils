@@ -66,7 +66,7 @@
       "properties": {
         "label_set": {
           "$ref": "#/$defs/digest",
-          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7)"
+          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7): one the registry wrote, and none holding items of a sealed certification sample, or the registration is refused (record 40 R3)"
         },
         "name": { "type": "string" },
         "rows": { "type": "integer", "minimum": 0 },

@@ -423,6 +423,7 @@ pub(crate) fn route(
                         ));
                     }
                 };
+                no_sealed_flag(&doc)?;
                 let rows =
                     labels::campaign_labels(registry.store(), c.id, of).map_err(labels_err)?;
                 let name = doc["name"].as_str().unwrap_or(&c.name).to_string();
@@ -433,7 +434,6 @@ pub(crate) fn route(
                     source: json!({"campaign": c.id, "name": c.name, "of": of.name(), "from": c.source}),
                     campaign_id: Some(c.id),
                     handle_id: c.handle_id,
-                    sealed: doc["sealed"].as_bool().unwrap_or(false),
                     created_by: principal,
                 };
                 let dir = export_dir(registry.store(), doc["place"].as_str(), &name)?;
@@ -448,6 +448,7 @@ pub(crate) fn route(
             }
             ["api", "label-sets"] if post => {
                 let doc = json_body(body)?;
+                no_sealed_flag(&doc)?;
                 let axis = doc["axis"]
                     .as_str()
                     .ok_or_else(|| Reply::error(400, "axis: what the labels are of"))?
@@ -509,7 +510,6 @@ pub(crate) fn route(
                     }),
                     campaign_id,
                     handle_id,
-                    sealed: doc["sealed"].as_bool().unwrap_or(false),
                     created_by: principal,
                 };
                 let dir = export_dir(registry.store(), doc["place"].as_str(), &name)?;
@@ -576,6 +576,18 @@ pub(crate) fn route(
             )),
         }
     })())
+}
+
+/// Record 40 R3: whether a set is sealed is the registry's finding, from
+/// the samples an operator sealed, and never the caller's to say.
+fn no_sealed_flag(doc: &Value) -> Result<(), Reply> {
+    if doc.get("sealed").is_some() {
+        return Err(Reply::error(
+            400,
+            "sealed is not the caller's to say: a set is sealed when any of its items is of a sample an operator sealed (nils labels seal)",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether the caller reads at detail plain, where a campaign's doors
@@ -955,7 +967,6 @@ pub(crate) struct SetMeta<'a> {
     pub(crate) source: Value,
     pub(crate) campaign_id: Option<i64>,
     pub(crate) handle_id: Option<i64>,
-    pub(crate) sealed: bool,
     pub(crate) created_by: &'a str,
 }
 
@@ -1016,7 +1027,8 @@ fn export_dir(store: &mut Store, place: Option<&str>, name: &str) -> Result<Path
 
 /// Write `labels.tsv` and `provenance.json` into a directory and record
 /// the set. The digest is the sha256 of `labels.tsv`, which the canonical
-/// order makes the same for the same labels.
+/// order makes the same for the same labels. The set is sealed when any of
+/// its items is of a sealed sample (record 40 R3).
 pub(crate) fn write_set(
     registry: &mut Registry,
     dir: &Path,
@@ -1025,6 +1037,7 @@ pub(crate) fn write_set(
 ) -> Result<LabelSet, String> {
     let text = labels::tsv(rows);
     let digest = sha256(text.as_bytes());
+    let sealed = labels::sealed_among(registry.store(), rows).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let (handle_hash, scheme_digest, pack_version) = match meta.handle_id {
         Some(h) => match nils_ask::handle::get(registry.store(), h).map_err(|e| e.to_string())? {
@@ -1048,7 +1061,7 @@ pub(crate) fn write_set(
             handle_id: meta.handle_id,
             pack_version: pack_version.as_deref(),
             scheme_digest: scheme_digest.as_deref(),
-            sealed: meta.sealed,
+            sealed,
             rows: rows.len() as i64,
             digest: &digest,
             place_id: place.as_ref().map(|p| p.id),
@@ -1167,10 +1180,6 @@ pub(crate) enum CampaignCommand {
         /// One row per answer rather than per settled item
         #[arg(long)]
         answers: bool,
-        /// The items were drawn from a sealed certification sample, so the
-        /// set is never training data (record 40 R3)
-        #[arg(long)]
-        sealed: bool,
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
         #[arg(long)]
@@ -1254,6 +1263,23 @@ pub(crate) enum LabelsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Seal a sample drawn for certification, before anyone looks: its
+    /// stacks are kept as sealed, and a label set holding any of them is
+    /// never training data (record 40 R3). Nothing is ever unsealed
+    Seal {
+        /// The sample: a saved selection, frozen now into its stacks
+        #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
+        select: Option<String>,
+        /// The sample: the stacks of a handle
+        #[arg(long, value_name = "ID")]
+        handle: Option<i64>,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Import v0's human labels of one axis from a TSV of
     /// SeriesInstanceUID, value and date, as person decisions marked
     /// imported:v0 with their date (record 42 R5)
@@ -1303,10 +1329,6 @@ pub(crate) struct ExportArgs {
     /// The directory, under an export place
     #[arg(long, value_name = "DIR")]
     to: PathBuf,
-    /// The stacks were drawn from a sealed certification sample, so the set
-    /// is never training data (record 40 R3)
-    #[arg(long)]
-    sealed: bool,
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
     #[arg(long, value_name = "DIR")]
@@ -1606,7 +1628,6 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             campaign: which,
             to,
             answers,
-            sealed,
             name,
             json,
         } => {
@@ -1629,7 +1650,6 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     source: json!({"campaign": c.id, "name": c.name, "of": of.name(), "from": c.source}),
                     campaign_id: Some(c.id),
                     handle_id: c.handle_id,
-                    sealed,
                     created_by: &principal,
                 },
             )
@@ -1831,12 +1851,63 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                     }),
                     campaign_id,
                     handle_id: handle,
-                    sealed: a.sealed,
                     created_by: &principal,
                 },
             )
             .map_err(fail)?;
             report_set(&set, a.json);
+            Ok(())
+        }
+        LabelsCommand::Seal {
+            select,
+            handle,
+            pack_dir,
+            pack,
+            json,
+        } => {
+            let (handle, sample) = match (&select, handle) {
+                (Some(spec), _) => {
+                    let h = crate::ask_cli::freeze_selection(
+                        home,
+                        spec,
+                        Grain::Stack,
+                        pack_dir,
+                        &pack,
+                    )?;
+                    let (name, version) = selection_spec(spec);
+                    let mut registry = crate::open(home)?;
+                    let version = match version {
+                        Some(v) => v,
+                        None => nils_ask::selection::get(registry.store(), name, None)
+                            .map_err(|e| fail(e.to_string()))?
+                            .map(|v| v.version)
+                            .ok_or_else(|| usage(format!("no selection {spec}")))?,
+                    };
+                    (h, format!("selection:{name}@{version}"))
+                }
+                (None, Some(h)) => (h, format!("handle:{h}")),
+                (None, None) => {
+                    return Err(usage(
+                        "the sample: --select selection:NAME@V or --handle ID",
+                    ));
+                }
+            };
+            let mut registry = crate::open(home)?;
+            let stacks: Vec<i64> = handle_keys(registry.store(), handle, Grain::Stack)
+                .map_err(rerr)?
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            let done = labels::seal(&mut registry, &sample, Some(handle), &stacks, &who())
+                .map_err(lerr)?;
+            if json {
+                print(&done.as_json());
+            } else {
+                println!(
+                    "sealed {}: {} stack(s), {} sealed already; a label set holding any of them is never training data",
+                    done.sample, done.stacks, done.already
+                );
+            }
             Ok(())
         }
         LabelsCommand::List { json } => {
@@ -1924,7 +1995,6 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                         source: json!({"imported": "v0", "file_sha256": sha256(text.as_bytes()), "counts": done.as_json()}),
                         campaign_id: None,
                         handle_id: None,
-                        sealed: false,
                         created_by: &principal,
                     },
                 )

@@ -45,7 +45,8 @@
 # commits the part of the staged decisions a filter names. Label sets under
 # /api/label-sets and a campaign's export, labels.tsv and provenance.json
 # with the sha256 of the labels, the handle pinned, and a flag for a set
-# drawn from a sealed certification sample, which is never training data.
+# holding items of a sample an operator sealed for certification, which is
+# never training data; the registry finds it and no caller sets it.
 # The grants are campaigns:see and campaigns:work of suite contract version
 # 3; closing a campaign writes decisions, so it needs review:work beside
 # campaigns:work.
@@ -325,7 +326,7 @@ paths:
         "200": {description: "{count, models: [model]}"}
     post:
       summary: Register a model by its card (nils model register)
-      description: "The body is the card of contracts/model/v1 (card.schema.json): name, version, kind (encoder, head, pass or segmenter; served is Kvasir's), digest (sha256: and 64 lowercase hex digits of the canonical artifact, the model's identity), task, slot (site, the default, one site-wide model per task, or cohort:<name>, a cohort's own; record 42 R4), a head's encoder by digest, which must be a registered encoder, the label set it was fitted on by digest, and whatever else the card says, kept whole. The model is registered and neither admitted nor promoted. Under models:work; an audit row."
+      description: "The body is the card of contracts/model/v1 (card.schema.json): name, version, kind (encoder, head, pass or segmenter; served is Kvasir's), digest (sha256: and 64 lowercase hex digits of the canonical artifact, the model's identity), task, slot (site, the default, one site-wide model per task, or cohort:<name>, a cohort's own; record 42 R4), a head's encoder by digest, which must be a registered encoder, the label set it was fitted on by digest, which must be a set this registry wrote (404 otherwise) and none holding items of a sealed certification sample (409, record 40 R3), and whatever else the card says, kept whole. The model is registered and neither admitted nor promoted. Under models:work; an audit row."
       requestBody:
         content:
           application/json:
@@ -1272,7 +1273,7 @@ paths:
       summary: Write a campaign's labels as a label set (record 42 S7; campaigns:work)
       description: "Into `labels/<name>` of the export place `place` names, or of the one export place there is. `of` is outcomes (the default: a row per resolved item, the decision it became with its author, or the adjudicator's or agreeing raters' answer, a row per file for a derivative) or answers (a row per answer, for an agreement study or a two-rater reference). The set is written and recorded as POST /api/label-sets says."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
-      requestBody: {content: {application/json: {schema: {type: object, properties: {of: {type: string, enum: [outcomes, answers], default: outcomes}, place: {type: string}, name: {type: string}, sealed: {type: boolean, default: false}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {of: {type: string, enum: [outcomes, answers], default: outcomes}, place: {type: string}, name: {type: string}}}}}}
       responses:
         "201": {description: "The label set, as GET /api/label-sets/{id} names it without its files"}
         "409": {description: No export place is declared}
@@ -1283,7 +1284,7 @@ paths:
         "200": {description: "{count, label_sets}"}
     post:
       summary: Write the decisions in force on one axis as a label set (record 42 S7; campaigns:work or review:work)
-      description: "One row per stack of the decision in force there, resolved as the classifier resolves them (the highest rank, then the narrowest scope, stack, group, series, subject, then the latest); a decision about a machine is a rule and is not exported. `selection` (frozen now, under the caller's query:see) or `handle` keeps the stacks it names and pins the handle; `authors` keeps the decisions in force by those kinds; `campaign` keeps those a campaign's close wrote; `staged` adds the staged ones. `labels.tsv` holds stack_id, subject_id, session_day, what, value, derivative_id, author_kind, author, decision_id, campaign_id, model_id and answer_id, in a canonical order, so the same state gives the same sha256 and one new decision changes it; `provenance.json` holds the source, the handle and its content hash, the epoch, the pack version, the scheme digest, `sealed` and `training`, the columns and the digest. `sealed` marks a set drawn from a sealed certification sample (record 40 R3), which a training tool refuses. Audited as labels.export."
+      description: "One row per stack of the decision in force there, resolved as the classifier resolves them (the highest rank, then the narrowest scope, stack, group, series, subject, then the latest); a decision about a machine is a rule and is not exported. `selection` (frozen now, under the caller's query:see) or `handle` keeps the stacks it names and pins the handle; `authors` keeps the decisions in force by those kinds; `campaign` keeps those a campaign's close wrote; `staged` adds the staged ones. `labels.tsv` holds stack_id, subject_id, session_day, what, value, derivative_id, author_kind, author, decision_id, campaign_id, model_id and answer_id, in a canonical order, so the same state gives the same sha256 and one new decision changes it; `provenance.json` holds the source, the handle and its content hash, the epoch, the pack version, the scheme digest, `sealed` and `training`, the columns and the digest. `sealed` marks a set any of whose items is of a sample an operator sealed for certification (`nils labels seal`; for a set of sessions, a sealed stack of the item's subject), which a training tool and a model's registration refuse (record 40 R3); it is the registry's finding and never the caller's, and a body that says `sealed` is refused with 400. Audited as labels.export."
       requestBody:
         content:
           application/json:
@@ -1299,7 +1300,6 @@ paths:
                 staged: {type: boolean, default: false}
                 place: {type: string}
                 name: {type: string}
-                sealed: {type: boolean, default: false}
       responses:
         "201": {description: "{id, name, kind, what, source, campaign_id, handle_id, epoch, pack_version, scheme_digest, sealed, training, rows, digest, place_id, path, created_by, created_at}"}
         "409": {description: No export place is declared}

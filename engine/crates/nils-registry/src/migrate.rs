@@ -375,12 +375,14 @@ fn a_campaign_asks_one_question_of_many(store: &mut Store, kind: Kind) -> Result
 }
 
 /// Record 42 S7: the label sets, each an export with its digest and the
-/// handle it pins. A registry from before gains the table empty.
+/// handle it pins, and the sealed samples of record 40 R3, whose stacks
+/// make a set that holds any of them sealed. A registry from before gains
+/// both tables empty: nothing was sealed before there was a seal.
 fn labels_leave_with_their_provenance(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry {
         return Ok(());
     }
-    add_tables(store, kind, &["label_set"])
+    add_tables(store, kind, &["label_set", "sealed_stack"])
 }
 
 /// Record 41 S2: every rule's vote. A registry from before gains the two

@@ -2084,6 +2084,28 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["digest"])
         .index(&["handle_id"]),
+        // Record 40 R3: the stacks of a sample drawn for certification and
+        // sealed by an operator before anyone looked (`nils labels seal`).
+        // A label set any of whose items is one of them, or of a sealed
+        // stack's subject where the item is a session, is sealed, and never
+        // training data. The seal is the registry's, never a caller's flag.
+        Table::new(
+            "sealed_stack",
+            vec![
+                col("id", Type::Id),
+                // what was sealed: a selection as name@version, or a handle
+                req("sample", Type::Text),
+                req("stack_id", Type::Int),
+                req("subject_id", Type::Int),
+                // the frozen list the sample came from, pinned by the seal
+                col("handle_id", Type::Int),
+                req("sealed_by", Type::Text),
+                req("sealed_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["sample", "stack_id"])
+        .index(&["stack_id"])
+        .index(&["subject_id"]),
     ]
 }
 
@@ -2219,6 +2241,7 @@ mod tests {
             "campaign_assignment",
             "campaign_answer",
             "label_set",
+            "sealed_stack",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

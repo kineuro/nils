@@ -623,6 +623,14 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
     );
     assert_eq!(labels["rows"].as_i64(), Some(n as i64), "{labels}");
     assert_eq!(labels["sealed"], false);
+    // whether a set is sealed is the registry's to say (record 40 R3)
+    let (status, refused) = server.call(
+        "POST",
+        "/api/label-sets",
+        Some(json!({"axis": "body_part", "place": "labels-out", "sealed": false})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{refused}");
     let again = server.ok(
         "POST",
         "/api/label-sets",
@@ -818,6 +826,40 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
         ],
     ))
     .unwrap();
+    // an operator seals the selection as a certification sample: a set of
+    // its stacks is sealed now, whatever anyone asks, and trains nothing
+    let status = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args([
+            "labels",
+            "export",
+            "--axis",
+            "body_part",
+            "--to",
+            second.to_str().unwrap(),
+            "--sealed",
+        ])
+        .env("NILS_PRINCIPAL", "cleo@lab")
+        .output()
+        .unwrap()
+        .status;
+    assert!(!status.success(), "--sealed is not a caller's to say");
+    let sealed: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &[
+            "labels",
+            "seal",
+            "--select",
+            "selection:every@1",
+            "--pack-dir",
+            pack_dir,
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(sealed["stacks"].as_i64(), Some(n as i64), "{sealed}");
     let again: Value = serde_json::from_str(&cli(
         &home,
         "cleo@lab",
@@ -828,7 +870,6 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
             "body_part",
             "--to",
             second.to_str().unwrap(),
-            "--sealed",
             "--json",
         ],
     ))
@@ -848,6 +889,29 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
         serde_json::from_str(&std::fs::read_to_string(second.join("provenance.json")).unwrap())
             .unwrap();
     assert_eq!(provenance["sealed"], true, "{provenance}");
+    // a model trained on those labels is refused, by either set's digest
+    let card = work.path().join("card.json");
+    std::fs::write(
+        &card,
+        json!({"name": "bp", "version": "1", "kind": "pass",
+               "digest": format!("sha256:{}", "7".repeat(64)), "task": "axis:body_part",
+               "trained_on": {"label_set": format!("sha256:{}", set["digest"].as_str().unwrap())}})
+        .to_string(),
+    )
+    .unwrap();
+    let out = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args(["model", "register", "--card", card.to_str().unwrap()])
+        .env("NILS_PRINCIPAL", "cleo@lab")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("R3"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // the campaign's own answers, one row each
     let answers: Value = serde_json::from_str(&cli(
         &home,

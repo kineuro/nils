@@ -9,8 +9,9 @@
 //! handle it covers.
 //!
 //! Record 40 R3: a sample drawn and sealed for certification is never
-//! training data. A set drawn from one carries `sealed`, and
-//! [`usable_for_training`] refuses it.
+//! training data. An operator seals the sample ([`seal`]); a set any of
+//! whose items is of a sealed sample carries `sealed`, which the registry
+//! works out and no caller sets, and [`usable_for_training`] refuses it.
 //!
 //! R5: v0's human body-part labels come in as person decisions marked as
 //! imported from v0, with the date v0 gave them ([`import_v0`]). A label
@@ -706,17 +707,221 @@ pub fn list(store: &mut Store) -> Result<Vec<LabelSet>, Error> {
         .collect::<Result<_, _>>()?)
 }
 
+/// The sets recorded with a digest, `sha256:` before it or not.
+pub fn by_digest(store: &mut Store, digest: &str) -> Result<Vec<LabelSet>, Error> {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    let sql = format!(
+        "SELECT {} FROM {} WHERE digest = {} ORDER BY id",
+        select_sets(store),
+        store.qualified("label_set"),
+        store.dialect().param(1, Type::Text)
+    );
+    Ok(store
+        .query(&sql, &[Param::from(hex)])?
+        .iter()
+        .map(set_of)
+        .collect::<Result<_, _>>()?)
+}
+
 /// The set, when a training tool may learn from it: a set drawn from a
 /// sealed certification sample is refused (record 40 R3), since a model
-/// fitted on the sample that certifies it certifies nothing.
+/// fitted on the sample that certifies it certifies nothing. A set is held
+/// to the seal it was written under and to the samples sealed since, read
+/// from its `labels.tsv` where the file is still there.
 pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error> {
     let set = get(store, id)?.ok_or_else(|| Error::NotFound(format!("no label set {id}")))?;
-    if set.sealed {
+    let sealed_since = match set.path.as_deref() {
+        Some(p) => match std::fs::read_to_string(std::path::Path::new(p).join("labels.tsv")) {
+            Ok(text) => sealed_among(store, &keys_of_tsv(&text))?,
+            Err(_) => false,
+        },
+        None => false,
+    };
+    if set.sealed || sealed_since {
         return Err(Error::Refused(format!(
-            "label set {id} was drawn from a sealed certification sample, which is never training data (record 40 R3)"
+            "label set {id} holds items of a sealed certification sample, which is never training data (record 40 R3)"
         )));
     }
     Ok(set)
+}
+
+/// The stack and subject of each row of a `labels.tsv`.
+fn keys_of_tsv(text: &str) -> Vec<Label> {
+    text.lines()
+        .skip(1)
+        .map(|line| {
+            let mut cells = line.split('\t');
+            let stack_id = cells.next().and_then(|c| c.parse::<i64>().ok());
+            let subject_id = cells.next().and_then(|c| c.parse::<i64>().ok());
+            Label {
+                stack_id,
+                subject_id,
+                ..Label::default()
+            }
+        })
+        .collect()
+}
+
+// ------------------------------------------------------- sealed samples
+
+/// What a seal did.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Sealed {
+    pub sample: String,
+    /// Stacks sealed now, and stacks the sample held sealed already.
+    pub stacks: i64,
+    pub already: i64,
+}
+
+impl Sealed {
+    pub fn as_json(&self) -> Value {
+        json!({"sample": self.sample, "stacks": self.stacks, "already": self.already})
+    }
+}
+
+/// Record 40 R3: seal a sample drawn for certification, before anyone
+/// looks. Every stack of it is kept by the registry as sealed, with its
+/// subject, so that a label set holding any of them is sealed and never
+/// training data. An operator's act: the seal is never a caller's flag on
+/// a set. Sealing a sample again adds what it did not hold; nothing is
+/// ever unsealed.
+pub fn seal(
+    registry: &mut Registry,
+    sample: &str,
+    handle_id: Option<i64>,
+    stacks: &[i64],
+    who: &str,
+) -> Result<Sealed, Error> {
+    let sample = sample.trim();
+    if sample.is_empty() {
+        return Err(Error::Invalid(
+            "a sealed sample names what it was drawn as".into(),
+        ));
+    }
+    if stacks.is_empty() {
+        return Err(Error::Invalid("the sample names no stack".into()));
+    }
+    let now = now_iso();
+    let store = registry.store();
+    store.begin()?;
+    let done = (|| -> Result<Sealed, Error> {
+        let d = store.dialect();
+        let mut subject_of: BTreeMap<i64, i64> = BTreeMap::new();
+        let wanted: BTreeSet<i64> = stacks.iter().copied().collect();
+        let list: Vec<i64> = wanted.iter().copied().collect();
+        for chunk in list.chunks(500) {
+            let sql = format!(
+                "SELECT k.id, r.subject_id FROM {} k JOIN {} r ON r.id = k.series_id WHERE k.id IN ({})",
+                store.qualified("stack"),
+                store.qualified("series"),
+                join_ids(chunk)
+            );
+            for r in store.query(&sql, &[])? {
+                subject_of.insert(r.int(0)?, r.int(1)?);
+            }
+        }
+        if let Some(missing) = wanted.iter().find(|k| !subject_of.contains_key(k)) {
+            return Err(Error::NotFound(format!("no stack {missing}")));
+        }
+        let sql = format!(
+            "SELECT stack_id FROM {} WHERE sample = {}",
+            store.qualified("sealed_stack"),
+            d.param(1, Type::Text)
+        );
+        let held: BTreeSet<i64> = store
+            .query(&sql, &[Param::from(sample)])?
+            .iter()
+            .map(|r| r.int(0))
+            .collect::<Result<_, _>>()?;
+        let rows: Vec<Vec<Param>> = subject_of
+            .iter()
+            .filter(|(k, _)| !held.contains(k))
+            .map(|(k, subject)| {
+                vec![
+                    Param::from(sample),
+                    Param::Int(*k),
+                    Param::Int(*subject),
+                    handle_id.map_or(Param::Null, Param::Int),
+                    Param::from(who),
+                    Param::from(now.as_str()),
+                ]
+            })
+            .collect();
+        for chunk in rows.chunks(500) {
+            store.insert(
+                &Insert::new(
+                    table("sealed_stack"),
+                    &[
+                        "sample",
+                        "stack_id",
+                        "subject_id",
+                        "handle_id",
+                        "sealed_by",
+                        "sealed_at",
+                    ],
+                ),
+                chunk,
+            )?;
+        }
+        Ok(Sealed {
+            sample: sample.to_string(),
+            stacks: rows.len() as i64,
+            already: (subject_of.len() - rows.len()) as i64,
+        })
+    })();
+    let sealed = match done {
+        Ok(s) => s,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e);
+        }
+    };
+    store.commit()?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::LabelsSeal,
+            scope: json!({"sample": sealed.sample, "handle": handle_id, "stacks": sealed.stacks}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"already": sealed.already})),
+        },
+    )?;
+    Ok(sealed)
+}
+
+fn join_ids(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether any of these labels is an item of a sealed sample: its stack is
+/// sealed, or, for a session's label that names no stack, a stack of its
+/// subject is.
+pub fn sealed_among(store: &mut Store, labels: &[Label]) -> Result<bool, Error> {
+    let stacks: BTreeSet<i64> = labels.iter().filter_map(|l| l.stack_id).collect();
+    let subjects: BTreeSet<i64> = labels
+        .iter()
+        .filter(|l| l.stack_id.is_none())
+        .filter_map(|l| l.subject_id)
+        .collect();
+    for (column, ids) in [("stack_id", stacks), ("subject_id", subjects)] {
+        let ids: Vec<i64> = ids.into_iter().collect();
+        for chunk in ids.chunks(500) {
+            let sql = format!(
+                "SELECT 1 FROM {} WHERE {column} IN ({}) LIMIT 1",
+                store.qualified("sealed_stack"),
+                join_ids(chunk)
+            );
+            if store.query_opt(&sql, &[])?.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 // ---------------------------------------------------------- v0's labels

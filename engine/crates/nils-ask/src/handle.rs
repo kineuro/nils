@@ -667,8 +667,8 @@ pub fn find_cached(
 }
 
 /// Who pins a handle: a cohort promoted from it, a selection whose ask
-/// reads it, a campaign whose items it froze and a label set that covers
-/// it (record 42). (A release or a job naming a handle is a later wave's
+/// reads it, a campaign whose items it froze, a label set that covers it
+/// (record 42) and a sample sealed from it (record 40 R3). (A release or a job naming a handle is a later wave's
 /// column.)
 pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError> {
     let d = store.dialect();
@@ -692,6 +692,15 @@ pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError>
         for r in store.query(&sql, &[Param::Int(id)])? {
             out.push(format!("{what} {}", r.text(0)?));
         }
+    }
+    // record 40 R3: a sealed sample's frozen list
+    let sql = format!(
+        "SELECT DISTINCT sample FROM {} WHERE handle_id = {} ORDER BY sample",
+        store.qualified("sealed_stack"),
+        d.param(1, Type::Int)
+    );
+    for r in store.query(&sql, &[Param::Int(id)])? {
+        out.push(format!("sealed sample {}", r.text(0)?));
     }
     let sql = format!(
         "SELECT s.name, sv.version, sv.ask FROM {} sv JOIN {} s ON s.id = sv.selection_id ORDER BY s.name, sv.version",

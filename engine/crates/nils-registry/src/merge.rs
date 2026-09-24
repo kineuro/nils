@@ -65,6 +65,8 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("values_member", Handling::Repoint),
     // record 42: a session-grain campaign item names its subject
     ("campaign_item", Handling::Repoint),
+    // record 40 R3: a sealed stack keeps its subject, for a set of sessions
+    ("sealed_stack", Handling::Repoint),
     // the linkage store
     ("identity", Handling::Repoint),
 ];

@@ -109,6 +109,8 @@ pub enum Action {
     /// from v0 imported as person decisions.
     LabelsExport,
     LabelsImport,
+    /// Record 40 R3: a sample sealed for certification, never training data.
+    LabelsSeal,
 }
 
 impl Action {
@@ -166,6 +168,7 @@ impl Action {
             Action::CampaignClose => "campaign.close",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
+            Action::LabelsSeal => "labels.seal",
         }
     }
 
@@ -197,6 +200,7 @@ impl Action {
                 | Action::CampaignMetric
                 | Action::CampaignClose
                 | Action::LabelsExport
+                | Action::LabelsSeal
         )
     }
 }

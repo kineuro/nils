@@ -1659,3 +1659,111 @@ fn a_second_writer_never_gets_a_stale_answer_or_a_second_close_in() {
         assert_eq!(count(reg, "decision", ""), 0, "{name}");
     }
 }
+
+/// Record 40 R3: a sample an operator sealed makes every label set holding
+/// any of its items sealed, the registry's own finding and never a flag a
+/// caller sets, and a model registered as trained on a sealed set, or on a
+/// digest no set has, is refused.
+#[test]
+fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let label = |stack: Option<i64>, subject: Option<i64>| labels::Label {
+            stack_id: stack,
+            subject_id: subject,
+            what: "body_part".into(),
+            value: Some("brain".into()),
+            author_kind: "person".into(),
+            author: "anna@lab".into(),
+            ..labels::Label::default()
+        };
+        let drawn = vec![label(Some(ids[0]), None)];
+        assert!(
+            !labels::sealed_among(reg.store(), &drawn).unwrap(),
+            "{name}"
+        );
+        let sealed = labels::seal(reg, "selection:draw@1", None, &ids[..2], "op@lab").unwrap();
+        assert_eq!((sealed.stacks, sealed.already), (2, 0), "{name}");
+        let again = labels::seal(reg, "selection:draw@1", None, &ids[..2], "op@lab").unwrap();
+        assert_eq!((again.stacks, again.already), (0, 2), "{name}");
+        assert!(labels::seal(reg, "selection:draw@1", None, &[999_999], "op@lab").is_err());
+        assert!(labels::sealed_among(reg.store(), &drawn).unwrap(), "{name}");
+        let other = vec![label(Some(ids[2]), None)];
+        assert!(
+            !labels::sealed_among(reg.store(), &other).unwrap(),
+            "{name}"
+        );
+        // a session's label is sealed when its subject has a sealed stack
+        let subject = select(reg, |s| {
+            format!(
+                "SELECT r.subject_id FROM {} k JOIN {} r ON r.id = k.series_id WHERE k.id = {}",
+                s.qualified("stack"),
+                s.qualified("series"),
+                ids[0]
+            )
+        })[0]
+            .int(0)
+            .unwrap();
+        let session = vec![label(None, Some(subject))];
+        assert!(
+            labels::sealed_among(reg.store(), &session).unwrap(),
+            "{name}"
+        );
+        let set = |reg: &mut Registry, digest: &str, sealed: bool| {
+            labels::record(
+                reg,
+                &labels::NewSet {
+                    name: "bp",
+                    kind: "decisions",
+                    what: "body_part",
+                    source: json!({}),
+                    campaign_id: None,
+                    handle_id: None,
+                    pack_version: None,
+                    scheme_digest: None,
+                    sealed,
+                    rows: 1,
+                    digest,
+                    place_id: None,
+                    path: None,
+                    created_by: "cleo@lab",
+                },
+            )
+            .unwrap()
+        };
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let sealed_set = labels::sealed_among(reg.store(), &drawn).unwrap();
+        set(reg, &a, sealed_set);
+        let open_set = labels::sealed_among(reg.store(), &other).unwrap();
+        set(reg, &b, open_set);
+        let card = |digest: &str, trained: &str| {
+            json!({"name": format!("h-{}", &digest[7..9]), "version": "1", "kind": "pass",
+                   "digest": digest, "task": "axis:body_part",
+                   "trained_on": {"label_set": format!("sha256:{trained}")}})
+        };
+        let e = nils_registry::model::register(
+            reg,
+            &card(&format!("sha256:{}", "1".repeat(64)), &"c".repeat(64)),
+            "op@lab",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("no label set"), "{name}: {e}");
+        let e = nils_registry::model::register(
+            reg,
+            &card(&format!("sha256:{}", "2".repeat(64)), &a),
+            "op@lab",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("R3"), "{name}: {e}");
+        nils_registry::model::register(
+            reg,
+            &card(&format!("sha256:{}", "3".repeat(64)), &b),
+            "op@lab",
+        )
+        .unwrap();
+        assert_eq!(count(reg, "audit", " WHERE action = 'labels.seal'"), 2);
+    }
+}

@@ -5190,7 +5190,7 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
     let head = |version: &str, digest: &str, encoder: Option<&str>| -> String {
         let mut card = serde_json::json!({
             "name": "base-head", "version": version, "kind": "head", "digest": digest,
-            "task": format!("axis:{asked_axis}"), "trained_on": {"label_set": format!("sha256:{}", "c".repeat(64))},
+            "task": format!("axis:{asked_axis}"),
             "metrics": {"accuracy": 0.97, "ece": 0.02},
         });
         if let Some(e) = encoder {
@@ -5201,6 +5201,20 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
     refused(
         &["model", "register", "--card", &head("1", &a, None)],
         "encoder",
+    );
+    // a model is trained on a label set this registry wrote, by its digest
+    let untrained = write(
+        "untrained.json",
+        &serde_json::json!({
+            "name": "a-pass", "version": "1", "kind": "pass",
+            "digest": format!("sha256:{}", "9".repeat(64)), "task": "axis:body_part",
+            "trained_on": {"label_set": format!("sha256:{}", "c".repeat(64))},
+        })
+        .to_string(),
+    );
+    refused(
+        &["model", "register", "--card", &untrained],
+        "no label set has the digest",
     );
     let first = doc(ok(&[
         "model",
