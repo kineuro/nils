@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# SynthStrip brain extraction: record 49's first analysis beside N4 (R1), a
+# starter the engine seeds at boot.
+#
+# One session's T1-weighted image in; a brain mask, the brain-extracted
+# image and a one-row table with the brain's volume out. Learning-based and
+# contrast-agnostic, CPU only, no licence, the model inside the image.
+#
+# The image is FreeSurfer 8.2.0, which ships mri_synthstrip, pinned by its
+# registry manifest digest (resolved 2026-09-24 with a registry manifest
+# request, not pulled: a single-platform linux/amd64 image manifest). The
+# dedicated freesurfer/synthstrip:1.8 image
+# (sha256:ebbc177221194371f16362513ace68312a22922bb581bdfa618ac7ff9c1d2c06,
+# v0's base) has mri_synthstrip as its ENTRYPOINT, which the job contract
+# runs before every command line; it takes one image a call and cannot
+# walk a run's sessions. FreeSurfer 8.2.0 is also the image of SynthSeg,
+# SAMSEG and recon-all, so one pull serves four starters.
+name: synthstrip
+schema-version: "0.5"
+tool-version: "freesurfer-8.2.0"
+description: >-
+  Skull-strip each session's T1-weighted image with SynthStrip: a binary
+  brain mask, the brain-extracted image, and the brain's volume in mm3. One
+  session is one unit; CPU, no licence.
+
+container-image:
+  type: docker
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+
+inputs:
+  - id: no_csf
+    name: Exclude CSF
+    type: Flag
+    description: Exclude the cerebrospinal fluid from the mask (SynthStrip --no-csf) for a tighter brain.
+    value-key: "[NOCSF]"
+    command-line-flag: "--no-csf"
+    default-value: false
+  - id: border
+    name: Mask border
+    type: Number
+    description: Grow (or with a negative value shrink) the mask's boundary by this many millimetres.
+    value-key: "[BORDER]"
+    default-value: 1
+    minimum: -5
+    maximum: 10
+    unit: mm
+  - id: threads
+    name: Threads
+    type: Number
+    description: The threads mri_synthstrip uses for one session.
+    value-key: "[THREADS]"
+    default-value: 2
+    integer: true
+    minimum: 1
+    maximum: 32
+
+command-line: >-
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+  d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
+  b=$(basename "$f" .nii.gz); b=${b%_T1w};
+  mri_synthstrip -i "$f" -o "$d/${b}_desc-brain_T1w.nii.gz" -m "$d/${b}_desc-brain_mask.nii.gz" -b [BORDER] -t [THREADS] [NOCSF] || continue;
+  v=$(fspython -c "import sys, numpy, nibabel; i = nibabel.load(sys.argv[1]); print(float(numpy.count_nonzero(i.get_fdata() > 0) * numpy.prod(i.header.get_zooms()[:3])))" "$d/${b}_desc-brain_mask.nii.gz") || continue;
+  printf "brain_volume\n%s\n" "$v" > "$d/${b}_desc-brain_volume.csv"; done'
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w]
+  units: apart
+  outputs:
+    - id: brain_mask
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_mask.nii.gz"
+      media-type: application/x-nifti+gzip
+    - id: brain
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_T1w.nii.gz"
+      media-type: application/x-nifti+gzip
+    - id: brain_volume
+      kind: table
+      format: csv
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_volume.csv"
+      columns:
+        - {name: brain_volume, type: number, unit: mm3, description: "The volume inside the brain mask"}
+  qc:
+    - {metric: brain_volume, op: ">=", value: 700000, description: "A mask smaller than 0.7 litres has cut into the brain"}
+    - {metric: brain_volume, op: "<=", value: 2200000, description: "A mask larger than 2.2 litres has taken skull or neck"}
+  needs:
+    gpu: none
+    cores: 2
+    memory-gb: 4
+    unit-minutes: 1

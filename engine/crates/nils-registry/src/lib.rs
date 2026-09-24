@@ -33,6 +33,7 @@ pub mod job;
 pub mod keys;
 pub mod labels;
 pub mod linkage;
+pub mod measure;
 pub mod merge;
 pub mod migrate;
 pub mod model;

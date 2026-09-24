@@ -22,8 +22,18 @@ use crate::store::{Error, Insert, Param, Row, Store};
 /// tiles (wave 43 moves them here), an output anything else a pipeline
 /// wrote. Record 43 adds two a run writes and a person does not: seeds,
 /// the suggestions a run made for a person to curate, and model, the
-/// artifact of a model a run fitted and the registry registered.
-pub const KINDS: [&str; 6] = ["mask", "embedding", "pyramid", "output", "seeds", "model"];
+/// artifact of a model a run fitted and the registry registered. Record 49
+/// adds table: a file of numbers with declared columns, whose rows the
+/// runner loads as measures the ask reads.
+pub const KINDS: [&str; 7] = [
+    "mask",
+    "embedding",
+    "pyramid",
+    "output",
+    "seeds",
+    "model",
+    "table",
+];
 
 /// The kinds only a pipeline run writes (record 43).
 pub const RUN_KINDS: [&str; 2] = ["seeds", "model"];

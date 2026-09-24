@@ -542,6 +542,8 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
         }
     }
 
+    measures_within_detail(ask, scope, &mut issues);
+
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
         issues.into_iter().partition(|i| i.code.is_warning());
     out.warnings = warnings;
@@ -1699,6 +1701,91 @@ fn check_class(info: &FieldInfo, field: &str, path: &str, scope: &Scope, issues:
             format!("{field} is local and never leaves the node"),
             "run at home, or drop the field",
         ));
+    }
+}
+
+/// Whether a field path reads a pipeline run's measure (record 49 A3):
+/// `measure.<pipeline>.<name>`, on the set's own grain or through a level,
+/// a partner or an ancestor (`session.measure.synthseg.total_intracranial`).
+pub fn is_measure_path(path: &str) -> bool {
+    path.starts_with("measure.") || path.contains(".measure.")
+}
+
+/// Record 49 R4: a run's numbers are read per scan only by a caller whose
+/// detail reaches quasi identifying fields; below it, a measure is read as
+/// a total over a group, in an aggregate of a group set's binding (count,
+/// distinct, sum, avg, min or max, never list), and in a predicate, which
+/// answers a count. It is refused in a column, an order, a group's key and
+/// a binding of any other set, where it would be one scan's value.
+fn measures_within_detail(ask: &Ask, scope: &Scope, issues: &mut Vec<Issue>) {
+    if scope.classes.contains(&Class::QuasiIdentifying) {
+        return;
+    }
+    // the first measure a clause reads per row, outside a total
+    fn per_row(c: &Clause, totalled: bool, in_group: bool) -> Option<String> {
+        if c.op == "field"
+            && let Some(p) = c.ref_name()
+            && is_measure_path(p)
+            && !(totalled && in_group)
+        {
+            return Some(p.to_string());
+        }
+        let totals = AGGREGATES.contains(&c.op.as_str()) && c.op != "list";
+        let mut all: Vec<&Clause> = Vec::new();
+        for a in &c.args {
+            match a {
+                Arg::Clause(inner) => all.push(inner),
+                Arg::List(items) => {
+                    for i in items {
+                        if let Arg::Clause(inner) = i {
+                            all.push(inner);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        all.into_iter()
+            .find_map(|inner| per_row(inner, totalled || totals, in_group))
+    }
+    let refuse = |issues: &mut Vec<Issue>, path: String, field: String| {
+        issues.push(issue(
+            Code::ForbiddenField,
+            path,
+            format!(
+                "{field} is a scan's measure, read per row only at detail quasi (record 49 R4); at this detail the ask answers its totals"
+            ),
+            "group the set and bind count, sum, avg, min or max over it, or ask for detail quasi",
+        ));
+    };
+    for (name, set) in &ask.sets {
+        let in_group = set.grain == Grain::Group;
+        for (b, c) in &set.bind.0 {
+            if let Some(f) = per_row(c, false, in_group) {
+                refuse(issues, format!("sets.{name}.bind.{b}"), f);
+            }
+        }
+        if let Some(g) = &set.group {
+            for (i, c) in g.by.iter().enumerate() {
+                if let Some(f) = per_row(c, false, false) {
+                    refuse(issues, format!("sets.{name}.group.by[{i}]"), f);
+                }
+            }
+        }
+    }
+    let in_group = ask
+        .sets
+        .get(&ask.out.set)
+        .is_some_and(|s| s.grain == Grain::Group);
+    for (i, c) in ask.out.columns.iter().enumerate() {
+        if let Some(f) = per_row(c, false, in_group) {
+            refuse(issues, format!("out.columns[{i}]"), f);
+        }
+    }
+    for (i, o) in ask.out.order.iter().enumerate() {
+        if let Some(f) = per_row(&o.0, false, in_group) {
+            refuse(issues, format!("out.order[{i}]"), f);
+        }
     }
 }
 

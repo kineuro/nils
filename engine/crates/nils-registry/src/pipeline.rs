@@ -56,6 +56,9 @@ pub struct Pipeline {
     pub state: String,
     pub added_by: String,
     pub added_at: String,
+    /// `starter` for a version the engine seeded (record 49 A4), none for
+    /// one a person added.
+    pub origin: Option<String>,
 }
 
 impl Pipeline {
@@ -80,7 +83,7 @@ pub struct New<'a> {
     pub added_at: &'a str,
 }
 
-const COLUMNS: [&str; 13] = [
+const COLUMNS: [&str; 14] = [
     "id",
     "name",
     "version",
@@ -94,6 +97,7 @@ const COLUMNS: [&str; 13] = [
     "state",
     "added_by",
     "added_at",
+    "origin",
 ];
 
 fn select(store: &mut Store) -> String {
@@ -130,7 +134,24 @@ fn of(r: &Row) -> Result<Pipeline, Error> {
         state: r.text(10)?.to_string(),
         added_by: r.text(11)?.to_string(),
         added_at: r.text(12)?.to_string(),
+        origin: r.opt_text(13)?.map(str::to_string),
     })
+}
+
+/// The origin a seeded entry carries (record 49 A4).
+pub const STARTER: &str = "starter";
+
+/// Mark an entry as the engine's own starter version.
+pub fn set_origin(store: &mut Store, id: i64, origin: &str) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET origin = {} WHERE id = {}",
+        store.qualified("pipeline"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int)
+    );
+    store.execute(&sql, &[Param::from(origin), Param::Int(id)])?;
+    Ok(())
 }
 
 /// Add a descriptor: the name's next version, or the version that already

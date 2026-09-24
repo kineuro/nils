@@ -65,6 +65,35 @@ Pipeline runs have a lane of their own: `nils serve --worker` runs them in a wor
 
 A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units leave. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the lane's own running units there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. Each unit holds its lease until its container ends, and is given that card alone.
 
+## Use the starter catalog
+
+The engine seeds the first analyses of record 49 into its catalog each time it starts, when they are not there: N4, SynthStrip, SynthSeg, SAMSEG with lesions, MRIQC and FreeSurfer recon-all. Each is marked as a starter, and each image is pinned by its registry manifest digest.
+
+1. See what the catalog holds of each:
+
+   ```sh
+   nils pipeline starter
+   ```
+
+2. Seed them now, without restarting the engine:
+
+   ```sh
+   nils pipeline starter --seed
+   ```
+
+3. Turn the seeding off, or back on:
+
+   ```sh
+   nils pipeline starter --off
+   nils pipeline starter --on
+   ```
+
+A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter.
+
+> **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
+
+> **Warning:** segcsvd, record 49's fourth analysis, is not a starter: it ships only as an image archive on Hugging Face, with no public registry image to pin by digest.
+
 ## Add a pipeline
 
 ```sh
@@ -82,7 +111,15 @@ nils pipeline show n4-bias-correction
 
 1. Save the selection to run over, as a question (`nils ask selections save`), or name a frozen handle.
 
-2. Run it:
+2. Check what the run would do, without running it:
+
+   ```sh
+   nils run samseg-lesions --select selection:ms-baseline@1 --preflight
+   ```
+
+   The pre-flight counts the units, names the units that lack an input and why (a session with no FLAIR picked, a stack with no file or no derivative its input needs), counts the stacks no unit takes, estimates the time from the pipeline's own past runs here or else from its descriptor, says whether it wants a GPU and what it would run on, and holds what a unit needs against the lane's budget. `ready` false lists the blockers. Nothing runs.
+
+3. Run it:
 
    ```sh
    nils run n4-bias-correction --select selection:every-t1@1 --param shrink_factor=2
@@ -90,7 +127,7 @@ nils pipeline show n4-bias-correction
 
    The selection is frozen into a handle the run pins. A parameter not given takes its default, and every parameter is recorded on the run.
 
-3. Read what it did:
+4. Read what it did:
 
    ```sh
    nils pipeline runs
@@ -105,6 +142,14 @@ Through the engine's doors a run is a job, queued by someone who holds `pipeline
 curl -X POST http://127.0.0.1:8437/api/jobs \
   -H 'content-type: application/json' \
   -d '{"command": ["run", "n4-bias-correction", "--select", "selection:every-t1@1"]}'
+```
+
+The door `POST /api/pipelines/{name}/preflight` answers the same pre-flight, under `pipelines:see`; below detail quasi it names no unit by its subject or session:
+
+```sh
+curl -X POST http://127.0.0.1:8437/api/pipelines/samseg-lesions/preflight \
+  -H 'content-type: application/json' \
+  -d '{"select": "selection:ms-baseline@1", "params": {"lesion": "on"}}'
 ```
 
 ## Take a run up again
@@ -144,6 +189,35 @@ A pipeline that needs a licence, such as FreeSurfer, declares it under `x-nils.s
 The file is read when a run starts and mounted read-only into that pipeline's containers alone, at the path its descriptor names (`/secrets/<id>` by default), with the variable it names (such as `FS_LICENSE`) pointing there. A run that needs a secret the site has not set is refused before anything runs.
 
 > **Warning:** a container can print what it was given. After each container the engine removes every file it left that holds the secret, and refuses it as a `pipeline:qc` item, and writes its log and `results.json` again with the secret replaced by `[secret <id>]`. The run records the secret's id, never its path or its bytes.
+
+## Read a run's numbers in the ask
+
+A table output (`kind: table`) is a file of numbers a unit or a run writes, with declared and typed columns. The runner registers the file as a derivative of kind `table`, reads its rows, and loads each as the unit's measures. The ask then reads each one as a field of the unit's grain, `measure.<pipeline>.<column>`, the value of the newest run that measured the unit, and `measure.<pipeline>.run` names that run.
+
+1. Run the pipeline, then ask per session:
+
+   ```json
+   {"ast_version": 1,
+    "sets": {"s": {"grain": "session"}},
+    "out": {"set": "s", "level": "record", "columns": [
+      ["field", {}, "id"],
+      ["field", {}, "measure.synthseg.left_hippocampus"],
+      ["field", {}, "measure.synthseg.run"]]}}
+   ```
+
+2. Below detail quasi, ask for totals over a group instead (record 49 R4):
+
+   ```json
+   {"ast_version": 1,
+    "sets": {"s": {"grain": "session"},
+             "g": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "subject.sex"]]},
+                   "bind": {"mean": ["avg", {"set": "s"}, ["field", {}, "measure.synthseg.left_hippocampus"]]}}},
+    "out": {"set": "g", "level": "aggregate", "columns": [["field", {}, "subject.sex"], ["field", {}, "mean"]]}}
+   ```
+
+> **Warning:** a measure is quasi identifying. Below detail quasi the ask refuses it in a column, an order, a group's key and any binding but a total (count, distinct, sum, avg, min or max) of a group set, and allows it in a predicate. A group of one scan is still one scan's value: the ask does not apply the agents' k rule to these totals.
+
+A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metric, op, value}`. Each unit that succeeded is held to them, the metric read from its `results.json` metrics or else from its tables; a breach is one `pipeline:qc` review item, status `breach`, whose error names the metric, its value and the check. A breach does not make a run partial. A metric a check reads from `results.json` is kept as a measure too.
 
 ## Run a model and take its proposals
 
@@ -283,6 +357,8 @@ What a run does, in order:
 | run-level outputs | a file of the whole run (`level: run`). A `model` output is registered as a model in state registered from the card beside it: the card must name the artifact's digest, it is trained on the label set the run was given, and its encoders are the card's |
 | seeds | the `seeds` and `selection` of `results.json`, kept as the run's one derivative of kind `seeds`, never as proposals |
 | proposals | on the axes the descriptor declares, grouped into `<axis>:model` review items and staged at the model card's threshold, or refused whole when the file says what the contract does not |
+| tables | a `table` output's rows, read by its declared columns (a column by the header its `from` names, or by the header whose folded form is its name), are the unit's measures; a unit's table holds one row, and a run's table names each row's unit in its `unit-column`. The run's `summary.numbers` counts the files, rows and measures, the declared columns a file lacked, the values refused, and the checks held |
+| checks | the declared checks (`x-nils.qc`), each held against each unit that succeeded; a breach is a `pipeline:qc` item with status `breach`, unless the unit has an item already |
 | review | a unit that failed, or that `results.json` did not name, is one `pipeline:qc` review item. A container that failed as a whole, exiting with an error and no `results.json`, or writing one that does not read, is one item of the run (unit `run`), not one per unit; so is a run whose every unit's container did |
 | run | every parameter, the runtime and its version, the host, the device, the models, the label set, the handle, the summary and a digest of the results, which a re-run that makes the same files repeats. A run whose container exited 0 is `done`, or `partial` when units failed or went unreported or a file it made was refused |
 

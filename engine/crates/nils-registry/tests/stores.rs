@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64],
+            [59, 60, 61, 62, 63, 64, 65],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2016,7 +2016,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64],
+            [61, 62, 63, 64, 65],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2078,7 +2078,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64],
+            [63, 64, 65],
             "{name}"
         );
         for (t, col) in [
@@ -2152,7 +2152,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64],
+            [64, 65],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2171,6 +2171,48 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         assert_eq!(rows[0].int(0).unwrap(), 0, "{name}");
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 49 A3 and A4: a registry from before gains the measures a run's
+/// tables load, empty, and a catalog entry's origin, empty, since every
+/// entry before was a person's; what it held reads as before.
+#[test]
+fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (p, m, meta) = (
+            store.qualified("pipeline"),
+            store.qualified("measure"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {m};
+                 ALTER TABLE {p} DROP COLUMN origin;
+                 INSERT INTO {p} (name, version, tool_version, descriptor, descriptor_digest, image, image_digest, layout, level, state, added_by, added_at) \
+                 VALUES ('n4', 1, '2', '{{}}', 'sha256:a', 'x@sha256:a', 'sha256:a', 'bids', 'session', 'active', 'op', '2026-09-24T00:00:00Z');
+                 UPDATE {meta} SET value = '64' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [65],
+            "{name}"
+        );
+        assert!(
+            migrate::table_exists(&mut store, "measure").unwrap(),
+            "{name}"
+        );
+        let kept = nils_registry::pipeline::list(&mut store).unwrap();
+        assert_eq!(kept.len(), 1, "{name}");
+        assert_eq!(kept[0].origin, None, "{name}");
+        assert!(
+            nils_registry::measure::families(&mut store)
                 .unwrap()
                 .is_empty(),
             "{name}"

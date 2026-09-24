@@ -1239,7 +1239,15 @@ fn a_run_queued_at_the_door_is_served_by_bytes_and_by_a_shared_path() {
     }
     let (status, cat) = server.call("GET", "/api/pipelines", None, OPERATOR);
     assert_eq!(status, 200);
-    assert_eq!(cat["pipelines"][0]["label"], "stack-echo@1", "{cat}");
+    // record 49 A4: beside it, the starters the engine seeded at its start
+    let echo = cat["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "stack-echo")
+        .unwrap_or_else(|| panic!("{cat}"));
+    assert_eq!(echo["label"], "stack-echo@1", "{cat}");
+    assert_eq!(echo["starter"], false, "{echo}");
     let (status, _) = server.call("GET", "/api/pipelines", None, READER);
     assert_eq!(status, 403, "a reader holds no pipelines:see");
 
@@ -3335,4 +3343,622 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
     let ends = trace(&t).iter().filter(|e| e.0 == "end").count();
     assert_eq!(ends, 4, "{:?}", trace(&t));
+}
+
+/// Record 49 A3: a pipeline of the stacks layout that writes one table a
+/// stack, a volume and a site, and reports an SNR among its metrics, one
+/// stack's (`low`) under the declared check.
+const VOLUMES: &str = r#"name: volumes
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/volumes@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+inputs:
+  - id: low
+    name: The stack whose SNR is low
+    type: Number
+    value-key: "[LOW]"
+    default-value: 0
+    integer: true
+  - id: scale
+    name: What each volume is multiplied by
+    type: Number
+    value-key: "[SCALE]"
+    default-value: 1000
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]; low = int(sys.argv[3]); scale = float(sys.argv[4])
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "volumes.csv"), "w").write("Brain Volume,Site\n%s,lab\n" % (scale * s["stack_id"]))
+      snr = 3.5 if s["stack_id"] == low else 20
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/volumes.csv"], "metrics": {"snr": snr}})
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [LOW] [SCALE]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: volumes
+      kind: table
+      path-template: "stack-{stack}/volumes.csv"
+      columns:
+        - {name: brain_volume, unit: mm3}
+        - {name: site, type: text}
+  qc: ["snr >= 8", "brain_volume <= 100000000"]
+  needs: {unit-minutes: 1}
+"#;
+
+/// The rows of an exported handle, each a map from its header, the columns
+/// the document asked for under their paths.
+fn exported(lab: &Lab, handle: &Value) -> Vec<std::collections::BTreeMap<String, String>> {
+    let csv = lab.work.path().join(format!("handle-{handle}.csv"));
+    lab.ok(
+        &[
+            "ask",
+            "handles",
+            "export",
+            "--handle",
+            &handle.to_string(),
+            "--out",
+            csv.to_str().unwrap(),
+        ],
+        None,
+    );
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<String> = lines
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .map(|c| c.trim_matches('"').to_string())
+        .collect();
+    lines
+        .map(|l| {
+            header
+                .iter()
+                .cloned()
+                .zip(l.split(',').map(|c| c.trim_matches('"').to_string()))
+                .collect()
+        })
+        .collect()
+}
+
+/// A row's value under a column whose header is, or ends with, `name`.
+fn cell<'a>(row: &'a std::collections::BTreeMap<String, String>, name: &str) -> &'a str {
+    row.iter()
+        .find(|(h, _)| *h == name || h.ends_with(&format!(".{name}")) || h.ends_with(name))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or_else(|| panic!("no column {name} in {row:?}"))
+}
+
+fn ask_file(lab: &Lab, name: &str, doc: &Value) -> String {
+    let f = lab.work.path().join(format!("{name}.json"));
+    std::fs::write(&f, doc.to_string()).unwrap();
+    f.to_str().unwrap().to_string()
+}
+
+/// Record 49 A3's proof, the first half: a run's table is answered in the
+/// ask, each value traced to its run, per scan at detail quasi and as a
+/// total below it; a planted breach of a declared check raises its
+/// `pipeline:qc` item, which names the metric and the value.
+#[test]
+fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-numbers");
+    lab.add_descriptor("volumes", VOLUMES);
+    let stacks: Vec<i64> = lab
+        .store()
+        .query("SELECT id FROM stack ORDER BY id", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    assert_eq!(stacks.len(), 4);
+    let low = stacks[0];
+    let v = lab.json(&[
+        "run",
+        "volumes",
+        "--select",
+        "selection:every@1",
+        "--param",
+        &format!("low={low}"),
+        "--json",
+    ]);
+    // a breach is not a failure: the run is done, the unit's item raised
+    assert_eq!(v["status"], "done", "{v}");
+    let numbers = &v["summary"]["numbers"];
+    assert_eq!(numbers["tables"]["files"], 4, "{v}");
+    assert_eq!(numbers["tables"]["rows"], 4, "{v}");
+    // a volume and a site a stack, and the SNR a check read from results
+    assert_eq!(numbers["measures"], 12, "{v}");
+    assert_eq!(numbers["checks"]["declared"], 2, "{v}");
+    assert_eq!(numbers["checks"]["breaches"], 1, "{v}");
+    assert_eq!(numbers["checks"]["unchecked"], 0, "{v}");
+    let run = v["id"].as_i64().unwrap();
+    let rows = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["kind"] == "table"),
+        "{rows}"
+    );
+    let mut store = lab.store();
+    let items = store
+        .query(
+            "SELECT evidence FROM review_item WHERE kind = 'pipeline:qc' AND status = 'open'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(items.len(), 1, "one planted breach, one item");
+    let evidence: Value = serde_json::from_str(items[0].text(0).unwrap()).unwrap();
+    assert_eq!(evidence["status"], "breach", "{evidence}");
+    assert_eq!(
+        evidence["error"], "snr is 3.5, and the check is snr >= 8",
+        "{evidence}"
+    );
+    assert_eq!(
+        evidence["metrics"]["breaches"][0]["value"], 3.5,
+        "{evidence}"
+    );
+    drop(store);
+
+    // the ask reads the run's numbers as fields of the stack, with the run
+    let packs = packs();
+    let p = packs.to_str().unwrap();
+    let per_scan = json!({
+        "ast_version": 1,
+        "sets": {"s": {"grain": "stack"}},
+        "out": {"set": "s", "level": "record", "columns": [
+            ["field", {}, "id"],
+            ["field", {}, "measure.volumes.brain_volume"],
+            ["field", {}, "measure.volumes.site"],
+            ["field", {}, "measure.volumes.snr"],
+            ["field", {}, "measure.volumes.run"],
+        ], "order": [[["field", {}, "id"], "asc"]]},
+    });
+    let file = ask_file(&lab, "per-scan", &per_scan);
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    let rows = exported(&lab, &answer["handle"]);
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for r in &rows {
+        let id: f64 = cell(r, "id").parse().unwrap();
+        let volume: f64 = cell(r, "measure.volumes.brain_volume").parse().unwrap();
+        assert_eq!(volume, 1000.0 * id, "{r:?}");
+        assert_eq!(cell(r, "measure.volumes.site"), "lab", "{r:?}");
+        let snr: f64 = cell(r, "measure.volumes.snr").parse().unwrap();
+        assert_eq!(snr, if id as i64 == low { 3.5 } else { 20.0 }, "{r:?}");
+        assert_eq!(
+            cell(r, "measure.volumes.run"),
+            run.to_string(),
+            "each value traced to its run: {r:?}"
+        );
+    }
+
+    // R4: below detail quasi a scan's value is refused, and its total is
+    // answered over a group
+    let (good, _, err) = lab.run_on(
+        &lab.path,
+        &["ask", "run", "--file", &file, "--pack-dir", p, "--json"],
+        None,
+    );
+    assert!(good, "at the keyboard every class is held");
+    let mut plain = lab.command(&lab.path);
+    let out = plain
+        .env("NILS_JOB_DETAIL", "plain")
+        .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+        .output()
+        .unwrap();
+    let err_text = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err_text}");
+    assert!(
+        err_text.contains("read per row only at detail quasi"),
+        "{err_text} {err}"
+    );
+    let totals = json!({
+        "ast_version": 1,
+        "sets": {
+            "s": {"grain": "stack"},
+            "g": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "n_instances"]]},
+                  "bind": {
+                      "total": ["sum", {"set": "s"}, ["field", {}, "measure.volumes.brain_volume"]],
+                      "mean": ["avg", {"set": "s"}, ["field", {}, "measure.volumes.brain_volume"]],
+                      "scans": ["count", {"set": "s"}],
+                  }},
+        },
+        "out": {"set": "g", "level": "aggregate", "columns": [
+            ["field", {}, "n_instances"], ["field", {}, "total"], ["field", {}, "mean"], ["field", {}, "scans"],
+        ]},
+    });
+    let file = ask_file(&lab, "totals", &totals);
+    let mut plain = lab.command(&lab.path);
+    let out = plain
+        .env("NILS_JOB_DETAIL", "plain")
+        .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = exported(&lab, &answer["handle"]);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let sum: f64 = stacks.iter().map(|s| 1000.0 * *s as f64).sum();
+    assert_eq!(
+        cell(&rows[0], "total").parse::<f64>().unwrap(),
+        sum,
+        "{rows:?}"
+    );
+    assert_eq!(cell(&rows[0], "scans"), "4", "{rows:?}");
+
+    // a newer run's value is the one the ask reads, and names that run
+    let again = lab.json(&[
+        "run",
+        "volumes",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "scale=2000",
+        "--json",
+    ]);
+    assert_eq!(
+        again["summary"]["numbers"]["checks"]["breaches"], 0,
+        "{again}"
+    );
+    let file = ask_file(&lab, "per-scan-again", &per_scan);
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    for r in exported(&lab, &answer["handle"]) {
+        let id: f64 = cell(&r, "id").parse().unwrap();
+        let volume: f64 = cell(&r, "measure.volumes.brain_volume").parse().unwrap();
+        assert_eq!(volume, 2000.0 * id, "{r:?}");
+        assert_eq!(
+            cell(&r, "measure.volumes.run"),
+            again["id"].to_string(),
+            "{r:?}"
+        );
+    }
+}
+
+/// Record 49 A3: a pipeline of the bids layout that needs a T1w and a
+/// FLAIR a session, and makes an output only where it has both.
+const NEEDS_FLAIR: &str = r#"name: needs-flair
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/needs-flair@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+command-line: |
+  python3 -c '
+  import glob, os, shutil, sys
+  src, out = sys.argv[1], sys.argv[2]
+  for t in sorted(glob.glob(src + "/sub-*/ses-*/anat/*_T1w.nii.gz")):
+      a = os.path.dirname(t)
+      if not glob.glob(a + "/*_FLAIR.nii.gz"):
+          continue
+      rel = os.path.relpath(t, src)
+      d = os.path.join(out, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
+      shutil.copy(t, os.path.join(d, os.path.basename(rel).replace("_T1w", "_desc-both_T1w")))
+      open(os.path.join(d, "stats.json"), "w").write("{\"Bytes\": %d}" % os.path.getsize(t))
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids, roles: [t1w, flair]}
+  outputs:
+    - id: both
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-both_T1w.nii.gz"
+    - id: stats
+      kind: table
+      path-template: "sub-{subject}/ses-{session}/anat/stats.json"
+      columns: [{name: bytes, type: integer}]
+  needs: {cores: 2, memory-gb: 3, unit-minutes: 4}
+"#;
+
+/// Record 49 A3's proof, the second half: the pre-flight of a selection
+/// whose one session lacks its FLAIR counts the units the run then has and
+/// names the one it then fails, at the command line and at the door, and
+/// estimates from the descriptor and then from the run.
+#[test]
+fn the_preflight_counts_what_the_run_then_does() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-preflight");
+    lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+    // one session's FLAIR left out of the selection
+    let flair = lab
+        .store()
+        .query(
+            "SELECT ps.stack_id FROM pick_stack ps JOIN pick p ON p.id = ps.pick_id \
+             WHERE p.role = 'flair' AND p.withdrawn_at IS NULL ORDER BY ps.stack_id LIMIT 1",
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    let doc = lab.work.path().join("most.json");
+    std::fs::write(
+        &doc,
+        json!({"ast_version": 1, "sets": {"most": {"grain": "stack",
+            "where": [["<>", {}, ["field", {}, "id"], flair]]}},
+            "out": {"set": "most", "level": "record"}})
+        .to_string(),
+    )
+    .unwrap();
+    let packs = packs();
+    lab.ok(
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            "most",
+            "--file",
+            doc.to_str().unwrap(),
+            "--pack-dir",
+            packs.to_str().unwrap(),
+        ],
+        None,
+    );
+    let pre = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["stacks"], 3, "{pre}");
+    assert_eq!(pre["units"]["total"], 2, "{pre}");
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    let why = pre["missing"][0]["why"][0].as_str().unwrap();
+    assert!(why.contains("no flair is picked"), "{pre}");
+    assert_eq!(pre["estimate"]["source"], "descriptor", "{pre}");
+    assert_eq!(
+        pre["estimate"]["seconds"], 480.0,
+        "two units of four minutes, one at a time: {pre}"
+    );
+    assert_eq!(pre["gpu"]["need"], "none");
+    assert_eq!(pre["gpu"]["device"], "cpu");
+    assert_eq!(pre["needs"]["cores"], 2.0, "{pre}");
+    assert_eq!(pre["budget"]["fits"], true, "{pre}");
+    assert_eq!(pre["ready"], true, "{pre}");
+    // nothing ran
+    assert!(lab.podman_runs().is_empty());
+    // the words a person reads
+    let text = lab.ok(
+        &[
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:most@1",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(text.contains("2 (1 ready, 1 missing an input)"), "{text}");
+    // a parameter it does not have is a blocker, not a run
+    let bad = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--preflight",
+        "--param",
+        "nope=1",
+        "--json",
+    ]);
+    assert_eq!(bad["ready"], false, "{bad}");
+
+    // the door answers the same, and at detail plain names no session
+    let server = Server::start(&lab);
+    let (status, door) = server.call(
+        "POST",
+        "/api/pipelines/needs-flair/preflight",
+        Some(json!({"select": "selection:most@1"})),
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{door}");
+    assert_eq!(door["units"], pre["units"], "{door}");
+    assert!(door["missing"][0]["session_day"].is_string(), "{door}");
+    let (status, flat) = server.call(
+        "POST",
+        "/api/pipelines/needs-flair/preflight",
+        Some(json!({"handle": pre["handle"]})),
+        PLAIN,
+    );
+    assert_eq!(status, 200, "{flat}");
+    assert_eq!(flat["units"], pre["units"]);
+    assert!(flat["missing"][0].get("session_day").is_none(), "{flat}");
+    assert!(flat["missing"][0]["why"].is_array(), "{flat}");
+    let (status, _) = server.call(
+        "POST",
+        "/api/pipelines/needs-flair/preflight",
+        Some(json!({"handle": pre["handle"]})),
+        READER,
+    );
+    assert_eq!(status, 403, "a reader holds no pipelines:see");
+    let (status, _) = server.call(
+        "POST",
+        "/api/pipelines/no-such/preflight",
+        Some(json!({"handle": pre["handle"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 404);
+    drop(server);
+
+    // the run then has those units, and fails the one named
+    let v = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--json",
+    ]);
+    assert_eq!(v["summary"]["units"]["total"], pre["units"]["total"], "{v}");
+    assert_eq!(
+        v["summary"]["units"]["failed"], pre["units"]["missing"],
+        "{v}"
+    );
+    assert_eq!(
+        v["summary"]["units"]["succeeded"], pre["units"]["ready"],
+        "{v}"
+    );
+    // a session's table is the session's measure in the ask
+    assert_eq!(v["summary"]["numbers"]["measures"], 1, "{v}");
+    let sessions = json!({
+        "ast_version": 1,
+        "sets": {"s": {"grain": "session"}},
+        "out": {"set": "s", "level": "record", "columns": [
+            ["field", {}, "id"], ["field", {}, "measure.needs-flair.bytes"],
+            ["field", {}, "measure.needs-flair.run"],
+        ]},
+    });
+    let file = ask_file(&lab, "sessions", &sessions);
+    let answer = lab.json(&[
+        "ask",
+        "run",
+        "--file",
+        &file,
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--json",
+    ]);
+    let rows = exported(&lab, &answer["handle"]);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let measured: Vec<&std::collections::BTreeMap<String, String>> = rows
+        .iter()
+        .filter(|r| !cell(r, "measure.needs-flair.bytes").is_empty())
+        .collect();
+    assert_eq!(measured.len(), 1, "the session with both: {rows:?}");
+    assert!(
+        cell(measured[0], "measure.needs-flair.bytes")
+            .parse::<f64>()
+            .unwrap()
+            > 0.0
+    );
+    assert_eq!(
+        cell(measured[0], "measure.needs-flair.run"),
+        v["id"].to_string()
+    );
+    // and the next pre-flight estimates from that run
+    let after = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(after["estimate"]["source"], "runs", "{after}");
+    assert_eq!(after["estimate"]["runs"], 1, "{after}");
+}
+
+/// Record 49 A4's proof: an engine started on a fresh registry seeds the
+/// starter catalog, each version marked as a starter and each image pinned;
+/// a second start adds nothing, a person's own version is never gone over,
+/// and the setting turns the seeding off.
+#[test]
+fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-starter");
+    let before = lab.json(&["pipeline", "starter", "--json"]);
+    assert_eq!(before["seeding"], "on");
+    assert!(
+        before["starters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["state"] == "absent"),
+        "{before}"
+    );
+    let server = Server::start(&lab);
+    let (status, cat) = server.call("GET", "/api/pipelines", None, OPERATOR);
+    assert_eq!(status, 200, "{cat}");
+    let names: Vec<&str> = cat["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["starter"] == true)
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "freesurfer-recon-all",
+            "mriqc",
+            "n4-bias-correction",
+            "samseg-lesions",
+            "synthseg",
+            "synthstrip"
+        ],
+        "{cat}"
+    );
+    for p in cat["pipelines"].as_array().unwrap() {
+        assert_eq!(p["origin"], "starter", "{p}");
+        assert!(p["image"].as_str().unwrap().contains("@sha256:"), "{p}");
+    }
+    drop(server);
+    // a second start adds nothing
+    let server = Server::start(&lab);
+    let (_, again) = server.call("GET", "/api/pipelines", None, OPERATOR);
+    assert_eq!(again["pipelines"].as_array().unwrap().len(), 6, "{again}");
+    drop(server);
+    let listed = lab.json(&["pipeline", "starter", "--json"]);
+    for s in listed["starters"].as_array().unwrap() {
+        assert!(
+            s["state"]
+                .as_str()
+                .unwrap()
+                .starts_with("in the catalog as"),
+            "{s}"
+        );
+    }
+    // a person's own version of a starter is left as it is
+    let mine = std::fs::read_to_string(repo().join("pipelines/synthstrip/nils.job.yml"))
+        .unwrap()
+        .replace("default-value: 2\n", "default-value: 3\n");
+    let v = lab.add_descriptor("synthstrip-mine", &mine);
+    assert_eq!(v["label"], "synthstrip@2", "{v}");
+    assert_eq!(v["starter"], false, "{v}");
+    let listed = lab.json(&["pipeline", "starter", "--seed", "--json"]);
+    assert!(listed["added"].as_array().unwrap().is_empty(), "{listed}");
+    let state = listed["starters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "synthstrip")
+        .unwrap()["state"]
+        .clone();
+    assert_eq!(state, "in the catalog as synthstrip@1", "{listed}");
+
+    // the setting turns it off, on a registry that has none yet
+    let fresh = Lab::new("pipelines-starter-off");
+    fresh.ok(&["pipeline", "starter", "--off"], None);
+    let server = Server::start(&fresh);
+    let (_, none) = server.call("GET", "/api/pipelines", None, OPERATOR);
+    assert!(none["pipelines"].as_array().unwrap().is_empty(), "{none}");
+    drop(server);
+    let text = fresh.ok(&["pipeline", "starter"], None);
+    assert!(
+        text.contains("seeding at the engine's start: off"),
+        "{text}"
+    );
 }

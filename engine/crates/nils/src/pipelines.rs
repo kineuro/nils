@@ -106,7 +106,7 @@ pub(crate) fn choice(registry: &mut Registry) -> Choice {
 
 /// What the look for a runtime found, kept half a minute, since the
 /// capabilities are read often and asking podman is not free.
-fn detect_cached(registry: &mut Registry) -> Detected {
+pub(crate) fn detect_cached(registry: &mut Registry) -> Detected {
     static CACHE: Mutex<Option<(Instant, Choice, Detected)>> = Mutex::new(None);
     let chosen = choice(registry);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -212,6 +212,8 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
         "image": p.image, "image_digest": p.image_digest,
         "descriptor_digest": p.descriptor_digest, "layout": p.layout, "level": p.level,
         "state": p.state, "added_by": p.added_by, "added_at": p.added_at,
+        "origin": p.origin, "starter": p.origin.as_deref() == Some(rows::STARTER),
+        "checks": x["qc"], "roles": x["input"]["roles"],
         "parameters": p.descriptor["inputs"], "inputs": x["inputs"], "outputs": x["outputs"],
         "needs": x["needs"], "proposals": x["proposals"],
         "descriptor": p.descriptor,
@@ -492,6 +494,22 @@ pub(crate) enum PipelineCommand {
         #[arg(long)]
         json: bool,
     },
+    /// The starter catalog (record 49 A4): the analyses the engine seeds at
+    /// its start, and what the catalog holds of each
+    Starter {
+        /// Seed what the catalog lacks now, as the engine does at its start
+        #[arg(long)]
+        seed: bool,
+        /// Turn the seeding at the engine's start off
+        #[arg(long, conflicts_with = "on")]
+        off: bool,
+        /// Turn it back on
+        #[arg(long)]
+        on: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// The runs, newest first, or one run with its derivatives
     Runs {
         /// One run, by id
@@ -572,6 +590,11 @@ pub(crate) struct RunArgs {
     /// The DICOM to NIfTI converter a bids input is released with
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
     pub(crate) dcm2niix: PathBuf,
+    /// Run nothing: say what the run would do (record 49 A3), its units,
+    /// the units missing an input and why, the time, the GPU, and what a
+    /// unit needs against the lane's budget
+    #[arg(long)]
+    pub(crate) preflight: bool,
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
@@ -986,6 +1009,51 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             }
             Ok(())
         }
+        PipelineCommand::Starter {
+            seed,
+            off,
+            on,
+            json,
+        } => {
+            if off || on {
+                let word = if off { "off" } else { "on" };
+                registry.set_meta(crate::starter::SETTING, word)?;
+                crate::audit(
+                    &mut registry,
+                    nils_registry::audit::Action::PipelineRuntime,
+                    json!({"starter": word}),
+                    None,
+                )?;
+            }
+            let added = if seed {
+                crate::starter::seed(&mut registry).map_err(fail)?
+            } else {
+                Vec::new()
+            };
+            let enabled = crate::starter::enabled(&mut registry);
+            let list = crate::starter::list(&mut registry).map_err(fail)?;
+            if json {
+                return print(&json!({
+                    "seeding": if enabled { "on" } else { "off" },
+                    "starters": list, "added": added,
+                }));
+            }
+            println!(
+                "seeding at the engine's start: {}",
+                if enabled { "on" } else { "off" }
+            );
+            for s in &list {
+                println!(
+                    "  {:<24} {}",
+                    s["name"].as_str().unwrap_or_default(),
+                    s["state"].as_str().unwrap_or_default()
+                );
+            }
+            for a in &added {
+                println!("seeded {}", a["label"].as_str().unwrap_or_default());
+            }
+            Ok(())
+        }
         PipelineCommand::Runs {
             id,
             pipeline,
@@ -1177,7 +1245,7 @@ fn nonce() -> String {
 }
 
 /// The stacks of a frozen handle.
-fn handle_stacks(store: &mut Store, handle: i64) -> Result<Vec<i64>, Exit> {
+pub(crate) fn handle_stacks(store: &mut Store, handle: i64) -> Result<Vec<i64>, Exit> {
     let h = nils_ask::handle::get(store, handle)
         .map_err(|e| fail(e.to_string()))?
         .ok_or_else(|| usage(format!("no handle {handle}")))?;
@@ -1991,6 +2059,9 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
 
 /// `nils run`.
 pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
+    if args.preflight {
+        return crate::preflight::command(home, &args);
+    }
     detail_allows_pixels()?;
     if let Some(run) = args.resume {
         return resume_command(home, &args, run);
@@ -2412,7 +2483,10 @@ fn conclude(
             error: error.as_deref(),
         },
     )?;
-    nils_registry::audit::record(
+    // record 49 A3: a run that loaded measures changed what the ask
+    // answers, so it moves the epoch and the ask's catalog is built again
+    let measures_loaded = summary["numbers"]["measures"].as_u64().unwrap_or(0) > 0;
+    nils_registry::audit::record_judging(
         registry,
         &nils_registry::audit::Entry {
             principal: c.who,
@@ -2427,8 +2501,10 @@ fn conclude(
             details: Some(json!({
                 "status": status, "runtime": c.runtime, "device": c.device,
                 "results": digest, "review_items": summary["review_items"],
+                "measures": summary["numbers"]["measures"],
             })),
         },
+        measures_loaded,
     )?;
     let job_state = match status {
         "done" | "partial" => job::State::Done,
@@ -3561,7 +3637,7 @@ fn take_in(
 
 /// Whether the run registered a file at this path already: a resume that
 /// takes a unit in again finds it rather than registering it twice.
-fn registered_already(store: &mut Store, run_id: i64, path: &str) -> Result<bool, String> {
+fn registered_already(store: &mut Store, run_id: i64, path: &str) -> Result<Option<i64>, String> {
     let d = store.dialect();
     let sql = format!(
         "SELECT id FROM {} WHERE run_id = {} AND path = {}",
@@ -3571,7 +3647,7 @@ fn registered_already(store: &mut Store, run_id: i64, path: &str) -> Result<bool
     );
     store
         .query_opt(&sql, &[Param::Int(run_id), Param::from(path)])
-        .map(|r| r.is_some())
+        .and_then(|r| r.map(|r| r.int(0)).transpose())
         .map_err(|e| e.to_string())
 }
 
@@ -3592,6 +3668,7 @@ fn register_unit(
     let working = PathBuf::from(&x.place.path);
     let mut hashed: Vec<Value> = Vec::new();
     let mut refused: Vec<Value> = Vec::new();
+    let mut tables: Vec<Value> = Vec::new();
     let (mut registered, mut bytes_total, mut embedded, mut cached) =
         (0usize, 0u64, 0usize, 0usize);
     let Some(belongs) = u.belongs() else {
@@ -3655,34 +3732,41 @@ fn register_unit(
                     continue;
                 }
             }
-        } else if registered_already(registry.store(), x.run_id, &path)? {
-            // taken in before a resume: the row stands
-            registered += 1;
-            bytes_total += bytes;
         } else {
-            derivative::insert_of_run(
-                registry.store(),
-                &derivative::New {
-                    kind,
-                    belongs: &belongs,
-                    place_id: x.place.id,
-                    path: &path,
-                    bytes: bytes as i64,
-                    sha256: &sha,
-                    media_type: &media,
-                    registered_by: x.who,
-                    actor: Some(x.actor),
-                    model_id: None,
-                    run_id: None,
-                    preprocess_version: None,
-                    supersedes_id: None,
-                    created_at: now,
-                },
-                x.run_id,
-            )
-            .map_err(|e| e.to_string())?;
+            let id = match registered_already(registry.store(), x.run_id, &path)? {
+                // taken in before a resume: the row stands
+                Some(id) => id,
+                None => derivative::insert_of_run(
+                    registry.store(),
+                    &derivative::New {
+                        kind,
+                        belongs: &belongs,
+                        place_id: x.place.id,
+                        path: &path,
+                        bytes: bytes as i64,
+                        sha256: &sha,
+                        media_type: &media,
+                        registered_by: x.who,
+                        actor: Some(x.actor),
+                        model_id: None,
+                        run_id: None,
+                        preprocess_version: None,
+                        supersedes_id: None,
+                        created_at: now,
+                    },
+                    x.run_id,
+                )
+                .map_err(|e| e.to_string())?,
+            };
             registered += 1;
             bytes_total += bytes;
+            // a table's rows are the unit's measures (record 49 A3), read
+            // when the run is closed, so a resume reads what it kept
+            if declared.table.is_some() {
+                tables.push(
+                    json!({"output": declared.id, "file": rel, "path": path, "derivative": id}),
+                );
+            }
         }
         hashed.push(json!({"path": rel, "sha256": sha}));
     }
@@ -3694,7 +3778,7 @@ fn register_unit(
     Ok(json!({
         "status": o.status, "error": o.error, "metrics": o.metrics,
         "files": hashed, "refused": refused, "registered": registered,
-        "bytes": bytes_total, "embedded": embedded, "cached": cached,
+        "bytes": bytes_total, "embedded": embedded, "cached": cached, "tables": tables,
     }))
 }
 
@@ -3752,6 +3836,50 @@ fn finalize(
         ));
     }
     digest_units.sort_by(|a, b| a["unit"].as_str().cmp(&b["unit"].as_str()));
+    // record 49 A3: the rows of the run's tables, as measures, and what
+    // reading them came to; a unit's own tables are read here from where
+    // it registered them, so a run taken up again reads what it kept
+    let mut measured: Vec<crate::measures::Pending> = Vec::new();
+    let mut notes = crate::measures::Notes::default();
+    for u in &m.units {
+        let Some(row) = by_name.get(u.id.as_str()) else {
+            continue;
+        };
+        let Some(belongs) = u.belongs() else {
+            continue;
+        };
+        for t in row.outcome["tables"].as_array().into_iter().flatten() {
+            let (Some(output), Some(path), Some(id)) = (
+                t["output"].as_str(),
+                t["path"].as_str(),
+                t["derivative"].as_i64(),
+            ) else {
+                continue;
+            };
+            let Some(declared) = d.outputs.iter().find(|o| o.id == output) else {
+                continue;
+            };
+            let read = std::fs::read(working.join(path))
+                .map_err(|e| e.to_string())
+                .and_then(|b| {
+                    crate::measures::unit_table(
+                        declared,
+                        &b,
+                        &u.id,
+                        &belongs,
+                        id,
+                        &mut notes,
+                        &mut measured,
+                    )
+                });
+            if let Err(why) = read {
+                refused.push(json!({
+                    "unit": u.id, "file": t["file"],
+                    "why": format!("its rows could not be read: {why}"),
+                }));
+            }
+        }
+    }
     // the run's exit: together, its one container's; apart, the first that
     // did not exit 0, or 0
     let exit_code = if apart {
@@ -3837,7 +3965,7 @@ fn finalize(
                 let (bytes, sha) =
                     nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
                 let media = nils_pipeline::files::media_type(&rel, o.media_type.as_deref());
-                derivative::insert_of_run(
+                let id = derivative::insert_of_run(
                     registry.store(),
                     &derivative::New {
                         kind: &o.kind,
@@ -3860,6 +3988,31 @@ fn finalize(
                 .map_err(|e| e.to_string())?;
                 registered += 1;
                 bytes_total += bytes;
+                // a run's table: each row's unit by its unit column (record
+                // 49 A3), and only a unit that succeeded
+                if o.table.is_some() {
+                    let units: Vec<(String, Option<Belongs>)> = statuses
+                        .iter()
+                        .map(|(i, status, ..)| {
+                            let u = &m.units[*i];
+                            (
+                                u.id.clone(),
+                                (status == "succeeded").then(|| u.belongs()).flatten(),
+                            )
+                        })
+                        .collect();
+                    let read = std::fs::read(&file)
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| {
+                            crate::measures::run_table(o, &b, &units, id, &mut notes, &mut measured)
+                        });
+                    if let Err(why) = read {
+                        refused.push(json!({
+                            "output": o.id, "file": rel,
+                            "why": format!("its rows could not be read: {why}"),
+                        }));
+                    }
+                }
                 run_files.push(json!({"path": rel, "sha256": sha}));
             }
         }
@@ -4049,6 +4202,82 @@ fn finalize(
         }
     }
 
+    // record 49 A3: the declared checks, held against each unit that
+    // succeeded, a breach one pipeline:qc item naming the metric and its
+    // value; a unit that has an item already keeps it
+    let mut breached: Vec<Value> = Vec::new();
+    if !whole {
+        let already: std::collections::BTreeSet<String> = statuses
+            .iter()
+            .filter(|(_, status, ..)| status == "failed" || status == "unreported")
+            .map(|(i, ..)| m.units[*i].id.clone())
+            .chain(
+                refused
+                    .iter()
+                    .filter_map(|r| r["unit"].as_str().map(str::to_string)),
+            )
+            .collect();
+        for (i, status, _, metrics, _) in &statuses {
+            if status != "succeeded" || d.checks.is_empty() {
+                continue;
+            }
+            let u = &m.units[*i];
+            let mine: BTreeMap<String, f64> = measured
+                .iter()
+                .filter(|p| p.unit_id == u.id)
+                .filter_map(|p| Some((p.name.clone(), p.number?)))
+                .collect();
+            let (breaches, taken, unchecked) = crate::measures::hold(&d.checks, metrics, &mine);
+            notes.unchecked += unchecked;
+            if let Some(b) = u.belongs() {
+                for (metric, value) in taken {
+                    measured.push(crate::measures::Pending {
+                        unit_id: u.id.clone(),
+                        belongs: b.clone(),
+                        derivative_id: None,
+                        source: nils_registry::measure::METRICS.into(),
+                        name: metric,
+                        ty: "number".into(),
+                        number: Some(value),
+                        text: None,
+                        unit: None,
+                    });
+                }
+            }
+            if breaches.is_empty() {
+                continue;
+            }
+            notes.breaches += breaches.len();
+            breached.push(json!({"unit": u.id, "breaches": breaches}));
+            if already.contains(&u.id) {
+                continue;
+            }
+            let words = crate::measures::breach_words(&breaches);
+            let id = nils_registry::review::raise_pipeline_qc(
+                registry.store(),
+                &nils_registry::review::PipelineQc {
+                    run_id: x.run_id,
+                    pipeline: &label,
+                    unit: &u.id,
+                    stack_id: u.stack_id,
+                    subject_id: u.subject_id,
+                    session_day: u.session_day.as_deref(),
+                    status: "breach",
+                    error: Some(&words),
+                    metrics: &json!({"breaches": breaches, "metrics": metrics}),
+                    job_id: Some(x.job_id),
+                },
+                &now,
+            )
+            .map_err(|e| e.to_string())?;
+            if !items.contains(&id) {
+                items.push(id);
+            }
+        }
+    }
+    let measures_written =
+        crate::measures::write(registry.store(), x.run_id, p.id, &p.name, &measured, &now)?;
+
     // the proposals on the axes it declares, through the review spine
     // (record 43 S6): grouped model items, staged at the model's threshold
     let (declared, undeclared): (Vec<Value>, Vec<Value>) =
@@ -4119,6 +4348,9 @@ fn finalize(
             (true, Some(e)) => json!(format!("unreadable: {e}")),
             (true, None) => json!("none: found by the declared templates"),
         },
+        // record 49 A3: the run's tables, measures and checks
+        "numbers": notes.summary(measures_written, d.checks.len()),
+        "breaches": breached,
         "input_release_id": m.release_id,
         // what the container was given of the sources: one bind per folder
         // of the selection's files, or the roots past the limit, and why

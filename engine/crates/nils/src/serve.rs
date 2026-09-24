@@ -1052,6 +1052,14 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             .map(|d| d.display().to_string())
             .unwrap_or_else(|| "none".to_string())
     );
+    // record 49 A4: the starter catalog, seeded where the setting allows;
+    // a failure is said and the engine serves on
+    // (never a panic: a caller that read the listening line and closed
+    // the pipe is not a reason to stop)
+    if let Ok(mut registry) = home.open() {
+        let line = crate::starter::at_start(&mut registry);
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes());
+    }
     let ask_caps = match &args.ask_caps {
         Some(text) => {
             let over: serde_json::Value = serde_json::from_str(text)
@@ -1499,6 +1507,18 @@ fn routed(
     // a run names a unit by its subject or session only at detail quasi
     let quasi = caller.allowed(path, need, Detail::Quasi).is_ok();
     if let Some(r) = crate::pipelines::route(registry, quasi, get, &segs, query) {
+        return r;
+    }
+    // record 49 A3: the pre-flight of a run
+    if let Some(r) = crate::preflight::route(
+        &doors.home,
+        doors.pack_dir.as_deref(),
+        registry,
+        quasi,
+        post,
+        &segs,
+        body,
+    ) {
         return r;
     }
     // record 42: the campaigns and the label sets
@@ -3452,6 +3472,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // record 43: the catalog and the runs are the Pipelines page's
         ("GET", ["api", "pipelines" | "pipeline-runs"])
         | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
+        // record 49 A3: the pre-flight reads and starts nothing
+        ("POST", ["api", "pipelines", _, "preflight"]) => (Need::One("pipelines:see"), Plain),
         ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
         ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
@@ -3891,6 +3913,7 @@ fn capabilities(
     .iter()
     .chain(crate::derivatives::DOORS.iter())
     .chain(crate::pipelines::DOORS.iter())
+    .chain(std::iter::once(&crate::preflight::DOOR))
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())

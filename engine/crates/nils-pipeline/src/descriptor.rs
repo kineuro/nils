@@ -45,9 +45,23 @@ pub const INPUT_TYPES: [&str; 2] = ["model", "label_set"];
 
 /// The derivative kinds an output may be declared as; each is one of the
 /// registry's. `model` is a run-level output only (record 43): a model the
-/// run fitted, which the runner registers from its card. The registry's
-/// `seeds` is the runner's own, written from the results, never declared.
-pub const OUTPUT_KINDS: [&str; 5] = ["mask", "embedding", "pyramid", "output", "model"];
+/// run fitted, which the runner registers from its card. `table` (record 49
+/// A3) is a file of numbers with declared columns, one row per unit, whose
+/// rows the runner loads for the ask. The registry's `seeds` is the
+/// runner's own, written from the results, never declared.
+pub const OUTPUT_KINDS: [&str; 6] = ["mask", "embedding", "pyramid", "output", "model", "table"];
+
+/// The file formats a table output may be written in (record 49 A3).
+pub const TABLE_FORMATS: [&str; 3] = ["csv", "tsv", "json"];
+
+/// The types of a table's columns.
+pub const COLUMN_TYPES: [&str; 3] = ["number", "integer", "text"];
+
+/// The comparisons a declared check may make (`x-nils.qc`, record 49 A3).
+pub const CHECK_OPS: [&str; 4] = [">=", "<=", ">", "<"];
+
+/// The column names a table may not take: the ask's own word for a run.
+pub const RESERVED_COLUMNS: [&str; 1] = ["run"];
 
 /// Where an output belongs (`x-nils.outputs[].level`).
 pub const OUTPUT_LEVELS: [&str; 2] = ["unit", "run"];
@@ -232,6 +246,118 @@ pub struct Output {
     /// by weight digest; the runner takes an embedding by no other, unless
     /// the run was given that encoder (record 43 second review).
     pub encoders: Vec<String>,
+    /// For a table output (record 49 A3): its format and typed columns.
+    pub table: Option<Table>,
+}
+
+/// The type of a table's column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    Number,
+    Integer,
+    Text,
+}
+
+impl ColumnType {
+    pub fn name(self) -> &'static str {
+        match self {
+            ColumnType::Number => "number",
+            ColumnType::Integer => "integer",
+            ColumnType::Text => "text",
+        }
+    }
+
+    /// Whether its values are numbers.
+    pub fn numeric(self) -> bool {
+        self != ColumnType::Text
+    }
+}
+
+/// One declared column of a table output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Column {
+    /// The measure's name: what the ask calls it, under the pipeline.
+    pub name: String,
+    /// The header (csv, tsv) or key (json) the value is read from; absent,
+    /// the header whose folded form is the name (lowercase, every run of
+    /// other characters one `_`), so `left hippocampus` is
+    /// `left_hippocampus`.
+    pub from: Option<String>,
+    pub ty: ColumnType,
+    pub unit: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A table output: a file of one row per unit, its columns declared and
+/// typed (record 49 A3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    /// `csv`, `tsv` or `json` (one object, or a list of objects).
+    pub format: String,
+    pub columns: Vec<Column>,
+    /// For a run-level table, the column that names each row's unit, as
+    /// `/inputs/manifest.json` names it or with the unit as its prefix
+    /// (`sub-01_ses-a_T1w` is unit `sub-01_ses-a`).
+    pub unit_column: Option<String>,
+}
+
+/// A declared check on a unit's metric (`x-nils.qc`, record 49 A3): a unit
+/// whose value breaks it is one `pipeline:qc` review item naming the
+/// metric and the value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Check {
+    /// A metric the unit's results carry, or a column of one of its tables.
+    pub metric: String,
+    /// `>=`, `<=`, `>` or `<`: what a good value is.
+    pub op: String,
+    pub value: f64,
+    pub description: Option<String>,
+}
+
+impl Check {
+    /// Whether a value keeps the check.
+    pub fn holds(&self, v: f64) -> bool {
+        match self.op.as_str() {
+            ">=" => v >= self.value,
+            "<=" => v <= self.value,
+            ">" => v > self.value,
+            "<" => v < self.value,
+            _ => false,
+        }
+    }
+
+    /// The check as a person writes it: `snr >= 8`.
+    pub fn text(&self) -> String {
+        format!("{} {} {}", self.metric, self.op, number_text(self.value))
+    }
+}
+
+/// A number as a person writes it: `8`, not `8.0`.
+pub fn number_text(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 9.0e15 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// A header folded to a column name: lowercase, every run of characters
+/// other than letters and digits one `_`, none at either end.
+pub fn fold(header: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in header.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            if gap && !out.is_empty() {
+                out.push('_');
+            }
+            gap = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            gap = true;
+        }
+    }
+    out
 }
 
 /// A descriptor, parsed and checked.
@@ -255,6 +381,15 @@ pub struct Descriptor {
     pub secrets: Vec<Secret>,
     /// The axes its results may propose values on.
     pub proposals: Vec<String>,
+    /// Its declared checks (record 49 A3).
+    pub checks: Vec<Check>,
+    /// For a bids input, the pick roles each unit needs (`x-nils.input.roles`,
+    /// record 49 A3): a session without a pick of one is named by the
+    /// pre-flight, with the role it lacks.
+    pub roles: Vec<String>,
+    /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
+    /// which the pre-flight estimates from until the pipeline has run here.
+    pub unit_minutes: Option<f64>,
     /// The document as it parsed, kept whole.
     pub document: Value,
 }
@@ -668,6 +803,17 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         if !encoders.is_empty() && kind != "embedding" {
             return Err(format!("{at}encoders belong to an embedding output"));
         }
+        let table = if kind == "table" {
+            Some(table_of(o, &at, &template, run_level)?)
+        } else {
+            if let Some(key) = ["columns", "format", "unit-column"]
+                .iter()
+                .find(|k| !o[**k].is_null())
+            {
+                return Err(format!("{at}{key} belongs to a table output"));
+            }
+            None
+        };
         outputs.push(Output {
             id,
             kind,
@@ -676,12 +822,26 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             run_level,
             card,
             encoders,
+            table,
         });
     }
     if outputs.is_empty() {
         return Err(
             "x-nils.outputs names at least one output, by derivative kind and path template".into(),
         );
+    }
+    // a measure is named once in a pipeline: the ask reads it by that name
+    let mut named: Vec<&str> = Vec::new();
+    for o in &outputs {
+        for c in o.table.iter().flat_map(|t| &t.columns) {
+            if named.contains(&c.name.as_str()) {
+                return Err(format!(
+                    "x-nils.outputs: the column {} is declared by two tables; the ask reads a measure by its name",
+                    c.name
+                ));
+            }
+            named.push(&c.name);
+        }
     }
     let gpu = match &x["needs"]["gpu"] {
         Value::Null => Gpu::None,
@@ -796,6 +956,44 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         }
         proposals.push(axis.to_string());
     }
+    // record 49 A3: the declared checks, the roles a unit needs, and the
+    // typical minutes a unit takes
+    let mut checks: Vec<Check> = Vec::new();
+    for (i, c) in array(x, "qc", "x-nils.")?.iter().enumerate() {
+        let check = check_of(c).map_err(|e| format!("x-nils.qc[{i}]: {e}"))?;
+        if checks
+            .iter()
+            .any(|k| k.metric == check.metric && k.op == check.op)
+        {
+            return Err(format!(
+                "x-nils.qc[{i}]: {} {} is declared twice",
+                check.metric, check.op
+            ));
+        }
+        checks.push(check);
+    }
+    let mut roles: Vec<String> = Vec::new();
+    for (i, r) in array(&x["input"], "roles", "x-nils.input.")?
+        .iter()
+        .enumerate()
+    {
+        let role = r.as_str().filter(|r| is_ident(r, true)).ok_or_else(|| {
+            format!("x-nils.input.roles[{i}] is a pick role of the pack, such as t1w")
+        })?;
+        if !roles.iter().any(|q| q == role) {
+            roles.push(role.to_string());
+        }
+    }
+    if !roles.is_empty() && layout != Layout::Bids {
+        return Err(
+            "x-nils.input.roles are the picks a bids input carries; a stacks input has none".into(),
+        );
+    }
+    let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
+        None => None,
+        Some(m) if m > 0.0 && m.is_finite() => Some(m),
+        Some(m) => return Err(format!("x-nils.needs.unit-minutes is above 0, not {m}")),
+    };
     Ok(Descriptor {
         name,
         tool_version,
@@ -811,7 +1009,140 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         units,
         secrets,
         proposals,
+        checks,
+        roles,
+        unit_minutes,
         document,
+    })
+}
+
+/// A table output's format and columns (record 49 A3).
+fn table_of(o: &Value, at: &str, template: &str, run_level: bool) -> Result<Table, String> {
+    let format = match opt_text(o, "format", at)? {
+        Some(f) => f,
+        None => {
+            let lower = template.to_ascii_lowercase();
+            TABLE_FORMATS
+                .iter()
+                .find(|f| lower.ends_with(&format!(".{f}")))
+                .map(|f| f.to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "{at}format is one of {}; the path template's extension names none",
+                        TABLE_FORMATS.join(", ")
+                    )
+                })?
+        }
+    };
+    if !TABLE_FORMATS.contains(&format.as_str()) {
+        return Err(format!(
+            "{at}format is one of {}, not {format}",
+            TABLE_FORMATS.join(", ")
+        ));
+    }
+    let mut columns: Vec<Column> = Vec::new();
+    for (j, c) in array(o, "columns", at)?.iter().enumerate() {
+        let cat = format!("{at}columns[{j}].");
+        let name = text(c, "name", &cat)?.to_string();
+        if !is_ident(&name, true) {
+            return Err(format!(
+                "{cat}name {name} is lowercase letters, digits and _, starting with a letter"
+            ));
+        }
+        if RESERVED_COLUMNS.contains(&name.as_str()) {
+            return Err(format!(
+                "{cat}name {name} is the ask's own word for the run a value came from"
+            ));
+        }
+        if columns.iter().any(|q| q.name == name) {
+            return Err(format!("{cat}name {name} is declared twice"));
+        }
+        let ty = match c["type"].as_str() {
+            None | Some("number") => ColumnType::Number,
+            Some("integer") => ColumnType::Integer,
+            Some("text") => ColumnType::Text,
+            Some(other) => {
+                return Err(format!(
+                    "{cat}type is one of {}, not {other}",
+                    COLUMN_TYPES.join(", ")
+                ));
+            }
+        };
+        columns.push(Column {
+            name,
+            from: opt_text(c, "from", &cat)?,
+            ty,
+            unit: opt_text(c, "unit", &cat)?,
+            description: opt_text(c, "description", &cat)?,
+        });
+    }
+    if columns.is_empty() {
+        return Err(format!(
+            "{at}a table declares its columns: name, type (number, integer or text), unit"
+        ));
+    }
+    let unit_column = opt_text(o, "unit-column", at)?;
+    match (run_level, &unit_column) {
+        (true, None) => {
+            return Err(format!(
+                "{at}a run's table names the column that says each row's unit: unit-column"
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(format!(
+                "{at}unit-column belongs to a run's table; a unit's table is that unit's rows"
+            ));
+        }
+        _ => {}
+    }
+    Ok(Table {
+        format,
+        columns,
+        unit_column,
+    })
+}
+
+/// A declared check, as a mapping `{metric, op, value}` or as the text
+/// `snr >= 8`.
+fn check_of(v: &Value) -> Result<Check, String> {
+    let (metric, op, value, description) = match v {
+        Value::String(t) => {
+            let words: Vec<&str> = t.split_whitespace().collect();
+            let [metric, op, value] = words.as_slice() else {
+                return Err(format!("{t} is written metric op value, such as snr >= 8"));
+            };
+            let value: f64 = value
+                .parse()
+                .map_err(|_| format!("{t}: {value} is not a number"))?;
+            (metric.to_string(), op.to_string(), value, None)
+        }
+        Value::Object(_) => (
+            text(v, "metric", "")?.to_string(),
+            text(v, "op", "")?.to_string(),
+            opt_number(v, "value", "")?.ok_or("value is required, as a number")?,
+            opt_text(v, "description", "")?,
+        ),
+        _ => return Err("a check is {metric, op, value} or the text metric op value".into()),
+    };
+    if !is_ident(&metric, true) {
+        return Err(format!(
+            "the metric {metric} is lowercase letters, digits and _"
+        ));
+    }
+    if !CHECK_OPS.contains(&op.as_str()) {
+        return Err(format!(
+            "the comparison is one of {}, not {op}",
+            CHECK_OPS.join(", ")
+        ));
+    }
+    if !value.is_finite() {
+        return Err(format!("the value {value} is not a finite number"));
+    }
+    Ok(Check {
+        metric,
+        op,
+        value,
+        description,
     })
 }
 
@@ -1424,5 +1755,72 @@ x-nils:
         ))
         .unwrap_err();
         assert!(e.contains("runs its units together"), "{e}");
+    }
+
+    /// Record 49 A3: a table output declares its format and typed columns,
+    /// a check its metric, comparison and value, and a bids input the pick
+    /// roles each unit needs.
+    #[test]
+    fn a_table_its_checks_and_the_roles_a_unit_needs_are_declared_and_checked() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with = |extra: &str, x: &str| {
+            let base = if x.contains("  input:") {
+                base.replace("  input: {layout: bids}\n", "")
+            } else {
+                base.clone()
+            };
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("{extra}  needs: {{gpu: optional, unit-minutes: 5}}\n{x}"),
+            )
+        };
+        let table = "    - id: vols\n      kind: table\n      path-template: \"sub-{subject}/ses-{session}/vols.csv\"\n      columns:\n        - {name: total_intracranial, unit: mm3}\n        - {name: third_ventricle, from: 3rd ventricle}\n        - {name: site, type: text}\n";
+        let d = parse(&with(
+            table,
+            "  qc: [\"total_intracranial >= 900000\", {metric: third_ventricle, op: \"<=\", value: 5000}]\n  input: {layout: bids, roles: [t1w, flair]}\n",
+        ))
+        .unwrap();
+        let t = d.outputs[1].table.as_ref().unwrap();
+        assert_eq!(t.format, "csv");
+        assert_eq!(t.columns[0].ty, ColumnType::Number);
+        assert_eq!(t.columns[1].from.as_deref(), Some("3rd ventricle"));
+        assert_eq!(t.columns[2].ty, ColumnType::Text);
+        assert_eq!(d.checks.len(), 2);
+        assert_eq!(d.checks[0].text(), "total_intracranial >= 900000");
+        assert!(d.checks[0].holds(1.0e6) && !d.checks[0].holds(8.0e5));
+        assert!(d.checks[1].holds(5000.0) && !d.checks[1].holds(5000.5));
+        assert_eq!(d.roles, ["t1w", "flair"]);
+        assert_eq!(d.unit_minutes, Some(5.0));
+        assert_eq!(fold(" Left-Hippocampus "), "left_hippocampus");
+        assert_eq!(fold("putamen+pallidum"), "putamen_pallidum");
+        for (extra, x, words) in [
+            (table.replace("vols.csv", "vols.txt"), String::new(), "extension names none"),
+            (table.replace("      columns:\n        - {name: total_intracranial, unit: mm3}\n        - {name: third_ventricle, from: 3rd ventricle}\n        - {name: site, type: text}\n", ""), String::new(), "declares its columns"),
+            (table.replace("name: site, type: text", "name: run"), String::new(), "ask's own word"),
+            (table.replace("type: text", "type: date"), String::new(), "type is one of"),
+            (table.replace("kind: table", "kind: output"), String::new(), "belongs to a table output"),
+            (format!("{table}      unit-column: bids_name\n"), String::new(), "belongs to a run's table"),
+            (table.replace("      path-template: \"sub-{subject}/ses-{session}/vols.csv\"", "      level: run\n      path-template: all.csv"), String::new(), "unit-column"),
+            (String::new(), "  qc: [\"snr => 8\"]\n".to_string(), "comparison is one of"),
+            (String::new(), "  qc: [\"snr >= high\"]\n".to_string(), "not a number"),
+            (String::new(), "  qc: [{metric: SNR, op: \">=\", value: 8}]\n".to_string(), "lowercase"),
+            (String::new(), "  qc: [\"snr >= 8\", \"snr >= 9\"]\n".to_string(), "declared twice"),
+            (String::new(), "  input: {layout: bids, roles: [T1w]}\n".to_string(), "pick role"),
+        ] {
+            let e = parse(&with(&extra, &x)).unwrap_err();
+            assert!(e.contains(words), "{words}: {e}");
+        }
+        // two tables may not both name one measure
+        let twice = format!(
+            "{table}{}",
+            table
+                .replace("id: vols", "id: more")
+                .replace("vols.csv", "more.csv")
+        );
+        assert!(
+            parse(&with(&twice, ""))
+                .unwrap_err()
+                .contains("declared by two tables")
+        );
     }
 }

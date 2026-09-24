@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# SAMSEG with lesions: whole-brain segmentation with white-matter lesions
+# from a T1-weighted image and a FLAIR, for MS and NMOSD lesion load
+# (record 49 R1), a starter the engine seeds at boot.
+#
+# One session's T1w and FLAIR in; a label map (FreeSurfer's aseg codes,
+# lesions 99) and a table of volumes, lesions and the intracranial volume
+# in mm3 out. The FLAIR is resampled onto the T1w's grid through the
+# scanner's world coordinates first, as v0's wrapper did, since SAMSEG
+# reads its contrasts on one grid. A session without a FLAIR picked is
+# named by the pre-flight and writes nothing here, so the run makes it a
+# pipeline:qc item.
+#
+# The image is FreeSurfer 8.2.0 (run_samseg, surfa in fspython), pinned by
+# its registry manifest digest, resolved 2026-09-24 by a registry manifest
+# request, not pulled. v0 ran SAMSEG standalone (MIT) in a private image;
+# this uses the one inside FreeSurfer, and declares no licence, which v0's
+# notes say SAMSEG needs none of.
+name: samseg-lesions
+schema-version: "0.5"
+tool-version: "freesurfer-8.2.0"
+description: >-
+  Segment each session with SAMSEG from its T1w and FLAIR, lesions
+  included: a label map and the volumes of the brain's structures and its
+  white-matter lesions, with the intracranial volume. One session is one
+  unit; CPU, about 45 minutes a session.
+
+container-image:
+  type: docker
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+
+inputs:
+  - id: lesion
+    name: Segment lesions
+    type: String
+    description: "on reads the FLAIR beside the T1w and segments white-matter lesions (label 99); off segments the anatomy from the T1w alone, in about a quarter of the time."
+    value-key: "[LESION]"
+    value-choices: ["on", "off"]
+    default-value: "on"
+  - id: pallidum_separate
+    name: Separate pallidum
+    type: Flag
+    description: Segment the pallidum as a class of its own rather than with the putamen.
+    value-key: "[PALLIDUM]"
+    command-line-flag: "--pallidum-separate"
+    default-value: true
+  - id: threads
+    name: Threads
+    type: Number
+    description: The threads SAMSEG uses for one session.
+    value-key: "[THREADS]"
+    default-value: 4
+    integer: true
+    minimum: 1
+    maximum: 32
+
+command-line: >-
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+  a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
+  b=$(basename "$f" .nii.gz); b=${b%_T1w}; w=$(mktemp -d);
+  fl=""; for g in $a/*_FLAIR.nii.gz; do fl=$g; break; done;
+  if [ "[LESION]" = on ]; then
+  if [ -z "$fl" ]; then echo "$a holds no FLAIR, so no lesions"; rm -rf "$w"; continue; fi;
+  fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).resample_like(surfa.load_volume(sys.argv[2])).save(sys.argv[3])" "$fl" "$f" "$w/flair.mgz" || continue;
+  run_samseg -i "$f" -i "$w/flair.mgz" --lesion --lesion-mask-pattern 0 1 -o "$w/out" --threads [THREADS] [PALLIDUM] || continue;
+  else run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || continue; fi;
+  fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).save(sys.argv[2])" "$w/out/seg.mgz" "$d/${b}_desc-samseg_dseg.nii.gz" || continue;
+  fspython -c "import sys, json; print(json.dumps(dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")])))" "$w/out" > "$d/${b}_desc-samseg_volumes.json";
+  rm -rf "$w"; done'
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w, flair]
+  units: apart
+  outputs:
+    - id: labels
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-samseg_dseg.nii.gz"
+      media-type: application/x-nifti+gzip
+    - id: volumes
+      kind: table
+      format: json
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-samseg_volumes.json"
+      columns:
+        - {name: intracranial, from: "Intra-Cranial", unit: mm3, description: "SAMSEG's intracranial volume (sbTIV)"}
+        - {name: lesions, from: "Lesions", unit: mm3, description: "White-matter lesion volume, label 99; absent when lesions were off"}
+        - {name: left_cerebral_white_matter, unit: mm3}
+        - {name: right_cerebral_white_matter, unit: mm3}
+        - {name: left_cerebral_cortex, unit: mm3}
+        - {name: right_cerebral_cortex, unit: mm3}
+        - {name: left_lateral_ventricle, unit: mm3}
+        - {name: right_lateral_ventricle, unit: mm3}
+        - {name: left_thalamus, unit: mm3}
+        - {name: right_thalamus, unit: mm3}
+        - {name: left_hippocampus, unit: mm3}
+        - {name: right_hippocampus, unit: mm3}
+        - {name: brain_stem, unit: mm3}
+        - {name: csf, unit: mm3}
+  qc:
+    - {metric: intracranial, op: ">=", value: 900000, description: "An intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
+    - {metric: intracranial, op: "<=", value: 2300000, description: "Over 2.3 litres the segmentation took more than the head"}
+  needs:
+    gpu: none
+    cores: 4
+    memory-gb: 16
+    unit-minutes: 45

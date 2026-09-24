@@ -339,7 +339,9 @@ fn column_name(binding: &str) -> String {
 }
 
 fn field_col(path: &str) -> String {
-    format!("f_{}", path.replace('.', "__"))
+    // a measure's path carries its pipeline's name, which may hold a `-`
+    // (record 49 A3): a column name does not
+    format!("f_{}", path.replace('.', "__").replace('-', "_x_"))
 }
 
 /// The base relation of a grain: its FROM clause, its key, and what it
@@ -755,6 +757,9 @@ impl<'a> Builder<'a> {
     /// The column of a field of a level in the base relation.
     fn base_column(&self, level: &str, path: &str) -> Option<Term> {
         let c: ColumnRef = self.ctx.names.column(level, path)?;
+        if c.table == "measure" {
+            return self.measure_column(level, &c.column);
+        }
         if c.table == "study" && c.column == "day" {
             return Some(Term::plain(
                 "COALESCE(sy.date_filled, sy.study_date)".into(),
@@ -769,6 +774,45 @@ impl<'a> Builder<'a> {
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
         })
+    }
+
+    /// A run's measure of a unit (record 49 A3), `<number|text|run>:
+    /// <pipeline>:<name>` as the catalog names it: the value of the newest
+    /// run that measured the unit, read beside the base relation by the
+    /// unit's key (a stack, a subject and a session's day, or a subject).
+    fn measure_column(&self, level: &str, column: &str) -> Option<Term> {
+        let mut parts = column.splitn(3, ':');
+        let (what, pipeline, name) = (parts.next()?, parts.next()?, parts.next()?);
+        let quote = |t: &str| format!("'{}'", t.replace('\'', "''"));
+        let value = match what {
+            "number" => "nm.number",
+            "text" => "nm.text",
+            "run" => "nm.run_id",
+            _ => return None,
+        };
+        let unit = match level {
+            "stack" => "nm.stack_id = st.id",
+            "session" => "nm.subject_id = su.id AND nm.session_day = sc.first",
+            "subject" => "nm.subject_id = su.id",
+            _ => return None,
+        };
+        let named = if what == "run" {
+            String::new()
+        } else {
+            format!(" AND nm.name = {}", quote(name))
+        };
+        let present = if what == "run" {
+            String::new()
+        } else {
+            format!(" AND {value} IS NOT NULL")
+        };
+        Some(Term::plain(format!(
+            "(SELECT {value} FROM {} nm WHERE nm.pipeline = {}{named} AND nm.scope = {} \
+             AND {unit}{present} ORDER BY nm.run_id DESC, nm.id DESC LIMIT 1)",
+            self.q("measure"),
+            quote(pipeline),
+            quote(level),
+        )))
     }
 
     /// Whether a level's fields are reachable from a grain's base.

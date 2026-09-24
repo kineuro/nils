@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRIQC: image quality metrics per T1-weighted image, the quality hook for
+# every other analysis (record 49 R1), a starter the engine seeds at boot.
+#
+# A BIDS App: the image's ENTRYPOINT is mriqc, which the job contract runs
+# before the command line, so the line is mriqc's own arguments. Each
+# session's IQMs (MRIQC's JSON beside the image's BIDS path) are the table
+# the ask reads, and two of them are the declared checks, as starting
+# points a site tunes: an SNR below 8 and a coefficient of joint variation
+# above 0.8 mark an image a person should look at.
+#
+# The image is nipreps/mriqc 24.0.2, pinned by its registry manifest digest
+# (resolved 2026-09-24 by a registry manifest request, not pulled: a
+# single-platform linux/amd64 image manifest). The run has no network, so
+# the templates MRIQC reads must be the ones inside the image; that it
+# needs none from the network was not tried here.
+name: mriqc
+schema-version: "0.5"
+tool-version: "24.0.2"
+description: >-
+  Measure the quality of each session's T1-weighted image with MRIQC: SNR,
+  CNR, CJV, EFC, FBER, smoothness, intensity non-uniformity and the tissue
+  volumes, one row a session, the SNR and the CJV held against thresholds.
+  One session is one unit; CPU, no licence.
+
+container-image:
+  type: docker
+  image: "docker.io/nipreps/mriqc@sha256:dabe930dd0d1180c565a42f2c6a34f2b23026d9642db5d110f05b427413b829f"
+
+inputs:
+  - id: processes
+    name: Processes
+    type: Number
+    description: The processes and threads MRIQC uses.
+    value-key: "[NPROCS]"
+    default-value: 4
+    integer: true
+    minimum: 1
+    maximum: 32
+  - id: memory_gb
+    name: Memory
+    type: Number
+    description: The memory MRIQC plans its work within.
+    value-key: "[MEM]"
+    default-value: 12
+    minimum: 2
+    maximum: 256
+    unit: GB
+
+command-line: >-
+  [InputDataset] [OutputLocation] participant --participant-label [ParticipantLabels]
+  -m T1w --no-sub -w /tmp/mriqc-work --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w]
+  outputs:
+    - id: iqms
+      kind: table
+      format: json
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_*T1w.json"
+      columns:
+        - {name: snr_total, description: "Signal to noise ratio over the brain's tissues"}
+        - {name: snr_gm}
+        - {name: snr_wm}
+        - {name: snr_csf}
+        - {name: snrd_total, description: "Dietrich's SNR, from the air around the head"}
+        - {name: cnr, description: "Contrast to noise ratio of grey and white matter"}
+        - {name: cjv, description: "Coefficient of joint variation of grey and white matter; lower is better"}
+        - {name: efc, description: "Entropy focus criterion; lower is better"}
+        - {name: fber, description: "Foreground to background energy ratio"}
+        - {name: fwhm_avg, unit: mm, description: "Smoothness, the mean full width at half maximum"}
+        - {name: inu_med, description: "Median of the intensity non-uniformity field"}
+        - {name: qi_1, description: "Mortamet's quality index 1, artefacts in the background"}
+        - {name: wm2max, description: "White matter median over the 95th percentile of intensity"}
+        - {name: icvs_gm, description: "Grey matter share of the intracranial volume"}
+        - {name: icvs_wm, description: "White matter share of the intracranial volume"}
+        - {name: icvs_csf, description: "CSF share of the intracranial volume"}
+  qc:
+    - {metric: snr_total, op: ">=", value: 8, description: "A starting point: an SNR below 8 is worth a look"}
+    - {metric: cjv, op: "<=", value: 0.8, description: "A starting point: a CJV above 0.8 is noise or motion"}
+  needs:
+    gpu: none
+    cores: 4
+    memory-gb: 12
+    unit-minutes: 20

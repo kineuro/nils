@@ -26,6 +26,9 @@
 #   they stand, since the engine splits the line into words itself and runs
 #   no shell of its own.
 #
+# Record 49 A4: a starter the engine seeds at boot; the roles a session
+# needs (a picked T1w), its units run apart, and a unit's typical minutes.
+#
 # Add it:  nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 # Run it:  nils run n4-bias-correction --select selection:<name>@<v>
 name: n4-bias-correction
@@ -83,6 +86,8 @@ x-nils:
   analysis-level: session
   input:
     layout: bids
+    roles: [t1w]
+  units: apart
   outputs:
     - id: n4_image
       kind: output
@@ -92,3 +97,4 @@ x-nils:
     gpu: none
     memory-gb: 4
     cores: 2
+    unit-minutes: 2

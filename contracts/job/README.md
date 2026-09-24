@@ -13,13 +13,13 @@ directory beside the old one, which stays.
 
 | version | documents | since |
 |---|---|---|
-| 1 | [`v1/`](v1/) | Record 43 slice S1, 2026-09-24 |
+| 1 | [`v1/`](v1/) | Record 43 slice S1, 2026-09-24; amended in place and additively by record 49 A3 (the table kind, the checks, the roles a unit needs, a unit's minutes) |
 
 ## What version 1 fixes
 
 | document | what it fixes |
 |---|---|
-| `nils.job.schema.json` | the descriptor: v0's Boutiques 0.5 subset with an `x-nils` block. The image by its registry manifest digest; the parameters (name, type, range, choices, default, unit); the command line with its value-keys; the analysis level (`participant`, `session` or `stack`); the input layout (`bids` or `stacks`); the typed inputs (`model`, `label_set`, `derivative:<kind>`); the outputs by derivative kind with path templates, each one per unit or, since the wave's rulings, one for the whole run (`level: run`), such as a model (`kind: model`, with the `card` beside it); the needs (`gpu: none, optional or required`, memory, cores); and the axes it may propose values on |
+| `nils.job.schema.json` | the descriptor: v0's Boutiques 0.5 subset with an `x-nils` block. The image by its registry manifest digest; the parameters (name, type, range, choices, default, unit); the command line with its value-keys; the analysis level (`participant`, `session` or `stack`); the input layout (`bids` or `stacks`); the typed inputs (`model`, `label_set`, `derivative:<kind>`); the outputs by derivative kind with path templates, each one per unit or, since the wave's rulings, one for the whole run (`level: run`), such as a model (`kind: model`, with the `card` beside it); the needs (`gpu: none, optional or required`, memory, cores); and the axes it may propose values on. Record 49 A3: a `table` output with its format (`csv`, `tsv` or `json`) and typed columns (`number`, `integer` or `text`, with a unit), one row per unit or, at run level, a `unit-column`; the checks each unit is held to (`x-nils.qc`, as `snr >= 8` or `{metric, op, value}`); the pick roles each unit of a bids input needs (`x-nils.input.roles`); and a unit's typical minutes on the CPU (`x-nils.needs.unit-minutes`) |
 | `stacks.schema.json` | `/input/stacks.json` in the stacks layout: each stack's files under the source places mounted read-only, and the frames of a multi-frame file; each stack's orientation, its `body_part` and `technique` as the registry holds them now, and its slice count |
 | `results.schema.json` | `/output/results.json`: each unit's status, files, metrics and error; the proposals (`proposals.schema.json`); the cards of the models the run used or made; and the `seeds` and `selection` it suggests a person curate, which are never proposals |
 | `proposals.schema.json` | a model's proposals, per stack: the axis, the value, the probability of every class and the registered model |
@@ -52,3 +52,5 @@ uid. A GPU is passed where the descriptor asks for one and the host has it
 7. A run whose container exits 0 while units failed or went unreported is `partial`, not `done`; those units are `pipeline:qc` review items.
 8. A run-level model output is registered as a model, in state registered, from its card: the card names the artifact's digest, the label set is the one the run was given, and the encoders are the card's.
 9. Seeds and a suggested selection are kept as the run's one derivative of kind `seeds`; `nils pipeline seeds <run> --save <name>` makes the selection a campaign starts from.
+10. A table's rows are its units' measures (record 49 A3): a unit's table holds its one row, a run's table names each row's unit, a column is read by the header its `from` names or by the header whose folded form is its name, and the ask reads each as `measure.<pipeline>.<column>` on the unit's grain, the newest run's value. A column's name is unique across a pipeline's tables, and `run` is the ask's own.
+11. A declared check is held against each unit that succeeded, its metric read from the unit's metrics in `results.json`, else from its tables; a breach is one `pipeline:qc` review item, status `breach`, naming the metric, its value and the check, and does not make the run partial.

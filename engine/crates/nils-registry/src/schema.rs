@@ -2243,6 +2243,9 @@ fn build_registry() -> Vec<Table> {
                 req("state", Type::Text),
                 req("added_by", Type::Text),
                 req("added_at", Type::Timestamp),
+                // Record 49 A4: `starter` for a version the engine seeded
+                // from its starter catalog, null for one a person added.
+                col("origin", Type::Text),
             ],
         )
         .unique(&["name", "version"])
@@ -2336,6 +2339,46 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["run_id", "unit"])
         .index(&["state"]),
+        // Record 49 A3: one measure of one unit from one run, loaded from a
+        // table the run wrote (or a metric its results declared), so the
+        // ask reads it as a field of the unit's grain. A newer run of the
+        // pipeline is the value the ask reads; the older rows stay.
+        Table::new(
+            "measure",
+            vec![
+                col("id", Type::Id),
+                req("run_id", Type::Int),
+                req("pipeline_id", Type::Int),
+                // the pipeline's name: the ask's field family is
+                // measure.<pipeline>.<name>
+                req("pipeline", Type::Text),
+                // the table derivative it was read from; null for a metric
+                // from results.json
+                col("derivative_id", Type::Int),
+                // the output it came from, or `metrics`
+                req("source", Type::Text),
+                // `subject`, `session` or `stack`, and the ids that say which
+                req("scope", Type::Text),
+                col("subject_id", Type::Int),
+                col("session_day", Type::Date),
+                col("stack_id", Type::Int),
+                // the work unit as the run named it: sub-<s>, sub-<s>_ses-<t>
+                // or stack-<id>
+                req("unit_id", Type::Text),
+                req("name", Type::Text),
+                // number | integer | text, as the table declares it
+                req("type", Type::Text),
+                col("number", Type::Double),
+                col("text", Type::Text),
+                // the value's unit of measurement, such as mm3
+                col("unit", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .index(&["pipeline", "name"])
+        .index(&["run_id"])
+        .index(&["subject_id"])
+        .index(&["stack_id"]),
     ]
 }
 
