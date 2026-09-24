@@ -764,7 +764,9 @@ fn iso(d: Day) -> String {
 }
 
 /// Picks keyed on a day that moved follow it: those made under this scheme,
-/// and those from before a pick named its scheme's digest.
+/// and those from before a pick named its scheme's digest. A run's pick a
+/// person's overruled follows too (record 42 S3), so that withdrawing the
+/// person's pick lets it apply on the day the occasion now opens.
 fn rekey_picks(
     store: &mut Store,
     subject: i64,
@@ -776,7 +778,8 @@ fn rekey_picks(
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET session_day = {} WHERE subject_id = {} AND session_day = {} \
-         AND withdrawn_at IS NULL AND (scheme_digest = {} OR scheme_digest IS NULL)",
+         AND (withdrawn_at IS NULL OR overruled_by IS NOT NULL) \
+         AND (scheme_digest = {} OR scheme_digest IS NULL)",
         store.qualified("pick"),
         d.param(1, Type::Date),
         d.param(2, Type::Int),

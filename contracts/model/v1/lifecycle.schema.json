@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/model/v1/lifecycle.schema.json",
+  "title": "NILS model lifecycle",
+  "description": "Record 42 (D15): the four states a registered model passes through and the record of each passage, the same in the engine and in Kvasir. A model is registered with its card; admitted by a check that passed, which is kept; promoted, which is refused unless it was admitted, and which retires the model promoted before it in the same task and slot, so one model is promoted per slot; and retired. A check that failed is kept too and leaves the state where it was. Every transition is an event with who and when, and an audit row. Nothing is deleted: a retired model still names what it decided.",
+  "$defs": {
+    "state": {
+      "type": "string",
+      "enum": ["registered", "admitted", "promoted", "retired"]
+    },
+    "transition": {
+      "type": "string",
+      "enum": ["registered", "admitted", "admission_failed", "promoted", "retired"]
+    },
+    "check": {
+      "type": "object",
+      "required": ["suite", "passed", "checks"],
+      "properties": {
+        "suite": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What was checked, such as heldout-calibration for a head or Kvasir's admission suite for a served model"
+        },
+        "version": { "type": "string" },
+        "passed": {
+          "type": "boolean",
+          "description": "Whether every check passed; it must agree with checks"
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "passed"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "passed": { "type": "boolean" },
+              "value": { "type": ["number", "string", "null"] },
+              "threshold": { "type": ["number", "string", "null"] }
+            }
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The names of the checks that failed, as Kvasir records them"
+        },
+        "runtime": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" },
+            "build": { "type": "string" }
+          }
+        },
+        "at": { "type": "string", "description": "ISO 8601, UTC" }
+      },
+      "description": "A check's result as it is recorded: the one that admitted a model stays on it"
+    },
+    "event": {
+      "type": "object",
+      "required": ["transition", "by", "at"],
+      "properties": {
+        "transition": { "$ref": "#/$defs/transition" },
+        "by": { "type": "string", "description": "The principal" },
+        "at": { "type": "string", "description": "ISO 8601, UTC" },
+        "detail": {
+          "type": ["object", "null"],
+          "description": "The check, the model a promotion retired or was retired by, the review item a person accepted, why"
+        }
+      }
+    }
+  },
+  "type": "object",
+  "description": "A registered model as the engine answers it (GET /api/models/{id}).",
+  "required": ["id", "name", "version", "kind", "digest", "task", "slot", "state", "card", "registered_by", "registered_at"],
+  "properties": {
+    "id": { "type": "integer" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "kind": { "$ref": "card.schema.json#/$defs/kind" },
+    "digest": { "$ref": "card.schema.json#/$defs/digest" },
+    "task": { "type": "string" },
+    "slot": { "$ref": "card.schema.json#/$defs/slot" },
+    "state": { "$ref": "#/$defs/state" },
+    "card": { "$ref": "card.schema.json" },
+    "encoder_model_id": { "type": ["integer", "null"] },
+    "trained_on": { "type": ["string", "null"] },
+    "check": {
+      "oneOf": [{ "$ref": "#/$defs/check" }, { "type": "null" }],
+      "description": "The check that admitted it, or the last one that failed while it was registered"
+    },
+    "registered_by": { "type": "string" },
+    "registered_at": { "type": "string" },
+    "admitted_by": { "type": ["string", "null"] },
+    "admitted_at": { "type": ["string", "null"] },
+    "promoted_by": { "type": ["string", "null"] },
+    "promoted_at": { "type": ["string", "null"] },
+    "retired_by": { "type": ["string", "null"] },
+    "retired_at": { "type": ["string", "null"] },
+    "review_item": { "type": ["integer", "null"], "description": "The review item a person accepted to promote it, when one did" },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    }
+  }
+}

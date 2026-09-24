@@ -260,16 +260,17 @@ fn the_door_serves_what_the_command_line_has() {
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "6", "{caps}");
+    assert_eq!(caps["contracts"]["openapi"], "7", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "4", "{caps}");
     // Wave 4c §4.5: the engine's document is the `engine` part of the
     // deployment capabilities document, and carries what the suite requires.
-    assert_eq!(caps["contracts"]["suite"], "2", "{caps}");
+    assert_eq!(caps["contracts"]["suite"], "3", "{caps}");
     assert_eq!(caps["contracts"]["mcp"], "2", "{caps}");
+    assert_eq!(caps["contracts"]["model"], "1", "{caps}");
     let suite: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../contracts/suite/v2/capabilities.schema.json"),
+                .join("../../../contracts/suite/v3/capabilities.schema.json"),
         )
         .unwrap(),
     )
@@ -311,8 +312,8 @@ fn the_door_serves_what_the_command_line_has() {
     assert!(epoch > 0, "{caps}");
     assert_eq!(caps["auth"], "off", "{caps}");
     assert_eq!(caps["principal"], "anna@ward-3", "{caps}");
-    // the suite contract, version 2: off holds every grant and detail sensitive
-    assert_eq!(caps["grants"].as_array().unwrap().len(), 24, "{caps}");
+    // the suite contract, version 3: off holds every grant and detail sensitive
+    assert_eq!(caps["grants"].as_array().unwrap().len(), 28, "{caps}");
     assert_eq!(caps["detail"], "sensitive", "{caps}");
     assert_eq!(
         caps["roles"],
@@ -566,7 +567,7 @@ fn nils_tokens_keeps_an_entry_s_own_list() {
     );
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["principal"], "cy@lab-2", "{doc}");
-    assert_eq!(doc["grants"].as_array().unwrap().len(), 24, "{doc}");
+    assert_eq!(doc["grants"].as_array().unwrap().len(), 28, "{doc}");
     assert_eq!(doc["detail"], "sensitive", "{doc}");
     server.finish();
 }
@@ -1820,13 +1821,13 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert_eq!(exported.id, "site@1.0.0");
 }
 
-/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v2` run against
+/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v3` run against
 /// the engine. Each case is minted with the key it names and presented; what
 /// happened is compared with what the vector expects.
 #[test]
 fn the_trust_list_vectors_hold() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v2/vectors");
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v3/vectors");
     let t: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(vectors.join("trust-list.json")).unwrap())
             .unwrap();
@@ -3627,6 +3628,8 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
         ("database-see", "database:see"),
         ("database-work", "database:work"),
         ("audit-see", "audit:see"),
+        ("models-see", "models:see"),
+        ("models-work", "models:work"),
         ("reader", "reader"),
         ("reviewer", "reviewer"),
         ("operator", "operator"),
@@ -3805,6 +3808,31 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "database-work",
             "audit:see",
         ),
+        // record 42 R7: the model registry
+        (
+            "GET",
+            "/api/models",
+            "",
+            "models-see",
+            "review-work",
+            "models:see",
+        ),
+        (
+            "POST",
+            "/api/models",
+            "{}",
+            "models-work",
+            "models-see",
+            "models:work",
+        ),
+        (
+            "POST",
+            "/api/models/1/promote",
+            "{}",
+            "models-work",
+            "reviewer",
+            "models:work",
+        ),
     ];
     // a queued command: the door needs one of the verbs' grants, and each
     // verb its own
@@ -3941,6 +3969,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
         caps["grants"],
         serde_json::json!([
             "data:see",
+            "models:see",
             "pipelines:see",
             "query:see",
             "query:work",
@@ -3974,8 +4003,19 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     );
     assert_eq!(
         row("GET /api/status")["grant"].as_array().unwrap().len(),
-        24
+        28
     );
+    // record 42 R7: a rater is not a reviewer of the whole queue; closing a
+    // campaign writes decisions, which needs both
+    assert_eq!(
+        row("POST /api/campaigns/{id}/claim")["grant"],
+        "campaigns:work"
+    );
+    assert_eq!(row("GET /api/campaigns/{id}")["grant"], "campaigns:see");
+    let close = row("POST /api/campaigns/{id}/close");
+    assert_eq!(close["grant"], "campaigns:work", "{close}");
+    assert_eq!(close["also"], "review:work", "{close}");
+    assert_eq!(row("POST /api/decisions/commit")["grant"], "review:work");
     assert_eq!(row("GET /api/review")["grant"], "review:see");
     assert_eq!(row("GET /api/review/{id}")["grant"], "review:see");
     assert_eq!(row("POST /api/ask/values")["grant"], "query:work");
@@ -4069,7 +4109,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
 #[test]
 fn the_grants_vectors_hold() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v2/vectors");
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v3/vectors");
     let read = |name: &str| -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(vectors.join(name)).unwrap()).unwrap()
     };
@@ -4900,4 +4940,521 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
     assert_eq!(classified["pack"], "mri@0.3.0", "{classified}");
+}
+
+/// Record 42 S1: the author of a decision is the verified actor, never the
+/// body. An agent's token that says `person` in the body, or in the header,
+/// is refused; a body that disagrees with the header is refused; an older
+/// client whose body agrees with its header, or says nothing, still works;
+/// and a decision names who put it in force.
+#[test]
+fn the_author_of_a_decision_is_the_verified_actor_never_the_body() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc");
+    let jwks = fixtures.join("jwks.json");
+    let key = EncodingKey::from_rsa_pem(&std::fs::read(fixtures.join("signing-key.pem")).unwrap())
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = |act: Option<&str>| -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-2026".to_string());
+        let mut claims = serde_json::json!({
+            "iss": "https://id.example.org/application/o/nils/",
+            "aud": "nils",
+            "sub": "bo",
+            "exp": now + 600,
+            "iat": now,
+            "groups": ["neuro-reviewers"],
+        });
+        if let Some(a) = act {
+            claims["act"] = serde_json::json!({ "sub": a });
+        }
+        encode(&header, &claims, &key).unwrap()
+    };
+    let person = token(None);
+    let agent = token(Some("nils-assistant"));
+    let home = registry();
+    let server = Server::start(
+        &home,
+        10,
+        &[
+            "--auth",
+            "oidc",
+            "--oidc-issuer",
+            "https://id.example.org/application/o/nils/",
+            "--oidc-audience",
+            "nils",
+            "--oidc-jwks",
+            jwks.to_str().unwrap(),
+            "--role",
+            "neuro-reviewers=reviewer",
+        ],
+        &[],
+    );
+    let (status, listed) = server.request("GET", "/api/review?status=open", None, Some(&person));
+    assert_eq!(status, 200, "{listed}");
+    let groups: Vec<serde_json::Value> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["scope"] == "group")
+        .cloned()
+        .collect();
+    let base = groups
+        .iter()
+        .find(|i| i["kind"] == "base:low_confidence")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let other = groups
+        .iter()
+        .find(|i| i["kind"] != "base:low_confidence")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let apply = format!("/api/review/{base}/apply");
+    let (a, b) = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT stack_id FROM review_member WHERE item_id = {base} ORDER BY stack_id"
+                ),
+                &[],
+            )
+            .unwrap();
+        (rows[0].int(0).unwrap(), rows[1].int(0).unwrap())
+    };
+
+    // An agent's token that says person in the body is refused, 403, and
+    // nothing is written.
+    let (status, doc) = server.request(
+        "POST",
+        &apply,
+        Some(&format!(
+            r#"{{"member": {a}, "value": "T2w", "author_kind": "person"}}"#
+        )),
+        Some(&agent),
+    );
+    assert_eq!(status, 403, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("acts as an agent"),
+        "{doc}"
+    );
+    // Nor can its header make it a person.
+    let (status, doc) = server.request_with(
+        "POST",
+        &apply,
+        Some(&format!(r#"{{"member": {a}, "value": "T2w"}}"#)),
+        Some(&agent),
+        &[("X-Nils-Actor", r#"{"kind": "person"}"#)],
+    );
+    assert_eq!(status, 403, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot make it a person"),
+        "{doc}"
+    );
+    // A person's token acting through an agent: the body cannot say person.
+    let (status, doc) = server.request_with(
+        "POST",
+        &apply,
+        Some(&format!(
+            r#"{{"member": {a}, "value": "T2w", "author_kind": "person"}}"#
+        )),
+        Some(&person),
+        &[("X-Nils-Actor", r#"{"kind": "agent", "name": "ask-help"}"#)],
+    );
+    assert_eq!(status, 403, "{doc}");
+    // An older client whose body agrees with its header works as it did.
+    let (status, doc) = server.request_with(
+        "POST",
+        &apply,
+        Some(&format!(
+            r#"{{"member": {a}, "value": "T2w", "author_kind": "agent"}}"#
+        )),
+        Some(&person),
+        &[("X-Nils-Actor", r#"{"kind": "agent", "name": "ask-help"}"#)],
+    );
+    assert_eq!(status, 200, "{doc}");
+    // A model's version from the body, with no model acting, is refused.
+    let (status, doc) = server.request(
+        "POST",
+        &apply,
+        Some(&format!(
+            r#"{{"member": {b}, "value": "T2w", "model_version": "3"}}"#
+        )),
+        Some(&person),
+    );
+    assert_eq!(status, 403, "{doc}");
+    // The agent's token saying nothing is recorded as the agent it is.
+    let (status, doc) = server.request(
+        "POST",
+        &apply,
+        Some(&format!(r#"{{"member": {b}, "value": "T2w"}}"#)),
+        Some(&agent),
+    );
+    assert_eq!(status, 200, "{doc}");
+    // A person stages, then commits: the committer is on the row.
+    let (status, staged) = server.request(
+        "POST",
+        &format!("/api/review/{other}/apply"),
+        Some(r#"{"value": "x", "stage": true}"#),
+        Some(&person),
+    );
+    assert_eq!(status, 200, "{staged}");
+    let staged = staged["decision"].as_i64().unwrap();
+    let (status, doc) = server.request(
+        "POST",
+        &format!("/api/decisions/{staged}/commit"),
+        Some(r#"{"anyway": true}"#),
+        Some(&person),
+    );
+    assert_eq!(status, 200, "{doc}");
+    // the agent does not withdraw the person's decision in force
+    let (status, doc) = server.request(
+        "POST",
+        &format!("/api/decisions/{staged}/withdraw"),
+        None,
+        Some(&agent),
+    );
+    assert_eq!(status, 403, "{doc}");
+    server.finish();
+
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let rows = store
+        .query(
+            "SELECT ref, author_kind, actor, committed_by, actor_detail, staged_at IS NOT NULL \
+             FROM decision ORDER BY id",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 3, "three decisions and no more");
+    let detail =
+        |i: usize| -> serde_json::Value { serde_json::from_str(rows[i].text(4).unwrap()).unwrap() };
+    assert_eq!(rows[0].text(0).unwrap(), a.to_string());
+    assert_eq!(rows[0].text(1).unwrap(), "agent");
+    assert_eq!(rows[0].text(2).unwrap(), "bo@id.example.org");
+    // an agent's answer is staged, whatever the body asked (R6)
+    assert_eq!(rows[0].opt_text(3).unwrap(), None, "not committed");
+    assert_eq!(rows[0].int(5).unwrap(), 1, "staged");
+    assert_eq!(detail(0)["name"], "ask-help");
+    assert_eq!(rows[1].text(0).unwrap(), b.to_string());
+    assert_eq!(rows[1].text(1).unwrap(), "agent", "never a person");
+    assert_eq!(rows[1].int(5).unwrap(), 1, "staged");
+    assert_eq!(detail(1)["name"], "nils-assistant");
+    assert_eq!(rows[2].text(1).unwrap(), "person");
+    assert_eq!(rows[2].int(5).unwrap(), 1, "staged");
+    assert_eq!(
+        rows[2].text(3).unwrap(),
+        "bo@id.example.org",
+        "the person who committed it"
+    );
+}
+
+/// Record 42 S2, through the doors: the model registry under its own
+/// grants, a promotion refused before a check admits the model, a model's
+/// answer refused for a model that is unknown or not admitted, staged for an
+/// admitted one and answered with the model, and put in force by a person
+/// and never by the agent that ran the model.
+#[test]
+fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc");
+    let jwks = fixtures.join("jwks.json");
+    let key = EncodingKey::from_rsa_pem(&std::fs::read(fixtures.join("signing-key.pem")).unwrap())
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = |sub: &str, group: &str, act: Option<serde_json::Value>| -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-2026".to_string());
+        let mut claims = serde_json::json!({
+            "iss": "https://id.example.org/application/o/nils/",
+            "aud": "nils",
+            "sub": sub,
+            "exp": now + 600,
+            "iat": now,
+            "groups": [group],
+        });
+        if let Some(a) = act {
+            claims["act"] = a;
+        }
+        encode(&header, &claims, &key).unwrap()
+    };
+    let encoder = format!("sha256:{}", "e".repeat(64));
+    let digest = format!("sha256:{}", "d".repeat(64));
+    let stranger_digest = format!("sha256:{}", "f".repeat(64));
+    let reviewer = token("bo", "neuro-reviewers", None);
+    let operator = token("cy", "neuro-ops", None);
+    // The issuer binds the model the pipeline runs into the token's act
+    // claim; the header can name it, never another.
+    let pipeline = token(
+        "cy",
+        "neuro-ops",
+        Some(serde_json::json!({"sub": "bodypart-pipeline", "model": digest})),
+    );
+    let stranger = token(
+        "cy",
+        "neuro-ops",
+        Some(serde_json::json!({"sub": "bodypart-pipeline", "model": stranger_digest})),
+    );
+    let bare_agent = token(
+        "cy",
+        "neuro-ops",
+        Some(serde_json::json!({"sub": "bodypart-pipeline"})),
+    );
+    let home = registry();
+    let server = Server::start(
+        &home,
+        18,
+        &[
+            "--auth",
+            "oidc",
+            "--oidc-issuer",
+            "https://id.example.org/application/o/nils/",
+            "--oidc-audience",
+            "nils",
+            "--oidc-jwks",
+            jwks.to_str().unwrap(),
+            "--role",
+            "neuro-reviewers=reviewer",
+            "--role",
+            "neuro-ops=operator",
+        ],
+        &[],
+    );
+    // The question a model will answer.
+    let (status, listed) = server.request("GET", "/api/review?status=open", None, Some(&reviewer));
+    assert_eq!(status, 200, "{listed}");
+    let asked = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| {
+            i["kind"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with(":low_confidence")
+                && i["evidence"]["value"].is_string()
+        })
+        .unwrap()
+        .clone();
+    let item = asked["id"].as_i64().unwrap();
+    let axis = asked["evidence"]["axis"].as_str().unwrap();
+    let value = asked["evidence"]["value"].as_str().unwrap();
+    let head = serde_json::json!({
+        "name": "a-head", "version": "1", "kind": "head", "digest": digest,
+        "task": format!("axis:{axis}"), "encoder": {"digest": encoder},
+    })
+    .to_string();
+
+    // models:work registers; a reviewer holds models:see only.
+    let (status, doc) = server.request("POST", "/api/models", Some(&head), Some(&reviewer));
+    assert_eq!(status, 403, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("models:work"),
+        "{doc}"
+    );
+    let (status, enc) = server.request(
+        "POST",
+        "/api/models",
+        Some(
+            &serde_json::json!({"name": "an-encoder", "version": "1", "kind": "encoder", "digest": encoder, "task": "embed:image"})
+                .to_string(),
+        ),
+        Some(&operator),
+    );
+    assert_eq!(status, 200, "{enc}");
+    let (status, model) = server.request("POST", "/api/models", Some(&head), Some(&operator));
+    assert_eq!(status, 200, "{model}");
+    assert_eq!(model["encoder_model_id"], enc["id"], "{model}");
+    let id = model["id"].as_i64().unwrap();
+    // promotion before admission is refused
+    let (status, doc) = server.request(
+        "POST",
+        &format!("/api/models/{id}/promote"),
+        None,
+        Some(&operator),
+    );
+    assert_eq!(status, 409, "{doc}");
+    let (status, doc) = server.request("GET", "/api/models", None, Some(&reviewer));
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["count"], 2, "{doc}");
+
+    // A model's answer, from the agent that ran it: refused while the model
+    // is not admitted, and for a model nobody registered.
+    let apply = format!("/api/review/{item}/apply");
+    let body = serde_json::json!({ "value": value }).to_string();
+    let as_model = |m: &str| serde_json::json!({ "kind": "model", "model": m }).to_string();
+    let (status, doc) = server.request_with(
+        "POST",
+        &apply,
+        Some(&body),
+        Some(&pipeline),
+        &[("X-Nils-Actor", &as_model(&digest))],
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("registered"),
+        "{doc}"
+    );
+    let check = r#"{"suite": "heldout", "passed": true, "checks": [{"name": "accuracy", "passed": true, "value": 0.97, "threshold": 0.9}]}"#;
+    let (status, doc) = server.request(
+        "POST",
+        &format!("/api/models/{id}/admit"),
+        Some(check),
+        Some(&operator),
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["state"], "admitted", "{doc}");
+    let (status, doc) = server.request_with(
+        "POST",
+        &apply,
+        Some(&body),
+        Some(&stranger),
+        &[("X-Nils-Actor", &as_model(&stranger_digest))],
+    );
+    assert_eq!(status, 404, "{doc}");
+    // The header cannot name a model the token does not carry, even the
+    // same one by another name, nor a name the token does not prove, and
+    // an agent's token that carries no model cannot act as one.
+    for (token, actor, says) in [
+        (&pipeline, as_model("a-head@1"), "the token carries"),
+        (
+            &pipeline,
+            serde_json::json!({"kind": "model", "model": digest, "name": "someone-else"})
+                .to_string(),
+            "acts as bodypart-pipeline",
+        ),
+        (&bare_agent, as_model(&digest), "carries no model"),
+    ] {
+        let (status, doc) = server.request_with(
+            "POST",
+            &apply,
+            Some(&body),
+            Some(token),
+            &[("X-Nils-Actor", &actor)],
+        );
+        assert_eq!(status, 403, "{actor}: {doc}");
+        assert!(
+            doc["error"].as_str().unwrap().contains(says),
+            "{actor}: {doc}"
+        );
+    }
+    // Admitted, it answers: staged, with the model named; the header may
+    // leave the model to the token.
+    let (status, applied) = server.request_with(
+        "POST",
+        &apply,
+        Some(&body),
+        Some(&pipeline),
+        &[("X-Nils-Actor", r#"{"kind": "model"}"#)],
+    );
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["staged"], true, "{applied}");
+    assert_eq!(applied["model"]["digest"], digest.as_str(), "{applied}");
+    let decision = applied["decision"].as_i64().unwrap();
+    // The agent does not put it in force; a person does.
+    let commit = format!("/api/decisions/{decision}/commit");
+    let (status, doc) = server.request("POST", &commit, None, Some(&pipeline));
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("R6"), "{doc}");
+    // Nor by a filter that takes it: the commit by filter holds the same
+    // rule, and commits nothing when it refuses.
+    let (status, doc) = server.request(
+        "POST",
+        "/api/decisions/commit",
+        Some(r#"{"min_confidence": 0}"#),
+        Some(&pipeline),
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("R6"), "{doc}");
+    let (status, doc) = server.request("POST", &commit, None, Some(&operator));
+    assert_eq!(status, 200, "{doc}");
+    // promoted now, and the card and every transition read back
+    let (status, doc) = server.request(
+        "POST",
+        &format!("/api/models/{id}/promote"),
+        Some(r#"{"why": "it passed"}"#),
+        Some(&operator),
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["retired"], serde_json::Value::Null, "{doc}");
+    let (status, doc) = server.request("GET", &format!("/api/models/{id}"), None, Some(&reviewer));
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["state"], "promoted", "{doc}");
+    let transitions: Vec<&str> = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["transition"].as_str().unwrap())
+        .collect();
+    assert_eq!(transitions, ["registered", "admitted", "promoted"], "{doc}");
+    server.finish();
+
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let row = &store
+        .query(
+            &format!(
+                "SELECT author_kind, model_id, author_version, committed_by, actor FROM decision WHERE id = {decision}"
+            ),
+            &[],
+        )
+        .unwrap()[0];
+    assert_eq!(row.text(0).unwrap(), "model");
+    assert_eq!(row.int(1).unwrap(), id);
+    assert_eq!(row.text(2).unwrap(), "1", "the registered model's version");
+    assert_eq!(row.text(3).unwrap(), "cy@id.example.org");
+    assert_eq!(row.text(4).unwrap(), "cy@id.example.org");
+    let acts: Vec<String> = store
+        .query(
+            "SELECT action FROM audit WHERE action LIKE 'model.%' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert_eq!(
+        acts,
+        [
+            "model.register",
+            "model.register",
+            "model.admit",
+            "model.promote"
+        ]
+    );
+}
+
+/// Record 42 S3 at the withdrawal as at the writing: a person's pick is a
+/// person's to withdraw, so a call whose X-Nils-Actor names an agent or a
+/// model is refused before anything is read.
+#[test]
+fn only_a_person_withdraws_a_person_s_pick() {
+    let home = registry();
+    let server = Server::start(&home, 2, &[], &[]);
+    for actor in [
+        r#"{"kind": "agent", "name": "helper"}"#,
+        r#"{"kind": "model", "model": "1"}"#,
+    ] {
+        let (status, doc) = server.request_with(
+            "POST",
+            "/api/picks/1/withdraw",
+            Some(r#"{"why": "not mine"}"#),
+            None,
+            &[("X-Nils-Actor", actor)],
+        );
+        assert_eq!(status, 403, "{actor}: {doc}");
+        assert!(doc["error"].as_str().unwrap().contains("a person"), "{doc}");
+    }
+    server.finish();
 }

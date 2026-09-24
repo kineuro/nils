@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 52;
+pub const SCHEMA_VERSION: i64 = 58;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +262,128 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 52,
         apply: every_rule_votes,
     },
+    Migration {
+        version: 53,
+        apply: an_answer_names_its_model_and_its_committer,
+    },
+    Migration {
+        version: 54,
+        apply: a_model_has_a_home,
+    },
+    Migration {
+        version: 55,
+        apply: a_person_may_pick,
+    },
+    Migration {
+        version: 56,
+        apply: a_derivative_has_a_home,
+    },
+    Migration {
+        version: 57,
+        apply: a_campaign_asks_one_question_of_many,
+    },
+    Migration {
+        version: 58,
+        apply: labels_leave_with_their_provenance,
+    },
 ];
+
+/// Record 42 S2: the model registry. A registry from before gains the two
+/// tables empty, since no model was registered before there was a place to
+/// register one, and a release gains the models its tree's answers came
+/// from, empty on every release before, which named none.
+fn a_model_has_a_home(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["model", "model_event"])?;
+    add_columns(store, "release", &["models"])
+}
+
+/// Record 42 S1: a decision, a piece of evidence and a pick name the
+/// registered model a model's answer came from and the campaign it was given
+/// in, and a decision names who put it in force. A registry from before
+/// gains the columns empty: no answer before it came from a registered model
+/// or a campaign, since neither existed. A decision written without staging
+/// was put in force by its own author as it was written, so its committer is
+/// its actor; one that was staged and committed later says nothing, because
+/// who committed it was never recorded on the row, and guessing would be a
+/// claim nobody made (the audit log holds the commit).
+fn an_answer_names_its_model_and_its_committer(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "decision",
+        &["model_id", "campaign_id", "committed_by"],
+    )?;
+    add_columns(
+        store,
+        "classification_evidence",
+        &["model_id", "campaign_id"],
+    )?;
+    add_columns(store, "pick", &["model_id", "campaign_id"])?;
+    if table_exists(store, "decision")? {
+        store.execute(
+            &format!(
+                "UPDATE {} SET committed_by = actor WHERE committed_by IS NULL AND staged_at IS NULL",
+                store.qualified("decision")
+            ),
+            &[],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record 42 S3: a person's pick. The pick table gains why a person picked,
+/// who withdrew a pick, and which person's pick overruled a run's; every
+/// pick written before is a run's, so the three are null on it.
+fn a_person_may_pick(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pick", &["why", "withdrawn_by", "overruled_by"])
+}
+
+/// Record 42 S4: the derivative table, empty. A registry from before has
+/// no derivative, and the working place it would be kept in is unchanged.
+fn a_derivative_has_a_home(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["derivative"])
+}
+
+/// Record 42 S5: campaigns, their items, the raters' assignments and their
+/// answers. A registry from before gains the four tables empty; with no
+/// campaign nothing changes and review items work as they did.
+fn a_campaign_asks_one_question_of_many(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "campaign",
+            "campaign_item",
+            "campaign_assignment",
+            "campaign_answer",
+        ],
+    )
+}
+
+/// Record 42 S7: the label sets, each an export with its digest and the
+/// handle it pins, and the sealed samples of record 40 R3, whose stacks
+/// make a set that holds any of them sealed. A registry from before gains
+/// both tables empty: nothing was sealed before there was a seal.
+fn labels_leave_with_their_provenance(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["label_set", "sealed_stack"])
+}
 
 /// Record 41 S2: every rule's vote. A registry from before gains the two
 /// tables empty, and the next `nils classify` fills them; until then

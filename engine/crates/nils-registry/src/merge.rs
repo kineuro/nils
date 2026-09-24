@@ -57,10 +57,16 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("subject_disease", Handling::Repoint),
     ("event", Handling::Repoint),
     ("pick", Handling::Repoint),
+    // record 42 S4: a derivative names its subject whatever its scope
+    ("derivative", Handling::Repoint),
     ("handover_subject", Handling::Repoint),
     ("session_cache", Handling::Rebuild),
     ("handle_member", Handling::Repoint),
     ("values_member", Handling::Repoint),
+    // record 42: a session-grain campaign item names its subject
+    ("campaign_item", Handling::Repoint),
+    // record 40 R3: a sealed stack keeps its subject, for a set of sessions
+    ("sealed_stack", Handling::Repoint),
     // the linkage store
     ("identity", Handling::Repoint),
 ];

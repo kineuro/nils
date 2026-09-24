@@ -197,7 +197,7 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     // the capabilities carry the ask block and the contract version
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "6");
+    assert_eq!(caps["contracts"]["openapi"], "7");
     // the synthetic marker: `nils synth` set it, a desk shows a banner on it
     assert_eq!(caps["registry"]["synthetic"], "nils-synth", "{caps}");
     let ask = &caps["ask"];
@@ -959,6 +959,7 @@ fn a_ceiling_only_narrows_and_the_actor_is_recorded_on_what_it_touches() {
         caps["grants"],
         serde_json::json!([
             "data:see",
+            "models:see",
             "pipelines:see",
             "query:see",
             "query:work",

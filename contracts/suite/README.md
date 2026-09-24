@@ -15,6 +15,7 @@ directory beside the old one, which stays.
 |---|---|---|
 | 1 | [`v1/`](v1/) | Wave 4c slice A7, 2026-09-09 |
 | 2 | [`v2/`](v2/) | 2026-09-15: grants and detail in place of the role ladder |
+| 3 | [`v3/`](v3/) | 2026-09-24: version 2 with the grants of record 42 R7: the model registry's `models:see` and `models:work`, and the campaigns' `campaigns:see` and `campaigns:work` |
 
 ## What version 1 fixes
 
@@ -53,3 +54,44 @@ A ladder name stands for its set wherever one is still met: a `--role`
 binding, a named token's list, a legacy entitlement, a ceiling. The engine
 runs the grants vectors in `engine/crates/nils/tests/serve.rs` beside the
 trust list vectors; Kvasir, the assistant and the desk run the same file.
+
+## What version 3 changes
+
+Version 3 is version 2 with four grants more, from record 42 R7.
+
+`models:see` reads the registered models and their cards, and
+`models:work` registers, admits, promotes and retires them. The reviewer's
+set holds `models:see`, since a reviewer reads which model answered what;
+the operator's and the admin's hold both.
+
+`campaigns:see` reads a campaign, its items and its answers, and a label
+set; `campaigns:work` makes a campaign, claims its items under a lease,
+answers them, gives them back, posts an item's external metric and exports
+its labels. Closing a campaign writes decisions, so it needs `review:work`
+beside `campaigns:work`. A rater is not a reviewer of the whole queue, which
+is why the grants are their own: no ladder set holds them but admin.
+
+A derivative is not a grant of its own: its doors are the Pipelines page's
+(`pipelines:see`, `pipelines:work`), as in version 2.
+
+The actor a token proves binds `X-Nils-Actor` (record 42 S1 and R6). A
+token whose `act` claim (RFC 8693) names an actor may say agent or model in
+the header, never person; its `name` is `act.sub` or is refused; and a model
+acting is the registered model the issuer bound into the claim as
+`act.model` (an id, a digest or `name@version`), which the header may leave
+out and cannot replace. A token whose claim carries no model cannot act as
+a model, so an agent never names a model of its own choosing.
+
+What an agent or a model answers is evidence until a person commits it
+(record 42 R6, which the wave's ruling extends to agents): a decision a
+model or an agent authored, or whose campaign item one of them answered, is
+staged, and a caller whose actor is an agent or a model cannot commit it.
+
+The other documents are version 2's.
+
+| document | what changes |
+|---|---|
+| `grants.schema.json` | the four grants in the vocabulary, which is 28 |
+| `headers.schema.json` | the actor names what an `act` claim binds: `name` and `model` |
+| `capabilities.schema.json` | the engine's contracts name the model contract's version |
+| `vectors/grants.json` | the sets and every expectation that holds one |

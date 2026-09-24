@@ -1038,6 +1038,11 @@ fn build_registry() -> Vec<Table> {
                 // not sit where a rule's answer belongs and look the same.
                 col("author", Type::Text),
                 col("author_kind", Type::Text),
+                // Record 42 S1: the registered model a model's answer came
+                // from, and the campaign an answer was given in. Null when
+                // neither.
+                col("model_id", Type::Int),
+                col("campaign_id", Type::Int),
             ],
         )
         .index(&["stack_id"]),
@@ -1121,6 +1126,13 @@ fn build_registry() -> Vec<Table> {
                 // A decision a later person withdrew stays, and stops
                 // applying: nothing about a human's judgement is deleted.
                 col("withdrawn_at", Type::Timestamp),
+                // Record 42 S1: the registered model that answered, when the
+                // author is a model (D15); the campaign the answer closed;
+                // and who put it in force, which for a staged answer is the
+                // person who committed it and not its author.
+                col("model_id", Type::Int),
+                col("campaign_id", Type::Int),
+                col("committed_by", Type::Text),
             ],
         )
         .index(&["scope", "ref", "axis"]),
@@ -1173,9 +1185,84 @@ fn build_registry() -> Vec<Table> {
                 req("decided_at", Type::Timestamp),
                 // A pick a person overruled stays and stops applying.
                 col("withdrawn_at", Type::Timestamp),
+                // Record 42 S1: the registered model and the campaign, as on
+                // a decision.
+                col("model_id", Type::Int),
+                col("campaign_id", Type::Int),
+                // Record 42 S3: why a person picked, in their words, and who
+                // withdrew a pick. A run's own pick has no why: its parts
+                // are the reason.
+                col("why", Type::Text),
+                col("withdrawn_by", Type::Text),
+                // The person's pick that stopped this run's pick from
+                // applying. Withdrawing that person's pick lets it apply
+                // again, so a person's mistake is undone without a new run.
+                col("overruled_by", Type::Int),
             ],
         )
         .index(&["role", "subject_id", "session_day"]),
+        // Record 42 S2 (D15): a model whose answers become registry facts,
+        // identified by the digest of its canonical artifact and described
+        // by its card (`contracts/model/v1`). Registered, admitted by a check
+        // that passed, promoted (one per task and slot), retired; nothing is
+        // deleted, because a retired model still names what it decided.
+        Table::new(
+            "model",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("version", Type::Text),
+                // encoder, head, pass or segmenter
+                req("kind", Type::Text),
+                // sha256:<hex> of the canonical artifact: the identity
+                req("digest", Type::Text),
+                // what it answers, such as axis:body_part, and where: site,
+                // or cohort:<name> (record 42 R4)
+                req("task", Type::Text),
+                req("slot", Type::Text),
+                req("state", Type::Text),
+                // the card as it was registered, kept whole
+                req("card", Type::Json),
+                // a head names the encoder whose features it reads
+                col("encoder_model_id", Type::Int),
+                // the digest of the label set it was fitted on (C7)
+                col("trained_on", Type::Text),
+                col("pack_version", Type::Text),
+                // the check that admitted it, or the last one that failed
+                // while it was registered
+                col("gate", Type::Json),
+                req("registered_by", Type::Text),
+                req("registered_at", Type::Timestamp),
+                col("admitted_by", Type::Text),
+                col("admitted_at", Type::Timestamp),
+                col("promoted_by", Type::Text),
+                col("promoted_at", Type::Timestamp),
+                col("retired_by", Type::Text),
+                col("retired_at", Type::Timestamp),
+                // the review item a person accepted to promote it
+                col("review_item", Type::Int),
+                // the job that fitted it, when a job did
+                col("job_id", Type::Int),
+            ],
+        )
+        .unique(&["digest"])
+        .unique(&["name", "version"])
+        .index(&["task", "slot", "state"]),
+        // Every transition of a model, with who and when: the lifecycle's
+        // own record beside the audit row (`contracts/model/v1`).
+        Table::new(
+            "model_event",
+            vec![
+                col("id", Type::Id),
+                req("model_id", Type::Int),
+                // registered, admitted, admission_failed, promoted, retired
+                req("transition", Type::Text),
+                req("principal", Type::Text),
+                req("at", Type::Timestamp),
+                col("detail", Type::Json),
+            ],
+        )
+        .index(&["model_id"]),
         Table::new(
             "pick_stack",
             vec![
@@ -1186,6 +1273,53 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["pick_id"])
         .index(&["stack_id"]),
+        // Record 42 S4: a file made from the archive that is not the archive,
+        // a mask, an embedding, a pipeline's output, kept in a working place
+        // (Wave 5 section 10.2) and named here by its digest. The registry
+        // holds the row and the digest; the bytes are the place's.
+        Table::new(
+            "derivative",
+            vec![
+                col("id", Type::Id),
+                // `mask`, `embedding`, `pyramid`, `output`.
+                req("kind", Type::Text),
+                // What it belongs to: `stack`, `series`, `session` or
+                // `subject`, and the ids that say which. The subject is
+                // filled whatever the scope, so a merge moves it and a
+                // subject's derivatives are one read.
+                req("scope", Type::Text),
+                col("stack_id", Type::Int),
+                col("series_id", Type::Int),
+                col("subject_id", Type::Int),
+                col("session_day", Type::Date),
+                // Where it lives: a place of role working, and the path
+                // under it.
+                req("place_id", Type::Int),
+                req("path", Type::Text),
+                req("bytes", Type::Int),
+                req("sha256", Type::Text),
+                req("media_type", Type::Text),
+                // Who made it. A person's upload names the principal and who
+                // acted for it; a model by its id in the model table (record
+                // 42 S2), checked when the row is written; a pipeline run by
+                // id once its table exists (wave 43), and null until then.
+                col("registered_by", Type::Text),
+                col("actor", Type::Json),
+                col("model_id", Type::Int),
+                col("run_id", Type::Int),
+                // For an embedding: the preprocessing it was made under.
+                col("preprocess_version", Type::Text),
+                // The row this one replaces. Nothing is deleted: the old row
+                // and its file stay, and a reader follows the link.
+                col("supersedes_id", Type::Int),
+                req("created_at", Type::Timestamp),
+                col("withdrawn_at", Type::Timestamp),
+            ],
+        )
+        .index(&["stack_id"])
+        .index(&["subject_id"])
+        .index(&["kind"])
+        .index(&["sha256"]),
         // Wave 3 §8.5: what a release did, as rows.
         //
         // Not a workbook beside the originals under a password kept in a
@@ -1283,6 +1417,10 @@ fn build_registry() -> Vec<Table> {
                 // that never closed and on a row written before this.
                 col("burned_in", Type::Int),
                 col("unjudged", Type::Int),
+                // Record 42 S2: the registered models whose answers are in
+                // force on the stacks of the tree, each by name, version and
+                // digest. Null on a row written before this.
+                col("models", Type::Json),
             ],
         )
         .index(&["name"]),
@@ -1786,8 +1924,200 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["digest"])
         .index(&["principal"]),
+        // Record 42 S5: one campaign mechanism for annotation and curation.
+        // A campaign asks one question of a frozen list of items, each item
+        // backed by a review item so that closing it writes through the one
+        // path decisions already have. No table here belongs to one QC
+        // product of v0, and a test holds every table name to that.
+        Table::new(
+            "campaign",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("owner", Type::Text),
+                // open | closing (a close is writing it) | closed | archived
+                req("status", Type::Text),
+                // {kind: axis|pick|form|derivative|free, ...}
+                req("question", Type::Json),
+                // stack | session: what one item is
+                req("grain", Type::Text),
+                // {selection: name@v} | {handle: id} | {review: {...}}
+                req("source", Type::Json),
+                // The frozen list a selection gave, pinned by the campaign.
+                col("handle_id", Type::Int),
+                col("content_hash", Type::Text),
+                req("epoch", Type::Int),
+                col("pack_version", Type::Text),
+                req("raters_per_item", Type::Int),
+                // {raters: [..], adjudicators: [..]}; absent means anyone
+                // holding campaigns:work
+                col("rater_policy", Type::Json),
+                // {when: disagree|always|never, metric: exact|kappa|external,
+                // threshold}
+                req("adjudication", Type::Json),
+                // decision | stage | pick | none
+                req("closes_into", Type::Text),
+                req("lease_seconds", Type::Int),
+                req("created_at", Type::Timestamp),
+                col("closed_at", Type::Timestamp),
+                col("closed_by", Type::Text),
+                // What the close measured over the whole campaign: the share
+                // of items the raters agreed on, Cohen's and Fleiss' kappa.
+                col("agreement", Type::Json),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "campaign_item",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("position", Type::Int),
+                req("review_item_id", Type::Int),
+                col("stack_id", Type::Int),
+                // A session-grain item names its subject and the day the
+                // session opened, as a pick does.
+                col("subject_id", Type::Int),
+                col("session_day", Type::Date),
+                req("key", Type::Text),
+                // Seeds and pre-segmentations an annotator starts from.
+                col("input_derivative_ids", Type::Json),
+                // open | awaiting_metric | needs_adjudication | agreed |
+                // adjudicated | disagreed | resolved | unresolved
+                req("state", Type::Text),
+                req("round", Type::Int),
+                // The share of the raters whose answer is the item's outcome.
+                col("agreement", Type::Double),
+                // An external metric posted for the item (a Dice over masks).
+                col("metric", Type::Json),
+                // What the item came to: the value, or the derivative.
+                col("outcome", Type::Json),
+                col("decision_id", Type::Int),
+                col("pick_id", Type::Int),
+                col("resolved_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["campaign_id", "position"])
+        .index(&["review_item_id"])
+        .index(&["subject_id"])
+        // a commit by filter and a label set read an item by its decision
+        .index(&["decision_id"]),
+        Table::new(
+            "campaign_assignment",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                // Null while a round-two assignment waits for any adjudicator.
+                col("principal", Type::Text),
+                // rater | adjudicator
+                req("role", Type::Text),
+                req("round", Type::Int),
+                // offered | leased | submitted | expired | released
+                req("state", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("leased_at", Type::Timestamp),
+                col("lease_until", Type::Timestamp),
+                col("ended_at", Type::Timestamp),
+            ],
+        )
+        .index(&["item_id"])
+        .index(&["campaign_id", "state"]),
+        // A rater's answer is never a decision: `apply` withdraws the
+        // earlier decision on the same key, so two raters written as
+        // decisions would cancel each other. Every answer is kept.
+        Table::new(
+            "campaign_answer",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("assignment_id", Type::Int),
+                req("principal", Type::Text),
+                req("role", Type::Text),
+                req("round", Type::Int),
+                // person | agent | model, from the verified actor
+                req("author_kind", Type::Text),
+                // The registered model, when a model answered (record 42
+                // S2), carried onto the decision a close writes from it.
+                col("model_id", Type::Int),
+                col("value", Type::Text),
+                col("form", Type::Json),
+                col("derivative_id", Type::Int),
+                col("why", Type::Text),
+                col("actor_detail", Type::Json),
+                req("answered_at", Type::Timestamp),
+                col("supersedes_id", Type::Int),
+            ],
+        )
+        // one answer per item, rater and round: a repeat is the same answer
+        .unique(&["item_id", "principal", "round"])
+        .index(&["item_id"])
+        .index(&["campaign_id"]),
+        // Record 42 S7 (C7): labels exported with their provenance. The
+        // digest covers the canonical labels.tsv, so the same state gives
+        // the same digest and one new decision changes it.
+        Table::new(
+            "label_set",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                // A set written again under a name taken is the name's next
+                // version, in files of its own.
+                req("version", Type::Int),
+                // decisions | answers | outcomes | imported
+                req("kind", Type::Text),
+                // the axis, or the question a campaign asked
+                req("what", Type::Text),
+                req("source", Type::Json),
+                col("campaign_id", Type::Int),
+                // The frozen stack list it covers, pinned while the set is.
+                col("handle_id", Type::Int),
+                req("epoch", Type::Int),
+                col("pack_version", Type::Text),
+                col("scheme_digest", Type::Text),
+                // Record 40 R3: 1 when the set was drawn from a sealed
+                // certification sample, which is never training data.
+                req("sealed", Type::Int),
+                req("rows", Type::Int),
+                req("digest", Type::Text),
+                col("place_id", Type::Int),
+                col("path", Type::Text),
+                req("created_by", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["name", "version"])
+        .index(&["digest"])
+        .index(&["handle_id"]),
+        // Record 40 R3: the stacks of a sample drawn for certification and
+        // sealed by an operator before anyone looked (`nils labels seal`).
+        // A label set any of whose items is one of them, or of a sealed
+        // stack's subject where the item is a session, is sealed, and never
+        // training data. The seal is the registry's, never a caller's flag.
+        Table::new(
+            "sealed_stack",
+            vec![
+                col("id", Type::Id),
+                // what was sealed: a selection as name@version, or a handle
+                req("sample", Type::Text),
+                req("stack_id", Type::Int),
+                req("subject_id", Type::Int),
+                // the frozen list the sample came from, pinned by the seal
+                col("handle_id", Type::Int),
+                req("sealed_by", Type::Text),
+                req("sealed_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["sample", "stack_id"])
+        .index(&["stack_id"])
+        .index(&["subject_id"]),
     ]
 }
+
+/// Record 42: the words a table of the campaign mechanism may never
+/// carry, because the mechanism belongs to no QC product of v0.
+pub const PRODUCT_WORDS: [&str; 4] = ["qc", "body_part", "axes", "acquisition"];
 
 fn detail(name: &'static str, level: Level) -> Table {
     Table::new(
@@ -1896,6 +2226,50 @@ mod tests {
         assert_eq!(table("source_file").uniques[0], vec!["source_id", "path"]);
         assert_eq!(linkage_tables().len(), 5);
         assert_eq!(linkage_tables()[0].name, "linkage_meta");
+    }
+
+    /// Record 42 S5: one campaign mechanism carries v0's five QC products,
+    /// so no table is named for one of them.
+    #[test]
+    fn no_table_belongs_to_one_qc_product() {
+        for t in registry_tables().iter().chain(linkage_tables()) {
+            for word in PRODUCT_WORDS {
+                assert!(
+                    !t.name.contains(word),
+                    "{} is named for a QC product ({word})",
+                    t.name
+                );
+            }
+        }
+        for name in [
+            "campaign",
+            "campaign_item",
+            "campaign_assignment",
+            "campaign_answer",
+            "label_set",
+            "sealed_stack",
+        ] {
+            assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
+        }
+    }
+
+    /// Record 42: a commit by filter and a label set find a campaign item
+    /// by the decision it closed into, and an item holds one answer per
+    /// rater and round.
+    #[test]
+    fn a_campaign_item_is_found_by_its_decision() {
+        assert!(
+            table("campaign_item")
+                .indexes
+                .iter()
+                .any(|k| k == &vec!["decision_id"])
+        );
+        assert!(
+            table("campaign_answer")
+                .uniques
+                .iter()
+                .any(|k| k == &vec!["item_id", "principal", "round"])
+        );
     }
 
     #[test]

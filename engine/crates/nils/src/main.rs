@@ -29,9 +29,11 @@ mod assist_cli;
 mod backup;
 mod batches;
 mod browse;
+mod campaigns;
 mod chain;
 mod dataset;
 mod depends;
+mod derivatives;
 mod door_client;
 mod explain;
 mod folders;
@@ -40,6 +42,7 @@ mod grants;
 mod linkage_doors;
 mod login;
 mod mcp;
+mod model_cli;
 mod originals;
 mod places;
 mod profile;
@@ -197,6 +200,26 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// The model registry (record 42, D15): models whose answers become
+    /// registry facts, by the digest of their artifact, registered,
+    /// admitted by a check, promoted in their slot and retired
+    Model {
+        #[command(subcommand)]
+        command: model_cli::ModelCommand,
+    },
+    /// Campaigns: one question asked of a frozen list of items, answered by
+    /// raters under leases, adjudicated where they disagree, and closed
+    /// through the one write path (record 42)
+    Campaign {
+        #[command(subcommand)]
+        command: campaigns::CampaignCommand,
+    },
+    /// Label sets: decisions as labelled data with their provenance and a
+    /// digest, and v0's labels imported (record 42)
+    Labels {
+        #[command(subcommand)]
+        command: campaigns::LabelsCommand,
+    },
     /// What a selection would release, without releasing it: each item and
     /// how it resolved, and what it reaches (Wave 4a section 8)
     Select(SelectArgs),
@@ -223,6 +246,11 @@ enum Command {
     Pyramid {
         #[command(subcommand)]
         command: PyramidCommand,
+    },
+    /// Files made from the archive, kept in a working place and named by their digest: masks, embeddings, a pipeline's outputs (record 42)
+    Derivative {
+        #[command(subcommand)]
+        command: derivatives::DerivativeCommand,
     },
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
@@ -1169,6 +1197,19 @@ enum PickCommand {
         #[arg(long)]
         json: bool,
     },
+    /// A person's pick: the stacks that stand for a role on their occasion, which a pick run leaves standing (record 42)
+    Set(PickSetArgs),
+    /// Withdraw a person's pick; the run's pick it overruled applies again
+    Withdraw {
+        /// The person's pick, from `nils pick list`
+        id: i64,
+        /// Why, kept on the audit row
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Why one pick came out the way it did: every component, and what it read
     Explain {
         /// The pick's id, from `nils pick list`
@@ -1199,6 +1240,36 @@ struct PickArgs {
     /// Only this subject, which also narrows the population scored against
     #[arg(long, value_name = "CODE")]
     subject: Option<String>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PickSetArgs {
+    /// The role the pick stands for, one the pack's picks declare
+    #[arg(long, value_name = "ROLE")]
+    role: String,
+    /// A stack the pick names; more than one for the stacks of one acquisition
+    #[arg(long = "stack", value_name = "ID", required = true)]
+    stacks: Vec<i64>,
+    /// Why this stack and not the run's, in a person's words
+    #[arg(long, value_name = "TEXT")]
+    why: String,
+    /// The pack's pick that declares the role, when more than one does
+    #[arg(long = "pick", value_name = "NAME")]
+    pick: Option<String>,
+    /// The pack's name, looked up in the pack directory
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// The session scheme, as a file; without one, the default
+    #[arg(long, value_name = "FILE", conflicts_with = "scheme_name")]
+    scheme: Option<PathBuf>,
+    /// A scheme stored in this registry, by name
+    #[arg(long = "scheme-name", value_name = "NAME")]
+    scheme_name: Option<String>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -1333,14 +1404,23 @@ enum ReviewCommand {
     Apply(DecideArgs),
     /// The same as `apply`, under the name Wave 2 gave it
     Decide(DecideArgs),
-    /// Put staged decisions in force: one by id, or every one with --all.
-    /// Refused when the registry moved on since they were staged, unless
-    /// --anyway
+    /// Put staged decisions in force: one by id, every one with --all, or
+    /// the part a filter names (--min-confidence, --campaign), leaving the
+    /// rest staged. Refused when the registry moved on since they were
+    /// staged, unless --anyway
     Commit {
         /// The decision to commit
         id: Option<i64>,
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["min_confidence", "campaign"])]
         all: bool,
+        /// Only decisions whose confidence is at least this: the agreement
+        /// of the campaign item that closed into it, else the confidence
+        /// its review item names
+        #[arg(long, value_name = "P", conflicts_with = "id")]
+        min_confidence: Option<f64>,
+        /// Only decisions this campaign's close staged
+        #[arg(long, value_name = "CAMPAIGN", conflicts_with = "id")]
+        campaign: Option<String>,
         #[arg(long)]
         anyway: bool,
     },
@@ -1397,9 +1477,11 @@ struct DecideArgs {
         value_name = "person|agent|model"
     )]
     author_kind: String,
-    /// The model's version, required when the author is a model (D15)
-    #[arg(long, value_name = "VERSION")]
-    model_version: Option<String>,
+    /// The registered model that answered, required when the author is a
+    /// model (D15): its id, its digest (sha256:...) or name@version. Its
+    /// answer is staged until a person commits it (record 42)
+    #[arg(long, value_name = "MODEL", alias = "model-version")]
+    model: Option<String>,
     /// Why, in the person's own words
     #[arg(long, value_name = "TEXT")]
     why: Option<String>,
@@ -1696,6 +1778,9 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Model { command } => model_cli::model_command(&home, command),
+        Command::Campaign { command } => campaigns::campaign_command(&home, command),
+        Command::Labels { command } => campaigns::labels_command(&home, command),
         Command::Private(args) => private_survey(&home, args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
@@ -1704,6 +1789,7 @@ fn main() -> ExitCode {
         Command::Jobs(command) => jobs_command(&home, command),
         Command::Settings { command } => settings_command(&home, command),
         Command::Pyramid { command } => pyramid_command(&home, command),
+        Command::Derivative { command } => derivatives::command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -3987,6 +4073,17 @@ fn actor() -> String {
     nils_registry::principal::Principal::current().to_string()
 }
 
+/// The kind of who acts at the keyboard: an agent or a model when a worker
+/// says so in `NILS_ACTOR`, else a person (record 42 R6 holds a commit to
+/// it).
+fn actor_kind() -> &'static str {
+    match nils_registry::actor::current()["kind"].as_str() {
+        Some("agent") => "agent",
+        Some("model") => "model",
+        _ => "person",
+    }
+}
+
 /// One audit row (Wave 4a section 9.2), as the command line writes it.
 fn audit(
     registry: &mut Registry,
@@ -4519,13 +4616,50 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             drop(columns);
             review_decide(&mut registry, args)
         }
-        ReviewCommand::Commit { id, all, anyway } => {
+        ReviewCommand::Commit {
+            id,
+            all,
+            min_confidence,
+            campaign,
+            anyway,
+        } => {
             drop(columns);
-            if id.is_none() && !all {
-                return Err(usage("name a decision to commit, or --all"));
-            }
-            let done = nils_registry::review::commit(&mut registry, id, anyway, &actor())
+            if min_confidence.is_some() || campaign.is_some() {
+                let campaign = match campaign {
+                    Some(w) => Some(
+                        nils_registry::campaign::find(registry.store(), &w)
+                            .map_err(|e| usage(e.to_string()))?
+                            .id,
+                    ),
+                    None => None,
+                };
+                let done = nils_registry::review::commit_where(
+                    &mut registry,
+                    &nils_registry::review::CommitFilter {
+                        min_confidence,
+                        campaign,
+                    },
+                    anyway,
+                    &actor(),
+                    actor_kind(),
+                )
                 .map_err(|e| fail(e.to_string()))?;
+                println!(
+                    "committed {} decision(s), {} item(s) accepted; {} left staged",
+                    done.decisions.len(),
+                    done.items,
+                    done.left
+                );
+                return Ok(());
+            }
+            if id.is_none() && !all {
+                return Err(usage(
+                    "name a decision to commit, --all, or a filter (--min-confidence, --campaign)",
+                ));
+            }
+            let done =
+                nils_registry::review::commit_as(&mut registry, id, anyway, &actor(), actor_kind())
+                    .map_err(|e| fail(e.to_string()))?;
             println!(
                 "committed {} decision(s), {} item(s) accepted",
                 done.decisions.len(),
@@ -4535,8 +4669,9 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         }
         ReviewCommand::Withdraw { id } => {
             drop(columns);
-            let reopened = nils_registry::review::withdraw(&mut registry, id, &actor())
-                .map_err(|e| fail(e.to_string()))?;
+            let reopened =
+                nils_registry::review::withdraw_as(&mut registry, id, &actor(), actor_kind())
+                    .map_err(|e| fail(e.to_string()))?;
             println!("withdrew decision {id}; {reopened} item(s) open again");
             Ok(())
         }
@@ -4676,7 +4811,7 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         nothing,
         actor,
         author_kind,
-        model_version,
+        model,
         why,
         stage,
         json,
@@ -4692,6 +4827,18 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         .and_then(nils_registry::principal::Principal::parse)
         .map(|p| p.to_string())
         .unwrap_or_else(self::actor);
+    let model = match model.as_deref() {
+        Some(reference) => Some(
+            nils_registry::model::resolve(registry.store(), reference)?
+                .ok_or_else(|| {
+                    usage(format!(
+                        "no registered model answers to {reference}: an id, a digest (sha256:...) or name@version"
+                    ))
+                })?
+                .id,
+        ),
+        None => None,
+    };
     let applied = nils_registry::review::apply(
         registry,
         &nils_registry::review::Apply {
@@ -4702,10 +4849,12 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
             author: nils_registry::review::Author {
                 who: &who,
                 kind: &author_kind,
-                version: model_version.as_deref(),
+                version: None,
+                model,
             },
             stage,
             why: why.as_deref(),
+            campaign: None,
         },
     )
     .map_err(|e| match e {
@@ -4897,6 +5046,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let overlays = count_of(store, "overlay", "")?;
     let overlays_proposed = count_of(store, "overlay", " WHERE status = 'proposed'")?;
     let overlays_adopted = count_of(store, "overlay", " WHERE status = 'adopted'")?;
+    let models = count_of(store, "model", "")?;
+    let models_promoted = count_of(store, "model", " WHERE state = 'promoted'")?;
     let jobs = count_of(store, "job", "")?;
     let batches = count_of(store, "ingest_batch", "")?;
     let cohorts = count_of(store, "cohort", "")?;
@@ -4915,7 +5066,27 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let curated = count_of(store, "catalog_curation", "")?;
     let identifier_reads = count_of(store, "handle_read_audit", "")?;
     let documents = count_of(store, "ask_document", "")?;
+    let campaigns = count_of(store, "campaign", "")?;
+    let campaign_items = count_of(store, "campaign_item", "")?;
+    let campaign_answers = count_of(store, "campaign_answer", "")?;
+    let label_sets = count_of(store, "label_set", "")?;
+    let sealed_stacks = count_of(store, "sealed_stack", "")?;
     let schema = store.schema().map(str::to_string);
+    let (derivative_rows, derivative_bytes) = nils_registry::derivative::totals(store)?;
+    let derivatives_where = match derivatives::working(store) {
+        Ok(p) => format!(
+            "files under {} in the working place {} ({}), and rows of derivative in the registry",
+            nils_registry::derivative::TREE,
+            p.name,
+            Path::new(&p.path)
+                .join(nils_registry::derivative::TREE)
+                .display()
+        ),
+        Err(_) => format!(
+            "files under {} in a working place, and none is bound now, so none can be added; rows of derivative in the registry",
+            nils_registry::derivative::TREE
+        ),
+    };
     let linkage_holdings = linkage::holdings(&mut registry.open_linkage()?)?;
 
     let dir = home.dir();
@@ -5089,6 +5260,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             },
         }),
         serde_json::json!({
+            "store": "models",
+            "owner": "the operator who registered, admitted and promoted each",
+            "what": "the models whose answers become registry facts (record 42, D15): each by the digest of its artifact, with its card, the check that admitted it, its state and every transition; never the artifact itself",
+            "where": "rows of model and model_event in the registry",
+            "files": [],
+            "holds": ["technical: names, versions, digests, tasks and slots, the metrics a card states, the checks", "who registered, admitted, promoted and retired each"],
+            "counts": { "models": models, "promoted": models_promoted },
+            "kept": "for good; a retired model is what the decisions it answered name",
+            "commands": {
+                "read": ["nils model list", "nils model show <model>"],
+                "change": ["nils model register --card <file>", "nils model admit <model> --check <file>", "nils model promote <model>", "nils model retire <model>"],
+                "export": ["nils model show <model> --json"],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
             "store": "clinical layer",
             "owner": "the research group that owns the cohort",
             "what": "what v0 kept in a second database, in the one registry (Wave 4a section 7.1): cohorts and their members, the vocabulary of diseases and observation kinds, each subject's diseases, the events, and the subject's demographics",
@@ -5105,6 +5292,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "change": ["nils clinical vocabulary load", "nils clinical cohort make | rename | set | retire | add | remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
                 "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
+            },
+        }),
+        serde_json::json!({
+            "store": "campaigns and label sets",
+            "owner": "the research group that runs the campaign; each answer is its rater's",
+            "what": "campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went; and the stacks of the samples an operator sealed for certification, which make a set that holds any of them sealed (record 40 R3)",
+            "where": "rows of campaign, campaign_item, campaign_assignment, campaign_answer, label_set and sealed_stack in the registry; a label set's labels.tsv and provenance.json in the export place it was written to",
+            "files": [],
+            "holds": ["quasi-identifying: the day a session opened, on a pick campaign's items and its labels", "a person's words: the why and the form of an answer", "technical: stack, subject and derivative ids, values, the principals, the times, the digests"],
+            "counts": { "campaigns": campaigns, "items": campaign_items, "answers": campaign_answers, "label_sets": label_sets, "sealed_stacks": sealed_stacks },
+            "kept": "for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal is never undone",
+            "commands": {
+                "read": ["nils campaign list", "nils campaign show <campaign> [--answers]", "nils labels list", "nils labels show <id>"],
+                "change": ["nils campaign create | claim | answer | release | metric | close", "nils labels import-v0 --tsv <file>", "nils labels seal --select selection:<name>@<v>"],
+                "export": ["nils campaign export <campaign> --to <dir> [--answers]", "nils labels export --axis <axis> --to <dir>"],
+                "delete": "with the registry",
             },
         }),
         serde_json::json!({
@@ -5243,6 +5446,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "change": [],
                 "export": [],
                 "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "derivatives",
+            "owner": "the research group that owns the archive",
+            "what": "files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42)",
+            "where": derivatives_where,
+            "files": [],
+            "holds": ["quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to", "technical: the kind, the digest, the size, the media type, the place and the path, who registered it"],
+            "counts": { "derivatives": derivative_rows, "bytes": derivative_bytes },
+            "kept": "for ever; a newer file supersedes an older one by a link and both stay",
+            "commands": {
+                "read": ["nils derivative list", "nils derivative show <id>", "GET /api/derivatives/{id}/content"],
+                "change": ["nils derivative add <file>"],
+                "export": ["GET /api/derivatives/{id}/content"],
+                "delete": "with the registry and the working place; nils has no command for one",
             },
         }),
         serde_json::json!({
@@ -6154,7 +6373,100 @@ fn pick_command(home: &Home, command: PickCommand) -> Result<(), Exit> {
             json,
         } => pick_list(home, role, borders, subject, json),
         PickCommand::Explain { id, json } => pick_explain(home, id, json),
+        PickCommand::Set(args) => pick_set(home, args),
+        PickCommand::Withdraw { id, why, json } => pick_withdraw(home, id, why, json),
     }
+}
+
+/// Record 42 S3: `nils pick set`, a person's pick.
+fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
+    let dir = pack_dir(home, args.pack_dir)?;
+    let found = packs_in(&dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+        .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
+    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+    let mut registry = open(home)?;
+    let scheme = match (&args.scheme, &args.scheme_name) {
+        (Some(path), _) => read_scheme(path)?,
+        (None, Some(name)) => stored_scheme(&mut registry, name)?,
+        (None, None) => session::Scheme::default(),
+    };
+    let who = actor();
+    let picked = nils_classify::picking::set_person(
+        &mut registry,
+        &pack,
+        &scheme,
+        &nils_classify::picking::PersonPick {
+            role: &args.role,
+            stacks: &args.stacks,
+            model: args.pick.as_deref(),
+            why: &args.why,
+            actor: &who,
+            campaign: None,
+            occasion: None,
+        },
+    )
+    .map_err(|e| match e {
+        nils_classify::picking::PersonError::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&picked)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!(
+        "pick {}: the {} of the occasion on {}, by a person",
+        picked.id, picked.role, picked.session_day
+    );
+    println!(
+        "  stacks           {}",
+        picked
+            .stacks
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  overrules        {} run's pick(s)",
+        picked.overruled.len()
+    );
+    if !picked.replaced.is_empty() {
+        println!(
+            "  replaces         {} earlier person's pick(s)",
+            picked.replaced.len()
+        );
+    }
+    println!("  answers          {} review item(s)", picked.answered);
+    Ok(())
+}
+
+/// Record 42 S3: `nils pick withdraw`, a person's pick withdrawn.
+fn pick_withdraw(home: &Home, id: i64, why: Option<String>, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let done = nils_classify::picking::withdraw_person(&mut registry, id, &actor(), why.as_deref())
+        .map_err(|e| match e {
+            nils_classify::picking::PersonError::Refused(m) => usage(m),
+            other => fail(other.to_string()),
+        })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&done)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!(
+        "pick {id} withdrawn; {} run's pick(s) apply again",
+        done.restored.len()
+    );
+    Ok(())
 }
 
 fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
@@ -6204,6 +6516,8 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     println!("  occasions        {:>12}", report.sessions);
     println!("  picked           {:>12}", report.written);
     println!("  nothing eligible {:>12}", report.empty);
+    println!("  {:<16} {:>12}", "person's stands", report.standing);
+    println!("  {:<16} {:>12}", "for review", report.raised);
     for (why, n) in &report.borders {
         println!("  {why:<16} {n:>12}   worth a person's eye");
     }
@@ -8242,6 +8556,11 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             p["uids"].as_str().unwrap_or_default(),
             p["from"].as_str().unwrap_or_default()
         );
+    }
+    // Record 42 S2: a value a model decided is traceable from the report to
+    // the model, by name, version and digest.
+    for m in &report.models {
+        println!("  model            {}@{}   {}", m.name, m.version, m.digest);
     }
     // Record 35: under what rule the file was de-identified. The row has
     // recorded the categories since they existed and nothing a person reads

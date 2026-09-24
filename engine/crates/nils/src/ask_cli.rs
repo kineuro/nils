@@ -1585,3 +1585,70 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
     }
     Ok(())
 }
+
+/// Record 42: a saved selection frozen into a list of stacks or sessions,
+/// for a campaign's items or a label set's stacks. The selection's own set
+/// opens the document and, where its grain is wider, the stacks or sessions
+/// under it are the answer, at record level so the handle keeps the keys.
+/// Answers the handle.
+pub(crate) fn freeze_selection(
+    home: &Home,
+    spec: &str,
+    want: nils_ask::ast::Grain,
+    pack_dir: Option<PathBuf>,
+    pack_name: &str,
+) -> Result<i64, Exit> {
+    let dir = crate::pack_dir(home, pack_dir)
+        .map_err(|_| usage("no packs here: pass --pack-dir DIR to freeze a selection"))?;
+    let pack = load_pack(&dir, pack_name)?;
+    let mut registry = open(home)?;
+    let bare = spec.strip_prefix("selection:").unwrap_or(spec);
+    let (name, version) = match bare.rsplit_once('@') {
+        Some((n, v)) => (n, v.parse::<u64>().ok()),
+        None => (bare, None),
+    };
+    let saved = selection::get(registry.store(), name, version)
+        .map_err(|e| fail(e.to_string()))?
+        .ok_or_else(|| usage(format!("no selection {spec}")))?;
+    let grain = saved
+        .ask
+        .sets
+        .get(&saved.ask.out.set)
+        .map(|s| s.grain)
+        .unwrap_or(nils_ask::ast::Grain::Subject);
+    let doc = crate::campaigns::freeze_document(name, saved.version, grain, want).map_err(usage)?;
+    let ask = parse(&doc.to_string()).map_err(|e| fail(format!("the freezing document: {e}")))?;
+    let catalog = Catalog::build(&mut registry, &pack).map_err(|e| fail(e.to_string()))?;
+    let pack_version = pack.version.to_string();
+    let node = job::hostname();
+    let who = principal();
+    let scheme = Scheme::default();
+    let out = run::run(
+        &mut registry,
+        Request {
+            ask,
+            names: &catalog,
+            scope: &scope(),
+            principal: &who,
+            node: &node,
+            pack_version: Some(&pack_version),
+            scheme: &scheme,
+            bounds: bounds(),
+            page_rows: Caps::default().page_rows as usize,
+            name: None,
+            keep: false,
+            after: None,
+            limit: None,
+            may_project_raw: false,
+            purpose: Some("freezing a selection"),
+            reader: None,
+        },
+    )
+    .map_err(|e| usage(e.to_string()))?;
+    if out.answer.truncated {
+        return Err(usage(format!(
+            "selection {spec} reaches more than one answer holds; narrow it"
+        )));
+    }
+    Ok(out.handle.id)
+}

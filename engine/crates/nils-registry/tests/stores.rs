@@ -1401,3 +1401,434 @@ fn the_audit_log_is_a_table_and_the_epoch_moves_with_a_judgement() {
             .unwrap();
     }
 }
+
+/// Record 42 S1, migration 53, on both backends: a registry from before
+/// gains `model_id` and `campaign_id` on decisions, evidence and picks, and
+/// `committed_by` on decisions. A decision written in force names its own
+/// actor as its committer; one staged and committed later names nobody,
+/// since nobody was recorded; twice is the same as once.
+#[test]
+fn migration_53_names_the_model_the_campaign_and_the_committer() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let q = |store: &Store, t: &str| store.qualified(t);
+        let (decision, evidence, pick, meta) = (
+            q(&store, "decision"),
+            q(&store, "classification_evidence"),
+            q(&store, "pick"),
+            q(&store, "registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {decision} DROP COLUMN model_id;
+                 ALTER TABLE {decision} DROP COLUMN campaign_id;
+                 ALTER TABLE {decision} DROP COLUMN committed_by;
+                 ALTER TABLE {evidence} DROP COLUMN model_id;
+                 ALTER TABLE {evidence} DROP COLUMN campaign_id;
+                 ALTER TABLE {pick} DROP COLUMN model_id;
+                 ALTER TABLE {pick} DROP COLUMN campaign_id;
+                 UPDATE {meta} SET value = '52' WHERE key = 'schema_version';
+                 INSERT INTO {decision} (scope, ref, axis, value, actor, author_kind, decided_at, committed_at)
+                   VALUES ('stack', '1', 'base', 'T1w', 'anna@ward-3', 'person', '2026-09-01T10:00:00Z', '2026-09-01T10:00:00Z');
+                 INSERT INTO {decision} (scope, ref, axis, value, actor, author_kind, decided_at, staged_at, committed_at)
+                   VALUES ('stack', '2', 'base', 'T2w', 'bot@ward-3', 'agent', '2026-09-01T10:00:00Z', '2026-09-01T10:00:00Z', '2026-09-02T10:00:00Z')"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(52),
+            "{name}"
+        );
+        let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+        assert_eq!(applied.first(), Some(&53), "{name}: {applied:?}");
+        for (t, c) in [
+            ("decision", "model_id"),
+            ("decision", "campaign_id"),
+            ("decision", "committed_by"),
+            ("classification_evidence", "model_id"),
+            ("classification_evidence", "campaign_id"),
+            ("pick", "model_id"),
+            ("pick", "campaign_id"),
+        ] {
+            assert!(
+                migrate::column_exists(&mut store, t, c).unwrap(),
+                "{name}: {t}.{c}"
+            );
+        }
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT ref, committed_by, model_id, campaign_id FROM {decision} ORDER BY id"
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows[0].opt_text(1).unwrap(), Some("anna@ward-3"), "{name}");
+        assert_eq!(rows[1].opt_text(1).unwrap(), None, "{name}: not recorded");
+        assert_eq!(rows[0].opt_int(2).unwrap(), None, "{name}");
+        assert_eq!(rows[0].opt_int(3).unwrap(), None, "{name}");
+        // once more, by hand: nothing moves
+        let version = migrate::MIGRATIONS
+            .iter()
+            .find(|m| m.version == 53)
+            .unwrap();
+        store.begin().unwrap();
+        (version.apply)(&mut store, Kind::Registry).unwrap();
+        store.commit().unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Current,
+            "{name}"
+        );
+    }
+}
+
+/// Record 42 S2, migration 54, on both backends: a registry from before
+/// gains the model registry's two tables and a release's models.
+#[test]
+fn migration_54_gives_a_model_a_home() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (model, event, release, meta) = (
+            store.qualified("model"),
+            store.qualified("model_event"),
+            store.qualified("release"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {model}; DROP TABLE {event};
+                 ALTER TABLE {release} DROP COLUMN models;
+                 UPDATE {meta} SET value = '53' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert!(
+            !migrate::table_exists(&mut store, "model").unwrap(),
+            "{name}"
+        );
+        let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+        assert_eq!(applied.first(), Some(&54), "{name}: {applied:?}");
+        assert!(
+            migrate::table_exists(&mut store, "model").unwrap(),
+            "{name}"
+        );
+        assert!(
+            migrate::table_exists(&mut store, "model_event").unwrap(),
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "release", "models").unwrap(),
+            "{name}"
+        );
+        // the digest is the identity: a second row with it is refused by the
+        // store itself, not only by the verb
+        let insert = format!(
+            "INSERT INTO {model} (name, version, kind, digest, task, slot, state, card, registered_by, registered_at) \
+             VALUES ('{{n}}', '1', 'head', 'sha256:x', 'axis:a', 'site', 'registered', '{{}}', 'a', '2026-09-24T00:00:00Z')"
+        );
+        store.batch(&insert.replace("{n}", "one")).unwrap();
+        assert!(
+            store.batch(&insert.replace("{n}", "two")).is_err(),
+            "{name}: one row per digest"
+        );
+    }
+}
+
+/// A registry on each backend: SQLite in a temporary home, and Postgres in
+/// a schema of its own when a DSN is given.
+fn registries() -> Vec<(
+    String,
+    Option<MutexGuard<'static, ()>>,
+    TempDir,
+    nils_registry::Registry,
+)> {
+    let mut out = Vec::new();
+    let init = |dir: &TempDir, backend: Backend, dsn: Option<String>, schema: Option<&str>| {
+        let home = Home::new(dir.path());
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        home.init(&InitOptions {
+            backend,
+            dsn,
+            schema: schema.map(str::to_string),
+            scheme: Scheme::DEFAULT,
+            key: "k".to_string(),
+            display_length: 12,
+            session_scheme: None,
+        })
+        .unwrap()
+    };
+    let dir = TempDir::new("models-sqlite");
+    let reg = init(&dir, Backend::Sqlite, None, None);
+    out.push(("sqlite".to_string(), None, dir, reg));
+    if let Some((guard, mut store)) = postgres_store("nils_models_test") {
+        store
+            .batch("DROP SCHEMA nils_models_test CASCADE; DROP SCHEMA IF EXISTS nils_models_test_linkage CASCADE")
+            .unwrap();
+        drop(store);
+        let dir = TempDir::new("models-pg");
+        let reg = init(
+            &dir,
+            Backend::Postgres,
+            postgres_dsn(),
+            Some("nils_models_test"),
+        );
+        out.push(("postgres".to_string(), Some(guard), dir, reg));
+    }
+    out
+}
+
+/// Record 42 S2 on both backends: register by digest, promotion refused
+/// before admission, a failed check moving nothing, one promoted model per
+/// slot, a cohort slot only for a cohort that exists; and a model's answer
+/// refused for an unknown model, staged for an admitted one, and committed
+/// by a person and never by an agent.
+#[test]
+fn the_model_registry_keeps_its_rules_on_both_backends() {
+    use nils_registry::model::{self, Error};
+    use nils_registry::review::{self, Apply, Author};
+    for (name, _guard, _dir, mut reg) in registries() {
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let card = |n: &str, v: &str, kind: &str, d: &str, extra: serde_json::Value| {
+            let mut c = serde_json::json!({"name": n, "version": v, "kind": kind, "digest": d, "task": "axis:body_part"});
+            for (k, x) in extra.as_object().unwrap() {
+                c[k] = x.clone();
+            }
+            c
+        };
+        let enc = model::register(
+            &mut reg,
+            &card(
+                "enc",
+                "1",
+                "encoder",
+                &digest('e'),
+                serde_json::json!({"task": "embed:image"}),
+            ),
+            "anna@ward-3",
+        )
+        .unwrap();
+        let with_encoder = serde_json::json!({"encoder": {"digest": digest('e')}});
+        let one = model::register(
+            &mut reg,
+            &card("head", "1", "head", &digest('1'), with_encoder.clone()),
+            "anna@ward-3",
+        )
+        .unwrap();
+        assert_eq!(one.encoder_model_id, Some(enc.id), "{name}");
+        assert_eq!(one.state, "registered", "{name}");
+        // by digest, once
+        let again = model::register(
+            &mut reg,
+            &card("other", "9", "head", &digest('1'), with_encoder.clone()),
+            "anna@ward-3",
+        );
+        assert!(matches!(again, Err(Error::Refused(_))), "{name}: {again:?}");
+        assert_eq!(
+            model::resolve(reg.store(), &digest('1'))
+                .unwrap()
+                .map(|m| m.id),
+            Some(one.id),
+            "{name}"
+        );
+        // a slot of a cohort that does not exist
+        let nowhere = model::register(
+            &mut reg,
+            &card(
+                "head",
+                "c",
+                "head",
+                &digest('c'),
+                serde_json::json!({"encoder": {"digest": digest('e')}, "slot": "cohort:nobody"}),
+            ),
+            "anna@ward-3",
+        );
+        assert!(
+            matches!(nowhere, Err(Error::Unknown(_))),
+            "{name}: {nowhere:?}"
+        );
+        // promotion before admission; a failed check moves nothing
+        let early = model::promote(&mut reg, one.id, "anna@ward-3", None, None);
+        assert!(matches!(early, Err(Error::Refused(_))), "{name}: {early:?}");
+        let failed = serde_json::json!({"suite": "heldout", "passed": false, "checks": [{"name": "ece", "passed": false}]});
+        let passed = serde_json::json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]});
+        assert_eq!(
+            model::admit(&mut reg, one.id, &failed, "anna@ward-3")
+                .unwrap()
+                .state,
+            "registered",
+            "{name}"
+        );
+        let lying = serde_json::json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": false}]});
+        assert!(
+            matches!(
+                model::admit(&mut reg, one.id, &lying, "anna@ward-3"),
+                Err(Error::Invalid(_))
+            ),
+            "{name}"
+        );
+        model::admit(&mut reg, one.id, &passed, "anna@ward-3").unwrap();
+        let first = model::promote(&mut reg, one.id, "anna@ward-3", None, None).unwrap();
+        assert_eq!(first.retired, None, "{name}");
+        // the second promotion in the slot retires the first
+        let two = model::register(
+            &mut reg,
+            &card("head", "2", "head", &digest('2'), with_encoder.clone()),
+            "anna@ward-3",
+        )
+        .unwrap();
+        model::admit(&mut reg, two.id, &passed, "anna@ward-3").unwrap();
+        let second = model::promote(&mut reg, two.id, "anna@ward-3", None, Some("better")).unwrap();
+        assert_eq!(
+            second.retired.as_ref().map(|m| m.id),
+            Some(one.id),
+            "{name}"
+        );
+        assert_eq!(second.retired.unwrap().state, "retired", "{name}");
+        let promoted = model::list(
+            reg.store(),
+            &model::Filter {
+                task: Some("axis:body_part"),
+                slot: Some("site"),
+                state: Some("promoted"),
+            },
+        )
+        .unwrap();
+        assert_eq!(promoted.len(), 1, "{name}: one promoted model per slot");
+        assert_eq!(
+            model::events(reg.store(), one.id).unwrap().len(),
+            5,
+            "{name}"
+        );
+
+        // a model's answer, on a question about the axis
+        let item = reg
+            .store()
+            .insert(
+                &Insert::new(
+                    table("review_item"),
+                    &["kind", "scope", "ref", "evidence", "status", "created_at"],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("body_part:model"),
+                    Param::from("stack"),
+                    Param::from(r#"{"stack_id": 7}"#),
+                    Param::from(r#"{"axis": "body_part", "value": "HEAD"}"#),
+                    Param::from("open"),
+                    Param::from("2026-09-24T00:00:00Z"),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let answer = |model: Option<i64>| Apply {
+            item,
+            member: None,
+            scope: "stack",
+            value: Some("HEAD"),
+            author: Author {
+                who: "pipeline@ward-3",
+                kind: "model",
+                version: None,
+                model,
+            },
+            stage: false,
+            why: None,
+            campaign: None,
+        };
+        let unknown = review::apply(&mut reg, &answer(Some(9999)));
+        assert!(
+            matches!(&unknown, Err(review::Error::Refused(m)) if m.contains("no model 9999")),
+            "{name}: {unknown:?}"
+        );
+        let retired = review::apply(&mut reg, &answer(Some(one.id)));
+        assert!(
+            matches!(&retired, Err(review::Error::Refused(m)) if m.contains("retired")),
+            "{name}: {retired:?}"
+        );
+        let applied = review::apply(&mut reg, &answer(Some(two.id))).unwrap();
+        assert!(applied.staged, "{name}: a model's answer is staged (R6)");
+        assert_eq!(applied.model.as_ref().map(|m| m.id), Some(two.id), "{name}");
+        let by_agent = review::commit_as(
+            &mut reg,
+            Some(applied.decision),
+            false,
+            "bot@ward-3",
+            "agent",
+        );
+        assert!(
+            matches!(&by_agent, Err(review::Error::Refused(m)) if m.contains("R6")),
+            "{name}: {by_agent:?}"
+        );
+        review::commit(&mut reg, Some(applied.decision), false, "anna@ward-3").unwrap();
+        let decision = reg.store().qualified("decision");
+        let rows = reg
+            .store()
+            .query(
+                &format!(
+                    "SELECT author_kind, model_id, author_version, committed_by FROM {decision} WHERE id = {}",
+                    applied.decision
+                ),
+                &[],
+            )
+            .unwrap();
+        let row = &rows[0];
+        assert_eq!(row.text(0).unwrap(), "model", "{name}");
+        assert_eq!(row.int(1).unwrap(), two.id, "{name}");
+        assert_eq!(row.text(2).unwrap(), "2", "{name}");
+        assert_eq!(row.text(3).unwrap(), "anna@ward-3", "{name}");
+        if name == "postgres" {
+            reg.store()
+                .batch("DROP SCHEMA nils_models_test CASCADE; DROP SCHEMA IF EXISTS nils_models_test_linkage CASCADE")
+                .unwrap();
+        }
+    }
+}
+
+/// Record 42 S3 and S4: migrations 55 and 56 bring a registry from before
+/// them to a pick a person may write and a derivative table, on both
+/// backends, and a second run changes nothing.
+#[test]
+fn migrations_55_and_56_add_the_person_s_pick_and_the_derivative() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let pick = store.qualified("pick");
+        let derivative = store.qualified("derivative");
+        let meta = store.qualified("registry_meta");
+        store
+            .batch(&format!(
+                "ALTER TABLE {pick} DROP COLUMN why; \
+                 ALTER TABLE {pick} DROP COLUMN withdrawn_by; \
+                 ALTER TABLE {pick} DROP COLUMN overruled_by; \
+                 DROP TABLE {derivative}; \
+                 UPDATE {meta} SET value = '54' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(54),
+            "{name}"
+        );
+        let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+        assert!(
+            applied.contains(&55) && applied.contains(&56),
+            "{name}: {applied:?}"
+        );
+        for column in ["why", "withdrawn_by", "overruled_by"] {
+            assert!(
+                migrate::column_exists(&mut store, "pick", column).unwrap(),
+                "{name}: pick.{column}"
+            );
+        }
+        let rows = store
+            .query(&format!("SELECT COUNT(*) FROM {derivative}"), &[])
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 0, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}

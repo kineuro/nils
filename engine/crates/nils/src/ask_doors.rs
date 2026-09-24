@@ -225,6 +225,7 @@ fn issues_reply(status: u16, what: &str, issues: &[nils_ask::validate::Issue]) -
         headers: Vec::new(),
         empty: false,
         raw: None,
+        file: None,
     }
 }
 
@@ -341,6 +342,7 @@ fn routed(
                 headers: Vec::new(),
                 empty: false,
                 raw: None,
+                file: None,
             });
         }
         Some(_) => {

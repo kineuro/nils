@@ -34,6 +34,7 @@ const REVIEW_ITEM_VERSION: &str = include_str!("../../../../contracts/review-ite
 const SUITE_VERSION: &str = include_str!("../../../../contracts/suite/VERSION");
 const MCP_VERSION: &str = include_str!("../../../../contracts/mcp/VERSION");
 const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VERSION");
+const MODEL_CONTRACT_VERSION: &str = include_str!("../../../../contracts/model/VERSION");
 
 /// The claims an OIDC token carries that the engine reads; `grants` and
 /// `detail` (the suite contract, version 2) are read from the rest.
@@ -226,6 +227,9 @@ struct Known {
     email: Option<String>,
     /// The `act` claim's subject, when the token was exchanged.
     act: Option<String>,
+    /// The registered model the actor runs, when the issuer bound one into
+    /// the `act` claim (`act.model`: an id, a digest or `name@version`).
+    act_model: Option<String>,
 }
 type ClaimsCache = HashMap<String, Known>;
 
@@ -538,7 +542,13 @@ impl Auth {
                     None => oidc.verify(&token, now)?,
                 };
                 let actor = match &known.act {
-                    Some(sub) => serde_json::json!({ "kind": "agent", "name": sub }),
+                    Some(sub) => {
+                        let mut a = serde_json::json!({ "kind": "agent", "name": sub });
+                        if let Some(m) = &known.act_model {
+                            a["model"] = serde_json::Value::String(m.clone());
+                        }
+                        a
+                    }
                     None => nils_registry::actor::absent(),
                 };
                 Caller {
@@ -578,6 +588,68 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
                 400,
                 "X-Nils-Actor is a JSON object with a kind: person, agent or model",
             ));
+        }
+        // Record 42 S1: what the token proves the header cannot raise. A
+        // token that acts for an agent (its `act` claim) may name the agent
+        // or a model it runs, and never a person, nor leave the actor absent,
+        // which is read as a person at a keyboard. The header cannot rename
+        // the actor the claim proves, and a model is the one the issuer bound
+        // into the claim (`act.model`) or none: an agent's token names no
+        // model of its own choosing.
+        let mut value = value;
+        if let Some(proven @ ("agent" | "model")) = caller.actor["kind"].as_str() {
+            let asked = value["kind"].as_str().unwrap_or("").to_string();
+            let asked = asked.as_str();
+            let rank = nils_registry::review::rank;
+            if !matches!(asked, "agent" | "model") || rank(asked) > rank(proven) {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "the token acts for {}; X-Nils-Actor cannot make it {}",
+                        with_article(proven),
+                        with_article(asked)
+                    ),
+                ));
+            }
+            let proven_name = caller.actor.get("name").and_then(|n| n.as_str());
+            match (value.get("name").filter(|n| !n.is_null()), proven_name) {
+                (Some(said), Some(name)) if said.as_str() != Some(name) => {
+                    return Err(Reply::error(
+                        403,
+                        format!("the token acts as {name}; X-Nils-Actor cannot name it {said}"),
+                    ));
+                }
+                (None, Some(name)) => value["name"] = serde_json::Value::from(name),
+                _ => {}
+            }
+            let carried = caller.actor.get("model").filter(|m| !m.is_null()).cloned();
+            let said = value.get("model").filter(|m| !m.is_null()).cloned();
+            match (said, carried) {
+                (Some(said), Some(carried)) if said != carried => {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "the token carries the model {carried}; X-Nils-Actor cannot name {said}"
+                        ),
+                    ));
+                }
+                (Some(said), None) => {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "the token carries no model, so X-Nils-Actor cannot name {said}; the issuer binds the model an agent runs into the act claim (act.model)"
+                        ),
+                    ));
+                }
+                (None, Some(carried)) => value["model"] = carried,
+                _ => {}
+            }
+            if asked == "model" && value.get("model").is_none_or(|m| m.is_null()) {
+                return Err(Reply::error(
+                    403,
+                    "the token carries no model, so it cannot act as one; the issuer binds the model an agent runs into the act claim (act.model)",
+                ));
+            }
         }
         caller.actor = value;
     }
@@ -727,19 +799,29 @@ impl Oidc {
             } else {
                 format!("{}@{}", claims.sub, trust.node)
             };
-            let known = Known {
-                principal,
-                access,
-                exp: claims.exp,
-                display: claims.preferred_username.clone().or(claims.name.clone()),
-                email: claims.email.clone(),
-                act: claims
-                    .act
-                    .as_ref()
-                    .and_then(|a| a.get("sub"))
-                    .and_then(|s| s.as_str())
-                    .map(String::from),
-            };
+            let known =
+                Known {
+                    principal,
+                    access,
+                    exp: claims.exp,
+                    display: claims.preferred_username.clone().or(claims.name.clone()),
+                    email: claims.email.clone(),
+                    act: claims
+                        .act
+                        .as_ref()
+                        .and_then(|a| a.get("sub"))
+                        .and_then(|s| s.as_str())
+                        .map(String::from),
+                    act_model: claims.act.as_ref().and_then(|a| a.get("model")).and_then(
+                        |m| match m {
+                            serde_json::Value::String(s) if !s.trim().is_empty() => {
+                                Some(s.trim().to_string())
+                            }
+                            serde_json::Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        },
+                    ),
+                };
             if let Ok(mut cache) = oidc.cache.lock() {
                 cache.retain(|_, k| k.exp > now);
                 cache.insert(token.to_string(), known.clone());
@@ -762,6 +844,9 @@ pub(crate) struct Reply {
     /// Wave 5 §12.7: bytes with their own content type, the instance door's
     /// tiles and renders; `body` is ignored when set.
     pub(crate) raw: Option<Box<(String, Vec<u8>)>>,
+    /// Record 42 S4: a file sent as it stands, streamed from its place
+    /// rather than read whole; its content type is among `headers`.
+    pub(crate) file: Option<Box<std::path::PathBuf>>,
 }
 
 impl Reply {
@@ -773,6 +858,23 @@ impl Reply {
             headers,
             empty: false,
             raw: Some(Box::new((content_type.to_string(), bytes))),
+            file: None,
+        }
+    }
+    /// A file with a content type, streamed from where it lies.
+    pub(crate) fn file(
+        content_type: &str,
+        path: std::path::PathBuf,
+        mut headers: Vec<(String, String)>,
+    ) -> Reply {
+        headers.insert(0, ("Content-Type".to_string(), content_type.to_string()));
+        Reply {
+            status: 200,
+            body: serde_json::Value::Null,
+            headers,
+            empty: false,
+            raw: None,
+            file: Some(Box::new(path)),
         }
     }
     pub(crate) fn ok(body: serde_json::Value) -> Reply {
@@ -782,6 +884,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     pub(crate) fn accepted(body: serde_json::Value) -> Reply {
@@ -791,6 +894,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     pub(crate) fn created(body: serde_json::Value) -> Reply {
@@ -800,6 +904,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     /// An error, with its disclosure (Wave 5 section 12.6): `internal` for
@@ -815,6 +920,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     /// An error whose text may carry a value of a person: a subject code,
@@ -827,6 +933,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     /// The same reply with one more header.
@@ -842,6 +949,7 @@ impl Reply {
             headers: Vec::new(),
             empty: true,
             raw: None,
+            file: None,
         }
     }
 }
@@ -1107,6 +1215,26 @@ fn queue_worker(
 }
 
 fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
+    if let Some(path) = &reply.file {
+        let file = match std::fs::File::open(path.as_path()) {
+            Ok(f) => f,
+            Err(e) => {
+                return respond(
+                    request,
+                    Reply::error(500, format!("the file will not open: {e}")),
+                );
+            }
+        };
+        let mut response = Response::from_file(file)
+            .with_status_code(StatusCode(reply.status))
+            .with_chunked_threshold(usize::MAX);
+        for (name, value) in &reply.headers {
+            if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                response = response.with_header(h);
+            }
+        }
+        return request.respond(response);
+    }
     if let Some(raw) = reply.raw {
         let (content_type, bytes) = *raw;
         let mut response = Response::from_data(bytes)
@@ -1160,9 +1288,12 @@ fn handle(
         })
         .collect();
     let mut body = String::new();
+    // Record 42 S4: a derivative's body is a file, read by its door once
+    // the caller passes and streamed into its place, never into memory.
+    let upload = method == Method::Post && path == "/api/derivatives";
     // A body rides on a POST and on a PUT (the selection door); reading
     // it only on a POST was why a PUT selection could carry no document.
-    if matches!(method, Method::Post | Method::Put) {
+    if matches!(method, Method::Post | Method::Put) && !upload {
         let _ = request.as_reader().read_to_string(&mut body);
     }
     if path == "/api/events" && method == Method::Get {
@@ -1177,6 +1308,17 @@ fn handle(
     // provenance on this thread.
     if let Ok(c) = &caller {
         nils_registry::actor::set(c.actor.clone());
+    }
+    if upload {
+        let reply = match &caller {
+            Ok(c) => match crate::derivatives::upload(registry, c, &query, &mut request) {
+                Ok(r) | Err(r) => r,
+            },
+            Err(_) => caller.err().expect("an error"),
+        };
+        nils_registry::actor::clear();
+        let _ = respond(request, reply);
+        return;
     }
     // Wave 4b §12.3: the MCP door and its public metadata, before the
     // older doors and before a refusal, so a client learns where to
@@ -1290,6 +1432,16 @@ fn routed(
         detail
     };
     caller.allowed(path, need, detail)?;
+    // record 42 S4: the derivative doors that read
+    if let Some(r) = crate::derivatives::route(registry, caller, get, &segs, query) {
+        return r;
+    }
+    // record 42: the campaigns and the label sets
+    if let Some(r) =
+        crate::campaigns::route(doors, registry, ask, caller, method.as_str(), &segs, body)
+    {
+        return r;
+    }
     // record 26: the linkage doors, under the table's grants like the rest
     if let Some(r) = crate::linkage_doors::route(
         &doors.home,
@@ -2723,7 +2875,7 @@ fn routed(
             if value.is_none() && !nothing {
                 return Err(Reply::error(400, "value, or nothing: true"));
             }
-            let kind = doc["author_kind"].as_str().unwrap_or("person");
+            let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
                 &nils_registry::review::Apply {
@@ -2734,10 +2886,12 @@ fn routed(
                     author: nils_registry::review::Author {
                         who: principal,
                         kind,
-                        version: doc["model_version"].as_str(),
+                        version,
+                        model,
                     },
                     stage: doc["stage"].as_bool().unwrap_or(false),
                     why: doc["why"].as_str(),
+                    campaign: None,
                 },
             )
             .map_err(review_err)?;
@@ -2745,6 +2899,7 @@ fn routed(
                 "decision": applied.decision, "axis": applied.axis, "scope": applied.scope,
                 "ref": applied.reference, "closed": applied.closed, "members": applied.members,
                 "staged": applied.staged,
+                "model": applied.model.as_ref().map(nils_registry::model::Model::named),
             })))
         }
         ["api", "review", _, "accept"] if post => {
@@ -2763,11 +2918,12 @@ fn routed(
         ["api", "decisions", _, "commit"] if post => {
             let id = id_at(2)?;
             let doc = json_body(body)?;
-            let done = nils_registry::review::commit(
+            let done = nils_registry::review::commit_as(
                 registry,
                 Some(id),
                 doc["anyway"].as_bool().unwrap_or(false),
                 principal,
+                author_of(caller).0,
             )
             .map_err(review_err)?;
             Ok(Reply::ok(
@@ -2777,9 +2933,157 @@ fn routed(
         ["api", "decisions", _, "withdraw"] if post => {
             let id = id_at(2)?;
             let reopened =
-                nils_registry::review::withdraw(registry, id, principal).map_err(review_err)?;
+                nils_registry::review::withdraw_as(registry, id, principal, author_of(caller).0)
+                    .map_err(review_err)?;
             Ok(Reply::ok(
                 serde_json::json!({ "withdrawn": id, "reopened": reopened }),
+            ))
+        }
+        // Record 42 S2: the model registry.
+        ["api", "models"] if get => {
+            let filter = nils_registry::model::Filter {
+                task: query.get("task").map(String::as_str),
+                slot: query.get("slot").map(String::as_str),
+                state: query.get("state").map(String::as_str),
+            };
+            let models = nils_registry::model::list(registry.store(), &filter)?;
+            Ok(Reply::ok(serde_json::json!({
+                "count": models.len(),
+                "models": models.iter().map(nils_registry::model::Model::to_json).collect::<Vec<_>>(),
+            })))
+        }
+        ["api", "models"] if post => {
+            let doc = json_body(body)?;
+            let m = nils_registry::model::register(registry, &doc, principal).map_err(model_err)?;
+            Ok(Reply::ok(m.to_json()))
+        }
+        ["api", "models", _] if get => {
+            let id = id_at(2)?;
+            let Some(m) = nils_registry::model::get(registry.store(), id)? else {
+                return Err(Reply::error(404, format!("no model {id}")));
+            };
+            let mut doc = m.to_json();
+            doc["events"] =
+                serde_json::Value::from(nils_registry::model::events(registry.store(), id)?);
+            Ok(Reply::ok(doc))
+        }
+        ["api", "models", _, "admit"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let m =
+                nils_registry::model::admit(registry, id, &doc, principal).map_err(model_err)?;
+            Ok(Reply::ok(m.to_json()))
+        }
+        ["api", "models", _, "promote"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let done = nils_registry::model::promote(
+                registry,
+                id,
+                principal,
+                doc["review_item"].as_i64(),
+                doc["why"].as_str(),
+            )
+            .map_err(model_err)?;
+            Ok(Reply::ok(serde_json::json!({
+                "model": done.model.to_json(),
+                "retired": done.retired.as_ref().map(nils_registry::model::Model::to_json),
+            })))
+        }
+        ["api", "models", _, "retire"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let m = nils_registry::model::retire(registry, id, principal, doc["why"].as_str())
+                .map_err(model_err)?;
+            Ok(Reply::ok(m.to_json()))
+        }
+        // Record 42 S3: a person's pick, which a pick run leaves standing,
+        // and its withdrawal. A pick a person writes is a person's: an
+        // agent or a model acting for the principal is refused here, since
+        // its answer is evidence for a person and not a pick.
+        ["api", "picks"] if post => {
+            let (kind, _) = author_of(caller);
+            if kind != "person" {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "a pick is written by a person; X-Nils-Actor names a {kind} acting for {principal}"
+                    ),
+                ));
+            }
+            let doc = json_body(body)?;
+            let role = doc["role"]
+                .as_str()
+                .ok_or_else(|| Reply::error(400, "role names the role the pick stands for"))?;
+            let stacks: Vec<i64> = doc["stacks"]
+                .as_array()
+                .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
+                .unwrap_or_default();
+            let why = doc["why"].as_str().unwrap_or_default();
+            let name = doc["pack"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| doors.ask_pack.clone());
+            let found = doors.pack_dir.as_ref().and_then(|dir| {
+                crate::packs_in(dir)
+                    .ok()?
+                    .into_iter()
+                    .find(|p| p.file_name().is_some_and(|f| *f == *name))
+            });
+            let Some(found) = found else {
+                return Err(Reply::error(
+                    409,
+                    format!("no pack named {name} is served, and a pick is the pack's"),
+                ));
+            };
+            let pack = nils_pack::load(&found, None)
+                .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+            let scheme = match doc["scheme"].as_str() {
+                None | Some("default" | "day") => nils_registry::session::Scheme::default(),
+                Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
+            };
+            let picked = nils_classify::picking::set_person(
+                registry,
+                &pack,
+                &scheme,
+                &nils_classify::picking::PersonPick {
+                    role,
+                    stacks: &stacks,
+                    model: doc["pick"].as_str(),
+                    why,
+                    actor: principal,
+                    campaign: None,
+                    occasion: None,
+                },
+            )
+            .map_err(pick_err)?;
+            Ok(Reply::created(
+                serde_json::to_value(picked).unwrap_or(serde_json::Value::Null),
+            ))
+        }
+        ["api", "picks", _, "withdraw"] if post => {
+            // a person's pick is a person's to withdraw, as it is theirs to
+            // write
+            let (kind, _) = author_of(caller);
+            if kind != "person" {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "a pick is withdrawn by a person; X-Nils-Actor names a {kind} acting for {principal}"
+                    ),
+                ));
+            }
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let done = nils_classify::picking::withdraw_person(
+                registry,
+                id,
+                principal,
+                doc["why"].as_str(),
+            )
+            .map_err(pick_err)?;
+            Ok(Reply::ok(
+                serde_json::to_value(done).unwrap_or(serde_json::Value::Null),
             ))
         }
         // Wave 5 section 12.2: every event on one object, in order.
@@ -2946,6 +3250,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
+        | ("POST", ["api", "picks"])
+        | ("POST", ["api", "picks", _, "withdraw"])
         | ("POST", ["api", "classify", "try"])
         | ("POST", ["api", "overlays"]) => (Need::One("review:work"), Plain),
         // adopting a rule changes how data is sorted: work on both pages
@@ -2963,6 +3269,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("pipelines:see"), Plain)
         }
         ("POST", ["api", "sessions", "rebuild"]) => (Need::One("pipelines:work"), Plain),
+        // record 42 S4: what pipelines make; the bytes are drawn from the
+        // pixels, so they open at detail quasi like the viewer's
+        ("GET", ["api", "derivatives"]) | ("GET", ["api", "derivatives", _]) => {
+            (Need::One("pipelines:see"), Plain)
+        }
+        ("GET", ["api", "derivatives", _, "content"]) => (Need::One("pipelines:see"), Quasi),
+        ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
         ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
         }
@@ -2975,6 +3288,17 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("database:work"), Plain)
         }
         ("GET", ["api", "audit" | "custody"]) => (Need::One("audit:see"), Plain),
+        // record 42 R7: the model registry has grants of its own
+        ("GET", ["api", "models"]) | ("GET", ["api", "models", _]) => {
+            (Need::One("models:see"), Plain)
+        }
+        ("POST", ["api", "models"]) | ("POST", ["api", "models", _, _]) => {
+            (Need::One("models:work"), Plain)
+        }
+        // record 42: the campaigns, the label sets and the commit by filter
+        (m, s) if crate::campaigns::door(m, s).is_some() => {
+            crate::campaigns::door(m, s).unwrap_or((Need::Any, Plain))
+        }
         _ => (Need::Any, Plain),
     }
 }
@@ -3068,7 +3392,7 @@ fn scope_of(doc: &serde_json::Value) -> Result<nils_classify::scope::Scope, Repl
 
 /// The author kind the caller acts as: the actor's kind when one was
 /// declared, else a person at a keyboard. With the model version beside it.
-fn author_of(caller: &Caller) -> (&str, Option<&str>) {
+pub(crate) fn author_of(caller: &Caller) -> (&str, Option<&str>) {
     // Anything else, `absent` included, is a person at a keyboard.
     let kind = match caller.actor["kind"].as_str() {
         Some("agent") => "agent",
@@ -3076,6 +3400,97 @@ fn author_of(caller: &Caller) -> (&str, Option<&str>) {
         _ => "person",
     };
     (kind, caller.actor["version"].as_str())
+}
+
+/// Record 42 S1: the author of a decision is the verified actor, never the
+/// body. The kind (and a model's version) come from `X-Nils-Actor` as the
+/// token allows it (`narrow`), a person at a keyboard when there is none. A
+/// body from an older client may still say `author_kind`, `model_version`
+/// and `model_id`; where it agrees with the actor it is taken, where it
+/// says something else the call is refused rather than recorded under a
+/// name the caller did not prove. Record 42 S2: a model acting names the
+/// registered model in the header's `model`, by id, digest or
+/// `name@version`, and one that no registered model answers to is refused.
+fn author_at_apply<'a>(
+    registry: &mut Registry,
+    caller: &'a Caller,
+    doc: &'a serde_json::Value,
+) -> Result<(&'a str, Option<&'a str>, Option<i64>), Reply> {
+    let (kind, version) = author_of(caller);
+    if let Some(said) = doc.get("author_kind").filter(|v| !v.is_null())
+        && said.as_str() != Some(kind)
+    {
+        return Err(Reply::error(
+            403,
+            format!(
+                "this call acts as {}, as X-Nils-Actor and the token say; a body that says author_kind {said} is refused, because the author is the verified actor and never the body",
+                with_article(kind)
+            ),
+        ));
+    }
+    let model = acting_model(registry, caller)?;
+    if let Some(said) = doc.get("model_id").filter(|v| !v.is_null())
+        && (said.as_i64() != model.as_ref().map(|m| m.id))
+    {
+        return Err(Reply::error(
+            403,
+            format!(
+                "model_id {said} is not the model X-Nils-Actor names; the model is the actor's, never the body's"
+            ),
+        ));
+    }
+    if let Some(said) = doc.get("model_version").filter(|v| !v.is_null()) {
+        let held = model.as_ref().map(|m| m.version.as_str()).or(version);
+        if kind != "model" || said.as_str() != held {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "model_version {said} is not the acting model's ({}); a model's version is the actor's, never the body's",
+                    held.unwrap_or("none")
+                ),
+            ));
+        }
+    }
+    Ok((kind, version, model.map(|m| m.id)))
+}
+
+/// Record 42 S2: the registered model a model acting names in
+/// `X-Nils-Actor` (by id, digest or `name@version`); none when a person or
+/// an agent acts. A model that names none, or one nothing registered
+/// answers to, is refused.
+pub(crate) fn acting_model(
+    registry: &mut Registry,
+    caller: &Caller,
+) -> Result<Option<nils_registry::model::Model>, Reply> {
+    if author_of(caller).0 != "model" {
+        return Ok(None);
+    }
+    let reference = match &caller.actor["model"] {
+        serde_json::Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => {
+            return Err(Reply::error(
+                400,
+                "a model acting names the registered model in X-Nils-Actor: {\"kind\": \"model\", \"model\": <id, sha256 digest or name@version>}",
+            ));
+        }
+    };
+    let Some(m) = nils_registry::model::resolve(registry.store(), &reference)? else {
+        return Err(Reply::error(
+            404,
+            format!("no registered model answers to {reference}; nils model list"),
+        ));
+    };
+    Ok(Some(m))
+}
+
+/// An author kind as a sentence names it.
+fn with_article(kind: &str) -> String {
+    match kind {
+        "agent" => "an agent".to_string(),
+        "absent" | "" => "nobody in particular".to_string(),
+        other => format!("a {other}"),
+    }
 }
 
 /// Wave 4c §6.6: an overlay from a body, rehearsed over a scope. The pack
@@ -3183,11 +3598,29 @@ fn cohort_err(e: nils_registry::cohort::Error) -> Reply {
     }
 }
 
+fn model_err(e: nils_registry::model::Error) -> Reply {
+    use nils_registry::model::Error;
+    match e {
+        Error::Invalid(m) => Reply::error(400, m),
+        Error::Unknown(m) => Reply::error(404, m),
+        Error::Refused(m) => Reply::error(409, m),
+        Error::Store(e) => Reply::error(500, e.to_string()),
+    }
+}
+
+fn pick_err(e: nils_classify::picking::PersonError) -> Reply {
+    match e {
+        nils_classify::picking::PersonError::Refused(m) => Reply::error(409, m),
+        nils_classify::picking::PersonError::Store(e) => Reply::error(500, e.to_string()),
+    }
+}
+
 /// A review refusal quotes what it refuses: a reference, a header value, a
 /// name, the person who decided; every one is gated.
 fn review_err(e: nils_registry::review::Error) -> Reply {
     match e {
         nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
+        nils_registry::review::Error::Forbidden(m) => Reply::error(403, m),
         other => Reply::error(500, other.to_string()),
     }
 }
@@ -3228,6 +3661,14 @@ fn capabilities(
         "POST /api/review/{id}/accept",
         "POST /api/decisions/{id}/commit",
         "POST /api/decisions/{id}/withdraw",
+        "GET /api/models",
+        "POST /api/models",
+        "GET /api/models/{id}",
+        "POST /api/models/{id}/admit",
+        "POST /api/models/{id}/promote",
+        "POST /api/models/{id}/retire",
+        "POST /api/picks",
+        "POST /api/picks/{id}/withdraw",
         "GET /api/timeline/{kind}/{id}",
         "GET /api/depends/{kind}/{id}",
         "GET /api/events",
@@ -3269,7 +3710,9 @@ fn capabilities(
         "GET /api/instances/{stack}/render/{level}/{z}",
     ]
     .iter()
+    .chain(crate::derivatives::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
+    .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect();
@@ -3281,6 +3724,7 @@ fn capabilities(
             "suite": SUITE_VERSION.trim(),
             "mcp": MCP_VERSION.trim(),
             "pack": PACK_CONTRACT_VERSION.trim(),
+            "model": MODEL_CONTRACT_VERSION.trim(),
         },
         "packs": packs,
         "registry": { "id": meta.registry_id, "epoch": meta.epoch, "schema_version": meta.schema_version, "synthetic": meta.synthetic },
@@ -3311,6 +3755,7 @@ fn capabilities(
         "ingest_roots": doors.ingest_roots.keys().collect::<Vec<_>>(),
         "backup_dir": doors.backup_dir.is_some(),
         "places": crate::places::capabilities(registry.store()),
+        "derivatives": crate::derivatives::capability(registry.store()),
         "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
@@ -3776,6 +4221,114 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one decision",
             "Withdrawing a decision",
             "Withdrew a decision",
+        ),
+        row(
+            "GET /api/models",
+            false,
+            false,
+            "bounded",
+            "every model",
+            "Listing the models",
+            "Listed the models",
+        ),
+        row(
+            "POST /api/models",
+            true,
+            false,
+            "free",
+            "one model",
+            "Registering a model",
+            "Registered a model",
+        ),
+        row(
+            "GET /api/models/{id}",
+            false,
+            false,
+            "free",
+            "one model",
+            "Reading a model's card",
+            "Read a model's card",
+        ),
+        row(
+            "POST /api/models/{id}/admit",
+            true,
+            false,
+            "free",
+            "one model",
+            "Recording a check on a model",
+            "Recorded a check on a model",
+        ),
+        row(
+            "POST /api/models/{id}/promote",
+            true,
+            false,
+            "free",
+            "one model",
+            "Promoting a model",
+            "Promoted a model",
+        ),
+        row(
+            "POST /api/models/{id}/retire",
+            true,
+            false,
+            "free",
+            "one model",
+            "Retiring a model",
+            "Retired a model",
+        ),
+        row(
+            "POST /api/picks",
+            true,
+            false,
+            "free",
+            "one pick",
+            "Picking a stack",
+            "Picked a stack",
+        ),
+        row(
+            "POST /api/picks/{id}/withdraw",
+            true,
+            false,
+            "free",
+            "one pick",
+            "Withdrawing a pick",
+            "Withdrew a pick",
+        ),
+        row(
+            "GET /api/derivatives",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing derivatives",
+            "Listed derivatives",
+        ),
+        row(
+            "POST /api/derivatives",
+            true,
+            false,
+            "bounded",
+            "one derivative",
+            "Registering a derivative",
+            "Registered a derivative",
+        ),
+        row(
+            "GET /api/derivatives/{id}",
+            false,
+            false,
+            "free",
+            "one derivative",
+            "Reading a derivative",
+            "Read a derivative",
+        ),
+        row(
+            "GET /api/derivatives/{id}/content",
+            false,
+            false,
+            "bounded",
+            "one file",
+            "Downloading a derivative",
+            "Downloaded a derivative",
         ),
         row(
             "GET /api/events",
@@ -4464,6 +5017,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Read what the pseudonymiser removes",
         ),
     ]
+    .into_iter()
+    .chain(
+        crate::campaigns::POLICY
+            .iter()
+            .map(|(door, writes, idem, cost, cap, now, then)| {
+                row(door, *writes, *idem, cost, cap, now, then)
+            }),
+    )
+    .collect()
 }
 
 #[cfg(test)]

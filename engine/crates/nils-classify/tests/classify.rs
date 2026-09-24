@@ -640,9 +640,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "anna@ward-3",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: Some("checked both"),
+                campaign: None,
             },
         )
         .unwrap();
@@ -703,9 +705,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "bot@ward-3",
                     kind: "agent",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -738,9 +742,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "anna@ward-3",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -762,9 +768,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "bot@ward-3",
                     kind: "agent",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         );
         assert!(
@@ -773,7 +781,7 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
         );
 
         // A staged decision on another question is written but not in
-        // force; the registry moves on (a run), so the commit is refused
+        // force; the registry moves on, so the commit is refused
         // until --anyway; committed, it is in force.
         let technique = rows(
             &mut reg,
@@ -792,9 +800,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                     who: "anna@ward-3",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: true,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -821,6 +831,9 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
             .all(|r| r.text(0).unwrap() != "decision"),
             "{name}: staged is not in force"
         );
+        // The registry moves on: an act that changes a judgement advances
+        // the epoch. Staging does not (record 42), and neither does a run.
+        reg.next_epoch().unwrap();
         let drift = review::commit(&mut reg, Some(staged.decision), false, "anna@ward-3");
         assert!(
             matches!(&drift, Err(review::Error::Refused(m)) if m.contains("moved on")),

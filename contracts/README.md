@@ -6,10 +6,11 @@ The interfaces that other software builds against, each versioned on its own and
 |---|---|---|
 | `pack/` | The modality pack manifest (D12, D26); the pack format is data since C11 | version 1, written down in Wave 4a |
 | `review-item/` | The review item every emitter writes and every consumer reads (D7) | version 4 (Wave 4c A6); version 1 written down in Wave 4a |
-| `openapi/` | The HTTP API of the engine (D5, C38) | version 4 (grants and detail); version 3 in Wave 4c A4; version 0 was the empty skeleton of Wave 4a §11 |
+| `openapi/` | The HTTP API of the engine (D5, C38) | version 7 (the model registry, person picks, derivatives, campaigns and label sets, record 42); version 4 (grants and detail); version 3 in Wave 4c A4; version 0 was the empty skeleton of Wave 4a §11 |
 | `query-ast/` | The JSON Schema of the query AST that the engine executes, the one door of every question (D5, D20) | Wave 4b |
 | `mcp/` | The MCP door: the operation vocabulary, the input schema per operation, the result envelope, the paging and the policy fields (D11, C43) | version 2 (grants in the policy fields); version 1 written down in Wave 4c slice A7 |
-| `suite/` | The vocabulary every part of the suite shares: grants and detail, headers and the actor, purposes and content classes, the deployment capabilities document, app registry entries, station manifests, the trust list and grants vectors (Wave 4c §4.5) | version 2 (grants and detail in place of entitlements); version 1 written down in Wave 4c slice A7 |
+| `suite/` | The vocabulary every part of the suite shares: grants and detail, headers and the actor, purposes and content classes, the deployment capabilities document, app registry entries, station manifests, the trust list and grants vectors (Wave 4c §4.5) | version 3 (the model registry's and the campaigns' grants, record 42 R7); version 2 (grants and detail in place of entitlements); version 1 written down in Wave 4c slice A7 |
+| `model/` | A registered model's card and lifecycle, the one idea the engine's model registry and Kvasir's both keep (D15, record 42) | version 1 |
 | `job/` | `nils.job.yml`, the pipeline job description (D9) | Wave 5 |
 | `federation/` | The request, disclosure and result protocol between nodes (D27, D28, D29) | Wave 7 |
 

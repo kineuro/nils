@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Grants and detail (the suite contract, version 2): what a caller may
+//! Grants and detail (the suite contract, version 3, which is version 2
+//! with record 42 R7's `models:see` and `models:work`, and `campaigns:see`
+//! and `campaigns:work`, which no ladder step but admin holds): what a caller may
 //! open, and how much of a record it sees. A grant names a page and how far
 //! a caller goes there, `see`, or `work`, which includes see; the assistant
 //! has `use`. Detail has an order: `plain` sees neither class, `quasi` the
@@ -16,11 +18,14 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::Value;
 
 /// The vocabulary, sorted by code point, as `grants.schema.json` lists it.
-pub(crate) const GRANTS: [&str; 24] = [
+pub(crate) const GRANTS: [&str; 28] = [
     "assistant-settings:see",
     "assistant-settings:work",
     "assistant:use",
     "audit:see",
+    // record 42 R7: a rater is not a reviewer of the whole queue
+    "campaigns:see",
+    "campaigns:work",
     "data:see",
     "data:work",
     "database:see",
@@ -31,6 +36,8 @@ pub(crate) const GRANTS: [&str; 24] = [
     "install:work",
     "kvasir:see",
     "kvasir:work",
+    "models:see",
+    "models:work",
     "pipelines:see",
     "pipelines:work",
     "places:see",
@@ -48,12 +55,13 @@ const ASSISTANT: &str = "assistant:use";
 
 /// What a reader holds; a reviewer holds more, an operator more again.
 const READER: &[&str] = &["data:see", "query:see", "query:work"];
-const REVIEWER: &[&str] = &["pipelines:see", "review:see", "review:work"];
+const REVIEWER: &[&str] = &["models:see", "pipelines:see", "review:see", "review:work"];
 const OPERATOR: &[&str] = &[
     "assistant-settings:see",
     "data:work",
     "install:see",
     "kvasir:see",
+    "models:work",
     "pipelines:work",
     "places:see",
     "places:work",
@@ -360,8 +368,8 @@ impl Need {
 mod tests {
     use super::*;
 
-    const VECTORS: &str = include_str!("../../../../contracts/suite/v2/vectors/grants.json");
-    const SCHEMA: &str = include_str!("../../../../contracts/suite/v2/grants.schema.json");
+    const VECTORS: &str = include_str!("../../../../contracts/suite/v3/vectors/grants.json");
+    const SCHEMA: &str = include_str!("../../../../contracts/suite/v3/grants.schema.json");
 
     fn vectors() -> Value {
         serde_json::from_str(VECTORS).expect("the grants vectors")

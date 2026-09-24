@@ -57,7 +57,7 @@ pub(crate) fn document(
         .collect::<Result<_, StoreError>>()?;
     let sql = format!(
         "SELECT axis, value, tier, confidence, rule_set, rule, source, matched, \
-                pass, reference, author, author_kind FROM {} \
+                pass, reference, author, author_kind, model_id FROM {} \
          WHERE stack_id = {} ORDER BY axis, id",
         store.qualified("classification_evidence"),
         d.param(1, Type::Int)
@@ -79,10 +79,21 @@ pub(crate) fn document(
                 "reference": r.opt_text(9)?,
                 "author": r.opt_text(10)?,
                 "author_kind": r.opt_text(11)?,
+                "model_id": r.opt_int(12)?,
             }))
         })
         .collect::<Result<_, StoreError>>()?;
     let decisions = decisions_of(store, stack)?;
+    // Record 42 S2: a value a model decided names the model by its name,
+    // its version and its digest, never a free-text version.
+    let mut models: BTreeMap<i64, Value> = BTreeMap::new();
+    for id in evidence.iter().filter_map(|e| e["model_id"].as_i64()) {
+        if let std::collections::btree_map::Entry::Vacant(slot) = models.entry(id)
+            && let Some(m) = nils_registry::model::get(store, id)?
+        {
+            slot.insert(m.named());
+        }
+    }
     let review = review_of(store, stack)?;
 
     let mut per_axis: BTreeMap<&str, usize> = BTreeMap::new();
@@ -127,18 +138,23 @@ pub(crate) fn document(
                         .is_none_or(|v| e["value"].as_str() == Some(v))
             });
             let decision = decided.map(|e| {
-                let why = decisions
+                let held = decisions
                     .iter()
-                    .find(|(a, v, _)| {
+                    .find(|(a, v, _, _)| {
                         a == axis && (v.is_none() || v.as_deref() == value.as_deref())
                     })
-                    .or_else(|| decisions.iter().find(|(a, _, _)| a == axis))
-                    .and_then(|(_, _, why)| why.clone());
+                    .or_else(|| decisions.iter().find(|(a, _, _, _)| a == axis));
+                let why = held.and_then(|(_, _, why, _)| why.clone());
+                let committed_by = held.and_then(|(_, _, _, by)| by.clone());
                 json!({
                     "kind": e["author_kind"],
                     "actor": e["author"],
                     "why": why,
                     "version": e["matched"],
+                    "model": e["model_id"]
+                        .as_i64()
+                        .and_then(|id| models.get(&id).cloned()),
+                    "committed_by": committed_by,
                 })
             });
             let label = value.as_deref().and_then(|v| {
@@ -311,7 +327,8 @@ fn about(kind: &str, e: &Value) -> String {
 }
 
 /// One decision in force: the axis, the value and the why.
-type Decided = (String, Option<String>, Option<String>);
+/// A decision in force: its axis, value, why and who committed it.
+type Decided = (String, Option<String>, Option<String>, Option<String>);
 
 /// The decisions in force on the stack, its series, its subject or its
 /// origin, newest first.
@@ -337,16 +354,20 @@ fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreErro
         .map(|m| format!("manufacturer={}", m.to_lowercase()))
         .unwrap_or_default();
     let sql = format!(
-        "SELECT axis, value, why FROM {} WHERE withdrawn_at IS NULL \
+        "SELECT axis, value, why, committed_by FROM {} WHERE withdrawn_at IS NULL \
          AND (staged_at IS NULL OR committed_at IS NOT NULL) \
          AND ((scope = 'stack' AND ref = {}) OR (scope = 'series' AND ref = {}) \
-              OR (scope = 'subject' AND ref = {}) OR (scope = 'origin' AND ref = {})) \
+              OR (scope = 'subject' AND ref = {}) OR (scope = 'origin' AND ref = {}) \
+              OR (scope = 'group' AND ref IN \
+                  (SELECT CAST(item_id AS TEXT) FROM {} WHERE stack_id = {}))) \
          ORDER BY id DESC",
         store.qualified("decision"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
         d.param(3, Type::Text),
         d.param(4, Type::Text),
+        store.qualified("review_member"),
+        d.param(5, Type::Int),
     );
     store
         .query(
@@ -356,6 +377,7 @@ fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreErro
                 Param::from(series),
                 Param::from(subject),
                 Param::from(origin),
+                Param::Int(stack),
             ],
         )?
         .iter()
@@ -364,6 +386,7 @@ fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreErro
                 r.text(0)?.to_string(),
                 r.opt_text(1)?.map(str::to_string),
                 r.opt_text(2)?.map(str::to_string),
+                r.opt_text(3)?.map(str::to_string),
             ))
         })
         .collect()
@@ -424,6 +447,18 @@ pub(crate) fn text(doc: &Value) -> String {
                     None => String::new(),
                 }
             ));
+            // Record 42 S2: which model, by name, version and digest, and
+            // the person who let its answer in.
+            if let Some(m) = d.get("model").and_then(Value::as_object) {
+                let digest = m["digest"].as_str().unwrap_or_default();
+                out.push_str(&format!(
+                    "      the model {}@{} ({}), committed by {}\n",
+                    m["name"].as_str().unwrap_or_default(),
+                    m["version"].as_str().unwrap_or_default(),
+                    digest,
+                    d["committed_by"].as_str().unwrap_or("nobody recorded")
+                ));
+            }
         }
         for e in a["evidence"].as_array().into_iter().flatten() {
             let line = format!(

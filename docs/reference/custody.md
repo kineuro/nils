@@ -100,6 +100,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils overlay export <id> --to <dir>` |
 | delete | with the registry |
 
+## models
+
+| | |
+|---|---|
+| what | the models whose answers become registry facts (record 42, D15): each by the digest of its artifact, with its card, the check that admitted it, its state and every transition; never the artifact itself |
+| where | rows of model and model_event in the registry |
+| holds | technical: names, versions, digests, tasks and slots, the metrics a card states, the checks<br>who registered, admitted, promoted and retired each |
+| owner | the operator who registered, admitted and promoted each |
+| kept | for good; a retired model is what the decisions it answered name |
+| read | `nils model list`<br>`nils model show <model>` |
+| change | `nils model register --card <file>`<br>`nils model admit <model> --check <file>`<br>`nils model promote <model>`<br>`nils model retire <model>` |
+| export | `nils model show <model> --json` |
+| delete | with the registry |
+
 ## clinical layer
 
 | | |
@@ -113,6 +127,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | change | `nils clinical vocabulary load`<br>`nils clinical cohort make \| rename \| set \| retire \| add \| remove`<br>`nils ask promote`<br>a digest of a dataset that feeds a cohort |
 | export | `nils release` |
 | delete | remove `<home>/registry.db` (nils has no command for it) |
+
+## campaigns and label sets
+
+| | |
+|---|---|
+| what | campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went; and the stacks of the samples an operator sealed for certification, which make a set that holds any of them sealed (record 40 R3) |
+| where | rows of campaign, campaign_item, campaign_assignment, campaign_answer, label_set and sealed_stack in the registry; a label set's labels.tsv and provenance.json in the export place it was written to |
+| holds | quasi-identifying: the day a session opened, on a pick campaign's items and its labels<br>a person's words: the why and the form of an answer<br>technical: stack, subject and derivative ids, values, the principals, the times, the digests |
+| owner | the research group that runs the campaign; each answer is its rater's |
+| kept | for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal is never undone |
+| read | `nils campaign list`<br>`nils campaign show <campaign> [--answers]`<br>`nils labels list`<br>`nils labels show <id>` |
+| change | `nils campaign create \| claim \| answer \| release \| metric \| close`<br>`nils labels import-v0 --tsv <file>`<br>`nils labels seal --select selection:<name>@<v>` |
+| export | `nils campaign export <campaign> --to <dir> [--answers]`<br>`nils labels export --axis <axis> --to <dir>` |
+| delete | with the registry |
 
 ## claims cache
 
@@ -225,6 +253,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | change | no command |
 | export | no command |
 | delete | with the registry |
+
+## derivatives
+
+| | |
+|---|---|
+| what | files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42) |
+| where | files under derivatives in a working place, and none is bound now, so none can be added; rows of derivative in the registry |
+| holds | quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to<br>technical: the kind, the digest, the size, the media type, the place and the path, who registered it |
+| owner | the research group that owns the archive |
+| kept | for ever; a newer file supersedes an older one by a link and both stay |
+| read | `nils derivative list`<br>`nils derivative show <id>`<br>GET /api/derivatives/{id}/content |
+| change | `nils derivative add <file>` |
+| export | GET /api/derivatives/{id}/content |
+| delete | with the registry and the working place; nils has no command for one |
 
 ## logs
 

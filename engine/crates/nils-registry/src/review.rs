@@ -25,13 +25,16 @@ use crate::time::now_iso;
 pub enum Error {
     Store(StoreError),
     Refused(String),
+    /// The caller's kind may not do it: an agent or a model where only a
+    /// person may.
+    Forbidden(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Refused(m) => f.write_str(m),
+            Error::Refused(m) | Error::Forbidden(m) => f.write_str(m),
         }
     }
 }
@@ -289,6 +292,8 @@ pub struct Author<'a> {
     /// `person`, `agent` or `model`.
     pub kind: &'a str,
     pub version: Option<&'a str>,
+    /// The registered model, when the author is a model (record 42, D15).
+    pub model: Option<i64>,
 }
 
 /// The one verb (§10.2): a decision applied to an item.
@@ -307,11 +312,16 @@ pub struct Apply<'a> {
     /// Written but not in force until committed.
     pub stage: bool,
     pub why: Option<&'a str>,
+    /// The campaign whose answer this is, when one closed into it (record
+    /// 42 S1).
+    pub campaign: Option<i64>,
 }
 
 /// What an apply did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
+    /// The registered model that answered, when a model did.
+    pub model: Option<crate::model::Model>,
     pub decision: i64,
     pub axis: String,
     /// The scope the decision was written at, and what it names.
@@ -374,19 +384,72 @@ fn resolve_scope(store: &mut Store, scope: &str, stack: i64) -> Result<(String, 
 
 /// Apply a decision (§10.2). One row at its scope, the earlier decision on
 /// the same key withdrawn rather than overwritten, the item closed with
-/// the same words (or staged), and the audit row with the epoch.
+/// the same words (or staged), and the audit row with the epoch, all in one
+/// transaction.
 pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
+    registry.store().begin()?;
+    match apply_within(registry, a) {
+        Ok(applied) => {
+            registry.store().commit()?;
+            Ok(applied)
+        }
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(e)
+        }
+    }
+}
+
+/// [`apply`] inside a transaction the caller holds, so that many decisions
+/// are written as one act or none (an import); the caller commits, or
+/// rolls back and re-reads the registry's epoch.
+pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
     if !["person", "agent", "model"].contains(&a.author.kind) {
         return Err(refused(format!(
             "an author is a person, an agent or a model, not {}",
             a.author.kind
         )));
     }
-    if a.author.kind == "model" && a.author.version.is_none() {
-        return Err(refused(
-            "a model's decision names the model's version (D15)",
-        ));
+    // Record 42 S2 (D15): a model's answer names a registered model that is
+    // admitted or promoted, and carries that model's version, not one the
+    // caller typed. Record 42 R6: it is evidence until a person commits it,
+    // so it is always staged.
+    let model = match (a.author.kind, a.author.model) {
+        ("model", Some(id)) => Some(crate::model::author(registry.store(), id).map_err(
+            |e| match e {
+                crate::model::Error::Store(s) => Error::Store(s),
+                other => refused(other.to_string()),
+            },
+        )?),
+        ("model", None) => {
+            return Err(refused(
+                "a model's decision names the registered model that answered (D15): nils model list",
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(refused(format!(
+                "a {} is not a model; only a model's decision names a model",
+                a.author.kind
+            )));
+        }
+        _ => None,
+    };
+    if let (Some(m), Some(v)) = (&model, a.author.version)
+        && v != m.version
+    {
+        return Err(refused(format!(
+            "model {} is {} at version {}, not {v}",
+            m.id, m.name, m.version
+        )));
     }
+    let version = model
+        .as_ref()
+        .map(|m| m.version.as_str())
+        .or(a.author.version);
+    // R6, which the wave's ruling extends to agents: a model's or an
+    // agent's answer is evidence until a person commits it.
+    let stage = a.stage || model.is_some() || a.author.kind != "person";
     let epoch = registry.meta().epoch;
     let store = registry.store();
     let Some(it) = item(store, a.item)? else {
@@ -401,6 +464,18 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                 it.id, it.kind
             ))
         })?;
+    // A model answers the task it was registered for, and no other.
+    if let Some(m) = &model
+        && m.task != format!("axis:{axis}")
+    {
+        return Err(refused(format!(
+            "model {} ({}) answers {}, and review item {} asks about the axis {axis}",
+            m.id,
+            m.label(),
+            m.task,
+            it.id
+        )));
+    }
     if it.status != "open" && it.status != "staged" {
         return Err(refused(format!(
             "review item {} is already {}; decide the axis again with a new run",
@@ -469,7 +544,6 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             )));
         }
     }
-    store.begin()?;
     let written = (|| -> Result<(i64, Vec<i64>, i64), Error> {
         // The earlier decision on the same key gives way to this one; it is
         // withdrawn, never deleted. A staged one replaces only staged ones.
@@ -481,7 +555,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             d.param(2, Type::Text),
             d.param(3, Type::Text),
             d.param(4, Type::Text),
-            if a.stage {
+            if stage {
                 "staged_at IS NOT NULL AND committed_at IS NULL"
             } else {
                 "1 = 1"
@@ -516,6 +590,9 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                         "staged_at",
                         "committed_at",
                         "epoch_staged",
+                        "model_id",
+                        "campaign_id",
+                        "committed_by",
                     ],
                 )
                 .returning(&["id"]),
@@ -526,24 +603,32 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                     a.value.map_or(Param::Null, Param::from),
                     Param::from(a.author.who),
                     Param::from(a.author.kind),
-                    a.author.version.map_or(Param::Null, Param::from),
+                    version.map_or(Param::Null, Param::from),
                     Param::from(actor_detail.to_string()),
                     a.why.map_or(Param::Null, Param::from),
                     Param::from(now.as_str()),
-                    if a.stage {
+                    if stage {
                         Param::from(now.as_str())
                     } else {
                         Param::Null
                     },
-                    if a.stage {
+                    if stage {
                         Param::Null
                     } else {
                         Param::from(now.as_str())
                     },
-                    if a.stage {
+                    if stage {
                         Param::Int(epoch)
                     } else {
                         Param::Null
+                    },
+                    a.author.model.map_or(Param::Null, Param::Int),
+                    a.campaign.map_or(Param::Null, Param::Int),
+                    // Written in force, it is in force by its own author.
+                    if stage {
+                        Param::Null
+                    } else {
+                        Param::from(a.author.who)
                     },
                 ]],
             )?
@@ -555,13 +640,15 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             "value": a.value,
             "actor": a.author.who,
             "author_kind": a.author.kind,
-            "model_version": a.author.version,
+            "model_version": version,
+            "model_id": a.author.model,
+            "campaign_id": a.campaign,
             "actor_detail": actor_detail,
             "why": a.why,
             "decision": decision,
-            "staged": a.stage,
+            "staged": stage,
         });
-        let status = if a.stage { "staged" } else { "accepted" };
+        let status = if stage { "staged" } else { "accepted" };
         let mut closed = Vec::new();
         let mut decided_members = 0i64;
         match member_stack {
@@ -641,15 +728,8 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
         }
         Ok((decision, closed, decided_members))
     })();
-    let (decision, closed, decided_members) = match written {
-        Ok(w) => w,
-        Err(e) => {
-            store.rollback().ok();
-            return Err(e);
-        }
-    };
-    store.commit()?;
-    audit::record(
+    let (decision, closed, decided_members) = written?;
+    audit::record_judging(
         registry,
         &Entry {
             principal: a.author.who,
@@ -662,18 +742,21 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             job_id: None,
             details: Some(serde_json::json!({
                 "value": a.value, "author_kind": a.author.kind,
-                "model_version": a.author.version, "why": a.why, "staged": a.stage,
+                "model_version": version, "model_id": a.author.model,
+                "campaign_id": a.campaign, "why": a.why, "staged": stage,
             })),
         },
+        !stage,
     )?;
     Ok(Applied {
+        model,
         decision,
         axis,
         scope,
         reference,
         closed,
         members: decided_members,
-        staged: a.stage,
+        staged: stage,
     })
 }
 
@@ -729,11 +812,24 @@ pub fn commit(
     anyway: bool,
     who: &str,
 ) -> Result<Committed, Error> {
+    commit_as(registry, decision, anyway, who, "person")
+}
+
+/// [`commit`], by a committer of a kind: a person, an agent or a model.
+/// Record 42 R6: a model's answer is put in force only by a person, so an
+/// agent or a model that would commit one is refused.
+pub fn commit_as(
+    registry: &mut Registry,
+    decision: Option<i64>,
+    anyway: bool,
+    who: &str,
+    kind: &str,
+) -> Result<Committed, Error> {
     let epoch = registry.meta().epoch;
     let store = registry.store();
     let d = store.dialect();
     let mut sql = format!(
-        "SELECT id, epoch_staged FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
+        "SELECT id, epoch_staged, author_kind FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
          AND withdrawn_at IS NULL",
         store.qualified("decision")
     );
@@ -742,11 +838,20 @@ pub fn commit(
         params.push(Param::Int(id));
         sql.push_str(&format!(" AND id = {}", d.param(1, Type::Int)));
     }
-    let staged: Vec<(i64, Option<i64>)> = store
+    let rows: Vec<(i64, Option<i64>, String)> = store
         .query(&sql, &params)?
         .iter()
-        .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
+        .map(|r| {
+            Ok((
+                r.int(0)?,
+                r.opt_int(1)?,
+                r.opt_text(2)?.unwrap_or("").to_string(),
+            ))
+        })
         .collect::<Result<_, StoreError>>()?;
+    let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
+    only_a_person_commits(store, &ids, kind)?;
+    let staged: Vec<(i64, Option<i64>)> = rows.into_iter().map(|(id, e, _)| (id, e)).collect();
     if staged.is_empty() {
         return Err(refused(match decision {
             Some(id) => format!("decision {id} is not staged"),
@@ -771,32 +876,17 @@ pub fn commit(
     }
     let now = now_iso();
     let mut out = Committed::default();
+    let ids: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
     store.begin()?;
-    let written = (|| -> Result<(), StoreError> {
-        for (id, _) in &staged {
-            store.update_by_id(
-                table("decision"),
-                &[("committed_at", Param::from(now.as_str()))],
-                "id",
-                *id,
-            )?;
-            // The items this decision staged are accepted now. The item's
-            // decision JSON names the decision.
-            let sql = format!(
-                "UPDATE {} SET status = 'accepted' WHERE status = 'staged' AND decision_id = {}",
-                store.qualified("review_item"),
-                d.param(1, Type::Int)
-            );
-            out.items += store.execute(&sql, &[Param::Int(*id)])? as i64;
-            out.decisions.push(*id);
+    match put_in_force(store, &ids, who, &now) {
+        Ok(items) => out.items = items,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e.into());
         }
-        Ok(())
-    })();
-    if let Err(e) = written {
-        store.rollback().ok();
-        return Err(e.into());
     }
     store.commit()?;
+    out.decisions = ids;
     audit::record(
         registry,
         &Entry {
@@ -811,19 +901,311 @@ pub fn commit(
     Ok(out)
 }
 
+/// Put staged decisions in force, by who commits them, in a few statements
+/// whatever their number: the decisions, then the items they staged, which
+/// are accepted now (the item's decision JSON names the decision). Answers
+/// how many items were accepted. The caller holds the transaction.
+fn put_in_force(store: &mut Store, ids: &[i64], who: &str, now: &str) -> Result<i64, StoreError> {
+    store.update_by_ids(
+        table("decision"),
+        &[
+            ("committed_at", Param::from(now)),
+            ("committed_by", Param::from(who)),
+        ],
+        "id",
+        ids,
+    )?;
+    let mut items = 0i64;
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "UPDATE {} SET status = 'accepted' WHERE status = 'staged' AND decision_id IN ({})",
+            store.qualified("review_item"),
+            id_list(chunk)
+        );
+        items += store.execute(&sql, &[])? as i64;
+    }
+    Ok(items)
+}
+
+/// Ids as a list inside `IN (...)`: integers only, so nothing a caller said
+/// reaches the statement.
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Record 42 R6, which the ruling on wave 42 extends to agents: a model's
+/// or an agent's answer is put in force by a person, so a committer who is
+/// an agent or a model is refused when any of the staged decisions it would
+/// commit carries one. Nothing is committed then.
+fn only_a_person_commits(store: &mut Store, ids: &[i64], kind: &str) -> Result<(), Error> {
+    if kind == "person" || ids.is_empty() {
+        return Ok(());
+    }
+    let by_model = needs_a_person(store, ids)?;
+    if by_model.is_empty() {
+        return Ok(());
+    }
+    Err(refused(format!(
+        "decision(s) {} carry a model's or an agent's answer, which a person puts in force (record 42 R6); {} does not",
+        by_model
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        if kind == "agent" {
+            "an agent"
+        } else {
+            "a model"
+        }
+    )))
+}
+
+/// The decisions among `ids` that carry a model's or an agent's answer: a
+/// model or an agent is their author, they name a registered model, or a
+/// campaign closed an item into them that a model or an agent answered (a
+/// person and a model or an agent who agreed, record 42 R6), found by the
+/// campaign item's link to the decision or by the review item the decision
+/// answered, so the rule holds even where the first is missing.
+pub fn needs_a_person(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+    let mut out = Vec::new();
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind IN ('model', 'agent') OR model_id IS NOT NULL) \
+             UNION SELECT i.decision_id FROM {} i JOIN {} a ON a.item_id = i.id \
+             WHERE i.decision_id IN ({list}) AND a.author_kind IN ('model', 'agent') \
+             UNION SELECT r.decision_id FROM {} r JOIN {} i ON i.review_item_id = r.id \
+             JOIN {} a ON a.item_id = i.id \
+             WHERE r.decision_id IN ({list}) AND a.author_kind IN ('model', 'agent')",
+            store.qualified("decision"),
+            store.qualified("campaign_item"),
+            store.qualified("campaign_answer"),
+            store.qualified("review_item"),
+            store.qualified("campaign_item"),
+            store.qualified("campaign_answer"),
+        );
+        for r in store.query(&sql, &[])? {
+            out.push(r.int(0)?);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// Which staged decisions a commit by filter takes (record 42 S6, v0's
+/// commit by minimum confidence).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CommitFilter {
+    /// Only decisions whose confidence is at least this: the agreement of
+    /// the campaign item that closed into it, else the `confidence` its
+    /// review item's evidence names. A decision with no confidence is left.
+    pub min_confidence: Option<f64>,
+    /// Only decisions a campaign's close staged.
+    pub campaign: Option<i64>,
+}
+
+/// What a commit by filter did, and what it left staged.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommittedPart {
+    pub decisions: Vec<i64>,
+    pub items: i64,
+    /// Staged decisions the filter left as they were.
+    pub left: i64,
+}
+
+/// Commit the part of the staged decisions a filter names, in one
+/// transaction, with the drift check [`commit`] makes: the rest stay
+/// staged. A filter that names nothing is refused, so that a commit of
+/// everything is always said as such. The committer is of a kind, as in
+/// [`commit_as`]: an agent or a model is refused when the part holds a
+/// model's answer (record 42 R6), and then nothing is committed.
+pub fn commit_where(
+    registry: &mut Registry,
+    filter: &CommitFilter,
+    anyway: bool,
+    who: &str,
+    kind: &str,
+) -> Result<CommittedPart, Error> {
+    if filter.min_confidence.is_none() && filter.campaign.is_none() {
+        return Err(refused(
+            "a commit by filter names a minimum confidence or a campaign; commit --all commits everything",
+        ));
+    }
+    let epoch = registry.meta().epoch;
+    let store = registry.store();
+    let staged: Vec<(i64, Option<i64>)> = store
+        .query(
+            &format!(
+                "SELECT id, epoch_staged FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
+                 AND withdrawn_at IS NULL ORDER BY id",
+                store.qualified("decision")
+            ),
+            &[],
+        )?
+        .iter()
+        .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
+        .collect::<Result<_, StoreError>>()?;
+    // what each staged decision's confidence and campaign are, read for
+    // all of them at once: the confidence its first review item names,
+    // and the agreement and campaign of the last campaign item closed into
+    // it, which wins
+    let t = table("review_item");
+    let d = store.dialect();
+    let mut confidence: BTreeMap<i64, f64> = BTreeMap::new();
+    let mut campaign_of: BTreeMap<i64, i64> = BTreeMap::new();
+    let all: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
+    for chunk in all.chunks(500) {
+        let sql = format!(
+            "SELECT decision_id, {} FROM {} WHERE decision_id IN ({}) ORDER BY id DESC",
+            d.text_of(t.column("evidence").expect("evidence")),
+            store.qualified("review_item"),
+            id_list(chunk)
+        );
+        // the lowest id is read last, so it is the one kept
+        for r in store.query(&sql, &[])? {
+            let evidence: serde_json::Value = r
+                .opt_text(1)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(serde_json::Value::Null);
+            match evidence["confidence"].as_f64() {
+                Some(c) => confidence.insert(r.int(0)?, c),
+                None => confidence.remove(&r.int(0)?),
+            };
+        }
+        let sql = format!(
+            "SELECT decision_id, campaign_id, agreement FROM {} WHERE decision_id IN ({}) ORDER BY id",
+            store.qualified("campaign_item"),
+            id_list(chunk)
+        );
+        // the highest id is read last, so it is the one kept
+        let mut agreement: BTreeMap<i64, Option<f64>> = BTreeMap::new();
+        for r in store.query(&sql, &[])? {
+            let id = r.int(0)?;
+            campaign_of.insert(id, r.int(1)?);
+            agreement.insert(id, r.opt_double(2)?);
+        }
+        for (id, a) in agreement {
+            if let Some(a) = a {
+                confidence.insert(id, a);
+            }
+        }
+    }
+    let mut chosen = Vec::new();
+    let mut left = 0i64;
+    for (id, epoch_staged) in &staged {
+        let keep = filter
+            .min_confidence
+            .is_none_or(|min| confidence.get(id).is_some_and(|c| *c >= min))
+            && filter
+                .campaign
+                .is_none_or(|want| campaign_of.get(id) == Some(&want));
+        if keep {
+            chosen.push((*id, *epoch_staged));
+        } else {
+            left += 1;
+        }
+    }
+    let ids: Vec<i64> = chosen.iter().map(|(id, _)| *id).collect();
+    only_a_person_commits(store, &ids, kind)?;
+    let drifted: Vec<i64> = chosen
+        .iter()
+        .filter(|(_, e)| e.is_some_and(|e| e != epoch))
+        .map(|(id, _)| *id)
+        .collect();
+    if !drifted.is_empty() && !anyway {
+        return Err(refused(format!(
+            "the registry moved on since decision(s) {} were staged (epoch {} now); look again, or commit --anyway",
+            drifted
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            epoch
+        )));
+    }
+    let mut out = CommittedPart {
+        left,
+        ..CommittedPart::default()
+    };
+    if chosen.is_empty() {
+        return Ok(out);
+    }
+    let now = now_iso();
+    store.begin()?;
+    match put_in_force(store, &ids, who, &now) {
+        Ok(items) => out.items = items,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e.into());
+        }
+    }
+    store.commit()?;
+    out.decisions = ids;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::Decision,
+            scope: serde_json::json!({ "committed": out.decisions, "items": out.items, "left": out.left }),
+            policy: None,
+            job_id: None,
+            details: Some(serde_json::json!({
+                "anyway": anyway, "min_confidence": filter.min_confidence, "campaign": filter.campaign,
+            })),
+        },
+    )?;
+    Ok(out)
+}
+
 /// Withdraw a decision, staged or committed: it stops being in force, the
 /// items it closed open again, and nothing is deleted.
 pub fn withdraw(registry: &mut Registry, decision: i64, who: &str) -> Result<i64, Error> {
+    withdraw_as(registry, decision, who, "person")
+}
+
+/// [`withdraw`], by a withdrawer of a kind. A person withdraws any
+/// decision; an agent or a model only one its own principal staged as that
+/// kind and nobody put in force, since a decision in force is a person's
+/// to take back (record 42 R6).
+pub fn withdraw_as(
+    registry: &mut Registry,
+    decision: i64,
+    who: &str,
+    kind: &str,
+) -> Result<i64, Error> {
     let store = registry.store();
     let d = store.dialect();
     let sql = format!(
-        "SELECT withdrawn_at IS NOT NULL FROM {} WHERE id = {}",
+        "SELECT withdrawn_at IS NOT NULL, author_kind, actor, \
+         CASE WHEN staged_at IS NOT NULL AND committed_at IS NULL THEN 1 ELSE 0 END \
+         FROM {} WHERE id = {}",
         store.qualified("decision"),
         d.param(1, Type::Int)
     );
     let Some(row) = store.query_opt(&sql, &[Param::Int(decision)])? else {
         return Err(refused(format!("no decision {decision}")));
     };
+    if kind != "person" {
+        let own = row.opt_text(1)? == Some(kind) && row.opt_text(2)? == Some(who);
+        if !own || row.int(3)? != 1 {
+            return Err(Error::Forbidden(format!(
+                "decision {decision} is withdrawn by a person; {} withdraws only a decision it staged itself and nobody put in force",
+                if kind == "agent" {
+                    "an agent"
+                } else {
+                    "a model"
+                }
+            )));
+        }
+    }
     if row.int(0)? != 0 {
         return Err(refused(format!("decision {decision} is already withdrawn")));
     }
@@ -1310,6 +1692,110 @@ pub fn close_resolved(
         d.param(4, Type::Text),
     );
     store.execute(&sql, &params)
+}
+
+// ---------------------------------------------------------------- pick items
+
+/// Record 42 S3: a session whose pick is not to be trusted without a look,
+/// because its two best candidates are too close, the winner is rare in its
+/// population, or nothing was eligible (v0's `needs_check`, study 1.4). One
+/// open item per pick model, role and occasion; a later run brings it up to
+/// date or closes it, and a person's pick answers it.
+pub const PICK_BORDER_KIND: &str = "pick.border";
+
+/// What groups the open `pick.border` item of one role on one occasion.
+pub fn pick_border_key(model: &str, role: &str, subject_id: i64, day: &str) -> String {
+    format!("pick:{model}|role:{role}|subject:{subject_id}|day:{day}")
+}
+
+/// One occasion a pick run thought worth a person's eye.
+#[derive(Debug, Clone)]
+pub struct PickBorder<'a> {
+    pub model: &'a str,
+    pub role: &'a str,
+    pub subject_id: i64,
+    pub day: &'a str,
+    /// The run's reasons, by name (`too_close`, `rare`, `nothing_eligible`).
+    pub borders: &'a [&'a str],
+    /// What the run wrote, when it wrote anything.
+    pub pick_id: Option<i64>,
+    pub score: Option<f64>,
+    pub margin: Option<f64>,
+    pub runner_up_score: Option<f64>,
+    /// Every candidate's stacks and score, best first.
+    pub considered: &'a serde_json::Value,
+    pub job_id: Option<i64>,
+}
+
+/// Raise or refresh the open `pick.border` item of one occasion. Scope
+/// `subject`, since an occasion is derived and has no row; `ref` names the
+/// subject, the day, the role and the model, and the evidence is the run's
+/// numbers, never a value of a person.
+pub fn raise_pick_border(
+    store: &mut Store,
+    b: &PickBorder<'_>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = pick_border_key(b.model, b.role, b.subject_id, b.day);
+    let reference = serde_json::json!({
+        "subject_id": b.subject_id, "session_day": b.day, "role": b.role, "model": b.model,
+    });
+    let candidates = b.considered.as_array().map_or(0, Vec::len) as i64;
+    let evidence = serde_json::json!({
+        "borders": b.borders, "pick_id": b.pick_id, "score": b.score, "margin": b.margin,
+        "runner_up_score": b.runner_up_score, "candidates": candidates,
+        "considered": b.considered,
+    });
+    if let Some((id, _)) = open_item(store, PICK_BORDER_KIND, &key)? {
+        refresh_item(store, id, &evidence, candidates.max(1), b.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        PICK_BORDER_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        candidates.max(1),
+        b.job_id,
+        now,
+    )
+}
+
+/// Close the open `pick.border` item of one occasion, if there is one:
+/// `superseded` when a later run found nothing to doubt, `accepted` when a
+/// person's pick answered it. Answers how many were closed.
+pub fn close_pick_border(
+    store: &mut Store,
+    key: &str,
+    status: &str,
+    actor: &str,
+    decision: &serde_json::Value,
+) -> Result<u64, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET status = {}, decided_at = {}, actor = {}, decision = {} \
+         WHERE kind = {} AND status = 'open' AND group_key = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Text),
+        d.param(4, Type::Json),
+        d.param(5, Type::Text),
+        d.param(6, Type::Text),
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::from(status),
+            Param::from(now_iso()),
+            Param::from(actor),
+            Param::from(decision.to_string()),
+            Param::from(PICK_BORDER_KIND),
+            Param::from(key),
+        ],
+    )
 }
 
 #[cfg(test)]

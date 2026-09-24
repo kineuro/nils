@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/model/v1/card.schema.json",
+  "title": "NILS model card",
+  "description": "Record 42 (D15): what a registered model is, as the engine and Kvasir both read it. A model is identified by the digest of its canonical artifact, never by its name; the name and version are how people call it and are unique together. The card travels with the model from the job that fitted it to the registry and is kept whole. A reader keeps a key it does not know, so a later version can add one without breaking an older reader.",
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "sha256 of the bytes, lowercase hex, prefixed"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["encoder", "head", "pass", "segmenter", "served"],
+      "description": "encoder: turns an image into features; head: answers a task from an encoder's features, and names its encoder; pass: a model the classifier runs as one of its passes; segmenter: writes a mask; served: a language model a gateway serves, which Kvasir registers (reserved in the engine)"
+    },
+    "slot": {
+      "type": "string",
+      "pattern": "^(site|(cohort|backend):\\S+)$",
+      "description": "Where the model answers its task. One model is promoted per task and slot. The engine takes site, the one site-wide model per task (record 42 R4), and cohort:<name>, a model of one cohort in a slot of its own; backend:<name> is Kvasir's, whose slot is the backend that serves the model"
+    },
+    "reference": {
+      "type": "object",
+      "required": ["digest"],
+      "properties": {
+        "digest": { "$ref": "#/$defs/digest" },
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "description": "Another registered model, by its digest"
+    }
+  },
+  "type": "object",
+  "required": ["name", "version", "kind", "digest", "task"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S+$"
+    },
+    "kind": { "$ref": "#/$defs/kind" },
+    "digest": {
+      "$ref": "#/$defs/digest",
+      "description": "The identity: the digest of the canonical artifact. For a head, a plain format (ONNX, or JSON coefficients) rather than a pickle, which executes code when it is loaded; for a served model, the weights file (a GGUF's sha256)"
+    },
+    "task": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*(:[A-Za-z0-9_.-]+)*$",
+      "description": "What the model answers, such as axis:body_part for a head that decides an axis of the pack, or chat for a served model"
+    },
+    "slot": {
+      "$ref": "#/$defs/slot",
+      "default": "site"
+    },
+    "encoder": {
+      "$ref": "#/$defs/reference",
+      "description": "The encoder a head reads the features of. Required of a head: a new encoder makes its heads stale"
+    },
+    "trained_on": {
+      "type": "object",
+      "required": ["label_set"],
+      "properties": {
+        "label_set": {
+          "$ref": "#/$defs/digest",
+          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7): one the registry wrote, and none holding items of a sealed certification sample, or the registration is refused (record 40 R3)"
+        },
+        "name": { "type": "string" },
+        "rows": { "type": "integer", "minimum": 0 },
+        "sealed": {
+          "type": "boolean",
+          "description": "Whether the labels came from a random draw rather than from items a system chose to ask about"
+        }
+      },
+      "description": "The exact labels, as a digest, not prose"
+    },
+    "pack_version": {
+      "type": "string",
+      "description": "The pack whose axis values a head was built for, such as mri@0.3.0"
+    },
+    "image_digest": {
+      "$ref": "#/$defs/digest",
+      "description": "The container image that runs the model, pinned by its manifest digest, when one does"
+    },
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["onnx", "json", "gguf", "safetensors", "joblib", "other"]
+        },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "What the fitting job measured, by name: accuracy, ece, brier, per-class counts and the like. Numbers, or objects of numbers; never a stack, a subject or an image"
+    },
+    "preprocessing": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" }
+      },
+      "description": "How an input is prepared before the model sees it, with a version, so that features made under another preparation are not mixed"
+    },
+    "params": {
+      "type": "object",
+      "description": "The fitting job's parameters"
+    },
+    "intended_use": { "type": "string" },
+    "limits": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "build": { "type": "string" }
+      },
+      "description": "The runtime a check was run under. A check pinned to a runtime says nothing about another"
+    }
+  }
+}

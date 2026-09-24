@@ -78,6 +78,39 @@ pub enum Action {
     /// the reason the person gave.
     OriginalsVault,
     OriginalsPurge,
+    /// Record 42 S2: a model registered, a check recorded on it, a model
+    /// promoted in its slot (retiring the one before), a model retired.
+    /// None changes a judgement: a model's answer is staged until a person
+    /// commits it, and the commit is the act that moves the epoch.
+    ModelRegister,
+    ModelAdmit,
+    ModelPromote,
+    ModelRetire,
+    /// Record 42 S3: a person picked the stack that stands for a session's
+    /// role, or withdrew a person's pick. The ask reads picks, so both
+    /// move the epoch.
+    PickSet,
+    PickWithdraw,
+    /// Record 42 S4: a derivative registered in a working place, and one
+    /// read whole through its door. Neither changes a judgement.
+    DerivativeRegister,
+    DerivativeRead,
+    /// Record 42 S5 and S6: a campaign made, an item claimed under a lease,
+    /// answered, given back, measured by an external metric, and the
+    /// campaign closed. None of them is a decision; the decisions a close
+    /// writes are audited by `apply` as every decision is.
+    CampaignCreate,
+    CampaignClaim,
+    CampaignAnswer,
+    CampaignRelease,
+    CampaignMetric,
+    CampaignClose,
+    /// Record 42 S7: a label set written out with its digest, and labels
+    /// from v0 imported as person decisions.
+    LabelsExport,
+    LabelsImport,
+    /// Record 40 R3: a sample sealed for certification, never training data.
+    LabelsSeal,
 }
 
 impl Action {
@@ -119,6 +152,23 @@ impl Action {
             Action::SubjectMerge => "subject.merge",
             Action::OriginalsVault => "originals.vault",
             Action::OriginalsPurge => "originals.purge",
+            Action::ModelRegister => "model.register",
+            Action::ModelAdmit => "model.admit",
+            Action::ModelPromote => "model.promote",
+            Action::ModelRetire => "model.retire",
+            Action::PickSet => "pick.set",
+            Action::PickWithdraw => "pick.withdraw",
+            Action::DerivativeRegister => "derivative.register",
+            Action::DerivativeRead => "derivative.read",
+            Action::CampaignCreate => "campaign.create",
+            Action::CampaignClaim => "campaign.claim",
+            Action::CampaignAnswer => "campaign.answer",
+            Action::CampaignRelease => "campaign.release",
+            Action::CampaignMetric => "campaign.metric",
+            Action::CampaignClose => "campaign.close",
+            Action::LabelsExport => "labels.export",
+            Action::LabelsImport => "labels.import",
+            Action::LabelsSeal => "labels.seal",
         }
     }
 
@@ -137,6 +187,20 @@ impl Action {
                 | Action::PlaceSet
                 | Action::PlaceRetire
                 | Action::BackupSchedule
+                | Action::ModelRegister
+                | Action::ModelAdmit
+                | Action::ModelPromote
+                | Action::ModelRetire
+                | Action::DerivativeRegister
+                | Action::DerivativeRead
+                | Action::CampaignCreate
+                | Action::CampaignClaim
+                | Action::CampaignAnswer
+                | Action::CampaignRelease
+                | Action::CampaignMetric
+                | Action::CampaignClose
+                | Action::LabelsExport
+                | Action::LabelsSeal
         )
     }
 }
@@ -160,7 +224,20 @@ pub struct Entry<'a> {
 /// Returns the row's id. Runs inside the caller's transaction when there
 /// is one.
 pub fn record(registry: &mut Registry, entry: &Entry<'_>) -> Result<i64, StoreError> {
-    let epoch = if entry.action.changes_judgement() {
+    record_judging(registry, entry, entry.action.changes_judgement())
+}
+
+/// [`record`], saying whether this act changes a judgement where its action
+/// alone cannot: a decision written staged is not in force, so it moves no
+/// epoch, and the commit that puts it in force does (record 42 R6). Were a
+/// stage to move the epoch, every staged decision would drift from itself
+/// and the next stage, and no commit would go through without `--anyway`.
+pub fn record_judging(
+    registry: &mut Registry,
+    entry: &Entry<'_>,
+    changes_judgement: bool,
+) -> Result<i64, StoreError> {
+    let epoch = if changes_judgement {
         Some(
             registry
                 .next_epoch()
