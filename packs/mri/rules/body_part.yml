@@ -4,11 +4,25 @@
 # mentions: a spine wins outright, a neck beside a brain is both, and
 # otherwise the neck comes before the brain.
 #
-# Every clause here reads `anatomy_text` and not `search_text`: the words
+# Every clause here reads an anatomy text and not `search_text`: the words
 # this axis is made of are the words the other normalizer drops as
-# boilerplate (`normalize-anatomy.yml`). A stack whose `BodyPartExamined`
-# says BRAIN or HEAD said what it is, and the rule reads it before anything
-# removes it.
+# boilerplate (`normalize-anatomy.yml`).
+#
+# What a series says about itself comes before what its exam was registered
+# as (record 41). `BodyPartExamined` is written from the exam's
+# registration, so it says the same thing on every series of an exam: a
+# brain protocol run in an exam registered as a spine said spine on every
+# series, and a spinal series in an exam registered as a brain said brain.
+# So the precedence runs three times, over three kinds of evidence, and the
+# first that says anything decides:
+#
+# 1. the series' own words (`anatomy_text`: its description, protocol,
+#    sequence name and comments);
+# 2. the coil it was received on, where the coil is a spine coil; a head and
+#    neck coil images either, so it says nothing;
+# 3. the stated body part (`stated_anatomy_text`), which is where most
+#    stacks get theirs: a stack whose `BodyPartExamined` says BRAIN or HEAD
+#    said what it is, and nothing of the series contradicted it.
 #
 # Order is precedence and a rule is reached only where the ones before it
 # do not fire, so a rule ahead of another must be the narrower of the two.
@@ -24,32 +38,73 @@ rule_set: body_part
 decides: [body_part]
 tiers: {keywords: 0.65}
 
-order: [spine, brain_neck, neck, brain, portrait_sagittal]
+order: [spine, brain_neck, neck, brain, spine_coil, stated_spine, stated_brain_neck, stated_neck, stated_brain, portrait_sagittal]
 
 rules:
 
+  # --- 1. the series' own words
+
   spine:
     clauses:
-      - {field: anatomy_text, keywords: ['spine', 'spinal', 'spinal cord', 'cervical', 'cerv', 'thoracic', 'thor ', 'lumbar', 'lumb', 'c-spine', 't-spine', 'l-spine', 'vertebral', 'vertebra', 'cord', 'medulla', 'rygg', 'ryggm rg', 'halsrygg', 'br strygg', 'brostrygg', 'l ndrygg', 'lumbalrygg', 'totalcolumna', 'columna', 'sag cc', 'th col', 'wirbel', 'hws', 'bws', 'lws', 'wirbels ule', 'rachis', 'cervicale', 'dorsale', 'lombaire', 'moelle', 'wervelkolom', 'ruggengraat', 'myelit', 'myelopathy', 'syringomyelia'], tier: keywords}
+      - {field: anatomy_text, keywords: &spine ['spine', 'spinal', 'spinal cord', 'cervical', 'cerv', 'thoracic', 'thor ', 'lumbar', 'lumb', 'c-spine', 't-spine', 'l-spine', 'vertebral', 'vertebra', 'cord', 'medulla', 'rygg', 'ryggm rg', 'halsrygg', 'br strygg', 'brostrygg', 'l ndrygg', 'lumbalrygg', 'totalcolumna', 'columna', 'sag cc', 'th col', 'wirbel', 'hws', 'bws', 'lws', 'wirbels ule', 'rachis', 'cervicale', 'dorsale', 'lombaire', 'moelle', 'wervelkolom', 'ruggengraat', 'myelit', 'myelopathy', 'syringomyelia'], tier: keywords}
     set: {body_part: spine}
     confidence: 0.65
     why: 'a spine mentioned at all decides it, even beside a brain'
 
   brain_neck:
     clauses:
-      - {when: {all: [{text: anatomy_text, any_substring: ['neck', 'nacke', 'hals', 'nakke', 'nek']}, {text: anatomy_text, any_substring: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
+      - {when: {all: [{text: anatomy_text, any_substring: &neck ['neck', 'nacke', 'hals', 'nakke', 'nek']}, {text: anatomy_text, any_substring: &brain ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
     set: {body_part: brain-neck}
     confidence: 0.65
 
   neck:
     clauses:
-      - {field: anatomy_text, keywords: ['neck', 'nacke', 'hals', 'nakke', 'nek'], tier: keywords}
+      - {field: anatomy_text, keywords: *neck, tier: keywords}
     set: {body_part: neck}
     confidence: 0.65
 
   brain:
     clauses:
-      - {field: anatomy_text, keywords: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd'], tier: keywords}
+      - {field: anatomy_text, keywords: *brain, tier: keywords}
+    set: {body_part: brain}
+    confidence: 0.65
+
+  # --- 2. the coil. Only a spine coil says which part it was on: 36 stacks
+  # of five protocols were received on one and every one was a spine, four
+  # of them in an exam registered as a brain. A head and neck coil received
+  # 1,900 brain stacks and 144 spinal ones, so it decides nothing.
+
+  spine_coil:
+    clauses:
+      - {when: {text: receive_coil_name, substring: spine}, cite: 'a spine coil', source: coil, tier: keywords}
+    set: {body_part: spine}
+    confidence: 0.65
+    why: 'the series was received on a spine coil'
+
+  # --- 3. the stated body part, where nothing of the series said anything
+
+  stated_spine:
+    clauses:
+      - {field: stated_anatomy_text, keywords: *spine, tier: keywords}
+    set: {body_part: spine}
+    confidence: 0.65
+    why: 'the stated body part names a spine, even beside a brain'
+
+  stated_brain_neck:
+    clauses:
+      - {when: {all: [{text: stated_anatomy_text, any_substring: *neck}, {text: stated_anatomy_text, any_substring: *brain}]}, cite: 'a neck and a brain stated', source: text, tier: keywords}
+    set: {body_part: brain-neck}
+    confidence: 0.65
+
+  stated_neck:
+    clauses:
+      - {field: stated_anatomy_text, keywords: *neck, tier: keywords}
+    set: {body_part: neck}
+    confidence: 0.65
+
+  stated_brain:
+    clauses:
+      - {field: stated_anatomy_text, keywords: *brain, tier: keywords}
     set: {body_part: brain}
     confidence: 0.65
 

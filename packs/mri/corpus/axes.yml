@@ -504,3 +504,51 @@ cases:
     axes:
       technique: ASL
       construct: ND
+
+  # What a series says about itself beats what its exam was registered as.
+  # `BodyPartExamined` is written from the exam's registration, so a brain
+  # protocol run in an exam registered as a spine said spine on every series
+  # (36 stacks), and a spinal series in an exam registered as a brain said
+  # brain (10). The series' own names decide first, then the coil it was
+  # received on, and only then the stated body part.
+  - name: a brain series in an exam registered as a spine is a brain by its own name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE\ND\NORM'
+      scanning_sequence: EP
+      text_body_part: 'SPINE,NECK'
+      text_sequence_name: '*ep_b1000#1'
+      text_series_description: 'ep2d_diff_2mm_hcp_32_b1000_AP'
+    axes:
+      body_part: brain
+
+  - name: a series received on a spine coil is a spine whatever the exam was registered as
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tse2d1_17'
+      text_series_description: 't2_tse_tra'
+      receive_coil_name: 'Spine_32'
+    axes:
+      body_part: spine
+
+  - name: a head and neck coil says nothing about which of the two was scanned
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tse2d1_17'
+      text_series_description: 't2_tse_tra'
+      receive_coil_name: 'HeadNeck_20'
+    axes:
+      body_part: brain
+
+  - name: a series that says spine is a spine in an exam registered as a brain, as it was
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tse2d1_17'
+      text_series_description: 't2_tse_sag spinal cord'
+    axes:
+      body_part: spine
