@@ -20,22 +20,42 @@ use crate::store::{Error, Insert, Param, Row, Store};
 /// The kinds a derivative may be. A mask is an uploaded segmentation, an
 /// embedding one encoder's vectors for one stack, a pyramid the viewer's
 /// tiles (wave 43 moves them here), an output anything else a pipeline
-/// wrote.
-pub const KINDS: [&str; 4] = ["mask", "embedding", "pyramid", "output"];
+/// wrote. Record 43 adds two a run writes and a person does not: seeds,
+/// the suggestions a run made for a person to curate, and model, the
+/// artifact of a model a run fitted and the registry registered.
+pub const KINDS: [&str; 6] = ["mask", "embedding", "pyramid", "output", "seeds", "model"];
+
+/// The kinds only a pipeline run writes (record 43).
+pub const RUN_KINDS: [&str; 2] = ["seeds", "model"];
 
 /// Where the files of registered derivatives go under a working place.
 pub const TREE: &str = "derivatives";
 
 /// What a derivative belongs to, resolved against the registry: the scope
-/// and its ids, the subject always filled.
+/// and its ids, the subject filled for every scope but a run's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Belongs {
-    /// `stack`, `series`, `session` or `subject`.
+    /// `stack`, `series`, `session`, `subject`, or `run` for a file that is
+    /// a whole run's rather than any subject's (record 43: seeds, a model).
     pub scope: String,
     pub stack_id: Option<i64>,
     pub series_id: Option<i64>,
-    pub subject_id: i64,
+    pub subject_id: Option<i64>,
     pub session_day: Option<String>,
+}
+
+impl Belongs {
+    /// A file that is a whole pipeline run's (record 43): it names the run,
+    /// through the row's `run_id`, and no subject.
+    pub fn run() -> Belongs {
+        Belongs {
+            scope: "run".into(),
+            stack_id: None,
+            series_id: None,
+            subject_id: None,
+            session_day: None,
+        }
+    }
 }
 
 /// One derivative as the registry holds it.
@@ -134,7 +154,7 @@ pub fn belongs(
             scope: "stack".into(),
             stack_id: Some(id),
             series_id: row.opt_int(0).map_err(Err)?,
-            subject_id: row.int(1).map_err(Err)?,
+            subject_id: Some(row.int(1).map_err(Err)?),
             session_day: None,
         });
     }
@@ -151,7 +171,7 @@ pub fn belongs(
             scope: "series".into(),
             stack_id: None,
             series_id: Some(id),
-            subject_id: row.int(0).map_err(Err)?,
+            subject_id: Some(row.int(0).map_err(Err)?),
             session_day: None,
         });
     }
@@ -173,7 +193,7 @@ pub fn belongs(
         scope: if day.is_some() { "session" } else { "subject" }.into(),
         stack_id: None,
         series_id: None,
-        subject_id: id,
+        subject_id: Some(id),
         session_day: day.map(str::to_string),
     })
 }
@@ -187,6 +207,9 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
 /// [`insert`] for a file a pipeline run made (record 43 S2): the row names
 /// the run, which the registry holds.
 pub fn insert_of_run(store: &mut Store, n: &New<'_>, run_id: i64) -> Result<i64, Error> {
+    if n.belongs.scope == "run" && n.belongs.subject_id.is_some() {
+        return Err(Error::Message("a run's own file names no subject".into()));
+    }
     if crate::pipeline::run(store, run_id)?.is_none() {
         return Err(Error::Message(format!(
             "no pipeline run {run_id} made this derivative"
@@ -196,6 +219,11 @@ pub fn insert_of_run(store: &mut Store, n: &New<'_>, run_id: i64) -> Result<i64,
 }
 
 fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64, Error> {
+    if n.belongs.subject_id.is_none() && (n.belongs.scope != "run" || run_id.is_none()) {
+        return Err(Error::Message(
+            "a derivative belongs to a subject, or is a pipeline run's own file".into(),
+        ));
+    }
     if let Some(model) = n.model_id
         && crate::model::get(store, model)?.is_none()
     {
@@ -233,7 +261,7 @@ fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64
             Param::from(n.belongs.scope.as_str()),
             n.belongs.stack_id.map_or(Param::Null, Param::Int),
             n.belongs.series_id.map_or(Param::Null, Param::Int),
-            Param::Int(n.belongs.subject_id),
+            n.belongs.subject_id.map_or(Param::Null, Param::Int),
             n.belongs
                 .session_day
                 .as_deref()
@@ -427,7 +455,7 @@ mod tests {
             scope: "session".into(),
             stack_id: None,
             series_id: None,
-            subject_id: 3,
+            subject_id: Some(3),
             session_day: Some("2021-02-03".into()),
         };
         let actor = serde_json::json!({"kind": "person"});

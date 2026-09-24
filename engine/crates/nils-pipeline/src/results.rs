@@ -3,8 +3,10 @@
 //! `results.json` (`contracts/job/v1/results.schema.json`): what a pipeline
 //! says of its run, one entry per work unit, and the values it proposes. v0's
 //! schema, read the way v0 read it (an object with `units`, or a bare list of
-//! units), with the proposals beside. A missing file is not an error: the
-//! runner then finds each unit's files by the descriptor's templates.
+//! units), with the proposals beside, and since record 43 the cards of the
+//! models the run used or made, the seeds it suggests and the selection it
+//! suggests curating. A missing file is not an error: the runner then finds
+//! each unit's files by the descriptor's templates.
 
 use serde_json::Value;
 
@@ -46,20 +48,49 @@ pub struct Unit {
     pub error: Option<String>,
 }
 
+/// One seed: a value suggested for a stack, for a person to curate
+/// (record 43). Never a proposal: no model decides by it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seed {
+    pub stack_id: i64,
+    pub axis: String,
+    pub value: String,
+    pub margin: Option<f64>,
+    /// The whole entry as the pipeline wrote it.
+    pub entry: Value,
+}
+
 /// The whole file.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Results {
     pub units: Vec<Unit>,
     pub proposals: Vec<Value>,
+    /// Model cards (`contracts/model/v1`) the run used or made.
+    pub models: Vec<Value>,
+    pub seeds: Vec<Seed>,
+    /// The stacks the pipeline suggests curating.
+    pub selection: Option<Vec<i64>>,
 }
 
 /// The file's name under the output folder.
 pub const FILE: &str = "results.json";
 
+/// Where the runner writes a run's seeds under its output folder, as the
+/// one derivative of kind `seeds` (record 43).
+pub const SEEDS_FILE: &str = "nils-seeds.json";
+
 /// Parse the text of a `results.json`.
 pub fn parse(text: &str) -> Result<Results, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|e| format!("results.json is not JSON: {e}"))?;
+    let list = |o: &serde_json::Map<String, Value>, key: &str| -> Result<Vec<Value>, String> {
+        match o.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(a)) => Ok(a.clone()),
+            Some(_) => Err(format!("results.json {key} is a list")),
+        }
+    };
+    let (mut models, mut seeds, mut selection) = (Vec::new(), Vec::new(), None);
     let (units, proposals) = match &value {
         Value::Array(a) => (a.clone(), Vec::new()),
         Value::Object(o) => {
@@ -74,10 +105,58 @@ pub fn parse(text: &str) -> Result<Results, String> {
                 Some(Value::Array(a)) => a.clone(),
                 Some(_) => return Err("results.json units is a list".into()),
             };
-            let proposals = match o.get("proposals") {
-                None | Some(Value::Null) => Vec::new(),
-                Some(Value::Array(a)) => a.clone(),
-                Some(_) => return Err("results.json proposals is a list".into()),
+            let proposals = list(o, "proposals")?;
+            models = list(o, "models")?;
+            if models.iter().any(|m| !m.is_object()) {
+                return Err("results.json models are model cards, objects".into());
+            }
+            for (i, e) in list(o, "seeds")?.into_iter().enumerate() {
+                let at = format!("results.json seeds[{i}]");
+                let stack_id = e["stack_id"]
+                    .as_i64()
+                    .filter(|s| *s > 0)
+                    .ok_or_else(|| format!("{at}.stack_id is a stack's id"))?;
+                let axis = e["axis"]
+                    .as_str()
+                    .filter(|a| {
+                        !a.is_empty() && a.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                    })
+                    .ok_or_else(|| format!("{at}.axis is an axis of the pack"))?
+                    .to_string();
+                let value = e["value"]
+                    .as_str()
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| format!("{at}.value is the value suggested"))?
+                    .to_string();
+                let margin = match &e["margin"] {
+                    Value::Null => None,
+                    m => Some(
+                        m.as_f64()
+                            .ok_or_else(|| format!("{at}.margin is a number"))?,
+                    ),
+                };
+                seeds.push(Seed {
+                    stack_id,
+                    axis,
+                    value,
+                    margin,
+                    entry: e,
+                });
+            }
+            selection = match o.get("selection") {
+                None | Some(Value::Null) => None,
+                Some(s) => Some(
+                    s["stacks"]
+                        .as_array()
+                        .ok_or("results.json selection names its stacks")?
+                        .iter()
+                        .map(|v| {
+                            v.as_i64()
+                                .filter(|i| *i > 0)
+                                .ok_or("results.json selection.stacks are stack ids")
+                        })
+                        .collect::<Result<Vec<i64>, _>>()?,
+                ),
             };
             (units, proposals)
         }
@@ -86,6 +165,9 @@ pub fn parse(text: &str) -> Result<Results, String> {
     let mut out = Results {
         units: Vec::with_capacity(units.len()),
         proposals,
+        models,
+        seeds,
+        selection,
     };
     for (i, u) in units.iter().enumerate() {
         let unit_id = match &u["unit_id"] {
@@ -166,5 +248,23 @@ mod tests {
         assert!(parse(r#"{"units": [{"unit_id": "a", "status": "done"}]}"#).is_err());
         assert!(parse(r#"{"schema_version": "2"}"#).is_err());
         assert!(parse("not json").is_err());
+    }
+
+    #[test]
+    fn seeds_and_a_selection_are_read_apart_from_the_proposals() {
+        let r = parse(
+            r#"{"units": [], "models": [{"name": "e"}],
+                "seeds": [{"stack_id": 4, "axis": "body_part", "value": "brain", "margin": 0.2, "source": "zero_shot"}],
+                "selection": {"stacks": [4, 9]}}"#,
+        )
+        .unwrap();
+        assert!(r.proposals.is_empty());
+        assert_eq!(r.models.len(), 1);
+        assert_eq!(r.seeds[0].stack_id, 4);
+        assert_eq!(r.seeds[0].margin, Some(0.2));
+        assert_eq!(r.seeds[0].entry["source"], "zero_shot");
+        assert_eq!(r.selection, Some(vec![4, 9]));
+        assert!(parse(r#"{"seeds": [{"stack_id": 4, "axis": "Body", "value": "x"}]}"#).is_err());
+        assert!(parse(r#"{"selection": {"stacks": ["a"]}}"#).is_err());
     }
 }

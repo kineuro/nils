@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 61;
+pub const SCHEMA_VERSION: i64 = 62;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,7 +298,28 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 61,
         apply: a_head_reads_its_encoders_in_order,
     },
+    Migration {
+        version: 62,
+        apply: a_run_s_input_release_says_so,
+    },
 ];
+
+/// Record 43: the release a pipeline run materialised its bids input by
+/// says so, so the release history can leave it out. A registry from before
+/// gains the column, and the releases its runs name are marked.
+fn a_run_s_input_release_says_so(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["purpose"])?;
+    let (r, pr) = (store.qualified("release"), store.qualified("pipeline_run"));
+    store.batch(&format!(
+        "UPDATE {r} SET purpose = '{}' WHERE purpose IS NULL AND id IN \
+         (SELECT input_release_id FROM {pr} WHERE input_release_id IS NOT NULL)",
+        crate::pipeline::RUN_INPUT
+    ))?;
+    Ok(())
+}
 
 /// Record 43: a head reads several encoders. A registry from before gains
 /// the table with each head's one encoder as its first, so every reader of

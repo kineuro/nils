@@ -2630,7 +2630,11 @@ fn routed(
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
-        ["api", "releases"] if get => Ok(Reply::ok(crate::releases_doc(registry, limit, None)?)),
+        ["api", "releases"] if get => {
+            // record 43: a run's input releases only when asked for
+            let runs = query.get("runs").is_some_and(|v| v == "true" || v == "1");
+            Ok(Reply::ok(crate::releases_doc(registry, limit, None, runs)?))
+        }
         ["api", "releases"] if post => {
             // Heavy: a queued `nils release`, 202.
             let doc = json_body(body)?;

@@ -259,10 +259,15 @@ impl Lab {
             path: OsString::new(),
         };
         let fake = lab.bin.file("podman", FAKE_PODMAN.as_bytes());
+        // no GPU in the lab, whatever the host has: a machine with one would
+        // otherwise pass it to an optional need
+        let no_gpu = lab.bin.file("nvidia-smi", b"#!/bin/sh\nexit 1\n");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for f in [&fake, &no_gpu] {
+                std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         let mut path = lab.bin.path().as_os_str().to_owned();
         if let Some(p) = std::env::var_os("PATH") {
@@ -582,9 +587,25 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
     );
     assert_eq!(first["summary"]["units"]["succeeded"], 4, "{first}");
     assert_eq!(first["summary"]["derivatives"], 4);
+    let proposed = &first["summary"]["proposals"];
     assert_eq!(
-        first["summary"]["proposals"],
-        json!({"given": 2, "declared": 1, "undeclared": 1, "taken": 0})
+        (
+            &proposed["given"],
+            &proposed["declared"],
+            &proposed["undeclared"],
+            &proposed["taken"]
+        ),
+        (&json!(2), &json!(1), &json!(1), &json!(0)),
+        "{proposed}"
+    );
+    // a proposal the contract does not admit (no probabilities, no model)
+    // is refused whole, and says why; it is never a fact
+    assert!(
+        proposed["refused"]
+            .as_str()
+            .unwrap()
+            .contains("probabilities"),
+        "{proposed}"
     );
     assert_eq!(first["derivatives"].as_array().unwrap().len(), 4);
     let run1 = first["id"].as_i64().unwrap();
@@ -632,6 +653,19 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
             .iter()
             .all(|s| s["files"].as_array().unwrap().len() == 12),
         "{manifest}"
+    );
+    // record 43: each stack's orientation, its axes as held now and its
+    // slice count, for an image that seeds and picks slices
+    for s in stacks {
+        assert_eq!(s["slices"], 12, "{s}");
+        assert!(s["orientation"].is_string(), "{s}");
+        for key in ["body_part", "technique"] {
+            assert!(s.get(key).is_some(), "{key}: {s}");
+        }
+    }
+    assert!(
+        stacks.iter().any(|s| s["technique"] == "MPRAGE"),
+        "the classifier's technique: {manifest}"
     );
 
     // each output a derivative of its stack, hashed by the engine, naming the run
@@ -697,7 +731,9 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
         "mode=fail-last",
         "--json",
     ]);
-    assert_eq!(failed["status"], "done", "the container exited 0: {failed}");
+    // record 43: the container exited 0 and a unit failed, so the run is
+    // partial, not done, and the failed unit is a review item
+    assert_eq!(failed["status"], "partial", "{failed}");
     assert_eq!(failed["summary"]["units"]["failed"], 1);
     assert_eq!(failed["summary"]["derivatives"], 3);
     let items = failed["summary"]["review_items"]
@@ -715,6 +751,7 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
         "--json",
     ]);
     assert_eq!(partial["summary"]["units"]["unreported"], 3, "{partial}");
+    assert_eq!(partial["status"], "partial", "{partial}");
     let listed = lab.json(&["review", "list", "--kind", "pipeline:qc", "--json"]);
     let open: Vec<&Value> = listed["items"].as_array().unwrap().iter().collect();
     assert_eq!(open.len(), 4, "{listed}");
@@ -889,6 +926,17 @@ fn a_bids_run_meets_one_t1w_per_session_and_registers_one_output_per_session() {
     );
     assert!(!good, "a finished run's folder is not a release target");
     assert!(err.contains("--into-run"), "{err}");
+    // record 43: the release of the run's input says so, and the history
+    // leaves it out unless asked for it
+    let history = lab.json(&["release", "--history", "--json"]);
+    assert_eq!(history["count"], 0, "{history}");
+    let all = lab.json(&["release", "--history", "--runs", "--json"]);
+    let rows = all["releases"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{all}");
+    assert_eq!(rows[0]["purpose"], "run_input", "{all}");
+    assert_eq!(rows[0]["id"], v["input_release_id"], "{all}");
+    let text = lab.ok(&["release", "--history"], None);
+    assert!(!text.contains("pipeline-run-"), "{text}");
 }
 
 /// A server with the worker beside the doors, on the lab's search path.
@@ -1197,9 +1245,32 @@ fn real_containers_run_n4_rootless_with_no_network() {
     let lab = Lab::new("pipelines-real");
     // the stand-in is not on this search path
     let path = std::env::var_os("PATH").unwrap_or_default();
+    // rootless podman maps the user it runs as by name, so the real
+    // containers run as the user this test is, not the lab's anna
+    let me = std::env::var("USER").unwrap_or_default();
     let ok = |args: &[&str]| -> Value {
-        let (good, out, err) = lab.run_on(&path, args, None);
-        assert!(good, "nils {}: {err}", args.join(" "));
+        let done = lab
+            .command(&path)
+            .env("USER", &me)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let (good, out, err) = (
+            done.status.success(),
+            String::from_utf8_lossy(&done.stdout).to_string(),
+            String::from_utf8_lossy(&done.stderr).to_string(),
+        );
+        if !good {
+            // the container's own words, when it ran
+            let logs: Vec<String> = std::fs::read_dir(lab.work.path().join("runs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| std::fs::read_to_string(e.path().join("log.txt")).ok())
+                .collect();
+            panic!("nils {}: {err}\n{}", args.join(" "), logs.join("\n"));
+        }
         serde_json::from_str(&out).unwrap_or(Value::Null)
     };
     if runtime == "docker" {
@@ -1274,5 +1345,393 @@ fn real_containers_run_n4_rootless_with_no_network() {
     assert_eq!(
         second["results_digest"], first["results_digest"],
         "a re-run gives the same digests"
+    );
+}
+
+/// The four stand-ins of the body-part loop's runner half (record 43): an
+/// embedding per stack under one encoder its results carry the card of,
+/// seeds and a selection, a head fitted as a run-level model output with
+/// its card, and proposals by that head. Each checks what stacks.json
+/// carries and writes only under the output folder.
+const LOOP: &str = r#"
+- name: bp-embed
+  command: |
+    python3 -c '
+    import json, os, struct, sys
+    m = json.load(open(sys.argv[1])); out = sys.argv[2]
+    enc = "sha256:" + "e" * 64
+    units = []
+    for s in m["stacks"]:
+        h = json.dumps({"format": "nils-embedding", "dtype": "<f4", "stack_id": s["stack_id"], "encoder": enc, "preprocess_version": "v1", "rows": 3, "dim": 4, "slices": [0, 1, 2]}).encode()
+        start = (12 + len(h) + 63) // 64 * 64
+        b = b"NILSEMB1" + struct.pack("<I", len(h)) + h
+        b += bytes(start - len(b)) + struct.pack("<12f", *[float(i) for i in range(12)])
+        rel = "emb/%d.emb" % s["stack_id"]
+        os.makedirs(os.path.join(out, "emb"), exist_ok=True)
+        open(os.path.join(out, rel), "wb").write(b)
+        units.append({"unit_id": s["unit"], "status": "succeeded", "derivatives": [rel]})
+    card = {"name": "stand-in-encoder", "version": "1", "kind": "encoder", "digest": enc, "task": "encoder"}
+    json.dump({"schema_version": "1", "units": units, "models": [card]}, open(os.path.join(out, "results.json"), "w"))
+    ' [Manifest] [OutputLocation]
+  outputs:
+    - {id: enc, kind: embedding, path-template: "emb/{stack}.emb", media-type: application/vnd.nils.embedding}
+- name: bp-seed
+  command: |
+    python3 -c '
+    import json, os, sys
+    m = json.load(open(sys.argv[1])); out = sys.argv[2]
+    st = m["stacks"]
+    assert all(s["slices"] == 12 and s["orientation"] for s in st), st
+    units = [{"unit_id": s["unit"], "status": "succeeded"} for s in st]
+    seeds = [{"stack_id": s["stack_id"], "axis": "body_part", "value": "brain", "margin": 0.3, "source": "zero_shot"} for s in st[:3]]
+    seeds.append({"stack_id": 999999, "axis": "body_part", "value": "spine", "margin": 0.1})
+    sel = {"stacks": [st[0]["stack_id"], st[1]["stack_id"], 999999]}
+    json.dump({"schema_version": "1", "units": units, "seeds": seeds, "selection": sel}, open(os.path.join(out, "results.json"), "w"))
+    ' [Manifest] [OutputLocation]
+  outputs:
+    - {id: note, kind: output, path-template: "notes/{stack}.txt"}
+- name: bp-train
+  params: |
+    - {id: enc, name: Encoder, type: String, value-key: "[ENC]", default-value: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+    - {id: lie, name: Lie, type: String, value-key: "[LIE]", default-value: "no"}
+  command: |
+    python3 -c '
+    import hashlib, json, os, sys
+    m = json.load(open(sys.argv[1])); out = sys.argv[2]; enc = sys.argv[3]; lie = sys.argv[4]
+    os.makedirs(os.path.join(out, "head"), exist_ok=True)
+    body = json.dumps({"format": "stand-in-head", "classes": ["brain", "spine"], "lie": lie}, sort_keys=True).encode()
+    open(os.path.join(out, "head/head.json"), "wb").write(body)
+    d = "sha256:" + (hashlib.sha256(body).hexdigest() if lie == "no" else "0" * 64)
+    card = {"name": "bp-head", "version": "h" + lie, "kind": "head", "digest": d, "task": "axis:body_part", "encoders": [{"digest": enc}], "threshold": 0.8}
+    json.dump(card, open(os.path.join(out, "head/card.json"), "w"))
+    units = [{"unit_id": s["unit"], "status": "succeeded"} for s in m["stacks"]]
+    json.dump({"schema_version": "1", "units": units, "models": [card]}, open(os.path.join(out, "results.json"), "w"))
+    ' [Manifest] [OutputLocation] [ENC] [LIE]
+  inputs:
+    - {id: labels, type: label_set, optional: true}
+  outputs:
+    - {id: head, kind: model, level: run, path-template: "head/head.json", card: head/card.json, media-type: application/json}
+- name: bp-infer
+  params: |
+    - {id: p, name: Confidence, type: Number, value-key: "[P]", default-value: 0.95}
+  command: |
+    python3 -c '
+    import hashlib, json, os, sys
+    m = json.load(open(sys.argv[1])); out = sys.argv[2]; head = sys.argv[3]; p = float(sys.argv[4])
+    d = "sha256:" + hashlib.sha256(open(head, "rb").read()).hexdigest()
+    props, units = [], []
+    for i, s in enumerate(m["stacks"]):
+        v, w = ("brain", "spine") if s["files"][0]["path"].split("/")[1] == "1" else ("spine", "brain")
+        q = p
+        props.append({"stack_id": s["stack_id"], "axis": "body_part", "value": v, "probabilities": {v: q, w: round(1 - q, 6)}, "model_digest": d})
+        units.append({"unit_id": s["unit"], "status": "succeeded"})
+    json.dump({"schema_version": "1", "units": units, "proposals": props}, open(os.path.join(out, "results.json"), "w"))
+    ' [Manifest] [OutputLocation] [Inputs]/head/head.json [P]
+  inputs:
+    - {id: head, type: model}
+  outputs:
+    - {id: note, kind: output, path-template: "notes/{stack}.txt"}
+  proposals: [{axis: body_part}]
+"#;
+
+/// One of [`LOOP`]'s stand-ins as a descriptor of the stacks layout.
+fn stand_in(name: &str) -> String {
+    let all: Value =
+        serde_json::to_value(serde_saphyr::from_str::<serde_json::Value>(LOOP).unwrap()).unwrap();
+    let e = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == name)
+        .unwrap();
+    let indent = |text: &str, n: usize| -> String {
+        text.lines()
+            .map(|l| format!("{}{l}\n", " ".repeat(n)))
+            .collect()
+    };
+    let yaml = |v: &Value| serde_json::to_string(v).unwrap();
+    let mut doc = format!(
+        "name: {name}\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image:\n  type: docker\n  image: \"example.org/{name}@sha256:{}\"\n",
+        "c".repeat(64)
+    );
+    if let Some(p) = e["params"].as_str() {
+        doc.push_str("inputs:\n");
+        doc.push_str(&indent(p, 2));
+    }
+    doc.push_str("command-line: |\n");
+    doc.push_str(&indent(e["command"].as_str().unwrap(), 2));
+    doc.push_str("x-nils:\n  analysis-level: stack\n  input: {layout: stacks}\n");
+    for key in ["inputs", "outputs", "proposals"] {
+        if !e[key].is_null() {
+            doc.push_str(&format!("  {key}: {}\n", yaml(&e[key])));
+        }
+    }
+    doc
+}
+
+/// Record 43's rulings at the runner, over the body-part loop's shape:
+/// embeddings kept under the cache's key, seeds apart from proposals and
+/// saved as a selection, a head registered as a model from a run-level
+/// output (its card, the label set it was given, its encoders), mounted
+/// for the run that reads it, proposals staged at the card's threshold,
+/// which a run may raise and not lower, and a newer run superseding what
+/// the older one left untaken.
+#[test]
+fn the_body_part_loop_embeds_seeds_trains_a_model_and_proposes_through_the_runner() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-loop");
+    for name in ["bp-embed", "bp-seed", "bp-train", "bp-infer"] {
+        lab.add_descriptor(name, &stand_in(name));
+    }
+    let run = |args: &[&str]| -> Value {
+        let mut all = vec!["run"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&["--select", "selection:every@1", "--json"]);
+        lab.json(&all)
+    };
+
+    // embed: each file under the key, the encoder registered from its card
+    let first = run(&["bp-embed"]);
+    assert_eq!(first["status"], "done", "{first}");
+    assert_eq!(
+        first["summary"]["embeddings"],
+        json!({"registered": 4, "kept": 0}),
+        "{first}"
+    );
+    let enc = lab.json(&[
+        "model",
+        "show",
+        &format!("sha256:{}", "e".repeat(64)),
+        "--json",
+    ]);
+    assert_eq!(enc["kind"], "encoder", "{enc}");
+    let rows = lab.json(&[
+        "derivative",
+        "list",
+        "--run",
+        &first["id"].to_string(),
+        "--json",
+    ]);
+    for d in rows.as_array().unwrap() {
+        assert_eq!(d["kind"], "embedding");
+        assert_eq!(d["model_id"], enc["id"]);
+        assert_eq!(d["preprocess_version"], "v1");
+    }
+    // a second run: the key holds every stack, nothing new is registered
+    let again = run(&["bp-embed"]);
+    assert_eq!(
+        again["summary"]["embeddings"],
+        json!({"registered": 0, "kept": 4}),
+        "{again}"
+    );
+
+    // seeds: kept as the run's one derivative of kind seeds, never proposals
+    let seeded = run(&["bp-seed"]);
+    assert_eq!(seeded["status"], "done", "{seeded}");
+    let seeds = &seeded["summary"]["seeds"];
+    assert_eq!(
+        (&seeds["seeds"], &seeds["outside"], &seeds["selection"]),
+        (&json!(3), &json!(1), &json!(2)),
+        "{seeded}"
+    );
+    assert_eq!(seeded["summary"]["proposals"]["given"], 0);
+    let listed = lab.json(&[
+        "derivative",
+        "list",
+        "--run",
+        &seeded["id"].to_string(),
+        "--json",
+    ]);
+    let row = &listed.as_array().unwrap()[0];
+    assert_eq!(
+        (&row["kind"], &row["scope"]),
+        (&json!("seeds"), &json!("run"))
+    );
+    assert!(row["subject_id"].is_null(), "{row}");
+    let saved = lab.json(&[
+        "pipeline",
+        "seeds",
+        &seeded["id"].to_string(),
+        "--save",
+        "to-curate",
+        "--json",
+    ]);
+    assert_eq!(saved["per_value"]["body_part=brain"], 3, "{saved}");
+    assert_eq!(saved["saved"]["version"], 1, "{saved}");
+    let campaign = lab.json(&[
+        "campaign",
+        "create",
+        "curate-seeds",
+        "--axis",
+        "body_part",
+        "--select",
+        "selection:to-curate@1",
+        "--json",
+    ]);
+    assert_eq!(
+        campaign["items"].as_array().unwrap().len(),
+        2,
+        "the suggested stacks, and only those: {campaign}"
+    );
+
+    // train: the head a run-level output, registered as a model
+    let labels = lab.work.path().join("export");
+    std::fs::create_dir_all(&labels).unwrap();
+    lab.ok(
+        &[
+            "place",
+            "add",
+            "exp",
+            labels.to_str().unwrap(),
+            "--role",
+            "export",
+        ],
+        None,
+    );
+    let tsv = lab.work.path().join("v0.tsv");
+    let mut text = String::from("SeriesInstanceUID\tbody_part\tdate\n");
+    // a person's labels on the second subject's stacks, which are then not
+    // asked again; the first subject's are the model's to propose
+    for root in ["72"] {
+        for n in ["1", "2"] {
+            text.push_str(&format!(
+                "1.2.826.0.1.3680043.8.498.{root}.1.{n}\t{}\t2024-05-06\n",
+                if n == "1" { "Brain" } else { "Spine" }
+            ));
+        }
+    }
+    std::fs::write(&tsv, text).unwrap();
+    let imported = lab.json(&[
+        "labels",
+        "import-v0",
+        "--tsv",
+        tsv.to_str().unwrap(),
+        "--to",
+        labels.join("v0").to_str().unwrap(),
+        "--json",
+    ]);
+    let set = imported["label_set"]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{imported}"));
+    let set_digest = format!(
+        "sha256:{}",
+        imported["label_set"]["digest"].as_str().unwrap()
+    );
+    let lied = run(&["bp-train", "--param", "lie=yes"]);
+    assert_eq!(
+        lied["status"], "partial",
+        "a card that is not the artifact's: {lied}"
+    );
+    assert!(
+        lied["summary"]["refused_files"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("the artifact is"),
+        "{lied}"
+    );
+    let trained = run(&["bp-train", "--labels", &set.to_string()]);
+    assert_eq!(trained["status"], "done", "{trained}");
+    let made = &trained["summary"]["models"][0];
+    assert_eq!(made["model"]["state"], "registered", "{trained}");
+    assert_eq!(made["trained_on"], set_digest.as_str(), "{trained}");
+    assert_eq!(made["encoders"], json!([enc["id"]]), "{trained}");
+    let head = lab.json(&["model", "show", "bp-head@hno", "--json"]);
+    assert_eq!(head["card"]["trained_on"]["label_set"], set_digest.as_str());
+    assert_eq!(head["encoder_model_ids"], json!([enc["id"]]));
+    assert_eq!(head["threshold"], 0.8);
+    let rows = lab.json(&[
+        "derivative",
+        "list",
+        "--run",
+        &trained["id"].to_string(),
+        "--json",
+    ]);
+    let artifact = &rows.as_array().unwrap()[0];
+    assert_eq!(
+        (&artifact["kind"], &artifact["scope"], &artifact["model_id"]),
+        (&json!("model"), &json!("run"), &head["id"])
+    );
+    let check = lab.work.path().join("check.json");
+    std::fs::write(
+        &check,
+        json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]})
+            .to_string(),
+    )
+    .unwrap();
+    lab.ok(
+        &[
+            "model",
+            "admit",
+            "bp-head@hno",
+            "--check",
+            check.to_str().unwrap(),
+        ],
+        None,
+    );
+
+    // infer: the head mounted, its proposals staged at its card's threshold
+    let (good, _, err) = lab.run(
+        &[
+            "run",
+            "bp-infer",
+            "--model",
+            "bp-head@hno",
+            "--threshold",
+            "0.5",
+            "--select",
+            "selection:every@1",
+        ],
+        None,
+    );
+    assert!(!good && err.contains("not lower it"), "{err}");
+    let one = run(&["bp-infer", "--model", "bp-head@hno"]);
+    assert_eq!(one["status"], "done", "{one}");
+    let ingested = &one["summary"]["proposals"]["ingested"];
+    assert_eq!(ingested["staged_members"], 2, "{one}");
+    assert_eq!(ingested["items"], 2, "{one}");
+    assert_eq!(
+        ingested["decided"], 2,
+        "a person's label is not asked again: {one}"
+    );
+    let two = run(&["bp-infer", "--model", "bp-head@hno", "--param", "p=0.97"]);
+    let ingested = &two["summary"]["proposals"]["ingested"];
+    assert_eq!(
+        (&ingested["superseded"], &ingested["withdrawn"]),
+        (&json!(2), &json!(2)),
+        "{two}"
+    );
+    let raised = run(&[
+        "bp-infer",
+        "--model",
+        "bp-head@hno",
+        "--param",
+        "p=0.97",
+        "--threshold",
+        "0.99",
+    ]);
+    let ingested = &raised["summary"]["proposals"]["ingested"];
+    assert_eq!(ingested["staged_members"], 0, "{raised}");
+    let open = lab.json(&["review", "list", "--kind", "body_part:model", "--json"]);
+    let items = open["items"].as_array().unwrap();
+    let live: Vec<&Value> = items
+        .iter()
+        .filter(|i| i["status"] == "open" || i["status"] == "staged")
+        .collect();
+    assert_eq!(live.len(), 2, "{open}");
+    assert!(
+        live.iter().all(|i| i["ref"]["run_id"] == raised["id"]),
+        "only the newest run's items are open: {open}"
+    );
+    assert!(
+        items
+            .iter()
+            .filter(|i| i["ref"]["run_id"] != raised["id"])
+            .all(|i| i["status"] == "superseded"),
+        "{open}"
     );
 }

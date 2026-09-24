@@ -47,7 +47,6 @@ mod originals;
 mod pipelines;
 mod places;
 mod profile;
-mod proposals;
 mod pyramid;
 mod schedule;
 mod serve;
@@ -310,6 +309,10 @@ struct ReleaseArgs {
     /// What every version of this dataset did, and write nothing (§8.6)
     #[arg(long)]
     history: bool,
+    /// With --history: list the releases pipeline runs made of their bids
+    /// inputs too, which the history leaves out otherwise (record 43)
+    #[arg(long, requires = "history")]
+    runs: bool,
     /// What to call this release, on its row and in its report
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
@@ -8910,11 +8913,13 @@ fn release_withdraw(home: &Home, name: &str, version: &str, why: &str) -> Result
 
 /// The releases the registry holds, newest first (`GET /api/releases`, and
 /// `nils release --history --json`); every version of one dataset where a
-/// name is given.
+/// name is given. The trees pipeline runs made of their bids inputs (record
+/// 43) are left out unless `runs` asks for them or the name is theirs.
 fn releases_doc(
     registry: &mut Registry,
     limit: usize,
     name: Option<&str>,
+    runs: bool,
 ) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let started = text_of(store, "release", "started_at");
@@ -8927,11 +8932,16 @@ fn releases_doc(
     if let Some(name) = name {
         wheres = format!(" WHERE name = {}", store.dialect().param(1, Type::Text));
         params.push(Param::from(name));
+    } else if !runs {
+        wheres = format!(
+            " WHERE (purpose IS NULL OR purpose <> '{}')",
+            nils_registry::pipeline::RUN_INPUT
+        );
     }
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories, naming FROM {}{wheres} \
+         {policies}, {scheme}, session_naming, categories, naming, purpose FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -8993,6 +9003,8 @@ fn releases_doc(
                 // was written when there was one and calling it either now
                 // would be a claim nobody made.
                 "naming": r.opt_text(22)?,
+                // Record 43: run_input for a pipeline run's bids input.
+                "purpose": r.opt_text(23)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -9067,7 +9079,12 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
     // Asked for by machine, the history is the document the door answers, so
     // that a caller reads one shape of a release row and not two.
     if args.json {
-        let doc = releases_doc(&mut registry, i64::MAX as usize, args.name.as_deref())?;
+        let doc = releases_doc(
+            &mut registry,
+            i64::MAX as usize,
+            args.name.as_deref(),
+            args.runs,
+        )?;
         println!(
             "{}",
             serde_json::to_string_pretty(&doc)
@@ -9084,6 +9101,11 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             store.dialect().param(1, nils_registry::schema::Type::Text)
         );
         params.push(nils_registry::store::Param::from(name.as_str()));
+    } else if !args.runs {
+        wheres = format!(
+            " WHERE (purpose IS NULL OR purpose <> '{}')",
+            nils_registry::pipeline::RUN_INPUT
+        );
     }
     // `started_at` through the dialect's own rendering: Postgres hands a
     // timestamp back in a type the store does not read as text, and a select

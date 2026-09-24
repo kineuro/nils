@@ -28,8 +28,14 @@ pub const PARAM_TYPES: [&str; 3] = ["Number", "String", "Flag"];
 /// The typed inputs beside the selection, `derivative:<kind>` besides.
 pub const INPUT_TYPES: [&str; 2] = ["model", "label_set"];
 
-/// The derivative kinds an output may be; the registry's own list.
-pub const OUTPUT_KINDS: [&str; 4] = ["mask", "embedding", "pyramid", "output"];
+/// The derivative kinds an output may be declared as; each is one of the
+/// registry's. `model` is a run-level output only (record 43): a model the
+/// run fitted, which the runner registers from its card. The registry's
+/// `seeds` is the runner's own, written from the results, never declared.
+pub const OUTPUT_KINDS: [&str; 5] = ["mask", "embedding", "pyramid", "output", "model"];
+
+/// Where an output belongs (`x-nils.outputs[].level`).
+pub const OUTPUT_LEVELS: [&str; 2] = ["unit", "run"];
 
 /// The value-keys the engine fills, which no parameter may take.
 pub const RESERVED_KEYS: [&str; 6] = [
@@ -157,6 +163,10 @@ pub struct Output {
     pub kind: String,
     pub template: String,
     pub media_type: Option<String>,
+    /// One file for the whole run rather than one per unit (record 43).
+    pub run_level: bool,
+    /// For a model output, where its card lies under `/output`.
+    pub card: Option<String>,
 }
 
 /// A descriptor, parsed and checked.
@@ -535,12 +545,47 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             ));
         }
         let template = text(o, "path-template", &at)?.to_string();
-        check_template(&template, level).map_err(|e| format!("{at}path-template: {e}"))?;
+        let run_level = match opt_text(o, "level", &at)?.as_deref() {
+            None | Some("unit") => false,
+            Some("run") => true,
+            Some(other) => {
+                return Err(format!(
+                    "{at}level is one of {}, not {other}",
+                    OUTPUT_LEVELS.join(", ")
+                ));
+            }
+        };
+        let card = opt_text(o, "card", &at)?;
+        if kind == "model" && !run_level {
+            return Err(format!(
+                "{at}a model output is one file for the whole run: level run"
+            ));
+        }
+        if run_level {
+            check_run_template(&template).map_err(|e| format!("{at}path-template: {e}"))?;
+        } else {
+            check_template(&template, level).map_err(|e| format!("{at}path-template: {e}"))?;
+        }
+        if kind == "model" {
+            let Some(c) = &card else {
+                return Err(format!(
+                    "{at}a model output names its card (contracts/model/v1): card"
+                ));
+            };
+            check_run_template(c).map_err(|e| format!("{at}card: {e}"))?;
+            if c.contains('*') {
+                return Err(format!("{at}card is one file, with no *"));
+            }
+        } else if card.is_some() {
+            return Err(format!("{at}card belongs to a model output"));
+        }
         outputs.push(Output {
             id,
             kind,
             template,
             media_type: opt_text(o, "media-type", &at)?,
+            run_level,
+            card,
         });
     }
     if outputs.is_empty() {
@@ -642,6 +687,34 @@ fn check_template(template: &str, level: Level) -> Result<(), String> {
         return Err(format!(
             "{template}: * is the one wildcard, inside one segment"
         ));
+    }
+    Ok(())
+}
+
+/// A run-level template: relative, no `..`, and no unit placeholder, since
+/// the file is the run's.
+fn check_run_template(template: &str) -> Result<(), String> {
+    if template.starts_with('/') || template.contains('\\') {
+        return Err(format!("{template} is a path relative to /output"));
+    }
+    if template
+        .split('/')
+        .any(|s| s == ".." || s == "." || s.is_empty())
+    {
+        return Err(format!("{template} steps outside or has an empty segment"));
+    }
+    if template.contains('{') || template.contains('}') {
+        return Err(format!(
+            "{template} is the run's own file and names no unit: no placeholder"
+        ));
+    }
+    if template.contains("**") || template.contains('?') || template.contains('[') {
+        return Err(format!(
+            "{template}: * is the one wildcard, inside one segment"
+        ));
+    }
+    if template == crate::results::FILE || template == crate::results::SEEDS_FILE {
+        return Err(format!("{template} is the runner's own name"));
     }
     Ok(())
 }
@@ -997,6 +1070,39 @@ x-nils:
         assert!(e.contains("keeps for itself"), "{e}");
         let e = parse(&base.replace("type: Flag", "type: File")).unwrap_err();
         assert!(e.contains("typed input"), "{e}");
+    }
+
+    /// Record 43's ruling: an output may be the run's own file, such as a
+    /// model a train entry point fitted, with its card beside it.
+    #[test]
+    fn a_run_level_output_names_no_unit_and_a_model_names_its_card() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with = |extra: &str| {
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("{extra}  needs: {{gpu: optional}}"),
+            )
+        };
+        let model = "    - id: head\n      kind: model\n      level: run\n      path-template: \"head/head.*\"\n      card: head/card.json\n";
+        let d = parse(&with(model)).unwrap();
+        let head = d.outputs.iter().find(|o| o.id == "head").unwrap();
+        assert!(head.run_level);
+        assert_eq!(head.card.as_deref(), Some("head/card.json"));
+        assert!(!d.outputs[0].run_level);
+        for (bad, words) in [
+            (model.replace("level: run", "level: unit"), "level run"),
+            (model.replace("      card: head/card.json\n", ""), "names its card"),
+            (model.replace("head/head.*", "head/{subject}.json"), "no placeholder"),
+            (model.replace("level: run", "level: study"), "level is one of"),
+            (model.replace("head/head.*", "results.json"), "runner's own"),
+            (
+                "    - id: extra\n      kind: output\n      path-template: \"sub-{subject}/ses-{session}/x\"\n      card: c.json\n".to_string(),
+                "belongs to a model",
+            ),
+        ] {
+            let e = parse(&with(&bad)).unwrap_err();
+            assert!(e.contains(words), "{words}: {e}");
+        }
     }
 
     #[test]

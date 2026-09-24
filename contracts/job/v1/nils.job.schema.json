@@ -47,12 +47,14 @@
       "required": ["id", "kind", "path-template"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-        "kind": {"enum": ["mask", "embedding", "pyramid", "output"], "description": "The derivative kind each file becomes"},
+        "kind": {"enum": ["mask", "embedding", "pyramid", "output", "model"], "description": "The derivative kind each file becomes. model is a run-level output only: the artifact of a model the run fitted, which the runner registers as a model (contracts/model/v1) from the card beside it, in state registered. (The registry's seeds kind is the runner's own, written from the results' seeds, and never declared)"},
+        "level": {"enum": ["unit", "run"], "default": "unit", "description": "unit: one file per work unit, which the template names by its placeholders. run (record 43): one file for the whole run, such as a model a train entry point fitted, whose template names no unit and which belongs to the run rather than to a subject"},
         "path-template": {
           "type": "string",
           "pattern": "^[^/].*$",
-          "description": "Where a unit's file lies under /output: a relative path with {subject} and {session} (the labels without sub- and ses-) or {stack} (the stack's id) standing for the unit, and * for any run of characters inside one path segment. It is how the runner finds a unit's outputs when the pipeline writes no results.json, and which kind a file named in results.json is"
+          "description": "Where a file lies under /output: for a unit-level output a relative path with {subject} and {session} (the labels without sub- and ses-) or {stack} (the stack's id) standing for the unit, for a run-level one a path with no placeholder, and * for any run of characters inside one path segment. It is how the runner finds the outputs when the pipeline writes no results.json, and which kind a file named in results.json is"
         },
+        "card": {"type": "string", "pattern": "^[^/].*$", "description": "For a model output: the path under /output of the model's card (contracts/model/v1), whose digest is the artifact's. The runner fills trained_on with the label set the run was given, and refuses a card that names another"},
         "media-type": {"type": "string"}
       }
     },

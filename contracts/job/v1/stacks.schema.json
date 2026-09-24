@@ -29,6 +29,10 @@
           "series_id": {"type": "integer"},
           "subject_id": {"type": "integer"},
           "modality": {"type": "string"},
+          "orientation": {"type": ["string", "null"], "description": "Record 43: the stack's orientation as the registry derived it, such as axial"},
+          "body_part": {"type": ["string", "null"], "description": "Record 43: the stack's body_part as the registry holds it now, or null where it has none"},
+          "technique": {"type": ["string", "null"], "description": "Record 43: the stack's technique as the registry holds it now, or null"},
+          "slices": {"type": "integer", "minimum": 0, "description": "Record 43: how many slices the files hold in order: one per single-frame file and the listed frames of a multi-frame file, so a pipeline picks slices without reading every header"},
           "files": {
             "type": "array",
             "items": {

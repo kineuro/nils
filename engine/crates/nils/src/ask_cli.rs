@@ -1592,6 +1592,41 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
 /// opens the document and, where its grain is wider, the stacks or sessions
 /// under it are the answer, at record level so the handle keeps the keys.
 /// Answers the handle.
+/// Save an ask document as the next version of a selection, as `nils ask
+/// selections save` does from a file (record 43: a run's seeds become a
+/// selection a campaign starts from). Answers the name, version and hash.
+pub(crate) fn save_selection_doc(
+    home: &Home,
+    name: &str,
+    doc: &serde_json::Value,
+    pack_dir: Option<PathBuf>,
+    pack_name: &str,
+    note: Option<&str>,
+) -> Result<serde_json::Value, Exit> {
+    let at = Where {
+        server: None,
+        token: None,
+        pack_dir,
+        pack: pack_name.to_string(),
+        json: false,
+    };
+    let mut l = local(home, &at)?;
+    let ask =
+        parse(&doc.to_string()).map_err(|e| fail(format!("the selection's document: {e}")))?;
+    let prepared = nils_ask::prepare(ask, &l.catalog, &scope()).map_err(refused)?;
+    let saved = selection::save(
+        &mut l.registry,
+        name,
+        &prepared.ask,
+        &prepared.bound_hash,
+        &principal(),
+        note,
+        None,
+    )
+    .map_err(|e| usage(e.to_string()))?;
+    Ok(serde_json::to_value(saved).unwrap_or_default())
+}
+
 pub(crate) fn freeze_selection(
     home: &Home,
     spec: &str,

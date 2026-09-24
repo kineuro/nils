@@ -19,9 +19,11 @@ directory beside the old one, which stays.
 
 | document | what it fixes |
 |---|---|
-| `nils.job.schema.json` | the descriptor: v0's Boutiques 0.5 subset with an `x-nils` block. The image by its registry manifest digest; the parameters (name, type, range, choices, default, unit); the command line with its value-keys; the analysis level (`participant`, `session` or `stack`); the input layout (`bids` or `stacks`); the typed inputs (`model`, `label_set`, `derivative:<kind>`); the outputs by derivative kind with path templates; the needs (`gpu: none, optional or required`, memory, cores); and the axes it may propose values on |
-| `stacks.schema.json` | `/input/stacks.json` in the stacks layout: each stack's files under the source places mounted read-only, and the frames of a multi-frame file |
-| `results.schema.json` | `/output/results.json`: each unit's status, files, metrics and error, and the proposals |
+| `nils.job.schema.json` | the descriptor: v0's Boutiques 0.5 subset with an `x-nils` block. The image by its registry manifest digest; the parameters (name, type, range, choices, default, unit); the command line with its value-keys; the analysis level (`participant`, `session` or `stack`); the input layout (`bids` or `stacks`); the typed inputs (`model`, `label_set`, `derivative:<kind>`); the outputs by derivative kind with path templates, each one per unit or, since the wave's rulings, one for the whole run (`level: run`), such as a model (`kind: model`, with the `card` beside it); the needs (`gpu: none, optional or required`, memory, cores); and the axes it may propose values on |
+| `stacks.schema.json` | `/input/stacks.json` in the stacks layout: each stack's files under the source places mounted read-only, and the frames of a multi-frame file; each stack's orientation, its `body_part` and `technique` as the registry holds them now, and its slice count |
+| `results.schema.json` | `/output/results.json`: each unit's status, files, metrics and error; the proposals (`proposals.schema.json`); the cards of the models the run used or made; and the `seeds` and `selection` it suggests a person curate, which are never proposals |
+| `proposals.schema.json` | a model's proposals, per stack: the axis, the value, the probability of every class and the registered model |
+| `embedding.md` | the embedding file a pipeline writes, one per stack and encoder |
 
 ## What a container meets
 
@@ -46,4 +48,7 @@ uid. A GPU is passed where the descriptor asks for one and the host has it
 3. The bids layout is a release with the picks applied (record 43 R4): a BIDS App meets one image per role and session.
 4. A unit is `sub-<s>`, `sub-<s>_ses-<t>` or `stack-<id>`, as `/inputs/manifest.json` names it. A failed unit, and a unit `results.json` does not name, is one `pipeline:qc` review item.
 5. A file is registered as a derivative only from under `/output`, hashed by the engine. Without `results.json`, a unit's files are the ones its declared path templates find.
-6. A proposal is evidence for the review spine, never a fact, and only on an axis the descriptor declares.
+6. A proposal is evidence for the review spine, never a fact, and only on an axis the descriptor declares. It is staged as the model's decision at or above the threshold on the model's card, which a run may raise and never lower; a newer run of the model supersedes what its earlier runs left untaken.
+7. A run whose container exits 0 while units failed or went unreported is `partial`, not `done`; those units are `pipeline:qc` review items.
+8. A run-level model output is registered as a model, in state registered, from its card: the card names the artifact's digest, the label set is the one the run was given, and the encoders are the card's.
+9. Seeds and a suggested selection are kept as the run's one derivative of kind `seeds`; `nils pipeline seeds <run> --save <name>` makes the selection a campaign starts from.

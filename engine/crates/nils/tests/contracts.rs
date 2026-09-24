@@ -329,7 +329,21 @@ fn the_job_contract_is_the_runner_s() {
         strings(&job["$defs"]["output"]["properties"]["kind"]["enum"]),
         descriptor::OUTPUT_KINDS
     );
-    assert_eq!(descriptor::OUTPUT_KINDS, nils_registry::derivative::KINDS);
+    for kind in descriptor::OUTPUT_KINDS {
+        assert!(nils_registry::derivative::KINDS.contains(&kind), "{kind}");
+    }
+    // the registry's kinds a run writes itself, and only a run
+    for kind in nils_registry::derivative::KINDS {
+        assert!(
+            descriptor::OUTPUT_KINDS.contains(&kind)
+                || nils_registry::derivative::RUN_KINDS.contains(&kind),
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        strings(&job["$defs"]["output"]["properties"]["level"]["enum"]),
+        descriptor::OUTPUT_LEVELS
+    );
     assert_eq!(
         strings(&job["required"]),
         [
@@ -371,6 +385,19 @@ fn the_job_contract_is_the_runner_s() {
         stacks["properties"]["contract"]["const"],
         nils_pipeline::CONTRACT
     );
+    // record 43's rulings: what a stack carries for an image that seeds and
+    // picks slices, and what results carry beside the proposals
+    let stack = &stacks["properties"]["stacks"]["items"]["properties"];
+    for key in ["orientation", "body_part", "technique", "slices"] {
+        assert!(stack.get(key).is_some(), "stacks.json names {key}");
+    }
+    assert_eq!(
+        results["properties"]["proposals"]["$ref"],
+        "proposals.schema.json"
+    );
+    for key in ["models", "seeds", "selection"] {
+        assert!(results["properties"].get(key).is_some(), "{key}");
+    }
     // v0's N4, re-pinned: it checks, and its image is the schema's
     let text =
         std::fs::read_to_string(contracts().join("../pipelines/n4-bias-correction/nils.job.yml"))

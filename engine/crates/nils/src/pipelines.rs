@@ -232,7 +232,8 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     let mut it = command.into_iter().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--select" | "--handle" | "--param" | "--model" | "--labels" | "--pack" => {
+            "--select" | "--handle" | "--param" | "--model" | "--labels" | "--pack"
+            | "--threshold" => {
                 let value = it
                     .next()
                     .ok_or_else(|| Reply::error(400, format!("run {arg} takes a value")))?;
@@ -243,7 +244,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
                 return Err(Reply::error(
                     400,
                     format!(
-                        "run takes --select, --handle, --param, --model, --labels and --pack, not {a}"
+                        "run takes --select, --handle, --param, --model, --labels, --threshold and --pack, not {a}"
                     ),
                 ));
             }
@@ -305,6 +306,23 @@ pub(crate) enum PipelineCommand {
         #[arg(long)]
         json: bool,
     },
+    /// A run's seeds (record 43): the values it suggests a person curate,
+    /// and the stacks it suggests curating, which --save keeps as a
+    /// selection a campaign starts from (nils campaign create --select)
+    Seeds {
+        /// The run, by id
+        run: i64,
+        /// Save the suggested stacks as the next version of this selection
+        #[arg(long, value_name = "NAME")]
+        save: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// The runs, newest first, or one run with its derivatives
     Runs {
         /// One run, by id
@@ -341,6 +359,10 @@ pub(crate) struct RunArgs {
     /// A label set the pipeline reads, by id
     #[arg(long = "labels", value_name = "ID")]
     pub(crate) labels: Option<i64>,
+    /// Stage the run's proposals at this probability or above: a model's
+    /// card sets the threshold, and a run may raise it, never lower it
+    #[arg(long, value_name = "P")]
+    pub(crate) threshold: Option<f64>,
     /// The pack a selection is frozen and a bids input released under
     #[arg(long, default_value = "mri")]
     pub(crate) pack: String,
@@ -539,6 +561,77 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             }
             Ok(())
         }
+        PipelineCommand::Seeds {
+            run,
+            save,
+            pack_dir,
+            pack,
+            json,
+        } => {
+            let doc = seeds_of(registry.store(), run).map_err(usage)?;
+            let mut out = json!({
+                "run": run, "seeds": doc["seeds"], "selection": doc["selection"],
+            });
+            let mut per: BTreeMap<String, usize> = BTreeMap::new();
+            for s in doc["seeds"].as_array().into_iter().flatten() {
+                let key = format!(
+                    "{}={}",
+                    s["axis"].as_str().unwrap_or_default(),
+                    s["value"].as_str().unwrap_or_default()
+                );
+                *per.entry(key).or_default() += 1;
+            }
+            out["per_value"] = json!(per);
+            if let Some(name) = save {
+                let stacks: Vec<i64> = doc["selection"]["stacks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64)
+                    .collect();
+                if stacks.is_empty() {
+                    return Err(usage(format!("run {run} suggests no stacks to curate")));
+                }
+                drop(registry);
+                let ask = json!({
+                    "ast_version": 1,
+                    "sets": {"seeded": {"grain": "stack", "where": [
+                        ["in", {}, ["field", {}, "id"], stacks],
+                    ]}},
+                    "out": {"set": "seeded", "level": "record"},
+                });
+                let saved = crate::ask_cli::save_selection_doc(
+                    home,
+                    &name,
+                    &ask,
+                    pack_dir,
+                    &pack,
+                    Some(&format!("the stacks pipeline run {run} suggests curating")),
+                )?;
+                out["saved"] = saved;
+            }
+            if json {
+                return print(&out);
+            }
+            println!(
+                "run {run}: {} seed(s), {} stack(s) suggested for curation",
+                doc["seeds"].as_array().map_or(0, Vec::len),
+                doc["selection"]["stacks"].as_array().map_or(0, Vec::len)
+            );
+            for (k, n) in &per {
+                println!("  {k:<32} {n}");
+            }
+            if let Some(s) = out.get("saved") {
+                println!(
+                    "saved as selection:{}@{}; nils campaign create --select selection:{}@{} makes a campaign of it",
+                    s["name"].as_str().unwrap_or_default(),
+                    s["version"],
+                    s["name"].as_str().unwrap_or_default(),
+                    s["version"]
+                );
+            }
+            Ok(())
+        }
         PipelineCommand::Runs {
             id,
             pipeline,
@@ -645,7 +738,7 @@ struct Unit {
 impl Unit {
     /// What a derivative of the unit belongs to.
     fn belongs(&self) -> Option<Belongs> {
-        let subject_id = self.subject_id?;
+        let subject_id = Some(self.subject_id?);
         Some(match (self.stack_id, &self.session_day) {
             (Some(stack), _) => Belongs {
                 scope: "stack".into(),
@@ -817,7 +910,10 @@ struct Materialised {
 }
 
 /// `stacks.json`: each stack's files under the source places, mounted
-/// read-only at `/source/<n>`, and the frames of a multi-frame file.
+/// read-only at `/source/<n>`, and the frames of a multi-frame file; since
+/// record 43 also each stack's orientation, its `body_part` and `technique`
+/// as the registry holds them now, and how many slices its files hold, so
+/// an image seeds and picks slices without reading every header.
 fn materialise_stacks(
     store: &mut Store,
     stacks: &[i64],
@@ -830,7 +926,7 @@ fn materialise_stacks(
     let err = |e: nils_registry::Error| e.to_string();
     for &stack in stacks {
         let sql = format!(
-            "SELECT st.series_id, se.subject_id, st.modality FROM {} st JOIN {} se ON se.id = st.series_id WHERE st.id = {}",
+            "SELECT st.series_id, se.subject_id, st.modality, st.orientation FROM {} st JOIN {} se ON se.id = st.series_id WHERE st.id = {}",
             store.qualified("stack"),
             store.qualified("series"),
             d.param(1, Type::Int)
@@ -843,10 +939,23 @@ fn materialise_stacks(
         let series_id = row.int(0).map_err(err)?;
         let subject_id = row.int(1).map_err(err)?;
         let modality = row.text(2).map_err(err)?.to_string();
+        let orientation = row.opt_text(3).map_err(err)?.map(str::to_string);
+        // the axes an image reads, as the registry holds them now
+        let axes_sql = format!(
+            "SELECT axis, value FROM {} WHERE stack_id = {} AND axis IN ('body_part', 'technique') \
+             AND value IS NOT NULL ORDER BY axis, value",
+            store.qualified("classification_axis"),
+            d.param(1, Type::Int)
+        );
+        let mut axes: BTreeMap<String, String> = BTreeMap::new();
+        for r in store.query(&axes_sql, &[Param::Int(stack)]).map_err(err)? {
+            axes.entry(r.text(0).map_err(err)?.to_string())
+                .or_insert(r.text(1).map_err(err)?.to_string());
+        }
         // the files: a multi-frame file's frames first, then the files whose
         // every frame is the stack's
         let framed = format!(
-            "SELECT so.id, so.root, f.path, fr.frames FROM {} fr JOIN {} i ON i.id = fr.instance_id \
+            "SELECT so.id, so.root, f.path, fr.frames, fr.n_frames FROM {} fr JOIN {} i ON i.id = fr.instance_id \
              JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
              WHERE fr.stack_id = {} ORDER BY f.path",
             store.qualified("instance_frame"),
@@ -864,18 +973,22 @@ fn materialise_stacks(
             d.param(1, Type::Int)
         );
         let mut files: Vec<Value> = Vec::new();
+        let mut slices: i64 = 0;
         let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
         let mut add = |sources: &mut BTreeMap<i64, (usize, String)>,
                        so: i64,
                        root: &str,
                        path: &str,
-                       frames: Option<&str>| {
+                       frames: Option<(&str, i64)>| {
             if !seen.insert((so, path.to_string())) {
                 return;
             }
             let n = sources.len();
             let (index, _) = sources.entry(so).or_insert((n, root.to_string()));
-            files.push(json!({"source": *index, "path": path, "frames": frames}));
+            // a single-frame file is one slice; a multi-frame file the
+            // frames that are the stack's
+            slices += frames.map_or(1, |(_, n)| n);
+            files.push(json!({"source": *index, "path": path, "frames": frames.map(|(f, _)| f)}));
         };
         for r in store.query(&framed, &[Param::Int(stack)]).map_err(err)? {
             add(
@@ -883,7 +996,7 @@ fn materialise_stacks(
                 r.int(0).map_err(err)?,
                 r.text(1).map_err(err)?,
                 r.text(2).map_err(err)?,
-                Some(r.text(3).map_err(err)?),
+                Some((r.text(3).map_err(err)?, r.int(4).map_err(err)?)),
             );
         }
         for r in store.query(&whole, &[Param::Int(stack)]).map_err(err)? {
@@ -902,6 +1015,8 @@ fn materialise_stacks(
         entries.push(json!({
             "unit": unit, "stack_id": stack, "series_id": series_id,
             "subject_id": subject_id, "modality": modality, "files": files,
+            "orientation": orientation, "body_part": axes.get("body_part"),
+            "technique": axes.get("technique"), "slices": slices,
         }));
         units.push(Unit {
             id: unit,
@@ -1175,7 +1290,18 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         if m.state == "retired" {
             return Err(usage(format!("model {} is retired", m.label())));
         }
+        // record 43: a run may raise a model's threshold, never lower it
+        if let Some(t) = args.threshold {
+            nils_registry::proposals::threshold(&m, Some(t)).map_err(|e| usage(e.to_string()))?;
+        }
         models.push(m);
+    }
+    if let Some(t) = args.threshold
+        && !(t > 0.0 && t <= 1.0)
+    {
+        return Err(usage(format!(
+            "--threshold is a probability above 0 and at most 1, not {t}"
+        )));
     }
     let label_input = d.inputs.iter().find(|t| t.ty == "label_set");
     let label_set = match (args.labels, label_input) {
@@ -1292,6 +1418,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             stacks: &stacks,
             models: &models,
             label_set: label_set.as_ref(),
+            threshold: args.threshold,
             who: &who,
             actor: &actor,
             args: &args,
@@ -1332,7 +1459,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         },
     )?;
     let job_state = match status {
-        "done" => job::State::Done,
+        "done" | "partial" => job::State::Done,
         "cancelled" => job::State::Cancelled,
         _ => job::State::Failed,
     };
@@ -1352,7 +1479,8 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         print_run(&doc);
     }
     match status {
-        "done" => Ok(()),
+        // a partial run completed: its failed units are review items
+        "done" | "partial" => Ok(()),
         "cancelled" => Err(Exit {
             code: crate::STOPPED,
             message: format!("run {run_id} was cancelled"),
@@ -1377,6 +1505,9 @@ struct Execution<'a> {
     stacks: &'a [i64],
     models: &'a [nils_registry::model::Model],
     label_set: Option<&'a nils_registry::labels::LabelSet>,
+    /// The caller's threshold for the run's proposals, which only raises a
+    /// model card's (record 43).
+    threshold: Option<f64>,
     who: &'a str,
     actor: &'a Value,
     args: &'a RunArgs,
@@ -1455,17 +1586,29 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     mounts.extend(m.mounts.iter().cloned());
     let model_inputs: Vec<&descriptor::TypedInput> =
         d.inputs.iter().filter(|t| t.ty == "model").collect();
-    let models_doc: Vec<Value> = x
-        .models
-        .iter()
-        .zip(&model_inputs)
-        .map(|(model, t)| {
-            json!({
-                "input": t.id, "model_id": model.id, "name": model.name, "version": model.version,
-                "digest": model.digest, "kind": model.kind, "card": model.card,
-            })
-        })
-        .collect();
+    let mut models_doc: Vec<Value> = Vec::new();
+    for (model, t) in x.models.iter().zip(&model_inputs) {
+        // a model a run fitted is that run's derivative of kind model
+        // (record 43): its folder is the input, read-only
+        let artifact = model_artifact(registry.store(), model.id, x.place.id)?;
+        if let Some(rel) = &artifact {
+            let host = working.join(rel);
+            if let Some(dir) = host.parent().filter(|d| d.is_dir()) {
+                mounts.push(Mount {
+                    host: dir.to_path_buf(),
+                    container: format!("/inputs/{}", t.id),
+                    read_only: true,
+                });
+            }
+        }
+        models_doc.push(json!({
+            "input": t.id, "model_id": model.id, "name": model.name, "version": model.version,
+            "digest": model.digest, "kind": model.kind, "card": model.card,
+            "encoder_model_ids": model.encoder_model_ids,
+            "artifact": artifact.as_deref().and_then(|a| Path::new(a).file_name())
+                .map(|f| format!("/inputs/{}/{}", t.id, f.to_string_lossy())),
+        }));
+    }
     let mut label_doc = Value::Null;
     if let (Some(set), Some(t)) = (x.label_set, d.inputs.iter().find(|t| t.ty == "label_set")) {
         label_doc = set.as_json();
@@ -1584,6 +1727,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         env: vec![
             ("NILS_RUN_ID".into(), x.run_id.to_string()),
             ("NILS_PIPELINE".into(), p.label()),
+            ("NILS_IMAGE_DIGEST".into(), p.image_digest.clone()),
         ],
         user,
     };
@@ -1619,6 +1763,12 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     } else {
         (None, None)
     };
+    // a run-level output is the run's own file, never a unit's (record 43)
+    let unit_outputs: Vec<descriptor::Output> =
+        d.outputs.iter().filter(|o| !o.run_level).cloned().collect();
+    let run_outputs: Vec<descriptor::Output> =
+        d.outputs.iter().filter(|o| o.run_level).cloned().collect();
+    let is_run_file = |rel: &str| nils_pipeline::files::which_output(&run_outputs, rel).is_some();
     let mut outcomes: Vec<(usize, Outcome)> = Vec::new();
     for (i, u) in m.units.iter().enumerate() {
         let o = if let Some(e) = &unreadable {
@@ -1641,9 +1791,14 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                     files: Vec::new(),
                 },
                 Some(e) => {
-                    let mut files = e.derivatives.clone();
+                    let mut files: Vec<String> = e
+                        .derivatives
+                        .iter()
+                        .filter(|f| !is_run_file(f))
+                        .cloned()
+                        .collect();
                     if e.status == nils_pipeline::results::Status::Succeeded && files.is_empty() {
-                        files = found_for(d, &out, u);
+                        files = found_for(&unit_outputs, &out, u);
                     }
                     Outcome {
                         status: e.status.name(),
@@ -1668,7 +1823,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 files: Vec::new(),
             }
         } else {
-            let files = found_for(d, &out, u);
+            let files = found_for(&unit_outputs, &out, u);
             if files.is_empty() {
                 Outcome {
                     status: "failed",
@@ -1688,10 +1843,16 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         outcomes.push((i, o));
     }
 
-    // every file hashed by the engine and registered, naming the run
+    // every file hashed by the engine and registered, naming the run; an
+    // embedding under the cache's key (record 43 S4)
     let now = nils_registry::time::now_iso();
+    let cards: Vec<Value> = reported
+        .as_ref()
+        .map(|r| r.models.clone())
+        .unwrap_or_default();
     let mut registered = 0usize;
     let mut bytes_total = 0u64;
+    let (mut embedded, mut cached) = (0usize, 0usize);
     let mut refused: Vec<Value> = Vec::new();
     let mut digest_units: Vec<Value> = Vec::new();
     for (i, o) in outcomes.iter_mut() {
@@ -1713,36 +1874,51 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             };
             let (bytes, sha) =
                 nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
-            let declared = nils_pipeline::files::which_output(&d.outputs, rel);
+            let declared = nils_pipeline::files::which_output(&unit_outputs, rel);
             let kind = declared.map_or("output", |o| o.kind.as_str());
             let media = nils_pipeline::files::media_type(
                 rel,
                 declared.and_then(|o| o.media_type.as_deref()),
             );
             let path = format!("{rel_out}/{rel}");
-            derivative::insert_of_run(
-                registry.store(),
-                &derivative::New {
-                    kind,
-                    belongs: &belongs,
-                    place_id: x.place.id,
-                    path: &path,
-                    bytes: bytes as i64,
-                    sha256: &sha,
-                    media_type: &media,
-                    registered_by: x.who,
-                    actor: Some(x.actor),
-                    model_id: None,
-                    run_id: None,
-                    preprocess_version: None,
-                    supersedes_id: None,
-                    created_at: &now,
-                },
-                x.run_id,
-            )
-            .map_err(|e| e.to_string())?;
-            registered += 1;
-            bytes_total += bytes;
+            if kind == nils_registry::embedding::KIND {
+                match register_embedding(registry, x, u, &file, &path, bytes, &sha, &cards, &now) {
+                    Ok(nils_registry::embedding::Registered::New(_)) => {
+                        embedded += 1;
+                        registered += 1;
+                        bytes_total += bytes;
+                    }
+                    Ok(nils_registry::embedding::Registered::Kept { .. }) => cached += 1,
+                    Err(why) => {
+                        refused.push(json!({"unit": u.id, "file": rel, "why": why}));
+                        continue;
+                    }
+                }
+            } else {
+                derivative::insert_of_run(
+                    registry.store(),
+                    &derivative::New {
+                        kind,
+                        belongs: &belongs,
+                        place_id: x.place.id,
+                        path: &path,
+                        bytes: bytes as i64,
+                        sha256: &sha,
+                        media_type: &media,
+                        registered_by: x.who,
+                        actor: Some(x.actor),
+                        model_id: None,
+                        run_id: None,
+                        preprocess_version: None,
+                        supersedes_id: None,
+                        created_at: &now,
+                    },
+                    x.run_id,
+                )
+                .map_err(|e| e.to_string())?;
+                registered += 1;
+                bytes_total += bytes;
+            }
             hashed.push(json!({"path": rel, "sha256": sha}));
             kept.push(rel.clone());
         }
@@ -1751,13 +1927,140 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         digest_units.push(json!({"unit": u.id, "status": o.status, "files": hashed}));
     }
     digest_units.sort_by(|a, b| a["unit"].as_str().cmp(&b["unit"].as_str()));
+
+    // the run's own files (record 43): a model it fitted, registered from
+    // its card, and any other run-level output; only a run that completed
+    let mut run_files: Vec<Value> = Vec::new();
+    let mut models_made: Vec<Value> = Vec::new();
+    if exit_code == Some(0) {
+        for o in &run_outputs {
+            let found = nils_pipeline::files::found(&out, &o.template, &[]);
+            if o.kind == "model" {
+                match found.as_slice() {
+                    [rel] => match register_model(registry, x, o, &out, rel, &rel_out, &now) {
+                        Ok((model, id, sha)) => {
+                            registered += 1;
+                            run_files.push(json!({"path": rel, "sha256": sha}));
+                            models_made.push(json!({
+                                "output": o.id, "model": model.named(), "derivative": id,
+                                "encoders": model.encoder_model_ids, "trained_on": model.trained_on,
+                            }));
+                        }
+                        Err(why) => refused.push(json!({"output": o.id, "file": rel, "why": why})),
+                    },
+                    [] => refused.push(json!({"output": o.id, "why": "the run wrote no model"})),
+                    many => refused.push(json!({
+                        "output": o.id,
+                        "why": format!("{} files match; a model output is one file", many.len()),
+                    })),
+                }
+                continue;
+            }
+            for rel in found {
+                let file = nils_pipeline::files::inside(&out, &rel)?;
+                let (bytes, sha) =
+                    nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
+                let media = nils_pipeline::files::media_type(&rel, o.media_type.as_deref());
+                derivative::insert_of_run(
+                    registry.store(),
+                    &derivative::New {
+                        kind: &o.kind,
+                        belongs: &Belongs::run(),
+                        place_id: x.place.id,
+                        path: &format!("{rel_out}/{rel}"),
+                        bytes: bytes as i64,
+                        sha256: &sha,
+                        media_type: &media,
+                        registered_by: x.who,
+                        actor: Some(x.actor),
+                        model_id: None,
+                        run_id: None,
+                        preprocess_version: None,
+                        supersedes_id: None,
+                        created_at: &now,
+                    },
+                    x.run_id,
+                )
+                .map_err(|e| e.to_string())?;
+                registered += 1;
+                bytes_total += bytes;
+                run_files.push(json!({"path": rel, "sha256": sha}));
+            }
+        }
+    }
+    run_files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+
+    // the seeds and the selection it suggests (record 43): kept whole as the
+    // run's one derivative of kind seeds, apart from any proposal
+    let mut seeds_doc = Value::Null;
+    let mut seeds_digest = Value::Null;
+    if let Some(r) = &reported
+        && (!r.seeds.is_empty() || r.selection.is_some())
+    {
+        let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
+        let taken: Vec<&Value> = r
+            .seeds
+            .iter()
+            .filter(|s| ours.contains(&s.stack_id))
+            .map(|s| &s.entry)
+            .collect();
+        let outside = r.seeds.len() - taken.len();
+        let mut selection: Vec<i64> = r
+            .selection
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|s| ours.contains(s))
+            .collect();
+        selection.sort_unstable();
+        selection.dedup();
+        let doc = json!({
+            "contract": nils_pipeline::CONTRACT, "run": x.run_id, "pipeline": p.label(),
+            "seeds": taken, "selection": {"stacks": selection},
+        });
+        let text = nils_pipeline::canonical(&doc);
+        let rel = nils_pipeline::results::SEEDS_FILE;
+        std::fs::write(out.join(rel), &text).map_err(|e| format!("{rel}: {e}"))?;
+        let sha = hex_of(&nils_pipeline::sha256(text.as_bytes()));
+        let id = derivative::insert_of_run(
+            registry.store(),
+            &derivative::New {
+                kind: "seeds",
+                belongs: &Belongs::run(),
+                place_id: x.place.id,
+                path: &format!("{rel_out}/{rel}"),
+                bytes: text.len() as i64,
+                sha256: &sha,
+                media_type: "application/json",
+                registered_by: x.who,
+                actor: Some(x.actor),
+                model_id: None,
+                run_id: None,
+                preprocess_version: None,
+                supersedes_id: None,
+                created_at: &now,
+            },
+            x.run_id,
+        )
+        .map_err(|e| e.to_string())?;
+        registered += 1;
+        bytes_total += text.len() as u64;
+        seeds_doc = json!({
+            "seeds": taken.len(), "outside": outside, "selection": selection.len(),
+            "derivative": id,
+        });
+        seeds_digest = json!(sha);
+    }
+
     let proposals = reported
         .as_ref()
         .map(|r| r.proposals.clone())
         .unwrap_or_default();
     let results_digest = nils_pipeline::sha256(
-        nils_pipeline::canonical(&json!({"units": digest_units, "proposals": proposals}))
-            .as_bytes(),
+        nils_pipeline::canonical(&json!({
+            "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
+        }))
+        .as_bytes(),
     );
 
     // the units no one can vouch for become review items
@@ -1788,18 +2091,40 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         items.push(id);
     }
 
-    // the proposals, through the review spine's hook
-    let ingested = crate::proposals::ingest(
-        registry,
-        &crate::proposals::From {
-            run_id: x.run_id,
-            pipeline: &label,
-            axes: &d.proposals,
-            model_ids: &x.models.iter().map(|m| m.id).collect::<Vec<_>>(),
-            job_id: Some(x.job_id),
-        },
-        &proposals,
-    )?;
+    // the proposals on the axes it declares, through the review spine
+    // (record 43 S6): grouped model items, staged at the model's threshold
+    let (declared, undeclared): (Vec<Value>, Vec<Value>) =
+        proposals.iter().cloned().partition(|p| {
+            p["axis"]
+                .as_str()
+                .is_some_and(|a| d.proposals.iter().any(|x| x == a))
+        });
+    let mut proposed = json!({
+        "given": proposals.len(), "declared": declared.len(),
+        "undeclared": undeclared.len(), "taken": 0,
+    });
+    if !declared.is_empty() {
+        let taken =
+            nils_registry::proposals::parse(&json!({ "proposals": declared })).and_then(|parsed| {
+                nils_registry::proposals::ingest(
+                    registry,
+                    &nils_registry::proposals::Run {
+                        id: x.run_id,
+                        job_id: Some(x.job_id),
+                        principal: x.who,
+                    },
+                    &parsed,
+                    x.threshold,
+                )
+            });
+        match taken {
+            Ok(done) => {
+                proposed["taken"] = json!(done.members);
+                proposed["ingested"] = done.to_json();
+            }
+            Err(e) => proposed["refused"] = json!(e.to_string()),
+        }
+    }
 
     let count = |s: &str| outcomes.iter().filter(|(_, o)| o.status == s).count();
     let summary = json!({
@@ -1809,12 +2134,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         },
         "derivatives": registered,
         "bytes": bytes_total,
+        "embeddings": {"registered": embedded, "kept": cached},
+        "run_files": run_files,
+        "models": models_made,
+        "seeds": seeds_doc,
         "refused_files": refused,
         "review_items": items,
-        "proposals": {
-            "given": proposals.len(), "declared": ingested.declared,
-            "undeclared": ingested.undeclared, "taken": ingested.taken,
-        },
+        "proposals": proposed,
         "results": match (&reported, &unreadable) {
             (Some(_), _) => json!("results.json"),
             (None, Some(e)) => json!(format!("unreadable: {e}")),
@@ -1824,7 +2150,12 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         "log": format!("{RUNS}/{}/log.txt", x.run_id),
     });
     if exit_code == Some(0) {
-        Ok(("done", summary, Some(results_digest), exit_code, None))
+        // record 43: a run that completed with units that failed or went
+        // unreported, or a file it made that was refused, is partial; the
+        // units are review items
+        let short = count("failed") + count("unreported") > 0 || !refused.is_empty();
+        let status = if short { "partial" } else { "done" };
+        Ok((status, summary, Some(results_digest), exit_code, None))
     } else {
         let error = format!(
             "the container exited {}; its log is {RUNS}/{}/log.txt in the working place {}",
@@ -1842,12 +2173,230 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     }
 }
 
+/// A run's seeds, as the runner kept them: the document of its derivative
+/// of kind seeds, read back from the working place and checked against the
+/// digest the row holds.
+fn seeds_of(store: &mut Store, run: i64) -> Result<Value, String> {
+    let r = rows::run(store, run)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no pipeline run {run}"))?;
+    let rows = derivative::list(
+        store,
+        &derivative::Filter {
+            kind: Some("seeds"),
+            run_id: Some(r.id),
+            limit: 1,
+            ..derivative::Filter::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let row = rows
+        .into_iter()
+        .find(|d| d.withdrawn_at.is_none())
+        .ok_or_else(|| format!("run {run} suggested no seeds"))?;
+    let place = nils_registry::place::show(store, row.place_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("the place of derivative {} is gone", row.id))?;
+    let bytes = std::fs::read(Path::new(&place.path).join(&row.path))
+        .map_err(|e| format!("the seeds of run {run}: {e}"))?;
+    if hex_of(&nils_pipeline::sha256(&bytes)) != row.sha256 {
+        return Err(format!(
+            "the seeds file of run {run} is not the one registered (derivative {})",
+            row.id
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("the seeds of run {run}: {e}"))
+}
+
+/// Where the artifact of a model a run fitted lies under the working place:
+/// the newest live derivative of kind model naming it there.
+fn model_artifact(
+    store: &mut Store,
+    model_id: i64,
+    place_id: i64,
+) -> Result<Option<String>, String> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT path FROM {} WHERE kind = 'model' AND model_id = {} AND place_id = {} \
+         AND withdrawn_at IS NULL ORDER BY id DESC",
+        store.qualified("derivative"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    store
+        .query_opt(&sql, &[Param::Int(model_id), Param::Int(place_id)])
+        .map_err(|e| e.to_string())?
+        .map(|r| r.text(0).map(str::to_string))
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
+/// `sha256:<hex>` to its hex, as the derivative rows keep a digest.
+fn hex_of(digest: &str) -> String {
+    digest.strip_prefix("sha256:").unwrap_or(digest).to_string()
+}
+
+/// Register an embedding a run wrote under the cache's key (record 43 S4):
+/// its header names the stack, the encoder and the preprocessing; the
+/// encoder is the registry's, or registered from the card the results
+/// carry for it. Answers what the cache did, or why the file is refused.
+#[allow(clippy::too_many_arguments)]
+fn register_embedding(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    u: &Unit,
+    file: &Path,
+    path: &str,
+    bytes: u64,
+    sha: &str,
+    cards: &[Value],
+    now: &str,
+) -> Result<nils_registry::embedding::Registered, String> {
+    use nils_registry::embedding;
+    let data = std::fs::read(file).map_err(|e| e.to_string())?;
+    let (h, _) = embedding::decode_header(&data)?;
+    if u.stack_id != Some(h.stack_id) {
+        return Err(format!(
+            "the embedding names stack {}, and the unit is {}",
+            h.stack_id, u.id
+        ));
+    }
+    let encoder = match nils_registry::model::by_digest(registry.store(), &h.encoder)
+        .map_err(|e| e.to_string())?
+    {
+        Some(m) => m,
+        None => {
+            let card = cards
+                .iter()
+                .find(|c| c["digest"] == h.encoder.as_str() && c["kind"] == "encoder")
+                .ok_or_else(|| {
+                    format!(
+                        "the encoder {} is not registered, and the results carry no card for it",
+                        h.encoder
+                    )
+                })?;
+            let text = |k: &str| card[k].as_str().filter(|s| !s.is_empty());
+            embedding::register_encoder(
+                registry,
+                &embedding::Encoder {
+                    name: text("name").ok_or("the encoder's card names no name")?,
+                    version: text("version").ok_or("the encoder's card names no version")?,
+                    weights_digest: &h.encoder,
+                    image_digest: text("image_digest"),
+                },
+                x.who,
+            )
+            .map_err(|e| e.to_string())?
+        }
+    };
+    embedding::register(
+        registry,
+        &embedding::New {
+            stack_id: h.stack_id,
+            encoder_id: encoder.id,
+            preprocess_version: &h.preprocess_version,
+            place_id: x.place.id,
+            path,
+            bytes: bytes as i64,
+            sha256: sha,
+            registered_by: x.who,
+            actor: Some(x.actor),
+            run_id: Some(x.run_id),
+            created_at: now,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Register the model a run fitted (record 43): the artifact hashed by the
+/// engine, the card beside it naming that digest, trained on the label set
+/// the run was given, its encoders the card's, in state registered. The
+/// artifact becomes the run's derivative of kind model, which a later run
+/// that reads the model mounts. Answers the model, the derivative's id and
+/// the artifact's digest.
+fn register_model(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    o: &descriptor::Output,
+    out: &Path,
+    rel: &str,
+    rel_out: &str,
+    now: &str,
+) -> Result<(nils_registry::model::Model, i64, String), String> {
+    let file = nils_pipeline::files::inside(out, rel)?;
+    let (bytes, sha) =
+        nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
+    let card_rel = o.card.as_deref().ok_or("a model output names its card")?;
+    let card_file = nils_pipeline::files::inside(out, card_rel)?;
+    let text =
+        std::fs::read_to_string(&card_file).map_err(|e| format!("the card {card_rel}: {e}"))?;
+    let mut card: Value =
+        serde_json::from_str(&text).map_err(|e| format!("the card {card_rel}: {e}"))?;
+    let digest = format!("sha256:{sha}");
+    if card["digest"].as_str() != Some(digest.as_str()) {
+        return Err(format!(
+            "the card names the digest {}, and the artifact is {digest}",
+            card["digest"]
+        ));
+    }
+    // trained on the label set it was given, and no other
+    let bare = |d: &str| d.strip_prefix("sha256:").unwrap_or(d).to_string();
+    match (x.label_set, card["trained_on"]["label_set"].as_str()) {
+        (Some(set), Some(named)) if bare(named) != bare(&set.digest) => {
+            return Err(format!(
+                "the card says it was trained on {named}, and the run gave it label set {} ({})",
+                set.id, set.digest
+            ));
+        }
+        (Some(set), _) => {
+            if !card["trained_on"].is_object() {
+                card["trained_on"] = json!({});
+            }
+            card["trained_on"]["label_set"] = json!(format!("sha256:{}", bare(&set.digest)));
+            card["trained_on"]["name"] = json!(set.name);
+            card["trained_on"]["rows"] = json!(set.rows);
+        }
+        (None, Some(named)) => {
+            return Err(format!(
+                "the card says it was trained on {named}, and the run was given no label set"
+            ));
+        }
+        (None, None) => {}
+    }
+    let model =
+        nils_registry::model::register(registry, &card, x.who).map_err(|e| e.to_string())?;
+    nils_registry::model::set_job(registry.store(), model.id, x.job_id)
+        .map_err(|e| e.to_string())?;
+    let media = nils_pipeline::files::media_type(rel, o.media_type.as_deref());
+    let id = derivative::insert_of_run(
+        registry.store(),
+        &derivative::New {
+            kind: "model",
+            belongs: &Belongs::run(),
+            place_id: x.place.id,
+            path: &format!("{rel_out}/{rel}"),
+            bytes: bytes as i64,
+            sha256: &sha,
+            media_type: &media,
+            registered_by: x.who,
+            actor: Some(x.actor),
+            model_id: Some(model.id),
+            run_id: None,
+            preprocess_version: None,
+            supersedes_id: None,
+            created_at: now,
+        },
+        x.run_id,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((model, id, sha))
+}
+
 /// A unit's files as the declared templates find them.
-fn found_for(d: &Descriptor, out: &Path, u: &Unit) -> Vec<String> {
+fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String> {
     let vars = u.vars();
     let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let mut files: Vec<String> = d
-        .outputs
+    let mut files: Vec<String> = outputs
         .iter()
         .flat_map(|o| nils_pipeline::files::found(out, &o.template, &pairs))
         .collect();

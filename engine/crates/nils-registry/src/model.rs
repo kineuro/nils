@@ -1034,6 +1034,12 @@ pub fn retire(
     Ok(m)
 }
 
+/// Name the job that fitted a model (record 43: a pipeline run's).
+pub fn set_job(store: &mut Store, id: i64, job_id: i64) -> Result<(), StoreError> {
+    store.update_by_id(table("model"), &[("job_id", Param::Int(job_id))], "id", id)?;
+    Ok(())
+}
+
 /// The model a model's answer names, refused unless it is registered and
 /// admitted or promoted (record 42 S2).
 pub fn author(store: &mut Store, id: i64) -> Result<Model, Error> {

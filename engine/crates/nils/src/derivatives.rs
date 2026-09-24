@@ -249,6 +249,15 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
             ),
         ));
     }
+    if derivative::RUN_KINDS.contains(&a.kind) {
+        return Err((
+            400,
+            format!(
+                "a derivative of kind {} is written by a pipeline run, not registered at the door",
+                a.kind
+            ),
+        ));
+    }
     if let Some(s) = a.sha256
         && !is_sha256(s)
     {
@@ -274,13 +283,13 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
         }
         // a successor is of what its predecessor was of: the same subject,
         // and the same stack where either names one
-        if prior.subject_id != Some(belongs.subject_id) || prior.stack_id != belongs.stack_id {
+        if prior.subject_id != belongs.subject_id || prior.stack_id != belongs.stack_id {
             return Err((
                 400,
                 format!(
                     "derivative {old} was made from {}; one made from {} does not supersede it",
                     made_from(prior.subject_id, prior.stack_id),
-                    made_from(Some(belongs.subject_id), belongs.stack_id)
+                    made_from(belongs.subject_id, belongs.stack_id)
                 ),
             ));
         }

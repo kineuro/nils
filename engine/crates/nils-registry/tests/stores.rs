@@ -1932,7 +1932,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
             scope: "session".into(),
             stack_id: None,
             series_id: None,
-            subject_id: 1,
+            subject_id: Some(1),
             session_day: Some("2022-01-15".into()),
         };
         let made = derivative::New {

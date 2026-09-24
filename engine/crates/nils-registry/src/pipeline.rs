@@ -22,7 +22,9 @@ use crate::store::{Error, Insert, Param, Row, Store};
 pub const STATES: [&str; 2] = ["active", "retired"];
 
 /// The states of a run.
-pub const RUN_STATUSES: [&str; 4] = ["running", "done", "failed", "cancelled"];
+/// How a run stands. `partial` (record 43): the container exited 0 and
+/// some of its units failed or went unreported, which are review items.
+pub const RUN_STATUSES: [&str; 5] = ["running", "done", "partial", "failed", "cancelled"];
 
 /// One version of a pipeline in the catalog.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -407,8 +409,19 @@ pub fn set_input_release(store: &mut Store, id: i64, release_id: i64) -> Result<
         "id",
         id,
     )?;
+    // record 43: the release says it is a run's input, which the history
+    // leaves out unless asked
+    store.update_by_id(
+        table("release"),
+        &[("purpose", Param::from(RUN_INPUT))],
+        "id",
+        release_id,
+    )?;
     Ok(())
 }
+
+/// The purpose of a release a run materialised its bids input by.
+pub const RUN_INPUT: &str = "run_input";
 
 /// How a run ended.
 #[derive(Debug, Clone)]

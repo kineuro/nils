@@ -1475,6 +1475,11 @@ fn build_registry() -> Vec<Table> {
                 // force on the stacks of the tree, each by name, version and
                 // digest. Null on a row written before this.
                 col("models", Type::Json),
+                // Record 43: why the tree was made. Null for a release a
+                // person asked for; `run_input` for the bids input a
+                // pipeline run materialised, which the history leaves out
+                // unless asked (the run names it as `input_release_id`).
+                col("purpose", Type::Text),
             ],
         )
         .index(&["name"]),
@@ -2219,7 +2224,7 @@ fn build_registry() -> Vec<Table> {
                 req("device", Type::Text),
                 req("model_ids", Type::Json),
                 col("label_set_id", Type::Int),
-                // running | done | failed | cancelled
+                // running | done | partial | failed | cancelled
                 req("status", Type::Text),
                 req("started_at", Type::Timestamp),
                 col("finished_at", Type::Timestamp),
