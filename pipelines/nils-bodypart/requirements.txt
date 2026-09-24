@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The image's pinned set, beside torch and torchvision, which the Dockerfile
+# installs first from the wheel index its TORCH_INDEX build argument names.
+# transformers stays below 5, which needs a newer torch; v0's worker ran
+# these versions (its uv.lock).
+numpy==2.3.4
+scipy==1.16.3
+scikit-learn==1.9.0
+joblib==1.6.0
+threadpoolctl==3.7.0
+pydicom==3.0.1
+pillow==12.1.0
+pylibjpeg==2.1.0
+pylibjpeg-libjpeg==2.4.0
+pylibjpeg-openjpeg==2.6.0
+open_clip_torch==3.3.0
+transformers==4.57.6
+tokenizers==0.22.1
+safetensors==0.6.2
+timm==1.0.28
+huggingface_hub==0.36.2
+ftfy==6.3.1
+regex==2025.11.3

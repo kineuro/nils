@@ -159,6 +159,7 @@ acq:
     tokens:
       brain: Brain
       'brain-neck': BrainNeck
+      chest: Chest
       neck: Neck
       spine: Spine
   - from: orientation

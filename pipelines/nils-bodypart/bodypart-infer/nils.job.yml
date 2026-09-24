@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# bodypart-infer: a head's probabilities per slice, composed per stack as v0
+# composed them. An axial stack is read at five slices, and brain in the
+# upper 40 % with spine in the lower 40 % is brain-neck; a sagittal or
+# coronal stack is read at its three centre slices with the middle one
+# weighted double; any other at its three centre slices. Every stack gets a
+# proposal on body_part with the probability of every class and the head's
+# digest (contracts/job/v1 proposals.schema.json); the engine stages the
+# confident part and asks a person about the rest.
+#
+# The image digest is a placeholder until CI publishes the image (see
+# bodypart-embed/nils.job.yml).
+name: bodypart-infer
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  Propose the body part of each stack from a registered head and the stacks'
+  embeddings, with v0's axial brain-neck rule and per-stack aggregation.
+
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+inputs:
+  - id: threshold
+    name: Needs-check threshold
+    type: Number
+    minimum: 0
+    maximum: 1
+    description: Below this confidence a stack is marked needs_check in its own file, v0's 0.70; the engine's staging threshold is the task's own.
+    value-key: "[THRESHOLD]"
+    command-line-flag: --threshold
+    default-value: 0.70
+    optional: true
+
+command-line: "nils-bodypart infer --stacks [Manifest] --head [Inputs]/head --embeddings [Inputs]/embeddings --output [OutputLocation] [THRESHOLD]"
+
+output-files:
+  - id: answer
+    name: The stack's answer with its reasoning
+    path-template: "bodypart/{stack}.json"
+
+suggested-resources:
+  cpu-cores: 2
+  ram: 2
+  walltime-estimate: 0.1
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+  inputs:
+    - id: head
+      type: model
+      description: A body_part head from bodypart-train, registered and admitted
+    - id: embeddings
+      type: "derivative:embedding"
+      description: The stacks' embeddings under the head's encoders, from bodypart-embed
+  outputs:
+    - id: answer
+      kind: output
+      path-template: "bodypart/{stack}.json"
+      media-type: application/json
+  needs:
+    gpu: none
+    memory-gb: 2
+    cores: 2
+  proposals:
+    - axis: body_part
+      description: A value of the pack's body_part per stack, with the probability of every class the head weighs

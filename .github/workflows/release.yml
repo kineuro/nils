@@ -113,3 +113,27 @@ jobs:
           tags: |
             ghcr.io/kineuro/nils:${{ github.ref_name }}
             ghcr.io/kineuro/nils:latest
+
+  bodypart-image:
+    # The body-part pipeline's image (record 43 S5), on the CPU base for
+    # linux/amd64, with its weights baked in at pinned revisions. Its four
+    # descriptors pin it by the registry manifest digest this job prints
+    # (record 43 R3), never by the tag.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: pipelines/nils-bodypart
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/kineuro/nils-bodypart:${{ github.ref_name }}
+      - name: the reference the descriptors pin
+        run: echo "ghcr.io/kineuro/nils-bodypart@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"

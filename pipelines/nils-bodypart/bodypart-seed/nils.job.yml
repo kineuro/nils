@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# bodypart-seed: v0's two-pool seeding, per body-part value. The stacks the
+# pack's rules gave the value are picked for diversity (farthest-point
+# sampling on BiomedCLIP embeddings); the stacks the rules left without a body
+# part are scored by the zero-shot text-image margin, gated, and picked the
+# same way. What it writes are seeds, suggestions a curation campaign starts
+# from, and not a model's proposals: results.json carries them under `seeds`
+# and `selection`, and each seeded stack has a small file of its own.
+#
+# It reads the pack's answers from stacks.json (`body_part` and `technique`
+# per stack); without them every stack is in the zero-shot pool.
+#
+# The image digest is a placeholder until CI publishes the image (see
+# bodypart-embed/nils.job.yml).
+name: bodypart-seed
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  Suggest the stacks a person labels first, per body-part value: a diverse
+  pick of the stacks the rules already named, and a zero-shot pick among the
+  stacks they did not, as v0 seeded its training set.
+
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+inputs:
+  - id: categories
+    name: Values
+    type: String
+    description: The body-part values to seed, comma-separated; v0's four by default.
+    value-key: "[CATEGORIES]"
+    command-line-flag: --categories
+    default-value: "brain,brain-neck,spine,chest"
+    optional: true
+  - id: n_target
+    name: Seeds per value
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 5000
+    description: How many stacks to suggest per value; half, at most 50, from the rules' own pool.
+    value-key: "[NTARGET]"
+    command-line-flag: --n-target
+    default-value: 100
+    optional: true
+  - id: p_min
+    name: Zero-shot probability floor
+    type: Number
+    minimum: 0
+    maximum: 1
+    value-key: "[PMIN]"
+    command-line-flag: --p-min
+    default-value: 0.55
+    optional: true
+  - id: m_min
+    name: Zero-shot margin floor
+    type: Number
+    minimum: -1
+    maximum: 1
+    value-key: "[MMIN]"
+    command-line-flag: --m-min
+    default-value: 0.05
+    optional: true
+  - id: seed_key
+    name: Subsample key
+    type: String
+    description: Seeds the stratified subsample of the zero-shot pool; v0 used the cohort's name.
+    value-key: "[SEEDKEY]"
+    command-line-flag: --seed-key
+    default-value: "nils"
+    optional: true
+
+command-line: "nils-bodypart seed --stacks [Manifest] --embeddings [Inputs]/embeddings --output [OutputLocation] [CATEGORIES] [NTARGET] [PMIN] [MMIN] [SEEDKEY]"
+
+output-files:
+  - id: seeds
+    name: The seeds of one stack
+    path-template: "seeds/{stack}.json"
+
+suggested-resources:
+  cpu-cores: 2
+  ram: 4
+  walltime-estimate: 0.2
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+  inputs:
+    - id: embeddings
+      type: "derivative:embedding"
+      description: BiomedCLIP embeddings of the stacks' centre slices, from bodypart-embed
+  outputs:
+    - id: seeds
+      kind: output
+      path-template: "seeds/{stack}.json"
+      media-type: application/json
+  needs:
+    gpu: optional
+    memory-gb: 4
+    cores: 2

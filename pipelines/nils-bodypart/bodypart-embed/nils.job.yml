@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# bodypart-embed: v0's preparation of a slice, then BiomedCLIP and SigLIP2,
+# on every slice the later steps read (the centre slice for seeding, the
+# three centre slices for training, five spread slices of an axial stack for
+# inference). One embedding file per stack and encoder, in the engine's
+# format (contracts/job/v1/embedding.md). The runner passes the embeddings
+# the cache holds already, and only the missing slices are computed.
+#
+# The selection is the eligible stacks, as v0 chose them: anatomical, not a
+# localizer, and not SyMRI, projection- or subtraction-derived.
+#
+# The image is pinned by its registry manifest digest (record 43 R3). The
+# digest below is a placeholder until CI publishes the image; the descriptor
+# is repinned from the published digest before it is added to a catalog.
+name: bodypart-embed
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  Embed the slices of each stack with BiomedCLIP and SigLIP2 at pinned
+  revisions, after v0's preparation (slope and intercept, percentile clip,
+  z-score, uint8, letterbox to 224). One embedding per stack and encoder.
+
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+inputs:
+  - id: batch
+    name: Batch size
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 1024
+    description: Images per encoder forward pass; v0's production setting.
+    value-key: "[BATCH]"
+    command-line-flag: --batch
+    default-value: 32
+    optional: true
+  - id: threads
+    name: Reading threads
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 64
+    description: Threads that read and prepare DICOM slices.
+    value-key: "[THREADS]"
+    command-line-flag: --threads
+    default-value: 16
+    optional: true
+  - id: encoders
+    name: Encoders
+    type: String
+    description: Which encoders to run; the head's chain is both.
+    value-key: "[ENCODERS]"
+    command-line-flag: --encoders
+    value-choices: ["biomedclip,siglip2", "biomedclip", "siglip2"]
+    default-value: "biomedclip,siglip2"
+    optional: true
+
+command-line: "nils-bodypart embed --stacks [Manifest] --embeddings [Inputs]/embeddings --output [OutputLocation] [BATCH] [THREADS] [ENCODERS]"
+
+output-files:
+  - id: biomedclip
+    name: BiomedCLIP embedding
+    path-template: "embeddings/biomedclip/{stack}.emb"
+  - id: siglip2
+    name: SigLIP2 embedding
+    path-template: "embeddings/siglip2/{stack}.emb"
+
+suggested-resources:
+  cpu-cores: 4
+  ram: 6
+  walltime-estimate: 1
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+  inputs:
+    - id: embeddings
+      type: "derivative:embedding"
+      optional: true
+      description: The embeddings the cache holds for these stacks under the image's encoders and preprocessing version
+  outputs:
+    - id: biomedclip
+      kind: embedding
+      path-template: "embeddings/biomedclip/{stack}.emb"
+      media-type: application/vnd.nils.embedding
+    - id: siglip2
+      kind: embedding
+      path-template: "embeddings/siglip2/{stack}.emb"
+      media-type: application/vnd.nils.embedding
+  needs:
+    gpu: optional
+    memory-gb: 6
+    cores: 4
