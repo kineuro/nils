@@ -591,7 +591,8 @@ impl Voters {
         ];
         store.begin()?;
         let written = store.insert(
-            &Insert::new(table("classification_voter"), COLUMNS).on_conflict(Conflict::Nothing(KEY)),
+            &Insert::new(table("classification_voter"), COLUMNS)
+                .on_conflict(Conflict::Nothing(KEY)),
             &rows,
         );
         match written {
