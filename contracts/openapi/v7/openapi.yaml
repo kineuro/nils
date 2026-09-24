@@ -1382,7 +1382,7 @@ paths:
   /api/campaigns/{id}/export:
     post:
       summary: Write a campaign's labels as a label set (record 42 S7; campaigns:work)
-      description: "Into `labels/<name>/v<version>` of the export place `place` names, or of the one export place there is: a set under a name taken is the name's next version, in files of its own, and never writes over an earlier version's. `of` is outcomes (the default: a row per resolved item, the decision it became with its author, or the adjudicator's or agreeing raters' answer, a row per file for a derivative) or answers (a row per answer, for an agreement study or a two-rater reference). The set is written and recorded as POST /api/label-sets says."
+      description: "Into `labels/<name>/v<version>` of the export place `place` names, or of the one export place there is: a set under a name taken is the name's next version, in files of its own, and never writes over an earlier version's. `of` is outcomes (the default: a row per resolved item, the decision it became with its author, or the adjudicator's or agreeing raters' answer, a row per file for a derivative) or answers (a row per answer, for an agreement study or a two-rater reference). The set is written and recorded as POST /api/label-sets says. Record 45: while the campaign is open, `of: answers` is refused (403) to anyone but an adjudicator of the campaign and a holder of review:work, since rating is blind until the close."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {of: {type: string, enum: [outcomes, answers], default: outcomes}, place: {type: string}, name: {type: string}}}}}}
       responses:
@@ -1417,7 +1417,7 @@ paths:
   /api/label-sets/{id}:
     get:
       summary: One label set, with its files (record 42 S7; campaigns:see or review:see)
-      description: "The set and `files`: the text of labels.tsv and provenance.json as written, read back from the export place. A set of sessions carries the day each opened, which needs detail quasi. A set of forms, free text or derivatives (whose labels carry a form beside the file) holds a person's words, read at detail quasi as the answers are: at plain it is answered without `files`, its metadata and counts only."
+      description: "The set and `files`: the text of labels.tsv and provenance.json as written, read back from the export place. A set of sessions carries the day each opened, which needs detail quasi. A set of forms, free text or derivatives (whose labels carry a form beside the file) holds a person's words, read at detail quasi as the answers are: at plain it is answered without `files`, its metadata and counts only. Record 45: a set of a campaign's answers is as blind as the answers door while the campaign is open, answered without `files` to anyone but an adjudicator of it and a holder of review:work."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: The label set}

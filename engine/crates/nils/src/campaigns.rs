@@ -317,18 +317,7 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let all = campaign::answers(registry.store(), c.id).map_err(campaign_err)?;
                 let free = c.question["kind"] == "free";
-                // record 45: rating is blind until the campaign closes. A
-                // rater reads their own answers; an adjudicator of the
-                // campaign and a holder of review:work read every one
-                let sees_all = c.status == "closed"
-                    || caller.access.holds("review:work")
-                    || c.adjudicators().iter().any(|p| p == principal)
-                    || campaign::assignments(registry.store(), c.id)
-                        .map_err(campaign_err)?
-                        .iter()
-                        .any(|a| {
-                            a.role == "adjudicator" && a.principal.as_deref() == Some(principal)
-                        });
+                let sees_all = sees_all(registry.store(), caller, principal, &c)?;
                 let list: Vec<Value> = all
                     .iter()
                     .filter(|a| sees_all || a.principal == principal)
@@ -503,6 +492,17 @@ pub(crate) fn route(
                     }
                 };
                 no_sealed_flag(&doc)?;
+                // blind through the export too: every answer of an open
+                // campaign is for those who read them all at the answers door
+                if matches!(of, Of::Answers) && !sees_all(registry.store(), caller, principal, &c)? {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "rating in {} is blind until it closes: its answers are exported by an adjudicator or a holder of review:work",
+                            c.name
+                        ),
+                    ));
+                }
                 let rows =
                     labels::campaign_labels(registry.store(), c.id, of).map_err(labels_err)?;
                 let name = doc["name"].as_str().unwrap_or(&c.name).to_string();
@@ -610,6 +610,17 @@ pub(crate) fn route(
                 // metadata and counts only
                 if plain(caller) && holds_words(&set.what) {
                     return Ok(Reply::ok(set_json(&set, None)));
+                }
+                // a set of a campaign's answers is as blind as its answers
+                // door while the campaign is open: metadata and counts only
+                if set.kind == Of::Answers.name()
+                    && let Some(cid) = set.campaign_id
+                {
+                    let c = campaign::find(registry.store(), &cid.to_string())
+                        .map_err(campaign_err)?;
+                    if !sees_all(registry.store(), caller, principal, &c)? {
+                        return Ok(Reply::ok(set_json(&set, None)));
+                    }
                 }
                 let files = set.path.as_deref().map(|p| {
                     let dir = Path::new(p);
@@ -738,6 +749,25 @@ fn holds_words(what: &str) -> bool {
 
 /// Whether the caller reads at detail plain, where a campaign's doors
 /// leave out what is quasi-identifying or free text.
+/// Record 45: rating is blind until the campaign closes. A rater reads
+/// their own answers; an adjudicator of the campaign and a holder of
+/// review:work read every one, at the answers door, through an export of
+/// the answers and in the label set it wrote.
+fn sees_all(
+    store: &mut Store,
+    caller: &Caller,
+    principal: &str,
+    c: &campaign::Campaign,
+) -> Result<bool, Reply> {
+    Ok(c.status == "closed"
+        || caller.access.holds("review:work")
+        || c.adjudicators().iter().any(|p| p == principal)
+        || campaign::assignments(store, c.id)
+            .map_err(campaign_err)?
+            .iter()
+            .any(|a| a.role == "adjudicator" && a.principal.as_deref() == Some(principal)))
+}
+
 fn plain(caller: &Caller) -> bool {
     caller.access.detail < Detail::Quasi
 }

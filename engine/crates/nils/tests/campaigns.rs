@@ -1478,6 +1478,35 @@ fn a_lease_is_renewed_rating_is_blind_and_an_axes_answer_is_an_object() {
         assert_eq!(all["blind"], false, "{all}");
         assert_eq!(all["answers"].as_array().unwrap().len(), 2, "{all}");
     }
+    // blind through the export too: a rater may not export the answers of
+    // an open campaign, and a set of them another made while it was open
+    // is read without its files until it closes
+    let out = TempDir::new("blind-export");
+    server.ok(
+        "POST",
+        "/api/places",
+        Some(json!({"name": "blind-out", "role": "export", "path": out.path().to_str().unwrap()})),
+        CURATOR,
+    );
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/campaigns/{id}/export"),
+        Some(json!({"of": "answers", "name": "peek"})),
+        ANNA,
+    );
+    assert_eq!(status, 403, "{doc}");
+    let set = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/export"),
+        Some(json!({"of": "answers", "name": "judged"})),
+        CURATOR,
+    );
+    let set_id = set["id"].as_i64().unwrap();
+    let seen = server.ok("GET", &format!("/api/label-sets/{set_id}"), None, ANNA);
+    assert!(seen.get("files").is_none_or(Value::is_null), "{seen}");
+    let seen = server.ok("GET", &format!("/api/label-sets/{set_id}"), None, JUDGE);
+    assert!(seen["files"]["labels.tsv"].is_string(), "{seen}");
+
     // after the close, every rater reads every answer
     server.ok(
         "POST",
@@ -1485,6 +1514,8 @@ fn a_lease_is_renewed_rating_is_blind_and_an_axes_answer_is_an_object() {
         Some(json!({})),
         CURATOR,
     );
+    let seen = server.ok("GET", &format!("/api/label-sets/{set_id}"), None, ANNA);
+    assert!(seen["files"]["labels.tsv"].is_string(), "{seen}");
     let all = server.ok("GET", &format!("/api/campaigns/{id}/answers"), None, BO);
     assert_eq!(all["blind"], false, "{all}");
     assert_eq!(all["answers"].as_array().unwrap().len(), 2, "{all}");
