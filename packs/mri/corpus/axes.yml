@@ -422,13 +422,25 @@ cases:
 
   # Canon's FASE is a single-shot fast spin echo, the vendor's HASTE, and
   # nothing like RESOLVE; the word stood on both values and RESOLVE came first.
-  - name: a Canon FASE series is HASTE, not RESOLVE
+  # It is not HASTE's word either: `fase` is phase in Danish, Norwegian and
+  # Dutch, and the pack has no manufacturer predicate to keep it to Canon, so
+  # a Canon FASE series is the spin echo its header says it is.
+  - name: a Canon FASE series is not RESOLVE
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: SE
       text_series_description: 'FASE cor T2'
     axes:
-      technique: HASTE
+      technique: SE
+
+  - name: a series named with the word for phase is not HASTE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      text_sequence_name: '*se2d1'
+      text_series_description: 't1 se tra fase 2'
+    axes:
+      technique: SE
 
   - name: a multiband BOLD series is BOLD, not RESOLVE
     stack:

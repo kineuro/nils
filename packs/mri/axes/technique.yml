@@ -201,7 +201,6 @@ values:
       - sstse
       - single shot tse
       - single shot fse
-      - fase
     detection:
       exclusive: is_haste
   IR-TSE:

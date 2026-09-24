@@ -71,7 +71,8 @@ token_replacements:
   'sense': 'grappa'
   # v0 rewrote `fase` to `resolve`. Canon's FASE is its single-shot fast spin
   # echo (a HASTE), and no series in the archive is named with the word, so
-  # the rewrite only ever mislabelled (record 41).
+  # the rewrite only ever mislabelled (record 41). HASTE does not take the
+  # word either: it is phase in Danish, Norwegian and Dutch.
 
 # v0 has one conditional replacement and it can never fire: it waits for
 # `t1`, which the unconditional replacement above has already turned into
