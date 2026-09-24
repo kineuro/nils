@@ -44,6 +44,14 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/label-sets",
     "GET /api/label-sets/{id}",
     "POST /api/decisions/commit",
+    "GET /api/stacks/{stack}/why",
+    "GET /api/campaigns/{id}/items/{item}/why",
+    "GET /api/campaigns/{id}/batches",
+    "POST /api/campaigns/{id}/batches/{batch}/accept",
+    "GET /api/campaigns/{id}/stats",
+    "GET /api/certificates",
+    "POST /api/certificates",
+    "POST /api/certificates/{id}/unseal",
 ];
 
 /// What each door needs, read by `serve::door` like every other door's.
@@ -52,9 +60,21 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
     Some(match (method, segs) {
         ("GET", ["api", "campaigns"])
         | ("GET", ["api", "campaigns", _])
-        | ("GET", ["api", "campaigns", _, "answers"])
-        | ("GET", ["api", "campaigns", _, "items", _, "candidates"]) => {
+        | ("GET", ["api", "campaigns", _, "answers" | "batches" | "stats"])
+        | ("GET", ["api", "campaigns", _, "items", _, "candidates" | "why"]) => {
             (Need::One("campaigns:see"), Plain)
+        }
+        // record 48: why one stack was judged so, one line per axis, is a
+        // review reading, as the explanation is
+        ("GET", ["api", "stacks", _, "why"]) => (Need::One("review:see"), Plain),
+        ("POST", ["api", "campaigns", _, "batches", _, "accept"]) => {
+            (Need::One("campaigns:work"), Plain)
+        }
+        // record 48 R2: a certificate and the unseal are the model
+        // registry's acts
+        ("GET", ["api", "certificates"]) => (Need::One("models:see"), Plain),
+        ("POST", ["api", "certificates"]) | ("POST", ["api", "certificates", _, "unseal"]) => {
+            (Need::One("models:work"), Plain)
         }
         ("POST", ["api", "campaigns"])
         | ("POST", ["api", "campaigns", _, "claim" | "export"])
@@ -233,6 +253,78 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Committing staged decisions",
         "Committed staged decisions",
     ),
+    (
+        "GET /api/stacks/{stack}/why",
+        false,
+        false,
+        "free",
+        "one line per axis",
+        "Reading why a stack was judged so",
+        "Read why a stack was judged so",
+    ),
+    (
+        "GET /api/campaigns/{id}/items/{item}/why",
+        false,
+        false,
+        "free",
+        "one line per axis",
+        "Reading an item's evidence",
+        "Read an item's evidence",
+    ),
+    (
+        "GET /api/campaigns/{id}/batches",
+        false,
+        false,
+        "bounded",
+        "every batch of the items open to the caller",
+        "Listing batches of like stacks",
+        "Listed batches of like stacks",
+    ),
+    (
+        "POST /api/campaigns/{id}/batches/{batch}/accept",
+        true,
+        false,
+        "bounded",
+        "one answer per item accepted",
+        "Accepting a batch",
+        "Accepted a batch",
+    ),
+    (
+        "GET /api/campaigns/{id}/stats",
+        false,
+        false,
+        "bounded",
+        "counts and times per rater",
+        "Reading how fast a campaign is read",
+        "Read how fast a campaign is read",
+    ),
+    (
+        "GET /api/certificates",
+        false,
+        false,
+        "bounded",
+        "every certificate",
+        "Listing certificates",
+        "Listed certificates",
+    ),
+    (
+        "POST /api/certificates",
+        true,
+        false,
+        "free",
+        "one certificate",
+        "Recording a certificate",
+        "Recorded a certificate",
+    ),
+    (
+        "POST /api/certificates/{id}/unseal",
+        true,
+        true,
+        "bounded",
+        "one sample unsealed",
+        "Unsealing a certified sample",
+        "Unsealed a certified sample",
+    ),
 ];
 
 fn campaign_err(e: campaign::Error) -> Reply {
@@ -269,11 +361,16 @@ pub(crate) fn route(
     caller: &Caller,
     method: &str,
     segs: &[&str],
+    query: &HashMap<String, String>,
     body: &str,
 ) -> Option<Result<Reply, Reply>> {
     if !matches!(
         segs,
-        ["api", "campaigns", ..] | ["api", "label-sets", ..] | ["api", "decisions", "commit"]
+        ["api", "campaigns", ..]
+            | ["api", "label-sets", ..]
+            | ["api", "decisions", "commit"]
+            | ["api", "stacks", _, "why"]
+            | ["api", "certificates", ..]
     ) {
         return None;
     }
@@ -359,14 +456,27 @@ pub(crate) fn route(
                 // a session is named by its subject and its day
                 caller.allowed("a campaign of sessions", Need::Any, Detail::Quasi)?;
                 let role = c.question["role"].as_str().map(str::to_string);
-                Ok(Reply::ok(candidates(
-                    registry.store(),
-                    c.id,
-                    item,
-                    subject,
-                    &day,
-                    role.as_deref(),
-                )?))
+                let mut doc =
+                    candidates(registry.store(), c.id, item, subject, &day, role.as_deref())?;
+                // record 48 R2: what the classifier says of a stack read
+                // blind is left out
+                let stacks: Vec<i64> = doc["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["stack_id"].as_i64())
+                    .collect();
+                let hidden = blind_among(registry.store(), caller, &stacks)?;
+                for cand in doc["candidates"].as_array_mut().into_iter().flatten() {
+                    if cand["stack_id"]
+                        .as_i64()
+                        .is_some_and(|s| hidden.contains(&s))
+                    {
+                        cand["axes"] = json!({});
+                        cand["blind"] = json!(true);
+                    }
+                }
+                Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "claim"] if post => {
                 let doc = json_body(body)?;
@@ -378,8 +488,16 @@ pub(crate) fn route(
                 }
                 let role =
                     Role::parse(doc["role"].as_str().unwrap_or("rater")).map_err(campaign_err)?;
-                let claimed =
-                    campaign::claim(registry, c.id, principal, role, &now).map_err(campaign_err)?;
+                // record 48 R1: the most valuable item first, when asked
+                let order = doc["order"]
+                    .as_str()
+                    .or_else(|| query.get("order").map(String::as_str))
+                    .map(campaign::Order::parse)
+                    .transpose()
+                    .map_err(campaign_err)?
+                    .unwrap_or_default();
+                let claimed = campaign::claim_in(registry, c.id, principal, role, order, &now)
+                    .map_err(campaign_err)?;
                 Ok(Reply::ok(match claimed {
                     Some(cl) => cl.as_json(),
                     None => json!({"assignment": null, "item": null, "why": format!(
@@ -406,7 +524,12 @@ pub(crate) fn route(
                     other => Some(other.to_string()),
                 };
                 let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
-                let answered = campaign::answer(
+                // record 48 R1: what the engine suggested for the item, kept
+                // beside the answer with the time it took; the engine's own,
+                // never the caller's
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let suggested = suggested_for(registry.store(), &c, a, pack.as_deref())?;
+                let answered = campaign::answer_with(
                     registry,
                     &Given {
                         assignment: a,
@@ -417,6 +540,10 @@ pub(crate) fn route(
                         form: form.as_ref(),
                         derivative_id: doc["derivative_id"].as_i64(),
                         why: doc["why"].as_str(),
+                    },
+                    &campaign::Timing {
+                        suggested: suggested.as_deref(),
+                        batch: false,
                     },
                     &now,
                 )
@@ -521,18 +648,285 @@ pub(crate) fn route(
                     .map_err(|(status, e)| Reply::error(status, e))?;
                 Ok(Reply::created(set_json(&set, None)))
             }
+            // record 48 R1: the evidence line of a stack, one entry per axis
+            ["api", "stacks", stack, "why"] if get => {
+                let stack = id_of(stack)?;
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let hidden = blind_to(registry.store(), caller, stack)?;
+                crate::reader::why(
+                    registry.store(),
+                    stack,
+                    pack.as_deref(),
+                    !plain(caller),
+                    hidden,
+                )?
+                .map(Reply::ok)
+                .ok_or_else(|| Reply::error(404, format!("stack {stack} has not been classified")))
+            }
+            ["api", "campaigns", which, "items", item, "why"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                let it = campaign::item(registry.store(), item)
+                    .map_err(campaign_err)?
+                    .ok_or_else(|| Reply::error(404, format!("no campaign item {item}")))?;
+                let stack = it.stack_id.ok_or_else(|| {
+                    Reply::error(
+                        400,
+                        format!("item {item} is a session's; the evidence line is a stack's"),
+                    )
+                })?;
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let q = c.question().map_err(campaign_err)?;
+                // record 48 R2: a stack of a sealed sample that an open
+                // campaign asks is read blind by its raters
+                let blind = blind_to(registry.store(), caller, stack)?;
+                let mut doc = crate::reader::why(
+                    registry.store(),
+                    stack,
+                    pack.as_deref(),
+                    !plain(caller),
+                    blind,
+                )?
+                .unwrap_or_else(|| json!({"stack": stack, "axes": [], "blind": false}));
+                let suggested = if blind {
+                    None
+                } else {
+                    crate::reader::suggestion(registry.store(), stack, &q, pack.as_deref())?
+                };
+                let mut s = json!(suggested);
+                axes_value(&c.question, &mut s);
+                doc["item"] = json!(item);
+                doc["suggested"] = s;
+                doc["worth"] = if blind {
+                    Value::Null
+                } else {
+                    campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
+                        .map_err(campaign_err)?
+                        .get(&stack)
+                        .map(campaign::Worth::as_json)
+                        .unwrap_or(Value::Null)
+                };
+                Ok(Reply::ok(doc))
+            }
+            ["api", "campaigns", which, "batches"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let found =
+                    crate::reader::batches(registry.store(), &c, principal, pack.as_deref(), None)
+                        .map_err(|(st, m)| Reply::error(st, m))?;
+                crate::reader::remember(c.id, principal, &found);
+                let sample = query
+                    .get("sample")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(5);
+                Ok(Reply::ok(found.as_json(
+                    &c,
+                    c.question["kind"].as_str().unwrap_or_default(),
+                    sample,
+                )))
+            }
+            ["api", "campaigns", which, "batches", key, "accept"] if post => {
+                let doc = json_body(body)?;
+                // record 48 R1: what is held back is the campaign's, set by
+                // its maker, and chosen by a seed the engine drew; never the
+                // caller's to say
+                for held in ["hold_back", "seed"] {
+                    if doc.get(held).is_some() {
+                        return Err(Reply::error(
+                            400,
+                            format!(
+                                "{held} is not the caller's to say: the share a batch holds back is the campaign's (hold_back, set when it is made), and the engine draws the seed"
+                            ),
+                        ));
+                    }
+                }
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let named: Option<Vec<i64>> = match &doc["items"] {
+                    Value::Null => None,
+                    Value::Array(list) => {
+                        let ids: Vec<i64> = list.iter().filter_map(Value::as_i64).collect();
+                        if ids.len() != list.len() {
+                            return Err(Reply::error(400, "items: a list of item ids"));
+                        }
+                        Some(ids)
+                    }
+                    _ => return Err(Reply::error(400, "items: a list of item ids")),
+                };
+                // an item of a sealed sample is never accepted in one move
+                if let Some(ids) = &named {
+                    let stacks = item_stacks(registry.store(), c.id, ids)?;
+                    let (sealed, _) =
+                        labels::sealed_now(registry.store(), &stacks, &[]).map_err(labels_err)?;
+                    if !sealed.is_empty() {
+                        return Err(Reply::error(
+                            409,
+                            format!(
+                                "{} of these items are of a sealed certification sample, and each is read alone, never accepted in a batch",
+                                sealed.len()
+                            ),
+                        ));
+                    }
+                }
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let batch =
+                    crate::reader::batch_now(registry.store(), &c, principal, pack.as_deref(), key)
+                        .map_err(|(st, m)| Reply::error(st, m))?
+                        .ok_or_else(|| {
+                            Reply::error(
+                                409,
+                                format!("campaign {} has no batch {key} open to {principal} now; list the batches again", c.name),
+                            )
+                        })?;
+                if let Some(x) = named.iter().flatten().find(|i| !batch.items.contains(i)) {
+                    return Err(Reply::error(
+                        409,
+                        format!("item {x} is not in batch {key} now"),
+                    ));
+                }
+                // the share is held back over the whole batch, whatever the
+                // caller names
+                let seed =
+                    campaign::hold_back_seed(registry.store(), c.id).map_err(campaign_err)?;
+                let held = crate::reader::held_back(&batch.items, c.hold_back, &seed);
+                let held_list: Vec<i64> = held.iter().copied().collect();
+                campaign::hold_back(registry.store(), c.id, &held_list).map_err(campaign_err)?;
+                let chosen: Vec<i64> = named
+                    .unwrap_or_else(|| batch.items.clone())
+                    .into_iter()
+                    .filter(|i| !held.contains(i))
+                    .collect();
+                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
+                let given = Given {
+                    assignment: 0,
+                    principal,
+                    author_kind: kind_of(caller),
+                    model: acting,
+                    value: Some(&batch.suggested),
+                    form: None,
+                    derivative_id: None,
+                    why: None,
+                };
+                let done = campaign::accept_many(
+                    registry,
+                    c.id,
+                    &chosen,
+                    &given,
+                    Some(&batch.suggested),
+                    &now,
+                )
+                .map_err(campaign_err)?;
+                let accepted: Vec<Value> = done
+                    .accepted
+                    .iter()
+                    .map(|d| json!({"item": d.item, "answer": d.answer, "state": d.state}))
+                    .collect();
+                let refused: Vec<Value> = done
+                    .refused
+                    .iter()
+                    .map(|(item, why)| json!({"item": item, "why": why}))
+                    .collect();
+                Ok(Reply::ok(json!({
+                    "campaign": c.id, "batch": key, "hold_back": c.hold_back,
+                    "accepted": accepted, "held_back": held_list, "refused": refused,
+                })))
+            }
+            ["api", "campaigns", which, "stats"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let mut doc = campaign::stats(registry.store(), c.id).map_err(campaign_err)?;
+                // blind as the answers are: a rater reads their own row
+                if !sees_all(registry.store(), caller, principal, &c)? {
+                    if let Some(list) = doc["raters"].as_array_mut() {
+                        list.retain(|r| r["principal"] == principal);
+                    }
+                    // the totals would give away the other raters' counts
+                    if let Some(m) = doc.as_object_mut() {
+                        m.remove("all");
+                    }
+                    doc["blind"] = json!(true);
+                }
+                Ok(Reply::ok(doc))
+            }
+            // record 48 R2: the certificates of sealed samples
+            ["api", "certificates"] if get => {
+                let list = labels::certificates(registry.store()).map_err(labels_err)?;
+                Ok(Reply::ok(json!({
+                    "count": list.len(),
+                    "certificates": list.iter().map(labels::Certificate::as_json).collect::<Vec<_>>(),
+                })))
+            }
+            ["api", "certificates"] if post => {
+                person_only(doors, caller, "recording a certificate")?;
+                let doc = json_body(body)?;
+                let sample = doc["sample"].as_str().ok_or_else(|| {
+                    Reply::error(
+                        400,
+                        "sample: the sealed sample it measured, as nils labels seal named it",
+                    )
+                })?;
+                let mut ids = Vec::new();
+                for m in doc["models"].as_array().into_iter().flatten() {
+                    let reference = match m {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        _ => return Err(Reply::error(400, "models: ids, digests or name@version")),
+                    };
+                    let found = nils_registry::model::resolve(registry.store(), &reference)?
+                        .ok_or_else(|| {
+                            Reply::error(404, format!("no registered model answers to {reference}"))
+                        })?;
+                    ids.push(found.id);
+                }
+                let cert = labels::record_certificate(
+                    registry,
+                    sample,
+                    &ids,
+                    &doc["result"],
+                    principal,
+                    kind_of(caller),
+                )
+                .map_err(labels_err)?;
+                Ok(Reply::created(cert.as_json()))
+            }
+            ["api", "certificates", id, "unseal"] if post => {
+                person_only(doors, caller, "unsealing a certified sample")?;
+                let id = id_of(id)?;
+                let cert = labels::certificate(registry.store(), id)
+                    .map_err(labels_err)?
+                    .ok_or_else(|| Reply::error(404, format!("no certificate {id}")))?;
+                let done = labels::unseal(registry, &cert.sample, id, principal, kind_of(caller))
+                    .map_err(labels_err)?;
+                Ok(Reply::ok(done.as_json()))
+            }
             ["api", "label-sets"] if get => {
                 let list = labels::list(registry.store()).map_err(labels_err)?;
-                let out: Vec<Value> = list.iter().map(LabelSet::as_json).collect();
+                let out: Vec<Value> = list
+                    .iter()
+                    .map(|set| {
+                        let mut v = set.as_json();
+                        training_now(registry.store(), set, &mut v);
+                        v
+                    })
+                    .collect();
                 Ok(Reply::ok(json!({"count": out.len(), "label_sets": out})))
             }
             ["api", "label-sets"] if post => {
                 let doc = json_body(body)?;
                 no_sealed_flag(&doc)?;
-                let axis = doc["axis"]
-                    .as_str()
-                    .ok_or_else(|| Reply::error(400, "axis: what the labels are of"))?
-                    .to_string();
+                // record 48 R2: the development labels, everything usable
+                // for training and nothing of a sample sealed now
+                let for_training = doc["for_training"].as_bool().unwrap_or(false);
+                if for_training && doc["staged"].as_bool().unwrap_or(false) {
+                    return Err(Reply::error(
+                        400,
+                        "for_training reads the decisions in force; a staged one never trains",
+                    ));
+                }
+                let axis = match doc["axis"].as_str() {
+                    Some(a) => a.to_string(),
+                    None if for_training => String::new(),
+                    None => return Err(Reply::error(400, "axis: what the labels are of")),
+                };
                 let authors: Vec<String> = doc["authors"]
                     .as_array()
                     .into_iter()
@@ -567,26 +961,49 @@ pub(crate) fn route(
                     }
                     _ => (None, None),
                 };
-                let rows = labels::decision_labels(
-                    registry.store(),
-                    &DecisionQuery {
-                        axis: &axis,
-                        stacks: stacks.as_deref(),
-                        authors: &authors,
-                        campaign: campaign_id,
-                        staged_too: doc["staged"].as_bool().unwrap_or(false),
-                    },
-                )
-                .map_err(labels_err)?;
-                let name = doc["name"].as_str().unwrap_or(&axis).to_string();
+                let (rows, left_out) = if for_training {
+                    labels::training_labels(
+                        registry.store(),
+                        (!axis.is_empty()).then_some(axis.as_str()),
+                        stacks.as_deref(),
+                        &authors,
+                        campaign_id,
+                    )
+                    .map_err(labels_err)?
+                } else {
+                    let rows = labels::decision_labels(
+                        registry.store(),
+                        &DecisionQuery {
+                            axis: &axis,
+                            stacks: stacks.as_deref(),
+                            authors: &authors,
+                            campaign: campaign_id,
+                            staged_too: doc["staged"].as_bool().unwrap_or(false),
+                        },
+                    )
+                    .map_err(labels_err)?;
+                    (rows, 0)
+                };
+                let what = if axis.is_empty() {
+                    "training".to_string()
+                } else {
+                    axis.clone()
+                };
+                let fallback = if for_training {
+                    format!("{what}-training")
+                } else {
+                    what.clone()
+                };
+                let name = doc["name"].as_str().unwrap_or(&fallback).to_string();
                 let meta = SetMeta {
                     name: &name,
                     kind: "decisions",
-                    what: &axis,
+                    what: &what,
                     source: json!({
-                        "axis": axis, "authors": authors, "campaign": campaign_id,
+                        "axis": doc["axis"], "authors": authors, "campaign": campaign_id,
                         "selection": doc["selection"], "handle": handle_id,
                         "staged": doc["staged"].as_bool().unwrap_or(false),
+                        "for_training": for_training, "left_out_sealed": left_out,
                     }),
                     campaign_id,
                     handle_id,
@@ -595,7 +1012,11 @@ pub(crate) fn route(
                 let dir = export_dir(registry.store(), doc["place"].as_str(), &name)?;
                 let set = write_set(registry, &dir, true, &rows, &meta)
                     .map_err(|(status, e)| Reply::error(status, e))?;
-                Ok(Reply::created(set_json(&set, None)))
+                let mut v = set_json(&set, None);
+                if for_training {
+                    v["left_out_sealed"] = json!(left_out);
+                }
+                Ok(Reply::created(v))
             }
             ["api", "label-sets", id] if get => {
                 let id = id_of(id)?;
@@ -632,7 +1053,9 @@ pub(crate) fn route(
                             .and_then(|t| serde_json::from_str::<Value>(&t).ok()),
                     })
                 });
-                Ok(Reply::ok(set_json(&set, files)))
+                let mut v = set_json(&set, files);
+                training_now(registry.store(), &set, &mut v);
+                Ok(Reply::ok(v))
             }
             ["api", "decisions", "commit"] if post => {
                 let doc = json_body(body)?;
@@ -730,6 +1153,62 @@ pub(crate) fn route(
     })())
 }
 
+/// Record 48 R2: whether the caller reads a stack blind: it is of a sample
+/// sealed now, an open campaign asks it, and the caller rates in that
+/// campaign or is neither its adjudicator nor a holder of review:work.
+pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result<bool, Reply> {
+    Ok(crate::reader::hidden(
+        store,
+        stack,
+        &caller.principal,
+        caller.access.holds("review:work"),
+    )?)
+}
+
+/// Record 48 R2: the stacks of these a caller reads blind.
+pub(crate) fn blind_among(
+    store: &mut Store,
+    caller: &Caller,
+    stacks: &[i64],
+) -> Result<std::collections::BTreeSet<i64>, Reply> {
+    Ok(crate::reader::hidden_stacks(
+        store,
+        stacks,
+        &caller.principal,
+        caller.access.holds("review:work"),
+    )?)
+}
+
+/// Record 48 R2: a certificate and the unseal are a person's acts; an
+/// agent's or a model's token is refused, whatever grants it holds.
+fn person_only(doors: &Doors, caller: &Caller, act: &str) -> Result<(), Reply> {
+    // two people are told apart by the identity the engine verified,
+    // never by a local user name
+    if !doors.identity_verified() {
+        return Err(Reply::error(
+            403,
+            format!("{act} needs a verified identity; this engine runs with --auth off"),
+        ));
+    }
+    let kind = kind_of(caller);
+    if kind != "person" {
+        return Err(Reply::error(
+            403,
+            format!("{act} is a person's act, and this caller acts as a {kind}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Record 48 R2: whether a set trains now, under the seals in force: a set
+/// written while its sample was sealed trains once a certificate unseals
+/// the sample. One reading for the list door and the set's own door.
+fn training_now(store: &mut Store, set: &LabelSet, v: &mut Value) {
+    if set.sealed && labels::usable_for_training(store, set.id).is_ok() {
+        v["training"] = json!("allowed: its sample was unsealed by a certificate (record 48 R2)");
+    }
+}
+
 /// Record 40 R3: whether a set is sealed is the registry's finding, from
 /// the samples an operator sealed, and never the caller's to say.
 fn no_sealed_flag(doc: &Value) -> Result<(), Reply> {
@@ -823,6 +1302,59 @@ fn belongs(store: &mut Store, campaign: i64, t: &str, id: i64) -> Result<(), Rep
             404,
             format!("campaign {campaign} has no {id} of that kind"),
         )),
+    }
+}
+
+/// The stacks of some items of a campaign.
+fn item_stacks(store: &mut Store, campaign: i64, items: &[i64]) -> Result<Vec<i64>, Reply> {
+    let mut out = Vec::new();
+    for chunk in items.chunks(500) {
+        let ids = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT stack_id FROM {} WHERE campaign_id = {} AND id IN ({ids}) AND stack_id IS NOT NULL",
+            store.qualified("campaign_item"),
+            store.dialect().param(1, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::Int(campaign)])? {
+            out.push(r.int(0)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Record 48 R1: what the engine suggests for the item an assignment
+/// leased, for the answer to keep beside it.
+fn suggested_for(
+    store: &mut Store,
+    c: &campaign::Campaign,
+    assignment: i64,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Option<String>, Reply> {
+    let Ok(q) = c.question() else {
+        return Ok(None);
+    };
+    if !matches!(
+        q,
+        campaign::Question::Axis { .. } | campaign::Question::Axes { .. }
+    ) {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT i.stack_id FROM {} a JOIN {} i ON i.id = a.item_id WHERE a.id = {}",
+        store.qualified("campaign_assignment"),
+        store.qualified("campaign_item"),
+        store.dialect().param(1, Type::Int)
+    );
+    let stack = store
+        .query_opt(&sql, &[Param::Int(assignment)])?
+        .and_then(|r| r.opt_int(0).ok().flatten());
+    match stack {
+        Some(s) => Ok(crate::reader::suggestion(store, s, &q, pack)?),
+        None => Ok(None),
     }
 }
 
@@ -1048,6 +1580,23 @@ fn strings(v: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Record 48 R1: the share of a batch a campaign holds back, as its maker
+/// gives it; the engine's least when none is.
+fn hold_back_of(v: &Value) -> Result<Option<f64>, Reply> {
+    match v {
+        Value::Null => Ok(None),
+        v => v.as_f64().map(Some).ok_or_else(|| {
+            Reply::error(
+                400,
+                format!(
+                    "hold_back: the share of a batch read alone, from {} to 1",
+                    campaign::HOLD_BACK_MIN
+                ),
+            )
+        }),
+    }
+}
+
 fn inputs_of(v: &Value) -> BTreeMap<String, Vec<i64>> {
     v.as_object()
         .map(|m| {
@@ -1153,6 +1702,7 @@ fn create_at_door(
             closes_into: doc["closes_into"].as_str().unwrap_or("none"),
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
             inputs: inputs_of(&doc["inputs"]),
+            hold_back: hold_back_of(&doc["hold_back"])?,
         },
     )
     .map_err(campaign_err)?;
@@ -1610,6 +2160,18 @@ pub(crate) enum CampaignCommand {
         campaign: String,
         #[arg(long)]
         adjudicator: bool,
+        /// The order a rater's items come in: by position, or by value, the
+        /// items where the systems or the rules disagree first, then the
+        /// least confident (record 48)
+        #[arg(long, default_value = "position", value_name = "position|value")]
+        order: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// How fast the campaign is read: per rater, the answers, the median
+    /// seconds from claim to answer, and the share of suggestions changed
+    Stats {
+        campaign: String,
         #[arg(long)]
         json: bool,
     },
@@ -1725,6 +2287,10 @@ pub(crate) struct CreateArgs {
     closes_into: String,
     #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
     lease_seconds: i64,
+    /// The share of each batch accepted in one move that is held back to
+    /// be read alone, from 0.1 to 1 (record 48)
+    #[arg(long, value_name = "SHARE")]
+    hold_back: Option<f64>,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
     #[arg(long, default_value = "mri")]
@@ -1752,7 +2318,8 @@ pub(crate) enum LabelsCommand {
     },
     /// Seal a sample drawn for certification, before anyone looks: its
     /// stacks are kept as sealed, and a label set holding any of them is
-    /// never training data (record 40 R3). Nothing is ever unsealed
+    /// not training data (record 40 R3) until the certificate the sample
+    /// was drawn for is recorded and the sample unsealed by it (record 48)
     Seal {
         /// The sample: a saved selection, frozen now into its stacks
         #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
@@ -1764,6 +2331,37 @@ pub(crate) enum LabelsCommand {
         pack_dir: Option<PathBuf>,
         #[arg(long, default_value = "mri")]
         pack: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refused at the keyboard: a certificate is recorded at the engine's
+    /// door, POST /api/certificates, by a person's token (record 48)
+    Certificate {
+        /// The sealed sample, as seal named it: selection:NAME@V or handle:ID
+        #[arg(long, value_name = "SAMPLE")]
+        sample: String,
+        /// A model it certified, by id, digest or name@version
+        #[arg(long = "model", value_name = "MODEL", required = true)]
+        models: Vec<String>,
+        /// The result, a JSON file
+        #[arg(long, value_name = "FILE")]
+        result: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Every certificate, newest first
+    Certificates {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refused at the keyboard: a certified sample is unsealed at the
+    /// engine's door, POST /api/certificates/{id}/unseal, by another
+    /// person's token than the one who recorded the certificate (record 48)
+    Unseal {
+        /// The sample, or a label set's id
+        which: String,
+        #[arg(long, value_name = "ID")]
+        certificate: i64,
         #[arg(long)]
         json: bool,
     },
@@ -1796,8 +2394,14 @@ pub(crate) enum LabelsCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ExportArgs {
-    #[arg(long, value_name = "AXIS")]
-    axis: String,
+    /// The axis; with --for-training and no axis, every axis with a decision
+    #[arg(long, value_name = "AXIS", required_unless_present = "for_training")]
+    axis: Option<String>,
+    /// The development labels a training tool reads (record 48): the
+    /// decisions in force by a person (unless --author says otherwise),
+    /// leaving out every item of a sample sealed now
+    #[arg(long)]
+    for_training: bool,
     /// Only the stacks of a saved selection, frozen now and pinned
     #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
     select: Option<String>,
@@ -2015,9 +2619,46 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             println!("  agreement  {}", doc["agreement"]);
             Ok(())
         }
+        CampaignCommand::Stats {
+            campaign: which,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            let doc = campaign::stats(registry.store(), c.id).map_err(cerr)?;
+            if json {
+                print(&doc);
+                return Ok(());
+            }
+            let line = |who: &str, v: &Value| {
+                let secs = |k: &str| {
+                    v[k].as_f64()
+                        .map(|s| format!("{s:.1} s"))
+                        .unwrap_or_else(|| "-".into())
+                };
+                println!(
+                    "  {:<24} {:>5} answer(s)  {:>5} read  {:>5} batched  median {}  p90 {}  changed {} of {}",
+                    who,
+                    v["answers"],
+                    v["read"],
+                    v["batched"],
+                    secs("median_seconds"),
+                    secs("p90_seconds"),
+                    v["changed"],
+                    v["suggested"]
+                );
+            };
+            println!("campaign {} {}", c.id, c.name);
+            for r in doc["raters"].as_array().into_iter().flatten() {
+                line(r["principal"].as_str().unwrap_or_default(), r);
+            }
+            line("all", &doc["all"]);
+            Ok(())
+        }
         CampaignCommand::Claim {
             campaign: which,
             adjudicator,
+            order,
             json,
         } => {
             let mut registry = crate::open(home)?;
@@ -2028,8 +2669,9 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 Role::Rater
             };
             let principal = who();
-            let claimed =
-                campaign::claim(&mut registry, c.id, &principal, role, &now).map_err(cerr)?;
+            let order = campaign::Order::parse(&order).map_err(cerr)?;
+            let claimed = campaign::claim_in(&mut registry, c.id, &principal, role, order, &now)
+                .map_err(cerr)?;
             match claimed {
                 Some(cl) if json => print(&cl.as_json()),
                 Some(cl) => println!(
@@ -2058,7 +2700,36 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 .transpose()?;
             let principal = who();
             let (author_kind, model) = keyboard_author(&mut registry)?;
-            let done = campaign::answer(
+            // record 48 R1: the suggestion kept beside the answer, under the
+            // pack the campaign was made with where it is found here
+            let sql = format!(
+                "SELECT campaign_id FROM {} WHERE id = {}",
+                registry.store().qualified("campaign_assignment"),
+                registry.store().dialect().param(1, Type::Int)
+            );
+            let campaign_of: Option<i64> = registry
+                .store()
+                .query_opt(&sql, &[Param::Int(assignment)])
+                .map_err(|e| fail(e.to_string()))?
+                .and_then(|r| r.int(0).ok());
+            let suggested = match campaign_of {
+                Some(cid) => {
+                    let c = campaign::find(registry.store(), &cid.to_string()).map_err(cerr)?;
+                    let name = c
+                        .pack_version
+                        .as_deref()
+                        .and_then(|v| v.split('@').next())
+                        .unwrap_or("mri")
+                        .to_string();
+                    let pack = crate::pack_dir(home, None)
+                        .ok()
+                        .and_then(|d| crate::reader::served_pack(Some(&d), &name));
+                    suggested_for(registry.store(), &c, assignment, pack.as_deref())
+                        .map_err(rerr)?
+                }
+                None => None,
+            };
+            let done = campaign::answer_with(
                 &mut registry,
                 &Given {
                     assignment,
@@ -2069,6 +2740,10 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     form: form.as_ref(),
                     derivative_id: derivative,
                     why: why.as_deref(),
+                },
+                &campaign::Timing {
+                    suggested: suggested.as_deref(),
+                    batch: false,
                 },
                 &now,
             )
@@ -2298,6 +2973,7 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
             closes_into: &a.closes_into,
             lease_seconds: a.lease_seconds,
             inputs: BTreeMap::new(),
+            hold_back: a.hold_back,
         },
     )
     .map_err(cerr)?;
@@ -2359,18 +3035,46 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                 Some(w) => Some(campaign::find(registry.store(), w).map_err(cerr)?.id),
                 None => None,
             };
-            let rows = labels::decision_labels(
-                registry.store(),
-                &DecisionQuery {
-                    axis: &a.axis,
-                    stacks: stacks.as_deref(),
-                    authors: &a.authors,
-                    campaign: campaign_id,
-                    staged_too: a.staged,
-                },
-            )
-            .map_err(lerr)?;
-            let name = a.name.clone().unwrap_or_else(|| a.axis.clone());
+            let (rows, left_out) = if a.for_training {
+                if a.staged {
+                    return Err(usage(
+                        "--for-training reads the decisions in force; a staged one never trains",
+                    ));
+                }
+                labels::training_labels(
+                    registry.store(),
+                    a.axis.as_deref(),
+                    stacks.as_deref(),
+                    &a.authors,
+                    campaign_id,
+                )
+                .map_err(lerr)?
+            } else {
+                let axis = a.axis.as_deref().unwrap_or_default();
+                let rows = labels::decision_labels(
+                    registry.store(),
+                    &DecisionQuery {
+                        axis,
+                        stacks: stacks.as_deref(),
+                        authors: &a.authors,
+                        campaign: campaign_id,
+                        staged_too: a.staged,
+                    },
+                )
+                .map_err(lerr)?;
+                (rows, 0)
+            };
+            let what = match (&a.axis, a.for_training) {
+                (Some(axis), _) => axis.clone(),
+                (None, _) => "training".to_string(),
+            };
+            let name = a.name.clone().unwrap_or_else(|| {
+                if a.for_training {
+                    format!("{what}-training")
+                } else {
+                    what.clone()
+                }
+            });
             let principal = who();
             let set = write_set(
                 &mut registry,
@@ -2380,10 +3084,11 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                 &SetMeta {
                     name: &name,
                     kind: "decisions",
-                    what: &a.axis,
+                    what: &what,
                     source: json!({
                         "axis": a.axis, "authors": a.authors, "campaign": campaign_id,
                         "selection": a.select, "handle": handle, "staged": a.staged,
+                        "for_training": a.for_training, "left_out_sealed": left_out,
                     }),
                     campaign_id,
                     handle_id: handle,
@@ -2392,8 +3097,52 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
             )
             .map_err(|(_, e)| fail(e))?;
             report_set(&set, a.json);
+            if a.for_training && !a.json {
+                println!("   left out {left_out} label(s) of a sample sealed now");
+            }
             Ok(())
         }
+        // record 48 R2: two people are told apart by the identity the
+        // engine verified at its door, never by a local user name
+        LabelsCommand::Certificate { .. } => Err(usage(
+            "a certificate is recorded at the engine's door by a person's token, POST /api/certificates, so the two people of a certificate are told apart by a verified identity",
+        )),
+        LabelsCommand::Certificates { json } => {
+            let mut registry = crate::open(home)?;
+            let list = labels::certificates(registry.store()).map_err(lerr)?;
+            if json {
+                print(&json!(
+                    list.iter()
+                        .map(labels::Certificate::as_json)
+                        .collect::<Vec<_>>()
+                ));
+                return Ok(());
+            }
+            if list.is_empty() {
+                println!("no certificates");
+            }
+            for c in &list {
+                let (sealed, unsealed) =
+                    labels::sample_counts(registry.store(), &c.sample).map_err(lerr)?;
+                println!(
+                    "  {:>4}  {:<28} model(s) {:<10} {} sealed, {} unsealed  {}",
+                    c.id,
+                    c.sample,
+                    c.model_ids
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    sealed,
+                    unsealed,
+                    c.created_at
+                );
+            }
+            Ok(())
+        }
+        LabelsCommand::Unseal { .. } => Err(usage(
+            "a certified sample is unsealed at the engine's door by another person's token, POST /api/certificates/{id}/unseal, never at the keyboard",
+        )),
         LabelsCommand::Seal {
             select,
             handle,

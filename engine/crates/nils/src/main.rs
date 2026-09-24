@@ -48,6 +48,7 @@ mod pipelines;
 mod places;
 mod profile;
 mod pyramid;
+mod reader;
 mod schedule;
 mod serve;
 mod setup;
@@ -5404,6 +5405,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let campaign_answers = count_of(store, "campaign_answer", "")?;
     let label_sets = count_of(store, "label_set", "")?;
     let sealed_stacks = count_of(store, "sealed_stack", "")?;
+    let certificates = count_of(store, "certificate", "")?;
     let schema = store.schema().map(str::to_string);
     let (derivative_rows, derivative_bytes) = nils_registry::derivative::totals(store)?;
     let (pipeline_rows, pipeline_runs) = nils_registry::pipeline::totals(store)?;
@@ -5644,16 +5646,16 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "campaigns and label sets",
             "owner": "the research group that runs the campaign; each answer is its rater's",
-            "what": "campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went; and the stacks of the samples an operator sealed for certification, which make a set that holds any of them sealed (record 40 R3)",
-            "where": "rows of campaign, campaign_item, campaign_assignment, campaign_answer, label_set and sealed_stack in the registry; a label set's labels.tsv and provenance.json in the export place it was written to",
+            "what": "campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went; and the stacks of the samples an operator sealed for certification, which make a set that holds any of them sealed (record 40 R3) until the certificate recorded for the sample unseals it (record 48 R2); and how long each answer took, the suggestion it had and whether it changed it (record 48 R1)",
+            "where": "rows of campaign, campaign_item, campaign_assignment, campaign_answer, label_set, sealed_stack and certificate in the registry; a label set's labels.tsv and provenance.json in the export place it was written to",
             "files": [],
             "holds": ["quasi-identifying: the day a session opened, on a pick campaign's items and its labels", "a person's words: the why and the form of an answer", "technical: stack, subject and derivative ids, values, the principals, the times, the digests"],
-            "counts": { "campaigns": campaigns, "items": campaign_items, "answers": campaign_answers, "label_sets": label_sets, "sealed_stacks": sealed_stacks },
-            "kept": "for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal is never undone",
+            "counts": { "campaigns": campaigns, "items": campaign_items, "answers": campaign_answers, "label_sets": label_sets, "sealed_stacks": sealed_stacks, "certificates": certificates },
+            "kept": "for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal's row stays when a certificate unseals it, naming the certificate",
             "commands": {
-                "read": ["nils campaign list", "nils campaign show <campaign> [--answers]", "nils labels list", "nils labels show <id>"],
-                "change": ["nils campaign create | claim | answer | release | metric | close", "nils labels import-v0 --tsv <file>", "nils labels seal --select selection:<name>@<v>"],
-                "export": ["nils campaign export <campaign> --to <dir> [--answers]", "nils labels export --axis <axis> --to <dir>"],
+                "read": ["nils campaign list", "nils campaign show <campaign> [--answers]", "nils campaign stats <campaign>", "nils labels list", "nils labels show <id>", "nils labels certificates"],
+                "change": ["nils campaign create | claim | answer | release | metric | close", "nils labels import-v0 --tsv <file>", "nils labels seal --select selection:<name>@<v>", "POST /api/certificates", "POST /api/certificates/<id>/unseal"],
+                "export": ["nils campaign export <campaign> --to <dir> [--answers]", "nils labels export --axis <axis> --to <dir>", "nils labels export --for-training --to <dir>"],
                 "delete": "with the registry",
             },
         }),

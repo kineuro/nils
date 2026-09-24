@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 62;
+pub const SCHEMA_VERSION: i64 = 63;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +302,65 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 62,
         apply: a_run_s_input_release_says_so,
     },
+    Migration {
+        version: 63,
+        apply: a_reading_is_timed_and_a_certificate_unseals,
+    },
 ];
+
+/// Record 48: an answer says how long it took, what the engine suggested
+/// and whether the answer changed it, and how it came (a claim or a
+/// batch); an item says a batch held it back to be read alone; a sealed stack may be unsealed by the certificate its sample
+/// was drawn for; and the certificates have a table. A registry from
+/// before gains the columns empty, since no answer before was timed and
+/// nothing was ever unsealed, and the table empty.
+fn a_reading_is_timed_and_a_certificate_unseals(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "campaign_answer",
+        &["seconds", "suggested", "changed", "via"],
+    )?;
+    add_columns(store, "campaign_item", &["held_back"])?;
+    add_columns(store, "campaign", &["hold_back", "hold_back_seed"])?;
+    // every campaign from before draws a seed of its own now, a secret
+    // nothing derives from its id
+    if !table_exists(store, "campaign")? {
+        return add_tables(store, kind, &["certificate"]);
+    }
+    let c = store.qualified("campaign");
+    let ids: Vec<i64> = store
+        .query(
+            &format!("SELECT id FROM {c} WHERE hold_back_seed IS NULL"),
+            &[],
+        )?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    for id in ids {
+        store.update_by_id(
+            schema::table("campaign"),
+            &[(
+                "hold_back_seed",
+                Param::from(uuid::Uuid::new_v4().to_string()),
+            )],
+            "id",
+            id,
+        )?;
+    }
+    add_columns(store, "campaign_assignment", &["leased_ms"])?;
+    add_columns(
+        store,
+        "sealed_stack",
+        &["unsealed_at", "unsealed_by", "certificate_id"],
+    )?;
+    add_tables(store, kind, &["certificate"])
+}
 
 /// Record 43: the release a pipeline run materialised its bids input by
 /// says so, so the release history can leave it out. A registry from before

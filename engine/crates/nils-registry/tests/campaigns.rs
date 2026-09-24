@@ -193,6 +193,7 @@ fn new<'a>(
         closes_into,
         lease_seconds: 600,
         inputs: Default::default(),
+        hold_back: None,
     }
 }
 
@@ -1780,7 +1781,7 @@ fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
             labels::sealed_among(reg.store(), &session).unwrap(),
             "{name}"
         );
-        let set = |reg: &mut Registry, digest: &str, sealed: bool| {
+        let set = |reg: &mut Registry, digest: &str, sealed: bool, path: Option<&str>| {
             let version = labels::next_version(reg.store(), "bp").unwrap();
             labels::record(
                 reg,
@@ -1798,18 +1799,23 @@ fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
                     rows: 1,
                     digest,
                     place_id: None,
-                    path: None,
+                    path,
                     created_by: "cleo@lab",
                 },
             )
             .unwrap()
         };
         let a = "a".repeat(64);
-        let b = "b".repeat(64);
+        // record 48 R2: a set trains only from a file its digest names
+        let open_dir = TempDir::new("bp-open");
+        let text = labels::tsv(&other);
+        std::fs::write(open_dir.path().join("labels.tsv"), &text).unwrap();
+        let b = hex::encode(ring::digest::digest(&ring::digest::SHA256, text.as_bytes()).as_ref());
+        let open_path = open_dir.path().display().to_string();
         let sealed_set = labels::sealed_among(reg.store(), &drawn).unwrap();
-        set(reg, &a, sealed_set);
+        set(reg, &a, sealed_set, None);
         let open_set = labels::sealed_among(reg.store(), &other).unwrap();
-        let second = set(reg, &b, open_set);
+        let second = set(reg, &b, open_set, Some(&open_path));
         assert_eq!(second.version, 2, "{name}: a name's next version");
         // a name and a version are one set
         let taken = labels::record(

@@ -2023,6 +2023,12 @@ fn build_registry() -> Vec<Table> {
                 // What the close measured over the whole campaign: the share
                 // of items the raters agreed on, Cohen's and Fleiss' kappa.
                 col("agreement", Type::Json),
+                // Record 48 R1: the share of each batch accepted in one move
+                // that is held back to be read alone, which the campaign's
+                // maker sets, and the seed the engine drew for the choice,
+                // which no door returns.
+                col("hold_back", Type::Double),
+                col("hold_back_seed", Type::Text),
             ],
         )
         .unique(&["name"]),
@@ -2054,6 +2060,9 @@ fn build_registry() -> Vec<Table> {
                 col("decision_id", Type::Int),
                 col("pick_id", Type::Int),
                 col("resolved_at", Type::Timestamp),
+                // Record 48 R1: 1 when a batch accepted in one move held the
+                // item back to be read alone; no later batch takes it.
+                col("held_back", Type::Int),
             ],
         )
         .unique(&["campaign_id", "position"])
@@ -2078,6 +2087,9 @@ fn build_registry() -> Vec<Table> {
                 col("leased_at", Type::Timestamp),
                 col("lease_until", Type::Timestamp),
                 col("ended_at", Type::Timestamp),
+                // Record 48 R1: the instant of the lease in milliseconds,
+                // which an answer's time is counted from.
+                col("leased_ms", Type::Int),
             ],
         )
         .index(&["item_id"])
@@ -2107,6 +2119,17 @@ fn build_registry() -> Vec<Table> {
                 col("actor_detail", Type::Json),
                 req("answered_at", Type::Timestamp),
                 col("supersedes_id", Type::Int),
+                // Record 48 R1: how long the answer took, from the claim
+                // that leased the item to the answer, in seconds (null for
+                // an answer given to a whole batch, which had no claim);
+                // the answer the engine suggested, as an answer's value
+                // is kept; whether the answer differs from it (null where
+                // there was no suggestion); and how it came: `claim` or
+                // `batch`.
+                col("seconds", Type::Double),
+                col("suggested", Type::Text),
+                col("changed", Type::Int),
+                col("via", Type::Text),
             ],
         )
         // one answer per item, rater and round: a repeat is the same answer
@@ -2166,11 +2189,35 @@ fn build_registry() -> Vec<Table> {
                 col("handle_id", Type::Int),
                 req("sealed_by", Type::Text),
                 req("sealed_at", Type::Timestamp),
+                // Record 48 R2: a sample is unsealed once the certificate
+                // it was drawn for is recorded; the row stays, as history,
+                // naming the certificate and who unsealed it.
+                col("unsealed_at", Type::Timestamp),
+                col("unsealed_by", Type::Text),
+                col("certificate_id", Type::Int),
             ],
         )
         .unique(&["sample", "stack_id"])
         .index(&["stack_id"])
         .index(&["subject_id"]),
+        // Record 48 R2: what a certification measured on a sealed sample:
+        // the sample, the models it certified, and the result as recorded.
+        // Its labels train the next model only once this row exists.
+        Table::new(
+            "certificate",
+            vec![
+                col("id", Type::Id),
+                // the sealed sample, as `nils labels seal` named it
+                req("sample", Type::Text),
+                // the registered models it measured, a list of ids
+                req("model_ids", Type::Json),
+                // the result as the certifying tool gave it
+                req("result", Type::Json),
+                req("created_by", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .index(&["sample"]),
         // Record 43 S1: the pipeline catalog. One row per version of a
         // descriptor (`contracts/job/v1`), kept whole with its digest; a
         // name's next version is a descriptor that differs, and the same
@@ -2382,6 +2429,7 @@ mod tests {
             "campaign_answer",
             "label_set",
             "sealed_stack",
+            "certificate",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

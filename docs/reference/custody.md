@@ -132,14 +132,14 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went; and the stacks of the samples an operator sealed for certification, which make a set that holds any of them sealed (record 40 R3) |
-| where | rows of campaign, campaign_item, campaign_assignment, campaign_answer, label_set and sealed_stack in the registry; a label set's labels.tsv and provenance.json in the export place it was written to |
+| what | campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went; and the stacks of the samples an operator sealed for certification, which make a set that holds any of them sealed (record 40 R3) until the certificate recorded for the sample unseals it (record 48 R2); and how long each answer took, the suggestion it had and whether it changed it (record 48 R1) |
+| where | rows of campaign, campaign_item, campaign_assignment, campaign_answer, label_set, sealed_stack and certificate in the registry; a label set's labels.tsv and provenance.json in the export place it was written to |
 | holds | quasi-identifying: the day a session opened, on a pick campaign's items and its labels<br>a person's words: the why and the form of an answer<br>technical: stack, subject and derivative ids, values, the principals, the times, the digests |
 | owner | the research group that runs the campaign; each answer is its rater's |
-| kept | for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal is never undone |
-| read | `nils campaign list`<br>`nils campaign show <campaign> [--answers]`<br>`nils labels list`<br>`nils labels show <id>` |
-| change | `nils campaign create \| claim \| answer \| release \| metric \| close`<br>`nils labels import-v0 --tsv <file>`<br>`nils labels seal --select selection:<name>@<v>` |
-| export | `nils campaign export <campaign> --to <dir> [--answers]`<br>`nils labels export --axis <axis> --to <dir>` |
+| kept | for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal's row stays when a certificate unseals it, naming the certificate |
+| read | `nils campaign list`<br>`nils campaign show <campaign> [--answers]`<br>`nils campaign stats <campaign>`<br>`nils labels list`<br>`nils labels show <id>`<br>`nils labels certificates` |
+| change | `nils campaign create \| claim \| answer \| release \| metric \| close`<br>`nils labels import-v0 --tsv <file>`<br>`nils labels seal --select selection:<name>@<v>`<br>POST /api/certificates<br>POST /api/certificates/<id>/unseal |
+| export | `nils campaign export <campaign> --to <dir> [--answers]`<br>`nils labels export --axis <axis> --to <dir>`<br>`nils labels export --for-training --to <dir>` |
 | delete | with the registry |
 
 ## claims cache

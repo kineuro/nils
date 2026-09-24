@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62],
+            [59, 60, 61, 62, 63],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2016,7 +2016,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62],
+            [61, 62, 63],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2027,6 +2027,97 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
         );
         let rows = store
             .query(&format!("SELECT COUNT(*) FROM {me}"), &[])
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 1, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 48, migration 63, on both backends: a registry from before
+/// gains the timing of an answer, the unsealing of a sealed stack and the
+/// certificates, empty; what it held reads as before.
+#[test]
+fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let cp = store.qualified("campaign");
+        let (a, s, c, meta) = (
+            store.qualified("campaign_answer"),
+            store.qualified("sealed_stack"),
+            store.qualified("certificate"),
+            store.qualified("registry_meta"),
+        );
+        let drop_column = |t: &str, col: &str| format!("ALTER TABLE {t} DROP COLUMN {col};");
+        let mut sql = String::new();
+        for col in ["seconds", "suggested", "changed", "via"] {
+            sql.push_str(&drop_column(&a, col));
+        }
+        for col in ["unsealed_at", "unsealed_by", "certificate_id"] {
+            sql.push_str(&drop_column(&s, col));
+        }
+        sql.push_str(&drop_column(&store.qualified("campaign_item"), "held_back"));
+        sql.push_str(&drop_column(&store.qualified("campaign"), "hold_back"));
+        sql.push_str(&drop_column(&store.qualified("campaign"), "hold_back_seed"));
+        sql.push_str(&drop_column(
+            &store.qualified("campaign_assignment"),
+            "leased_ms",
+        ));
+        sql.push_str(&format!(
+            "DROP TABLE {c};
+             INSERT INTO {s} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+             VALUES ('selection:cert@1', 7, 3, 'op', '2026-09-24T00:00:00Z');
+             INSERT INTO {cp} (name, owner, status, question, grain, source, epoch, raters_per_item, adjudication, closes_into, lease_seconds, created_at) \
+             VALUES ('old', 'op', 'open', '{{}}', 'stack', '{{}}', 1, 1, '{{}}', 'none', 60, '2026-09-24T00:00:00Z');
+             UPDATE {meta} SET value = '62' WHERE key = 'schema_version'"
+        ));
+        store.batch(&sql).unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [63],
+            "{name}"
+        );
+        for (t, col) in [
+            ("campaign_answer", "seconds"),
+            ("campaign_answer", "via"),
+            ("sealed_stack", "unsealed_at"),
+            ("sealed_stack", "certificate_id"),
+            ("campaign_item", "held_back"),
+            ("campaign_assignment", "leased_ms"),
+            ("campaign", "hold_back_seed"),
+        ] {
+            assert!(
+                migrate::column_exists(&mut store, t, col).unwrap(),
+                "{name} {t}.{col}"
+            );
+        }
+        assert!(
+            migrate::table_exists(&mut store, "certificate").unwrap(),
+            "{name}"
+        );
+        // a campaign from before draws a seed of its own
+        let seeds = store
+            .query(&format!("SELECT hold_back_seed FROM {cp}"), &[])
+            .unwrap();
+        let seed = seeds[0]
+            .opt_text(0)
+            .unwrap()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            seed.len() >= 32 && !seed.contains("campaign"),
+            "{name}: {seed}"
+        );
+        // the stack sealed before is sealed still: nothing was unsealed
+        let rows = store
+            .query(
+                &format!("SELECT COUNT(*) FROM {s} WHERE unsealed_at IS NULL"),
+                &[],
+            )
             .unwrap();
         assert_eq!(rows[0].int(0).unwrap(), 1, "{name}");
         assert!(

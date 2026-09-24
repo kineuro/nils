@@ -1006,6 +1006,15 @@ pub(crate) struct Doors {
     pub(crate) backup_dir: Option<PathBuf>,
 }
 
+impl Doors {
+    /// Record 48 R2: whether a caller's principal is an identity the engine
+    /// verified (a token it holds, or a trusted issuer's subject), and not
+    /// the local user name `--auth off` takes.
+    pub(crate) fn identity_verified(&self) -> bool {
+        !matches!(self.auth, Auth::Off)
+    }
+}
+
 pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     if !home.exists() {
         return Err(usage(format!("no registry in {}", home.dir().display())));
@@ -1474,9 +1483,16 @@ fn routed(
         return r;
     }
     // record 42: the campaigns and the label sets
-    if let Some(r) =
-        crate::campaigns::route(doors, registry, ask, caller, method.as_str(), &segs, body)
-    {
+    if let Some(r) = crate::campaigns::route(
+        doors,
+        registry,
+        ask,
+        caller,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
         return r;
     }
     // record 26: the linkage doors, under the table's grants like the rest
@@ -1675,8 +1691,26 @@ fn routed(
         // record 26 §11: why one stack was judged so, as `nils explain` says it
         ["api", "explain", _] if get => {
             let stack = id_at(2)?;
+            // record 48 R2: a stack read blind says nothing a system said
+            if crate::campaigns::blind_to(registry.store(), caller, stack)? {
+                return Ok(Reply::ok(serde_json::json!({
+                    "stack": stack, "blind": true, "axes": [], "review": [],
+                })));
+            }
             match crate::explain::document(registry.store(), stack, doors.pack_dir.as_deref())? {
-                Some(doc) => Ok(Reply::ok(doc)),
+                Some(mut doc) => {
+                    // the words a rule matched are text a stack carried
+                    if caller.access.detail < Detail::Quasi {
+                        for a in doc["axes"].as_array_mut().into_iter().flatten() {
+                            for e in a["evidence"].as_array_mut().into_iter().flatten() {
+                                if let Some(m) = e.as_object_mut() {
+                                    m.remove("matched");
+                                }
+                            }
+                        }
+                    }
+                    Ok(Reply::ok(doc))
+                }
                 None => Err(Reply::error(
                     404,
                     format!("stack {stack} has not been classified"),
@@ -2870,6 +2904,7 @@ fn routed(
                 rows.retain(|r| r["id"].as_i64().is_some_and(|id| keep.contains(&id)));
                 rows.truncate(limit.max(1));
             }
+            blind_review(registry.store(), caller, &mut rows)?;
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
             ))
@@ -2902,11 +2937,13 @@ fn routed(
             } else {
                 Vec::new()
             };
-            Ok(Reply::ok(serde_json::json!({
+            let mut doc = serde_json::json!({
                 "id": item.id, "kind": item.kind, "scope": item.scope, "status": item.status,
                 "ref": item.reference, "evidence": item.evidence, "members": item.members,
                 "member_stacks": members,
-            })))
+            });
+            blind_review(registry.store(), caller, std::slice::from_mut(&mut doc))?;
+            Ok(Reply::ok(doc))
         }
         ["api", "review", _, "apply"] if post && json_body(body)?["values"].is_object() => {
             // Record 45 R5: an item that asks several axes (System 1's
@@ -3888,6 +3925,59 @@ fn capabilities(
             "hours": nils_registry::idempotency::KEEP_HOURS,
         },
     })
+}
+
+/// Record 48 R2: review items about a stack the caller reads blind say
+/// nothing a system said of it: a stack's item keeps its axis and loses its
+/// evidence, and a group's hidden members lose theirs, the group's own
+/// evidence going with them.
+fn blind_review(
+    store: &mut nils_registry::Store,
+    caller: &Caller,
+    rows: &mut [serde_json::Value],
+) -> Result<(), Reply> {
+    let mut about: Vec<(usize, Vec<i64>)> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        let mut stacks: Vec<i64> = r["ref"]["stack_id"].as_i64().into_iter().collect();
+        if r["scope"] == "group"
+            && let Some(id) = r["id"].as_i64()
+        {
+            let sql = format!(
+                "SELECT stack_id FROM {} WHERE item_id = {}",
+                store.qualified("review_member"),
+                store.dialect().param(1, nils_registry::schema::Type::Int)
+            );
+            for m in store.query(&sql, &[nils_registry::Param::Int(id)])? {
+                stacks.push(m.int(0)?);
+            }
+        }
+        if !stacks.is_empty() {
+            about.push((i, stacks));
+        }
+    }
+    let all: Vec<i64> = about.iter().flat_map(|(_, s)| s.iter().copied()).collect();
+    let hidden = crate::campaigns::blind_among(store, caller, &all)?;
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    for (i, stacks) in about {
+        if !stacks.iter().any(|s| hidden.contains(s)) {
+            continue;
+        }
+        let r = &mut rows[i];
+        let axis = r["evidence"]["axis"].clone();
+        r["evidence"] = serde_json::json!({"axis": axis, "blind": true});
+        if r.get("decision").is_some() {
+            r["decision"] = serde_json::Value::Null;
+        }
+        r["blind"] = serde_json::json!(true);
+        for m in r["member_stacks"].as_array_mut().into_iter().flatten() {
+            if m["stack_id"].as_i64().is_some_and(|s| hidden.contains(&s)) {
+                m["evidence"] = serde_json::json!({"blind": true});
+            }
+        }
+    }
+    Ok(())
 }
 
 fn review_list(

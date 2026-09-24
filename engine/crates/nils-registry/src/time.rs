@@ -12,6 +12,24 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Record 48 R1: an instant in milliseconds since the Unix epoch, for
+/// timing a person's answer finer than the second the registry's stamps
+/// keep. Where `now` is the present second, the clock is read to the
+/// millisecond; where it is another time (a test, a replay), that time's
+/// own second is the instant, so a given time always times the same.
+pub fn millis_at(now: &str) -> Option<u64> {
+    let secs = secs_of(now)?;
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if (clock / 1000).abs_diff(secs) <= 1 {
+        Some(clock)
+    } else {
+        Some(secs * 1000)
+    }
+}
+
 /// Now, as `YYYY-MM-DDTHH:MM:SSZ`.
 pub fn now_iso() -> String {
     iso_of(unix_secs())

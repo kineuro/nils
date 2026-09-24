@@ -1852,6 +1852,7 @@ dependencies = [
  "nix",
  "postgres",
  "regex",
+ "ring",
  "rusqlite",
  "serde",
  "serde-saphyr",
