@@ -1535,6 +1535,17 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
         let e = nils_registry::review::commit_as(reg, Some(with_agent), true, "bot@lab", "agent")
             .unwrap_err();
         assert!(e.to_string().contains("R6"), "{name}: {e}");
+        // the rule does not hang on the item's link to its decision alone:
+        // a close that died before it wrote the link still holds it
+        let unlink = format!(
+            "UPDATE {} SET decision_id = NULL WHERE campaign_id = {}",
+            reg.store().qualified("campaign_item"),
+            c.id
+        );
+        reg.store().batch(&unlink).unwrap();
+        let e = nils_registry::review::commit_as(reg, Some(with_agent), true, "bot@lab", "agent")
+            .unwrap_err();
+        assert!(e.to_string().contains("R6"), "{name}: unlinked: {e}");
         nils_registry::review::commit_where(reg, &filter, true, "cleo@lab", "person").unwrap();
 
         // two persons, closed by an agent: staged
@@ -1906,5 +1917,53 @@ fn v0_labels_keep_out_of_a_person_s_decision_at_any_scope() {
         assert!(done.decisions.is_empty(), "{name}");
         assert_eq!(count(reg, "decision", ""), 2, "{name}");
         assert_eq!(count(reg, "review_item", ""), items, "{name}");
+    }
+}
+
+/// A close that died part way leaves its campaign closing; a person runs
+/// the close again, which writes the items not yet resolved and counts the
+/// ones that were, and an agent or a model may not.
+#[test]
+fn a_close_that_died_is_run_again_by_a_person() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "never", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new("again", &q, &adj, Items::Stacks(ids.clone()), 1, "decision"),
+        )
+        .unwrap();
+        for _ in 0..ids.len() {
+            let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+                .unwrap()
+                .unwrap();
+            campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(1)).unwrap();
+        }
+        let first = campaign::items(reg.store(), c.id).unwrap()[0].id;
+        let died = format!(
+            "UPDATE {} SET status = 'closing' WHERE id = {}; UPDATE {} SET state = 'resolved' WHERE id = {first}",
+            reg.store().qualified("campaign"),
+            c.id,
+            reg.store().qualified("campaign_item"),
+        );
+        reg.store().batch(&died).unwrap();
+        let by = |kind: &'static str| Close {
+            campaign: c.id,
+            who: "cleo@lab",
+            author_kind: kind,
+            model: None,
+            picks: None,
+        };
+        let e = campaign::close(reg, &by("agent"), &at(2)).unwrap_err();
+        assert!(e.to_string().contains("closing"), "{name}: {e}");
+        let closed = campaign::close(reg, &by("person"), &at(3)).unwrap();
+        assert_eq!(closed.decisions.len(), ids.len() - 1, "{name}: {closed:?}");
+        assert_eq!(closed.resolved, ids.len() as i64, "{name}");
+        assert_eq!(closed.unresolved, 0, "{name}");
+        let status = campaign::get(reg.store(), c.id).unwrap().unwrap().status;
+        assert_eq!(status, "closed", "{name}");
     }
 }

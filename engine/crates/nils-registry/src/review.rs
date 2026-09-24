@@ -966,7 +966,9 @@ fn only_a_person_commits(store: &mut Store, ids: &[i64], kind: &str) -> Result<(
 /// The decisions among `ids` that carry a model's or an agent's answer: a
 /// model or an agent is their author, they name a registered model, or a
 /// campaign closed an item into them that a model or an agent answered (a
-/// person and a model or an agent who agreed, record 42 R6).
+/// person and a model or an agent who agreed, record 42 R6), found by the
+/// campaign item's link to the decision or by the review item the decision
+/// answered, so the rule holds even where the first is missing.
 pub fn needs_a_person(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreError> {
     let mut out = Vec::new();
     for chunk in ids.chunks(500) {
@@ -978,8 +980,14 @@ pub fn needs_a_person(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreE
         let sql = format!(
             "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind IN ('model', 'agent') OR model_id IS NOT NULL) \
              UNION SELECT i.decision_id FROM {} i JOIN {} a ON a.item_id = i.id \
-             WHERE i.decision_id IN ({list}) AND a.author_kind IN ('model', 'agent')",
+             WHERE i.decision_id IN ({list}) AND a.author_kind IN ('model', 'agent') \
+             UNION SELECT r.decision_id FROM {} r JOIN {} i ON i.review_item_id = r.id \
+             JOIN {} a ON a.item_id = i.id \
+             WHERE r.decision_id IN ({list}) AND a.author_kind IN ('model', 'agent')",
             store.qualified("decision"),
+            store.qualified("campaign_item"),
+            store.qualified("campaign_answer"),
+            store.qualified("review_item"),
             store.qualified("campaign_item"),
             store.qualified("campaign_answer"),
         );

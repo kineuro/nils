@@ -2621,25 +2621,39 @@ impl Closed {
 pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Closed, Error> {
     let c = get(registry.store(), cl.campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {}", cl.campaign)))?;
-    if c.status != "open" {
-        return Err(refused(format!("campaign {} is {}", c.name, c.status)));
+    // A close that died part way left the campaign closing; a person runs
+    // it again, and it writes what the first did not.
+    let again = c.status == "closing" && cl.author_kind == "person";
+    if c.status != "open" && !again {
+        return Err(refused(format!(
+            "campaign {} is {}{}",
+            c.name,
+            c.status,
+            if c.status == "closing" {
+                "; a person runs its close again"
+            } else {
+                ""
+            }
+        )));
     }
     let question = c.question()?;
     // The close is one writer: it takes the campaign from open to closing in
     // one statement before it writes anything, so a second close, and every
     // claim, answer and metric, finds it no longer open. Each item is then
-    // written through `apply`, which keeps its own transaction; a close that
-    // fails part way opens the campaign again, and a close run again skips
-    // the items already resolved.
+    // written in a transaction of its own, the decision with the item's link
+    // to it; a close that fails part way opens the campaign again, one that
+    // died leaves it closing for a person to run again, and a close run
+    // again counts the items already resolved and writes the rest.
     let store = registry.store();
     let d = store.dialect();
     let took = store.execute(
         &format!(
-            "UPDATE {} SET status = 'closing' WHERE id = {} AND status = 'open'",
+            "UPDATE {} SET status = 'closing' WHERE id = {} AND status = {}",
             store.qualified("campaign"),
-            d.param(1, Type::Int)
+            d.param(1, Type::Int),
+            d.param(2, Type::Text)
         ),
-        &[Param::Int(c.id)],
+        &[Param::Int(c.id), Param::from(c.status.as_str())],
     )?;
     if took != 1 {
         let now_is = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
@@ -2676,6 +2690,11 @@ fn close_items(
     let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
     for it in &all {
+        // a close run again after one that died counts what it resolved
+        if it.state == "resolved" {
+            out.resolved += 1;
+            continue;
+        }
         if !matches!(it.state.as_str(), "agreed" | "adjudicated") {
             out.unresolved += 1;
             continue;
@@ -2751,58 +2770,77 @@ fn close_items(
                     out.unresolved += 1;
                     continue;
                 };
-                let applied = review::apply(
-                    registry,
-                    &review::Apply {
-                        item: it.review_item_id,
-                        member: None,
-                        scope: "stack",
-                        value: Some(&value),
-                        author: review::Author {
-                            who: &who,
-                            kind: &kind,
-                            version: None,
-                            model,
+                // The decision, its review item and the item's link to it
+                // are one transaction, so the link never lags the decision
+                // (a commit reads who answered through it).
+                registry.store().begin()?;
+                let written = (|| -> Result<Result<review::Applied, String>, Error> {
+                    let applied = match review::apply_within(
+                        registry,
+                        &review::Apply {
+                            item: it.review_item_id,
+                            member: None,
+                            scope: "stack",
+                            value: Some(&value),
+                            author: review::Author {
+                                who: &who,
+                                kind: &kind,
+                                version: None,
+                                model,
+                            },
+                            stage,
+                            why: Some(&path),
+                            campaign: Some(c.id),
                         },
-                        stage,
-                        why: Some(&path),
-                        campaign: Some(c.id),
-                    },
-                );
-                match applied {
-                    Ok(applied) => {
-                        let store = registry.store();
-                        if !applied.closed.contains(&it.review_item_id) {
-                            finish_review_item(
-                                store,
-                                it.review_item_id,
-                                if applied.staged { "staged" } else { "accepted" },
-                                &who,
-                                &json!({"campaign": c.id, "decision": applied.decision, "value": value}),
-                                Some(applied.decision),
-                                now,
-                            )?;
-                        }
-                        mark_review_item(store, it.review_item_id, "resolved")?;
-                        store.update_by_id(
-                            table("campaign_item"),
-                            &[
-                                ("state", Param::from("resolved")),
-                                ("decision_id", Param::Int(applied.decision)),
-                                ("resolved_at", Param::from(now)),
-                            ],
-                            "id",
-                            it.id,
+                    ) {
+                        Ok(a) => a,
+                        Err(review::Error::Store(e)) => return Err(e.into()),
+                        Err(e) => return Ok(Err(e.to_string())),
+                    };
+                    let store = registry.store();
+                    if !applied.closed.contains(&it.review_item_id) {
+                        finish_review_item(
+                            store,
+                            it.review_item_id,
+                            if applied.staged { "staged" } else { "accepted" },
+                            &who,
+                            &json!({"campaign": c.id, "decision": applied.decision, "value": value}),
+                            Some(applied.decision),
+                            now,
                         )?;
+                    }
+                    mark_review_item(store, it.review_item_id, "resolved")?;
+                    store.update_by_id(
+                        table("campaign_item"),
+                        &[
+                            ("state", Param::from("resolved")),
+                            ("decision_id", Param::Int(applied.decision)),
+                            ("resolved_at", Param::from(now)),
+                        ],
+                        "id",
+                        it.id,
+                    )?;
+                    Ok(Ok(applied))
+                })();
+                match written {
+                    Ok(Ok(applied)) => {
+                        registry.store().commit()?;
                         if applied.staged {
                             staged_ones.push(applied.decision);
                         }
                         out.decisions.push(applied.decision);
                         out.resolved += 1;
                     }
-                    Err(e) => {
-                        out.refused.push((it.id, e.to_string()));
+                    Ok(Err(why)) => {
+                        registry.store().rollback().ok();
+                        registry.refresh_meta().ok();
+                        out.refused.push((it.id, why));
                         out.unresolved += 1;
+                    }
+                    Err(e) => {
+                        registry.store().rollback().ok();
+                        registry.refresh_meta().ok();
+                        return Err(e);
                     }
                 }
             }
