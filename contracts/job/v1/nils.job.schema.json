@@ -95,8 +95,10 @@
       "properties": {
         "gpu": {"enum": ["none", "optional", "required"], "description": "optional runs on the CPU where the host has no GPU, or the lane names no card, and records device cpu; required is refused there"},
         "memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Of the lane's memory; 2 where absent"},
-        "cores": {"type": "integer", "minimum": 1, "description": "Of the lane's cores; 1 where absent. The container is told it as NILS_CORES, and the memory as NILS_MEMORY_GB"},
+        "cores": {"type": "integer", "minimum": 1, "description": "Of the lane's cores; 1 where absent. The container is told it as NILS_CORES, and the memory as NILS_MEMORY_GB, and is held to both by the runtime where the host's cgroups allow it"},
         "gpu-memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A2: of the card's memory, for a unit that takes the GPU; 8 where absent. A unit waits while the card's free memory, less what the lane's own running units there declared, is below it"},
+        "cores-input": {"type": "string", "description": "Record 49, after review: the id of the Number parameter that tells the tool its threads. Left out of a run, it is set to cores; asked above cores, the run is refused"},
+        "memory-input": {"type": "string", "description": "Record 49, after review: the id of the Number parameter that tells the tool the memory, in GB, it plans within. Left out of a run, it is set to memory-gb; asked above memory-gb, the run is refused"},
         "unit-minutes": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A3: the typical minutes a unit takes on the CPU, which the pre-flight estimates from until the pipeline has run on this engine, and from its own past runs after"}
       }
     },
