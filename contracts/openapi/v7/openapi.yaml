@@ -86,7 +86,10 @@
 # filter names. A campaign question of kind axes asks several axes of a
 # stack at once, held to the served pack's legal combinations and closed
 # into one decision per axis; GET /api/campaigns/{id}/items/{item}/candidates
-# names a session item's stacks for a pick question. An item that asks
+# names a session item's stacks for a pick question, POST
+# /api/campaigns/{id}/assignments/{assignment}/renew lengthens a lease its
+# holder holds, the answers door is blind to a rater until the close, and an
+# axes answer reads as an object. An item that asks
 # several axes (a campaign's, or System 1's classify.asked, whose evidence
 # the review-item contract fixes) is answered whole at POST
 # /api/review/{id}/apply with values. An `<axis>:model` group's evidence
@@ -1284,10 +1287,22 @@ paths:
   /api/campaigns/{id}/answers:
     get:
       summary: Every answer of a campaign, in the order given (record 42 S5; campaigns:see)
-      description: "Each {id, item_id, assignment_id, principal, role, round, author_kind, value, form, derivative_id, why, actor_detail, answered_at, model_id}. An answer is never overwritten or deleted, and never a decision. At detail plain why, form and actor_detail are left out, and so is the value of a free question, which is free text; quasi and above read the answer whole."
+      description: "Each {id, item_id, assignment_id, principal, role, round, author_kind, value, form, derivative_id, why, actor_detail, answered_at, model_id}, and `blind`. Record 45: rating is blind until the campaign closes; a rater reads their own answers alone (`blind` true), and an adjudicator of the campaign (named in its policy, or holding an adjudicator's assignment) and a holder of review:work read every one; once closed, every holder of campaigns:see does. An axes question's value reads as the object it was answered as, and so does an item's outcome value in GET /api/campaigns/{id}. An answer is never overwritten or deleted, and never a decision. At detail plain why, form and actor_detail are left out, and so is the value of a free question, which is free text; quasi and above read the answer whole."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
-        "200": {description: "{campaign, count, answers}"}
+        "200": {description: "{campaign, count, answers, blind}"}
+  /api/campaigns/{id}/assignments/{assignment}/renew:
+    post:
+      summary: Lengthen a lease the caller holds (record 45; campaigns:work)
+      description: "The rating workspace's heartbeat: the lease runs the campaign's lease_seconds from now, as a claim's does, and the assignment is answered as it now stands. Refused for another principal's assignment (403), and for one no longer leased, a lease that ran out (its item may be another rater's by then; claim again) or a campaign that is not open (409). Checked under the campaign's lock. Writes no audit row: the claim and the answer are the acts."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: assignment, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: "The assignment, with its new lease_until"}
+        "403": {description: Another principal's assignment}
+        "404": {description: No such assignment in this campaign}
+        "409": {description: "Not leased, the lease ran out, or the campaign is not open"}
   /api/campaigns/{id}/items/{item}/candidates:
     get:
       summary: The stacks a session item's pick is made among (record 45; campaigns:see at detail quasi)
