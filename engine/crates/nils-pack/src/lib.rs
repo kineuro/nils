@@ -17,6 +17,7 @@ pub mod corpus;
 pub mod error;
 pub mod eval;
 pub mod expr;
+pub mod legal;
 pub mod level;
 pub mod mcp;
 pub mod normalize;

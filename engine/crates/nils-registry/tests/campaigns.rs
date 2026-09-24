@@ -1078,6 +1078,7 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
             &nils_registry::review::CommitFilter {
                 min_confidence: Some(0.9),
                 campaign: Some(c.id),
+                ..Default::default()
             },
             false,
             "cleo@lab",
@@ -1344,6 +1345,7 @@ fn a_model_s_answer_keeps_its_model_on_the_decision() {
         let filter = nils_registry::review::CommitFilter {
             min_confidence: None,
             campaign: Some(c.id),
+            ..Default::default()
         };
         for kind in ["agent", "model"] {
             let e = nils_registry::review::commit_where(reg, &filter, true, "bot@lab", kind)
@@ -1530,6 +1532,7 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
         let filter = nils_registry::review::CommitFilter {
             min_confidence: None,
             campaign: Some(c.id),
+            ..Default::default()
         };
         let e = nils_registry::review::commit_where(reg, &filter, true, "bot@lab", "agent")
             .unwrap_err();
@@ -2017,6 +2020,528 @@ fn a_v0_import_reads_what_stands_inside_its_transaction() {
         let done = t.join().unwrap();
         assert_eq!(done.held, 1, "{name}: {done:?}");
         assert!(done.decisions.is_empty(), "{name}");
+    }
+}
+
+// ------------------------------------------------------------ record 45
+
+/// The constraints an axes question carries, as the engine freezes them
+/// from a pack (`nils_pack::legal`): three axes, a multi-valued one with an
+/// exclusion group, and a technique that implies its base contrast.
+fn axes_question() -> serde_json::Value {
+    json!({
+        "kind": "axes",
+        "axes": ["base", "technique", "modifier"],
+        "constraints": {
+            "pack": "test@1",
+            "values": {
+                "base": ["T1w", "T2w", "PDw"],
+                "technique": ["MPRAGE", "TSE", "SE"],
+                "modifier": ["FLAIR", "STIR", "FatSat"]
+            },
+            "multi": ["modifier"],
+            "groups": {"modifier": {"IR_CONTRAST": ["FLAIR", "STIR"]}},
+            "implications": [{
+                "rule": "base/technique:MPRAGE",
+                "when": {"axis": "technique", "is": "MPRAGE"},
+                "then": [{"axis": "base", "value": "T1w"}]
+            }]
+        }
+    })
+}
+
+fn person_closes(c: i64) -> Close<'static> {
+    Close {
+        campaign: c,
+        who: "cleo@lab",
+        author_kind: "person",
+        model: None,
+        picks: None,
+    }
+}
+
+/// Record 45 E4: an answer the pack forbids is refused before anything is
+/// written, and three raters on an axes campaign give one decision per axis
+/// per item, agreement measured whole and per axis, the label set one row
+/// per axis.
+#[test]
+fn three_raters_on_an_axes_campaign_give_one_decision_per_axis_per_item() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = axes_question();
+        let adj = json!({"when": "disagree", "metric": "kappa"});
+        let c = campaign::create(
+            reg,
+            &new("axes", &q, &adj, Items::Stacks(ids.clone()), 3, "decision"),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(items.len(), 2, "{name}");
+        let r = nils_registry::review::item(reg.store(), items[0].review_item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.kind, "campaign.axes", "{name}");
+        assert_eq!(
+            r.evidence["axes"],
+            json!(["base", "technique", "modifier"]),
+            "{name}"
+        );
+        // an axes question is not made without its constraints
+        let bare = json!({"kind": "axes", "axes": ["base"]});
+        assert!(
+            campaign::create(
+                reg,
+                &new("bare", &bare, &adj, Items::Stacks(ids.clone()), 1, "none")
+            )
+            .is_err(),
+            "{name}"
+        );
+
+        // the refusals, each before anything is written
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        for (bad, says) in [
+            (
+                r#"{"base": "T2w", "technique": "MPRAGE", "modifier": []}"#,
+                "technique:MPRAGE",
+            ),
+            (
+                r#"{"base": "T1w", "technique": "TSE", "modifier": ["FLAIR", "STIR"]}"#,
+                "IR_CONTRAST",
+            ),
+            (
+                r#"{"base": "T1w", "technique": "TSE"}"#,
+                "modifier is missing",
+            ),
+            (
+                r#"{"base": "T1w", "technique": "TSE", "modifier": null, "construct": "x"}"#,
+                "does not ask",
+            ),
+            (
+                r#"{"base": ["T1w", "T2w"], "technique": "TSE", "modifier": null}"#,
+                "holds one value",
+            ),
+            (
+                r#"{"base": "T3w", "technique": "TSE", "modifier": null}"#,
+                "not a value of base",
+            ),
+            ("T1w", "an object"),
+        ] {
+            let e =
+                campaign::answer(reg, &give(a.assignment.id, "anna@lab", bad), &at(1)).unwrap_err();
+            assert!(
+                matches!(e, campaign::Error::Invalid(_)) && e.to_string().contains(says),
+                "{name}: {bad}: {e}"
+            );
+        }
+        assert_eq!(count(reg, "campaign_answer", ""), 0, "{name}");
+
+        // three raters on each item; the same joint answer in another order
+        // is the same answer
+        let first = [
+            r#"{"base": "T1w", "technique": "MPRAGE", "modifier": ["FatSat"]}"#,
+            r#"{"modifier": "FatSat", "technique": "MPRAGE", "base": "T1w"}"#,
+            r#"{"technique": "MPRAGE", "modifier": ["FatSat"], "base": "T1w"}"#,
+        ];
+        let second = [
+            r#"{"base": "T2w", "technique": "TSE", "modifier": ["FatSat", "FLAIR"]}"#,
+            r#"{"base": "T2w", "technique": "TSE", "modifier": ["FLAIR", "FatSat"]}"#,
+            r#"{"base": "T2w", "technique": "TSE", "modifier": ["FLAIR", "FatSat", "FLAIR"]}"#,
+        ];
+        let mut asked = vec![(a, "anna@lab")];
+        for who in ["bo@lab", "cy@lab"] {
+            asked.push((
+                campaign::claim(reg, c.id, who, Role::Rater, &at(0))
+                    .unwrap()
+                    .unwrap(),
+                who,
+            ));
+        }
+        for (i, (cl, who)) in asked.iter().enumerate() {
+            assert_eq!(cl.item.position, 0, "{name}");
+            let done =
+                campaign::answer(reg, &give(cl.assignment.id, who, first[i]), &at(2)).unwrap();
+            assert_eq!(done.state, if i == 2 { "agreed" } else { "open" }, "{name}");
+        }
+        for (i, who) in ["anna@lab", "bo@lab", "cy@lab"].iter().enumerate() {
+            let cl = campaign::claim(reg, c.id, who, Role::Rater, &at(3))
+                .unwrap()
+                .unwrap();
+            assert_eq!(cl.item.position, 1, "{name}");
+            campaign::answer(reg, &give(cl.assignment.id, who, second[i]), &at(4)).unwrap();
+        }
+        let it = &campaign::items(reg.store(), c.id).unwrap()[1];
+        assert_eq!(it.state, "agreed", "{name}");
+        assert_eq!(it.outcome["per_axis"]["modifier"], 1.0, "{name}");
+        assert_eq!(
+            count(reg, "decision", ""),
+            0,
+            "{name}: an answer is no decision"
+        );
+
+        let closed = campaign::close(reg, &person_closes(c.id), &at(5)).unwrap();
+        assert_eq!(closed.resolved, 2, "{name}: {:?}", closed.refused);
+        assert_eq!(closed.decisions.len(), 6, "{name}: three axes of two items");
+        assert!(!closed.staged, "{name}: persons only, in force");
+        // one decision in force per axis per stack, and no other
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT ref, axis, value, campaign_id FROM {} WHERE withdrawn_at IS NULL AND committed_at IS NOT NULL ORDER BY ref, axis",
+                s.qualified("decision")
+            )
+        });
+        let got: Vec<(String, String, Option<String>)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    r.text(1).unwrap().to_string(),
+                    r.opt_text(2).unwrap().map(str::to_string),
+                )
+            })
+            .collect();
+        let (s0, s1) = (ids[0].to_string(), ids[1].to_string());
+        let mut want = vec![
+            (s0.clone(), "base".to_string(), Some("T1w".to_string())),
+            (
+                s0.clone(),
+                "modifier".to_string(),
+                Some("FatSat".to_string()),
+            ),
+            (
+                s0.clone(),
+                "technique".to_string(),
+                Some("MPRAGE".to_string()),
+            ),
+            (s1.clone(), "base".to_string(), Some("T2w".to_string())),
+            (
+                s1.clone(),
+                "modifier".to_string(),
+                Some("FLAIR,FatSat".to_string()),
+            ),
+            (s1.clone(), "technique".to_string(), Some("TSE".to_string())),
+        ];
+        want.sort();
+        assert_eq!(got, want, "{name}");
+        assert!(
+            rows.iter().all(|r| r.opt_int(3).unwrap() == Some(c.id)),
+            "{name}: each names its campaign"
+        );
+        // the item's review item is closed, naming every decision
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.state, "resolved", "{name}");
+        assert_eq!(
+            it.outcome["decisions"].as_object().unwrap().len(),
+            3,
+            "{name}"
+        );
+        let r = nils_registry::review::item(reg.store(), it.review_item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.status, "accepted", "{name}");
+        // agreement whole and per axis
+        assert_eq!(closed.agreement["exact"], 1.0, "{name}");
+        for axis in ["base", "technique", "modifier"] {
+            assert_eq!(closed.agreement["per_axis"][axis]["exact"], 1.0, "{name}");
+        }
+        // the label set: a row per axis per item, each its decision
+        let rows = labels::campaign_labels(reg.store(), c.id, Of::Outcomes).unwrap();
+        assert_eq!(rows.len(), 6, "{name}");
+        assert!(rows.iter().all(|l| l.decision_id.is_some()), "{name}");
+        let answers = labels::campaign_labels(reg.store(), c.id, Of::Answers).unwrap();
+        assert_eq!(
+            answers.len(),
+            18,
+            "{name}: three raters, two items, three axes"
+        );
+    }
+}
+
+/// Record 45 E4: an axes campaign over open review items asks each stack
+/// once, and its close answers the adopted questions axis by axis: a
+/// group's member is decided on its own, a stack's question is closed by
+/// the decision on its axis; raters who disagree on one axis are measured
+/// per axis.
+#[test]
+fn an_axes_campaign_over_review_items_answers_them_axis_by_axis() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let now = nils_registry::time::now_iso();
+        let store = reg.store();
+        // a base question on each stack, grouped, and a technique question
+        // on the first
+        let group = row(
+            store,
+            "review_item",
+            &[
+                ("kind", Param::from("base:low_confidence")),
+                ("scope", Param::from("group")),
+                ("ref", Param::from(json!({"group": "g"}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "base", "confidence": 0.4}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+                ("members", Param::Int(2)),
+            ],
+        );
+        for s in &ids {
+            row(
+                store,
+                "review_member",
+                &[("item_id", Param::Int(group)), ("stack_id", Param::Int(*s))],
+            );
+        }
+        let own = row(
+            store,
+            "review_item",
+            &[
+                ("kind", Param::from("technique:missing")),
+                ("scope", Param::from("stack")),
+                ("ref", Param::from(json!({"stack_id": ids[0]}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "technique", "confidence": 0.2}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+            ],
+        );
+        let q = axes_question();
+        let adj = json!({"when": "never"});
+        // an item about an axis the question does not ask is refused
+        let only_base = json!({"kind": "axes", "axes": ["modifier"],
+            "constraints": {"values": {"modifier": ["FLAIR"]}, "multi": ["modifier"], "groups": {}, "implications": []}});
+        assert!(
+            campaign::create(
+                reg,
+                &new(
+                    "wrong",
+                    &only_base,
+                    &adj,
+                    Items::Review(vec![own]),
+                    1,
+                    "decision"
+                )
+            )
+            .is_err(),
+            "{name}"
+        );
+        let c = campaign::create(
+            reg,
+            &new(
+                "adopt-axes",
+                &q,
+                &adj,
+                Items::Review(vec![group, own]),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(items.len(), 2, "{name}: one item per stack");
+        assert_eq!(items[0].stack_id, Some(ids[0]), "{name}");
+        // one open campaign asks each adopted item
+        assert!(
+            campaign::create(
+                reg,
+                &new("again", &q, &adj, Items::Review(vec![own]), 1, "decision")
+            )
+            .is_err(),
+            "{name}"
+        );
+        let answer = [
+            (
+                0,
+                r#"{"base": "T1w", "technique": "MPRAGE", "modifier": null}"#,
+                r#"{"base": "T1w", "technique": "MPRAGE", "modifier": []}"#,
+            ),
+            (
+                1,
+                r#"{"base": "PDw", "technique": "TSE", "modifier": null}"#,
+                r#"{"base": "PDw", "technique": "SE", "modifier": null}"#,
+            ),
+        ];
+        for (_, x, y) in answer {
+            for (who, v) in [("anna@lab", x), ("bo@lab", y)] {
+                let cl = campaign::claim(reg, c.id, who, Role::Rater, &at(0))
+                    .unwrap()
+                    .unwrap();
+                campaign::answer(reg, &give(cl.assignment.id, who, v), &at(1)).unwrap();
+            }
+        }
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(items[0].state, "agreed", "{name}");
+        assert_eq!(items[1].state, "disagreed", "{name}");
+        let agreement = campaign::agreement(reg.store(), c.id).unwrap();
+        assert_eq!(agreement["exact"], 0.5, "{name}");
+        assert_eq!(agreement["per_axis"]["base"]["exact"], 1.0, "{name}");
+        assert_eq!(agreement["per_axis"]["technique"]["exact"], 0.5, "{name}");
+        let closed = campaign::close(reg, &person_closes(c.id), &at(2)).unwrap();
+        assert_eq!(closed.resolved, 1, "{name}: {:?}", closed.refused);
+        assert_eq!(closed.unresolved, 1, "{name}");
+        assert_eq!(closed.decisions.len(), 3, "{name}");
+        // the first stack's base decided as the group's member, its
+        // technique question closed by the technique decision
+        let members = nils_registry::review::members(reg.store(), group).unwrap();
+        let decided: Vec<(i64, bool)> = members
+            .iter()
+            .map(|m| (m.stack_id, m.decided_at.is_some()))
+            .collect();
+        assert_eq!(decided, [(ids[0], true), (ids[1], false)], "{name}");
+        let g = nils_registry::review::item(reg.store(), group)
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.status, "open", "{name}: the second member waits");
+        let t = nils_registry::review::item(reg.store(), own)
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.status, "accepted", "{name}");
+        assert_eq!(
+            count(
+                reg,
+                "decision",
+                &format!(" WHERE ref = '{}' AND withdrawn_at IS NULL", ids[0])
+            ),
+            3,
+            "{name}"
+        );
+    }
+}
+
+/// Record 45 R5: System 1's question is held to its shape, and to the
+/// pack's legal combinations where they are given; one open per stack; and
+/// a chosen candidate answers every axis at once, a decision per axis, the
+/// item closed.
+#[test]
+fn a_classify_asked_item_is_its_shape_and_a_candidate_answers_every_axis() {
+    let example: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../contracts/review-item/v4/classify.asked.example.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let evidence = example["evidence"].clone();
+    assert_eq!(example["kind"], "classify.asked");
+    nils_registry::asked::check(&evidence, None).unwrap();
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let constraints = axes_question()["constraints"].clone();
+        // an illegal candidate is refused with the pack's constraints
+        let mut bad = evidence.clone();
+        bad["candidates"][1]["values"]["base"] = json!("T2w");
+        bad["candidates"][1]["values"]["technique"] = json!("MPRAGE");
+        let e = nils_registry::asked::raise(reg.store(), ids[0], &bad, Some(&constraints), None)
+            .unwrap_err();
+        assert!(e.to_string().contains("MPRAGE"), "{name}: {e}");
+        // out of order, or not summing to one or less, is not the shape
+        let mut swapped = evidence.clone();
+        swapped["candidates"][0]["p"] = json!(0.1);
+        assert!(
+            nils_registry::asked::check(&swapped, None).is_err(),
+            "{name}"
+        );
+        let first =
+            nils_registry::asked::raise(reg.store(), ids[0], &evidence, Some(&constraints), None)
+                .unwrap();
+        let second =
+            nils_registry::asked::raise(reg.store(), ids[0], &evidence, Some(&constraints), None)
+                .unwrap();
+        let was = nils_registry::review::item(reg.store(), first)
+            .unwrap()
+            .unwrap();
+        assert_eq!(was.status, "superseded", "{name}: one open per stack");
+        let item = nils_registry::review::item(reg.store(), second)
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.kind, "classify.asked", "{name}");
+        // the first candidate, chosen in Review
+        let values: Vec<(String, Option<String>)> = vec![
+            ("base".into(), Some("T1w".into())),
+            ("technique".into(), Some("MPRAGE".into())),
+            ("modifier".into(), Some("FatSat".into())),
+        ];
+        let applied = nils_registry::review::apply_values(
+            reg,
+            &nils_registry::review::Apply {
+                item: second,
+                member: None,
+                scope: "stack",
+                value: None,
+                author: nils_registry::review::Author {
+                    who: "anna@lab",
+                    kind: "person",
+                    version: None,
+                    model: None,
+                },
+                stage: false,
+                why: Some("the first candidate"),
+                campaign: None,
+            },
+            &values,
+        )
+        .unwrap();
+        assert_eq!(applied.len(), 3, "{name}");
+        let item = nils_registry::review::item(reg.store(), second)
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.status, "accepted", "{name}");
+        assert_eq!(
+            count(
+                reg,
+                "decision",
+                &format!(" WHERE ref = '{}' AND committed_at IS NOT NULL", ids[0])
+            ),
+            3,
+            "{name}"
+        );
+        // an axis the item does not ask is refused, and nothing is written
+        let third =
+            nils_registry::asked::raise(reg.store(), ids[1], &evidence, None, None).unwrap();
+        let before = count(reg, "decision", "");
+        let e = nils_registry::review::apply_values(
+            reg,
+            &nils_registry::review::Apply {
+                item: third,
+                member: None,
+                scope: "stack",
+                value: None,
+                author: nils_registry::review::Author {
+                    who: "anna@lab",
+                    kind: "person",
+                    version: None,
+                    model: None,
+                },
+                stage: false,
+                why: None,
+                campaign: None,
+            },
+            &[
+                ("base".into(), Some("T1w".into())),
+                ("construct".into(), None),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("does not ask about construct"),
+            "{name}: {e}"
+        );
+        assert_eq!(
+            count(reg, "decision", ""),
+            before,
+            "{name}: nothing written"
+        );
     }
 }
 

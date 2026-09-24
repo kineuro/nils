@@ -636,11 +636,23 @@ enum SettingsCommand {
 
 #[derive(Debug, Subcommand)]
 enum PyramidCommand {
-    /// Build the pyramid of one stack: every slice at four in-plane levels, 256 by 256 tiles, reversible HTJ2K
+    /// Build the pyramid of one stack, or of a selection's stacks as one job that skips those built: every slice at four in-plane levels, 256 by 256 tiles, reversible HTJ2K
     Build {
         /// The stack's id in the registry
+        #[arg(long, value_name = "ID", required_unless_present_any = ["select", "handle"], conflicts_with_all = ["select", "handle"])]
+        stack: Option<i64>,
+        /// Every stack of a saved selection, frozen now into its stacks (record 45)
+        #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
+        select: Option<String>,
+        /// Every stack of a frozen handle, such as the one a campaign pins
         #[arg(long, value_name = "ID")]
-        stack: i64,
+        handle: Option<i64>,
+        /// The pack a selection is frozen under
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        /// Where the packs are
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<std::path::PathBuf>,
         /// The working place to write under; the first working place when absent
         #[arg(long, value_name = "NAME")]
         place: Option<String>,
@@ -1432,14 +1444,40 @@ enum ReviewCommand {
     /// The same as `apply`, under the name Wave 2 gave it
     Decide(DecideArgs),
     /// Put staged decisions in force: one by id, every one with --all, or
-    /// the part a filter names (--min-confidence, --campaign), leaving the
-    /// rest staged. Refused when the registry moved on since they were
-    /// staged, unless --anyway
+    /// the part a filter names (--min-confidence, --campaign, --model,
+    /// --axis with --from and --to, --stacks), leaving the rest staged.
+    /// Refused when the registry moved on since they were staged, unless
+    /// --anyway
     Commit {
         /// The decision to commit
         id: Option<i64>,
-        #[arg(long, conflicts_with_all = ["min_confidence", "campaign"])]
+        #[arg(long, conflicts_with_all = ["min_confidence", "campaign", "model", "axis", "from", "to", "stacks"])]
         all: bool,
+        /// Only decisions this registered model authored: its id, its
+        /// digest or name@version (record 45)
+        #[arg(long, value_name = "MODEL", conflicts_with = "id")]
+        model: Option<String>,
+        /// Only decisions on this axis; --from and --to are its values
+        #[arg(long, value_name = "AXIS", conflicts_with = "id")]
+        axis: Option<String>,
+        /// Only where the axis holds this value now on every stack the
+        /// decision reaches (a multi-valued axis's values joined by commas;
+        /// empty for none); a group's decision is split to the stacks that do
+        #[arg(long, value_name = "VALUE", requires = "axis", conflicts_with = "id")]
+        from: Option<String>,
+        /// Only decisions that set this value
+        #[arg(long, value_name = "VALUE", requires = "axis", conflicts_with = "id")]
+        to: Option<String>,
+        /// Only on these stacks, as ids joined by commas; a group's decision
+        /// is split to the ones it reaches
+        #[arg(long, value_name = "IDS", value_delimiter = ',', conflicts_with = "id")]
+        stacks: Option<Vec<i64>>,
+        /// The pack whose names of the axis's values --from and --to are
+        /// read in (identity or label alike)
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<std::path::PathBuf>,
         /// Only decisions whose confidence is at least this: the agreement
         /// of the campaign item that closed into it, else the confidence
         /// its review item names
@@ -1464,6 +1502,22 @@ enum ReviewCommand {
         /// A word on what was checked
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
+    },
+    /// A fixture of System 1's question (record 45 R5): a classify.asked
+    /// item on a stack from an evidence file, held to the shape the
+    /// review-item contract fixes and, with a pack, to its legal
+    /// combinations. Wave 44 writes the real ones
+    #[command(hide = true)]
+    Asked {
+        #[arg(long, value_name = "ID")]
+        stack: i64,
+        /// The evidence, as JSON
+        #[arg(long, value_name = "FILE")]
+        evidence: std::path::PathBuf,
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -3749,18 +3803,26 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
     match command {
         PyramidCommand::Build {
             stack,
+            select,
+            handle,
+            pack,
+            pack_dir,
             place,
             workers,
         } => {
             let working =
                 crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
-            let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
-            let volume = crate::pyramid::read_volume(registry.store(), stack).map_err(fail)?;
             let workers = workers.unwrap_or_else(|| {
                 std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4)
             });
+            let Some(stack) = stack else {
+                drop(registry);
+                return pyramid_many(home, select, handle, &pack, pack_dir, &working, workers);
+            };
+            let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
+            let volume = crate::pyramid::read_volume(registry.store(), stack).map_err(fail)?;
             let m = crate::pyramid::build(&volume, stack, &root, workers, None).map_err(fail)?;
             println!(
                 "{}",
@@ -3769,6 +3831,8 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
                     "shape": m.shape, "levels": m.levels, "codec": m.codec,
                     "bytes_per_level": m.bytes_per_level, "raw_bytes": m.precompute.raw_bytes,
                     "wall_seconds": m.precompute.wall_seconds, "workers": m.precompute.workers,
+                    "orientation": m.orientation, "origin": m.origin, "frame": m.frame,
+                    "plane": m.plane, "oblique": m.oblique,
                 })
             );
             Ok(())
@@ -3801,6 +3865,90 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             Ok(())
         }
     }
+}
+
+/// Record 45 E1: the pyramids of a selection's or a handle's stacks as one
+/// job of kind `pyramid`, which skips the stacks built, counts the ones
+/// that fail with why and goes on, and ends with built, skipped and failed
+/// in its result.
+fn pyramid_many(
+    home: &Home,
+    select: Option<String>,
+    handle: Option<i64>,
+    pack: &str,
+    pack_dir: Option<std::path::PathBuf>,
+    working: &nils_registry::place::Place,
+    workers: usize,
+) -> Result<(), Exit> {
+    let handle = match (&select, handle) {
+        (Some(spec), _) => crate::ask_cli::freeze_selection(
+            home,
+            spec,
+            nils_ask::ast::Grain::Stack,
+            pack_dir,
+            pack,
+        )?,
+        (None, Some(h)) => h,
+        (None, None) => return Err(usage("--stack, --select or --handle")),
+    };
+    let mut registry = open(home)?;
+    let stacks: Vec<i64> =
+        crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)
+            .map_err(crate::campaigns::rerr)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+    let job = nils_registry::job::claim(
+        registry.store(),
+        &nils_registry::job::Claim {
+            kind: "pyramid",
+            name: select.as_deref().unwrap_or("handle"),
+            args: serde_json::json!({
+                "selection": select, "handle": handle, "place": working.name,
+                "stacks": stacks.len(), "workers": workers,
+            }),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let total = stacks.len();
+    let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::pyramid::Many| {
+        let done = so_far.built.len() + so_far.skipped.len() + so_far.failed.len();
+        let progress = serde_json::json!({
+            "done": done, "total": total, "built": so_far.built.len(),
+            "skipped": so_far.skipped.len(), "failed": so_far.failed.len(),
+        });
+        !matches!(
+            nils_registry::job::beat(store, job, Some(&progress)),
+            Ok(nils_registry::job::Asked::Cancel)
+        )
+    };
+    let many = crate::pyramid::build_many(
+        registry.store(),
+        std::path::Path::new(&working.path),
+        &stacks,
+        workers,
+        None,
+        &mut go_on,
+    );
+    let mut result = many.as_json(&working.name);
+    result["handle"] = serde_json::json!(handle);
+    result["selection"] = serde_json::json!(select);
+    let store = registry.store();
+    nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
+    let state = if many.stopped {
+        nils_registry::job::State::Cancelled
+    } else {
+        nils_registry::job::State::Done
+    };
+    nils_registry::job::finish(store, job, state, None).map_err(|e| fail(e.to_string()))?;
+    println!("{result}");
+    if many.stopped {
+        return Err(Exit {
+            code: crate::STOPPED,
+            message: "stopped: what was built stays built; run it again to go on".into(),
+        });
+    }
+    Ok(())
 }
 
 fn settings_command(home: &Home, command: SettingsCommand) -> Result<(), Exit> {
@@ -4585,7 +4733,55 @@ fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exi
 }
 
 /// `nils review list | show`: the rows of `review_item`.
+/// Record 45 R5: a `classify.asked` item from a file, the fixture of what
+/// wave 44 writes.
+fn review_asked(
+    home: &Home,
+    stack: i64,
+    evidence: &std::path::Path,
+    pack: &str,
+    pack_dir: Option<std::path::PathBuf>,
+) -> Result<(), Exit> {
+    let text = std::fs::read_to_string(evidence)
+        .map_err(|e| usage(format!("{}: {e}", evidence.display())))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| usage(format!("{}: {e}", evidence.display())))?;
+    let axes: Vec<String> = doc["axes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_str().map(str::to_string))
+        .collect();
+    let constraints = match crate::pack_dir(home, pack_dir)
+        .ok()
+        .and_then(|d| nils_pack::load(&d.join(pack), None).ok())
+    {
+        Some(p) if !axes.is_empty() => Some(
+            nils_pack::legal::constraints(&p, &axes, &std::collections::BTreeMap::new())
+                .map_err(usage)?,
+        ),
+        _ => None,
+    };
+    let mut registry = open(home)?;
+    let id = nils_registry::asked::raise(registry.store(), stack, &doc, constraints.as_ref(), None)
+        .map_err(|e| usage(e.to_string()))?;
+    println!(
+        "{}",
+        serde_json::json!({"review_item": id, "kind": nils_registry::asked::KIND, "stack": stack, "checked_against_pack": constraints.is_some()})
+    );
+    Ok(())
+}
+
 fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
+    let command = match command {
+        ReviewCommand::Asked {
+            stack,
+            evidence,
+            pack,
+            pack_dir,
+        } => return review_asked(home, stack, &evidence, &pack, pack_dir),
+        other => other,
+    };
     let mut registry = open(home)?;
     let store = registry.store();
     let d = store.dialect();
@@ -4688,10 +4884,22 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             all,
             min_confidence,
             campaign,
+            model,
+            axis,
+            from,
+            to,
+            stacks,
+            pack,
+            pack_dir,
             anyway,
         } => {
             drop(columns);
-            if min_confidence.is_some() || campaign.is_some() {
+            if min_confidence.is_some()
+                || campaign.is_some()
+                || model.is_some()
+                || axis.is_some()
+                || stacks.is_some()
+            {
                 let campaign = match campaign {
                     Some(w) => Some(
                         nils_registry::campaign::find(registry.store(), &w)
@@ -4705,6 +4913,18 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     &nils_registry::review::CommitFilter {
                         min_confidence,
                         campaign,
+                        model,
+                        names: crate::campaigns::value_names(
+                            crate::pack_dir(home, pack_dir)
+                                .ok()
+                                .and_then(|d| nils_pack::load(&d.join(&pack), None).ok())
+                                .as_ref(),
+                            axis.as_deref(),
+                        ),
+                        axis,
+                        from,
+                        to,
+                        stacks,
                     },
                     anyway,
                     &actor(),
@@ -4712,16 +4932,28 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 )
                 .map_err(|e| fail(e.to_string()))?;
                 println!(
-                    "committed {} decision(s), {} item(s) accepted; {} left staged",
+                    "committed {} decision(s), {} item(s) accepted; {} left staged{}",
                     done.decisions.len(),
                     done.items,
-                    done.left
+                    done.left,
+                    if done.split.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; part of group decision(s) {} committed stack by stack",
+                            done.split
+                                .iter()
+                                .map(i64::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
                 );
                 return Ok(());
             }
             if id.is_none() && !all {
                 return Err(usage(
-                    "name a decision to commit, --all, or a filter (--min-confidence, --campaign)",
+                    "name a decision to commit, --all, or a filter (--min-confidence, --campaign, --model, --axis with --from and --to, --stacks)",
                 ));
             }
             let done =
@@ -4746,6 +4978,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             drop(columns);
             review_accept(&mut registry, id, why)
         }
+        ReviewCommand::Asked { .. } => unreachable!("answered before the registry opened"),
         ReviewCommand::Show { id, json } => {
             let sql = format!(
                 "SELECT {columns} FROM {} WHERE id = {}",

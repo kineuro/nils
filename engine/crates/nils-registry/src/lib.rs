@@ -16,6 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 
 pub mod actor;
+pub mod asked;
 pub mod audit;
 pub mod campaign;
 pub mod clinical;

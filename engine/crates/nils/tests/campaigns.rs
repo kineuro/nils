@@ -1023,6 +1023,474 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
     assert!(shown.contains("closed"), "{shown}");
 }
 
+/// Record 45 E4, E3 and R5 through the door: an axes question takes the
+/// served pack's legal combinations, never the caller's; an answer the pack
+/// forbids is refused; three raters give one decision per axis per item;
+/// the commit by filter says what it needs; and System 1's question,
+/// written by its fixture, is answered whole by one of its candidates.
+#[test]
+fn an_axes_campaign_at_the_door_is_held_to_the_pack_and_closes_axis_by_axis() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let question = json!({"kind": "axes", "axes": ["base", "technique", "modifier"]});
+    // the constraints are the pack's, never the caller's
+    let mut forged = question.clone();
+    forged["constraints"] = json!({"values": {}, "multi": [], "groups": {}, "implications": []});
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(
+            json!({"name": "forged", "question": forged, "source": {"selection": "every-stack@1"}}),
+        ),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(json!({"name": "colour", "question": {"kind": "axes", "axes": ["colour"]}, "source": {"selection": "every-stack@1"}})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "classification",
+            "question": question,
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 3,
+            "closes_into": "stage",
+        })),
+        CURATOR,
+    );
+    let id = made["id"].as_i64().unwrap().to_string();
+    assert!(
+        made["question"]["constraints"]["pack"]
+            .as_str()
+            .unwrap()
+            .starts_with("mri@"),
+        "{made}"
+    );
+    assert!(
+        made["question"]["values"]["modifier"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("FatSat")),
+        "{made}"
+    );
+    assert_eq!(made["pictures"]["stacks"], 4, "{made}");
+    assert_eq!(made["pictures"]["missing"], 4, "{made}");
+
+    // what the pack forbids is refused, in the pack's words
+    let claimed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/claim"),
+        Some(json!({})),
+        ANNA,
+    );
+    let a = claimed["assignment"]["id"].as_i64().unwrap();
+    for (bad, says) in [
+        (
+            json!({"base": "T2w", "technique": "MPRAGE", "modifier": null}),
+            "MPRAGE",
+        ),
+        (
+            json!({"base": "T2w", "technique": "TSE", "modifier": ["FLAIR", "STIR"]}),
+            "IR_CONTRAST",
+        ),
+        (json!({"base": "T1w", "technique": "MPRAGE"}), "modifier"),
+    ] {
+        let (status, doc) = server.call(
+            "POST",
+            &format!("/api/campaigns/{id}/assignments/{a}/answer"),
+            Some(json!({"value": bad})),
+            ANNA,
+        );
+        assert_eq!(status, 400, "{bad}: {doc}");
+        assert!(doc.to_string().contains(says), "{bad}: {doc}");
+    }
+    // three raters, four items, one joint answer each, in any order
+    let answer = json!({"value": {"modifier": ["FatSat"], "base": "T1w", "technique": "MPRAGE"}});
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/assignments/{a}/answer"),
+        Some(answer.clone()),
+        ANNA,
+    );
+    for (token, items) in [(ANNA, 3), (BO, 4), (JUDGE, 4)] {
+        for _ in 0..items {
+            rate(&server, &id, token, answer.clone());
+        }
+    }
+    let closed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/close"),
+        Some(json!({})),
+        CURATOR,
+    );
+    assert_eq!(closed["resolved"], 4, "{closed}");
+    assert_eq!(closed["staged"], true, "{closed}");
+    assert_eq!(
+        closed["decisions"].as_array().unwrap().len(),
+        12,
+        "one decision per axis per item: {closed}"
+    );
+    assert_eq!(
+        closed["agreement"]["per_axis"]["base"]["exact"], 1.0,
+        "{closed}"
+    );
+    let shown = server.ok("GET", &format!("/api/campaigns/{id}"), None, CURATOR);
+    for it in shown["items"].as_array().unwrap() {
+        assert_eq!(
+            it["outcome"]["decisions"].as_object().unwrap().len(),
+            3,
+            "{it}"
+        );
+    }
+
+    // E3: the commit by filter's words
+    for (body, says) in [
+        (json!({"from": "T1w"}), "name the axis"),
+        (json!({"model": "no-such@1"}), "no registered model"),
+        (json!({"stacks": []}), "names no stack"),
+    ] {
+        let (status, doc) =
+            server.call("POST", "/api/decisions/commit", Some(body.clone()), CURATOR);
+        assert_eq!(status, 409, "{body}: {doc}");
+        assert!(doc.to_string().contains(says), "{body}: {doc}");
+    }
+    // from is what the stack holds now, the classifier's value here, and a
+    // field sent as null is a field not asked: the change from what stack 1
+    // holds to T1w commits the base decision of every stack that holds it,
+    // and nothing else
+    let explained = server.ok("GET", "/api/explain/1", None, CURATOR);
+    let from = explained["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "base")
+        .and_then(|a| a["value"].as_str())
+        .unwrap_or_else(|| panic!("stack 1 has a base: {explained}"))
+        .to_string();
+    let holding = (1..=4)
+        .filter(|s| {
+            let e = server.ok("GET", &format!("/api/explain/{s}"), None, CURATOR);
+            e["axes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["axis"] == "base" && a["value"] == from.as_str())
+        })
+        .count();
+    let part = server.ok(
+        "POST",
+        "/api/decisions/commit",
+        Some(json!({
+            "axis": "base", "from": from, "to": "T1w", "model": null, "stacks": null,
+            "min_confidence": null, "campaign": null,
+        })),
+        CURATOR,
+    );
+    assert_eq!(
+        part["committed"].as_array().unwrap().len(),
+        holding,
+        "{from}: {part}"
+    );
+    assert_eq!(part["left"], 12 - holding as i64, "{part}");
+
+    // R5: System 1's question, from its fixture, answered whole
+    let example: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../contracts/review-item/v4/classify.asked.example.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let dir = TempDir::new("campaign-asked");
+    let file = dir.file("evidence.json", example["evidence"].to_string().as_bytes());
+    let raised: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &[
+            "review",
+            "asked",
+            "--stack",
+            "2",
+            "--evidence",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(raised["checked_against_pack"], true, "{raised}");
+    let item = raised["review_item"].as_i64().unwrap();
+    // a query value is read decoded, on every door
+    let listed = server.ok("GET", "/api/review?kind=classify%2Easked", None, CURATOR);
+    assert!(listed.to_string().contains("\"candidates\""), "{listed}");
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/review/{item}/apply"),
+        Some(json!({"values": {"base": "T2w", "technique": "MPRAGE", "modifier": []}})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let done = server.ok(
+        "POST",
+        &format!("/api/review/{item}/apply"),
+        Some(json!({"values": example["evidence"]["candidates"][0]["values"]})),
+        CURATOR,
+    );
+    assert_eq!(done["decisions"].as_array().unwrap().len(), 3, "{done}");
+    assert_eq!(done["staged"], false, "{done}");
+}
+
+/// Record 45 at the keyboard: an axes campaign made with `--axes` takes the
+/// pack's constraints, refuses what the pack forbids, closes staged into a
+/// decision per axis, and `review commit --axis --to` puts one axis's part
+/// in force and leaves the rest.
+#[test]
+fn the_keyboard_asks_several_axes_and_commits_one_axis_of_them() {
+    let home = registry();
+    let work = TempDir::new("campaign-axes-cli");
+    let pack_dir = packs();
+    let pack_dir = pack_dir.to_str().unwrap();
+    let doc = work.path().join("every.json");
+    std::fs::write(
+        &doc,
+        json!({"ast_version": 1, "sets": {"every": {"grain": "stack"}}, "out": {"set": "every", "level": "record"}}).to_string(),
+    )
+    .unwrap();
+    cli(
+        &home,
+        "cleo@lab",
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            "every",
+            "--file",
+            doc.to_str().unwrap(),
+            "--pack-dir",
+            pack_dir,
+        ],
+    );
+    let made: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &[
+            "campaign",
+            "create",
+            "classify",
+            "--axes",
+            "base,technique",
+            "--select",
+            "selection:every@1",
+            "--closes-into",
+            "stage",
+            "--pack-dir",
+            pack_dir,
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(made["question"]["kind"], "axes", "{made}");
+    assert!(
+        made["question"]["constraints"]["implications"].is_array(),
+        "{made}"
+    );
+    assert_eq!(made["pictures"]["missing"], 4, "{made}");
+    let n = made["items"].as_array().unwrap().len();
+    for i in 0..n {
+        let claimed: Value = serde_json::from_str(&cli(
+            &home,
+            "anna@lab",
+            &["campaign", "claim", "classify", "--json"],
+        ))
+        .unwrap();
+        let a = claimed["assignment"]["id"].as_i64().unwrap().to_string();
+        if i == 0 {
+            let out = nils()
+                .arg("--registry")
+                .arg(home.path())
+                .args([
+                    "campaign",
+                    "answer",
+                    &a,
+                    "--value",
+                    r#"{"base": "T2w", "technique": "MPRAGE"}"#,
+                ])
+                .env("NILS_PRINCIPAL", "anna@lab")
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains("MPRAGE"), "{err}");
+        }
+        let value = if i % 2 == 0 {
+            r#"{"base": "T1w", "technique": "MPRAGE"}"#
+        } else {
+            r#"{"base": "T2w", "technique": "TSE"}"#
+        };
+        cli(
+            &home,
+            "anna@lab",
+            &["campaign", "answer", &a, "--value", value],
+        );
+    }
+    let closed: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &["campaign", "close", "classify", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(
+        closed["decisions"].as_array().unwrap().len(),
+        2 * n,
+        "{closed}"
+    );
+    assert_eq!(closed["staged"], true, "{closed}");
+    // the base axis's T1w part, and nothing else
+    let text = cli(
+        &home,
+        "cleo@lab",
+        &["review", "commit", "--axis", "base", "--to", "T1w"],
+    );
+    let t1 = n.div_ceil(2);
+    assert!(
+        text.contains(&format!("committed {t1} decision(s)"))
+            && text.contains(&format!("{} left staged", 2 * n - t1)),
+        "{text}"
+    );
+}
+
+/// Record 45 for the rating workspace: a lease is renewed by the rater who
+/// holds it and nobody else; rating is blind until the campaign closes,
+/// except to an adjudicator and a holder of review:work; and an axes answer
+/// reads back as the object it was sent as.
+#[test]
+fn a_lease_is_renewed_rating_is_blind_and_an_axes_answer_is_an_object() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "blind",
+            "question": {"kind": "axes", "axes": ["base", "technique"]},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 2,
+            "adjudicators": ["judge@lab"],
+            "lease_seconds": 600,
+        })),
+        CURATOR,
+    );
+    let id = made["id"].as_i64().unwrap().to_string();
+
+    // the lease: renewed by its holder, refused to another
+    let claimed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/claim"),
+        Some(json!({})),
+        ANNA,
+    );
+    let a = claimed["assignment"]["id"].as_i64().unwrap();
+    let before = claimed["assignment"]["lease_until"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let renewed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/assignments/{a}/renew"),
+        Some(json!({})),
+        ANNA,
+    );
+    assert!(
+        renewed["lease_until"].as_str().unwrap() > before.as_str(),
+        "{before} then {renewed}"
+    );
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/campaigns/{id}/assignments/{a}/renew"),
+        Some(json!({})),
+        BO,
+    );
+    assert_eq!(status, 403, "{doc}");
+
+    // two raters answer the first item, differently
+    let joint = json!({"technique": "MPRAGE", "base": "T1w"});
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/assignments/{a}/answer"),
+        Some(json!({"value": joint})),
+        ANNA,
+    );
+    let (claim_b, _) = rate(
+        &server,
+        &id,
+        BO,
+        json!({"value": {"base": "T2w", "technique": "TSE"}}),
+    );
+    assert_eq!(claim_b["item"]["id"], claimed["item"]["id"]);
+    // a lease that ended with its answer is not renewed
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/campaigns/{id}/assignments/{a}/renew"),
+        Some(json!({})),
+        ANNA,
+    );
+    assert_eq!(status, 409, "{doc}");
+
+    // blind: a rater reads only her own answer, as the object she sent
+    let mine = server.ok("GET", &format!("/api/campaigns/{id}/answers"), None, ANNA);
+    assert_eq!(mine["blind"], true, "{mine}");
+    let list = mine["answers"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{mine}");
+    assert_eq!(list[0]["principal"], "anna@lab");
+    assert_eq!(list[0]["value"], joint, "{mine}");
+    // the adjudicator, and a holder of review:work, read both
+    for token in [JUDGE, CURATOR] {
+        let all = server.ok("GET", &format!("/api/campaigns/{id}/answers"), None, token);
+        assert_eq!(all["blind"], false, "{all}");
+        assert_eq!(all["answers"].as_array().unwrap().len(), 2, "{all}");
+    }
+    // after the close, every rater reads every answer
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/close"),
+        Some(json!({})),
+        CURATOR,
+    );
+    let all = server.ok("GET", &format!("/api/campaigns/{id}/answers"), None, BO);
+    assert_eq!(all["blind"], false, "{all}");
+    assert_eq!(all["answers"].as_array().unwrap().len(), 2, "{all}");
+    assert!(all["answers"][0]["value"].is_object(), "{all}");
+}
+
 /// The command line as a principal with an actor in `NILS_ACTOR`, as a
 /// worker runs a verb; answers the output whatever the exit.
 fn cli_as(home: &TempDir, who: &str, actor: Option<&str>, args: &[&str]) -> std::process::Output {

@@ -16,10 +16,12 @@
 //!   written as decisions would cancel each other. An answer stays an
 //!   answer, kept for good, and an item becomes one decision only when the
 //!   campaign closes: the value the raters agreed on, or the adjudicator's.
-//! - **Five questions.** `axis` (which value of one pack axis), `pick`
-//!   (which stacks stand for a role in a session), `form` (a small declared
-//!   form), `derivative` (a file answer, a mask, named by its derivative
-//!   id; the bytes go through the derivative door) and `free`.
+//! - **Six questions.** `axis` (which value of one pack axis), `axes`
+//!   (several axes of a stack at once, record 45: the answer is held to the
+//!   pack's legal combinations and closes into one decision per axis),
+//!   `pick` (which stacks stand for a role in a session), `form` (a small
+//!   declared form), `derivative` (a file answer, a mask, named by its
+//!   derivative id; the bytes go through the derivative door) and `free`.
 //! - **Agreement.** Exact agreement per item, Cohen's and Fleiss' kappa over
 //!   the campaign, or an external metric a caller posts for an item (a Dice
 //!   over masks, which something with pixels computed: the engine never
@@ -88,6 +90,15 @@ pub enum Question {
     /// Which value of one pack axis; `values`, when given, is the
     /// vocabulary an answer must come from.
     Axis { axis: String, values: Vec<String> },
+    /// Several axes of one stack at once (record 45 R2): the answer names a
+    /// value, or a set of them for a multi-valued axis, for every axis
+    /// asked, and is refused unless the pack's constraints, frozen into the
+    /// question when the campaign was made, allow the combination
+    /// (`nils_pack::legal`). It closes into one decision per axis.
+    Axes {
+        axes: Vec<String>,
+        constraints: Value,
+    },
     /// Which stacks stand for a role in a session.
     Pick { role: String, scheme: String },
     /// A small declared form: `properties` with a `type` or an `enum` each,
@@ -104,13 +115,13 @@ pub enum Question {
 }
 
 /// The question kinds, as a campaign names them.
-pub const KINDS: [&str; 5] = ["axis", "pick", "form", "derivative", "free"];
+pub const KINDS: [&str; 6] = ["axis", "axes", "pick", "form", "derivative", "free"];
 
 impl Question {
     pub fn parse(v: &Value) -> Result<Question, Error> {
         let kind = v["kind"]
             .as_str()
-            .ok_or_else(|| invalid("question.kind: axis, pick, form, derivative or free"))?;
+            .ok_or_else(|| invalid("question.kind: axis, axes, pick, form, derivative or free"))?;
         Ok(match kind {
             "axis" => {
                 let axis = v["axis"]
@@ -133,6 +144,26 @@ impl Question {
                     axis: axis.to_string(),
                     values,
                 }
+            }
+            "axes" => {
+                let axes: Vec<String> = v["axes"]
+                    .as_array()
+                    .filter(|a| !a.is_empty())
+                    .ok_or_else(|| invalid("an axes question names its axes, a list"))?
+                    .iter()
+                    .map(|x| {
+                        x.as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .ok_or_else(|| invalid("question.axes: a list of axis names"))
+                    })
+                    .collect::<Result<_, _>>()?;
+                if axes.iter().collect::<BTreeSet<_>>().len() != axes.len() {
+                    return Err(invalid("question.axes names an axis twice"));
+                }
+                let constraints = v["constraints"].clone();
+                check_constraints(&axes, &constraints)?;
+                Question::Axes { axes, constraints }
             }
             "pick" => Question::Pick {
                 role: v["role"]
@@ -163,7 +194,7 @@ impl Question {
             "free" => Question::Free,
             other => {
                 return Err(invalid(format!(
-                    "{other} is not a question: axis, pick, form, derivative or free"
+                    "{other} is not a question: axis, axes, pick, form, derivative or free"
                 )));
             }
         })
@@ -172,6 +203,7 @@ impl Question {
     pub fn kind(&self) -> &'static str {
         match self {
             Question::Axis { .. } => "axis",
+            Question::Axes { .. } => "axes",
             Question::Pick { .. } => "pick",
             Question::Form { .. } => "form",
             Question::Derivative { .. } => "derivative",
@@ -189,6 +221,10 @@ impl Question {
                 }
                 v
             }
+            Question::Axes { axes, constraints } => json!({
+                "kind": "axes", "axes": axes, "values": constraints["values"],
+                "constraints": constraints,
+            }),
             Question::Pick { role, scheme } => {
                 json!({"kind": "pick", "role": role, "scheme": scheme})
             }
@@ -212,6 +248,7 @@ impl Question {
     pub fn what(&self) -> String {
         match self {
             Question::Axis { axis, .. } => axis.clone(),
+            Question::Axes { axes, .. } => format!("axes:{}", axes.join("+")),
             Question::Pick { role, .. } => format!("pick:{role}"),
             Question::Form { .. } => "form".to_string(),
             Question::Derivative {
@@ -234,6 +271,16 @@ impl Question {
                         values.join(", ")
                     )));
                 }
+            }
+            Question::Axes { axes, constraints } => {
+                let v = value.ok_or_else(|| {
+                    invalid(format!(
+                        "the answer names a value of each of {}, as {{axis: value}}",
+                        axes.join(", ")
+                    ))
+                })?;
+                let joint = joint_of(axes, constraints, v)?;
+                legal(constraints, &joint).map_err(invalid)?;
             }
             Question::Pick { role, .. } => {
                 let v = value.ok_or_else(|| {
@@ -272,7 +319,7 @@ impl Question {
     /// None where there is nothing the engine can compare (a mask).
     fn comparable(&self, a: &Answer) -> Option<String> {
         match self {
-            Question::Axis { .. } | Question::Free => a.value.clone(),
+            Question::Axis { .. } | Question::Axes { .. } | Question::Free => a.value.clone(),
             Question::Pick { .. } => a
                 .value
                 .as_deref()
@@ -301,6 +348,244 @@ pub fn pick_stacks(v: &str) -> Result<Vec<i64>, Error> {
     out.sort_unstable();
     out.dedup();
     Ok(out)
+}
+
+// ------------------------------------------------------- the axes question
+
+/// A joint answer: each asked axis with its values, none for "the axis has
+/// no value here", one for a single-valued axis, a set for a multi-valued
+/// one, in identities.
+pub type Joint = BTreeMap<String, Vec<String>>;
+
+/// The constraints an axes question carries are the shape
+/// `nils_pack::legal::constraints` writes: every asked axis's vocabulary,
+/// the multi-valued axes, the exclusion groups and the implications.
+fn check_constraints(axes: &[String], c: &Value) -> Result<(), Error> {
+    if !c.is_object() {
+        return Err(invalid(
+            "an axes question carries the pack's constraints, which the engine fills in from the served pack when the campaign is made",
+        ));
+    }
+    for a in axes {
+        if !c["values"][a].is_array() {
+            return Err(invalid(format!(
+                "the constraints name no values of {a}, an axis the question asks"
+            )));
+        }
+    }
+    if !c["multi"].is_array() || !c["implications"].is_array() {
+        return Err(invalid(
+            "the constraints are {values, multi, groups, implications}",
+        ));
+    }
+    Ok(())
+}
+
+fn words(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// An axes answer, `{axis: value | [values] | null}`, read against the
+/// question: every asked axis and no other, each value one the question
+/// asks for, a single-valued axis one value at most.
+pub fn joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Joint, Error> {
+    let v: Value = serde_json::from_str(text)
+        .map_err(|_| invalid("an axes answer is an object, {axis: value | [values]}"))?;
+    let given = v
+        .as_object()
+        .ok_or_else(|| invalid("an axes answer is an object, {axis: value | [values]}"))?;
+    for k in given.keys() {
+        if !axes.contains(k) {
+            return Err(invalid(format!(
+                "the answer names {k}, which the question does not ask; it asks {}",
+                axes.join(", ")
+            )));
+        }
+    }
+    let multi = words(&constraints["multi"]);
+    let mut out = Joint::new();
+    for axis in axes {
+        let raw = given.get(axis).ok_or_else(|| {
+            invalid(format!(
+                "the answer names every axis the question asks, and {axis} is missing (null says it has no value)"
+            ))
+        })?;
+        let mut values: Vec<String> = match raw {
+            Value::Null => Vec::new(),
+            Value::String(s) if s.trim().is_empty() => Vec::new(),
+            Value::String(s) => vec![s.trim().to_string()],
+            Value::Array(list) => list
+                .iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(|s| s.trim().to_string())
+                        .ok_or_else(|| invalid(format!("{axis}: a value or a list of values")))
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err(invalid(format!("{axis}: a value or a list of values"))),
+        };
+        values.sort();
+        values.dedup();
+        if values.len() > 1 && !multi.contains(axis) {
+            return Err(invalid(format!(
+                "{axis} holds one value, and the answer names {}",
+                values.join(", ")
+            )));
+        }
+        let allowed = words(&constraints["values"][axis]);
+        if let Some(bad) = values.iter().find(|x| !allowed.contains(x)) {
+            return Err(invalid(format!(
+                "{bad} is not a value of {axis} this campaign asks for: {}",
+                allowed.join(", ")
+            )));
+        }
+        out.insert(axis.clone(), values);
+    }
+    Ok(out)
+}
+
+/// An assignment as the one text two equal answers share: the axes in
+/// order, a single-valued axis as its value or null, a multi-valued one as
+/// its sorted list.
+pub fn canonical_joint(constraints: &Value, a: &Joint) -> String {
+    let multi = words(&constraints["multi"]);
+    let mut m = serde_json::Map::new();
+    for (axis, values) in a {
+        let v = if multi.contains(axis) {
+            json!(values)
+        } else {
+            values.first().map_or(Value::Null, |v| json!(v))
+        };
+        m.insert(axis.clone(), v);
+    }
+    Value::Object(m).to_string()
+}
+
+/// A condition of the constraint language on an answer: true, false, or
+/// unknown when it reads an axis the answer does not name.
+fn holds(e: &Value, a: &Joint) -> Option<bool> {
+    match e {
+        Value::Bool(b) => Some(*b),
+        Value::Object(m) => {
+            if let Some(axis) = m.get("axis").and_then(Value::as_str) {
+                let held = a.get(axis)?;
+                if let Some(v) = m.get("is").and_then(Value::as_str) {
+                    return Some(held.iter().any(|x| x == v));
+                }
+                if let Some(v) = m.get("missing_or").and_then(Value::as_str) {
+                    return Some(held.is_empty() || held.iter().any(|x| x == v));
+                }
+                return None;
+            }
+            if let Some(list) = m.get("all").and_then(Value::as_array) {
+                let each: Vec<Option<bool>> = list.iter().map(|x| holds(x, a)).collect();
+                if each.contains(&Some(false)) {
+                    return Some(false);
+                }
+                return each.iter().all(|x| *x == Some(true)).then_some(true);
+            }
+            if let Some(list) = m.get("any").and_then(Value::as_array) {
+                let each: Vec<Option<bool>> = list.iter().map(|x| holds(x, a)).collect();
+                if each.contains(&Some(true)) {
+                    return Some(true);
+                }
+                return each.iter().all(|x| *x == Some(false)).then_some(false);
+            }
+            if let Some(x) = m.get("not") {
+                return holds(x, a).map(|b| !b);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Whether the pack allows an assignment: at most one member of each
+/// exclusion group, and what an implication whose condition holds sets.
+/// The words say which rule or group forbids it.
+pub fn legal(constraints: &Value, a: &Joint) -> Result<(), String> {
+    for (axis, groups) in constraints["groups"].as_object().into_iter().flatten() {
+        let Some(held) = a.get(axis) else { continue };
+        for (group, members) in groups.as_object().into_iter().flatten() {
+            let members = words(members);
+            let both: Vec<&String> = held.iter().filter(|v| members.contains(v)).collect();
+            if both.len() > 1 {
+                return Err(format!(
+                    "{} are all in the exclusion group {group} of {axis}, and at most one of them holds (the pack, {})",
+                    both.iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                    constraints["pack"].as_str().unwrap_or("its pack")
+                ));
+            }
+        }
+    }
+    for imp in constraints["implications"].as_array().into_iter().flatten() {
+        if holds(&imp["when"], a) != Some(true) {
+            continue;
+        }
+        for t in imp["then"].as_array().into_iter().flatten() {
+            if !t["when"].is_null() && holds(&t["when"], a) != Some(true) {
+                continue;
+            }
+            let (Some(axis), Some(value)) = (t["axis"].as_str(), t["value"].as_str()) else {
+                continue;
+            };
+            let Some(held) = a.get(axis) else { continue };
+            if !held.iter().any(|v| v == value) {
+                return Err(format!(
+                    "the pack's rule {} sets {axis} to {value} when {}, and the answer says {axis} is {}",
+                    imp["rule"].as_str().unwrap_or("?"),
+                    said(&imp["when"]),
+                    if held.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        held.join(", ")
+                    }
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A condition in words, for a refusal.
+fn said(e: &Value) -> String {
+    match e {
+        Value::Bool(b) => b.to_string(),
+        Value::Object(m) => {
+            if let Some(axis) = m.get("axis").and_then(Value::as_str) {
+                if let Some(v) = m.get("is").and_then(Value::as_str) {
+                    return format!("{axis} is {v}");
+                }
+                if let Some(v) = m.get("missing_or").and_then(Value::as_str) {
+                    return format!("{axis} is {v} or nothing");
+                }
+            }
+            for (key, join) in [("all", " and "), ("any", " or ")] {
+                if let Some(list) = m.get(key).and_then(Value::as_array) {
+                    return list.iter().map(said).collect::<Vec<_>>().join(join);
+                }
+            }
+            if let Some(x) = m.get("not") {
+                return format!("not ({})", said(x));
+            }
+            e.to_string()
+        }
+        _ => e.to_string(),
+    }
+}
+
+/// What one axis of an axes answer says, as text, for agreement per axis.
+fn axis_of_answer(text: Option<&str>, axis: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text?).ok()?;
+    v.get(axis).map(Value::to_string)
 }
 
 fn join_ids(ids: &[i64]) -> String {
@@ -805,12 +1090,12 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         )));
     }
     match (n.closes_into, &question) {
-        ("decision" | "stage", Question::Axis { .. })
+        ("decision" | "stage", Question::Axis { .. } | Question::Axes { .. })
         | ("pick", Question::Pick { .. })
         | ("none", _) => {}
         ("decision" | "stage", _) => {
             return Err(invalid(
-                "only an axis question closes into a decision; close the others into none",
+                "only an axis or an axes question closes into decisions; close the others into none",
             ));
         }
         ("pick", _) => return Err(invalid("only a pick question closes into a pick")),
@@ -831,8 +1116,10 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         return Err(invalid("lease_seconds is one or more"));
     }
     let grain = match (&n.items, &question) {
-        (Items::Sessions(_), Question::Axis { .. }) => {
-            return Err(invalid("an axis question is asked of stacks, not sessions"));
+        (Items::Sessions(_), Question::Axis { .. } | Question::Axes { .. }) => {
+            return Err(invalid(
+                "an axis or an axes question is asked of stacks, not sessions",
+            ));
         }
         (Items::Stacks(_) | Items::Review(_), Question::Pick { .. }) => {
             return Err(invalid(
@@ -882,20 +1169,19 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         "review item {id} is not a question about {axis}"
                     )));
                 }
+                if let Question::Axes { axes, .. } = &question
+                    && !it.evidence["axis"]
+                        .as_str()
+                        .is_some_and(|a| axes.iter().any(|x| x == a))
+                {
+                    return Err(invalid(format!(
+                        "review item {id} is not a question about {}, the axes the question asks",
+                        axes.join(", ")
+                    )));
+                }
                 out.push(it);
             }
-            let d = store.dialect();
-            let sql = format!(
-                "SELECT i.review_item_id FROM {} i JOIN {} c ON c.id = i.campaign_id WHERE c.status = 'open'",
-                store.qualified("campaign_item"),
-                store.qualified("campaign")
-            );
-            let _ = d;
-            let held: BTreeSet<i64> = store
-                .query(&sql, &[])?
-                .iter()
-                .map(|r| r.int(0))
-                .collect::<Result<_, _>>()?;
+            let held = held_review_items(store)?;
             if let Some(id) = ids.iter().find(|id| held.contains(id)) {
                 return Err(refused(format!(
                     "review item {id} is asked by an open campaign already"
@@ -964,6 +1250,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
             });
             match &question {
                 Question::Axis { axis, .. } => e["axis"] = json!(axis),
+                Question::Axes { axes, .. } => e["axes"] = json!(axes),
                 Question::Pick { role, .. } => e["role"] = json!(role),
                 _ => {}
             }
@@ -1032,6 +1319,62 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         Some(*subject),
                         Some(day),
                         &format!("session:{subject}:{day}"),
+                    ));
+                }
+            }
+            // Record 45: an axes question asks a stack once, whatever the
+            // adopted items it answers. One item per stack, backed by a
+            // review item of its own that names the adopted ones (`asks`),
+            // which its close answers axis by axis.
+            Items::Review(_) if matches!(question, Question::Axes { .. }) => {
+                let mut by_stack: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+                let mut order: Vec<i64> = Vec::new();
+                for it in &adopted {
+                    let stacks: Vec<i64> = if it.scope == "group" {
+                        review::members(store, it.id)
+                            .map_err(|e| invalid(e.to_string()))?
+                            .into_iter()
+                            .filter(|m| m.decided_at.is_none())
+                            .map(|m| m.stack_id)
+                            .collect()
+                    } else {
+                        it.reference["stack_id"].as_i64().into_iter().collect()
+                    };
+                    for s in stacks {
+                        if !by_stack.contains_key(&s) {
+                            order.push(s);
+                        }
+                        by_stack.entry(s).or_default().push(it.id);
+                    }
+                    let mut ev = it.evidence.clone();
+                    if let Value::Object(m) = &mut ev {
+                        m.insert("campaign".into(), json!(id));
+                        m.insert("campaign_name".into(), json!(name));
+                        m.insert("campaign_state".into(), json!("open"));
+                    }
+                    store.update_by_id(
+                        table("review_item"),
+                        &[("evidence", Param::from(ev.to_string()))],
+                        "id",
+                        it.id,
+                    )?;
+                }
+                for (i, stack) in order.iter().enumerate() {
+                    let r = raise(
+                        store,
+                        &kind,
+                        "stack",
+                        &json!({"stack_id": stack}),
+                        &evidence(json!({"position": i, "asks": by_stack[stack]})),
+                        &now,
+                    )?;
+                    rows.push(item_row(
+                        i,
+                        r,
+                        Some(*stack),
+                        None,
+                        None,
+                        &format!("stack:{stack}"),
                     ));
                 }
             }
@@ -1135,6 +1478,48 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         },
     )?;
     get(registry.store(), id)?.ok_or_else(|| Error::NotFound(format!("no campaign {id}")))
+}
+
+/// The review items an open campaign asks: the ones its items stand on,
+/// and those an axes item answers (`asks`, record 45), so one item is asked
+/// by one open campaign at a time.
+fn held_review_items(store: &mut Store) -> Result<BTreeSet<i64>, Error> {
+    let sql = format!(
+        "SELECT i.review_item_id FROM {} i JOIN {} c ON c.id = i.campaign_id WHERE c.status IN ('open', 'closing')",
+        store.qualified("campaign_item"),
+        store.qualified("campaign")
+    );
+    let backing: Vec<i64> = store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    let mut held: BTreeSet<i64> = backing.iter().copied().collect();
+    let t = table("review_item");
+    for chunk in backing.chunks(500) {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE kind = 'campaign.axes' AND id IN ({})",
+            store
+                .dialect()
+                .text_of(t.column("evidence").expect("evidence")),
+            store.qualified("review_item"),
+            join_ids(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            let ev: Value = r
+                .opt_text(0)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(Value::Null);
+            held.extend(
+                ev["asks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64),
+            );
+        }
+    }
+    Ok(held)
 }
 
 fn raise(
@@ -1728,6 +2113,71 @@ pub fn claim(
     }))
 }
 
+/// Lengthen a lease its holder still holds (record 45): the lease runs the
+/// campaign's `lease_seconds` from now, as a claim's does. A lease that ran
+/// out is not renewed, since its item may be another rater's by now; the
+/// rater claims again. A heartbeat, so it writes no audit row: the claim
+/// and the answer are the acts.
+pub fn renew(
+    registry: &mut Registry,
+    assignment_id: i64,
+    principal: &str,
+    now: &str,
+) -> Result<Assignment, Error> {
+    let store = registry.store();
+    let a = assignment(store, assignment_id)?
+        .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
+    if a.principal.as_deref() != Some(principal) {
+        return Err(Error::Forbidden(format!(
+            "assignment {assignment_id} is not {principal}'s"
+        )));
+    }
+    store.begin()?;
+    let done = (|| -> Result<(), Error> {
+        lock(store, a.campaign_id)?;
+        // read again under the lock: a close, an answer or an expiry may
+        // have come first
+        let c = get(store, a.campaign_id)?
+            .ok_or_else(|| Error::NotFound(format!("no campaign {}", a.campaign_id)))?;
+        if c.status != "open" {
+            return Err(refused(format!("campaign {} is {}", c.name, c.status)));
+        }
+        let a = assignment(store, a.id)?
+            .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
+        if a.state != "leased" {
+            return Err(refused(format!(
+                "assignment {assignment_id} is {}, not leased; claim again",
+                a.state
+            )));
+        }
+        if a.lease_until
+            .as_deref()
+            .is_some_and(|u| secs_of(u).zip(secs_of(now)).is_some_and(|(u, n)| u < n))
+        {
+            return Err(refused(format!(
+                "the lease of assignment {assignment_id} ran out; claim again"
+            )));
+        }
+        store.update_by_id(
+            table("campaign_assignment"),
+            &[(
+                "lease_until",
+                Param::from(plus_seconds(now, c.lease_seconds).as_str()),
+            )],
+            "id",
+            a.id,
+        )?;
+        Ok(())
+    })();
+    if let Err(e) = done {
+        store.rollback().ok();
+        return Err(e);
+    }
+    store.commit()?;
+    assignment(registry.store(), assignment_id)?
+        .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))
+}
+
 /// Give a leased item back unanswered. A rater's item returns to the pool
 /// for others (never to the same rater); an adjudicator's is offered again.
 pub fn release(
@@ -2023,6 +2473,11 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
             .value
             .map(|v| pick_stacks(v).map(|s| join_ids(&s)))
             .transpose()?,
+        // one text for one joint answer, whatever order it came in
+        Question::Axes { axes, constraints } => g
+            .value
+            .map(|v| joint_of(axes, constraints, v).map(|a| canonical_joint(constraints, &a)))
+            .transpose()?,
         _ => g.value.map(|v| v.trim().to_string()),
     };
     store.begin()?;
@@ -2136,7 +2591,8 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
         let state = if a.role == "adjudicator" {
             let settled = all.last().expect("the answer just written");
             let agreement = share_agreeing(&question, &all, settled);
-            let outcome = outcome_of(&question, std::slice::from_ref(settled));
+            let mut outcome = outcome_of(&question, std::slice::from_ref(settled));
+            per_axis(&question, &all, settled, &mut outcome);
             set_item(
                 store,
                 it.id,
@@ -2166,7 +2622,8 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                 let owned: Vec<Answer> = raters.iter().map(|x| (*x).clone()).collect();
                 match next {
                     "agreed" => {
-                        let outcome = outcome_of(&question, &owned);
+                        let mut outcome = outcome_of(&question, &owned);
+                        per_axis(&question, &all, &owned[0], &mut outcome);
                         set_item(store, it.id, "agreed", 1, Some(1.0), Some(&outcome), now)?;
                     }
                     "needs_adjudication" => {
@@ -2197,9 +2654,12 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
     }
     // the value of an axis or a pick is a word of the pack or stack ids; a
     // form's text and a free answer stay out of the audit row
-    let shown = matches!(question, Question::Axis { .. } | Question::Pick { .. })
-        .then(|| stored_value.clone())
-        .flatten();
+    let shown = matches!(
+        question,
+        Question::Axis { .. } | Question::Axes { .. } | Question::Pick { .. }
+    )
+    .then(|| stored_value.clone())
+    .flatten();
     audit::record(
         registry,
         &Entry {
@@ -2221,6 +2681,32 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
     Ok(answered)
 }
 
+/// For an axes item, the share of round-one raters whose answer on each
+/// axis is the settled one's: agreement per axis beside the whole.
+fn per_axis(question: &Question, all: &[Answer], settled: &Answer, outcome: &mut Value) {
+    let Question::Axes { axes, .. } = question else {
+        return;
+    };
+    let raters: Vec<&Answer> = all.iter().filter(|a| a.role == "rater").collect();
+    let mut m = serde_json::Map::new();
+    for axis in axes {
+        let want = axis_of_answer(settled.value.as_deref(), axis);
+        let same = raters
+            .iter()
+            .filter(|a| want.is_some() && axis_of_answer(a.value.as_deref(), axis) == want)
+            .count();
+        m.insert(
+            axis.clone(),
+            if raters.is_empty() {
+                Value::Null
+            } else {
+                json!(same as f64 / raters.len() as f64)
+            },
+        );
+    }
+    outcome["per_axis"] = Value::Object(m);
+}
+
 /// The share of round-one raters whose answer is the settled one.
 fn share_agreeing(question: &Question, all: &[Answer], settled: &Answer) -> Option<f64> {
     let key = question.comparable(settled)?;
@@ -2236,10 +2722,16 @@ fn share_agreeing(question: &Question, all: &[Answer], settled: &Answer) -> Opti
 }
 
 /// What an item came to: the value (and form) the answers agree on, or the
-/// files when the question is a derivative.
+/// files when the question is a derivative. An axes item says, beside it,
+/// how far the round-one raters agreed on each axis (record 45).
 fn outcome_of(question: &Question, answers: &[Answer]) -> Value {
     let first = answers.first();
     match question {
+        Question::Axes { .. } => json!({
+            "value": first.and_then(|a| a.value.clone()),
+            "form": null,
+            "answers": answers.iter().map(|a| a.id).collect::<Vec<_>>(),
+        }),
         Question::Derivative { .. } => json!({
             "derivatives": answers.iter().filter_map(|a| a.derivative_id).collect::<Vec<_>>(),
             "form": first.and_then(|a| a.form.clone()),
@@ -2427,25 +2919,40 @@ pub fn agreement(store: &mut Store, campaign: i64) -> Result<Value, Error> {
         get(store, campaign)?.ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     let question = c.question()?;
     let all = answers(store, campaign)?;
+    let n = c.raters_per_item as usize;
+    let mut out = measure(&all, n, |a| question.comparable(a));
+    // record 45: an axes campaign is measured whole and per axis
+    if let Question::Axes { axes, .. } = &question {
+        let mut per = serde_json::Map::new();
+        for axis in axes {
+            per.insert(
+                axis.clone(),
+                measure(&all, n, |a| axis_of_answer(a.value.as_deref(), axis)),
+            );
+        }
+        out["per_axis"] = Value::Object(per);
+    }
+    Ok(out)
+}
+
+/// Agreement over the items every rater answered, by what `key` compares.
+fn measure(all: &[Answer], n: usize, key: impl Fn(&Answer) -> Option<String>) -> Value {
     let mut by_item: BTreeMap<i64, Vec<&Answer>> = BTreeMap::new();
     for a in all.iter().filter(|a| a.role == "rater") {
         by_item.entry(a.item_id).or_default().push(a);
     }
-    let n = c.raters_per_item as usize;
     let complete: Vec<Vec<(String, String)>> = by_item
         .values()
         .filter(|v| v.len() == n)
         .map(|v| {
             v.iter()
-                .filter_map(|a| question.comparable(a).map(|k| (a.principal.clone(), k)))
+                .filter_map(|a| key(a).map(|k| (a.principal.clone(), k)))
                 .collect::<Vec<_>>()
         })
         .filter(|v: &Vec<(String, String)>| v.len() == n)
         .collect();
     if complete.is_empty() || n < 2 {
-        return Ok(
-            json!({"items": complete.len(), "raters_per_item": n, "exact": null, "fleiss_kappa": null, "cohen_kappa": null}),
-        );
+        return json!({"items": complete.len(), "raters_per_item": n, "exact": null, "fleiss_kappa": null, "cohen_kappa": null});
     }
     let agreed = complete
         .iter()
@@ -2484,13 +2991,13 @@ pub fn agreement(store: &mut Store, campaign: i64) -> Result<Value, Error> {
     } else {
         None
     };
-    Ok(json!({
+    json!({
         "items": complete.len(),
         "raters_per_item": n,
         "exact": agreed as f64 / complete.len() as f64,
         "fleiss_kappa": fleiss,
         "cohen_kappa": cohen,
-    }))
+    })
 }
 
 /// Fleiss' kappa over items that each carry the same number of ratings.
@@ -2828,6 +3335,62 @@ fn close_items(
             continue;
         }
         match c.closes_into.as_str() {
+            "decision" | "stage" if matches!(question, Question::Axes { .. }) => {
+                let Question::Axes { axes, constraints } = question else {
+                    unreachable!("matched above");
+                };
+                let joint = it.outcome["value"]
+                    .as_str()
+                    .map(|v| joint_of(axes, constraints, v));
+                let Some(Ok(joint)) = joint else {
+                    out.refused
+                        .push((it.id, "the item came to no joint answer".into()));
+                    out.unresolved += 1;
+                    continue;
+                };
+                // Every decision of the item, its review items and the
+                // item's link are one transaction: the item closes whole,
+                // one decision per axis, or not at all.
+                registry.store().begin()?;
+                let written = close_axes(
+                    registry,
+                    c,
+                    it,
+                    axes,
+                    &joint,
+                    &Author {
+                        who: &who,
+                        kind: &kind,
+                        model,
+                    },
+                    stage,
+                    &path,
+                    now,
+                );
+                match written {
+                    Ok(Ok(decided)) => {
+                        registry.store().commit()?;
+                        for (id, staged) in decided {
+                            if staged {
+                                staged_ones.push(id);
+                            }
+                            out.decisions.push(id);
+                        }
+                        out.resolved += 1;
+                    }
+                    Ok(Err(why)) => {
+                        registry.store().rollback().ok();
+                        registry.refresh_meta().ok();
+                        out.refused.push((it.id, why));
+                        out.unresolved += 1;
+                    }
+                    Err(e) => {
+                        registry.store().rollback().ok();
+                        registry.refresh_meta().ok();
+                        return Err(e);
+                    }
+                }
+            }
             "decision" | "stage" => {
                 let value = it.outcome["value"].as_str().map(str::to_string);
                 let Some(value) = value else {
@@ -3099,6 +3662,135 @@ fn close_items(
         },
     )?;
     Ok(out)
+}
+
+/// Who an item's decisions are by.
+struct Author<'a> {
+    who: &'a str,
+    kind: &'a str,
+    model: Option<i64>,
+}
+
+/// Close one axes item inside the transaction the caller holds (record 45
+/// E4): one decision per axis, each through [`review::apply_within`], so
+/// rank, withdrawal, the audit and the epoch are the spine's. The decision
+/// on an axis answers the adopted item that asks it: a group's member, or a
+/// stack's own question, which the apply closes; with none, it is written
+/// on the item's own review item for that axis. Answers each decision and
+/// whether it is staged, or why the item was refused (the caller rolls
+/// back).
+#[allow(clippy::too_many_arguments)]
+fn close_axes(
+    registry: &mut Registry,
+    c: &Campaign,
+    it: &Item,
+    axes: &[String],
+    joint: &Joint,
+    by: &Author<'_>,
+    stage: bool,
+    path: &str,
+    now: &str,
+) -> Result<Result<Vec<(i64, bool)>, String>, Error> {
+    let Some(stack) = it.stack_id else {
+        return Ok(Err("an axes item names its stack".into()));
+    };
+    let own = review::item(registry.store(), it.review_item_id)
+        .map_err(|e| invalid(e.to_string()))?
+        .ok_or_else(|| Error::NotFound(format!("no review item {}", it.review_item_id)))?;
+    // the adopted items this one answers, still waiting for an answer
+    let mut adopted: Vec<review::Item> = Vec::new();
+    for id in own.evidence["asks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+    {
+        if let Some(x) = review::item(registry.store(), id).map_err(|e| invalid(e.to_string()))?
+            && matches!(x.status.as_str(), "open" | "staged")
+        {
+            adopted.push(x);
+        }
+    }
+    let mut decided: Vec<(i64, bool)> = Vec::new();
+    let mut by_axis = serde_json::Map::new();
+    for axis in axes {
+        let values = joint.get(axis).cloned().unwrap_or_default();
+        let value = (!values.is_empty()).then(|| values.join(","));
+        // the adopted question about this axis on this stack, if any: a
+        // group whose member the stack is and still undecided, else the
+        // stack's own
+        let mut target: (i64, Option<i64>, Option<&str>) = (own.id, None, Some(axis.as_str()));
+        for x in adopted
+            .iter()
+            .filter(|x| x.evidence["axis"].as_str() == Some(axis.as_str()))
+        {
+            if x.scope == "group" {
+                let open = review::members(registry.store(), x.id)
+                    .map_err(|e| invalid(e.to_string()))?
+                    .iter()
+                    .any(|m| m.stack_id == stack && m.decided_at.is_none());
+                if open {
+                    target = (x.id, Some(stack), None);
+                    break;
+                }
+            } else if x.reference["stack_id"].as_i64() == Some(stack) {
+                target = (x.id, None, None);
+            }
+        }
+        let apply = review::Apply {
+            item: target.0,
+            member: target.1,
+            scope: "stack",
+            value: value.as_deref(),
+            author: review::Author {
+                who: by.who,
+                kind: by.kind,
+                version: None,
+                model: by.model,
+            },
+            stage,
+            why: Some(path),
+            campaign: Some(c.id),
+        };
+        let applied = match target.2 {
+            Some(a) => review::apply_axis_within(registry, &apply, a),
+            None => review::apply_within(registry, &apply),
+        };
+        let applied = match applied {
+            Ok(a) => a,
+            Err(review::Error::Store(e)) => return Err(e.into()),
+            Err(e) => return Ok(Err(format!("{axis}: {e}"))),
+        };
+        by_axis.insert(axis.clone(), json!(applied.decision));
+        decided.push((applied.decision, applied.staged));
+    }
+    let staged = decided.iter().any(|(_, s)| *s);
+    let first = decided.first().map(|(id, _)| *id);
+    let store = registry.store();
+    finish_review_item(
+        store,
+        own.id,
+        if staged { "staged" } else { "accepted" },
+        by.who,
+        &json!({"campaign": c.id, "decisions": by_axis, "value": joint}),
+        first,
+        now,
+    )?;
+    mark_review_item(store, own.id, "resolved")?;
+    let mut outcome = it.outcome.clone();
+    outcome["decisions"] = Value::Object(by_axis);
+    store.update_by_id(
+        table("campaign_item"),
+        &[
+            ("state", Param::from("resolved")),
+            ("decision_id", first.map_or(Param::Null, Param::Int)),
+            ("outcome", Param::from(outcome.to_string())),
+            ("resolved_at", Param::from(now)),
+        ],
+        "id",
+        it.id,
+    )?;
+    Ok(Ok(decided))
 }
 
 /// Close a review item with what the campaign made of it, when `apply` did

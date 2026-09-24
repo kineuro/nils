@@ -465,41 +465,6 @@ fn int_of(
         .transpose()
 }
 
-/// Undo the percent-encoding of one query value.
-fn decoded(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match std::str::from_utf8(&bytes[i + 1..i + 3])
-                    .ok()
-                    .and_then(|h| u8::from_str_radix(h, 16).ok())
-                {
-                    Some(b) => {
-                        out.push(b);
-                        i += 3;
-                    }
-                    None => {
-                        out.push(b'%');
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// `POST /api/derivatives`: the body is the file, and the query says what
 /// it is: `kind`, one of `stack`, `series` or `subject` (with `day` for one
 /// occasion), `sha256`, and optionally `supersedes`, `model` and `name`, whose
@@ -513,8 +478,8 @@ pub(crate) fn upload(
 ) -> Result<Reply, Reply> {
     let (need, detail) = crate::serve::door("POST", &["api", "derivatives"]);
     caller.allowed("/api/derivatives", need, detail)?;
-    let q: std::collections::HashMap<String, String> =
-        query.iter().map(|(k, v)| (k.clone(), decoded(v))).collect();
+    // the router decoded every query value (record 45)
+    let q = query.clone();
     let header = |name: &str| -> Option<String> {
         request
             .headers()
@@ -584,7 +549,7 @@ pub(crate) fn route(
     };
     Some(match segs {
         ["api", "derivatives"] => (|| {
-            let kind = query.get("kind").map(|k| decoded(k));
+            let kind = query.get("kind").cloned();
             let rows = derivative::list(
                 registry.store(),
                 &derivative::Filter {
@@ -639,7 +604,7 @@ pub(crate) fn route(
                 file_of(registry.store(), &d).map_err(|(status, m)| Reply::error(status, m))?;
             // record 43 S3: the second transport, a path on a volume the
             // caller shares with the engine, gated and audited as the bytes
-            match query.get("transport").map(|t| decoded(t)).as_deref() {
+            match query.get("transport").map(String::as_str) {
                 None | Some("door") => {}
                 Some("share") => {
                     let p = place::show(registry.store(), d.place_id)
@@ -976,14 +941,6 @@ mod tests {
         assert_eq!(extension(Some("a.b c")), "");
         assert_eq!(extension(Some("a..b")), "");
         assert_eq!(extension(None), "");
-    }
-
-    #[test]
-    fn a_query_value_is_decoded() {
-        assert_eq!(decoded("application%2Fx-nifti"), "application/x-nifti");
-        assert_eq!(decoded("a+b"), "a b");
-        assert_eq!(decoded("100%"), "100%");
-        assert_eq!(decoded("%zz"), "%zz");
     }
 
     #[test]

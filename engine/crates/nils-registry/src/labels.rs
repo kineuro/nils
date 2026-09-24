@@ -399,6 +399,10 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
     for a in &answers {
         of_items.entry(a.item_id).or_default().push(a);
     }
+    // record 45: an axes question is labelled axis by axis
+    if let campaign::Question::Axes { axes, constraints } = &question {
+        return axes_labels(store, campaign, axes, constraints, &items, &answers, of);
+    }
     let mut out = Vec::new();
     match of {
         Of::Answers => {
@@ -524,6 +528,135 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                             derivative_id: Some(f),
                             ..base.clone()
                         });
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// An axes campaign's labels, one row per axis: every rater's answer on
+/// each axis, or what each resolved item came to on each, the decision it
+/// closed into where it closed into one.
+fn axes_labels(
+    store: &mut Store,
+    campaign: i64,
+    axes: &[String],
+    constraints: &Value,
+    items: &BTreeMap<i64, crate::campaign::Item>,
+    answers: &[crate::campaign::Answer],
+    of: Of,
+) -> Result<Vec<Label>, Error> {
+    use crate::campaign;
+    let joined = |j: &campaign::Joint, axis: &str| -> Option<String> {
+        j.get(axis).filter(|v| !v.is_empty()).map(|v| v.join(","))
+    };
+    let mut out = Vec::new();
+    match of {
+        Of::Answers => {
+            for a in answers {
+                let it = &items[&a.item_id];
+                let Some(Ok(j)) = a
+                    .value
+                    .as_deref()
+                    .map(|v| campaign::joint_of(axes, constraints, v))
+                else {
+                    continue;
+                };
+                for axis in axes {
+                    out.push(Label {
+                        stack_id: it.stack_id,
+                        subject_id: it.subject_id,
+                        what: axis.clone(),
+                        value: joined(&j, axis),
+                        author_kind: a.author_kind.clone(),
+                        author: a.principal.clone(),
+                        campaign_id: Some(campaign),
+                        model_id: a.model_id,
+                        answer_id: Some(a.id),
+                        ..Label::default()
+                    });
+                }
+            }
+        }
+        Of::Outcomes => {
+            for it in items.values().filter(|i| i.state == "resolved") {
+                let decided = it.outcome["decisions"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let ids: Vec<i64> = decided.values().filter_map(Value::as_i64).collect();
+                let mut rows: BTreeMap<i64, (Option<String>, String, String, Option<i64>)> =
+                    BTreeMap::new();
+                if !ids.is_empty() {
+                    let sql = format!(
+                        "SELECT id, value, actor, author_kind, model_id FROM {} WHERE id IN ({})",
+                        store.qualified("decision"),
+                        join_ids(&ids)
+                    );
+                    for r in store.query(&sql, &[])? {
+                        rows.insert(
+                            r.int(0)?,
+                            (
+                                r.opt_text(1)?.map(str::to_string),
+                                r.text(2)?.to_string(),
+                                r.text(3)?.to_string(),
+                                r.opt_int(4)?,
+                            ),
+                        );
+                    }
+                }
+                let j = it.outcome["value"]
+                    .as_str()
+                    .and_then(|v| campaign::joint_of(axes, constraints, v).ok())
+                    .unwrap_or_default();
+                let settled: Vec<&campaign::Answer> = answers
+                    .iter()
+                    .filter(|a| a.item_id == it.id)
+                    .filter(|a| {
+                        it.outcome["answers"]
+                            .as_array()
+                            .is_some_and(|l| l.iter().any(|x| x.as_i64() == Some(a.id)))
+                    })
+                    .collect();
+                for axis in axes {
+                    let base = Label {
+                        stack_id: it.stack_id,
+                        subject_id: it.subject_id,
+                        what: axis.clone(),
+                        campaign_id: Some(campaign),
+                        ..Label::default()
+                    };
+                    match decided.get(axis).and_then(Value::as_i64) {
+                        Some(d) => {
+                            if let Some((value, actor, kind, model)) = rows.get(&d) {
+                                out.push(Label {
+                                    value: value.clone(),
+                                    author: actor.clone(),
+                                    author_kind: kind.clone(),
+                                    model_id: *model,
+                                    decision_id: Some(d),
+                                    ..base
+                                });
+                            }
+                        }
+                        None => out.push(Label {
+                            value: joined(&j, axis),
+                            author: settled
+                                .iter()
+                                .map(|a| a.principal.as_str())
+                                .collect::<Vec<_>>()
+                                .join("+"),
+                            author_kind: settled
+                                .iter()
+                                .map(|a| a.author_kind.as_str())
+                                .collect::<BTreeSet<_>>()
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                                .join("+"),
+                            ..base
+                        }),
                     }
                 }
             }

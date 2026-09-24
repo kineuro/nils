@@ -751,6 +751,7 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
         let filter = CommitFilter {
             min_confidence: Some(0.96),
             campaign: None,
+            ..Default::default()
         };
         for kind in ["agent", "model"] {
             let e = review::commit_where(reg, &filter, false, "bot@lab", kind).unwrap_err();
@@ -1015,6 +1016,7 @@ fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
         let filter = CommitFilter {
             min_confidence: Some(0.99),
             campaign: None,
+            ..Default::default()
         };
         let committed = review::commit_where(reg, &filter, false, "anna@lab", "person").unwrap();
         assert_eq!(committed.decisions.len(), 1, "{name}: {committed:?}");
@@ -1297,5 +1299,255 @@ fn a_run_proposes_only_on_its_stacks_and_for_its_models() {
             2,
             "{name}"
         );
+    }
+}
+
+/// Record 45 E3: a commit by model, by from and to, and by stacks commits
+/// only its part. A model's group whose members hold different values now
+/// is split: the members the filter names are written as decisions of their
+/// own stack by the same model and put in force, and the group's decision
+/// stays staged for the rest.
+#[test]
+fn a_commit_by_model_from_and_to_commits_only_its_part() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 3);
+        // what the classifier says of each stack now: neck on four, brain
+        // on one, nothing on the last
+        let store = reg.store();
+        for (i, s) in ids.iter().enumerate() {
+            let value = match i {
+                0 | 1 | 4 | 5 => "neck",
+                2 => "brain",
+                _ => continue,
+            };
+            row(
+                store,
+                "classification_axis",
+                &[
+                    ("stack_id", Param::Int(*s)),
+                    ("axis", Param::from("body_part")),
+                    ("value", Param::from(value)),
+                    ("confidence", Param::Double(0.9)),
+                    ("tier", Param::from("keywords")),
+                ],
+            );
+        }
+        let a = head(reg, "1", '1', Some(0.8));
+        let b = head(reg, "2", '2', Some(0.8));
+        let run = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+            stacks: None,
+            models: None,
+        };
+        // model a says spine of every stack, one group; model b says brain
+        // of the stack that holds nothing
+        let mut given: Vec<proposals::Proposal> = ids
+            .iter()
+            .filter(|s| **s != ids[3])
+            .map(|s| proposal(*s, "spine", 0.97, a.id))
+            .collect();
+        given.push(proposal(ids[3], "brain", 0.97, b.id));
+        let done = proposals::ingest(reg, &run(1), &given, None).unwrap();
+        assert_eq!(
+            done.groups.iter().filter(|g| g.staged.is_some()).count(),
+            2,
+            "{name}"
+        );
+        let group_of = |m: i64| {
+            done.groups
+                .iter()
+                .find(|g| g.model_id == m)
+                .and_then(|g| g.staged)
+                .unwrap()
+        };
+        let (ga, gb) = (group_of(a.id), group_of(b.id));
+        // the change each group would make reads from and to: how many of
+        // its members hold each value now, and each member's own
+        let item_of = |m: i64| done.groups.iter().find(|g| g.model_id == m).unwrap().item;
+        let group_a = review::item(reg.store(), item_of(a.id)).unwrap().unwrap();
+        assert_eq!(
+            group_a.evidence["from"],
+            json!({"neck": 4, "brain": 1}),
+            "{name}"
+        );
+        let group_b = review::item(reg.store(), item_of(b.id)).unwrap().unwrap();
+        assert_eq!(
+            group_b.evidence["from"],
+            json!({"": 1}),
+            "{name}: nothing held"
+        );
+        let members = review::members(reg.store(), item_of(a.id)).unwrap();
+        let brain = members.iter().find(|m| m.stack_id == ids[2]).unwrap();
+        assert_eq!(brain.evidence["from"], "brain", "{name}");
+        let in_force = |reg: &mut Registry| -> Vec<(i64, String)> {
+            labels::decision_labels(
+                reg.store(),
+                &DecisionQuery {
+                    axis: "body_part",
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.stack_id.unwrap(), l.value.unwrap()))
+            .collect()
+        };
+
+        // the words a filter needs, and R6
+        let e = review::commit_where(reg, &CommitFilter::default(), false, "anna@lab", "person")
+            .unwrap_err();
+        assert!(e.to_string().contains("names"), "{name}: {e}");
+        let e = review::commit_where(
+            reg,
+            &CommitFilter {
+                from: Some("neck".into()),
+                ..Default::default()
+            },
+            false,
+            "anna@lab",
+            "person",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("name the axis"), "{name}: {e}");
+        let e = review::commit_where(
+            reg,
+            &CommitFilter {
+                model: Some("bp-head@9".into()),
+                ..Default::default()
+            },
+            false,
+            "anna@lab",
+            "person",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("no registered model"), "{name}: {e}");
+        let by_b = CommitFilter {
+            model: Some(format!("bp-head@{}", b.version)),
+            ..Default::default()
+        };
+        for kind in ["agent", "model"] {
+            let e = review::commit_where(reg, &by_b, false, "bot@lab", kind).unwrap_err();
+            assert!(e.to_string().contains("R6"), "{name}: {e}");
+        }
+
+        // by model: b's alone, named by name@version, then by digest (nothing left)
+        let part = review::commit_where(reg, &by_b, false, "anna@lab", "person").unwrap();
+        assert_eq!(part.decisions, vec![gb], "{name}");
+        assert_eq!(part.left, 1, "{name}");
+        assert_eq!(in_force(reg), vec![(ids[3], "brain".to_string())], "{name}");
+        let again = review::commit_where(
+            reg,
+            &CommitFilter {
+                model: Some(b.digest.clone()),
+                ..Default::default()
+            },
+            false,
+            "anna@lab",
+            "person",
+        )
+        .unwrap();
+        assert!(again.decisions.is_empty(), "{name}");
+
+        // by from and to: the change neck to spine, which is four of a's
+        // five stacks; the group is split and stays staged for the fifth.
+        // The commit of b's moved the registry on, so a's is looked at again
+        let neck_to_spine = CommitFilter {
+            axis: Some("body_part".into()),
+            from: Some("neck".into()),
+            to: Some("spine".into()),
+            ..Default::default()
+        };
+        let e = review::commit_where(reg, &neck_to_spine, false, "anna@lab", "person").unwrap_err();
+        assert!(e.to_string().contains("moved on"), "{name}: {e}");
+        let part = review::commit_where(reg, &neck_to_spine, true, "anna@lab", "person").unwrap();
+        assert_eq!(part.split, vec![ga], "{name}");
+        assert_eq!(part.decisions.len(), 4, "{name}: {part:?}");
+        let mut now = in_force(reg);
+        now.sort();
+        let mut want: Vec<(i64, String)> = [0, 1, 4, 5]
+            .iter()
+            .map(|i| (ids[*i], "spine".to_string()))
+            .chain([(ids[3], "brain".to_string())])
+            .collect();
+        want.sort();
+        assert_eq!(now, want, "{name}: the brain stack is not taken");
+        let sql = format!(
+            "SELECT scope, author_kind, model_id, committed_by FROM {} WHERE id IN ({})",
+            reg.store().qualified("decision"),
+            part.decisions
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in reg.store().query(&sql, &[]).unwrap() {
+            assert_eq!(r.text(0).unwrap(), "stack", "{name}");
+            assert_eq!(
+                r.text(1).unwrap(),
+                "model",
+                "{name}: the author stays the model"
+            );
+            assert_eq!(r.opt_int(2).unwrap(), Some(a.id), "{name}");
+            assert_eq!(r.text(3).unwrap(), "anna@lab", "{name}");
+        }
+        let staged = count(
+            reg,
+            "decision",
+            &format!(" WHERE id = {ga} AND committed_at IS NULL AND withdrawn_at IS NULL"),
+        );
+        assert_eq!(staged, 1, "{name}: the group's decision stays staged");
+        // a value that does not match takes nothing
+        let none = review::commit_where(
+            reg,
+            &CommitFilter {
+                axis: Some("body_part".into()),
+                from: Some("neck".into()),
+                to: Some("brain".into()),
+                ..Default::default()
+            },
+            true,
+            "anna@lab",
+            "person",
+        )
+        .unwrap();
+        assert!(none.decisions.is_empty() && none.split.is_empty(), "{name}");
+
+        // by stacks: the last one, the brain stack
+        let part = review::commit_where(
+            reg,
+            &CommitFilter {
+                stacks: Some(vec![ids[2]]),
+                ..Default::default()
+            },
+            true,
+            "anna@lab",
+            "person",
+        )
+        .unwrap();
+        assert_eq!(part.split, vec![ga], "{name}");
+        assert_eq!(part.decisions.len(), 1, "{name}");
+        assert!(
+            in_force(reg).contains(&(ids[2], "spine".to_string())),
+            "{name}"
+        );
+        // the group's own item and decision wait, staged, for whoever
+        // commits the group whole
+        let item = done
+            .groups
+            .iter()
+            .find(|g| g.staged == Some(ga))
+            .unwrap()
+            .item;
+        let it = review::item(reg.store(), item).unwrap().unwrap();
+        assert_eq!(it.status, "staged", "{name}");
+        let whole = review::commit_as(reg, Some(ga), true, "anna@lab", "person").unwrap();
+        assert_eq!(whole.items, 1, "{name}");
+        let mut now = in_force(reg);
+        now.sort();
+        assert_eq!(now.len(), 6, "{name}: {now:?}");
     }
 }
