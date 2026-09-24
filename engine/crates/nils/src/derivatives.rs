@@ -272,6 +272,18 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
                 ),
             ));
         }
+        // a successor is of what its predecessor was of: the same subject,
+        // and the same stack where either names one
+        if prior.subject_id != Some(belongs.subject_id) || prior.stack_id != belongs.stack_id {
+            return Err((
+                400,
+                format!(
+                    "derivative {old} was made from {}; one made from {} does not supersede it",
+                    made_from(prior.subject_id, prior.stack_id),
+                    made_from(Some(belongs.subject_id), belongs.stack_id)
+                ),
+            ));
+        }
     }
     let model_id = match a.model {
         None => None,
@@ -287,6 +299,15 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
         place,
         model_id,
     })
+}
+
+/// What a derivative was made from, as a refusal names it: ids only.
+fn made_from(subject: Option<i64>, stack: Option<i64>) -> String {
+    match (stack, subject) {
+        (Some(k), _) => format!("stack {k}"),
+        (None, Some(s)) => format!("subject {s}"),
+        (None, None) => "nothing named".to_string(),
+    }
 }
 
 /// Register a derivative: check, write the bytes, write the row, audit.

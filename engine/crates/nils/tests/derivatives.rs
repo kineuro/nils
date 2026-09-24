@@ -409,6 +409,26 @@ fn a_derivative_goes_round_and_is_refused_without_its_grant_or_its_place() {
     );
     assert!(!good);
     assert!(err.contains("does not supersede"), "{err}");
+    // nor is a file of another stack, or another subject, its successor
+    let (good, _, err) = run(
+        &home,
+        &[
+            "derivative",
+            "add",
+            file.to_str().unwrap(),
+            "--kind",
+            "mask",
+            "--stack",
+            "2",
+            "--supersedes",
+            &id.to_string(),
+            "--sha256",
+            &sha256(b"a corrected mask"),
+        ],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("made from"), "{err}");
 
     // A derivative a model made names it in the model table: an unknown
     // model is refused before a byte is kept, a registered one is kept on
