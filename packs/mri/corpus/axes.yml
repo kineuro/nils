@@ -500,6 +500,33 @@ cases:
     axes:
       modifier: FlowComp
 
+  # GE writes flow compensation per axis, `FC_SLICE_AX_GEMS` along the slice
+  # axis and `FC_FREQ_AX_GEMS` along the frequency axis, where Siemens writes
+  # `FC`.
+  - name: a GE stack flow compensated along the slice axis is FlowComp
+    stack:
+      manufacturer: 'GE MEDICAL SYSTEMS'
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FC_SLICE_AX_GEMS\FAST_GEMS\EDR_GEMS\FILTERED_GEMS'
+      text_sequence_name: 'fse-xl'
+      text_series_description: 'Ax T2 FSE'
+    axes:
+      modifier: FlowComp
+
+  - name: a GE stack flow compensated along the frequency axis is FlowComp
+    stack:
+      manufacturer: 'GE MEDICAL SYSTEMS'
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FC_FREQ_AX_GEMS\FAST_GEMS\EDR_GEMS\FILTERED_GEMS'
+      text_sequence_name: 'fse-xl'
+      text_series_description: 'Sag T2 FSE'
+    axes:
+      modifier: FlowComp
+
   # Siemens writes `TTEST` on the perfusion-weighted image of its 3D GRASE
   # ASL, which is the label-control subtraction and the image an ASL series
   # exists for: 249 of them were a t test map. The token keeps its meaning

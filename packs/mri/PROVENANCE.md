@@ -123,7 +123,7 @@ v0 still gives the old answer:
 | rule | in v0 | here, and why |
 |---|---|---|
 | technique `MS-EPI` (RESOLVE) | also by the combination segmented k-space plus EPI | only by the readout-segmented sequence name (`*re_b`) or its words. Siemens writes `SK` on every EPI; the combination called 2,916 single-shot diffusion stacks, 462 BOLD stacks and 403 ASL stacks RESOLVE |
-| modifier `FlowComp` | also by the words `flow comp`, `flowcomp`, `gmn` and `fc` | only by ScanOptions `FC`. A protocol named `0 flow comp` with flow compensation off was FlowComp on 212 stacks |
+| modifier `FlowComp` | also by the words `flow comp`, `flowcomp`, `gmn` and `fc` | only by ScanOptions: `FC`, and GE's `FC_SLICE_AX_GEMS` and `FC_FREQ_AX_GEMS`. A protocol named `0 flow comp` with flow compensation off was FlowComp on 212 stacks |
 | body part | one text of the series' names and `BodyPartExamined`, a spine word anywhere winning | the series' own names first, then a spine receive coil, then `BodyPartExamined`, which is written from the exam's registration and says the same on every series |
 | construct `TTestMap` (v1's own) | not in v0 | not on an ASL series, where Siemens writes `TTEST` on the perfusion-weighted image |
 | the SWI route | its last resort calls every unnamed output the SWI image | an MPR plane is a reformat first, as every other MPR is |

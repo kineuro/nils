@@ -294,7 +294,10 @@ parsers:
       has_ir:            {token: IR}
       has_fat_sat:       {all: [{any_token: [FS, SFS]}, {not: {token: FSE}}]}
       has_mt:            {token: MT}
-      has_flow_comp:     {token: FC}
+      # Flow compensation: `FC` is the standard's term, which Siemens writes;
+      # GE writes it per axis, `FC_SLICE_AX_GEMS` along the slice axis and
+      # `FC_FREQ_AX_GEMS` along the frequency axis.
+      has_flow_comp:     {any_token: [FC, FC_SLICE_AX_GEMS, FC_FREQ_AX_GEMS]}
       has_partial_fourier_phase: {token: PFP}
       has_partial_fourier_freq:  {token: PFF}
       has_phase_reorder: {token: PER}
