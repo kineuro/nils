@@ -6,10 +6,15 @@
 # part are scored by the zero-shot text-image margin, gated, and picked the
 # same way. What it writes are seeds, suggestions a curation campaign starts
 # from, and not a model's proposals: results.json carries them under `seeds`
-# and `selection`, and each seeded stack has a small file of its own.
+# (per stack the value suggested and its margin) and `selection`, which the
+# runner keeps as the run's derivative of kind seeds and `nils pipeline seeds
+# <run> --save <name>` turns into the selection a campaign starts from. Each
+# seeded stack has a small file of its own besides.
 #
-# It reads the pack's answers from stacks.json (`body_part` and `technique`
-# per stack); without them every stack is in the zero-shot pool.
+# It reads the registry's answers from stacks.json (`body_part` and
+# `technique` per stack, as the job contract's stacks.json gives them, with
+# `orientation` and `slices`); a stack without a body part is in the
+# zero-shot pool.
 #
 # The image digest is a placeholder until CI publishes the image (see
 # bodypart-embed/nils.job.yml).

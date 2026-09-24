@@ -69,6 +69,21 @@ def test_the_store_finds_embeddings_anywhere_and_joins_slices(tmp_path):
     assert s.get(D, "other", 7) is None
 
 
+def test_a_stack_s_slice_count_spares_reading_a_header():
+    doc = {
+        "sources": [{"id": 0, "mount": "/source/0"}],
+        "stacks": [{"unit": "stack-5", "stack_id": 5, "slices": 7, "orientation": "axial",
+                    "body_part": None, "technique": "TSE", "files": [{"source": 0, "path": "a/mf.dcm", "frames": None}]}],
+    }
+    asked = []
+    st = manifest.parse(doc, frames_of=lambda p: asked.append(p) or 1)
+    assert st[0].num_slices == 7 and not asked
+    assert "slices" not in st[0].extra
+    doc["stacks"][0].pop("slices")
+    st = manifest.parse(doc, frames_of=lambda p: 4)
+    assert st[0].num_slices == 4
+
+
 def test_the_manifest_expands_frames_in_order():
     counted = []
 

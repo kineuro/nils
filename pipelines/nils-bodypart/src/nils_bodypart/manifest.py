@@ -8,20 +8,23 @@
        {"unit": "stack-12", "stack_id": 12,
         "files": [{"source": 0, "path": "a/1.dcm", "frames": null},
                   {"source": 0, "path": "a/mf.dcm", "frames": "1-40"}],
-        "orientation": "axial", "body_part": null, "technique": "MPRAGE"}]}
+        "orientation": "axial", "body_part": null, "technique": "MPRAGE",
+        "slices": 41}]}
 
 A stack's files are in its slice order, and a slice index counts their
 frames in that order from 0, as v0 counted them. ``frames`` names the
 frames of a multi-frame file that are the stack's, from one, as ranges
 (``1-4,9``); null is every frame. A stack of one file whose frames are null
-is asked its NumberOfFrames; a stack of many such files is one frame per
-file, which is what a classic series is, since reading every header of an
+has the runner's ``slices`` count, or is asked its NumberOfFrames where the
+manifest gives none; a stack of many such files is one frame per file,
+which is what a classic series is, since reading every header of an
 archive to count frames would cost more than the embedding.
 
-This image also reads three keys the contract leaves to the runner, where
-the runner gives them: ``orientation`` (which slices inference reads; none
-means the centre three) and the pack's own ``body_part`` and ``technique``
-(the seeder's pools and strata; none means every stack is in the null pool).
+The runner also gives, since the job contract's rulings of record 43,
+``orientation`` (which slices inference reads; none means the centre three),
+the stack's ``body_part`` and ``technique`` as the registry holds them now
+(the seeder's pools and strata; none means every stack is in the null pool)
+and ``slices``, how many slices its files hold.
 """
 
 from __future__ import annotations
@@ -93,7 +96,7 @@ def _safe_join(mount: Path, rel: str) -> str:
     return str(mount / p)
 
 
-KNOWN = {"unit", "stack_id", "files", "orientation", "body_part", "technique"}
+KNOWN = {"unit", "stack_id", "files", "orientation", "body_part", "technique", "slices"}
 
 
 def parse(
@@ -124,6 +127,8 @@ def parse(
             raise ManifestError(f"stack {sid} is listed twice")
         seen.add(sid)
         files = s.get("files") or []
+        counted = s.get("slices")
+        counted = counted if isinstance(counted, int) and not isinstance(counted, bool) and counted > 0 else None
         slices: list[Slice] = []
         for f in files:
             src = int(f.get("source", 0))
@@ -132,7 +137,7 @@ def parse(
             path = _safe_join(mounts[src], f["path"])
             frames = f.get("frames")
             if frames is None:
-                n = frames_of(path) if len(files) == 1 else 1
+                n = (counted or frames_of(path)) if len(files) == 1 else 1
                 slices.extend(Slice(path, i) for i in range(n))
             else:
                 slices.extend(Slice(path, i) for i in parse_frames(str(frames)))

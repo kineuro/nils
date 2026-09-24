@@ -398,6 +398,20 @@ fn the_job_contract_is_the_runner_s() {
     for key in ["models", "seeds", "selection"] {
         assert!(results["properties"].get(key).is_some(), "{key}");
     }
+    // every descriptor of the body-part image checks, as the catalog takes it
+    for entry in ["embed", "seed", "train", "infer"] {
+        let text = std::fs::read_to_string(contracts().join(format!(
+            "../pipelines/nils-bodypart/bodypart-{entry}/nils.job.yml"
+        )))
+        .unwrap();
+        let d = descriptor::parse(&text).unwrap_or_else(|e| panic!("bodypart-{entry}: {e}"));
+        assert_eq!(d.name, format!("bodypart-{entry}"));
+        assert_eq!(d.layout, descriptor::Layout::Stacks);
+        if entry == "train" {
+            let model = d.outputs.iter().find(|o| o.kind == "model").unwrap();
+            assert!(model.run_level && model.card.is_some());
+        }
+    }
     // v0's N4, re-pinned: it checks, and its image is the schema's
     let text =
         std::fs::read_to_string(contracts().join("../pipelines/n4-bias-correction/nils.job.yml"))

@@ -7,7 +7,10 @@
 # weighted double; any other at its three centre slices. Every stack gets a
 # proposal on body_part with the probability of every class and the head's
 # digest (contracts/job/v1 proposals.schema.json); the engine stages the
-# confident part and asks a person about the rest.
+# part at or above the head card's threshold and asks a person about the
+# rest. The head is the registered model the run is given (--model), whose
+# folder the runner mounts at /inputs/head: the artifact a bodypart-train
+# run registered, with its card beside it.
 #
 # The image digest is a placeholder until CI publishes the image (see
 # bodypart-embed/nils.job.yml).

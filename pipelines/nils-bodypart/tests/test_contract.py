@@ -15,14 +15,27 @@ from .test_formats import write_set
 
 HERE = Path(__file__).resolve().parent.parent
 CONTRACT = HERE.parent.parent / "contracts" / "job" / "v1"
+MODEL = HERE.parent.parent / "contracts" / "model" / "v1"
 ENTRIES = ("bodypart-embed", "bodypart-seed", "bodypart-train", "bodypart-infer")
 
 
-def schema(name: str) -> dict:
-    p = CONTRACT / name
+def schema(name: str, where: Path = CONTRACT) -> dict:
+    p = where / name
     if not p.is_file():
-        pytest.skip(f"contracts/job/v1/{name} is not in this tree")
+        pytest.skip(f"{p.relative_to(HERE.parent.parent)} is not in this tree")
     return json.loads(p.read_text())
+
+
+def validator(name: str, where: Path = CONTRACT):
+    """A validator of one schema that resolves the contract's other
+    documents from this tree, never from the network."""
+    jsonschema = pytest.importorskip("jsonschema")
+    referencing = pytest.importorskip("referencing")
+    registry = referencing.Registry()
+    for p in sorted(where.glob("*.schema.json")):
+        doc = json.loads(p.read_text())
+        registry = registry.with_resource(doc["$id"], referencing.Resource.from_contents(doc))
+    return jsonschema.Draft202012Validator(schema(name, where), registry=registry)
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
@@ -52,10 +65,24 @@ def test_the_results_and_proposals_are_the_contracts(synthetic):
     write_set(root / "labels", [(101, "brain"), (102, "brain"), (103, "spine")])
     assert cli.main(["train", *common, "--embeddings", str(root / "e"), "--labels", str(root / "labels"), "--output", str(root / "t"), "--min-per-class", "1"]) == 0
     assert cli.main(["infer", *common, "--embeddings", str(root / "e"), "--head", str(root / "t" / "head"), "--output", str(root / "i")]) == 0
-    for out in ("e", "t", "i"):
+    assert results["properties"]["proposals"]["$ref"] == "proposals.schema.json"
+    check = validator("results.schema.json")
+    assert cli.main(["seed", *common, "--embeddings", str(root / "e"), "--output", str(root / "s"), "--n-target", "2"]) == 0
+    for out in ("e", "s", "t", "i"):
         doc = json.loads((root / out / "results.json").read_text())
-        jsonschema.validate(doc, results)
-    proposals = CONTRACT / "proposals.schema.json"
-    if proposals.is_file():
-        doc = json.loads((root / "i" / "results.json").read_text())
-        jsonschema.validate(doc["proposals"], json.loads(proposals.read_text()))
+        check.validate(doc)
+    doc = json.loads((root / "i" / "results.json").read_text())
+    jsonschema.validate(doc["proposals"], schema("proposals.schema.json"))
+    # the seeds are apart from the proposals, each with its value and margin
+    seeded = json.loads((root / "s" / "results.json").read_text())
+    assert seeded["seeds"] and "proposals" not in seeded
+    assert all({"stack_id", "axis", "value", "margin"} <= set(s) for s in seeded["seeds"])
+    # every card the runs carry is a model card: the encoders an embed
+    # used, and the head a train fitted with its encoders and threshold
+    card = validator("card.schema.json", MODEL)
+    for out in ("e", "t"):
+        for m in json.loads((root / out / "results.json").read_text())["models"]:
+            card.validate(m)
+    head = json.loads((root / "t" / "results.json").read_text())["models"][0]
+    assert [e["digest"] for e in head["encoders"]] == [m["digest"] for m in json.loads((root / "e" / "results.json").read_text())["models"]]
+    assert head["threshold"] == 0.7

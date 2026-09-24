@@ -306,8 +306,11 @@ def cmd_train(a: argparse.Namespace) -> Run:
         "random_state": a.random_state,
         "n_train_slices": a.n_train_slices,
         "min_per_class": a.min_per_class,
+        "threshold": a.threshold,
         "calibration": "temperature" if a.estimator == "logreg" else "CalibratedClassifierCV(sigmoid, cv=3)",
     }
+    if not 0.0 < a.threshold <= 1.0:
+        raise RunError(f"the threshold is a probability above 0 and at most 1, not {a.threshold}")
     run = Run("bodypart-train", a.output, params, "cpu")
     ls = labelsets.load(a.labels)
     by_stack, conflicted = ls.stack_labels(AXIS)
@@ -390,9 +393,12 @@ def cmd_train(a: argparse.Namespace) -> Run:
         "digest": digest,
         "task": f"axis:{AXIS}",
         "slot": a.slot,
-        # The card names one encoder; the head reads the whole chain, which
-        # preprocessing.encoders lists by digest.
-        "encoder": {"digest": infos[0].digest, "name": infos[0].name, "version": infos[0].version},
+        # Every encoder the head reads, in the order it concatenates their
+        # features (contracts/model/v1, record 43).
+        "encoders": [{"digest": i.digest, "name": i.name, "version": i.version} for i in infos],
+        # The probability at or above which the engine stages its proposals;
+        # a run may raise it, never lower it.
+        "threshold": a.threshold,
         "trained_on": {"label_set": ls.digest, "name": ls.name or "", "rows": len(ls.rows)},
         "pack_version": ls.pack_version or PACK_VERSION,
         "artifact": {"format": fmt, "bytes": len(data)},
@@ -573,6 +579,7 @@ def parser() -> argparse.ArgumentParser:
     t.add_argument("--name", default="bodypart-head")
     t.add_argument("--model-version", default=None)
     t.add_argument("--slot", default="site")
+    t.add_argument("--threshold", type=float, default=0.70, help="the card's threshold: proposals at or above it are staged")
 
     i = sub.add_parser("infer", help="propose a body part per stack")
     common(i)

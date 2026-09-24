@@ -5,7 +5,10 @@
 # three centre slices for training, five spread slices of an axial stack for
 # inference). One embedding file per stack and encoder, in the engine's
 # format (contracts/job/v1/embedding.md). The runner passes the embeddings
-# the cache holds already, and only the missing slices are computed.
+# the cache holds already, and only the missing slices are computed. The
+# results carry each encoder's card, from which the runner registers an
+# encoder it does not hold yet, and it keeps every file under its stack,
+# encoder and preprocessing version.
 #
 # The selection is the eligible stacks, as v0 chose them: anatomical, not a
 # localizer, and not SyMRI, projection- or subtraction-derived.
