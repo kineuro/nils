@@ -396,7 +396,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     author: a.principal.clone(),
                     decision_id: None,
                     campaign_id: Some(campaign),
-                    model_id: None,
+                    model_id: a.model_id,
                     answer_id: Some(a.id),
                 });
             }
@@ -463,10 +463,15 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     Some(list) => list.iter().filter_map(Value::as_i64).collect(),
                     None => Vec::new(),
                 };
+                // one model settled it: its answer names it
+                let models: BTreeSet<i64> = settled.iter().filter_map(|a| a.model_id).collect();
                 let base = Label {
                     value,
                     author_kind: kind,
                     author: authors.join("+"),
+                    model_id: (settled.len() == 1)
+                        .then(|| models.first().copied())
+                        .flatten(),
                     ..base
                 };
                 if files.is_empty() {

@@ -1216,7 +1216,7 @@ paths:
   /api/campaigns/{id}/assignments/{assignment}/answer:
     post:
       summary: Answer a claimed item (record 42 S5; campaigns:work)
-      description: "The answer fits the question or is refused before anything is written: `value` for an axis (a value of the axis, of `values` when the question lists them), a pick (stack ids, as `12,14` or a list) and a free question; `form` for a form; `derivative_id` for a derivative, the file registered by POST /api/derivatives first (a derivative of the kind the question asks for, not withdrawn, of the item's subject and, where both name one, made from the item's stack), with `form` beside it when the question declares one. The author is the caller, of the kind its verified actor is. Once every rater of an item answered, it is agreed, waits for its external metric, or is offered to an adjudicator (the review item's evidence then says `campaign_state: needs_adjudication`); an adjudicator's answer settles it. Nothing here is a decision. An expired lease is refused. Audited as campaign.answer with the value of an axis or a pick and never a form's text."
+      description: "The answer fits the question or is refused before anything is written: `value` for an axis (a value of the axis, of `values` when the question lists them), a pick (stack ids, as `12,14` or a list) and a free question; `form` for a form; `derivative_id` for a derivative, the file registered by POST /api/derivatives first (a derivative of the kind the question asks for, not withdrawn, of the item's subject and, where both name one, made from the item's stack), with `form` beside it when the question declares one. The author is the verified actor; a model acting names its registered model in X-Nils-Actor, which the answer keeps and a close carries onto the decision it writes, staged (record 42 R6). The author is the caller, of the kind its verified actor is. Once every rater of an item answered, it is agreed, waits for its external metric, or is offered to an adjudicator (the review item's evidence then says `campaign_state: needs_adjudication`); an adjudicator's answer settles it. Nothing here is a decision. An expired lease is refused. Audited as campaign.answer with the value of an axis or a pick and never a form's text."
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {name: assignment, in: path, required: true, schema: {type: integer}}
@@ -1232,8 +1232,9 @@ paths:
                 why: {type: string}
       responses:
         "200": {description: "{answer, item, state, adjudication}: the item's state after it, and the adjudicator assignment it opened, if any"}
-        "400": {description: An answer that does not fit the question}
+        "400": {description: "An answer that does not fit the question, or a model acting that names no registered model"}
         "403": {description: Another principal's assignment}
+        "404": {description: "No registered model answers to the one X-Nils-Actor names"}
         "404": {description: No such assignment in this campaign}
         "409": {description: The lease ran out, the assignment is not leased, or the campaign is closed}
   /api/campaigns/{id}/assignments/{assignment}/release:

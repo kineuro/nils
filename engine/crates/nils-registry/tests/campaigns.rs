@@ -230,6 +230,7 @@ fn give<'a>(assignment: i64, who: &'a str, value: &'a str) -> Given<'a> {
         assignment,
         principal: who,
         author_kind: "person",
+        model: None,
         value: Some(value),
         form: None,
         derivative_id: None,
@@ -370,6 +371,7 @@ fn two_raters_share_the_items_and_an_expired_lease_returns_one() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(20),
@@ -489,6 +491,7 @@ fn three_raters_who_disagree_give_one_adjudicator_and_one_decision() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(4),
@@ -578,6 +581,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                         assignment: a.assignment.id,
                         principal: who,
                         author_kind: "person",
+                        model: None,
                         value: None,
                         form: Some(&form),
                         derivative_id: Some(file),
@@ -602,6 +606,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                     assignment: a.assignment.id,
                     principal: who,
                     author_kind: "person",
+                    model: None,
                     value: None,
                     form: Some(&form),
                     derivative_id: Some(file),
@@ -628,6 +633,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                 assignment: j.assignment.id,
                 principal: "judge@lab",
                 author_kind: "person",
+                model: None,
                 value: None,
                 form: Some(&form),
                 derivative_id: Some(union),
@@ -642,6 +648,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(5),
@@ -733,6 +740,7 @@ fn a_campaign_adopts_review_items_and_one_campaign_asks_each() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(2),
@@ -789,6 +797,7 @@ fn a_label_set_is_the_decisions_in_force_and_its_bytes_follow_them() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(9),
@@ -1043,6 +1052,7 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(9),
@@ -1155,6 +1165,7 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: None,
             },
             &at(2),
@@ -1175,6 +1186,7 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
                 campaign: c.id,
                 who: "bot@lab",
                 author_kind: "agent",
+                model: None,
                 picks: Some(&never),
             },
             &at(2),
@@ -1203,6 +1215,7 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
                 campaign: c.id,
                 who: "cleo@lab",
                 author_kind: "person",
+                model: None,
                 picks: Some(&writer),
             },
             &at(2),
@@ -1231,5 +1244,95 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
             0,
             "{name}: a pick is not a decision"
         );
+    }
+}
+
+/// Record 42 S2 with S6: a model that answers in a campaign names its
+/// registered model, and the close carries it onto the decision, which is
+/// staged, as a model's answer always is (R6). A model's answer without its
+/// model, or a person's naming one, is refused before it is written.
+#[test]
+fn a_model_s_answer_keeps_its_model_on_the_decision() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let model = nils_registry::model::register(
+            reg,
+            &json!({"name": "bp", "version": "1", "kind": "pass", "digest": digest, "task": "axis:body_part"}),
+            "anna@lab",
+        )
+        .unwrap();
+        nils_registry::model::admit(
+            reg,
+            model.id,
+            &json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]}),
+            "anna@lab",
+        )
+        .unwrap();
+        let q = json!({"kind": "axis", "axis": "body_part", "values": ["brain", "spine"]});
+        let adj = json!({"when": "always"});
+        let c = campaign::create(
+            reg,
+            &new("bp", &q, &adj, Items::Stacks(vec![ids[0]]), 1, "decision"),
+        )
+        .unwrap();
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(1)).unwrap();
+        let j = campaign::claim(reg, c.id, "bp@lab", Role::Adjudicator, &at(2))
+            .unwrap()
+            .unwrap();
+        let by = |kind: &'static str, model: Option<i64>| Given {
+            assignment: j.assignment.id,
+            principal: "bp@lab",
+            author_kind: kind,
+            model,
+            value: Some("brain"),
+            form: None,
+            derivative_id: None,
+            why: None,
+        };
+        let e = campaign::answer(reg, &by("model", None), &at(3)).unwrap_err();
+        assert!(
+            e.to_string().contains("names the registered model"),
+            "{name}: {e}"
+        );
+        let e = campaign::answer(reg, &by("person", Some(model.id)), &at(3)).unwrap_err();
+        assert!(e.to_string().contains("not a model"), "{name}: {e}");
+        let e = campaign::answer(reg, &by("model", Some(9999)), &at(3)).unwrap_err();
+        assert!(
+            e.to_string().contains("no registered model 9999"),
+            "{name}: {e}"
+        );
+        campaign::answer(reg, &by("model", Some(model.id)), &at(3)).unwrap();
+        let kept = campaign::answers(reg.store(), c.id).unwrap();
+        assert_eq!(kept.last().unwrap().model_id, Some(model.id), "{name}");
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+                model: None,
+                picks: None,
+            },
+            &at(4),
+        )
+        .unwrap();
+        assert_eq!(closed.decisions.len(), 1, "{name}: {closed:?}");
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT author_kind, model_id, campaign_id, staged_at IS NOT NULL, committed_at IS NULL FROM {}",
+                s.qualified("decision")
+            )
+        });
+        assert_eq!(rows[0].text(0).unwrap(), "model", "{name}");
+        assert_eq!(rows[0].opt_int(1).unwrap(), Some(model.id), "{name}");
+        assert_eq!(rows[0].opt_int(2).unwrap(), Some(c.id), "{name}");
+        assert_eq!(rows[0].int(3).unwrap(), 1, "{name}: staged (R6)");
+        assert_eq!(rows[0].int(4).unwrap(), 1, "{name}: not in force");
     }
 }

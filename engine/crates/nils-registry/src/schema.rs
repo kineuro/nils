@@ -2036,6 +2036,9 @@ fn build_registry() -> Vec<Table> {
                 req("round", Type::Int),
                 // person | agent | model, from the verified actor
                 req("author_kind", Type::Text),
+                // The registered model, when a model answered (record 42
+                // S2), carried onto the decision a close writes from it.
+                col("model_id", Type::Int),
                 col("value", Type::Text),
                 col("form", Type::Json),
                 col("derivative_id", Type::Int),

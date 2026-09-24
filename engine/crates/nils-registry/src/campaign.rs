@@ -1768,6 +1768,8 @@ pub struct Given<'a> {
     pub principal: &'a str,
     /// The verified actor's kind: person, agent or model.
     pub author_kind: &'a str,
+    /// The registered model, when a model answers (record 42 S2).
+    pub model: Option<i64>,
     pub value: Option<&'a str>,
     pub form: Option<&'a Value>,
     pub derivative_id: Option<i64>,
@@ -1791,6 +1793,8 @@ pub struct Answer {
     pub why: Option<String>,
     pub actor_detail: Value,
     pub answered_at: String,
+    /// The registered model, when a model answered.
+    pub model_id: Option<i64>,
 }
 
 impl Answer {
@@ -1801,11 +1805,12 @@ impl Answer {
             "round": self.round, "author_kind": self.author_kind, "value": self.value,
             "form": self.form, "derivative_id": self.derivative_id, "why": self.why,
             "actor_detail": self.actor_detail, "answered_at": self.answered_at,
+            "model_id": self.model_id,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 14] = [
+const ANSWER_COLUMNS: [&str; 15] = [
     "id",
     "campaign_id",
     "item_id",
@@ -1820,6 +1825,7 @@ const ANSWER_COLUMNS: [&str; 14] = [
     "why",
     "actor_detail",
     "answered_at",
+    "model_id",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -1839,6 +1845,7 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
         why: r.opt_text(11)?.map(str::to_string),
         actor_detail: json_at(r, 12)?,
         answered_at: r.text(13)?.to_string(),
+        model_id: r.opt_int(14)?,
     })
 }
 
@@ -1969,6 +1976,26 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
             g.author_kind
         )));
     }
+    // Record 42 S2 (D15): a model's answer names the registered model, and
+    // only a model's does; the close carries it onto the decision.
+    match (g.author_kind, g.model) {
+        ("model", None) => {
+            return Err(invalid(
+                "a model's answer names the registered model that answered (D15)",
+            ));
+        }
+        ("model", Some(id)) => {
+            if crate::model::get(store, id)?.is_none() {
+                return Err(Error::NotFound(format!("no registered model {id}")));
+            }
+        }
+        (kind, Some(_)) => {
+            return Err(invalid(format!(
+                "a {kind} is not a model; only a model's answer names a model"
+            )));
+        }
+        _ => {}
+    }
     let actor_detail = crate::actor::current();
     let stored_value = match &question {
         Question::Pick { .. } => g
@@ -1998,6 +2025,7 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                         "why",
                         "actor_detail",
                         "answered_at",
+                        "model_id",
                     ],
                 )
                 .returning(&["id"]),
@@ -2015,6 +2043,7 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                     g.why.map_or(Param::Null, Param::from),
                     Param::from(actor_detail.to_string()),
                     Param::from(now),
+                    g.model.map_or(Param::Null, Param::Int),
                 ]],
             )?
             .first()
@@ -2467,6 +2496,9 @@ pub struct Close<'a> {
     /// The verified principal closing it, and the kind its actor is.
     pub who: &'a str,
     pub author_kind: &'a str,
+    /// The registered model, when a model closes it (record 42 S2): the
+    /// decisions it writes are that model's answers, staged (R6).
+    pub model: Option<i64>,
     /// The person's pick writer a pick campaign closes through; a pick
     /// campaign closed without one leaves its items unresolved and says so.
     pub picks: Option<PickWriter<'a>>,
@@ -2478,6 +2510,7 @@ impl std::fmt::Debug for Close<'_> {
             .field("campaign", &self.campaign)
             .field("who", &self.who)
             .field("author_kind", &self.author_kind)
+            .field("model", &self.model)
             .field("picks", &self.picks.is_some())
             .finish()
     }
@@ -2551,9 +2584,9 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
         };
         // the author of what the item came to: the adjudicator where there
         // was one, else the principal closing it, each as verified
-        let (who, kind) = match adjudicator {
-            Some(a) => (a.principal.clone(), a.author_kind.clone()),
-            None => (cl.who.to_string(), cl.author_kind.to_string()),
+        let (who, kind, model) = match adjudicator {
+            Some(a) => (a.principal.clone(), a.author_kind.clone(), a.model_id),
+            None => (cl.who.to_string(), cl.author_kind.to_string(), cl.model),
         };
         match c.closes_into.as_str() {
             "decision" | "stage" => {
@@ -2575,7 +2608,7 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                             who: &who,
                             kind: &kind,
                             version: None,
-                            model: None,
+                            model,
                         },
                         stage: staged,
                         why: Some(&path),
@@ -2932,6 +2965,7 @@ mod tests {
             assignment: 1,
             principal: "p",
             author_kind: "person",
+            model: None,
             value,
             form: None,
             derivative_id: None,

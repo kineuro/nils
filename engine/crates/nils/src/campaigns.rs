@@ -323,12 +323,14 @@ pub(crate) fn route(
                     ),
                     other => Some(other.to_string()),
                 };
+                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
                 let answered = campaign::answer(
                     registry,
                     &Given {
                         assignment: a,
                         principal,
                         author_kind: kind_of(caller),
+                        model: acting,
                         value: value.as_deref(),
                         form: form.as_ref(),
                         derivative_id: doc["derivative_id"].as_i64(),
@@ -371,12 +373,14 @@ pub(crate) fn route(
                     .as_ref()
                     .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
                 let picks = pick_writer(pack);
+                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
                 let closed = campaign::close(
                     registry,
                     &Close {
                         campaign: c.id,
                         who: principal,
                         author_kind: kind_of(caller),
+                        model: acting,
                         picks: Some(&picks),
                     },
                     &now,
@@ -1457,6 +1461,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     assignment,
                     principal: &principal,
                     author_kind: "person",
+                    model: None,
                     value: value.as_deref(),
                     form: form.as_ref(),
                     derivative_id: derivative,
@@ -1508,6 +1513,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     campaign: c.id,
                     who: &principal,
                     author_kind: "person",
+                    model: None,
                     picks: Some(&picks),
                 },
                 &now,

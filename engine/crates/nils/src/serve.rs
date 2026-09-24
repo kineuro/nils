@@ -3359,27 +3359,7 @@ fn author_at_apply<'a>(
             ),
         ));
     }
-    let model = if kind == "model" {
-        let reference = match &caller.actor["model"] {
-            serde_json::Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
-            _ => {
-                return Err(Reply::error(
-                    400,
-                    "a model acting names the registered model in X-Nils-Actor: {\"kind\": \"model\", \"model\": <id, sha256 digest or name@version>}",
-                ));
-            }
-        };
-        let Some(m) = nils_registry::model::resolve(registry.store(), &reference)? else {
-            return Err(Reply::error(
-                404,
-                format!("no registered model answers to {reference}; nils model list"),
-            ));
-        };
-        Some(m)
-    } else {
-        None
-    };
+    let model = acting_model(registry, caller)?;
     if let Some(said) = doc.get("model_id").filter(|v| !v.is_null())
         && (said.as_i64() != model.as_ref().map(|m| m.id))
     {
@@ -3403,6 +3383,36 @@ fn author_at_apply<'a>(
         }
     }
     Ok((kind, version, model.map(|m| m.id)))
+}
+
+/// Record 42 S2: the registered model a model acting names in
+/// `X-Nils-Actor` (by id, digest or `name@version`); none when a person or
+/// an agent acts. A model that names none, or one nothing registered
+/// answers to, is refused.
+pub(crate) fn acting_model(
+    registry: &mut Registry,
+    caller: &Caller,
+) -> Result<Option<nils_registry::model::Model>, Reply> {
+    if author_of(caller).0 != "model" {
+        return Ok(None);
+    }
+    let reference = match &caller.actor["model"] {
+        serde_json::Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => {
+            return Err(Reply::error(
+                400,
+                "a model acting names the registered model in X-Nils-Actor: {\"kind\": \"model\", \"model\": <id, sha256 digest or name@version>}",
+            ));
+        }
+    };
+    let Some(m) = nils_registry::model::resolve(registry.store(), &reference)? else {
+        return Err(Reply::error(
+            404,
+            format!("no registered model answers to {reference}; nils model list"),
+        ));
+    };
+    Ok(Some(m))
 }
 
 /// An author kind as a sentence names it.
