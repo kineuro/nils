@@ -13156,12 +13156,26 @@ fn use_model_server(
         }
     };
     console.progress(&format!("Kvasir holds {model} from {url} as {backend}"));
-    // each of the stations' purposes goes to that model
-    let Some(table) = kvasir.call("GET", "/v1/purposes", None, 10) else {
+    // each of the stations' purposes goes to that model, once Kvasir lists
+    // them: right after a restart it may not list them yet, and Kvasir maps
+    // no purpose it does not list
+    let expected = station_purposes(plan);
+    let Some(table) = listed_purposes(kvasir, console, &expected) else {
         return console.broken(&format!(
             "Kvasir did not list its purposes, so the stations are not mapped to {model}"
         ));
     };
+    let listed: Vec<&str> = table["purposes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["purpose"].as_str())
+        .collect();
+    let missing: Vec<&str> = expected
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !listed.contains(p))
+        .collect();
     let mut mapped = 0;
     let mut refused = Vec::new();
     for row in table["purposes"].as_array().into_iter().flatten() {
@@ -13191,7 +13205,30 @@ fn use_model_server(
             )),
         }
     }
+    if mapped == 0 && refused.is_empty() {
+        console.say("once the assistant runs, nils setup --update maps them");
+        return console.broken(&format!(
+            "Kvasir lists none of the stations' purposes{}, so no station goes to {model}",
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", missing.join(", "))
+            }
+        ));
+    }
     console.progress(&format!("{mapped} station purpose(s) go to {model}"));
+    if !missing.is_empty() {
+        console.say("once the assistant runs, nils setup --update maps them");
+        console.broken(&format!(
+            "Kvasir does not list {}, so {} not go to {model}",
+            missing.join(", "),
+            if missing.len() == 1 {
+                "it does"
+            } else {
+                "they do"
+            }
+        ))?;
+    }
     if !refused.is_empty() {
         console.broken(&format!(
             "Kvasir did not map {} to {model}",
@@ -13199,6 +13236,82 @@ fn use_model_server(
         ))?;
     }
     Ok(())
+}
+
+/// How long setup waits for Kvasir to list the stations' purposes, and how
+/// often it asks.
+#[cfg(not(test))]
+const PURPOSES_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const PURPOSES_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(not(test))]
+const PURPOSES_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const PURPOSES_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The purposes of the assistant's stations: those Kvasir's configuration
+/// declares, and those of the stations installed, which setup declares in
+/// it.
+fn station_purposes(plan: &Plan) -> Vec<String> {
+    let declared = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .map(|value| value["purposes"].clone())
+        .unwrap_or_default();
+    let mut ids: Vec<String> = assistant_purposes(plan, &declared)
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .filter(|id| id.starts_with("assistant."))
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Kvasir's purpose table once it lists every one of `expected`, or, where
+/// none is expected, at least one of the assistant's; after
+/// `PURPOSES_WAIT`, the table as it is then. None where Kvasir never
+/// answered.
+fn listed_purposes(
+    kvasir: &Kvasir,
+    console: &Console,
+    expected: &[String],
+) -> Option<serde_json::Value> {
+    let started = std::time::Instant::now();
+    let mut last = None;
+    let mut waited = false;
+    loop {
+        if let Some(table) = kvasir.call("GET", "/v1/purposes", None, 10) {
+            let listed: Vec<&str> = table["purposes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row["purpose"].as_str())
+                .collect();
+            let whole = if expected.is_empty() {
+                listed.iter().any(|p| p.starts_with("assistant."))
+            } else {
+                expected.iter().all(|p| listed.contains(&p.as_str()))
+            };
+            if whole {
+                if waited {
+                    console.waited();
+                }
+                return Some(table);
+            }
+            last = Some(table);
+        }
+        if started.elapsed() >= PURPOSES_WAIT {
+            if waited {
+                console.waited();
+            }
+            return last;
+        }
+        waited = true;
+        console.waiting("Kvasir listing the stations' purposes", started);
+        std::thread::sleep(PURPOSES_POLL);
+    }
 }
 
 /// The model ids a backend or a catalog names, each given as a name or as
@@ -18932,6 +19045,11 @@ mod tests {
         offered: Vec<serde_json::Value>,
         /// The credentials sealed, by name.
         sealed: BTreeMap<String, String>,
+        /// How many more times `/v1/purposes` lists none of the assistant's
+        /// purposes, as right after Kvasir or the assistant restarted.
+        purposes_late: usize,
+        /// Purposes `/v1/purposes` never lists.
+        purposes_unlisted: Vec<&'static str>,
     }
 
     /// Kvasir's doors over what it holds. A backend is added unless one of
@@ -19002,7 +19120,23 @@ mod tests {
                 ]})),
                 ("POST", "/v1/keys") => ok(json!({"id": "k_new", "key": "kvs_k_new.fresh"})),
                 ("DELETE", p) if p.starts_with("/v1/keys/") => (204, String::new()),
-                ("GET", "/v1/purposes") => ok(json!({ "purposes": held.purposes })),
+                ("GET", "/v1/purposes") => {
+                    let late = held.purposes_late > 0;
+                    held.purposes_late = held.purposes_late.saturating_sub(1);
+                    let rows: Vec<serde_json::Value> = held
+                        .purposes
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|row| {
+                            let id = row["purpose"].as_str().unwrap_or_default();
+                            !(late && id.starts_with("assistant."))
+                                && !held.purposes_unlisted.contains(&id)
+                        })
+                        .cloned()
+                        .collect();
+                    ok(json!({ "purposes": rows }))
+                }
                 ("PUT", p) if p.ends_with("/policy") => ok(json!({})),
                 ("PUT", p) if p.starts_with("/v1/credentials/") => {
                     let name = p["/v1/credentials/".len()..].to_string();
@@ -19232,6 +19366,99 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_model_server_maps_the_stations_once_kvasir_lists_their_purposes_and_never_maps_none_quietly()
+     {
+        use serde_json::json;
+        let record_before = std::fs::read(state_path()).ok();
+        let dir = kvasir_dir(
+            "model-server-late",
+            json!([
+                {"id": "assistant.ask-help", "content": "rows"},
+                {"id": "assistant.operator", "content": "catalog"}
+            ]),
+        );
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret\n").unwrap();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: json!([
+                {"purpose": "assistant.operator", "content": "catalog", "backend": null},
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null},
+                {"purpose": "desk.search", "content": "rows", "backend": null}
+            ]),
+            offered: offered_by_the_card(),
+            // the assistant was just restarted: its purposes come a few
+            // looks later
+            purposes_late: 4,
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        plan.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: Some("flash-next".to_string()),
+        });
+        let console = Console::new(true);
+        console.strict.set(true);
+        let mapped = |calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("PUT /v1/purposes/"))
+                .count()
+        };
+
+        // listed late: setup waits for them, and maps both
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(mapped(&calls), 2, "{:?}", calls.lock().unwrap());
+        assert_eq!(held.lock().unwrap().purposes_late, 0);
+
+        // never listed within the wait: no station goes to the model, and
+        // that stops an install with the reason, rather than passing
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().purposes_late = usize::MAX;
+        let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
+        assert!(
+            stopped
+                .message
+                .contains("lists none of the stations' purposes")
+                && stopped
+                    .message
+                    .contains("assistant.ask-help, assistant.operator"),
+            "{}",
+            stopped.message
+        );
+        assert_eq!(mapped(&calls), 0);
+
+        // one listed and one not: the one is mapped, the other named
+        calls.lock().unwrap().clear();
+        {
+            let mut held = held.lock().unwrap();
+            held.purposes_late = 0;
+            held.purposes_unlisted = vec!["assistant.operator"];
+        }
+        let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
+        assert!(
+            stopped
+                .message
+                .contains("Kvasir does not list assistant.operator"),
+            "{}",
+            stopped.message
+        );
+        assert_eq!(mapped(&calls), 1);
+
+        assert_eq!(
+            std::fs::read(state_path()).ok(),
+            record_before,
+            "the machine's own record changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
