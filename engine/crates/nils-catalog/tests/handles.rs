@@ -840,3 +840,51 @@ fn a_selection_saved_under_the_question_s_hash_still_holds_its_handle() {
         );
     }
 }
+
+/// The second review of record 43: a selection is saved with the bound
+/// hash under the registry's locale, and promotion hashes the handle's
+/// ask under the same locale, so a registry off UTC still finds it.
+#[test]
+fn promotion_hashes_under_the_registry_s_locale() {
+    for mut l in labs() {
+        l.registry.set_meta("timezone", "Europe/Stockholm").unwrap();
+        l.registry.refresh_meta().unwrap();
+        let out = go(&mut l, fixture("yardstick"), None, false);
+        let stored = out.handle.ask.clone().unwrap();
+        let locale = nils_ask::hash::Locale {
+            timezone: "Europe/Stockholm".into(),
+            week_start: "monday".into(),
+        };
+        let bound = nils_ask::hash::bound_hash_under(&stored, &locale);
+        assert_ne!(
+            bound,
+            out.handle.bound_hash().unwrap(),
+            "the locale is in the hash"
+        );
+        selection::save(
+            &mut l.registry,
+            "converters",
+            &stored,
+            &bound,
+            "tester",
+            None,
+            None,
+        )
+        .unwrap();
+        let p = promote::promote(
+            &mut l.registry,
+            out.handle.id,
+            "converters",
+            "tester",
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            p.selection,
+            Some(("converters".to_string(), 1)),
+            "{}",
+            l.name
+        );
+    }
+}

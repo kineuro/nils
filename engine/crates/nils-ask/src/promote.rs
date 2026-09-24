@@ -111,12 +111,16 @@ struct Applied {
 /// is the handle's, so an old selection still matches and never another's.
 fn holding(
     store: &mut Store,
+    locale: &crate::hash::Locale,
     name: Option<&str>,
     h: &handle::Handle,
 ) -> Result<Option<Matched>, StoreError> {
-    let (Some(bound), Some(question)) = (h.bound_hash(), h.ask_hash()) else {
+    // under the registry's locale, as a save hashes (record 43 review)
+    let Some(ask) = h.ask.as_ref() else {
         return Ok(None);
     };
+    let bound = crate::hash::bound_hash_under(ask, locale);
+    let question = crate::hash::content_hash_under(ask, locale);
     let d = store.dialect();
     let ask = d.text_of(table("selection_version").column("ask").expect("ask"));
     let mut params = vec![Param::from(bound.as_str()), Param::from(question.as_str())];
@@ -138,7 +142,7 @@ fn holding(
         let holds = stored == bound
             || r.opt_text(5)?
                 .and_then(|t| serde_json::from_str::<crate::ast::Ask>(t).ok())
-                .is_some_and(|a| crate::hash::bound_hash(&a) == bound);
+                .is_some_and(|a| crate::hash::bound_hash_under(&a, locale) == bound);
         if holds {
             return Ok(Some(Matched {
                 name: r.text(0)?.to_string(),
@@ -192,6 +196,10 @@ pub fn promote(
         .into_iter()
         .collect();
     let ask_hash = h.ask_hash();
+    let locale = crate::hash::Locale {
+        timezone: registry.meta().timezone.clone(),
+        week_start: registry.meta().week_start.clone(),
+    };
     let store = registry.store();
     let existing = cohort::by_name(store, cohort)?;
     if let Some(c) = &existing
@@ -207,7 +215,7 @@ pub fn promote(
     if existing.is_none()
         && create
         && cohort::selection_named(store, cohort)?
-        && holding(store, Some(cohort), &h)?.is_none()
+        && holding(store, &locale, Some(cohort), &h)?.is_none()
     {
         return Err(PromoteError::Refused(format!(
             "{cohort} is a selection's name; a cohort cannot be named so (Wave 4b section 8.2)"
@@ -221,7 +229,7 @@ pub fn promote(
             None => return Err(PromoteError::NoSuchCohort(cohort.to_string())),
         };
         // the selection whose version holds this ask, if any
-        let selection = holding(store, None, &h)?;
+        let selection = holding(store, &locale, None, &h)?;
         // record 26 §9: the grain and the row count beside the parameters
         // as bound, so an interval says what kind of answer opened it
         let params = json!({
