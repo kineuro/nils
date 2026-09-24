@@ -538,6 +538,7 @@ pub(crate) fn route(
                     &filter,
                     doc["anyway"].as_bool().unwrap_or(false),
                     principal,
+                    kind_of(caller),
                 )
                 .map_err(|e| match e {
                     nils_registry::review::Error::Refused(m) => Reply::error(409, m),

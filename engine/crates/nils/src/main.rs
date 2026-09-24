@@ -4073,6 +4073,17 @@ fn actor() -> String {
     nils_registry::principal::Principal::current().to_string()
 }
 
+/// The kind of who acts at the keyboard: an agent or a model when a worker
+/// says so in `NILS_ACTOR`, else a person (record 42 R6 holds a commit to
+/// it).
+fn actor_kind() -> &'static str {
+    match nils_registry::actor::current()["kind"].as_str() {
+        Some("agent") => "agent",
+        Some("model") => "model",
+        _ => "person",
+    }
+}
+
 /// One audit row (Wave 4a section 9.2), as the command line writes it.
 fn audit(
     registry: &mut Registry,
@@ -4630,6 +4641,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     },
                     anyway,
                     &actor(),
+                    actor_kind(),
                 )
                 .map_err(|e| fail(e.to_string()))?;
                 println!(
@@ -4645,8 +4657,9 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     "name a decision to commit, --all, or a filter (--min-confidence, --campaign)",
                 ));
             }
-            let done = nils_registry::review::commit(&mut registry, id, anyway, &actor())
-                .map_err(|e| fail(e.to_string()))?;
+            let done =
+                nils_registry::review::commit_as(&mut registry, id, anyway, &actor(), actor_kind())
+                    .map_err(|e| fail(e.to_string()))?;
             println!(
                 "committed {} decision(s), {} item(s) accepted",
                 done.decisions.len(),

@@ -1064,7 +1064,8 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
                 reg,
                 &nils_registry::review::CommitFilter::default(),
                 false,
-                "cleo@lab"
+                "cleo@lab",
+                "person",
             )
             .is_err(),
             "{name}"
@@ -1077,6 +1078,7 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
             },
             false,
             "cleo@lab",
+            "person",
         )
         .unwrap();
         assert_eq!(done.decisions.len(), ids.len() - 1, "{name}: {done:?}");
@@ -1334,5 +1336,24 @@ fn a_model_s_answer_keeps_its_model_on_the_decision() {
         assert_eq!(rows[0].opt_int(2).unwrap(), Some(c.id), "{name}");
         assert_eq!(rows[0].int(3).unwrap(), 1, "{name}: staged (R6)");
         assert_eq!(rows[0].int(4).unwrap(), 1, "{name}: not in force");
+        // R6 by filter as by id: an agent or a model does not put a model's
+        // answer in force, and nothing is committed when it is refused
+        let filter = nils_registry::review::CommitFilter {
+            min_confidence: None,
+            campaign: Some(c.id),
+        };
+        for kind in ["agent", "model"] {
+            let e = nils_registry::review::commit_where(reg, &filter, true, "bot@lab", kind)
+                .unwrap_err();
+            assert!(e.to_string().contains("R6"), "{name}: {e}");
+        }
+        assert_eq!(
+            count(reg, "decision", " WHERE committed_at IS NOT NULL"),
+            0,
+            "{name}"
+        );
+        let done =
+            nils_registry::review::commit_where(reg, &filter, true, "cleo@lab", "person").unwrap();
+        assert_eq!(done.decisions.len(), 1, "{name}");
     }
 }

@@ -5319,6 +5319,28 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
         "--json",
     ]));
     assert_eq!(said["staged"], true, "{said}");
+    // An agent at the keyboard (a worker says so in NILS_ACTOR) does not
+    // put it in force, by id, all or a filter (record 42 R6).
+    for args in [
+        &["review", "commit", "--all"][..],
+        &["review", "commit", "--min-confidence", "0"][..],
+    ] {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .env("NILS_ACTOR", r#"{"kind": "agent", "name": "a-worker"}"#)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            stdout(&out)
+        );
+        assert!(stderr(&out).contains("R6"), "{}", stderr(&out));
+    }
     ok(&["review", "commit", "--all"]);
     ok(&["classify", "--review-below", "1.0", "--pack-dir", pack_dir]);
     // the evidence of the decided value carries the model, and explain

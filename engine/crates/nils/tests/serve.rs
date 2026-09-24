@@ -5185,7 +5185,7 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
     let home = registry();
     let server = Server::start(
         &home,
-        14,
+        15,
         &[
             "--auth",
             "oidc",
@@ -5314,6 +5314,16 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
     // The agent does not put it in force; a person does.
     let commit = format!("/api/decisions/{decision}/commit");
     let (status, doc) = server.request("POST", &commit, None, Some(&pipeline));
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("R6"), "{doc}");
+    // Nor by a filter that takes it: the commit by filter holds the same
+    // rule, and commits nothing when it refuses.
+    let (status, doc) = server.request(
+        "POST",
+        "/api/decisions/commit",
+        Some(r#"{"min_confidence": 0}"#),
+        Some(&pipeline),
+    );
     assert_eq!(status, 409, "{doc}");
     assert!(doc["error"].as_str().unwrap().contains("R6"), "{doc}");
     let (status, doc) = server.request("POST", &commit, None, Some(&operator));

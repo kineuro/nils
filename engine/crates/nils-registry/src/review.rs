@@ -833,26 +833,8 @@ pub fn commit_as(
             ))
         })
         .collect::<Result<_, StoreError>>()?;
-    let by_model: Vec<i64> = rows
-        .iter()
-        .filter(|(_, _, k)| k == "model")
-        .map(|(id, _, _)| *id)
-        .collect();
-    if kind != "person" && !by_model.is_empty() {
-        return Err(refused(format!(
-            "decision(s) {} are a model's answer, which a person puts in force (record 42 R6); {} does not",
-            by_model
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-            if kind == "agent" {
-                "an agent"
-            } else {
-                "a model"
-            }
-        )));
-    }
+    let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
+    only_a_person_commits(store, &ids, kind)?;
     let staged: Vec<(i64, Option<i64>)> = rows.into_iter().map(|(id, e, _)| (id, e)).collect();
     if staged.is_empty() {
         return Err(refused(match decision {
@@ -921,6 +903,55 @@ pub fn commit_as(
     Ok(out)
 }
 
+/// Record 42 R6: a model's answer is put in force by a person, so a
+/// committer who is an agent or a model is refused when any of the staged
+/// decisions it would commit carries one. Nothing is committed then.
+fn only_a_person_commits(store: &mut Store, ids: &[i64], kind: &str) -> Result<(), Error> {
+    if kind == "person" || ids.is_empty() {
+        return Ok(());
+    }
+    let by_model = models_answers(store, ids)?;
+    if by_model.is_empty() {
+        return Ok(());
+    }
+    Err(refused(format!(
+        "decision(s) {} carry a model's answer, which a person puts in force (record 42 R6); {} does not",
+        by_model
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        if kind == "agent" {
+            "an agent"
+        } else {
+            "a model"
+        }
+    )))
+}
+
+/// The decisions among `ids` that carry a model's answer: a model is their
+/// author, or they name a registered model.
+pub fn models_answers(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+    let mut out = Vec::new();
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind = 'model' OR model_id IS NOT NULL) ORDER BY id",
+            store.qualified("decision")
+        );
+        for r in store.query(&sql, &[])? {
+            out.push(r.int(0)?);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
 /// Which staged decisions a commit by filter takes (record 42 S6, v0's
 /// commit by minimum confidence).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -945,12 +976,15 @@ pub struct CommittedPart {
 /// Commit the part of the staged decisions a filter names, in one
 /// transaction, with the drift check [`commit`] makes: the rest stay
 /// staged. A filter that names nothing is refused, so that a commit of
-/// everything is always said as such.
+/// everything is always said as such. The committer is of a kind, as in
+/// [`commit_as`]: an agent or a model is refused when the part holds a
+/// model's answer (record 42 R6), and then nothing is committed.
 pub fn commit_where(
     registry: &mut Registry,
     filter: &CommitFilter,
     anyway: bool,
     who: &str,
+    kind: &str,
 ) -> Result<CommittedPart, Error> {
     if filter.min_confidence.is_none() && filter.campaign.is_none() {
         return Err(refused(
@@ -1013,6 +1047,8 @@ pub fn commit_where(
             left += 1;
         }
     }
+    let ids: Vec<i64> = chosen.iter().map(|(id, _)| *id).collect();
+    only_a_person_commits(store, &ids, kind)?;
     let drifted: Vec<i64> = chosen
         .iter()
         .filter(|(_, e)| e.is_some_and(|e| e != epoch))
