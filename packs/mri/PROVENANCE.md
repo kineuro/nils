@@ -61,6 +61,7 @@ either; that is the point.
 | the perfusion guard on the anat intent rule | `DSC`, `DCE` and `ASL` are not values of v0's modifier axis, so the guard can never block |
 | the `PhaseMap` rule of the intent cascade | no construct of that name exists and none was ever written |
 | `is_dixon_water`, `is_dixon_fat`, `is_dixon_in_phase` and `is_dixon_out_phase` | v0 reads none of the four either; the construct axis reads `has_water`, `has_fat`, `has_in_phase` and `has_out_phase`, and has carried the Dixon part on every stack that states it since it was written. Removed by record 37 rather than wired, because a second spelling of a decided fact is how two parts of one program come to disagree about it |
+| the two `FatFraction` tests of the intent cascade | no rule writes `FatFraction`, in v0 or here, so the Dixon rule's third alternative and the dual-echo field map's third exclusion could never hold. Removed by record 41; the value stays in the vocabulary |
 
 ## What this pack has that v0 does not
 
@@ -110,6 +111,23 @@ question and not a programming one, so it goes to the verified corpus and not
 into a pack on an engineer's say-so. The mechanism is in the format and tested;
 the rule is out, and the numbers are here so that the decision can be taken on
 them.
+
+## Where this pack departs from v0 on purpose
+
+Record 41 read five Siemens scanner protocols against their printouts
+(`studies/2026-09-24-v1-on-the-protocols/` in the design repository, 23,136
+stacks) and found rules v0 wrote, and v1 transcribed, that the printouts
+prove wrong. Each is changed here, with a case in `corpus/` that says so, and
+v0 still gives the old answer:
+
+| rule | in v0 | here, and why |
+|---|---|---|
+| technique `MS-EPI` (RESOLVE) | also by the combination segmented k-space plus EPI | only by the readout-segmented sequence name (`*re_b`) or its words. Siemens writes `SK` on every EPI; the combination called 2,916 single-shot diffusion stacks, 462 BOLD stacks and 403 ASL stacks RESOLVE |
+| modifier `FlowComp` | also by the words `flow comp`, `flowcomp`, `gmn` and `fc` | only by ScanOptions `FC`. A protocol named `0 flow comp` with flow compensation off was FlowComp on 212 stacks |
+| body part | one text of the series' names and `BodyPartExamined`, a spine word anywhere winning | the series' own names first, then a spine receive coil, then `BodyPartExamined`, which is written from the exam's registration and says the same on every series |
+| construct `TTestMap` (v1's own) | not in v0 | not on an ASL series, where Siemens writes `TTEST` on the perfusion-weighted image |
+| the SWI route | its last resort calls every unnamed output the SWI image | an MPR plane is a reformat first, as every other MPR is |
+| disposition | no disposition in v0 | a `MOCO` copy and a `SUB` subtraction, both computed by the scanner, are `scanner_derived` |
 
 ## The private dictionary
 
