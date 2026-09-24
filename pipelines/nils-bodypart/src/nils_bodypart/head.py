@@ -8,8 +8,11 @@ Ported from v0 (``train.py``), with what record 43 adds:
   logistic regression (the default), a random forest, or an RBF SVM. With
   at least 20 samples the PCA size and the hyperparameters are chosen by
   stratified cross-validation over v0's grids (PCA from {none, 64, 128, 256,
-  512, D} within what a fold can hold, C from 0.01 to 100 for logistic
-  regression); below 20 v0's fixed PCA of 128, clamped, is used.
+  512, D} within what the smallest split a fit sees can hold, the nested
+  one the temperature is fitted on included, with 16 and 32 added where
+  fewer than two of those fit; C from 0.01 to 100 for logistic
+  regression); below 20, or with the tuning off, a fixed PCA (v0's 128 by
+  default), clamped the same way, is used.
 - **Every head is calibrated**, not only the SVM. Logistic regression gets
   temperature scaling, one scalar fitted by log-loss on out-of-fold logits,
   so the argmax, and with it every label, is the uncalibrated head's. The
@@ -113,26 +116,78 @@ def n_folds_for(y: np.ndarray) -> int:
     return max(2, min(5, int(counts.min())))
 
 
+def _smallest_train(y: np.ndarray, random_state: int) -> int:
+    """The smallest training part of the stratified folds ``y`` is split
+    into, as the head splits it."""
+    from sklearn.model_selection import StratifiedKFold
+
+    folds = StratifiedKFold(n_splits=n_folds_for(y), shuffle=True, random_state=random_state)
+    return min(len(tr) for tr, _ in folds.split(np.zeros((len(y), 1)), y))
+
+
+def smallest_fit(y: np.ndarray, *, random_state: int, estimator_kind: str = "logreg") -> int:
+    """The fewest samples any fit of a head sees, and so the largest PCA it
+    can hold: an outer fold's training part and, for logistic regression,
+    the nested split inside that fold that its temperature is fitted on, and
+    the split of the whole set the final temperature is fitted on. Wave 43's
+    proof: 85 labels gave outer folds of 68 and nested ones of 54, and a PCA
+    of 64 chosen by the outer folds failed in the nested ones."""
+    y = np.asarray([str(v) for v in y], dtype=object)
+    _, counts = np.unique(y, return_counts=True)
+    if int(counts.min()) < 2:
+        # no cross-validation: the whole set is the one fit
+        return len(y)
+    from sklearn.model_selection import StratifiedKFold
+
+    smallest = len(y)
+    folds = StratifiedKFold(n_splits=n_folds_for(y), shuffle=True, random_state=random_state)
+    for tr, _ in folds.split(np.zeros((len(y), 1)), y):
+        smallest = min(smallest, len(tr))
+        if estimator_kind == "logreg":
+            smallest = min(smallest, _smallest_train(y[tr], random_state))
+    if estimator_kind == "logreg":
+        smallest = min(smallest, _smallest_train(y, random_state))
+    return smallest
+
+
+def pca_grid(sizes: tuple[int, ...], *, upper: int, floor: int) -> list[int | None]:
+    """v0's PCA sizes that fit under ``upper``, with none; where fewer than
+    two of them fit, as on a label set under a few hundred, 16 and 32 are
+    offered too, so a small set still has sizes to choose between."""
+    fit = {c for c in sizes if floor <= c <= upper}
+    if len(fit) < 2:
+        fit |= {c for c in (16, 32) if floor <= c <= upper}
+    return [None, *sorted(fit)]
+
+
 def auto_tune(
-    X: np.ndarray, y: np.ndarray, *, random_state: int, pca_floor: int, estimator_kind: str = "logreg"
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    random_state: int,
+    pca_floor: int,
+    estimator_kind: str = "logreg",
+    upper: int | None = None,
 ) -> tuple[int | None, dict, dict]:
     """v0's grid search: (best PCA, best hyperparameters, report). The PCA
-    sizes are capped at a fold's training size, so no fold asks for more
-    components than it has samples."""
+    sizes are capped at ``upper``, the fewest samples any fit sees
+    (:func:`smallest_fit`), so no fold, and no nested split inside one, asks
+    for more components than it has samples."""
     from sklearn.model_selection import StratifiedKFold, cross_val_score
 
     N, D = X.shape
     n_folds = n_folds_for(y)
-    upper = min(N * (n_folds - 1) // n_folds, D)
+    smallest = smallest_fit(y, random_state=random_state, estimator_kind=estimator_kind) if upper is None else upper
+    upper = min(smallest, D)
     cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     if estimator_kind == "rf":
         pca_candidates: list[int | None] = [None]
         grid = [{"n_estimators": n, "max_depth": d} for n in (100, 300, 600) for d in (None, 10, 20)]
     elif estimator_kind == "svm":
-        pca_candidates = [None] + sorted({c for c in (64, 128, 256) if pca_floor <= c <= upper})
+        pca_candidates = pca_grid((64, 128, 256), upper=upper, floor=pca_floor)
         grid = [{"C": c} for c in (0.1, 1.0, 10.0)]
     else:
-        pca_candidates = [None] + sorted({c for c in (64, 128, 256, 512, D) if pca_floor <= c <= upper})
+        pca_candidates = pca_grid((64, 128, 256, 512, D), upper=upper, floor=pca_floor)
         grid = [{"C": c} for c in (0.01, 0.1, 1.0, 10.0, 100.0)]
 
     best_score, best_pca, best_hp = -1.0, None, {}
@@ -162,6 +217,7 @@ def auto_tune(
         "best_hp": best_hp,
         "best_cv_accuracy": round(best_score, 4),
         "estimator_kind": estimator_kind,
+        "smallest_fit": smallest,
     }
     return best_pca, best_hp, report
 
@@ -319,12 +375,19 @@ def fit_head(X: np.ndarray, y: np.ndarray, config: TrainConfig = DEFAULT_TRAIN_C
         raise ValueError(f"need at least 2 samples and 2 features, got {X.shape}")
     y = np.asarray([str(v) for v in y], dtype=object)
 
-    upper = min(X.shape[0], X.shape[1])
+    # the largest PCA every fit can hold, the nested splits included
+    smallest = smallest_fit(y, random_state=config.random_state, estimator_kind=config.estimator_kind)
+    upper = min(smallest, X.shape[1])
     hp: dict = {"C": config.logreg_C}
     tune_report = None
     if config.auto_tune and X.shape[0] >= 20:
         n_components, hp, tune_report = auto_tune(
-            X, y, random_state=config.random_state, pca_floor=config.pca_floor, estimator_kind=config.estimator_kind
+            X,
+            y,
+            random_state=config.random_state,
+            pca_floor=config.pca_floor,
+            estimator_kind=config.estimator_kind,
+            upper=smallest,
         )
     elif config.pca_components is None:
         n_components = None

@@ -1036,7 +1036,8 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 }
             }
             Items::Review(_) => {
-                for (i, it) in adopted.iter().enumerate() {
+                let mut position = 0usize;
+                for it in &adopted {
                     // the adopted item says which campaign asks it now
                     let mut ev = it.evidence.clone();
                     if let Value::Object(m) = &mut ev {
@@ -1050,15 +1051,42 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         "id",
                         it.id,
                     )?;
+                    // a group is asked stack by stack: one item per member
+                    // not yet decided, so a rater answers a stack, never a
+                    // whole confidence band (wave 43's proof: 3 items for
+                    // 239 stacks)
+                    if it.scope == "group" {
+                        for m in
+                            review::members(store, it.id).map_err(|e| invalid(e.to_string()))?
+                        {
+                            if m.decided_at.is_some() {
+                                continue;
+                            }
+                            rows.push(item_row(
+                                position,
+                                it.id,
+                                Some(m.stack_id),
+                                None,
+                                None,
+                                &format!("review:{}:stack:{}", it.id, m.stack_id),
+                            ));
+                            position += 1;
+                        }
+                        continue;
+                    }
                     let stack = it.reference["stack_id"].as_i64();
                     rows.push(item_row(
-                        i,
+                        position,
                         it.id,
                         stack,
                         None,
                         None,
                         &format!("review:{}", it.id),
                     ));
+                    position += 1;
+                }
+                if rows.is_empty() {
+                    return Err(invalid("the review items name no stack left to decide"));
                 }
             }
         }
@@ -2586,6 +2614,10 @@ pub struct Closed {
     pub unresolved: i64,
     /// Items a decision could not be written for, with why.
     pub refused: Vec<(i64, String)>,
+    /// Items asked of a group's member that someone decided on their own
+    /// while the campaign was open: that decision stands and the item is
+    /// skipped, with why.
+    pub skipped: Vec<(i64, String)>,
     /// Whether it staged anything: every decision of a campaign that closes
     /// into `stage`, and any a model's answer settled or an agent or a
     /// model closed (record 42 R6).
@@ -2601,6 +2633,7 @@ impl Closed {
             "resolved": self.resolved,
             "unresolved": self.unresolved,
             "refused": self.refused.iter().map(|(i, why)| json!({"item": i, "why": why})).collect::<Vec<_>>(),
+            "skipped": self.skipped.iter().map(|(i, why)| json!({"item": i, "why": why})).collect::<Vec<_>>(),
             "staged": self.staged,
             "agreement": self.agreement,
         })
@@ -2689,6 +2722,8 @@ fn close_items(
     let mut out = Closed::default();
     let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
+    // the items this close resolved, for a group asked member by member
+    let mut resolved_here: BTreeSet<i64> = BTreeSet::new();
     for it in &all {
         // a close run again after one that died counts what it resolved
         if it.state == "resolved" {
@@ -2761,6 +2796,37 @@ fn close_items(
                     .join(", ")
             )
         };
+        // An item asked of one member of a group decides that member
+        // alone; the group closes when its last member is decided.
+        let member = match it.stack_id {
+            Some(stack)
+                if review::item(registry.store(), it.review_item_id)
+                    .map_err(|e| invalid(e.to_string()))?
+                    .is_some_and(|r| r.scope == "group") =>
+            {
+                Some(stack)
+            }
+            _ => None,
+        };
+        // A member someone decided on their own while the campaign was
+        // open keeps that decision: the close skips it and says so, as it
+        // refuses a stack item whose review item was closed meanwhile.
+        if let Some(stack) = member
+            && matches!(c.closes_into.as_str(), "decision" | "stage")
+            && review::members(registry.store(), it.review_item_id)
+                .map_err(|e| invalid(e.to_string()))?
+                .iter()
+                .any(|m| m.stack_id == stack && m.decided_at.is_some())
+        {
+            out.skipped.push((
+                it.id,
+                format!(
+                    "stack {stack} of review item {} was decided while the campaign was open; that decision stands",
+                    it.review_item_id
+                ),
+            ));
+            continue;
+        }
         match c.closes_into.as_str() {
             "decision" | "stage" => {
                 let value = it.outcome["value"].as_str().map(str::to_string);
@@ -2779,7 +2845,7 @@ fn close_items(
                         registry,
                         &review::Apply {
                             item: it.review_item_id,
-                            member: None,
+                            member,
                             scope: "stack",
                             value: Some(&value),
                             author: review::Author {
@@ -2798,7 +2864,10 @@ fn close_items(
                         Err(e) => return Ok(Err(e.to_string())),
                     };
                     let store = registry.store();
-                    if !applied.closed.contains(&it.review_item_id) {
+                    // a group with members still undecided stays open in
+                    // the queue for them
+                    let whole = member.is_none() || applied.closed.contains(&it.review_item_id);
+                    if member.is_none() && !applied.closed.contains(&it.review_item_id) {
                         finish_review_item(
                             store,
                             it.review_item_id,
@@ -2809,7 +2878,9 @@ fn close_items(
                             now,
                         )?;
                     }
-                    mark_review_item(store, it.review_item_id, "resolved")?;
+                    if whole {
+                        mark_review_item(store, it.review_item_id, "resolved")?;
+                    }
                     store.update_by_id(
                         table("campaign_item"),
                         &[
@@ -2936,16 +3007,27 @@ fn close_items(
             }
             _ => {
                 let store = registry.store();
-                finish_review_item(
-                    store,
-                    it.review_item_id,
-                    "accepted",
-                    &who,
-                    &json!({"campaign": c.id, "closed_into": "none", "outcome": it.outcome}),
-                    None,
-                    now,
-                )?;
-                mark_review_item(store, it.review_item_id, "resolved")?;
+                // a group asked member by member is closed with its last
+                // member's item
+                let last = member.is_none()
+                    || all.iter().all(|o| {
+                        o.id == it.id
+                            || o.review_item_id != it.review_item_id
+                            || o.state == "resolved"
+                            || resolved_here.contains(&o.id)
+                    });
+                if last {
+                    finish_review_item(
+                        store,
+                        it.review_item_id,
+                        "accepted",
+                        &who,
+                        &json!({"campaign": c.id, "closed_into": "none", "outcome": it.outcome}),
+                        None,
+                        now,
+                    )?;
+                    mark_review_item(store, it.review_item_id, "resolved")?;
+                }
                 store.update_by_id(
                     table("campaign_item"),
                     &[
@@ -2955,6 +3037,7 @@ fn close_items(
                     "id",
                     it.id,
                 )?;
+                resolved_here.insert(it.id);
                 out.resolved += 1;
             }
         }
@@ -3010,7 +3093,7 @@ fn close_items(
             details: Some(json!({
                 "closes_into": c.closes_into, "decisions": out.decisions.len(),
                 "picks": out.picks.len(), "resolved": out.resolved,
-                "unresolved": out.unresolved, "refused": out.refused.len(),
+                "unresolved": out.unresolved, "refused": out.refused.len(), "skipped": out.skipped.len(),
                 "agreement": out.agreement,
             })),
         },

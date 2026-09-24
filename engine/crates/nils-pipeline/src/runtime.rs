@@ -8,7 +8,8 @@
 //! off and says why (D1). Every run carries the same guarantees whatever the
 //! runtime: no network, the input and every typed input read-only, one
 //! output folder, and a process that is not root on the host (podman's
-//! `--userns keep-id`, apptainer's own user, docker's `--user`). A GPU is
+//! `--userns keep-id` with `--user`, apptainer's own user, docker's
+//! `--user`). A GPU is
 //! passed where the pipeline asks and the host offers one: CDI for podman,
 //! `--nv` for apptainer, `--gpus` for docker.
 
@@ -89,8 +90,14 @@ pub struct Invocation {
     /// Pass the host's GPU.
     pub gpu: bool,
     pub env: Vec<(String, String)>,
-    /// The uid and gid a runtime that must be told runs the process as
-    /// (docker); podman and apptainer run it as the user by construction.
+    /// The uid and gid the process runs as: the engine's user (for podman
+    /// the engine process's own uid and gid, the ids keep-id maps). Docker
+    /// and podman are told with `--user`; podman's `--userns keep-id` maps
+    /// the user to the same ids inside, and `--user` makes the process that
+    /// user even where the image names a `USER` of its own (wave 43's
+    /// proof: `USER 65534` won over keep-id, the outputs belonged to a
+    /// sub-uid, and the next run could not hard-link them). Apptainer runs
+    /// the user by construction.
     pub user: Option<(u32, u32)>,
 }
 
@@ -105,6 +112,11 @@ pub trait Runtime {
     fn command(&self, inv: &Invocation) -> Command;
     /// Stop a running invocation, for a cancel; best effort.
     fn stop(&self, _inv: &Invocation) {}
+    /// Where this runtime keeps its images here, for an error that has to
+    /// say where an image was looked for; none where it cannot say.
+    fn store(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A runtime reached by its command line.
@@ -135,6 +147,18 @@ impl Runtime for Cli {
         c
     }
 
+    fn store(&self) -> Option<String> {
+        let format = match self.kind {
+            Kind::Podman => "{{.Store.GraphRoot}}",
+            Kind::Docker => "{{.DockerRootDir}}",
+            Kind::Apptainer => return None,
+        };
+        match answer(&self.program, &["info", "--format", format], PROBE_CAP) {
+            Said::Line(l) if !l.is_empty() => Some(l),
+            _ => None,
+        }
+    }
+
     fn stop(&self, inv: &Invocation) {
         if matches!(self.kind, Kind::Podman | Kind::Docker) {
             let _ = Command::new(&self.program)
@@ -163,7 +187,8 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             a.extend(["--network", "none"].map(String::from));
             if kind == Kind::Podman {
                 a.extend(["--pull", "missing", "--userns", "keep-id"].map(String::from));
-            } else if let Some((uid, gid)) = inv.user {
+            }
+            if let Some((uid, gid)) = inv.user {
                 a.extend(["--user".to_string(), format!("{uid}:{gid}")]);
             }
             a.extend(
@@ -226,6 +251,9 @@ pub struct Detected {
     pub reason: Option<String>,
     /// What was looked at, in order, and what each said.
     pub looked: Vec<(String, String)>,
+    /// Whether a runtime did not answer in time, so none is found for now
+    /// and a later look may find one: not a finding to keep.
+    pub unknown: bool,
 }
 
 /// A program on a search path, as a shell would find it.
@@ -248,36 +276,56 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// A program's answer, its first line, within a few seconds.
-fn answer(program: &Path, args: &[&str]) -> Option<String> {
-    let mut child = Command::new(program)
+/// How long a runtime is given to answer a question about itself. Wave 43's
+/// proof: `podman info` took 7 to 8 s on a busy host, and a cap of 10 s
+/// turned pipelines off two probes in three.
+pub const PROBE_CAP: Duration = Duration::from_secs(30);
+
+/// What a program said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Said {
+    /// Its first line.
+    Line(String),
+    /// It failed, or could not be started.
+    Failed,
+    /// It did not answer within the cap: nothing is known.
+    TimedOut,
+}
+
+/// A program's answer, its first line, within `cap`.
+fn answer(program: &Path, args: &[&str], cap: Duration) -> Said {
+    let Ok(mut child) = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+    else {
+        return Said::Failed;
+    };
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > Duration::from_secs(10) => {
+            Ok(None) if started.elapsed() > cap => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Said::TimedOut;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return None,
+            Err(_) => return Said::Failed,
         }
     }
-    let out = child.wait_with_output().ok()?;
+    let Ok(out) = child.wait_with_output() else {
+        return Said::Failed;
+    };
     if !out.status.success() {
-        return None;
+        return Said::Failed;
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()
-        .map(|l| l.trim().to_string())
+        .map_or(Said::Failed, |l| Said::Line(l.trim().to_string()))
 }
 
 /// The version word of `<program> --version`: `podman version 5.0.0`,
@@ -294,9 +342,14 @@ fn version_of(line: &str) -> String {
 /// The name of the host's first NVIDIA GPU, when `nvidia-smi` answers.
 fn nvidia(path: Option<&OsStr>) -> Option<String> {
     let smi = which("nvidia-smi", path)?;
-    answer(&smi, &["--query-gpu=name", "--format=csv,noheader"])
-        .filter(|n| !n.is_empty())
-        .map(|n| format!("cuda:{n}"))
+    match answer(
+        &smi,
+        &["--query-gpu=name", "--format=csv,noheader"],
+        Duration::from_secs(10),
+    ) {
+        Said::Line(n) if !n.is_empty() => Some(format!("cuda:{n}")),
+        _ => None,
+    }
 }
 
 /// Whether a CDI specification here names NVIDIA's GPUs, which is what
@@ -313,12 +366,21 @@ fn cdi_names_nvidia() -> bool {
 
 /// Look for a runtime on a search path, as the operator's choice says.
 pub fn detect(choice: Choice, path: Option<&OsStr>) -> Detected {
+    detect_within(choice, path, PROBE_CAP)
+}
+
+/// [`detect`], each runtime given `cap` to answer. One that does not answer
+/// in time is not found for now, and the finding says so: unknown, and
+/// worth a retry, never "not rootless".
+pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Detected {
     let mut looked: Vec<(String, String)> = Vec::new();
-    let none = |choice, looked, reason: String| Detected {
+    let mut unknown = false;
+    let none = |choice, looked, reason: String, unknown| Detected {
         choice,
         runtime: None,
         reason: Some(reason),
         looked,
+        unknown,
     };
     let order: Vec<Kind> = match choice {
         Choice::Off => {
@@ -326,6 +388,7 @@ pub fn detect(choice: Choice, path: Option<&OsStr>) -> Detected {
                 choice,
                 looked,
                 "pipelines are off: an operator turned the runtime off (nils pipeline runtime --set auto turns it on)".into(),
+                false,
             );
         }
         Choice::Auto => vec![Kind::Podman, Kind::Apptainer],
@@ -336,23 +399,51 @@ pub fn detect(choice: Choice, path: Option<&OsStr>) -> Detected {
             looked.push((kind.name().into(), "not installed".into()));
             continue;
         };
-        let Some(line) = answer(&program, &["--version"]) else {
-            looked.push((kind.name().into(), "does not answer --version".into()));
-            continue;
+        let line = match answer(&program, &["--version"], cap) {
+            Said::Line(l) => l,
+            Said::Failed => {
+                looked.push((kind.name().into(), "does not answer --version".into()));
+                continue;
+            }
+            Said::TimedOut => {
+                unknown = true;
+                looked.push((
+                    kind.name().into(),
+                    format!(
+                        "did not answer --version within {} s; unknown, retry",
+                        cap.as_secs()
+                    ),
+                ));
+                continue;
+            }
         };
         let version = version_of(&line);
         let gpu = match kind {
             Kind::Podman => {
-                let rootless = answer(
+                match answer(
                     &program,
                     &["info", "--format", "{{.Host.Security.Rootless}}"],
-                );
-                if rootless.as_deref() != Some("true") {
-                    looked.push((
-                        kind.name().into(),
-                        format!("{version}, not rootless here (D18 runs pipelines rootless)"),
-                    ));
-                    continue;
+                    cap,
+                ) {
+                    Said::Line(l) if l == "true" => {}
+                    Said::TimedOut => {
+                        unknown = true;
+                        looked.push((
+                            kind.name().into(),
+                            format!(
+                                "{version}, did not answer podman info within {} s (a busy host?); unknown, retry",
+                                cap.as_secs()
+                            ),
+                        ));
+                        continue;
+                    }
+                    _ => {
+                        looked.push((
+                            kind.name().into(),
+                            format!("{version}, not rootless here (D18 runs pipelines rootless)"),
+                        ));
+                        continue;
+                    }
                 }
                 if cdi_names_nvidia() {
                     nvidia(path)
@@ -373,9 +464,19 @@ pub fn detect(choice: Choice, path: Option<&OsStr>) -> Detected {
             }),
             reason: None,
             looked,
+            unknown: false,
         };
     }
     let reason = match choice {
+        _ if unknown => format!(
+            "pipelines are off for now: {}; nothing is known, so look again (nils pipeline runtime)",
+            looked
+                .iter()
+                .filter(|(_, s)| s.ends_with("unknown, retry"))
+                .map(|(k, s)| format!("{k} {s}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
         Choice::Only(Kind::Docker) => {
             "pipelines are off: docker was chosen and does not answer here".to_string()
         }
@@ -386,7 +487,7 @@ pub fn detect(choice: Choice, path: Option<&OsStr>) -> Detected {
         ),
         _ => "pipelines are off: no container runtime here; rootless podman or apptainer runs them, and docker only where an operator opts in with nils pipeline runtime --set docker (D18)".to_string(),
     };
-    none(choice, looked, reason)
+    none(choice, looked, reason, unknown)
 }
 
 /// How an invocation ended.
@@ -583,6 +684,8 @@ mod tests {
         for pair in [
             &["--network", "none"][..],
             &["--userns", "keep-id"],
+            // wave 43's proof: an image's USER beat keep-id; --user wins
+            &["--user", "1000:1000"],
             &["--volume", "/w/runs/7/input:/input:ro"],
             &["--volume", "/w/derivatives/p/7:/output"],
             &["--cap-drop", "all"],
@@ -648,6 +751,48 @@ mod tests {
                 .contains("turned the runtime off")
         );
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// Wave 43's proof: `podman info` took 7 to 8 s on a busy host, and the
+    /// 10 s cap then reported podman "not rootless" and turned pipelines
+    /// off. A runtime that does not answer in time is unknown, worth a
+    /// retry, and never said to be something it was not asked.
+    #[test]
+    fn a_runtime_that_answers_late_is_unknown_not_refused() {
+        let dir = std::env::temp_dir().join(format!("nils-slow-podman-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let podman = dir.join("podman");
+        std::fs::write(
+            &podman,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'podman version 5.7.0'; exit 0; }\n[ \"$1\" = info ] && { sleep \"${SLOW:-3}\"; echo true; exit 0; }\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&podman, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let slow = detect_within(
+                Choice::Only(Kind::Podman),
+                Some(dir.as_os_str()),
+                Duration::from_secs(1),
+            );
+            assert!(slow.runtime.is_none());
+            assert!(slow.unknown, "{slow:?}");
+            let reason = slow.reason.unwrap();
+            assert!(reason.contains("unknown, retry"), "{reason}");
+            assert!(!reason.contains("not rootless"), "{reason}");
+            // given the time it needs, the same podman is taken
+            let patient = detect_within(
+                Choice::Only(Kind::Podman),
+                Some(dir.as_os_str()),
+                Duration::from_secs(10),
+            );
+            assert_eq!(patient.runtime.unwrap().version, "5.7.0");
+            assert!(!patient.unknown);
+            assert!(PROBE_CAP >= Duration::from_secs(30));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

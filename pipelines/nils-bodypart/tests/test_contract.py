@@ -53,7 +53,46 @@ def test_each_descriptor_is_the_contracts(entry):
 
     used = set(re.findall(r"\[[A-Za-z0-9_]+\]", doc["command-line"]))
     assert used <= own | engine, used - own - engine
-    assert doc["command-line"].split()[:2] == ["nils-bodypart", entry.split("-")[1]]
+
+
+def entrypoint() -> list[str]:
+    """The image's ENTRYPOINT in its exec form, or none."""
+    words: list[str] = []
+    for line in (HERE / "Dockerfile").read_text().splitlines():
+        if line.startswith("ENTRYPOINT"):
+            words = json.loads(line.split(None, 1)[1])
+    return words
+
+
+def container_argv(doc: dict) -> list[str]:
+    """What the container runs for a descriptor, as the engine writes it:
+    the image's entry point, then the command line with the engine's
+    folders in place and every parameter at its default (one without a
+    default left out)."""
+    import shlex
+
+    line = doc["command-line"]
+    for key, at in {"[Manifest]": "/input/stacks.json", "[Inputs]": "/inputs", "[OutputLocation]": "/output"}.items():
+        line = line.replace(key, at)
+    for p in doc.get("inputs", []):
+        given = p.get("default-value")
+        word = "" if given is None else f"{p.get('command-line-flag', '')} {given}".strip()
+        line = line.replace(p["value-key"], word)
+    return entrypoint() + shlex.split(line)
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_each_command_line_runs_against_the_image_s_entry_point(entry):
+    """Wave 43's proof: the image's ENTRYPOINT and a command line that
+    named the program too ran ``nils-bodypart nils-bodypart embed``, which
+    argparse refused. The program is named once, and what follows it is a
+    command this package's parser takes."""
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load((HERE / entry / "nils.job.yml").read_text())
+    argv = container_argv(doc)
+    assert argv[0] == "nils-bodypart" and argv.count("nils-bodypart") == 1, argv
+    parsed = cli.parser().parse_args(argv[1:])
+    assert parsed.entry == entry.split("-")[1]
 
 
 def test_the_results_and_proposals_are_the_contracts(synthetic):
@@ -86,3 +125,21 @@ def test_the_results_and_proposals_are_the_contracts(synthetic):
     head = json.loads((root / "t" / "results.json").read_text())["models"][0]
     assert [e["digest"] for e in head["encoders"]] == [m["digest"] for m in json.loads((root / "e" / "results.json").read_text())["models"]]
     assert head["threshold"] == 0.7
+
+
+def test_the_train_and_infer_descriptors_expose_what_a_small_set_and_a_pickle_need():
+    """Wave 43's proof: train could not be given a PCA size, and infer could
+    not be told to trust a pickled head whose card checks."""
+    yaml = pytest.importorskip("yaml")
+    train = yaml.safe_load((HERE / "bodypart-train" / "nils.job.yml").read_text())
+    params = {p["id"]: p for p in train["inputs"]}
+    assert params["pca_components"]["command-line-flag"] == "--pca-components"
+    assert params["pca_components"]["value-key"] in train["command-line"]
+    assert params["auto_tune"]["command-line-flag"] == "--auto-tune"
+    a = cli.parser().parse_args(container_argv(train)[1:] + ["--pca-components", "32", "--auto-tune", "false"])
+    assert (a.pca_components, a.auto_tune) == (32, False)
+    infer = yaml.safe_load((HERE / "bodypart-infer" / "nils.job.yml").read_text())
+    params = {p["id"]: p for p in infer["inputs"]}
+    assert params["allow_pickle"]["default-value"] == "false"
+    assert params["allow_pickle"]["value-key"] in infer["command-line"]
+    assert cli.parser().parse_args(container_argv(infer)[1:]).allow_pickle is False

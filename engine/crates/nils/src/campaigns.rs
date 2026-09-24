@@ -1417,6 +1417,35 @@ fn who() -> String {
         .unwrap_or_else(crate::actor)
 }
 
+/// Who answers or closes at the keyboard, read as the other verbs read it
+/// (`review commit`, `review withdraw`): an agent or a model where a worker
+/// says so in `NILS_ACTOR`, else a person. A model names the registered
+/// model it is. Record 42 R6 then holds what they answer to staging, as it
+/// does at the door (wave 43's proof: the keyboard recorded every answer
+/// as a person's).
+fn keyboard_author(registry: &mut Registry) -> Result<(&'static str, Option<i64>), Exit> {
+    let kind = crate::actor_kind();
+    if kind != "model" {
+        return Ok((kind, None));
+    }
+    let actor = nils_registry::actor::current();
+    let reference = match &actor["model"] {
+        Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => {
+            return Err(usage(
+                "a model acting names the registered model in NILS_ACTOR: {\"kind\": \"model\", \"model\": <id, sha256 digest or name@version>}",
+            ));
+        }
+    };
+    let m = nils_registry::model::resolve(registry.store(), &reference)?.ok_or_else(|| {
+        usage(format!(
+            "no registered model answers to {reference}; nils model list"
+        ))
+    })?;
+    Ok(("model", Some(m.id)))
+}
+
 fn cerr(e: campaign::Error) -> Exit {
     match e {
         campaign::Error::Store(s) => fail(s.to_string()),
@@ -1612,13 +1641,14 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 .map(|f| serde_json::from_str(&f).map_err(|e| usage(format!("--form: {e}"))))
                 .transpose()?;
             let principal = who();
+            let (author_kind, model) = keyboard_author(&mut registry)?;
             let done = campaign::answer(
                 &mut registry,
                 &Given {
                     assignment,
                     principal: &principal,
-                    author_kind: "person",
-                    model: None,
+                    author_kind,
+                    model,
                     value: value.as_deref(),
                     form: form.as_ref(),
                     derivative_id: derivative,
@@ -1664,13 +1694,14 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 .ok()
                 .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
             let picks = pick_writer(pack);
+            let (author_kind, model) = keyboard_author(&mut registry)?;
             let closed = campaign::close(
                 &mut registry,
                 &Close {
                     campaign: c.id,
                     who: &principal,
-                    author_kind: "person",
-                    model: None,
+                    author_kind,
+                    model,
                     picks: Some(&picks),
                 },
                 &now,
@@ -1691,6 +1722,9 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             );
             for (item, why) in &closed.refused {
                 println!("  item {item}: {why}");
+            }
+            for (item, why) in &closed.skipped {
+                println!("  item {item} skipped: {why}");
             }
             println!("  agreement {}", closed.agreement);
             Ok(())

@@ -84,6 +84,12 @@ pub(crate) fn document(
         })
         .collect::<Result<_, StoreError>>()?;
     let decisions = decisions_of(store, stack)?;
+    let mut campaigns: BTreeMap<i64, Value> = BTreeMap::new();
+    for (.., id, campaign) in &decisions {
+        if let Some(c) = campaign {
+            campaigns.insert(*id, campaign_answers(store, *id, *c)?);
+        }
+    }
     // Record 42 S2: a value a model decided names the model by its name,
     // its version and its digest, never a free-text version.
     let mut models: BTreeMap<i64, Value> = BTreeMap::new();
@@ -140,12 +146,13 @@ pub(crate) fn document(
             let decision = decided.map(|e| {
                 let held = decisions
                     .iter()
-                    .find(|(a, v, _, _)| {
+                    .find(|(a, v, ..)| {
                         a == axis && (v.is_none() || v.as_deref() == value.as_deref())
                     })
-                    .or_else(|| decisions.iter().find(|(a, _, _, _)| a == axis));
-                let why = held.and_then(|(_, _, why, _)| why.clone());
-                let committed_by = held.and_then(|(_, _, _, by)| by.clone());
+                    .or_else(|| decisions.iter().find(|(a, ..)| a == axis));
+                let why = held.and_then(|(_, _, why, ..)| why.clone());
+                let committed_by = held.and_then(|(_, _, _, by, ..)| by.clone());
+                let campaign = held.and_then(|(.., id, _)| campaigns.get(id).cloned());
                 json!({
                     "kind": e["author_kind"],
                     "actor": e["author"],
@@ -155,6 +162,7 @@ pub(crate) fn document(
                         .as_i64()
                         .and_then(|id| models.get(&id).cloned()),
                     "committed_by": committed_by,
+                    "campaign": campaign,
                 })
             });
             let label = value.as_deref().and_then(|v| {
@@ -328,7 +336,16 @@ fn about(kind: &str, e: &Value) -> String {
 
 /// One decision in force: the axis, the value and the why.
 /// A decision in force: its axis, value, why and who committed it.
-type Decided = (String, Option<String>, Option<String>, Option<String>);
+/// A decision in force: its axis, value, why, who committed it, its id and
+/// the campaign that closed into it.
+type Decided = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<i64>,
+);
 
 /// The decisions in force on the stack, its series, its subject or its
 /// origin, newest first.
@@ -354,7 +371,7 @@ fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreErro
         .map(|m| format!("manufacturer={}", m.to_lowercase()))
         .unwrap_or_default();
     let sql = format!(
-        "SELECT axis, value, why, committed_by FROM {} WHERE withdrawn_at IS NULL \
+        "SELECT axis, value, why, committed_by, id, campaign_id FROM {} WHERE withdrawn_at IS NULL \
          AND (staged_at IS NULL OR committed_at IS NOT NULL) \
          AND ((scope = 'stack' AND ref = {}) OR (scope = 'series' AND ref = {}) \
               OR (scope = 'subject' AND ref = {}) OR (scope = 'origin' AND ref = {}) \
@@ -387,9 +404,55 @@ fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreErro
                 r.opt_text(1)?.map(str::to_string),
                 r.opt_text(2)?.map(str::to_string),
                 r.opt_text(3)?.map(str::to_string),
+                r.int(4)?,
+                r.opt_int(5)?,
             ))
         })
         .collect()
+}
+
+/// The answers a campaign's item came to before it closed into a decision:
+/// who answered, as what kind of author, in which role and with what
+/// value. A decision a campaign closed is authored by its adjudicator, its
+/// one model or the principal who closed it (record 42 R6), so the raters
+/// behind it, an agent among them, show here and nowhere else (wave 43's
+/// proof).
+fn campaign_answers(store: &mut Store, decision: i64, campaign: i64) -> Result<Value, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT a.principal, a.author_kind, a.role, a.value, a.model_id \
+         FROM {} a JOIN {} i ON i.id = a.item_id \
+         WHERE i.decision_id = {} AND i.campaign_id = {} ORDER BY a.id",
+        store.qualified("campaign_answer"),
+        store.qualified("campaign_item"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+    );
+    let answers: Vec<Value> = store
+        .query(&sql, &[Param::Int(decision), Param::Int(campaign)])?
+        .iter()
+        .map(|r| {
+            Ok(json!({
+                "principal": r.text(0)?,
+                "author_kind": r.text(1)?,
+                "role": r.text(2)?,
+                "value": r.opt_text(3)?,
+                "model_id": r.opt_int(4)?,
+            }))
+        })
+        .collect::<Result<_, StoreError>>()?;
+    let name = store
+        .query_opt(
+            &format!(
+                "SELECT name FROM {} WHERE id = {}",
+                store.qualified("campaign"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(campaign)],
+        )?
+        .map(|r| r.text(0).map(str::to_string))
+        .transpose()?;
+    Ok(json!({"id": campaign, "name": name, "answers": answers}))
 }
 
 /// The pack's label for each `(axis, value)`, keyed by the value's id and
@@ -459,6 +522,39 @@ pub(crate) fn text(doc: &Value) -> String {
                     d["committed_by"].as_str().unwrap_or("nobody recorded")
                 ));
             }
+            // the answers a campaign closed into this decision, by whom
+            if let Some(c) = d.get("campaign").and_then(Value::as_object) {
+                let by: Vec<String> = c["answers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|a| {
+                        format!(
+                            "{} {} ({}{})",
+                            with_article(a["author_kind"].as_str().unwrap_or("person")),
+                            a["principal"].as_str().unwrap_or_default(),
+                            a["role"].as_str().unwrap_or("rater"),
+                            a["value"]
+                                .as_str()
+                                .map(|v| format!(", {v}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "      from campaign {}, answered by {}{}\n",
+                    c["name"].as_str().unwrap_or_default(),
+                    if by.is_empty() {
+                        "nobody recorded".to_string()
+                    } else {
+                        by.join("; ")
+                    },
+                    d["committed_by"]
+                        .as_str()
+                        .map(|w| format!(", committed by {w}"))
+                        .unwrap_or_default()
+                ));
+            }
         }
         for e in a["evidence"].as_array().into_iter().flatten() {
             let line = format!(
@@ -496,4 +592,13 @@ pub(crate) fn text(doc: &Value) -> String {
         ));
     }
     out
+}
+
+/// An author kind as a sentence names it.
+fn with_article(kind: &str) -> &'static str {
+    match kind {
+        "agent" => "an agent",
+        "model" => "a model",
+        _ => "a person",
+    }
 }

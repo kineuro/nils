@@ -1022,3 +1022,165 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
     let shown = cli(&home, "cleo@lab", &["campaign", "show", "curate"]);
     assert!(shown.contains("closed"), "{shown}");
 }
+
+/// The command line as a principal with an actor in `NILS_ACTOR`, as a
+/// worker runs a verb; answers the output whatever the exit.
+fn cli_as(home: &TempDir, who: &str, actor: Option<&str>, args: &[&str]) -> std::process::Output {
+    let mut cmd = nils();
+    cmd.arg("--registry")
+        .arg(home.path())
+        .args(args)
+        .env("USER", "cleo")
+        .env("HOSTNAME", "lab")
+        .env("NILS_PRINCIPAL", who)
+        .env_remove("NILS_ACTOR")
+        .stdin(Stdio::null());
+    if let Some(a) = actor {
+        cmd.env("NILS_ACTOR", a);
+    }
+    cmd.output().unwrap()
+}
+
+/// Wave 43's proof: `nils campaign answer` recorded every answer as a
+/// person's, so an agent at the keyboard passed for one. The keyboard reads
+/// `NILS_ACTOR` as the other verbs do: an agent's answers are an agent's,
+/// the close stages what they settled (R6), a model must name itself, and
+/// `nils explain` shows who answered behind the closer's decision.
+#[test]
+fn an_agent_at_the_keyboard_answers_as_an_agent_and_explain_names_it() {
+    const AGENT: &str = r#"{"kind": "agent", "name": "stand-in-rater"}"#;
+    let home = registry();
+    let work = TempDir::new("campaign-agent");
+    let pack_dir = packs();
+    let pack_dir = pack_dir.to_str().unwrap();
+    let doc = work.path().join("every.json");
+    std::fs::write(
+        &doc,
+        json!({"ast_version": 1, "sets": {"every": {"grain": "stack"}}, "out": {"set": "every", "level": "record"}}).to_string(),
+    )
+    .unwrap();
+    cli(
+        &home,
+        "cleo@lab",
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            "every",
+            "--file",
+            doc.to_str().unwrap(),
+            "--pack-dir",
+            pack_dir,
+        ],
+    );
+    let made: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &[
+            "campaign",
+            "create",
+            "agents",
+            "--axis",
+            "body_part",
+            "--select",
+            "selection:every@1",
+            "--closes-into",
+            "decision",
+            "--pack-dir",
+            pack_dir,
+            "--json",
+        ],
+    ))
+    .unwrap();
+    let items = made["items"].as_array().unwrap().clone();
+    assert!(!items.is_empty(), "{made}");
+    for _ in &items {
+        let out = cli_as(
+            &home,
+            "worker@lab",
+            Some(AGENT),
+            &["campaign", "claim", "agents", "--json"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let claimed: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let a = claimed["assignment"]["id"].as_i64().unwrap().to_string();
+        let out = cli_as(
+            &home,
+            "worker@lab",
+            Some(AGENT),
+            &["campaign", "answer", &a, "--value", "spine"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let shown: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &["campaign", "show", "agents", "--answers", "--json"],
+    ))
+    .unwrap();
+    let answers = shown["answers"].as_array().unwrap();
+    assert_eq!(answers.len(), items.len());
+    assert!(
+        answers.iter().all(|a| a["author_kind"] == "agent"),
+        "every answer is the agent's: {shown}"
+    );
+    // a model at the keyboard names the registered model it is
+    let out = cli_as(
+        &home,
+        "worker@lab",
+        Some(r#"{"kind": "model"}"#),
+        &["campaign", "close", "agents"],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("NILS_ACTOR"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // a person closes: the agent's answers are staged, never in force
+    let closed: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &["campaign", "close", "agents", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(closed["staged"], true, "{closed}");
+    assert_eq!(closed["decisions"].as_array().unwrap().len(), items.len());
+    cli(
+        &home,
+        "cleo@lab",
+        &["review", "commit", "--campaign", "agents"],
+    );
+    cli(&home, "cleo@lab", &["classify", "--pack-dir", pack_dir]);
+    // explain names the closer as the author and the agent behind it
+    let stack = items[0]["stack_id"].as_i64().unwrap().to_string();
+    let explained: Value =
+        serde_json::from_str(&cli(&home, "cleo@lab", &["explain", &stack, "--json"])).unwrap();
+    let axis = explained["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["axis"] == "body_part")
+        .unwrap()
+        .clone();
+    assert_eq!(axis["value"], "spine", "{axis}");
+    assert_eq!(axis["decision"]["kind"], "person", "{axis}");
+    let c = &axis["decision"]["campaign"];
+    assert_eq!(c["name"], "agents", "{axis}");
+    assert_eq!(c["answers"][0]["author_kind"], "agent", "{axis}");
+    assert_eq!(c["answers"][0]["principal"], "worker@lab", "{axis}");
+    let text = cli(&home, "cleo@lab", &["explain", &stack]);
+    assert!(
+        text.contains("from campaign agents, answered by an agent worker@lab (rater, spine)"),
+        "{text}"
+    );
+}
