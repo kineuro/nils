@@ -61,10 +61,22 @@
     },
     "needs": {
       "type": "object",
+      "description": "What one scheduling unit needs (record 49 A1): a unit where the units run apart, the whole run where they run together. The pipeline lane starts a unit only when its cores and memory fit in what the running units leave of the lane's budget, and a GPU unit only under a lease on the lane's card whose free memory covers gpu-memory-gb",
       "properties": {
-        "gpu": {"enum": ["none", "optional", "required"], "description": "optional runs on the CPU where the host has no GPU and records device cpu; required is refused on such a host"},
-        "memory-gb": {"type": "number", "minimum": 0},
-        "cores": {"type": "integer", "minimum": 1}
+        "gpu": {"enum": ["none", "optional", "required"], "description": "optional runs on the CPU where the host has no GPU, or the lane names no card, and records device cpu; required is refused there"},
+        "memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Of the lane's memory; 2 where absent"},
+        "cores": {"type": "integer", "minimum": 1, "description": "Of the lane's cores; 1 where absent. The container is told it as NILS_CORES, and the memory as NILS_MEMORY_GB"},
+        "gpu-memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A2: of the card's memory, for a unit that takes the GPU; 8 where absent. A unit waits while the card's free memory, less what the lane's own running units there declared, is below it"}
+      }
+    },
+    "secret": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The secret's name, which the site sets to a file: nils pipeline secret set <id> --file <path>"},
+        "mount": {"type": "string", "pattern": "^/[^:,]*$", "default": "/secrets/<id>", "description": "Where the container sees the file, read-only; never at or under /input, /inputs, /output or /source"},
+        "env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "description": "An environment variable the container is given naming the mount, such as FS_LICENSE"},
+        "optional": {"type": "boolean", "description": "Run without it where the site has not set it; otherwise a run is refused before it starts"}
       }
     },
     "proposal": {
@@ -131,6 +143,16 @@
         "inputs": {"type": "array", "items": {"$ref": "#/$defs/typed_input"}},
         "outputs": {"type": "array", "items": {"$ref": "#/$defs/output"}, "minItems": 1},
         "needs": {"$ref": "#/$defs/needs"},
+        "units": {
+          "enum": ["together", "apart"],
+          "default": "together",
+          "description": "Record 49 A1. together: one container for the whole run, as record 43 ran every pipeline. apart: a container per unit, which sees the dataset's top-level files and its own subject or session alone (bids) or a stacks.json of its own stack (stacks), with [ParticipantLabels] its one subject and NILS_UNIT its id, and writes its own folder, derivatives/<pipeline>/<run>/<unit>, with a results.json of its own; the lane runs several at once within its budget, and a run that stopped resumes with the units it finished kept. A pipeline with a run-level output runs its units together"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/secret"},
+          "description": "Record 49 R3: files the site keeps, such as a licence, that the engine reads at run time and mounts read-only into this pipeline's containers alone. After each container every file it left that holds the secret is removed and refused, and its log and results.json are written again with it replaced by [secret <id>]; a run records the secret's id, never its path or its bytes"
+        },
         "proposals": {"type": "array", "items": {"$ref": "#/$defs/proposal"}, "description": "The axes the pipeline's results may propose values on; a proposal on an axis not declared here is not taken"}
       }
     }
