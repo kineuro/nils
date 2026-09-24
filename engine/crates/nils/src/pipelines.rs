@@ -2041,7 +2041,18 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             // the row names the file where it is, never a link to it
             let path = place_path(&working, &file)?;
             if kind == nils_registry::embedding::KIND {
-                match register_embedding(registry, x, u, &file, &path, bytes, &sha, &cards, &now) {
+                match register_embedding(
+                    registry,
+                    x,
+                    u,
+                    &declared.encoders,
+                    &file,
+                    &path,
+                    bytes,
+                    &sha,
+                    &cards,
+                    &now,
+                ) {
                     Ok(nils_registry::embedding::Registered::New(_)) => {
                         embedded += 1;
                         registered += 1;
@@ -2576,6 +2587,7 @@ fn register_embedding(
     registry: &mut Registry,
     x: &Execution<'_>,
     u: &Unit,
+    declared: &[String],
     file: &Path,
     path: &str,
     bytes: u64,
@@ -2591,6 +2603,14 @@ fn register_embedding(
         return Err(format!(
             "the embedding names stack {}, and the unit is {}",
             h.stack_id, u.id
+        ));
+    }
+    // only an encoder the run was given, or its descriptor declares
+    let given = x.models.iter().any(|m| m.digest == h.encoder);
+    if !given && !declared.contains(&h.encoder) {
+        return Err(format!(
+            "the encoder {} is one the run was neither given nor declares for this output",
+            h.encoder
         ));
     }
     let encoder = match nils_registry::model::by_digest(registry.store(), &h.encoder)

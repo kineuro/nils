@@ -87,14 +87,19 @@ x-nils:
       optional: true
       description: The embeddings the cache holds for these stacks under the image's encoders and preprocessing version
   outputs:
+    # The encoders' weight digests, as the image bakes them; the runner
+    # keeps an embedding by no other. Placeholders until the release pins
+    # the image and its weights, as the image digest above is.
     - id: biomedclip
       kind: embedding
       path-template: "embeddings/biomedclip/{stack}.emb"
       media-type: application/vnd.nils.embedding
+      encoders: ["sha256:0000000000000000000000000000000000000000000000000000000000000001"]
     - id: siglip2
       kind: embedding
       path-template: "embeddings/siglip2/{stack}.emb"
       media-type: application/vnd.nils.embedding
+      encoders: ["sha256:0000000000000000000000000000000000000000000000000000000000000002"]
   needs:
     gpu: optional
     memory-gb: 6

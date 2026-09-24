@@ -167,6 +167,10 @@ pub struct Output {
     pub run_level: bool,
     /// For a model output, where its card lies under `/output`.
     pub card: Option<String>,
+    /// For an embedding output, the encoders whose embeddings it may make,
+    /// by weight digest; the runner takes an embedding by no other, unless
+    /// the run was given that encoder (record 43 second review).
+    pub encoders: Vec<String>,
 }
 
 /// A descriptor, parsed and checked.
@@ -579,6 +583,24 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         } else if card.is_some() {
             return Err(format!("{at}card belongs to a model output"));
         }
+        let mut encoders = Vec::new();
+        for (j, e) in array(o, "encoders", &at)?.iter().enumerate() {
+            let d = e.as_str().unwrap_or("");
+            let hex = d.strip_prefix("sha256:").unwrap_or("");
+            if hex.len() != 64
+                || !hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            {
+                return Err(format!(
+                    "{at}encoders[{j}] is an encoder's weight digest, sha256:<64 hex>"
+                ));
+            }
+            encoders.push(d.to_string());
+        }
+        if !encoders.is_empty() && kind != "embedding" {
+            return Err(format!("{at}encoders belong to an embedding output"));
+        }
         outputs.push(Output {
             id,
             kind,
@@ -586,6 +608,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             media_type: opt_text(o, "media-type", &at)?,
             run_level,
             card,
+            encoders,
         });
     }
     if outputs.is_empty() {

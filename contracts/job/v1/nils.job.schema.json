@@ -54,6 +54,7 @@
           "pattern": "^[^/].*$",
           "description": "Where a file lies under /output: for a unit-level output a relative path with {subject} and {session} (the labels without sub- and ses-) or {stack} (the stack's id) standing for the unit, for a run-level one a path with no placeholder, and * for any run of characters inside one path segment, never right beside a placeholder, which would let one unit take another's file (stack 4 and 45.nii). It is how the runner finds the outputs when the pipeline writes no results.json, and which kind a file named in results.json is"
         },
+        "encoders": {"type": "array", "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "description": "For an embedding output (record 43): the encoders, by weight digest, whose embeddings it may make. The runner keeps an embedding only by one of these or by an encoder the run was given as a model, and registers it from the card the results carry"},
         "card": {"type": "string", "pattern": "^[^/].*$", "description": "For a model output: the path under /output of the model's card (contracts/model/v1), whose digest is the artifact's. The runner fills trained_on with the label set the run was given, and refuses a card that names another"},
         "media-type": {"type": "string"}
       }

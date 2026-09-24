@@ -1487,7 +1487,7 @@ const LOOP: &str = r#"
     json.dump({"schema_version": "1", "units": units, "models": [card]}, open(os.path.join(out, "results.json"), "w"))
     ' [Manifest] [OutputLocation]
   outputs:
-    - {id: enc, kind: embedding, path-template: "emb/{stack}.emb", media-type: application/vnd.nils.embedding}
+    - {id: enc, kind: embedding, path-template: "emb/{stack}.emb", media-type: application/vnd.nils.embedding, encoders: ["sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]}
 - name: bp-seed
   command: |
     python3 -c '
@@ -1929,13 +1929,13 @@ command-line: |
   if mode == "run-link":
       os.makedirs(os.path.join(out, "extra"), exist_ok=True)
       os.symlink(victim, os.path.join(out, "extra", "leak.txt"))
-  if mode == "nan":
+  if mode in ("nan", "foreign"):
       enc = "sha256:" + "e" * 64
       for s in st:
           h = json.dumps({"format": "nils-embedding", "dtype": "<f4", "stack_id": s["stack_id"], "encoder": enc, "preprocess_version": "v1", "rows": 1, "dim": 2, "slices": [0]}).encode()
           start = (12 + len(h) + 63) // 64 * 64
           b = b"NILSEMB1" + struct.pack("<I", len(h)) + h
-          b += bytes(start - len(b)) + struct.pack("<2f", float("nan"), 1.0)
+          b += bytes(start - len(b)) + struct.pack("<2f", float("nan") if mode == "nan" else 0.5, 1.0)
           rel = s["unit"] + "/x.emb"
           open(os.path.join(out, rel), "wb").write(b)
           next(u for u in units if u["unit_id"] == s["unit"])["derivatives"].append(rel)
@@ -2060,6 +2060,24 @@ fn a_hostile_output_folder_is_refused_file_by_file_and_never_followed() {
     let nan = run("nan", "none");
     assert_eq!(nan["summary"]["embeddings"]["registered"], 0, "{nan}");
     assert_eq!(nan["status"], "partial", "{nan}");
+
+    // an embedding by an encoder the run was neither given nor declares
+    let foreign = run("foreign", "none");
+    assert_eq!(
+        foreign["summary"]["embeddings"]["registered"], 0,
+        "{foreign}"
+    );
+    assert!(
+        foreign["summary"]["refused_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["why"]
+                .as_str()
+                .unwrap_or("")
+                .contains("neither given nor declares")),
+        "{foreign}"
+    );
 
     // no registered path is a link: each row names the file where it is
     let rows = lab.json(&["derivative", "list", "--json"]);

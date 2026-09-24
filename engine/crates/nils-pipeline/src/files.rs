@@ -284,6 +284,7 @@ mod tests {
             media_type: None,
             run_level: false,
             card: None,
+            encoders: Vec::new(),
         }];
         assert!(unit_output(&outputs, "stack-4/out.txt", &[("stack", "4")]).is_some());
         assert!(unit_output(&outputs, "stack-5/out.txt", &[("stack", "4")]).is_none());
