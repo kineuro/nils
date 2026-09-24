@@ -344,6 +344,22 @@ fn the_job_contract_is_the_runner_s() {
         strings(&job["$defs"]["output"]["properties"]["level"]["enum"]),
         descriptor::OUTPUT_LEVELS
     );
+    // record 49: how units meet their containers, what a unit needs of the
+    // lane and the card, and the secrets a pipeline reads
+    assert_eq!(strings(&x["units"]["enum"]), descriptor::UNITS);
+    for key in ["cores", "memory-gb", "gpu-memory-gb"] {
+        assert!(
+            job["$defs"]["needs"]["properties"].get(key).is_some(),
+            "{key}"
+        );
+    }
+    for key in ["id", "mount", "env", "optional"] {
+        assert!(
+            job["$defs"]["secret"]["properties"].get(key).is_some(),
+            "{key}"
+        );
+    }
+    assert_eq!(x["secrets"]["items"]["$ref"], "#/$defs/secret");
     assert_eq!(
         strings(&job["required"]),
         [
@@ -445,4 +461,187 @@ fn the_job_contract_is_the_runner_s() {
         serde_json::Value::Object(n4.resolve(&[]).unwrap()),
         serde_json::json!({"dimension": 3, "shrink_factor": 4})
     );
+}
+
+/// A small reader of the JSON Schema keywords the job contract uses
+/// (`$ref`, `type`, `enum`, `const`, `not`, `pattern`, `required`,
+/// `properties`, `additionalProperties: false`, `items`, `minItems`,
+/// `minimum`, `exclusiveMinimum`, `oneOf`), enough to hold a descriptor to
+/// the schema itself and not only to the runner's reading of it. Answers
+/// every place the value breaks the schema.
+fn breaks(
+    schema: &serde_json::Value,
+    root: &serde_json::Value,
+    v: &serde_json::Value,
+    at: &str,
+) -> Vec<String> {
+    use serde_json::Value;
+    let mut out = Vec::new();
+    if let Some(r) = schema["$ref"].as_str() {
+        let name = r.trim_start_matches("#/$defs/");
+        return breaks(&root["$defs"][name], root, v, at);
+    }
+    if let Some(ty) = schema.get("type") {
+        let types: Vec<&str> = match ty {
+            Value::String(t) => vec![t.as_str()],
+            Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let fits = types.iter().any(|t| match *t {
+            "string" => v.is_string(),
+            "number" => v.is_number(),
+            "integer" => v.as_f64().is_some_and(|n| n.fract() == 0.0),
+            "boolean" => v.is_boolean(),
+            "object" => v.is_object(),
+            "array" => v.is_array(),
+            _ => false,
+        });
+        if !fits {
+            out.push(format!("{at}: not {types:?}: {v}"));
+            return out;
+        }
+    }
+    if let Some(e) = schema["enum"].as_array()
+        && !e.contains(v)
+    {
+        out.push(format!("{at}: {v} is not one of {e:?}"));
+    }
+    if let Some(c) = schema.get("const")
+        && c != v
+        && !(c.as_str().is_some() && v.as_f64().map(|n| n.to_string()).as_deref() == c.as_str())
+    {
+        out.push(format!("{at}: {v} is not {c}"));
+    }
+    if let Some(n) = schema.get("not")
+        && breaks(n, root, v, at).is_empty()
+    {
+        out.push(format!("{at}: {v} is what it may not be"));
+    }
+    if let (Some(p), Some(t)) = (schema["pattern"].as_str(), v.as_str())
+        && !regex::Regex::new(p).unwrap().is_match(t)
+    {
+        out.push(format!("{at}: {t} does not match {p}"));
+    }
+    if let Some(n) = v.as_f64() {
+        if let Some(m) = schema["minimum"].as_f64()
+            && n < m
+        {
+            out.push(format!("{at}: {n} is below {m}"));
+        }
+        if let Some(m) = schema["exclusiveMinimum"].as_f64()
+            && n <= m
+        {
+            out.push(format!("{at}: {n} is not above {m}"));
+        }
+    }
+    if let Some(o) = v.as_object() {
+        for r in schema["required"].as_array().into_iter().flatten() {
+            let k = r.as_str().unwrap();
+            if !o.contains_key(k) {
+                out.push(format!("{at}: {k} is required"));
+            }
+        }
+        let props = schema["properties"].as_object();
+        for (k, value) in o {
+            match props.and_then(|p| p.get(k)) {
+                Some(s) => out.extend(breaks(s, root, value, &format!("{at}.{k}"))),
+                None if schema["additionalProperties"] == false => {
+                    out.push(format!("{at}.{k} is not a key"));
+                }
+                None => {}
+            }
+        }
+    }
+    if let Some(a) = v.as_array() {
+        if let Some(m) = schema["minItems"].as_u64()
+            && (a.len() as u64) < m
+        {
+            out.push(format!("{at}: fewer than {m} items"));
+        }
+        if let Some(items) = schema.get("items") {
+            for (i, item) in a.iter().enumerate() {
+                out.extend(breaks(items, root, item, &format!("{at}[{i}]")));
+            }
+        }
+    }
+    if let Some(one) = schema["oneOf"].as_array() {
+        let fit = one
+            .iter()
+            .filter(|s| breaks(s, root, v, at).is_empty())
+            .count();
+        if fit != 1 {
+            out.push(format!("{at}: {v} fits {fit} of oneOf, not one"));
+        }
+    }
+    out
+}
+
+/// Record 49 A3 and A4: the table kind, the checks and the roles are the
+/// runner's words as the schema names them, and every descriptor this
+/// repository ships, the starter catalog first, checks against the schema
+/// itself and against the runner.
+#[test]
+fn every_descriptor_the_repository_ships_validates_against_the_job_contract() {
+    use nils_pipeline::descriptor;
+    let job = json("job/v1/nils.job.schema.json");
+    let out = &job["$defs"]["output"]["properties"];
+    assert_eq!(strings(&out["format"]["enum"]), descriptor::TABLE_FORMATS);
+    assert_eq!(
+        strings(&job["$defs"]["column"]["properties"]["type"]["enum"]),
+        descriptor::COLUMN_TYPES
+    );
+    assert_eq!(
+        strings(&job["$defs"]["check"]["oneOf"][1]["properties"]["op"]["enum"]),
+        descriptor::CHECK_OPS
+    );
+    let mut files: Vec<PathBuf> = Vec::new();
+    let pipelines = contracts().join("../pipelines");
+    for entry in std::fs::read_dir(&pipelines).unwrap().flatten() {
+        let dir = entry.path();
+        if dir.join("nils.job.yml").is_file() {
+            files.push(dir.join("nils.job.yml"));
+        }
+        for sub in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if sub.path().join("nils.job.yml").is_file() {
+                files.push(sub.path().join("nils.job.yml"));
+            }
+        }
+    }
+    files.sort();
+    assert!(files.len() >= 10, "{files:?}");
+    let starters = [
+        "n4-bias-correction",
+        "synthstrip",
+        "synthseg",
+        "samseg-lesions",
+        "mriqc",
+        "freesurfer-recon-all",
+    ];
+    for s in starters {
+        assert!(
+            files.iter().any(|f| f.parent().unwrap().ends_with(s)),
+            "the starter {s} is in pipelines/"
+        );
+    }
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+        let broken = breaks(&job, &job, &value, "descriptor");
+        assert!(broken.is_empty(), "{}: {broken:#?}", f.display());
+        let d = descriptor::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        d.resolve(&[])
+            .unwrap_or_else(|e| panic!("{}: its defaults: {e}", f.display()));
+    }
+    // and the schema refuses what the runner refuses
+    let bad: serde_json::Value = serde_saphyr::from_str(
+        "name: x\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image: {type: docker, image: \"a/b:latest\"}\nx-nils: {analysis-level: session, input: {layout: bids}, outputs: [{id: t, kind: table, path-template: \"sub-{subject}/ses-{session}/t.csv\", columns: [{name: run}]}], qc: [\"snr => 8\"]}\n",
+    )
+    .unwrap();
+    let broken = breaks(&job, &job, &bad, "descriptor");
+    for words in ["does not match", "what it may not be", "fits 0 of oneOf"] {
+        assert!(
+            broken.iter().any(|b| b.contains(words)),
+            "{words}: {broken:#?}"
+        );
+    }
 }

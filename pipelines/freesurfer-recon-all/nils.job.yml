@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# FreeSurfer recon-all: the field's reference for cortical thickness and
+# subcortical volumes (record 49 R1, the last of the first analyses), a
+# starter the engine seeds at boot.
+#
+# One session's T1-weighted image in; the whole FreeSurfer subject folder
+# as one archive, and the aseg volumes as a table out. SurfaceHoles is the
+# declared check: the topological defects before fixing, which grow as the
+# Euler number falls, 200 marking a surface a person should look at.
+#
+# It reads the lab's FreeSurfer licence as a secret input (record 49 R3):
+# `x-nils.secrets` mounts the file the site set with `nils pipeline secret
+# set freesurfer_license --file <path>` read-only into this pipeline's
+# containers alone and names it in FS_LICENSE, never in an output, a log or
+# the run's record. A run is refused before it starts where the site has
+# not set it.
+#
+# Each session runs in a container of its own (`x-nils.units: apart`), so
+# the lane runs as many side by side as its budget holds, and a run that
+# stopped keeps the sessions it finished.
+#
+# The image is FreeSurfer 8.2.0, pinned by its registry manifest digest,
+# resolved 2026-09-24 by a registry manifest request, not pulled.
+name: freesurfer-recon-all
+schema-version: "0.5"
+tool-version: "8.2.0"
+description: >-
+  Run FreeSurfer 8.2.0 recon-all on each session's T1-weighted image: the
+  subject folder as one archive, and the volumes of aseg with the
+  intracranial volume and the surface holes as a table. One session is
+  one unit; CPU, hours a session, the lab's licence.
+
+container-image:
+  type: docker
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+
+inputs:
+  - id: threads
+    name: Threads
+    type: Number
+    description: The threads recon-all's OpenMP steps use.
+    value-key: "[THREADS]"
+    default-value: 2
+    integer: true
+    minimum: 1
+    maximum: 32
+
+command-line: >-
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+  a=$(dirname "$f"); s=$(echo "${a%/anat}" | tr / _); d=[OutputLocation]/$a; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
+  recon-all -all -s "$s" -i "$f" -sd "$w" -threads [THREADS] || { rm -rf "$w"; continue; };
+  SUBJECTS_DIR="$w" asegstats2table --subjects "$s" --meas volume --tablefile "$d/${s}_desc-aseg_volumes.tsv";
+  tar -C "$w" -czf "$d/${s}_desc-freesurfer_subject.tar.gz" "$s";
+  rm -rf "$w"; done'
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w]
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      mount: /opt/fs/license.txt
+      env: FS_LICENSE
+  outputs:
+    - id: subject
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_desc-freesurfer_subject.tar.gz"
+      media-type: application/gzip
+    - id: aseg
+      kind: table
+      format: tsv
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_desc-aseg_volumes.tsv"
+      columns:
+        - {name: intracranial, from: "EstimatedTotalIntraCranialVol", unit: mm3, description: "The estimated total intracranial volume (eTIV)"}
+        - {name: brain_segmentation, from: "BrainSegVol", unit: mm3}
+        - {name: cortex, from: "CortexVol", unit: mm3}
+        - {name: cerebral_white_matter, from: "CerebralWhiteMatterVol", unit: mm3}
+        - {name: surface_holes, from: "SurfaceHoles", type: integer, description: "Topological defects of the surfaces before fixing"}
+        - {name: left_hippocampus, unit: mm3}
+        - {name: right_hippocampus, unit: mm3}
+        - {name: left_amygdala, unit: mm3}
+        - {name: right_amygdala, unit: mm3}
+        - {name: left_thalamus, unit: mm3}
+        - {name: right_thalamus, unit: mm3}
+        - {name: left_lateral_ventricle, unit: mm3}
+        - {name: right_lateral_ventricle, unit: mm3}
+        - {name: wm_hypointensities, from: "WM-hypointensities", unit: mm3}
+  qc:
+    - {metric: surface_holes, op: "<=", value: 200, description: "More holes than 200 is a surface a person should look at"}
+  needs:
+    cores-input: threads
+    gpu: none
+    cores: 2
+    memory-gb: 8
+    unit-minutes: 420

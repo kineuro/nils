@@ -1811,6 +1811,8 @@ dependencies = [
 name = "nils-pipeline"
 version = "1.0.0-alpha.38"
 dependencies = [
+ "csv",
+ "flate2",
  "glob",
  "hex",
  "libc",

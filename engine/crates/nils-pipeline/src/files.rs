@@ -10,6 +10,12 @@ use std::path::{Component, Path, PathBuf};
 
 /// The size and the sha256 (hex) of a file, read through once.
 pub fn sha256_file(path: &Path) -> std::io::Result<(u64, String)> {
+    sha256_file_ticking(path, &mut || {})
+}
+
+/// [`sha256_file`], calling `tick` after each piece it reads, so a caller
+/// hashing a large file can say it is alive meanwhile.
+pub fn sha256_file_ticking(path: &Path, tick: &mut dyn FnMut()) -> std::io::Result<(u64, String)> {
     let mut f = std::fs::File::open(path)?;
     let mut context = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buffer = vec![0u8; 1 << 20];
@@ -21,6 +27,7 @@ pub fn sha256_file(path: &Path) -> std::io::Result<(u64, String)> {
         }
         total += n as u64;
         context.update(&buffer[..n]);
+        tick();
     }
     Ok((total, hex::encode(context.finish().as_ref())))
 }
@@ -202,6 +209,21 @@ mod tests {
         p
     }
 
+    /// Record 49, after review: a large file's hash says it is alive as it
+    /// reads, so a long intake keeps its job's heart beating.
+    #[test]
+    fn a_long_hash_ticks_as_it_reads() {
+        let root = temp("ticks");
+        let f = root.join("big.bin");
+        std::fs::write(&f, vec![7u8; (3 << 20) + 5]).unwrap();
+        let mut ticks = 0;
+        let (n, sha) = sha256_file_ticking(&f, &mut || ticks += 1).unwrap();
+        assert_eq!(n, (3 << 20) + 5);
+        assert_eq!(sha, sha256_file(&f).unwrap().1);
+        assert!(ticks >= 4, "{ticks}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_unit_s_files_are_found_by_its_template_and_nothing_outside_is_taken() {
         let root = temp("found");
@@ -285,6 +307,7 @@ mod tests {
             run_level: false,
             card: None,
             encoders: Vec::new(),
+            table: None,
         }];
         assert!(unit_output(&outputs, "stack-4/out.txt", &[("stack", "4")]).is_some());
         assert!(unit_output(&outputs, "stack-5/out.txt", &[("stack", "4")]).is_none());

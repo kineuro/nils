@@ -1013,6 +1013,113 @@ fn fixed_fields() -> Vec<Field> {
     ]
 }
 
+/// The table the ask reads a run's measures from (record 49 A3), which the
+/// compiler reads through [`ColumnRef`]: its column is
+/// `<number|text|run>:<pipeline>:<name>`.
+pub const MEASURE_TABLE: &str = "measure";
+
+/// The fields a pipeline's measures make (record 49 A3): for every measure a
+/// run loaded, `measure.<pipeline>.<name>` on the grain of its unit (a
+/// subject, a session or a stack), a unit's value being its newest run of the current version's;
+/// and `measure.<pipeline>.run`, the run that value came from, so every
+/// number traces to its run. A measure is read per scan only at detail
+/// quasi (R4): it is quasi identifying, and below that detail the ask
+/// answers its totals over a group, never its rows.
+fn measure_fields(store: &mut Store) -> Result<Vec<Field>, Error> {
+    let families = nils_registry::measure::families(store)?;
+    if families.is_empty() {
+        return Ok(Vec::new());
+    }
+    // what the newest version of each pipeline says of its columns
+    let mut said: BTreeMap<(String, String), (String, Option<String>)> = BTreeMap::new();
+    for p in nils_registry::pipeline::list(store)? {
+        for o in p.descriptor["x-nils"]["outputs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            for c in o["columns"].as_array().into_iter().flatten() {
+                if let Some(name) = c["name"].as_str() {
+                    said.insert(
+                        (p.name.clone(), name.to_string()),
+                        (
+                            o["id"].as_str().unwrap_or_default().to_string(),
+                            c["description"].as_str().map(str::to_string),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut runs: BTreeSet<(String, String)> = BTreeSet::new();
+    for f in families {
+        let text = f.ty == "text";
+        let (output, words) = said
+            .get(&(f.pipeline.clone(), f.name.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let unit = f
+            .unit
+            .as_deref()
+            .map(|u| format!(", in {u}"))
+            .unwrap_or_default();
+        let from = if output.is_empty() {
+            format!("pipeline {}", f.pipeline)
+        } else {
+            format!("pipeline {}'s table {output}", f.pipeline)
+        };
+        out.push(Field {
+            level: f.scope.clone(),
+            path: format!("measure.{}.{}", f.pipeline, f.name),
+            type_: if text { "text" } else { "number" }.into(),
+            class: Class::QuasiIdentifying,
+            dated: false,
+            federated: false,
+            description: format!(
+                "{}{unit}: from {from}, each {}'s value from its newest run of the current version",
+                words.unwrap_or_else(|| f.name.replace('_', " ")),
+                f.scope
+            ),
+            caveats: Some(
+                "read per row only at detail quasi (record 49 R4); below it, as a total over a group of 5 scans or more"
+                    .into(),
+            ),
+            ai_context: None,
+            curated: false,
+            provenance: "pipeline",
+            table: MEASURE_TABLE.into(),
+            column: format!(
+                "{}:{}:{}",
+                if text { "text" } else { "number" },
+                f.pipeline,
+                f.name
+            ),
+        });
+        runs.insert((f.scope, f.pipeline));
+    }
+    for (scope, pipeline) in runs {
+        out.push(Field {
+            level: scope.clone(),
+            path: format!("measure.{pipeline}.run"),
+            type_: "integer".into(),
+            class: Class::Technical,
+            dated: false,
+            federated: false,
+            description: format!(
+                "the pipeline run the {scope}'s newest {pipeline} measures came from"
+            ),
+            caveats: None,
+            ai_context: None,
+            curated: false,
+            provenance: "pipeline",
+            table: MEASURE_TABLE.into(),
+            column: format!("run:{pipeline}:"),
+        });
+    }
+    Ok(out)
+}
+
 /// The derived fields (§4.3), with their parameters and defaults.
 fn derived_fields() -> Vec<DerivedRecord> {
     let d = |name: &str, grain: Grain, params: &[(&str, &str)], description: &str| DerivedRecord {
@@ -1194,6 +1301,9 @@ impl Catalog {
             }
         }
         for f in fixed_fields() {
+            fields.insert((f.level.clone(), f.path.clone()), f);
+        }
+        for f in measure_fields(store)? {
             fields.insert((f.level.clone(), f.path.clone()), f);
         }
         // the pack's visibility, by column, on every level that carries it

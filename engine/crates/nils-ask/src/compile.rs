@@ -339,7 +339,9 @@ fn column_name(binding: &str) -> String {
 }
 
 fn field_col(path: &str) -> String {
-    format!("f_{}", path.replace('.', "__"))
+    // a measure's path carries its pipeline's name, which may hold a `-`
+    // (record 49 A3): a column name does not
+    format!("f_{}", path.replace('.', "__").replace('-', "_x_"))
 }
 
 /// The base relation of a grain: its FROM clause, its key, and what it
@@ -403,6 +405,9 @@ struct Builder<'a> {
     external: HashMap<String, BTreeSet<String>>,
     answer_columns: Vec<String>,
     code_columns: Vec<usize>,
+    /// The sets whose totals show only for `MEASURE_K` scans or more
+    /// (below detail quasi, over a pipeline's measures).
+    small_cells: BTreeSet<String>,
 }
 
 const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
@@ -755,6 +760,9 @@ impl<'a> Builder<'a> {
     /// The column of a field of a level in the base relation.
     fn base_column(&self, level: &str, path: &str) -> Option<Term> {
         let c: ColumnRef = self.ctx.names.column(level, path)?;
+        if c.table == "measure" {
+            return self.measure_column(level, &c.column);
+        }
         if c.table == "study" && c.column == "day" {
             return Some(Term::plain(
                 "COALESCE(sy.date_filled, sy.study_date)".into(),
@@ -769,6 +777,58 @@ impl<'a> Builder<'a> {
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
         })
+    }
+
+    /// A run's measure of a unit (record 49 A3), `<number|text|run>:
+    /// <pipeline>:<name>` as the catalog names it: the value of the newest
+    /// run that measured the unit, read beside the base relation by the
+    /// unit's key (a stack, a subject and a session's day, or a subject).
+    fn measure_column(&self, level: &str, column: &str) -> Option<Term> {
+        let mut parts = column.splitn(3, ':');
+        let (what, pipeline, name) = (parts.next()?, parts.next()?, parts.next()?);
+        let quote = |t: &str| format!("'{}'", t.replace('\'', "''"));
+        let value = match what {
+            "number" => "nm.number",
+            "text" => "nm.text",
+            "run" => "nm.run_id",
+            _ => return None,
+        };
+        let unit = |a: &str| match level {
+            "stack" => Some(format!("{a}.stack_id = st.id")),
+            "session" => Some(format!(
+                "{a}.subject_id = su.id AND {a}.session_day = sc.first"
+            )),
+            "subject" => Some(format!("{a}.subject_id = su.id")),
+            _ => None,
+        };
+        let (mu, ru) = (unit("nm")?, unit("mr")?);
+        // the run a unit's values are read from: its newest run of the
+        // pipeline's current version (the newest active one), else its
+        // newest run of any version; every value, and the run field, come
+        // from that one run
+        let current = format!(
+            "(SELECT pl.id FROM {} pl WHERE pl.name = {} AND pl.state = 'active' ORDER BY pl.version DESC LIMIT 1)",
+            self.q("pipeline"),
+            quote(pipeline)
+        );
+        let run = format!(
+            "(SELECT mr.run_id FROM {} mr WHERE mr.pipeline = {} AND mr.scope = {} AND {ru} \
+             ORDER BY CASE WHEN mr.pipeline_id = {current} THEN 1 ELSE 0 END DESC, mr.run_id DESC LIMIT 1)",
+            self.q("measure"),
+            quote(pipeline),
+            quote(level),
+        );
+        if what == "run" {
+            return Some(Term::plain(run));
+        }
+        Some(Term::plain(format!(
+            "(SELECT {value} FROM {} nm WHERE nm.pipeline = {} AND nm.name = {} AND nm.scope = {} \
+             AND {mu} AND nm.run_id = {run} ORDER BY nm.id DESC LIMIT 1)",
+            self.q("measure"),
+            quote(pipeline),
+            quote(name),
+            quote(level),
+        )))
     }
 
     /// Whether a level's fields are reachable from a grain's base.
@@ -1813,12 +1873,27 @@ impl<'a> Builder<'a> {
                 .unwrap_or_else(|| format!("by{i}"));
             frame.group_by.push((label, col));
         }
-        cols.push("COUNT(*) AS _rows".into());
-        cols.push(if child.has_subj {
-            "COUNT(DISTINCT ch.subj) AS _subjects".into()
-        } else {
-            "COUNT(DISTINCT ch.k) AS _subjects".into()
-        });
+        // Nima's ruling after record 49's review: below detail quasi a
+        // group that totals a measure, or groups a set filtered on one,
+        // shows its totals and its counts only for MEASURE_K scans or more
+        let k = crate::validate::MEASURE_K;
+        let small = self.small_cells.contains(name);
+        let held = |e: String| -> String {
+            if small {
+                format!("CASE WHEN COUNT(*) >= {k} THEN {e} END")
+            } else {
+                e
+            }
+        };
+        cols.push(format!("{} AS _rows", held("COUNT(*)".into())));
+        cols.push(format!(
+            "{} AS _subjects",
+            held(if child.has_subj {
+                "COUNT(DISTINCT ch.subj)".into()
+            } else {
+                "COUNT(DISTINCT ch.k)".into()
+            })
+        ));
         frame.bindings.push(("_rows".into(), "_rows".into()));
         frame
             .bindings
@@ -1851,7 +1926,7 @@ impl<'a> Builder<'a> {
                 };
                 cols.push(format!(
                     "{} AS {col}",
-                    self.aggregate(&c.op, inner.as_deref(), &bp)?
+                    held(self.aggregate(&c.op, inner.as_deref(), &bp)?)
                 ));
             } else {
                 post.push((b.clone(), col.clone()));
@@ -2956,20 +3031,40 @@ impl<'a> Builder<'a> {
                 } else {
                     "COUNT(*)"
                 };
+                // a count of a set filtered on a measure, below detail
+                // quasi: none, or MEASURE_K and more, else withheld
+                let held = |e: String| -> String {
+                    if self.small_cells.contains(&out.set) {
+                        format!(
+                            "CASE WHEN COUNT(*) = 0 OR COUNT(*) >= {} THEN {e} END",
+                            crate::validate::MEASURE_K
+                        )
+                    } else {
+                        e
+                    }
+                };
                 let sql = format!(
                     "SELECT {} AS rows_, {} AS subjects_ FROM {} o",
-                    self.sql.as_bigint("COUNT(*)"),
-                    self.sql.as_bigint(subjects),
+                    held(self.sql.as_bigint("COUNT(*)")),
+                    held(self.sql.as_bigint(subjects)),
                     cte_name(&out.set)
                 );
                 self.answer_columns = vec!["rows".into(), "subjects".into()];
                 return Ok(sql);
             }
             crate::ast::Level::Boolean => {
-                let sql = format!(
-                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM {} o) THEN 1 ELSE 0 END AS any_",
-                    cte_name(&out.set)
-                );
+                let sql = if self.small_cells.contains(&out.set) {
+                    format!(
+                        "SELECT CASE WHEN COUNT(*) = 0 THEN 0 WHEN COUNT(*) >= {} THEN 1 END AS any_ FROM {} o",
+                        crate::validate::MEASURE_K,
+                        cte_name(&out.set)
+                    )
+                } else {
+                    format!(
+                        "SELECT CASE WHEN EXISTS (SELECT 1 FROM {} o) THEN 1 ELSE 0 END AS any_",
+                        cte_name(&out.set)
+                    )
+                };
                 self.answer_columns = vec!["any".into()];
                 return Ok(sql);
             }
@@ -3062,6 +3157,7 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         external: external_paths(ask),
         answer_columns: Vec::new(),
         code_columns: Vec::new(),
+        small_cells: validated.small_cells.clone(),
     };
     for name in &validated.order {
         b.current = Some(ask.sets[name].grain);

@@ -21,10 +21,24 @@ use crate::store::{Error, Insert, Param, Row, Store};
 /// The states of a catalog entry.
 pub const STATES: [&str; 2] = ["active", "retired"];
 
-/// The states of a run.
 /// How a run stands. `partial` (record 43): the container exited 0 and
 /// some of its units failed or went unreported, which are review items.
-pub const RUN_STATUSES: [&str; 5] = ["running", "done", "partial", "failed", "cancelled"];
+/// `interrupted` (record 49 A1): the engine that ran it went away with
+/// units in flight, and the lane takes it up again.
+pub const RUN_STATUSES: [&str; 6] = [
+    "running",
+    "done",
+    "partial",
+    "failed",
+    "cancelled",
+    "interrupted",
+];
+
+/// How a unit of a run stands (record 49 A1): queued until the lane starts
+/// it, running while its container runs, registering while what it left is
+/// taken in (a resume takes it in again, and runs nothing), over once that
+/// is done, whatever its outcome.
+pub const UNIT_STATES: [&str; 4] = ["queued", "running", "registering", "over"];
 
 /// One version of a pipeline in the catalog.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -42,6 +56,9 @@ pub struct Pipeline {
     pub state: String,
     pub added_by: String,
     pub added_at: String,
+    /// `starter` for a version the engine seeded (record 49 A4), none for
+    /// one a person added.
+    pub origin: Option<String>,
 }
 
 impl Pipeline {
@@ -66,7 +83,7 @@ pub struct New<'a> {
     pub added_at: &'a str,
 }
 
-const COLUMNS: [&str; 13] = [
+const COLUMNS: [&str; 14] = [
     "id",
     "name",
     "version",
@@ -80,6 +97,7 @@ const COLUMNS: [&str; 13] = [
     "state",
     "added_by",
     "added_at",
+    "origin",
 ];
 
 fn select(store: &mut Store) -> String {
@@ -116,7 +134,24 @@ fn of(r: &Row) -> Result<Pipeline, Error> {
         state: r.text(10)?.to_string(),
         added_by: r.text(11)?.to_string(),
         added_at: r.text(12)?.to_string(),
+        origin: r.opt_text(13)?.map(str::to_string),
     })
+}
+
+/// The origin a seeded entry carries (record 49 A4).
+pub const STARTER: &str = "starter";
+
+/// Mark an entry as the engine's own starter version.
+pub fn set_origin(store: &mut Store, id: i64, origin: &str) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET origin = {} WHERE id = {}",
+        store.qualified("pipeline"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int)
+    );
+    store.execute(&sql, &[Param::from(origin), Param::Int(id)])?;
+    Ok(())
 }
 
 /// Add a descriptor: the name's next version, or the version that already
@@ -249,6 +284,11 @@ pub struct Run {
     pub principal: String,
     pub actor: Value,
     pub error: Option<String>,
+    /// together | apart; none on a run from before record 49, which ran
+    /// its units together.
+    pub units: Option<String>,
+    pub resumes: Option<i64>,
+    pub threshold: Option<f64>,
 }
 
 /// A run to start.
@@ -271,7 +311,7 @@ pub struct NewRun<'a> {
     pub started_at: &'a str,
 }
 
-const RUN_COLUMNS: [&str; 24] = [
+const RUN_COLUMNS: [&str; 27] = [
     "id",
     "pipeline_id",
     "job_id",
@@ -296,6 +336,9 @@ const RUN_COLUMNS: [&str; 24] = [
     "principal",
     "actor",
     "error",
+    "units",
+    "resumes",
+    "threshold",
 ];
 
 fn select_runs(store: &mut Store) -> String {
@@ -338,6 +381,9 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         principal: r.text(21)?.to_string(),
         actor: json(r.opt_text(22)?),
         error: r.opt_text(23)?.map(str::to_string),
+        units: r.opt_text(24)?.map(str::to_string),
+        resumes: r.opt_int(25)?,
+        threshold: r.opt_double(26)?,
     })
 }
 
@@ -489,6 +535,294 @@ pub fn runs(store: &mut Store, pipeline_id: Option<i64>, limit: usize) -> Result
     store.query(&sql, &params)?.iter().map(run_of).collect()
 }
 
+/// How a run meets its units and the threshold its caller gave, which a
+/// resume keeps (record 49 A1).
+pub fn set_units(
+    store: &mut Store,
+    id: i64,
+    units: &str,
+    threshold: Option<f64>,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_run"),
+        &[
+            ("units", Param::from(units)),
+            ("threshold", threshold.map_or(Param::Null, Param::Double)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// A run taken up again under a new job: running, its end undone, one more
+/// resume counted.
+pub fn resume(store: &mut Store, id: i64, job_id: i64) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET status = 'running', job_id = {}, finished_at = NULL, error = NULL, \
+         resumes = COALESCE(resumes, 0) + 1 WHERE id = {}",
+        store.qualified("pipeline_run"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    store.execute(&sql, &[Param::Int(job_id), Param::Int(id)])?;
+    Ok(())
+}
+
+/// Mark a running run whose engine went away as interrupted, so the lane
+/// queues it once to be taken up again. Answers whether this call did.
+pub fn interrupt(store: &mut Store, id: i64, why: &str) -> Result<bool, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET status = 'interrupted', error = {} WHERE id = {} AND status = 'running'",
+        store.qualified("pipeline_run"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int)
+    );
+    Ok(store.execute(&sql, &[Param::from(why), Param::Int(id)])? == 1)
+}
+
+/// The runs in a status, oldest first.
+pub fn runs_in(store: &mut Store, status: &str) -> Result<Vec<Run>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "{} WHERE status = {} ORDER BY id",
+        select_runs(store),
+        d.param(1, Type::Text)
+    );
+    store
+        .query(&sql, &[Param::from(status)])?
+        .iter()
+        .map(run_of)
+        .collect()
+}
+
+/// One unit of a run, as the lane schedules it (record 49 A1).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Unit {
+    pub id: i64,
+    pub run_id: i64,
+    pub unit: String,
+    pub position: i64,
+    pub state: String,
+    pub attempts: i64,
+    pub cores: Option<i64>,
+    pub memory_mb: Option<i64>,
+    pub gpu_card: Option<i64>,
+    pub gpu_memory_mb: Option<i64>,
+    pub device: Option<String>,
+    pub container: Option<String>,
+    pub pid: Option<i64>,
+    pub host: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i64>,
+    pub outcome: Value,
+}
+
+const UNIT_COLUMNS: [&str; 18] = [
+    "id",
+    "run_id",
+    "unit",
+    "position",
+    "state",
+    "attempts",
+    "cores",
+    "memory_mb",
+    "gpu_card",
+    "gpu_memory_mb",
+    "device",
+    "container",
+    "pid",
+    "host",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "outcome",
+];
+
+fn unit_of(r: &Row) -> Result<Unit, Error> {
+    Ok(Unit {
+        id: r.int(0)?,
+        run_id: r.int(1)?,
+        unit: r.text(2)?.to_string(),
+        position: r.int(3)?,
+        state: r.text(4)?.to_string(),
+        attempts: r.int(5)?,
+        cores: r.opt_int(6)?,
+        memory_mb: r.opt_int(7)?,
+        gpu_card: r.opt_int(8)?,
+        gpu_memory_mb: r.opt_int(9)?,
+        device: r.opt_text(10)?.map(str::to_string),
+        container: r.opt_text(11)?.map(str::to_string),
+        pid: r.opt_int(12)?,
+        host: r.opt_text(13)?.map(str::to_string),
+        started_at: r.opt_text(14)?.map(str::to_string),
+        finished_at: r.opt_text(15)?.map(str::to_string),
+        exit_code: r.opt_int(16)?,
+        outcome: json(r.opt_text(17)?),
+    })
+}
+
+/// The units of a run, in their order.
+pub fn units(store: &mut Store, run_id: i64) -> Result<Vec<Unit>, Error> {
+    let d = store.dialect();
+    let t = table("pipeline_unit");
+    let cols: Vec<String> = UNIT_COLUMNS
+        .iter()
+        .map(|c| d.text_of(t.column(c).expect("a pipeline_unit column")))
+        .collect();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE run_id = {} ORDER BY position, id",
+        cols.join(", "),
+        store.qualified("pipeline_unit"),
+        d.param(1, Type::Int)
+    );
+    store
+        .query(&sql, &[Param::Int(run_id)])?
+        .iter()
+        .map(unit_of)
+        .collect()
+}
+
+/// Write the units of a run that it has no row for yet, queued, in the
+/// order given; the rows it has stand as they are. Answers every unit.
+pub fn ensure_units(store: &mut Store, run_id: i64, names: &[String]) -> Result<Vec<Unit>, Error> {
+    let have: std::collections::BTreeSet<String> =
+        units(store, run_id)?.into_iter().map(|u| u.unit).collect();
+    let rows: Vec<Vec<Param>> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !have.contains(*n))
+        .map(|(i, n)| {
+            vec![
+                Param::Int(run_id),
+                Param::from(n.as_str()),
+                Param::Int(i as i64),
+                Param::from("queued"),
+                Param::Int(0),
+            ]
+        })
+        .collect();
+    for chunk in rows.chunks(500) {
+        store.insert(
+            &Insert::new(
+                table("pipeline_unit"),
+                &["run_id", "unit", "position", "state", "attempts"],
+            ),
+            chunk,
+        )?;
+    }
+    units(store, run_id)
+}
+
+/// What a unit holds while it runs.
+#[derive(Debug, Clone)]
+pub struct UnitStart<'a> {
+    pub cores: i64,
+    pub memory_mb: i64,
+    pub gpu_card: Option<i64>,
+    pub gpu_memory_mb: Option<i64>,
+    pub device: &'a str,
+    pub container: &'a str,
+    pub pid: Option<i64>,
+    pub host: &'a str,
+    pub started_at: &'a str,
+}
+
+/// A unit started: running, one more attempt, with what it holds.
+pub fn unit_started(store: &mut Store, id: i64, s: &UnitStart<'_>) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET state = 'running', attempts = attempts + 1, cores = {}, memory_mb = {}, \
+         gpu_card = {}, gpu_memory_mb = {}, device = {}, container = {}, pid = {}, host = {}, \
+         started_at = {}, finished_at = NULL, exit_code = NULL, outcome = NULL WHERE id = {}",
+        store.qualified("pipeline_unit"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Int),
+        d.param(4, Type::Int),
+        d.param(5, Type::Text),
+        d.param(6, Type::Text),
+        d.param(7, Type::Int),
+        d.param(8, Type::Text),
+        d.param(9, Type::Timestamp),
+        d.param(10, Type::Int),
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::Int(s.cores),
+            Param::Int(s.memory_mb),
+            s.gpu_card.map_or(Param::Null, Param::Int),
+            s.gpu_memory_mb.map_or(Param::Null, Param::Int),
+            Param::from(s.device),
+            Param::from(s.container),
+            s.pid.map_or(Param::Null, Param::Int),
+            Param::from(s.host),
+            Param::from(s.started_at),
+            Param::Int(id),
+        ],
+    )?;
+    Ok(())
+}
+
+/// A unit over: its exit code and what became of it.
+pub fn unit_over(
+    store: &mut Store,
+    id: i64,
+    exit_code: Option<i64>,
+    outcome: &Value,
+    finished_at: &str,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_unit"),
+        &[
+            ("state", Param::from("over")),
+            ("exit_code", exit_code.map_or(Param::Null, Param::Int)),
+            ("outcome", Param::from(outcome.to_string())),
+            ("finished_at", Param::from(finished_at)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// A unit whose container ended: what it left is being taken in, and its
+/// exit code is kept for a resume that takes it in again.
+pub fn unit_registering(store: &mut Store, id: i64, exit_code: Option<i64>) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_unit"),
+        &[
+            ("state", Param::from("registering")),
+            ("exit_code", exit_code.map_or(Param::Null, Param::Int)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// A unit that was in flight queued again, holding nothing: how a stopped
+/// run gives its running units back, and a resume reruns them.
+pub fn unit_requeued(store: &mut Store, id: i64) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_unit"),
+        &[
+            ("state", Param::from("queued")),
+            ("gpu_card", Param::Null),
+            ("gpu_memory_mb", Param::Null),
+            ("pid", Param::Null),
+            ("container", Param::Null),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
 /// How many entries and runs the registry keeps, for custody.
 pub fn totals(store: &mut Store) -> Result<(i64, i64), Error> {
     let count = |store: &mut Store, t: &str| -> Result<i64, Error> {
@@ -625,5 +959,87 @@ mod tests {
         assert_eq!(r.summary, summary);
         assert_eq!(runs(&mut store, Some(p.id), 10).unwrap().len(), 1);
         assert_eq!(totals(&mut store).unwrap(), (1, 1));
+    }
+
+    /// Record 49 A1: a run's units are written once, started and ended one
+    /// by one, and a unit in flight is queued again with nothing held.
+    #[test]
+    fn a_run_s_units_are_written_once_and_taken_up_again() {
+        let mut store = store();
+        let d = serde_json::json!({});
+        let (p, _) = add(&mut store, &new(&d, "sha256:1")).unwrap();
+        let params = serde_json::json!({});
+        let id = start(
+            &mut store,
+            &NewRun {
+                pipeline_id: p.id,
+                job_id: Some(1),
+                handle_id: None,
+                selection: None,
+                params: &params,
+                runtime: "podman",
+                runtime_version: "5",
+                host: "b",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: None,
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-09-24T00:00:00Z",
+            },
+        )
+        .unwrap();
+        set_units(&mut store, id, "apart", Some(0.9)).unwrap();
+        let names: Vec<String> = ["stack-1", "stack-2", "stack-3"].map(String::from).to_vec();
+        let us = ensure_units(&mut store, id, &names).unwrap();
+        assert_eq!(us.len(), 3);
+        assert!(us.iter().all(|u| u.state == "queued" && u.attempts == 0));
+        // written once: a second call adds nothing
+        assert_eq!(ensure_units(&mut store, id, &names).unwrap(), us);
+        fn start_of(c: &str) -> UnitStart<'_> {
+            UnitStart {
+                cores: 2,
+                memory_mb: 2048,
+                gpu_card: Some(1),
+                gpu_memory_mb: Some(4096),
+                device: "cuda:x",
+                container: c,
+                pid: Some(4242),
+                host: "b",
+                started_at: "2026-09-24T00:00:01Z",
+            }
+        }
+        unit_started(&mut store, us[0].id, &start_of("nils-run-1-a")).unwrap();
+        unit_started(&mut store, us[1].id, &start_of("nils-run-1-b")).unwrap();
+        unit_over(
+            &mut store,
+            us[0].id,
+            Some(0),
+            &serde_json::json!({"status": "succeeded"}),
+            "2026-09-24T00:00:02Z",
+        )
+        .unwrap();
+        unit_requeued(&mut store, us[1].id).unwrap();
+        let now = units(&mut store, id).unwrap();
+        assert_eq!(now[0].state, "over");
+        assert_eq!(now[0].outcome["status"], "succeeded");
+        assert_eq!(now[0].gpu_card, Some(1));
+        assert_eq!((now[1].state.as_str(), now[1].attempts), ("queued", 1));
+        assert_eq!((now[1].gpu_card, now[1].pid), (None, None));
+        let r = run(&mut store, id).unwrap().unwrap();
+        assert_eq!(
+            (r.units.as_deref(), r.threshold),
+            (Some("apart"), Some(0.9))
+        );
+        assert!(interrupt(&mut store, id, "gone").unwrap());
+        assert!(!interrupt(&mut store, id, "gone").unwrap());
+        assert_eq!(runs_in(&mut store, "interrupted").unwrap().len(), 1);
+        resume(&mut store, id, 9).unwrap();
+        let r = run(&mut store, id).unwrap().unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.job_id, r.resumes),
+            ("running", Some(9), Some(1))
+        );
     }
 }

@@ -272,13 +272,13 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; in the working place, the input it was given (a release in the BIDS layout, or stacks.json), its manifest and its container's log |
+| what | the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; each unit of a run as the pipeline lane scheduled it (record 49); the lane's budget and card, and the path of each secret input the site set; in the working place, the input it was given (a release in the BIDS layout, or stacks.json, and each unit's own where units run apart), its manifest, its containers' logs and apptainer's copies of images, by digest |
 | where | rows of pipeline and pipeline_run in the registry; a run's folders go under runs/<run> in a working place, and none is bound now, so no pipeline can run |
-| holds | quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed<br>technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times |
+| holds | quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed<br>technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times<br>secret: none; a secret input's path is kept, never its bytes, and what a container left is swept of it |
 | owner | the operator who added each pipeline; each run is its principal's |
 | kept | the rows for good, since a derivative names the run that made it; a run's folder under runs until an operator removes it |
 | read | `nils pipeline list`<br>`nils pipeline show <pipeline>`<br>`nils pipeline runs [<run>]` |
-| change | `nils pipeline add <nils.job.yml>`<br>`nils pipeline runtime --set <choice>`<br>`nils run <pipeline> --select selection:<name>@<v>` |
+| change | `nils pipeline add <nils.job.yml>`<br>`nils pipeline runtime --set <choice>`<br>`nils pipeline lane --cores <n> --memory-gb <n> --gpu-card <n\|none>`<br>`nils pipeline secret set <id> --file <path>`<br>`nils run <pipeline> --select selection:<name>@<v>`<br>`nils run --resume <run>` |
 | export | `nils pipeline show <pipeline> --json`<br>`nils pipeline runs <run> --json` |
 | delete | with the registry and the working place; nils has no command for one |
 

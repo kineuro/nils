@@ -86,6 +86,7 @@ while i < len(a):
 keys = sorted(mounts, key=len, reverse=True)
 pattern = re.compile("(" + "|".join(re.escape(k) for k in keys) + r")(?=/|$|[^A-Za-z0-9_])")
 argv = [pattern.sub(lambda m: mounts[m.group(1)], w) for w in a[i:]]
+env = {k: pattern.sub(lambda m: mounts[m.group(1)], v) for k, v in env.items()}
 sys.exit(subprocess.call(argv, env=dict(os.environ, **env)))
 "#;
 
@@ -1076,6 +1077,51 @@ fn a_bids_run_meets_one_t1w_per_session_and_registers_one_output_per_session() {
     assert_eq!(rows[0]["id"], v["input_release_id"], "{all}");
     let text = lab.ok(&["release", "--history"], None);
     assert!(!text.contains("pipeline-run-"), "{text}");
+
+    // record 49 A1: units apart, each session in a container of its own
+    // that sees its own subject's session alone and is named its subject
+    let apart = BIDS_COPY
+        .replace("name: bids-copy", "name: bids-apart")
+        .replace(
+            "  src, out = sys.argv[1], sys.argv[2]\n",
+            "  src, out = sys.argv[1], sys.argv[2]\n  assert len(glob.glob(src + \"/sub-*/ses-*\")) == 1 and len(sys.argv) == 4, sys.argv\n",
+        )
+        .replace("  input: {layout: bids}\n", "  input: {layout: bids}\n  units: apart\n");
+    assert!(
+        apart.contains("units: apart") && apart.contains("assert len"),
+        "{apart}"
+    );
+    lab.add_descriptor("bids-apart", &apart);
+    let before = lab.podman_runs().len();
+    let v = lab.json(&[
+        "run",
+        "bids-apart",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "done", "{v}");
+    assert_eq!(v["summary"]["units"]["succeeded"], 2, "{v}");
+    assert_eq!(v["summary"]["derivatives"], 2, "{v}");
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len() - before, 2, "a container per session");
+    let id = v["id"].as_i64().unwrap();
+    for u in v["units_run"].as_array().unwrap() {
+        let unit = u["unit"].as_str().unwrap();
+        let input = lab
+            .work
+            .path()
+            .join(format!("runs/{id}/units/{unit}/input"));
+        let subjects: Vec<String> = std::fs::read_dir(&input)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(subjects.len(), 1, "{unit}: {subjects:?}");
+        assert!(unit.starts_with(&subjects[0]), "{unit}: {subjects:?}");
+        assert!(input.join("dataset_description.json").is_file());
+    }
 }
 
 /// A server with the worker beside the doors, on the lab's search path.
@@ -1094,13 +1140,20 @@ impl Drop for Server {
 const OPERATOR: &str = "an-operator-token-of-length";
 const PLAIN: &str = "a-plain-pipelines-token-long";
 const READER: &str = "a-reader-token-of-its-length";
+/// Record 49 R4's review: a reader of runs and of review items at plain.
+const PLAIN_REVIEW: &str = "a-plain-review-token-of-lens";
 
 impl Server {
     fn start(lab: &Lab) -> Server {
+        Server::start_with(lab, &[])
+    }
+
+    fn start_with(lab: &Lab, extra: &[&str]) -> Server {
         let tokens = [
             format!("{OPERATOR}=ops@lab:operator"),
             format!("{PLAIN}=pat@lab:pipelines:work,pipelines:see"),
             format!("{READER}=lou@lab:reader"),
+            format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
         ]
         .join(",");
         let mut child = lab
@@ -1116,6 +1169,7 @@ impl Server {
                 "token",
             ])
             .args(["--pack-dir", packs().to_str().unwrap()])
+            .args(extra)
             .env("NILS_TOKENS", tokens)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1188,7 +1242,15 @@ fn a_run_queued_at_the_door_is_served_by_bytes_and_by_a_shared_path() {
     }
     let (status, cat) = server.call("GET", "/api/pipelines", None, OPERATOR);
     assert_eq!(status, 200);
-    assert_eq!(cat["pipelines"][0]["label"], "stack-echo@1", "{cat}");
+    // record 49 A4: beside it, the starters the engine seeded at its start
+    let echo = cat["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "stack-echo")
+        .unwrap_or_else(|| panic!("{cat}"));
+    assert_eq!(echo["label"], "stack-echo@1", "{cat}");
+    assert_eq!(echo["starter"], false, "{echo}");
     let (status, _) = server.call("GET", "/api/pipelines", None, READER);
     assert_eq!(status, 403, "a reader holds no pipelines:see");
 
@@ -2361,4 +2423,1897 @@ fn odd_folder_names_and_files_at_the_root_are_bound_and_said() {
     );
     let words = lab.podman_runs().pop().unwrap();
     assert!(!words.iter().any(|w| w.contains("t1:mprage")), "{words:?}");
+}
+
+// ------------------------------------------------------------ record 49
+
+/// A stand-in for apptainer, as the lane runs it (record 49 A2): it answers
+/// `--version`, keeps the words of every call, makes the SIF file or the
+/// sandbox folder a `build` names, and runs a `run`'s command on the host
+/// with every container path written as its host folder, once it has
+/// checked the local image it was given is there. It does not clear the
+/// environment as `--cleanenv` does; the words say that it was asked to.
+const FAKE_APPTAINER: &str = r#"#!/usr/bin/env python3
+import json, os, re, subprocess, sys
+a = sys.argv[1:]
+if not a or a[0] == "--version":
+    print("apptainer version 1.3.4"); sys.exit(0)
+with open(os.environ["FAKE_APPTAINER_ARGS"], "a") as log:
+    log.write(json.dumps(a) + "\n")
+if a[0] == "build":
+    target, source = a[-2], a[-1]
+    if "--sandbox" in a:
+        os.makedirs(target); open(os.path.join(target, "source"), "w").write(source)
+    else:
+        open(target, "w").write("SIF " + source)
+    sys.exit(0)
+if a[0] != "run":
+    sys.exit(0)
+mounts, env, i = {}, {}, 1
+while i < len(a):
+    w = a[i]
+    if w == "--bind":
+        host, ctr = a[i + 1].split(":")[:2]; mounts[ctr] = host; i += 2
+    elif w == "--env":
+        k, v = a[i + 1].split("=", 1); env[k] = v; i += 2
+    elif w in ("--network", "--cpus", "--memory"):
+        i += 2
+    elif w.startswith("--"):
+        i += 1
+    else:
+        break
+image = a[i]; i += 1
+if not os.path.exists(image):
+    print("no image at " + image, file=sys.stderr); sys.exit(255)
+keys = sorted(mounts, key=len, reverse=True)
+pattern = re.compile("(" + "|".join(re.escape(k) for k in keys) + r")(?=/|$|[^A-Za-z0-9_])")
+argv = [pattern.sub(lambda m: mounts[m.group(1)], w) for w in a[i:]]
+env = {k: pattern.sub(lambda m: mounts[m.group(1)], v) for k, v in env.items()}
+sys.exit(subprocess.call(argv, env=dict(os.environ, **env)))
+"#;
+
+/// A stand-in for `nvidia-smi` (no card is touched on a laptop that has
+/// one): it names a card, answers a card's free memory from a file the test
+/// writes, and keeps each question it was asked.
+const FAKE_SMI: &str = r#"#!/bin/sh
+echo "$*" >> "$FAKE_GPU_ASKED"
+case "$1" in
+  --query-gpu=name) echo "Stand-in Card"; exit 0 ;;
+  --query-gpu=memory.free) echo "$(cat "$FAKE_GPU_FREE") MiB"; exit 0 ;;
+esac
+exit 1
+"#;
+
+/// A pipeline of the stacks layout whose units run apart (record 49 A1):
+/// each unit sees its own stack alone, notes when it starts and ends in the
+/// file `LANE_TRACE` names, sleeps, and writes one file.
+fn stack_slow(name: &str, needs: &str, extra: &str) -> String {
+    format!(
+        r#"name: {name}
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/{name}@sha256:{hex}"
+inputs:
+  - id: sleep
+    name: Seconds a unit takes
+    type: Number
+    value-key: "[SLEEP]"
+    default-value: 1
+command-line: |
+  python3 -c '
+  import json, os, sys, time
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  assert len(m["stacks"]) == 1, "a unit that runs apart sees its own stack"
+  man = json.load(open(sys.argv[4] + "/manifest.json"))
+  assert len(man["units"]) == 1 and man["unit"] == m["stacks"][0]["unit"]
+  def mark(w):
+      if not os.environ.get("LANE_TRACE"):
+          return
+      with open(os.environ["LANE_TRACE"], "a") as f:
+          f.write("%s %.6f %s %s %s\n" % (w, time.time(), os.environ["NILS_UNIT"], os.environ.get("CUDA_VISIBLE_DEVICES", "-"), os.environ["NILS_CORES"]))
+  mark("start")
+  time.sleep(float(sys.argv[3]))
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
+  json.dump({{"schema_version": "1", "units": [{{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]}}]}}, open(os.path.join(out, "results.json"), "w"))
+  mark("end")
+  ' [Manifest] [OutputLocation] [SLEEP] [Inputs]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  outputs:
+    - id: slow
+      kind: output
+      path-template: "stack-{{stack}}/out.txt"
+      media-type: text/plain
+  needs: {needs}
+{extra}"#,
+        hex = "c".repeat(64),
+    )
+}
+
+/// The trace a lane's units left: each start and end, in time order.
+fn trace(path: &Path) -> Vec<(String, f64, String, String)> {
+    let mut events: Vec<(String, f64, String, String)> = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            Some((
+                w[0].to_string(),
+                w[1].parse().ok()?,
+                w[2].to_string(),
+                w[3].to_string(),
+            ))
+        })
+        .collect();
+    events.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    events
+}
+
+/// The most units that ran at once, by the trace.
+fn most_at_once(path: &Path) -> usize {
+    let (mut now, mut most) = (0usize, 0usize);
+    for (w, ..) in trace(path) {
+        if w == "start" {
+            now += 1;
+            most = most.max(now);
+        } else {
+            now -= 1;
+        }
+    }
+    most
+}
+
+impl Lab {
+    fn traced(&self, trace: &Path, args: &[&str]) -> (bool, String, String) {
+        let child = self
+            .command(&self.path)
+            .args(args)
+            .env("LANE_TRACE", trace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    }
+
+    fn count(&self, sql: &str) -> i64 {
+        self.store().query(sql, &[]).unwrap()[0].int(0).unwrap()
+    }
+}
+
+/// Record 49 A1: a run whose units run apart runs them side by side, each
+/// in a container of its own that sees its own stack alone, as many at once
+/// as the lane's cores and memory allow and never more; a unit that could
+/// never fit is refused before anything runs.
+#[test]
+fn units_apart_fill_the_lane_s_budget_and_never_pass_it() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-budget");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 2, memory-gb: 1}", ""));
+    let t = lab.work.path().join("trace-cores");
+    // four cores: two units of two cores at once
+    lab.ok(
+        &["pipeline", "lane", "--cores", "4", "--memory-gb", "100"],
+        None,
+    );
+    let (ok, out, err) = lab.traced(
+        &t,
+        &[
+            "run",
+            "slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=1.2",
+            "--json",
+        ],
+    );
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["units"], "apart");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    assert_eq!(run["derivatives"].as_array().unwrap().len(), 4, "{run}");
+    assert_eq!(run["summary"]["lane"]["cores"], 4, "{run}");
+    assert_eq!(run["unit_states"]["over"], 4, "{run}");
+    assert_eq!(trace(&t).len(), 8);
+    assert_eq!(most_at_once(&t), 2, "{:?}", trace(&t));
+    // each unit had a container of its own, told its unit and its cores
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 4);
+    for words in &runs {
+        assert!(
+            words.iter().any(|w| w.starts_with("NILS_UNIT=stack-")),
+            "{words:?}"
+        );
+        assert!(words.iter().any(|w| w == "NILS_CORES=2"), "{words:?}");
+    }
+
+    // memory binds as cores do: three units of 1 GB in a lane of 3 GB,
+    // each of one core, so the cores never bind first on a machine of 4
+    // (the lane's cores are never more than the machine offers)
+    lab.add_descriptor(
+        "slow-one",
+        &stack_slow("slow-one", "{cores: 1, memory-gb: 1}", ""),
+    );
+    let t = lab.work.path().join("trace-memory");
+    lab.ok(
+        &["pipeline", "lane", "--cores", "64", "--memory-gb", "3"],
+        None,
+    );
+    let (ok, _, err) = lab.traced(
+        &t,
+        &[
+            "run",
+            "slow-one",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=1.2",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(most_at_once(&t), 3, "{:?}", trace(&t));
+
+    // a unit that could never fit is refused, and nothing runs
+    lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let (ok, _, err) = lab.run(&["run", "slow", "--select", "selection:every@1"], None);
+    assert!(!ok);
+    assert!(
+        err.contains("asks 2 cores") && err.contains("nils pipeline lane"),
+        "{err}"
+    );
+    assert_eq!(lab.podman_runs().len(), 8);
+    let lane: Value = serde_json::from_str(&lab.ok(&["pipeline", "lane", "--json"], None)).unwrap();
+    assert_eq!(lane["cores"], 1, "{lane}");
+    assert_eq!(lane["set"]["memory_gb"], 3, "{lane}");
+}
+
+/// Record 49 A1: a run whose engine is killed with units in flight is taken
+/// up where it stopped. The units it finished are kept with their
+/// derivatives and never run again; those in flight run again from a clean
+/// folder. The pipeline lane's worker finds the run by itself and queues it
+/// under what its job recorded; a run finished cannot be resumed.
+#[test]
+fn a_killed_run_is_taken_up_where_it_stopped() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-resume");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    lab.ok(
+        &["pipeline", "lane", "--cores", "2", "--memory-gb", "100"],
+        None,
+    );
+    let t = lab.work.path().join("trace");
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        lab.command(&lab.path)
+            .args([
+                "run",
+                "slow",
+                "--select",
+                "selection:every@1",
+                "--param",
+                "sleep=2",
+            ])
+            .env("LANE_TRACE", &t)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // a group of its own, so the kill takes its containers with it
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    };
+    // the first two units end, the next two start; then the engine dies
+    let started = std::time::Instant::now();
+    loop {
+        let over = lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'");
+        let marked = trace(&t).iter().filter(|e| e.0 == "start").count();
+        if over >= 2 && marked >= 3 {
+            break;
+        }
+        assert!(
+            started.elapsed().as_secs() < 60,
+            "the run never got half way"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let pgid = child.id();
+    // `--` before the group: procps 4.0.4 (Ubuntu 24.04) reads a bare
+    // `-<pgid>` after the signal as something else, kills nothing and says 0
+    let killed = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "the engine's group was not killed");
+    let _ = child.wait();
+    let over_before: Vec<String> = lab
+        .store()
+        .query(
+            "SELECT unit FROM pipeline_unit WHERE state = 'over' ORDER BY unit",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert!(
+        over_before.len() >= 2 && over_before.len() < 4,
+        "{over_before:?}"
+    );
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline_run WHERE status = 'running'"),
+        1,
+        "a killed engine leaves its run saying running"
+    );
+    let derivatives_before = lab.count("SELECT COUNT(*) FROM derivative");
+    assert_eq!(derivatives_before, over_before.len() as i64);
+
+    // the pipeline lane's worker takes it up again by itself
+    // bounded: a worker that never ends fails here, not in the job's timeout
+    let said = lab.work.path().join("worker-stderr");
+    let mut worker = lab
+        .command(&lab.path)
+        .args(["jobs", "work", "--lane", "pipelines", "--once"])
+        .env("LANE_TRACE", &t)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = worker.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed().as_secs() >= 180 {
+            let _ = worker.kill();
+            let _ = worker.wait();
+            panic!(
+                "the lane's worker did not end within 180 s: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(
+        status.success(),
+        "{}",
+        std::fs::read_to_string(&said).unwrap_or_default()
+    );
+    let run: Value =
+        serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["resumes"], 1, "{run}");
+    assert_eq!(run["summary"]["resumed"], true, "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+    assert_eq!(
+        lab.count("SELECT COUNT(DISTINCT path) FROM derivative"),
+        4,
+        "no unit registered twice"
+    );
+    // a unit over before the kill never started again
+    let events = trace(&t);
+    for unit in &over_before {
+        let starts = events
+            .iter()
+            .filter(|e| e.0 == "start" && &e.2 == unit)
+            .count();
+        assert_eq!(starts, 1, "{unit} ran again: {events:?}");
+    }
+    // every unit ended once at least, and the ones in flight twice started
+    let starts = events.iter().filter(|e| e.0 == "start").count();
+    assert!(starts > 4 && starts <= 6, "{events:?}");
+    let ends = events.iter().filter(|e| e.0 == "end").count();
+    assert_eq!(ends, 4, "a killed unit never ended: {events:?}");
+    let attempts: i64 = lab.count("SELECT SUM(attempts) FROM pipeline_unit");
+    assert_eq!(attempts as usize, starts, "{events:?}");
+    // the job that took it up ran as the one the killed run recorded
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let resumed = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["args"]["resume"] == 1)
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(resumed["state"], "done", "{resumed}");
+    assert_eq!(resumed["kind"], "pipeline", "{resumed}");
+    // a run that is done has nothing left to run
+    let (ok, _, err) = lab.run(&["run", "--resume", "1"], None);
+    assert!(!ok && err.contains("nothing is left to run"), "{err}");
+}
+
+/// Record 49 A1, the proof: a long run and a digest go on together. The
+/// pipeline lane runs the run while the main lane runs a digest queued after
+/// it, which ends first.
+#[test]
+fn a_long_run_and_a_digest_go_on_together() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-digest");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    // one unit at a time: four units of three seconds each
+    lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let src = format!("src={}", lab._src.path().display());
+    let server = Server::start_with(&lab, &["--ingest-root", &src]);
+    let (status, doc) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "slow", "--select", "selection:every@1", "--param", "sleep=3"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 202, "{doc}");
+    let run_job = doc["job"].as_i64().unwrap();
+    let job = |id: i64| {
+        server
+            .call("GET", &format!("/api/jobs/{id}"), None, OPERATOR)
+            .1
+    };
+    let started = std::time::Instant::now();
+    while job(run_job)["progress"]["running"].as_u64() != Some(1) {
+        assert!(started.elapsed().as_secs() < 60, "{}", job(run_job));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (status, doc) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["digest", "@src"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 202, "{doc}");
+    let digest_job = doc["job"].as_i64().unwrap();
+    let mut digest = Value::Null;
+    for _ in 0..600 {
+        digest = job(digest_job);
+        if matches!(
+            digest["state"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(digest["state"], "done", "{digest}");
+    // the run is still going when the digest queued after it is done
+    let during = job(run_job);
+    assert_eq!(during["state"], "running", "{during}");
+    assert!(during["progress"]["over"].as_u64().unwrap() < 4, "{during}");
+    let mut state = Value::Null;
+    for _ in 0..900 {
+        state = job(run_job);
+        if matches!(
+            state["state"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(state["state"], "done", "{state}");
+    // the two lanes' workers, each a row of its own kind
+    let (_, all) = server.call("GET", "/api/jobs?all=1", None, OPERATOR);
+    let text = all.to_string();
+    assert!(text.contains("\"pipeline-worker\""), "{all}");
+}
+
+/// Record 49 A2: under apptainer the image is built once from its pinned
+/// digest and kept by it; a GPU unit waits while the card's free memory is
+/// below its need and each holds a lease on the named card, so two units
+/// that would not fit together never run at once. No card is used: a
+/// stand-in nvidia-smi answers.
+#[test]
+fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the stand-ins need it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-gpu");
+    let fake = lab.bin.file("apptainer", FAKE_APPTAINER.as_bytes());
+    let smi = lab.bin.file("nvidia-smi", FAKE_SMI.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&fake, &smi] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let free = lab.work.path().join("gpu-free");
+    std::fs::write(&free, "2000").unwrap();
+    let asked = lab.work.path().join("gpu-asked");
+    let apptainer_args = lab.bin.path().join("apptainer.log");
+    let t = lab.work.path().join("trace");
+    lab.add_descriptor(
+        "gpu-slow",
+        &stack_slow(
+            "gpu-slow",
+            "{gpu: required, gpu-memory-gb: 4, cores: 1, memory-gb: 1}",
+            "",
+        ),
+    );
+    lab.ok(&["pipeline", "runtime", "--set", "apptainer"], None);
+    lab.ok(
+        &[
+            "pipeline",
+            "lane",
+            "--cores",
+            "8",
+            "--memory-gb",
+            "100",
+            "--gpu-card",
+            "1",
+        ],
+        None,
+    );
+    let child = lab
+        .command(&lab.path)
+        .args([
+            "run",
+            "gpu-slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=0.5",
+            "--json",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args)
+        .env("FAKE_GPU_FREE", &free)
+        .env("FAKE_GPU_ASKED", &asked)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // 2000 MiB free and 4096 needed: the units wait, and say why
+    let started = std::time::Instant::now();
+    loop {
+        let progress: String = lab
+            .store()
+            .query("SELECT progress FROM job WHERE kind = 'pipeline'", &[])
+            .unwrap()
+            .first()
+            .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+            .unwrap_or_default();
+        if progress.contains("card 1: 2000 MiB free") {
+            break;
+        }
+        assert!(started.elapsed().as_secs() < 60, "{progress}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(trace(&t).is_empty(), "a unit started without its lease");
+    // room for one unit's need, not two: one lease at a time
+    std::fs::write(&free, "6000").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["runtime"], "apptainer");
+    assert_eq!(run["device"], "cuda:Stand-in Card");
+    assert_eq!(most_at_once(&t), 1, "{:?}", trace(&t));
+    assert!(
+        trace(&t).iter().all(|e| e.3 == "1"),
+        "the leased card alone: {:?}",
+        trace(&t)
+    );
+    for u in run["units_run"].as_array().unwrap() {
+        assert_eq!(u["gpu_card"], 1, "{u}");
+    }
+    let questions = std::fs::read_to_string(&asked).unwrap();
+    assert!(
+        questions.contains("--query-gpu=memory.free --format=csv,noheader -i 1"),
+        "{questions}"
+    );
+    // the image: built once from the pinned digest, run from where it is kept
+    let calls: Vec<Vec<String>> = std::fs::read_to_string(&apptainer_args)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let builds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "build").collect();
+    assert_eq!(builds.len(), 1, "{calls:?}");
+    let sif = lab
+        .work
+        .path()
+        .join("images")
+        .join(format!("{}.sif", "c".repeat(64)));
+    assert!(sif.is_file());
+    assert_eq!(
+        builds[0].last().unwrap(),
+        &format!("docker://example.org/gpu-slow@sha256:{}", "c".repeat(64))
+    );
+    let execs: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "run").collect();
+    assert_eq!(execs.len(), 4);
+    let work = lab.work.path().canonicalize().unwrap();
+    for e in &execs {
+        assert_eq!(
+            &e[..7],
+            [
+                "run",
+                "--containall",
+                "--cleanenv",
+                "--no-home",
+                "--net",
+                "--network",
+                "none"
+            ]
+        );
+        assert!(e.iter().any(|w| w == "--nv"), "{e:?}");
+        assert!(pair(e, "--env", "CUDA_VISIBLE_DEVICES=1"), "{e:?}");
+        assert!(e.iter().any(|w| w == sif.to_str().unwrap()), "{e:?}");
+        // bound: the unit's own input, inputs and output, and the folders
+        // of its stack's files, nothing wider
+        let binds: Vec<&String> = e
+            .windows(2)
+            .filter(|w| w[0] == "--bind")
+            .map(|w| &w[1])
+            .collect();
+        for b in &binds {
+            let host = Path::new(b.split(':').next().unwrap());
+            let host = host.canonicalize().unwrap_or(host.to_path_buf());
+            let unit_side = host.starts_with(work.join("runs/1/units"))
+                || host
+                    .to_string_lossy()
+                    .starts_with(&format!("{}/derivatives/gpu-slow/1/stack-", work.display()));
+            let source = host.starts_with(lab._src.path().canonicalize().unwrap());
+            assert!(unit_side || source, "{b} is wider than the unit");
+        }
+        assert!(binds.iter().any(|b| b.ends_with(":/input:ro")));
+    }
+    // a second run finds the image kept and builds nothing
+    std::fs::write(&free, "99999").unwrap();
+    let mut again = lab.command(&lab.path);
+    again
+        .args([
+            "run",
+            "gpu-slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=0",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args)
+        .env("FAKE_GPU_FREE", &free)
+        .env("FAKE_GPU_ASKED", &asked);
+    assert!(again.output().unwrap().status.success());
+    let builds = std::fs::read_to_string(&apptainer_args)
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("[\"build\""))
+        .count();
+    assert_eq!(builds, 1);
+    // with no card named, a unit that needs one is refused before it runs
+    lab.ok(&["pipeline", "lane", "--gpu-card", "none"], None);
+    let mut refused = lab.command(&lab.path);
+    refused
+        .args(["run", "gpu-slow", "--select", "selection:every@1"])
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args)
+        .env("FAKE_GPU_ASKED", &asked);
+    let out = refused.output().unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("uses no card"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Record 49 R3: a secret the site sets is mounted read-only into the
+/// containers of the pipeline that declares it, and only those; it is never
+/// in an output, a log, the run's record or its results, even when the
+/// pipeline prints it, writes it into a file and reports it. A grep of every
+/// file under the working place, the registry and what the engine printed
+/// finds none of it.
+#[test]
+fn a_secret_is_mounted_for_its_run_alone_and_found_nowhere_after() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-secret");
+    const TOKEN: &str = "NILS-PLANTED-SECRET-7f3a9c1e2b";
+    const SECOND: &str = "Xk2vQ9pLm4sT8wZ1";
+    let secret_dir = TempDir::new("pipelines-secret-home");
+    let licence = secret_dir.file("license.txt", format!("{TOKEN}\n{SECOND}\n").as_bytes());
+    let leak = format!(
+        r#"name: leak
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/leak@sha256:{hex}"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  lic = open(os.environ["FS_LICENSE"]).read()
+  print("the licence reads: " + lic)
+  print("a line of it: " + lic.splitlines()[1], file=sys.stderr)
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
+  open(os.path.join(d, "copy.txt"), "w").write(lic)
+  json.dump({{"schema_version": "1", "units": [{{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt", u + "/copy.txt"], "metrics": {{"licence": lic.strip()}}}}]}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      env: FS_LICENSE
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{{stack}}/*.txt"
+      media-type: text/plain
+"#,
+        hex = "d".repeat(64)
+    );
+    lab.add_descriptor("leak", &leak);
+    // not set: the run is refused before anything runs, and says the cure
+    let (ok, _, err) = lab.run(&["run", "leak", "--select", "selection:every@1"], None);
+    assert!(!ok);
+    assert!(
+        err.contains("nils pipeline secret set freesurfer_license"),
+        "{err}"
+    );
+    lab.ok(
+        &[
+            "pipeline",
+            "secret",
+            "set",
+            "freesurfer_license",
+            "--file",
+            licence.to_str().unwrap(),
+        ],
+        None,
+    );
+    let listed: Value =
+        serde_json::from_str(&lab.ok(&["pipeline", "secret", "list", "--json"], None)).unwrap();
+    assert_eq!(
+        listed,
+        json!([{"id": "freesurfer_license", "readable": true}])
+    );
+    let (ok, out, err) = lab.run(
+        &["run", "leak", "--select", "selection:every@1", "--json"],
+        None,
+    );
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    // each copy was removed and refused; the clean file of each unit stands
+    assert_eq!(run["status"], "partial", "{run}");
+    assert_eq!(run["derivatives"].as_array().unwrap().len(), 4, "{run}");
+    assert_eq!(run["summary"]["secrets"], json!(["freesurfer_license"]));
+    let refused = run["summary"]["refused_files"].as_array().unwrap();
+    assert_eq!(
+        refused
+            .iter()
+            .filter(|r| r["why"]
+                .as_str()
+                .unwrap_or("")
+                .contains("held a secret input"))
+            .count(),
+        4,
+        "{run}"
+    );
+    // mounted read-only for this pipeline's containers
+    let mount = format!("{}:/secrets/freesurfer_license:ro", licence.display());
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 4);
+    assert!(runs.iter().all(|w| pair(w, "--volume", &mount)), "{runs:?}");
+    assert!(
+        runs.iter()
+            .all(|w| pair(w, "--env", "FS_LICENSE=/secrets/freesurfer_license"))
+    );
+    // and never for a pipeline that does not declare it
+    lab.add_descriptor(
+        "stack-echo",
+        &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+    );
+    lab.ok(
+        &["run", "stack-echo", "--select", "selection:every@1"],
+        None,
+    );
+    let runs = lab.podman_runs();
+    assert!(
+        !runs[4].iter().any(|w| w.contains("secrets")),
+        "{:?}",
+        runs[4]
+    );
+    // the logs say where it was, never what
+    let log =
+        std::fs::read_to_string(lab.work.path().join("runs/1/units/stack-1/log.txt")).unwrap();
+    assert!(log.contains("[secret freesurfer_license]"), "{log}");
+
+    // nothing anywhere holds a byte of it: every file the working place and
+    // the registry hold, and what the engine printed
+    let mut files = Vec::new();
+    let mut stack = vec![lab.work.path().to_path_buf(), lab.home.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(e.path());
+            } else if kind.is_file() {
+                files.push(e.path());
+            }
+        }
+    }
+    assert!(files.len() > 20, "{}", files.len());
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap();
+        for needle in [TOKEN, SECOND] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{} holds the secret",
+                f.display()
+            );
+        }
+    }
+    for text in [&out, &err] {
+        assert!(!text.contains(TOKEN) && !text.contains(SECOND));
+    }
+    // the rows say so too, read through the store
+    let mut store = lab.store();
+    for (table, cols) in [
+        ("pipeline_run", "summary || COALESCE(error, '') || params"),
+        ("pipeline_unit", "COALESCE(outcome, '')"),
+        ("review_item", "*"),
+        (
+            "job",
+            "COALESCE(args, '') || COALESCE(result, '') || COALESCE(progress, '') || COALESCE(error, '')",
+        ),
+        ("audit", "*"),
+    ] {
+        let sql = if cols == "*" {
+            format!("SELECT * FROM {table}")
+        } else {
+            format!("SELECT {cols} FROM {table}")
+        };
+        let rows = store.query(&sql, &[]).unwrap();
+        for r in rows {
+            for cell in &r.0 {
+                if let nils_registry::store::Cell::Text(t) = cell {
+                    assert!(!t.contains(TOKEN) && !t.contains(SECOND), "{table}: {t}");
+                }
+            }
+        }
+    }
+}
+
+/// Record 49 R3, after review: a run cancelled while its units hold the
+/// secret in their logs and outputs leaves none of it behind; the units in
+/// flight are swept as the ones that ended are.
+#[test]
+fn a_cancelled_run_leaves_no_secret_behind() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-secret-cancel");
+    const TOKEN: &str = "NILS-PLANTED-SECRET-c4nc3l-9d2e";
+    let secret_dir = TempDir::new("pipelines-secret-cancel-home");
+    let licence = secret_dir.file("license.txt", format!("{TOKEN}\n").as_bytes());
+    let leak = format!(
+        r#"name: leak-slow
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/leak-slow@sha256:{hex}"
+command-line: |
+  python3 -c '
+  import json, os, sys, time
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  lic = open(os.environ["FS_LICENSE"]).read()
+  print("the licence reads: " + lic, flush=True)
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "copy.txt"), "w").write(lic)
+  with open(os.environ["LANE_TRACE"], "a") as f:
+      f.write("start %.6f %s - 1\n" % (time.time(), u))
+  time.sleep(60)
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      env: FS_LICENSE
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{{stack}}/*.txt"
+      media-type: text/plain
+  needs: {{cores: 1, memory-gb: 1}}
+"#,
+        hex = "e".repeat(64)
+    );
+    lab.add_descriptor("leak-slow", &leak);
+    lab.ok(
+        &[
+            "pipeline",
+            "secret",
+            "set",
+            "freesurfer_license",
+            "--file",
+            licence.to_str().unwrap(),
+        ],
+        None,
+    );
+    lab.ok(&["pipeline", "lane", "--cores", "2"], None);
+    let t = lab.work.path().join("trace");
+    let child = lab
+        .command(&lab.path)
+        .args(["run", "leak-slow", "--select", "selection:every@1"])
+        .env("LANE_TRACE", &t)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while trace(&t).len() < 2 {
+        assert!(started.elapsed().as_secs() < 60, "{:?}", trace(&t));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let _ = child.wait_with_output().unwrap();
+    let mut stack = vec![lab.work.path().to_path_buf()];
+    let mut seen = 0;
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(e.path());
+            } else if kind.is_file() && e.file_name() != "trace" {
+                seen += 1;
+                let bytes = std::fs::read(e.path()).unwrap();
+                assert!(
+                    !bytes.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes()),
+                    "{} holds the secret",
+                    e.path().display()
+                );
+            }
+        }
+    }
+    assert!(seen > 3, "{seen}");
+}
+
+/// Record 49 A1: a person's cancel stops the units in flight and closes the
+/// run as cancelled, with the units it finished kept; `nils run --resume`
+/// goes on from there.
+#[test]
+fn a_cancelled_run_keeps_its_units_and_goes_on() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-cancel");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let t = lab.work.path().join("trace");
+    let child = lab
+        .command(&lab.path)
+        .args([
+            "run",
+            "slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=1",
+        ])
+        .env("LANE_TRACE", &t)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'") < 1 {
+        assert!(started.elapsed().as_secs() < 60);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("nils run --resume 1"), "{err}");
+    let run: Value =
+        serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
+    assert_eq!(run["status"], "cancelled", "{run}");
+    let over = run["unit_states"]["over"].as_u64().unwrap();
+    assert!((1..4).contains(&over), "{run}");
+    assert!(
+        run["unit_states"].get("running").is_none(),
+        "none left in flight: {run}"
+    );
+    // taken up again by hand: the rest run, and nothing twice
+    let (ok, out, err) = lab.traced(&t, &["run", "--resume", "1", "--json"]);
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    assert_eq!(lab.count("SELECT COUNT(DISTINCT path) FROM derivative"), 4);
+    assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+    let ends = trace(&t).iter().filter(|e| e.0 == "end").count();
+    assert_eq!(ends, 4, "{:?}", trace(&t));
+}
+
+/// Record 49 A3: a pipeline of the stacks layout that writes one table a
+/// stack, a volume and a site, and reports an SNR among its metrics, one
+/// stack's (`low`) under the declared check.
+const VOLUMES: &str = r#"name: volumes
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/volumes@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+inputs:
+  - id: low
+    name: The stack whose SNR is low
+    type: Number
+    value-key: "[LOW]"
+    default-value: 0
+    integer: true
+  - id: scale
+    name: What each volume is multiplied by
+    type: Number
+    value-key: "[SCALE]"
+    default-value: 1000
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]; low = int(sys.argv[3]); scale = float(sys.argv[4])
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "volumes.csv"), "w").write("Brain Volume,Site\n%s,lab\n" % (scale * s["stack_id"]))
+      snr = 3.5 if s["stack_id"] == low else 20
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/volumes.csv"], "metrics": {"snr": snr}})
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [LOW] [SCALE]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: volumes
+      kind: table
+      path-template: "stack-{stack}/volumes.csv"
+      columns:
+        - {name: brain_volume, unit: mm3}
+        - {name: site, type: text}
+  qc: ["snr >= 8", "brain_volume <= 100000000"]
+  needs: {unit-minutes: 1}
+"#;
+
+/// The rows of an exported handle, each a map from its header, the columns
+/// the document asked for under their paths.
+fn exported(lab: &Lab, handle: &Value) -> Vec<std::collections::BTreeMap<String, String>> {
+    let csv = lab.work.path().join(format!("handle-{handle}.csv"));
+    lab.ok(
+        &[
+            "ask",
+            "handles",
+            "export",
+            "--handle",
+            &handle.to_string(),
+            "--out",
+            csv.to_str().unwrap(),
+        ],
+        None,
+    );
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<String> = lines
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .map(|c| c.trim_matches('"').to_string())
+        .collect();
+    lines
+        .map(|l| {
+            header
+                .iter()
+                .cloned()
+                .zip(l.split(',').map(|c| c.trim_matches('"').to_string()))
+                .collect()
+        })
+        .collect()
+}
+
+/// A row's value under a column whose header is, or ends with, `name`.
+fn cell<'a>(row: &'a std::collections::BTreeMap<String, String>, name: &str) -> &'a str {
+    row.iter()
+        .find(|(h, _)| *h == name || h.ends_with(&format!(".{name}")) || h.ends_with(name))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or_else(|| panic!("no column {name} in {row:?}"))
+}
+
+fn ask_file(lab: &Lab, name: &str, doc: &Value) -> String {
+    let f = lab.work.path().join(format!("{name}.json"));
+    std::fs::write(&f, doc.to_string()).unwrap();
+    f.to_str().unwrap().to_string()
+}
+
+/// Record 49 A3's proof, the first half: a run's table is answered in the
+/// ask, each value traced to its run, per scan at detail quasi and as a
+/// total below it; a planted breach of a declared check raises its
+/// `pipeline:qc` item, which names the metric and the value.
+#[test]
+fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-numbers");
+    lab.add_descriptor("volumes", VOLUMES);
+    let stacks: Vec<i64> = lab
+        .store()
+        .query("SELECT id FROM stack ORDER BY id", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    assert_eq!(stacks.len(), 4);
+    let low = stacks[0];
+    let v = lab.json(&[
+        "run",
+        "volumes",
+        "--select",
+        "selection:every@1",
+        "--param",
+        &format!("low={low}"),
+        "--json",
+    ]);
+    // a breach is not a failure: the run is done, the unit's item raised
+    assert_eq!(v["status"], "done", "{v}");
+    let numbers = &v["summary"]["numbers"];
+    assert_eq!(numbers["tables"]["files"], 4, "{v}");
+    assert_eq!(numbers["tables"]["rows"], 4, "{v}");
+    // a volume and a site a stack, and the SNR a check read from results
+    assert_eq!(numbers["measures"], 12, "{v}");
+    assert_eq!(numbers["checks"]["declared"], 2, "{v}");
+    assert_eq!(numbers["checks"]["breaches"], 1, "{v}");
+    assert_eq!(numbers["checks"]["unchecked"], 0, "{v}");
+    let run = v["id"].as_i64().unwrap();
+    let rows = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["kind"] == "table"),
+        "{rows}"
+    );
+    let mut store = lab.store();
+    let items = store
+        .query(
+            "SELECT evidence FROM review_item WHERE kind = 'pipeline:qc' AND status = 'open'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(items.len(), 1, "one planted breach, one item");
+    let evidence: Value = serde_json::from_str(items[0].text(0).unwrap()).unwrap();
+    assert_eq!(evidence["status"], "breach", "{evidence}");
+    assert_eq!(
+        evidence["error"], "snr is 3.5, and the check is snr >= 8",
+        "{evidence}"
+    );
+    assert_eq!(
+        evidence["metrics"]["breaches"][0]["value"], 3.5,
+        "{evidence}"
+    );
+    drop(store);
+
+    // record 49 R4, after the assistant's review: below detail quasi every
+    // door that shows the run says its checks as counts by check, a count
+    // of fewer than 5 scans withheld, and no unit, value or tool's words
+    let server = Server::start(&lab);
+    let unit = format!("stack-{low}");
+    let (status, full) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+    assert_eq!(status, 200, "{full}");
+    assert_eq!(
+        full["summary"]["breaches"][0]["unit"],
+        unit.as_str(),
+        "{full}"
+    );
+    assert_eq!(full["summary"]["breaches"][0]["breaches"][0]["value"], 3.5);
+    let quiet = |doc: &Value| {
+        let text = doc.to_string();
+        assert!(!text.contains(&unit), "{unit} below quasi: {text}");
+        assert!(!text.contains("3.5"), "a value below quasi: {text}");
+        assert!(
+            !text.contains("the check is"),
+            "a breach's words below quasi: {text}"
+        );
+    };
+    for token in [PLAIN, PLAIN_REVIEW] {
+        let (status, doc) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, token);
+        assert_eq!(status, 200, "{doc}");
+        quiet(&doc);
+        let s = &doc["summary"];
+        assert_eq!(s["detail"], "totals", "{doc}");
+        assert_eq!(s["breaches"], json!([]), "{doc}");
+        assert_eq!(
+            s["breaches_by_check"],
+            json!([{"check": "snr >= 8", "metric": "snr", "units": null, "withheld": true}]),
+            "one breach stands for one scan: {doc}"
+        );
+        assert!(s["numbers"]["checks"]["breaches"].is_null(), "{doc}");
+        assert_eq!(s["numbers"]["checks"]["declared"], 2, "{doc}");
+        assert_eq!(s["units"]["total"], 4, "{doc}");
+        assert_eq!(doc["units_run"], json!([]), "{doc}");
+        let (status, list) = server.call("GET", "/api/pipeline-runs", None, token);
+        assert_eq!(status, 200, "{list}");
+        quiet(&list);
+        if let Some(job) = doc["job_id"].as_i64() {
+            let (status, j) = server.call("GET", &format!("/api/jobs/{job}"), None, token);
+            assert_eq!(status, 200, "{j}");
+            quiet(&j);
+            let (status, all) = server.call("GET", "/api/jobs?all=1", None, token);
+            assert_eq!(status, 200, "{all}");
+            quiet(&all);
+        }
+    }
+    // the review list says the run's items one a check, a count of fewer
+    // than 5 withheld, never one a unit, and an item is not read by its id
+    let (status, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, PLAIN_REVIEW);
+    assert_eq!(status, 200, "{items}");
+    quiet(&items);
+    assert_eq!(items["count"], 1, "{items}");
+    let group = &items["items"][0];
+    assert_eq!(group["grouped"], true, "{group}");
+    assert_eq!(group["evidence"]["status"], "breach", "{group}");
+    assert_eq!(group["evidence"]["check"], "snr >= 8", "{group}");
+    assert!(
+        group["units"].is_null() && group["withheld"] == true,
+        "{group}"
+    );
+    assert_eq!(
+        group["ref"],
+        json!({"run_id": run, "pipeline": "volumes@1"}),
+        "{group}"
+    );
+    assert!(group.get("id").is_none(), "{group}");
+    let (_, full_items) = server.call("GET", "/api/review?kind=pipeline:qc", None, OPERATOR);
+    let id = full_items["items"][0]["id"].as_i64().unwrap();
+    let (status, one) = server.call("GET", &format!("/api/review/{id}"), None, PLAIN_REVIEW);
+    assert_eq!(status, 404, "{one}");
+    quiet(&one);
+    let (status, sum) = server.call("GET", "/api/review/summary", None, PLAIN_REVIEW);
+    assert_eq!(status, 200, "{sum}");
+    assert!(
+        sum["by_kind"]["pipeline:qc"].is_null(),
+        "one open item: {sum}"
+    );
+    let (_, sum) = server.call("GET", "/api/review/summary", None, OPERATOR);
+    assert_eq!(sum["by_kind"]["pipeline:qc"], 1, "{sum}");
+    let (_, doc) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run}"),
+        None,
+        PLAIN_REVIEW,
+    );
+    assert!(doc["summary"]["review_items"].is_null(), "{doc}");
+    let (status, why) = server.call("GET", &format!("/api/explain/{low}"), None, PLAIN_REVIEW);
+    assert!(status == 200 || status == 404, "{why}");
+    quiet(&why);
+    // at detail quasi the review item still names the unit and the value
+    let (_, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, OPERATOR);
+    assert_eq!(items["items"][0]["ref"]["unit"], unit.as_str(), "{items}");
+    assert_eq!(
+        items["items"][0]["evidence"]["metrics"]["breaches"][0]["value"],
+        3.5
+    );
+    // the pre-flight door reads its pipeline's name decoded, as a query
+    // is: `volumes@1` sent as `volumes%401`
+    for path in [
+        "/api/pipelines/volumes%401/preflight",
+        "/api/pipelines/volumes@1/preflight",
+    ] {
+        let (status, pre) = server.call(
+            "POST",
+            path,
+            Some(json!({"select": "selection:every@1"})),
+            PLAIN,
+        );
+        assert_eq!(status, 200, "{path}: {pre}");
+        assert_eq!(pre["units"]["total"], 4, "{path}: {pre}");
+    }
+    drop(server);
+
+    // the ask reads the run's numbers as fields of the stack, with the run
+    let packs = packs();
+    let p = packs.to_str().unwrap();
+    let per_scan = json!({
+        "ast_version": 1,
+        "sets": {"s": {"grain": "stack"}},
+        "out": {"set": "s", "level": "record", "columns": [
+            ["field", {}, "id"],
+            ["field", {}, "measure.volumes.brain_volume"],
+            ["field", {}, "measure.volumes.site"],
+            ["field", {}, "measure.volumes.snr"],
+            ["field", {}, "measure.volumes.run"],
+        ], "order": [[["field", {}, "id"], "asc"]]},
+    });
+    let file = ask_file(&lab, "per-scan", &per_scan);
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    let rows = exported(&lab, &answer["handle"]);
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for r in &rows {
+        let id: f64 = cell(r, "id").parse().unwrap();
+        let volume: f64 = cell(r, "measure.volumes.brain_volume").parse().unwrap();
+        assert_eq!(volume, 1000.0 * id, "{r:?}");
+        assert_eq!(cell(r, "measure.volumes.site"), "lab", "{r:?}");
+        let snr: f64 = cell(r, "measure.volumes.snr").parse().unwrap();
+        assert_eq!(snr, if id as i64 == low { 3.5 } else { 20.0 }, "{r:?}");
+        assert_eq!(
+            cell(r, "measure.volumes.run"),
+            run.to_string(),
+            "each value traced to its run: {r:?}"
+        );
+    }
+
+    // R4: below detail quasi a scan's value is refused, and its total is
+    // answered over a group
+    let (good, _, err) = lab.run_on(
+        &lab.path,
+        &["ask", "run", "--file", &file, "--pack-dir", p, "--json"],
+        None,
+    );
+    assert!(good, "at the keyboard every class is held");
+    let mut plain = lab.command(&lab.path);
+    let out = plain
+        .env("NILS_JOB_DETAIL", "plain")
+        .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+        .output()
+        .unwrap();
+    let err_text = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err_text}");
+    assert!(
+        err_text.contains("read per row only at detail quasi"),
+        "{err_text} {err}"
+    );
+    let totals = json!({
+        "ast_version": 1,
+        "sets": {
+            "s": {"grain": "stack"},
+            "g": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "n_instances"]]},
+                  "bind": {
+                      "total": ["sum", {"set": "s"}, ["field", {}, "measure.volumes.brain_volume"]],
+                      "mean": ["avg", {"set": "s"}, ["field", {}, "measure.volumes.brain_volume"]],
+                      "scans": ["count", {"set": "s"}],
+                  }},
+        },
+        "out": {"set": "g", "level": "aggregate", "columns": [
+            ["field", {}, "n_instances"], ["field", {}, "total"], ["field", {}, "mean"], ["field", {}, "scans"],
+        ]},
+    });
+    let file = ask_file(&lab, "totals", &totals);
+    let mut plain = lab.command(&lab.path);
+    let out = plain
+        .env("NILS_JOB_DETAIL", "plain")
+        .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = exported(&lab, &answer["handle"]);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    // Nima's ruling after review: below detail quasi a group's totals of a
+    // measure show only for 5 scans or more (D27's k, for measures alone);
+    // this group holds 4, so its totals and its count are withheld
+    for c in ["total", "mean", "scans", "_rows"] {
+        if let Some(v) = rows[0].get(c) {
+            assert_eq!(v, "", "{c} is withheld for a group of 4: {rows:?}");
+        }
+    }
+    // at detail quasi the same group's totals are answered
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    let rows = exported(&lab, &answer["handle"]);
+    let sum: f64 = stacks.iter().map(|s| 1000.0 * *s as f64).sum();
+    assert_eq!(
+        cell(&rows[0], "total").parse::<f64>().unwrap(),
+        sum,
+        "{rows:?}"
+    );
+    assert_eq!(cell(&rows[0], "scans"), "4", "{rows:?}");
+    // a filter on a measure counts toward the same rule: a count of the
+    // scans it keeps is withheld below 5, and none is still none
+    for (bound, shown) in [(0.0, false), (1.0e12, true)] {
+        let filtered = json!({
+            "ast_version": 1,
+            "sets": {"s": {"grain": "stack", "where": [
+                [">", {}, ["field", {}, "measure.volumes.brain_volume"], bound]]}},
+            "out": {"set": "s", "level": "count"},
+        });
+        let file = ask_file(&lab, &format!("filtered-{bound}"), &filtered);
+        let out = lab
+            .command(&lab.path)
+            .env("NILS_JOB_DETAIL", "plain")
+            .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let rows = exported(&lab, &answer["handle"]);
+        let want = if shown { "0" } else { "" };
+        assert_eq!(cell(&rows[0], "rows"), want, "{rows:?}");
+        assert_eq!(cell(&rows[0], "subjects"), want, "{rows:?}");
+    }
+
+    // a plain list of the scans a measure filter keeps is refused below
+    // detail quasi: the list itself says each one's measure against the
+    // bound (Nima's ruling after review)
+    let listed = json!({
+        "ast_version": 1,
+        "sets": {"s": {"grain": "stack", "where": [
+            [">", {}, ["field", {}, "measure.volumes.brain_volume"], 0.0]]}},
+        "out": {"set": "s", "level": "record", "columns": [["field", {}, "id"]]},
+    });
+    let file = ask_file(&lab, "listed", &listed);
+    let out = lab
+        .command(&lab.path)
+        .env("NILS_JOB_DETAIL", "plain")
+        .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+        .output()
+        .unwrap();
+    let err_text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a list over a measure filter is refused"
+    );
+    assert!(err_text.contains("filtered on a measure"), "{err_text}");
+    // at detail quasi the same list is answered
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    assert_eq!(exported(&lab, &answer["handle"]).len(), 4);
+
+    // a newer run's value is the one the ask reads, and names that run
+    let again = lab.json(&[
+        "run",
+        "volumes",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "scale=2000",
+        "--json",
+    ]);
+    assert_eq!(
+        again["summary"]["numbers"]["checks"]["breaches"], 0,
+        "{again}"
+    );
+    let file = ask_file(&lab, "per-scan-again", &per_scan);
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    for r in exported(&lab, &answer["handle"]) {
+        let id: f64 = cell(&r, "id").parse().unwrap();
+        let volume: f64 = cell(&r, "measure.volumes.brain_volume").parse().unwrap();
+        assert_eq!(volume, 2000.0 * id, "{r:?}");
+        assert_eq!(
+            cell(&r, "measure.volumes.run"),
+            again["id"].to_string(),
+            "{r:?}"
+        );
+    }
+
+    // the newest run of the pipeline's current version is read, even where
+    // an older version ran later, and names that run
+    lab.add_descriptor(
+        "volumes",
+        &VOLUMES.replace("tool-version: \"1\"", "tool-version: \"2\""),
+    );
+    let current = lab.json(&[
+        "run",
+        "volumes",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "scale=3000",
+        "--json",
+    ]);
+    assert_eq!(current["pipeline"], "volumes@2", "{current}");
+    let older = lab.json(&[
+        "run",
+        "volumes@1",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "scale=5000",
+        "--json",
+    ]);
+    assert_eq!(older["pipeline"], "volumes@1", "{older}");
+    let file = ask_file(&lab, "per-scan-current", &per_scan);
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    for r in exported(&lab, &answer["handle"]) {
+        let id: f64 = cell(&r, "id").parse().unwrap();
+        let volume: f64 = cell(&r, "measure.volumes.brain_volume").parse().unwrap();
+        assert_eq!(volume, 3000.0 * id, "{r:?}");
+        assert_eq!(
+            cell(&r, "measure.volumes.run"),
+            current["id"].to_string(),
+            "{r:?}"
+        );
+    }
+}
+
+/// Record 49 A3: a pipeline of the bids layout that needs a T1w and a
+/// FLAIR a session, and makes an output only where it has both.
+const NEEDS_FLAIR: &str = r#"name: needs-flair
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/needs-flair@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+command-line: |
+  python3 -c '
+  import glob, os, shutil, sys
+  src, out = sys.argv[1], sys.argv[2]
+  for t in sorted(glob.glob(src + "/sub-*/ses-*/anat/*_T1w.nii.gz")):
+      a = os.path.dirname(t)
+      if not glob.glob(a + "/*_FLAIR.nii.gz"):
+          continue
+      rel = os.path.relpath(t, src)
+      d = os.path.join(out, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
+      shutil.copy(t, os.path.join(d, os.path.basename(rel).replace("_T1w", "_desc-both_T1w")))
+      open(os.path.join(d, "stats.json"), "w").write("{\"Bytes\": %d}" % os.path.getsize(t))
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids, roles: [t1w, flair]}
+  outputs:
+    - id: both
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-both_T1w.nii.gz"
+    - id: stats
+      kind: table
+      path-template: "sub-{subject}/ses-{session}/anat/stats.json"
+      columns: [{name: bytes, type: integer}]
+  needs: {cores: 2, memory-gb: 3, unit-minutes: 4}
+"#;
+
+/// Record 49 A3's proof, the second half: the pre-flight of a selection
+/// whose one session lacks its FLAIR counts the units the run then has and
+/// names the one it then fails, at the command line and at the door, and
+/// estimates from the descriptor and then from the run.
+#[test]
+fn the_preflight_counts_what_the_run_then_does() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-preflight");
+    lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+    // one session's FLAIR left out of the selection
+    let flair = lab
+        .store()
+        .query(
+            "SELECT ps.stack_id FROM pick_stack ps JOIN pick p ON p.id = ps.pick_id \
+             WHERE p.role = 'flair' AND p.withdrawn_at IS NULL ORDER BY ps.stack_id LIMIT 1",
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    let doc = lab.work.path().join("most.json");
+    std::fs::write(
+        &doc,
+        json!({"ast_version": 1, "sets": {"most": {"grain": "stack",
+            "where": [["<>", {}, ["field", {}, "id"], flair]]}},
+            "out": {"set": "most", "level": "record"}})
+        .to_string(),
+    )
+    .unwrap();
+    let packs = packs();
+    lab.ok(
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            "most",
+            "--file",
+            doc.to_str().unwrap(),
+            "--pack-dir",
+            packs.to_str().unwrap(),
+        ],
+        None,
+    );
+    let pre = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["stacks"], 3, "{pre}");
+    assert_eq!(pre["units"]["total"], 2, "{pre}");
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    let why = pre["missing"][0]["why"][0].as_str().unwrap();
+    assert!(why.contains("no flair is picked"), "{pre}");
+    assert_eq!(pre["estimate"]["source"], "descriptor", "{pre}");
+    assert_eq!(
+        pre["estimate"]["seconds"], 480.0,
+        "two units of four minutes, one at a time: {pre}"
+    );
+    assert_eq!(pre["gpu"]["need"], "none");
+    assert_eq!(pre["gpu"]["device"], "cpu");
+    assert_eq!(pre["needs"]["cores"], 2.0, "{pre}");
+    assert_eq!(pre["budget"]["fits"], true, "{pre}");
+    assert_eq!(pre["ready"], true, "{pre}");
+    // nothing ran
+    assert!(lab.podman_runs().is_empty());
+    // the words a person reads
+    let text = lab.ok(
+        &[
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:most@1",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(text.contains("2 (1 ready, 1 missing an input)"), "{text}");
+    // a parameter it does not have is a blocker, not a run
+    let bad = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--preflight",
+        "--param",
+        "nope=1",
+        "--json",
+    ]);
+    assert_eq!(bad["ready"], false, "{bad}");
+
+    // the door answers the same, and at detail plain names no session
+    let server = Server::start(&lab);
+    let (status, door) = server.call(
+        "POST",
+        "/api/pipelines/needs-flair/preflight",
+        Some(json!({"select": "selection:most@1"})),
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{door}");
+    assert_eq!(door["units"], pre["units"], "{door}");
+    assert!(door["missing"][0]["session_day"].is_string(), "{door}");
+    let (status, flat) = server.call(
+        "POST",
+        "/api/pipelines/needs-flair/preflight",
+        Some(json!({"handle": pre["handle"]})),
+        PLAIN,
+    );
+    assert_eq!(status, 200, "{flat}");
+    assert_eq!(flat["units"], pre["units"]);
+    assert!(flat["missing"][0].get("session_day").is_none(), "{flat}");
+    assert!(flat["missing"][0]["why"].is_array(), "{flat}");
+    let (status, _) = server.call(
+        "POST",
+        "/api/pipelines/needs-flair/preflight",
+        Some(json!({"handle": pre["handle"]})),
+        READER,
+    );
+    assert_eq!(status, 403, "a reader holds no pipelines:see");
+    let (status, _) = server.call(
+        "POST",
+        "/api/pipelines/no-such/preflight",
+        Some(json!({"handle": pre["handle"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 404);
+    drop(server);
+
+    // the run then has those units, and fails the one named
+    let v = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--json",
+    ]);
+    assert_eq!(v["summary"]["units"]["total"], pre["units"]["total"], "{v}");
+    assert_eq!(
+        v["summary"]["units"]["failed"], pre["units"]["missing"],
+        "{v}"
+    );
+    assert_eq!(
+        v["summary"]["units"]["succeeded"], pre["units"]["ready"],
+        "{v}"
+    );
+    // a session's table is the session's measure in the ask
+    assert_eq!(v["summary"]["numbers"]["measures"], 1, "{v}");
+    let sessions = json!({
+        "ast_version": 1,
+        "sets": {"s": {"grain": "session"}},
+        "out": {"set": "s", "level": "record", "columns": [
+            ["field", {}, "id"], ["field", {}, "measure.needs-flair.bytes"],
+            ["field", {}, "measure.needs-flair.run"],
+        ]},
+    });
+    let file = ask_file(&lab, "sessions", &sessions);
+    let answer = lab.json(&[
+        "ask",
+        "run",
+        "--file",
+        &file,
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--json",
+    ]);
+    let rows = exported(&lab, &answer["handle"]);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let measured: Vec<&std::collections::BTreeMap<String, String>> = rows
+        .iter()
+        .filter(|r| !cell(r, "measure.needs-flair.bytes").is_empty())
+        .collect();
+    assert_eq!(measured.len(), 1, "the session with both: {rows:?}");
+    assert!(
+        cell(measured[0], "measure.needs-flair.bytes")
+            .parse::<f64>()
+            .unwrap()
+            > 0.0
+    );
+    assert_eq!(
+        cell(measured[0], "measure.needs-flair.run"),
+        v["id"].to_string()
+    );
+    // and the next pre-flight estimates from that run
+    let after = lab.json(&[
+        "run",
+        "needs-flair",
+        "--select",
+        "selection:most@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(after["estimate"]["source"], "runs", "{after}");
+    assert_eq!(after["estimate"]["runs"], 1, "{after}");
+}
+
+/// Record 49 A4's proof: an engine started on a fresh registry seeds the
+/// starter catalog, each version marked as a starter and each image pinned;
+/// a second start adds nothing, a person's own version is never gone over,
+/// and the setting turns the seeding off.
+#[test]
+fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-starter");
+    let before = lab.json(&["pipeline", "starter", "--json"]);
+    assert_eq!(before["seeding"], "on");
+    assert!(
+        before["starters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["state"] == "absent"),
+        "{before}"
+    );
+    let server = Server::start(&lab);
+    let (status, cat) = server.call("GET", "/api/pipelines", None, OPERATOR);
+    assert_eq!(status, 200, "{cat}");
+    let names: Vec<&str> = cat["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["starter"] == true)
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "freesurfer-recon-all",
+            "mriqc",
+            "n4-bias-correction",
+            "samseg-lesions",
+            "synthseg",
+            "synthstrip"
+        ],
+        "{cat}"
+    );
+    for p in cat["pipelines"].as_array().unwrap() {
+        assert_eq!(p["origin"], "starter", "{p}");
+        assert!(p["image"].as_str().unwrap().contains("@sha256:"), "{p}");
+    }
+    drop(server);
+    // a second start adds nothing
+    let server = Server::start(&lab);
+    let (_, again) = server.call("GET", "/api/pipelines", None, OPERATOR);
+    assert_eq!(again["pipelines"].as_array().unwrap().len(), 6, "{again}");
+    drop(server);
+    let listed = lab.json(&["pipeline", "starter", "--json"]);
+    for s in listed["starters"].as_array().unwrap() {
+        assert!(
+            s["state"]
+                .as_str()
+                .unwrap()
+                .starts_with("in the catalog as"),
+            "{s}"
+        );
+    }
+    // a person's own version of a starter is left as it is
+    let mine = std::fs::read_to_string(repo().join("pipelines/synthstrip/nils.job.yml"))
+        .unwrap()
+        .replace("default-value: 2\n", "default-value: 3\n");
+    let v = lab.add_descriptor("synthstrip-mine", &mine);
+    assert_eq!(v["label"], "synthstrip@2", "{v}");
+    assert_eq!(v["starter"], false, "{v}");
+    let listed = lab.json(&["pipeline", "starter", "--seed", "--json"]);
+    assert!(listed["added"].as_array().unwrap().is_empty(), "{listed}");
+    let state = listed["starters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "synthstrip")
+        .unwrap()["state"]
+        .clone();
+    assert_eq!(state, "in the catalog as synthstrip@1", "{listed}");
+
+    // the setting turns it off, on a registry that has none yet
+    let fresh = Lab::new("pipelines-starter-off");
+    fresh.ok(&["pipeline", "starter", "--off"], None);
+    let server = Server::start(&fresh);
+    let (_, none) = server.call("GET", "/api/pipelines", None, OPERATOR);
+    assert!(none["pipelines"].as_array().unwrap().is_empty(), "{none}");
+    drop(server);
+    let text = fresh.ok(&["pipeline", "starter"], None);
+    assert!(
+        text.contains("seeding at the engine's start: off"),
+        "{text}"
+    );
 }

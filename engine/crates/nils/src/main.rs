@@ -42,10 +42,12 @@ mod grants;
 mod linkage_doors;
 mod login;
 mod mcp;
+mod measures;
 mod model_cli;
 mod originals;
 mod pipelines;
 mod places;
+mod preflight;
 mod profile;
 mod pyramid;
 mod reader;
@@ -53,6 +55,7 @@ mod schedule;
 mod serve;
 mod setup;
 mod sources;
+mod starter;
 mod summary;
 mod supervise;
 mod timeline;
@@ -741,6 +744,11 @@ enum JobsCommand {
         /// (Wave 4c section 6.6), as the serve flag names it
         #[arg(long = "ingest-root", value_name = "NAME=PATH")]
         ingest_root: Vec<String>,
+        /// Which jobs it takes: all, main (every job but a pipeline run),
+        /// or pipelines (runs only, record 49 A1); nils serve --worker runs
+        /// the two lanes side by side
+        #[arg(long, default_value = "all")]
+        lane: String,
     },
 }
 
@@ -5816,15 +5824,15 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "pipelines",
             "owner": "the operator who added each pipeline; each run is its principal's",
-            "what": "the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; in the working place, the input it was given (a release in the BIDS layout, or stacks.json), its manifest and its container's log",
+            "what": "the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; each unit of a run as the pipeline lane scheduled it (record 49); the lane's budget and card, and the path of each secret input the site set; in the working place, the input it was given (a release in the BIDS layout, or stacks.json, and each unit's own where units run apart), its manifest, its containers' logs and apptainer's copies of images, by digest",
             "where": runs_where,
             "files": [],
-            "holds": ["quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed", "technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times"],
+            "holds": ["quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed", "technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times", "secret: none; a secret input's path is kept, never its bytes, and what a container left is swept of it"],
             "counts": { "pipelines": pipeline_rows, "runs": pipeline_runs },
             "kept": "the rows for good, since a derivative names the run that made it; a run's folder under runs until an operator removes it",
             "commands": {
                 "read": ["nils pipeline list", "nils pipeline show <pipeline>", "nils pipeline runs [<run>]"],
-                "change": ["nils pipeline add <nils.job.yml>", "nils pipeline runtime --set <choice>", "nils run <pipeline> --select selection:<name>@<v>"],
+                "change": ["nils pipeline add <nils.job.yml>", "nils pipeline runtime --set <choice>", "nils pipeline lane --cores <n> --memory-gb <n> --gpu-card <n|none>", "nils pipeline secret set <id> --file <path>", "nils run <pipeline> --select selection:<name>@<v>", "nils run --resume <run>"],
                 "export": ["nils pipeline show <pipeline> --json", "nils pipeline runs <run> --json"],
                 "delete": "with the registry and the working place; nils has no command for one",
             },
@@ -7378,11 +7386,27 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                     j.state.name()
                 )));
             }
-            let Some(argv) = j.argv().filter(|a| a.len() > 1) else {
+            let Some(mut argv) = j.argv().filter(|a| a.len() > 1) else {
                 return Err(usage(format!(
                     "job {id} recorded no command line; it was made before this binary or by a door"
                 )));
             };
+            // record 49 A1: a pipeline run that did not finish goes on where
+            // it stopped, with the units it finished kept, rather than
+            // starting a run of its own
+            if j.kind == "pipeline"
+                && let Some(run) = j.args["run"].as_i64()
+                && nils_registry::pipeline::run(store, run)
+                    .map_err(|e| fail(e.to_string()))?
+                    .is_some_and(|r| {
+                        matches!(r.status.as_str(), "running" | "cancelled" | "interrupted")
+                            || (r.status == "failed" && r.results_digest.is_none())
+                    })
+                && let Some(at) = argv.iter().position(|w| w == "run")
+            {
+                argv.truncate(at + 1);
+                argv.extend(["--resume".to_string(), run.to_string()]);
+            }
             println!("running again: nils {}", argv[1..].join(" "));
             let status = std::process::Command::new(
                 std::env::current_exe().map_err(|e| fail(e.to_string()))?,
@@ -7429,8 +7453,11 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             once,
             every,
             ingest_root,
+            lane,
         } => {
-            let queue = crate::worker::claim(store, once).map_err(|e| match e {
+            let lane = job::Lane::parse(&lane)
+                .ok_or_else(|| usage(format!("--lane is all, main or pipelines, not {lane}")))?;
+            let queue = crate::worker::claim(store, once, lane).map_err(|e| match e {
                 job::Error::Busy { .. } => Exit {
                     code: BUSY,
                     message: e.to_string(),
@@ -7451,6 +7478,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                     // line
                     workers: None,
                     quiet: false,
+                    lane,
                 },
                 &|| cancel.stop(),
             )

@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# SynthSeg: whole-brain segmentation and volumes on clinical scans of any
+# contrast and resolution (record 49 R1), a starter the engine seeds at boot.
+#
+# One session's T1-weighted image in; a label map, a table of structure
+# volumes and a table of SynthSeg's own quality scores out. The quality
+# scores are the declared checks: SynthSeg's authors read a score below
+# 0.65 as a likely failure, so a session whose score falls under it is a
+# pipeline:qc item that names the score.
+#
+# The image is FreeSurfer 8.2.0 (mri_synthseg), pinned by its registry
+# manifest digest, resolved 2026-09-24 by a registry manifest request, not
+# pulled. mri_synthseg runs on the CPU here (--cpu); whether FreeSurfer's
+# mri_synthseg reads the licence file was not checked, and this descriptor
+# declares none.
+name: synthseg
+schema-version: "0.5"
+tool-version: "freesurfer-8.2.0"
+description: >-
+  Segment each session's T1-weighted image with SynthSeg (robust): a label
+  map, the volume of every structure in mm3, and SynthSeg's quality scores,
+  held against 0.65. One session is one unit; CPU, no licence declared.
+
+container-image:
+  type: docker
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+
+inputs:
+  - id: robust
+    name: Robust
+    type: Flag
+    description: SynthSeg-robust, slower and better on clinical scans of low resolution or odd contrast.
+    value-key: "[ROBUST]"
+    command-line-flag: "--robust"
+    default-value: true
+  - id: threads
+    name: Threads
+    type: Number
+    description: The threads mri_synthseg uses for one session.
+    value-key: "[THREADS]"
+    default-value: 4
+    integer: true
+    minimum: 1
+    maximum: 32
+
+command-line: >-
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+  d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
+  b=$(basename "$f" .nii.gz); b=${b%_T1w};
+  mri_synthseg --i "$f" --o "$d/${b}_desc-synthseg_dseg.nii.gz"
+  --vol "$d/${b}_desc-synthseg_volumes.csv" --qc "$d/${b}_desc-synthseg_qc.csv"
+  --threads [THREADS] --cpu [ROBUST] || true; done'
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w]
+  units: apart
+  outputs:
+    - id: labels
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-synthseg_dseg.nii.gz"
+      media-type: application/x-nifti+gzip
+    - id: volumes
+      kind: table
+      format: csv
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-synthseg_volumes.csv"
+      columns:
+        - {name: total_intracranial, unit: mm3, description: "Total intracranial volume"}
+        - {name: left_cerebral_white_matter, unit: mm3}
+        - {name: left_cerebral_cortex, unit: mm3}
+        - {name: left_lateral_ventricle, unit: mm3}
+        - {name: left_inferior_lateral_ventricle, unit: mm3}
+        - {name: left_cerebellum_white_matter, unit: mm3}
+        - {name: left_cerebellum_cortex, unit: mm3}
+        - {name: left_thalamus, unit: mm3}
+        - {name: left_caudate, unit: mm3}
+        - {name: left_putamen, unit: mm3}
+        - {name: left_pallidum, unit: mm3}
+        - {name: third_ventricle, from: "3rd ventricle", unit: mm3}
+        - {name: fourth_ventricle, from: "4th ventricle", unit: mm3}
+        - {name: brain_stem, unit: mm3}
+        - {name: left_hippocampus, unit: mm3}
+        - {name: left_amygdala, unit: mm3}
+        - {name: csf, unit: mm3}
+        - {name: left_accumbens_area, unit: mm3}
+        - {name: left_ventral_dc, unit: mm3}
+        - {name: right_cerebral_white_matter, unit: mm3}
+        - {name: right_cerebral_cortex, unit: mm3}
+        - {name: right_lateral_ventricle, unit: mm3}
+        - {name: right_inferior_lateral_ventricle, unit: mm3}
+        - {name: right_cerebellum_white_matter, unit: mm3}
+        - {name: right_cerebellum_cortex, unit: mm3}
+        - {name: right_thalamus, unit: mm3}
+        - {name: right_caudate, unit: mm3}
+        - {name: right_putamen, unit: mm3}
+        - {name: right_pallidum, unit: mm3}
+        - {name: right_hippocampus, unit: mm3}
+        - {name: right_amygdala, unit: mm3}
+        - {name: right_accumbens_area, unit: mm3}
+        - {name: right_ventral_dc, unit: mm3}
+    - id: quality
+      kind: table
+      format: csv
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-synthseg_qc.csv"
+      columns:
+        - {name: qc_general_white_matter, from: "general white matter", description: "SynthSeg's quality score, 0 to 1"}
+        - {name: qc_general_grey_matter, from: "general grey matter"}
+        - {name: qc_general_csf, from: "general csf"}
+        - {name: qc_cerebellum, from: "cerebellum"}
+        - {name: qc_brainstem, from: "brainstem"}
+        - {name: qc_thalamus, from: "thalamus"}
+        - {name: qc_putamen_pallidum, from: "putamen+pallidum"}
+        - {name: qc_hippocampus_amygdala, from: "hippocampus+amygdala"}
+  qc:
+    - {metric: qc_general_white_matter, op: ">=", value: 0.65, description: "Below 0.65 SynthSeg has likely failed"}
+    - {metric: qc_general_grey_matter, op: ">=", value: 0.65}
+    - {metric: qc_general_csf, op: ">=", value: 0.65}
+  needs:
+    cores-input: threads
+    gpu: none
+    cores: 4
+    memory-gb: 12
+    unit-minutes: 5

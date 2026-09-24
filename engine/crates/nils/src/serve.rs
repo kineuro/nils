@@ -1052,6 +1052,14 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             .map(|d| d.display().to_string())
             .unwrap_or_else(|| "none".to_string())
     );
+    // record 49 A4: the starter catalog, seeded where the setting allows;
+    // a failure is said and the engine serves on
+    // (never a panic: a caller that read the listening line and closed
+    // the pipe is not a reason to stop)
+    if let Ok(mut registry) = home.open() {
+        let line = crate::starter::at_start(&mut registry);
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes());
+    }
     let ask_caps = match &args.ask_caps {
         Some(text) => {
             let over: serde_json::Value = serde_json::from_str(text)
@@ -1107,15 +1115,28 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // registry's queue has one worker, so where another already holds it,
     // this one waits and looks again.
     let stop_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let queue = args.worker.then(|| {
-        let home = home.clone();
-        let roots = args.ingest_root.clone();
-        let stop = Arc::clone(&stop_queue);
-        // lab 26b, finding 4: a job this engine queues runs with the workers
-        // the engine was started with, where the caller named none
-        let workers = args.workers.max(1);
-        std::thread::spawn(move || queue_worker(&home, &roots, workers, &stop))
-    });
+    // Record 49 A1: pipeline runs have a lane of their own beside it, so a
+    // long run never holds up a digest, a classify or a release.
+    let queue: Vec<std::thread::JoinHandle<()>> = if args.worker {
+        [
+            nils_registry::job::Lane::Main,
+            nils_registry::job::Lane::Pipelines,
+        ]
+        .into_iter()
+        .map(|lane| {
+            let home = home.clone();
+            let roots = args.ingest_root.clone();
+            let stop = Arc::clone(&stop_queue);
+            // lab 26b, finding 4: a job this engine queues runs with the
+            // workers the engine was started with, where the caller
+            // named none
+            let workers = args.workers.max(1);
+            std::thread::spawn(move || queue_worker(&home, &roots, workers, lane, &stop))
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
     // Wave 5 §10.3: the backup schedule beside the queue that runs what it
     // queues, where there is a directory to write to.
     let schedule = args.backup_dir.clone().filter(|_| args.worker).map(|dir| {
@@ -1165,8 +1186,8 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let _ = h.join();
     }
     stop_queue.store(true, Ordering::SeqCst);
-    if let Some(queue) = queue {
-        let _ = queue.join();
+    for q in queue {
+        let _ = q.join();
     }
     if let Some(schedule) = schedule {
         let _ = schedule.join();
@@ -1181,6 +1202,7 @@ fn queue_worker(
     home: &Home,
     roots: &[String],
     workers: usize,
+    lane: nils_registry::job::Lane,
     stop: &std::sync::atomic::AtomicBool,
 ) {
     let stopped = || stop.load(Ordering::SeqCst);
@@ -1188,7 +1210,7 @@ fn queue_worker(
         let outcome = match home.open() {
             Ok(mut registry) => {
                 let store = registry.store();
-                match crate::worker::claim(store, false) {
+                match crate::worker::claim(store, false, lane) {
                     Ok(worker) => crate::worker::run(
                         home,
                         store,
@@ -1199,6 +1221,7 @@ fn queue_worker(
                             ingest_roots: roots,
                             workers: Some(workers),
                             quiet: true,
+                            lane,
                         },
                         &stopped,
                     )
@@ -1212,7 +1235,11 @@ fn queue_worker(
         };
         if let Err(why) = outcome {
             use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "nils serve: the queue's worker: {why}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "nils serve: the {} lane's worker: {why}",
+                lane.name()
+            );
         }
         for _ in 0..30 {
             if stopped() {
@@ -1479,7 +1506,24 @@ fn routed(
     // record 43: the pipeline catalog and its runs
     // a run names a unit by its subject or session only at detail quasi
     let quasi = caller.allowed(path, need, Detail::Quasi).is_ok();
-    if let Some(r) = crate::pipelines::route(registry, quasi, get, &segs, query) {
+    // a pipeline is named by its id or `name@version`, which a client may
+    // send percent-encoded (`volumes%401`): its segments are decoded once
+    // here, as the query is
+    let decoded_segs: Vec<String> = segs.iter().map(|s| decoded(s)).collect();
+    let pipeline_segs: Vec<&str> = decoded_segs.iter().map(String::as_str).collect();
+    if let Some(r) = crate::pipelines::route(registry, quasi, get, &pipeline_segs, query) {
+        return r;
+    }
+    // record 49 A3: the pre-flight of a run
+    if let Some(r) = crate::preflight::route(
+        &doors.home,
+        doors.pack_dir.as_deref(),
+        registry,
+        quasi,
+        post,
+        &pipeline_segs,
+        body,
+    ) {
         return r;
     }
     // record 42: the campaigns and the label sets
@@ -1701,6 +1745,11 @@ fn routed(
                 Some(mut doc) => {
                     // the words a rule matched are text a stack carried
                     if caller.access.detail < Detail::Quasi {
+                        // record 49 R4b: a pipeline's items are read as totals
+                        // on the review list, never one a unit
+                        if let Some(list) = doc["review"].as_array_mut() {
+                            list.retain(|r| r["kind"] != nils_registry::review::PIPELINE_QC_KIND);
+                        }
                         for a in doc["axes"].as_array_mut().into_iter().flatten() {
                             for e in a["evidence"].as_array_mut().into_iter().flatten() {
                                 if let Some(m) = e.as_object_mut() {
@@ -2521,11 +2570,16 @@ fn routed(
             let jobs: Vec<_> = nils_registry::job::list(registry.store(), all, limit)
                 .map_err(job_err)?
                 .into_iter()
-                .filter(|j| all || j.kind != "worker")
+                .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
                 .collect();
+            let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+            // record 49 R4: a run's result below detail quasi is its totals
+            if !quasi {
+                docs.iter_mut().for_each(crate::pipelines::job_totals_only);
+            }
             Ok(Reply::ok(serde_json::json!({
                 "count": jobs.len(),
-                "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
+                "jobs": docs,
             })))
         }
         ["api", "jobs"] if post => {
@@ -2679,7 +2733,13 @@ fn routed(
         ["api", "jobs", _] if get => {
             let id = id_at(2)?;
             match nils_registry::job::show(registry.store(), id).map_err(job_err)? {
-                Some(j) => Ok(Reply::ok(j.as_json())),
+                Some(j) => {
+                    let mut doc = j.as_json();
+                    if !quasi {
+                        crate::pipelines::job_totals_only(&mut doc);
+                    }
+                    Ok(Reply::ok(doc))
+                }
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
@@ -2905,6 +2965,12 @@ fn routed(
                 rows.truncate(limit.max(1));
             }
             blind_review(registry.store(), caller, &mut rows)?;
+            // record 49 R4 and R4b: below detail quasi a pipeline's items
+            // are one entry a run and a check or reason, with a count held
+            // to 5 scans, never one a unit
+            if !quasi {
+                rows = crate::pipelines::qc_items_grouped(rows);
+            }
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
             ))
@@ -2916,10 +2982,15 @@ fn routed(
             {
                 return Err(Reply::error(404, format!("no cohort named {name}")));
             }
-            Ok(Reply::ok(nils_registry::cohort::review_summary(
-                registry.store(),
-                cohort,
-            )?))
+            let mut doc = nils_registry::cohort::review_summary(registry.store(), cohort)?;
+            // record 49 R4b: the open pipeline items are units; 1 to 4 held
+            if !quasi {
+                crate::pipelines::hold_count(
+                    &mut doc["by_kind"],
+                    nils_registry::review::PIPELINE_QC_KIND,
+                );
+            }
+            Ok(Reply::ok(doc))
         }
         ["api", "review", _] if get => {
             let id = id_at(2)?;
@@ -2943,6 +3014,11 @@ fn routed(
                 "member_stacks": members,
             });
             blind_review(registry.store(), caller, std::slice::from_mut(&mut doc))?;
+            // record 49 R4b: below detail quasi a pipeline's item is not read
+            // one by one, and answers as an item that is not there
+            if !quasi && item.kind == nils_registry::review::PIPELINE_QC_KIND {
+                return Err(Reply::error(404, format!("no review item {id}")));
+            }
             Ok(Reply::ok(doc))
         }
         ["api", "review", _, "apply"] if post && json_body(body)?["values"].is_object() => {
@@ -3433,6 +3509,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // record 43: the catalog and the runs are the Pipelines page's
         ("GET", ["api", "pipelines" | "pipeline-runs"])
         | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
+        // record 49 A3: the pre-flight reads and starts nothing
+        ("POST", ["api", "pipelines", _, "preflight"]) => (Need::One("pipelines:see"), Plain),
         ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
         ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
@@ -3872,6 +3950,7 @@ fn capabilities(
     .iter()
     .chain(crate::derivatives::DOORS.iter())
     .chain(crate::pipelines::DOORS.iter())
+    .chain(std::iter::once(&crate::preflight::DOOR))
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
@@ -4081,11 +4160,15 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
         let jobs: Vec<_> = nils_registry::job::list(registry.store(), false, 50)
             .unwrap_or_default()
             .into_iter()
-            .filter(|j| all || j.kind != "worker")
+            .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
             .collect();
+        let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+        if caller.access.detail < Detail::Quasi {
+            docs.iter_mut().for_each(crate::pipelines::job_totals_only);
+        }
         let data = serde_json::json!({
             "epoch": registry.meta().epoch,
-            "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
+            "jobs": docs,
         });
         if writer
             .write_all(format!("event: jobs\ndata: {data}\n\n").as_bytes())

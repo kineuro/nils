@@ -4,7 +4,11 @@
 //!
 //! The order is rootless podman, then apptainer, then docker only where an
 //! operator opted in (`nils pipeline runtime --set docker`), since docker's
-//! daemon is root on the host. None found is not an error: the capability is
+//! daemon is root on the host; `--set apptainer-first` looks for apptainer
+//! before podman, as an unprivileged container such as the group's NILS
+//! guest wants (record 49 A2). Apptainer runs an image the engine built from
+//! the pinned OCI digest into a SIF file or a sandbox folder, kept by that
+//! digest, so an image is fetched once and a run never pulls a tag. None found is not an error: the capability is
 //! off and says why (D1). Every run carries the same guarantees whatever the
 //! runtime: no network, the input and every typed input read-only, one
 //! output folder, and a process that is not root on the host (podman's
@@ -38,21 +42,31 @@ impl Kind {
     }
 }
 
-/// What an operator chose: find one (`auto`, podman then apptainer), only
-/// this one (the one way docker is taken), or none.
+/// What an operator chose: find one (`auto`, podman then apptainer, or
+/// `apptainer-first`, apptainer then podman), only this one (the one way
+/// docker is taken), or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
     Auto,
+    ApptainerFirst,
     Only(Kind),
     Off,
 }
 
 impl Choice {
-    pub const WORDS: [&'static str; 5] = ["auto", "podman", "apptainer", "docker", "off"];
+    pub const WORDS: [&'static str; 6] = [
+        "auto",
+        "apptainer-first",
+        "podman",
+        "apptainer",
+        "docker",
+        "off",
+    ];
 
     pub fn parse(text: &str) -> Option<Choice> {
         Some(match text.trim() {
             "" | "auto" => Choice::Auto,
+            "apptainer-first" => Choice::ApptainerFirst,
             "podman" => Choice::Only(Kind::Podman),
             "apptainer" => Choice::Only(Kind::Apptainer),
             "docker" => Choice::Only(Kind::Docker),
@@ -64,6 +78,7 @@ impl Choice {
     pub fn name(self) -> &'static str {
         match self {
             Choice::Auto => "auto",
+            Choice::ApptainerFirst => "apptainer-first",
             Choice::Only(k) => k.name(),
             Choice::Off => "off",
         }
@@ -89,6 +104,12 @@ pub struct Invocation {
     pub mounts: Vec<Mount>,
     /// Pass the host's GPU.
     pub gpu: bool,
+    /// The one card to pass, by index, where the lane leased one (record 49
+    /// A2); none is the lane's default card, 0. Every card is never passed.
+    pub card: Option<u32>,
+    /// For apptainer, the SIF file or sandbox folder built from the image's
+    /// digest; none runs `docker://<image>`.
+    pub local_image: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     /// The uid and gid the process runs as: the engine's user (for podman
     /// the engine process's own uid and gid, the ids keep-id maps). Docker
@@ -99,6 +120,11 @@ pub struct Invocation {
     /// sub-uid, and the next run could not hard-link them). Apptainer runs
     /// the user by construction.
     pub user: Option<(u32, u32)>,
+    /// The cores and the memory the runtime holds the container to, from
+    /// what the unit declares (record 49, after review); none where the
+    /// runtime cannot hold it to them here.
+    pub cpus: Option<u32>,
+    pub memory_mib: Option<u64>,
 }
 
 /// A container runtime, as the runner uses one.
@@ -194,11 +220,21 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             a.extend(
                 ["--cap-drop", "all", "--security-opt", "no-new-privileges"].map(String::from),
             );
+            if let Some(c) = inv.cpus {
+                a.extend(["--cpus".to_string(), c.to_string()]);
+            }
+            if let Some(m) = inv.memory_mib {
+                a.extend(["--memory".to_string(), format!("{m}m")]);
+            }
             if inv.gpu {
+                // the one card the lease holds: CDI names it alone for
+                // podman, and docker is told that device; inside, it is
+                // the container's only card
+                let card = inv.card.unwrap_or(0);
                 if kind == Kind::Podman {
-                    a.extend(["--device", "nvidia.com/gpu=all"].map(String::from));
+                    a.extend(["--device".to_string(), format!("nvidia.com/gpu={card}")]);
                 } else {
-                    a.extend(["--gpus", "all"].map(String::from));
+                    a.extend(["--gpus".to_string(), format!("device={card}")]);
                 }
             }
             for m in &inv.mounts {
@@ -212,9 +248,13 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             a.push(inv.image.clone());
         }
         Kind::Apptainer => {
+            // `run`, not `exec`: an image built from an OCI image runs its
+            // ENTRYPOINT with these words after it (its CMD where there are
+            // none), as podman and docker do; `exec` would skip the
+            // ENTRYPOINT (record 49 A2)
             a.extend(
                 [
-                    "exec",
+                    "run",
                     "--containall",
                     "--cleanenv",
                     "--no-home",
@@ -224,8 +264,26 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
                 ]
                 .map(String::from),
             );
+            if let Some(c) = inv.cpus {
+                a.extend(["--cpus".to_string(), c.to_string()]);
+            }
+            if let Some(m) = inv.memory_mib {
+                a.extend(["--memory".to_string(), format!("{m}M")]);
+            }
             if inv.gpu {
+                // --nv shows every card of the host: the process is told
+                // the one its lease holds, counted in the bus order that
+                // nvidia-smi's index counts in
+                let card = inv.card.unwrap_or(0);
                 a.push("--nv".into());
+                for env in [
+                    "CUDA_DEVICE_ORDER=PCI_BUS_ID".to_string(),
+                    format!("CUDA_VISIBLE_DEVICES={card}"),
+                    format!("NVIDIA_VISIBLE_DEVICES={card}"),
+                ] {
+                    a.push("--env".into());
+                    a.push(env);
+                }
             }
             for m in &inv.mounts {
                 a.push("--bind".into());
@@ -235,7 +293,10 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
                 a.push("--env".into());
                 a.push(format!("{k}={v}"));
             }
-            a.push(format!("docker://{}", inv.image));
+            match &inv.local_image {
+                Some(local) => a.push(local.display().to_string()),
+                None => a.push(format!("docker://{}", inv.image)),
+            }
         }
     }
     a.extend(inv.argv.iter().cloned());
@@ -392,6 +453,7 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
             );
         }
         Choice::Auto => vec![Kind::Podman, Kind::Apptainer],
+        Choice::ApptainerFirst => vec![Kind::Apptainer, Kind::Podman],
         Choice::Only(k) => vec![k],
     };
     for kind in order {
@@ -451,7 +513,21 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
                     None
                 }
             }
-            Kind::Apptainer | Kind::Docker => nvidia(path),
+            Kind::Apptainer => {
+                // before 1.1 an unprivileged apptainer cannot keep a
+                // container off the network, which every run is
+                if !apptainer_isolates(&version) {
+                    looked.push((
+                        kind.name().into(),
+                        format!(
+                            "{version}, older than 1.1, which cannot run --network none unprivileged"
+                        ),
+                    ));
+                    continue;
+                }
+                nvidia(path)
+            }
+            Kind::Docker => nvidia(path),
         };
         looked.push((kind.name().into(), format!("{version}, taken")));
         return Detected {
@@ -490,6 +566,218 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
     none(choice, looked, reason, unknown)
 }
 
+/// Whether an apptainer version runs `--net --network none` for an
+/// unprivileged user: 1.1 and later.
+pub fn apptainer_isolates(version: &str) -> bool {
+    let mut parts = version
+        .trim_start_matches('v')
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    (major, minor) >= (1, 1)
+}
+
+/// How apptainer keeps an image: a SIF file, which needs squashfuse or a
+/// setuid install to run unprivileged, or a sandbox folder, which runs
+/// where there is no /dev/fuse, as in an unprivileged container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageForm {
+    Sif,
+    Sandbox,
+}
+
+impl ImageForm {
+    pub const WORDS: [&'static str; 2] = ["sif", "sandbox"];
+
+    pub fn parse(text: &str) -> Option<ImageForm> {
+        match text.trim() {
+            "" | "sif" => Some(ImageForm::Sif),
+            "sandbox" => Some(ImageForm::Sandbox),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ImageForm::Sif => "sif",
+            ImageForm::Sandbox => "sandbox",
+        }
+    }
+}
+
+/// Where apptainer's copy of an image is kept under the image folder: by
+/// the image's manifest digest, `<hex>.sif` or `<hex>.sandbox`.
+pub fn local_image(dir: &Path, digest: &str, form: ImageForm) -> PathBuf {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    dir.join(match form {
+        ImageForm::Sif => format!("{hex}.sif"),
+        ImageForm::Sandbox => format!("{hex}.sandbox"),
+    })
+}
+
+/// The words after `apptainer` that build an image's local copy at `target`
+/// from its pinned reference.
+pub fn build_argv(reference: &str, target: &Path, form: ImageForm) -> Vec<String> {
+    let mut a = vec!["build".to_string()];
+    if form == ImageForm::Sandbox {
+        a.push("--sandbox".into());
+    }
+    a.push(target.display().to_string());
+    a.push(format!("docker://{reference}"));
+    a
+}
+
+/// The cgroup controllers podman names, from `{{.Host.CgroupControllers}}`:
+/// `[cpu io memory pids]`.
+pub fn parse_controllers(text: &str) -> Vec<String> {
+    text.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Which of the cores and the memory this runtime can hold a container to
+/// here (record 49, after review): docker's daemon always can; rootless
+/// podman where its cgroups delegate the controller; apptainer where the
+/// cgroup v2 tree it would run in (the user's delegated one, unless it
+/// runs as root) offers it. Answers (cores, memory).
+pub fn limits_here(cli: &Cli) -> (bool, bool) {
+    let has = |c: &[String], w: &str| c.iter().any(|x| x == w);
+    match cli.kind {
+        Kind::Docker => (true, true),
+        Kind::Podman => match answer(
+            &cli.program,
+            &["info", "--format", "{{.Host.CgroupControllers}}"],
+            PROBE_CAP,
+        ) {
+            Said::Line(l) => {
+                let c = parse_controllers(&l);
+                (has(&c, "cpu"), has(&c, "memory"))
+            }
+            _ => (false, false),
+        },
+        Kind::Apptainer => {
+            let root = Path::new("/sys/fs/cgroup");
+            #[cfg(unix)]
+            let uid = unsafe_free_uid();
+            #[cfg(not(unix))]
+            let uid = 1;
+            let file = if uid == 0 {
+                root.join("cgroup.controllers")
+            } else {
+                root.join(format!(
+                    "user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers"
+                ))
+            };
+            let c = std::fs::read_to_string(file)
+                .map(|t| parse_controllers(&t))
+                .unwrap_or_default();
+            (has(&c, "cpu"), has(&c, "memory"))
+        }
+    }
+}
+
+/// This process's uid, read from /proc, so no unsafe call is needed.
+#[cfg(unix)]
+fn unsafe_free_uid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|u| u.parse().ok())
+        })
+        .unwrap_or(1)
+}
+
+/// The file beside a cached image that records what the engine built.
+fn image_record(target: &Path) -> PathBuf {
+    let mut name = target.file_name().unwrap_or_default().to_os_string();
+    name.push(".digest");
+    target.with_file_name(name)
+}
+
+/// What a cached image is, as a digest: a SIF file by the sha256 of its
+/// bytes; a sandbox folder by the sha256 of every entry's path, kind,
+/// mode, size and modification time, and a link's target, never followed.
+/// A link in the image's own place is refused.
+pub fn image_fingerprint(target: &Path, form: ImageForm) -> std::io::Result<String> {
+    let meta = std::fs::symlink_metadata(target)?;
+    let bad = || std::io::Error::other("not the kind of image the engine builds");
+    match form {
+        ImageForm::Sif => {
+            if !meta.is_file() {
+                return Err(bad());
+            }
+            Ok(crate::files::sha256_file(target)?.1)
+        }
+        ImageForm::Sandbox => {
+            if !meta.is_dir() {
+                return Err(bad());
+            }
+            let mut lines: Vec<String> = Vec::new();
+            let mut stack = vec![target.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d)? {
+                    let e = e?;
+                    let p = e.path();
+                    let m = std::fs::symlink_metadata(&p)?;
+                    let rel = p
+                        .strip_prefix(target)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .into_owned();
+                    let mtime = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_nanos());
+                    #[cfg(unix)]
+                    let mode = {
+                        use std::os::unix::fs::MetadataExt;
+                        m.mode()
+                    };
+                    #[cfg(not(unix))]
+                    let mode = 0u32;
+                    let link = if m.file_type().is_symlink() {
+                        std::fs::read_link(&p)?.to_string_lossy().into_owned()
+                    } else {
+                        String::new()
+                    };
+                    lines.push(format!("{rel}\t{mode:o}\t{}\t{mtime}\t{link}", m.len()));
+                    if m.is_dir() {
+                        stack.push(p);
+                    }
+                }
+            }
+            lines.sort();
+            Ok(crate::sha256(lines.join("\n").as_bytes()))
+        }
+    }
+}
+
+/// Record what the engine built, beside it.
+pub fn record_image(target: &Path, form: ImageForm) -> std::io::Result<()> {
+    let digest = image_fingerprint(target, form)?;
+    let record = image_record(target);
+    let _ = std::fs::remove_file(&record);
+    crate::files::write_new(&record, digest.as_bytes())
+}
+
+/// Whether a cached image is what the engine built: its digest now is the
+/// one recorded when it was built.
+pub fn image_verified(target: &Path, form: ImageForm) -> bool {
+    let Ok(recorded) = std::fs::read_to_string(image_record(target)) else {
+        return false;
+    };
+    image_fingerprint(target, form).is_ok_and(|d| d == recorded.trim())
+}
+
 /// How an invocation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
@@ -507,16 +795,7 @@ pub fn run(
     log: &Path,
     tick: &mut dyn FnMut() -> bool,
 ) -> std::io::Result<Ended> {
-    check_mounts(&inv.mounts).map_err(std::io::Error::other)?;
-    prepare_mountpoints(&inv.mounts)?;
-    let out = std::fs::File::create(log)?;
-    let err = out.try_clone()?;
-    let mut child = rt
-        .command(inv)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()?;
+    let mut child = spawn(rt, inv, log)?;
     let mut ticked = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
@@ -529,8 +808,7 @@ pub fn run(
             ticked = Instant::now();
             if !tick() {
                 rt.stop(inv);
-                let _ = child.kill();
-                let status = child.wait()?;
+                let status = kill(&mut child)?;
                 return Ok(Ended {
                     code: status.code(),
                     stopped: true,
@@ -538,6 +816,56 @@ pub fn run(
             }
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Start an invocation and leave it running, its output and errors into
+/// `log`: how the lane runs several at once (record 49 A1).
+pub fn spawn(
+    rt: &dyn Runtime,
+    inv: &Invocation,
+    log: &Path,
+) -> std::io::Result<std::process::Child> {
+    check_mounts(&inv.mounts).map_err(std::io::Error::other)?;
+    prepare_mountpoints(&inv.mounts)?;
+    let out = std::fs::File::create(log)?;
+    let err = out.try_clone()?;
+    let mut c = rt.command(inv);
+    c.stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    // a group of its own, so a stop reaches every process the runtime
+    // started (apptainer's starter, a stand-in's child), not the client alone
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
+    c.spawn()
+}
+
+/// Stop a spawned invocation and every process in its group; answers how
+/// it ended.
+pub fn kill(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    kill_group(child.id());
+    let _ = child.kill();
+    child.wait()
+}
+
+/// Send SIGKILL to the process group a spawned invocation leads.
+pub fn kill_group(leader: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{leader}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = leader;
     }
 }
 
@@ -668,14 +996,120 @@ mod tests {
                 },
             ],
             gpu,
+            card: None,
+            local_image: None,
             env: vec![("NILS_RUN".into(), "7".into())],
             user: Some((1000, 1000)),
+            cpus: None,
+            memory_mib: None,
         }
     }
 
     fn has(a: &[String], pair: &[&str]) -> bool {
         a.windows(pair.len())
             .any(|w| w.iter().zip(pair).all(|(x, y)| x == y))
+    }
+
+    fn has2(a: &[String], w: &[&str]) -> bool {
+        a.windows(w.len())
+            .any(|x| x.iter().zip(w).all(|(p, q)| p == q))
+    }
+
+    /// Record 49, after review: a GPU unit sees the one card its lease
+    /// holds, by the bus order nvidia-smi counts in, and never every card.
+    #[test]
+    fn a_gpu_unit_is_given_its_leased_card_alone() {
+        let mut i = inv(true);
+        i.card = Some(1);
+        let a = argv(Kind::Apptainer, &i);
+        for env in [
+            "CUDA_DEVICE_ORDER=PCI_BUS_ID",
+            "CUDA_VISIBLE_DEVICES=1",
+            "NVIDIA_VISIBLE_DEVICES=1",
+        ] {
+            assert!(has2(&a, &["--env", env]), "{env}: {a:?}");
+        }
+        let p = argv(Kind::Podman, &i);
+        assert!(has2(&p, &["--device", "nvidia.com/gpu=1"]), "{p:?}");
+        // no card named: the lane's default card, never all of them
+        let i = inv(true);
+        for kind in [Kind::Podman, Kind::Docker, Kind::Apptainer] {
+            let a = argv(kind, &i);
+            assert!(!a.iter().any(|w| w.ends_with("gpu=all")), "{kind:?}: {a:?}");
+            assert!(!has2(&a, &["--gpus", "all"]), "{kind:?}: {a:?}");
+        }
+        assert!(has2(
+            &argv(Kind::Podman, &i),
+            &["--device", "nvidia.com/gpu=0"]
+        ));
+        assert!(has2(&argv(Kind::Docker, &i), &["--gpus", "device=0"]));
+    }
+
+    /// Record 49, after review: a unit's declared cores and memory are
+    /// enforced by the runtime, not only counted by the lane.
+    #[test]
+    fn a_unit_s_cores_and_memory_are_enforced() {
+        let mut i = inv(false);
+        i.cpus = Some(2);
+        i.memory_mib = Some(4096);
+        for kind in [Kind::Podman, Kind::Docker] {
+            let a = argv(kind, &i);
+            assert!(
+                has2(&a, &["--cpus", "2"]) && has2(&a, &["--memory", "4096m"]),
+                "{a:?}"
+            );
+        }
+        let a = argv(Kind::Apptainer, &i);
+        assert!(
+            has2(&a, &["--cpus", "2"]) && has2(&a, &["--memory", "4096M"]),
+            "{a:?}"
+        );
+        let a = argv(Kind::Podman, &inv(false));
+        assert!(!a.iter().any(|w| w == "--cpus" || w == "--memory"), "{a:?}");
+        assert_eq!(parse_controllers("[memory pids]"), ["memory", "pids"]);
+        assert_eq!(parse_controllers("[cpu io memory pids]").len(), 4);
+        assert!(parse_controllers("").is_empty());
+    }
+
+    /// Record 49, after review: a cached image is used only where it is
+    /// what the engine built, by the digest it recorded then; a changed
+    /// file, a changed tree or a link in its place is not.
+    #[test]
+    fn a_cached_image_is_used_only_as_built() {
+        let dir = std::env::temp_dir().join(format!("nils-image-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sif = dir.join("abc.sif");
+        std::fs::write(&sif, b"an image").unwrap();
+        assert!(
+            !image_verified(&sif, ImageForm::Sif),
+            "no digest recorded yet"
+        );
+        record_image(&sif, ImageForm::Sif).unwrap();
+        assert!(image_verified(&sif, ImageForm::Sif));
+        std::fs::write(&sif, b"an image, changed").unwrap();
+        assert!(!image_verified(&sif, ImageForm::Sif));
+        let tree = dir.join("abc.sandbox");
+        std::fs::create_dir_all(tree.join("bin")).unwrap();
+        std::fs::write(tree.join("bin/tool"), b"#!/bin/sh").unwrap();
+        record_image(&tree, ImageForm::Sandbox).unwrap();
+        assert!(image_verified(&tree, ImageForm::Sandbox));
+        std::fs::write(tree.join("bin/tool"), b"#!/bin/sh\necho changed").unwrap();
+        assert!(!image_verified(&tree, ImageForm::Sandbox));
+        #[cfg(unix)]
+        {
+            let other = dir.join("other.sif");
+            std::fs::write(&other, b"an image").unwrap();
+            let linked = dir.join("def.sif");
+            std::os::unix::fs::symlink(&other, &linked).unwrap();
+            std::fs::write(
+                dir.join("def.sif.digest"),
+                std::fs::read(dir.join("abc.sif.digest")).unwrap(),
+            )
+            .unwrap();
+            assert!(!image_verified(&linked, ImageForm::Sif));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -697,15 +1131,15 @@ mod tests {
         assert_eq!(&p[image_at + 1..], ["sh", "-c", "ls /input > /output/x"]);
         assert!(has(
             &argv(Kind::Podman, &inv(true)),
-            &["--device", "nvidia.com/gpu=all"]
+            &["--device", "nvidia.com/gpu=0"]
         ));
 
         let d = argv(Kind::Docker, &inv(true));
         assert!(has(&d, &["--network", "none"]) && has(&d, &["--user", "1000:1000"]));
-        assert!(has(&d, &["--gpus", "all"]) && !d.iter().any(|w| w == "keep-id"));
+        assert!(has(&d, &["--gpus", "device=0"]) && !d.iter().any(|w| w == "keep-id"));
 
         let a = argv(Kind::Apptainer, &inv(true));
-        assert_eq!(a[0], "exec");
+        assert_eq!(a[0], "run");
         assert!(has(&a, &["--network", "none"]) && a.iter().any(|w| w == "--nv"));
         assert!(has(&a, &["--bind", "/w/runs/7/input:/input:ro"]));
         assert!(a.iter().any(|w| w.starts_with("docker://busybox@sha256:")));
@@ -865,5 +1299,102 @@ mod tests {
         assert!(inputs.join("labels").is_dir());
         assert!(inputs.join("head/card.json").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Record 49 A2: a leased card is the one card passed, by each runtime
+    /// its own way, and apptainer runs the local copy it was given, with
+    /// the flags that keep it apart from the host.
+    #[test]
+    fn a_leased_card_is_the_one_passed_and_apptainer_runs_its_local_copy() {
+        let mut i = inv(true);
+        i.card = Some(1);
+        assert!(has(
+            &argv(Kind::Podman, &i),
+            &["--device", "nvidia.com/gpu=1"]
+        ));
+        assert!(has(&argv(Kind::Docker, &i), &["--gpus", "device=1"]));
+        i.local_image = Some(PathBuf::from("/w/images/abc.sif"));
+        let a = argv(Kind::Apptainer, &i);
+        assert_eq!(
+            &a[..7],
+            [
+                "run",
+                "--containall",
+                "--cleanenv",
+                "--no-home",
+                "--net",
+                "--network",
+                "none"
+            ]
+        );
+        assert!(has(&a, &["--env", "CUDA_VISIBLE_DEVICES=1"]) && a.iter().any(|w| w == "--nv"));
+        // the words after the image follow its ENTRYPOINT, as under podman:
+        // `run`, never `exec`, which would skip it
+        assert!(!a.iter().any(|w| w == "exec"), "{a:?}");
+        let image_at = a.iter().position(|w| w == "/w/images/abc.sif").unwrap();
+        assert_eq!(&a[image_at + 1..], ["sh", "-c", "ls /input > /output/x"]);
+        assert!(!a.iter().any(|w| w.starts_with("docker://")));
+        let target = local_image(
+            Path::new("/w/images"),
+            &format!("sha256:{}", "b".repeat(64)),
+            ImageForm::Sandbox,
+        );
+        assert_eq!(
+            target,
+            PathBuf::from(format!("/w/images/{}.sandbox", "b".repeat(64)))
+        );
+        assert_eq!(
+            build_argv("busybox@sha256:00", &target, ImageForm::Sandbox)[..2],
+            ["build", "--sandbox"]
+        );
+        assert_eq!(
+            build_argv("busybox@sha256:00", Path::new("/x.sif"), ImageForm::Sif),
+            ["build", "/x.sif", "docker://busybox@sha256:00"]
+        );
+        assert!(apptainer_isolates("1.3.4-1") && apptainer_isolates("1.1.0"));
+        assert!(!apptainer_isolates("1.0.3") && !apptainer_isolates("0.9"));
+        assert_eq!(
+            Choice::parse("apptainer-first"),
+            Some(Choice::ApptainerFirst)
+        );
+        assert_eq!(ImageForm::parse("sandbox"), Some(ImageForm::Sandbox));
+    }
+
+    /// `apptainer-first` looks for apptainer before podman; an apptainer
+    /// too old to isolate the network is passed over, with the reason.
+    #[test]
+    fn apptainer_first_prefers_apptainer_and_an_old_one_is_passed_over() {
+        let dir = std::env::temp_dir().join(format!("nils-apptainer-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let write = |name: &str, body: &str| {
+                let f = dir.join(name);
+                std::fs::write(&f, body).unwrap();
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            write(
+                "podman",
+                "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'podman version 5.0.0'; exit 0; }\necho true\n",
+            );
+            write("apptainer", "#!/bin/sh\necho 'apptainer version 1.3.4'\n");
+            write("nvidia-smi", "#!/bin/sh\nexit 1\n");
+            let path = Some(dir.as_os_str());
+            assert_eq!(
+                detect(Choice::Auto, path).runtime.unwrap().kind,
+                Kind::Podman
+            );
+            assert_eq!(
+                detect(Choice::ApptainerFirst, path).runtime.unwrap().kind,
+                Kind::Apptainer
+            );
+            write("apptainer", "#!/bin/sh\necho 'apptainer version 1.0.3'\n");
+            let d = detect(Choice::ApptainerFirst, path);
+            assert_eq!(d.runtime.unwrap().kind, Kind::Podman);
+            assert!(d.looked[0].1.contains("older than 1.1"), "{:?}", d.looked);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

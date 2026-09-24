@@ -22,6 +22,21 @@ pub const LAYOUTS: [&str; 2] = ["bids", "stacks"];
 /// What a pipeline needs of a GPU (`x-nils.needs.gpu`).
 pub const GPU: [&str; 3] = ["none", "optional", "required"];
 
+/// How a run's units meet their containers (`x-nils.units`, record 49 A1):
+/// all in one container, or each unit in a container of its own, so the
+/// lane runs them side by side within its budget.
+pub const UNITS: [&str; 2] = ["together", "apart"];
+
+/// What a unit is taken to need where the descriptor says nothing: one core
+/// and 2 GB of memory; a GPU unit 8 GB of the card's memory.
+pub const DEFAULT_CORES: u32 = 1;
+pub const DEFAULT_MEMORY_GB: f64 = 2.0;
+pub const DEFAULT_GPU_MEMORY_GB: f64 = 8.0;
+
+/// The container paths a secret may not be mounted at or under: the
+/// runner's own.
+pub const RUNNER_PATHS: [&str; 4] = ["/input", "/inputs", "/output", "/source"];
+
 /// The parameter types (the Boutiques inputs a runner takes).
 pub const PARAM_TYPES: [&str; 3] = ["Number", "String", "Flag"];
 
@@ -30,9 +45,23 @@ pub const INPUT_TYPES: [&str; 2] = ["model", "label_set"];
 
 /// The derivative kinds an output may be declared as; each is one of the
 /// registry's. `model` is a run-level output only (record 43): a model the
-/// run fitted, which the runner registers from its card. The registry's
-/// `seeds` is the runner's own, written from the results, never declared.
-pub const OUTPUT_KINDS: [&str; 5] = ["mask", "embedding", "pyramid", "output", "model"];
+/// run fitted, which the runner registers from its card. `table` (record 49
+/// A3) is a file of numbers with declared columns, one row per unit, whose
+/// rows the runner loads for the ask. The registry's `seeds` is the
+/// runner's own, written from the results, never declared.
+pub const OUTPUT_KINDS: [&str; 6] = ["mask", "embedding", "pyramid", "output", "model", "table"];
+
+/// The file formats a table output may be written in (record 49 A3).
+pub const TABLE_FORMATS: [&str; 3] = ["csv", "tsv", "json"];
+
+/// The types of a table's columns.
+pub const COLUMN_TYPES: [&str; 3] = ["number", "integer", "text"];
+
+/// The comparisons a declared check may make (`x-nils.qc`, record 49 A3).
+pub const CHECK_OPS: [&str; 4] = [">=", "<=", ">", "<"];
+
+/// The column names a table may not take: the ask's own word for a run.
+pub const RESERVED_COLUMNS: [&str; 1] = ["run"];
 
 /// Where an output belongs (`x-nils.outputs[].level`).
 pub const OUTPUT_LEVELS: [&str; 2] = ["unit", "run"];
@@ -112,6 +141,59 @@ impl Gpu {
     }
 }
 
+/// How a run's units meet their containers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Units {
+    /// One container for the whole run (record 43, and what a descriptor
+    /// that says nothing gets): a pipeline that fits a model over every
+    /// unit, or loops over them itself.
+    Together,
+    /// A container per unit, each seeing only its own unit's input, so the
+    /// lane runs several at once and a run that stopped resumes with the
+    /// units it had not finished (record 49 A1).
+    Apart,
+}
+
+impl Units {
+    pub fn name(self) -> &'static str {
+        match self {
+            Units::Together => "together",
+            Units::Apart => "apart",
+        }
+    }
+}
+
+/// What a scheduling unit needs (`x-nils.needs`): a unit where units run
+/// apart, the whole run where they run together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Needs {
+    pub cores: u32,
+    pub memory_gb: f64,
+    /// Of the card's memory, for a unit that takes the GPU.
+    pub gpu_memory_gb: f64,
+    /// The Number parameter that sets a unit's threads (`cores-input`,
+    /// record 49 after review): left out, it is `cores`; above it, refused.
+    pub cores_input: Option<String>,
+    /// The Number parameter that sets the memory, in GB, a unit's tool
+    /// plans within (`memory-input`): left out, it is `memory-gb`; above
+    /// it, refused.
+    pub memory_input: Option<String>,
+}
+
+/// A secret input (`x-nils.secrets`, record 49 R3): a file the site keeps,
+/// such as a licence, that the engine reads at run time and mounts
+/// read-only into this pipeline's containers alone, never into an output, a
+/// log, the run's record or its results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Secret {
+    pub id: String,
+    /// Where the container sees the file.
+    pub mount: String,
+    /// An environment variable that names `mount`, such as FS_LICENSE.
+    pub env: Option<String>,
+    pub optional: bool,
+}
+
 /// The image, by its registry manifest digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -171,6 +253,118 @@ pub struct Output {
     /// by weight digest; the runner takes an embedding by no other, unless
     /// the run was given that encoder (record 43 second review).
     pub encoders: Vec<String>,
+    /// For a table output (record 49 A3): its format and typed columns.
+    pub table: Option<Table>,
+}
+
+/// The type of a table's column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    Number,
+    Integer,
+    Text,
+}
+
+impl ColumnType {
+    pub fn name(self) -> &'static str {
+        match self {
+            ColumnType::Number => "number",
+            ColumnType::Integer => "integer",
+            ColumnType::Text => "text",
+        }
+    }
+
+    /// Whether its values are numbers.
+    pub fn numeric(self) -> bool {
+        self != ColumnType::Text
+    }
+}
+
+/// One declared column of a table output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Column {
+    /// The measure's name: what the ask calls it, under the pipeline.
+    pub name: String,
+    /// The header (csv, tsv) or key (json) the value is read from; absent,
+    /// the header whose folded form is the name (lowercase, every run of
+    /// other characters one `_`), so `left hippocampus` is
+    /// `left_hippocampus`.
+    pub from: Option<String>,
+    pub ty: ColumnType,
+    pub unit: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A table output: a file of one row per unit, its columns declared and
+/// typed (record 49 A3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    /// `csv`, `tsv` or `json` (one object, or a list of objects).
+    pub format: String,
+    pub columns: Vec<Column>,
+    /// For a run-level table, the column that names each row's unit, as
+    /// `/inputs/manifest.json` names it or with the unit as its prefix
+    /// (`sub-01_ses-a_T1w` is unit `sub-01_ses-a`).
+    pub unit_column: Option<String>,
+}
+
+/// A declared check on a unit's metric (`x-nils.qc`, record 49 A3): a unit
+/// whose value breaks it is one `pipeline:qc` review item naming the
+/// metric and the value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Check {
+    /// A metric the unit's results carry, or a column of one of its tables.
+    pub metric: String,
+    /// `>=`, `<=`, `>` or `<`: what a good value is.
+    pub op: String,
+    pub value: f64,
+    pub description: Option<String>,
+}
+
+impl Check {
+    /// Whether a value keeps the check.
+    pub fn holds(&self, v: f64) -> bool {
+        match self.op.as_str() {
+            ">=" => v >= self.value,
+            "<=" => v <= self.value,
+            ">" => v > self.value,
+            "<" => v < self.value,
+            _ => false,
+        }
+    }
+
+    /// The check as a person writes it: `snr >= 8`.
+    pub fn text(&self) -> String {
+        format!("{} {} {}", self.metric, self.op, number_text(self.value))
+    }
+}
+
+/// A number as a person writes it: `8`, not `8.0`.
+pub fn number_text(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 9.0e15 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// A header folded to a column name: lowercase, every run of characters
+/// other than letters and digits one `_`, none at either end.
+pub fn fold(header: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in header.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            if gap && !out.is_empty() {
+                out.push('_');
+            }
+            gap = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            gap = true;
+        }
+    }
+    out
 }
 
 /// A descriptor, parsed and checked.
@@ -186,8 +380,23 @@ pub struct Descriptor {
     pub inputs: Vec<TypedInput>,
     pub outputs: Vec<Output>,
     pub gpu: Gpu,
+    /// The cores, memory and card memory a scheduling unit needs.
+    pub needs: Needs,
+    /// Whether units run in one container or each in its own.
+    pub units: Units,
+    /// The secret inputs it reads.
+    pub secrets: Vec<Secret>,
     /// The axes its results may propose values on.
     pub proposals: Vec<String>,
+    /// Its declared checks (record 49 A3).
+    pub checks: Vec<Check>,
+    /// For a bids input, the pick roles each unit needs (`x-nils.input.roles`,
+    /// record 49 A3): a session without a pick of one is named by the
+    /// pre-flight, with the role it lacks.
+    pub roles: Vec<String>,
+    /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
+    /// which the pre-flight estimates from until the pipeline has run here.
+    pub unit_minutes: Option<f64>,
     /// The document as it parsed, kept whole.
     pub document: Value,
 }
@@ -601,6 +810,17 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         if !encoders.is_empty() && kind != "embedding" {
             return Err(format!("{at}encoders belong to an embedding output"));
         }
+        let table = if kind == "table" {
+            Some(table_of(o, &at, &template, run_level)?)
+        } else {
+            if let Some(key) = ["columns", "format", "unit-column"]
+                .iter()
+                .find(|k| !o[**k].is_null())
+            {
+                return Err(format!("{at}{key} belongs to a table output"));
+            }
+            None
+        };
         outputs.push(Output {
             id,
             kind,
@@ -609,12 +829,26 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             run_level,
             card,
             encoders,
+            table,
         });
     }
     if outputs.is_empty() {
         return Err(
             "x-nils.outputs names at least one output, by derivative kind and path template".into(),
         );
+    }
+    // a measure is named once in a pipeline: the ask reads it by that name
+    let mut named: Vec<&str> = Vec::new();
+    for o in &outputs {
+        for c in o.table.iter().flat_map(|t| &t.columns) {
+            if named.contains(&c.name.as_str()) {
+                return Err(format!(
+                    "x-nils.outputs: the column {} is declared by two tables; the ask reads a measure by its name",
+                    c.name
+                ));
+            }
+            named.push(&c.name);
+        }
     }
     let gpu = match &x["needs"]["gpu"] {
         Value::Null => Gpu::None,
@@ -631,6 +865,113 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             ));
         }
     };
+    let n = &x["needs"];
+    if !n.is_null() && !n.is_object() {
+        return Err("x-nils.needs is a mapping: gpu, cores, memory-gb, gpu-memory-gb".into());
+    }
+    let cores = match &n["cores"] {
+        Value::Null => DEFAULT_CORES,
+        Value::Number(c) => match c.as_u64() {
+            Some(c) if (1..=4096).contains(&c) => c as u32,
+            _ => {
+                return Err(format!(
+                    "x-nils.needs.cores is a whole number from 1, not {c}"
+                ));
+            }
+        },
+        other => return Err(format!("x-nils.needs.cores is a whole number, not {other}")),
+    };
+    let positive = |key: &str, default: f64| -> Result<f64, String> {
+        match opt_number(n, key, "x-nils.needs.")? {
+            None => Ok(default),
+            Some(v) if v > 0.0 && v.is_finite() => Ok(v),
+            Some(v) => Err(format!("x-nils.needs.{key} is a number above 0, not {v}")),
+        }
+    };
+    let needs = Needs {
+        cores,
+        memory_gb: positive("memory-gb", DEFAULT_MEMORY_GB)?,
+        gpu_memory_gb: positive("gpu-memory-gb", DEFAULT_GPU_MEMORY_GB)?,
+        cores_input: opt_text(n, "cores-input", "x-nils.needs.")?,
+        memory_input: opt_text(n, "memory-input", "x-nils.needs.")?,
+    };
+    for (key, id) in [
+        ("cores-input", &needs.cores_input),
+        ("memory-input", &needs.memory_input),
+    ] {
+        let Some(id) = id else { continue };
+        match params.iter().find(|p| &p.id == id) {
+            None => return Err(format!("x-nils.needs.{key} names no parameter {id}")),
+            Some(p) if p.ty != ParamType::Number => {
+                return Err(format!(
+                    "x-nils.needs.{key}: {id} is to be a Number parameter, the count the tool is told"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    let units = match opt_text(x, "units", "x-nils.")?.as_deref() {
+        None | Some("together") => Units::Together,
+        Some("apart") => Units::Apart,
+        Some(other) => {
+            return Err(format!(
+                "x-nils.units is one of {}, not {other}",
+                UNITS.join(", ")
+            ));
+        }
+    };
+    if units == Units::Apart
+        && let Some(o) = outputs.iter().find(|o| o.run_level)
+    {
+        return Err(format!(
+            "x-nils.units apart runs each unit in a container of its own, and the output {} is the whole run's: a pipeline with a run-level output runs its units together",
+            o.id
+        ));
+    }
+    let mut secrets: Vec<Secret> = Vec::new();
+    for (i, s) in array(x, "secrets", "x-nils.")?.iter().enumerate() {
+        let at = format!("x-nils.secrets[{i}].");
+        let id = text(s, "id", &at)?.to_string();
+        if !is_ident(&id, true) {
+            return Err(format!("{at}id {id} is lowercase letters, digits and _"));
+        }
+        if secrets.iter().any(|q| q.id == id) {
+            return Err(format!("{at}id {id} is declared twice"));
+        }
+        let mount = opt_text(s, "mount", &at)?.unwrap_or_else(|| format!("/secrets/{id}"));
+        let clean = mount.starts_with('/')
+            && !mount.contains(':')
+            && !mount.contains(',')
+            && !mount.contains('\\')
+            && mount[1..]
+                .split('/')
+                .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
+        if !clean {
+            return Err(format!(
+                "{at}mount {mount} is an absolute container path, with no empty, . or .. segment and no ':' or ','"
+            ));
+        }
+        if let Some(own) = RUNNER_PATHS
+            .iter()
+            .find(|p| mount == **p || mount.starts_with(&format!("{p}/")))
+        {
+            return Err(format!(
+                "{at}mount {mount} is under {own}, which the runner mounts itself"
+            ));
+        }
+        let env = opt_text(s, "env", &at)?;
+        if let Some(e) = &env
+            && !(is_ident(e, false) && e.chars().all(|c| !c.is_ascii_lowercase()))
+        {
+            return Err(format!("{at}env {e} is an upper-case variable name"));
+        }
+        secrets.push(Secret {
+            id,
+            mount,
+            env,
+            optional: opt_bool(s, "optional", &at)?.unwrap_or(false),
+        });
+    }
     let mut proposals: Vec<String> = Vec::new();
     for (i, p) in array(x, "proposals", "x-nils.")?.iter().enumerate() {
         let axis = text(p, "axis", &format!("x-nils.proposals[{i}]."))?;
@@ -639,6 +980,44 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         }
         proposals.push(axis.to_string());
     }
+    // record 49 A3: the declared checks, the roles a unit needs, and the
+    // typical minutes a unit takes
+    let mut checks: Vec<Check> = Vec::new();
+    for (i, c) in array(x, "qc", "x-nils.")?.iter().enumerate() {
+        let check = check_of(c).map_err(|e| format!("x-nils.qc[{i}]: {e}"))?;
+        if checks
+            .iter()
+            .any(|k| k.metric == check.metric && k.op == check.op)
+        {
+            return Err(format!(
+                "x-nils.qc[{i}]: {} {} is declared twice",
+                check.metric, check.op
+            ));
+        }
+        checks.push(check);
+    }
+    let mut roles: Vec<String> = Vec::new();
+    for (i, r) in array(&x["input"], "roles", "x-nils.input.")?
+        .iter()
+        .enumerate()
+    {
+        let role = r.as_str().filter(|r| is_ident(r, true)).ok_or_else(|| {
+            format!("x-nils.input.roles[{i}] is a pick role of the pack, such as t1w")
+        })?;
+        if !roles.iter().any(|q| q == role) {
+            roles.push(role.to_string());
+        }
+    }
+    if !roles.is_empty() && layout != Layout::Bids {
+        return Err(
+            "x-nils.input.roles are the picks a bids input carries; a stacks input has none".into(),
+        );
+    }
+    let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
+        None => None,
+        Some(m) if m > 0.0 && m.is_finite() => Some(m),
+        Some(m) => return Err(format!("x-nils.needs.unit-minutes is above 0, not {m}")),
+    };
     Ok(Descriptor {
         name,
         tool_version,
@@ -650,8 +1029,144 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         inputs,
         outputs,
         gpu,
+        needs,
+        units,
+        secrets,
         proposals,
+        checks,
+        roles,
+        unit_minutes,
         document,
+    })
+}
+
+/// A table output's format and columns (record 49 A3).
+fn table_of(o: &Value, at: &str, template: &str, run_level: bool) -> Result<Table, String> {
+    let format = match opt_text(o, "format", at)? {
+        Some(f) => f,
+        None => {
+            let lower = template.to_ascii_lowercase();
+            TABLE_FORMATS
+                .iter()
+                .find(|f| lower.ends_with(&format!(".{f}")))
+                .map(|f| f.to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "{at}format is one of {}; the path template's extension names none",
+                        TABLE_FORMATS.join(", ")
+                    )
+                })?
+        }
+    };
+    if !TABLE_FORMATS.contains(&format.as_str()) {
+        return Err(format!(
+            "{at}format is one of {}, not {format}",
+            TABLE_FORMATS.join(", ")
+        ));
+    }
+    let mut columns: Vec<Column> = Vec::new();
+    for (j, c) in array(o, "columns", at)?.iter().enumerate() {
+        let cat = format!("{at}columns[{j}].");
+        let name = text(c, "name", &cat)?.to_string();
+        if !is_ident(&name, true) {
+            return Err(format!(
+                "{cat}name {name} is lowercase letters, digits and _, starting with a letter"
+            ));
+        }
+        if RESERVED_COLUMNS.contains(&name.as_str()) {
+            return Err(format!(
+                "{cat}name {name} is the ask's own word for the run a value came from"
+            ));
+        }
+        if columns.iter().any(|q| q.name == name) {
+            return Err(format!("{cat}name {name} is declared twice"));
+        }
+        let ty = match c["type"].as_str() {
+            None | Some("number") => ColumnType::Number,
+            Some("integer") => ColumnType::Integer,
+            Some("text") => ColumnType::Text,
+            Some(other) => {
+                return Err(format!(
+                    "{cat}type is one of {}, not {other}",
+                    COLUMN_TYPES.join(", ")
+                ));
+            }
+        };
+        columns.push(Column {
+            name,
+            from: opt_text(c, "from", &cat)?,
+            ty,
+            unit: opt_text(c, "unit", &cat)?,
+            description: opt_text(c, "description", &cat)?,
+        });
+    }
+    if columns.is_empty() {
+        return Err(format!(
+            "{at}a table declares its columns: name, type (number, integer or text), unit"
+        ));
+    }
+    let unit_column = opt_text(o, "unit-column", at)?;
+    match (run_level, &unit_column) {
+        (true, None) => {
+            return Err(format!(
+                "{at}a run's table names the column that says each row's unit: unit-column"
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(format!(
+                "{at}unit-column belongs to a run's table; a unit's table is that unit's rows"
+            ));
+        }
+        _ => {}
+    }
+    Ok(Table {
+        format,
+        columns,
+        unit_column,
+    })
+}
+
+/// A declared check, as a mapping `{metric, op, value}` or as the text
+/// `snr >= 8`.
+fn check_of(v: &Value) -> Result<Check, String> {
+    let (metric, op, value, description) = match v {
+        Value::String(t) => {
+            let words: Vec<&str> = t.split_whitespace().collect();
+            let [metric, op, value] = words.as_slice() else {
+                return Err(format!("{t} is written metric op value, such as snr >= 8"));
+            };
+            let value: f64 = value
+                .parse()
+                .map_err(|_| format!("{t}: {value} is not a number"))?;
+            (metric.to_string(), op.to_string(), value, None)
+        }
+        Value::Object(_) => (
+            text(v, "metric", "")?.to_string(),
+            text(v, "op", "")?.to_string(),
+            opt_number(v, "value", "")?.ok_or("value is required, as a number")?,
+            opt_text(v, "description", "")?,
+        ),
+        _ => return Err("a check is {metric, op, value} or the text metric op value".into()),
+    };
+    if !is_ident(&metric, true) {
+        return Err(format!(
+            "the metric {metric} is lowercase letters, digits and _"
+        ));
+    }
+    if !CHECK_OPS.contains(&op.as_str()) {
+        return Err(format!(
+            "the comparison is one of {}, not {op}",
+            CHECK_OPS.join(", ")
+        ));
+    }
+    if !value.is_finite() {
+        return Err(format!("the value {value} is not a finite number"));
+    }
+    Ok(Check {
+        metric,
+        op,
+        value,
+        description,
     })
 }
 
@@ -870,6 +1385,51 @@ impl Descriptor {
                 },
             };
             out.insert(p.id.clone(), value);
+        }
+        // record 49, after review: the parameters a unit's threads and
+        // memory are told by are held to what the unit declares, which the
+        // lane counts and the runtime enforces
+        let held = [
+            (
+                &self.needs.cores_input,
+                f64::from(self.needs.cores),
+                "cores",
+            ),
+            (
+                &self.needs.memory_input,
+                self.needs.memory_gb,
+                "GB of memory",
+            ),
+        ];
+        for (input, most, what) in held {
+            let Some(id) = input else { continue };
+            let Some(p) = self.params.iter().find(|p| &p.id == id) else {
+                continue;
+            };
+            let asked = given.iter().any(|(g, _)| g == id);
+            if asked {
+                let v = out.get(id).and_then(Value::as_f64).unwrap_or(0.0);
+                if v > most {
+                    return Err(format!(
+                        "{id} {} is above the {} {what} each unit of {} declares (x-nils.needs), which is what the lane gives it; ask for {} or less",
+                        number_text(v),
+                        number_text(most),
+                        self.name,
+                        number_text(most)
+                    ));
+                }
+            } else {
+                let v = if p.integer {
+                    most.floor().max(1.0)
+                } else {
+                    most
+                };
+                let v = number(v);
+                check_value(p, &v).map_err(|e| {
+                    format!("{id}, set to what each unit declares (x-nils.needs): {e}")
+                })?;
+                out.insert(id.clone(), v);
+            }
         }
         Ok(out)
     }
@@ -1162,6 +1722,207 @@ x-nils:
                 "01",
                 "02"
             ]
+        );
+    }
+
+    /// Record 49 A1 and A2: what a unit needs, whether units run apart, and
+    /// the secrets a pipeline reads, each checked where it is declared.
+    #[test]
+    fn needs_units_and_secrets_are_declared_and_checked() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let d = parse(&base).unwrap();
+        assert_eq!(d.units, Units::Together);
+        assert_eq!(d.needs.cores, DEFAULT_CORES);
+        assert_eq!(d.needs.memory_gb, DEFAULT_MEMORY_GB);
+        assert!(d.secrets.is_empty());
+        let with = |needs: &str, extra: &str| {
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("  needs: {needs}\n{extra}"),
+            )
+        };
+        let d = parse(&with(
+            "{gpu: required, cores: 4, memory-gb: 12, gpu-memory-gb: 6}",
+            "  units: apart\n  secrets:\n    - id: freesurfer_license\n      mount: /opt/fs/license.txt\n      env: FS_LICENSE\n",
+        ))
+        .unwrap();
+        assert_eq!(d.units, Units::Apart);
+        assert_eq!(
+            d.needs,
+            Needs {
+                cores: 4,
+                memory_gb: 12.0,
+                gpu_memory_gb: 6.0,
+                cores_input: None,
+                memory_input: None,
+            }
+        );
+        assert_eq!(
+            d.secrets,
+            [Secret {
+                id: "freesurfer_license".into(),
+                mount: "/opt/fs/license.txt".into(),
+                env: Some("FS_LICENSE".into()),
+                optional: false,
+            }]
+        );
+        let d = parse(&with("{gpu: none}", "  secrets: [{id: key}]\n")).unwrap();
+        assert_eq!(d.secrets[0].mount, "/secrets/key");
+        for (needs, extra, words) in [
+            ("{cores: 0}", "", "whole number from 1"),
+            ("{cores: 1.5}", "", "whole number from 1"),
+            ("{memory-gb: -2}", "", "above 0"),
+            ("{gpu-memory-gb: 0}", "", "above 0"),
+            (
+                "{gpu: none}",
+                "  units: sometimes\n",
+                "x-nils.units is one of",
+            ),
+            ("{gpu: none}", "  secrets: [{id: Key}]\n", "lowercase"),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a}, {id: a}]\n",
+                "declared twice",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: /output/lic}]\n",
+                "runner mounts itself",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: /inputs}]\n",
+                "runner mounts itself",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: relative}]\n",
+                "absolute container path",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: \"/a:b\"}]\n",
+                "absolute container path",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: /a/../b}]\n",
+                "absolute container path",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, env: fs_license}]\n",
+                "upper-case",
+            ),
+        ] {
+            let e = parse(&with(needs, extra)).unwrap_err();
+            assert!(e.contains(words), "{needs} {extra}: {e}");
+        }
+        // a run-level output is the whole run's: its units cannot run apart
+        let model = "    - id: head\n      kind: model\n      level: run\n      path-template: \"head/head.*\"\n      card: head/card.json\n";
+        let e = parse(&base.replace(
+            "  needs: {gpu: optional}",
+            &format!("{model}  needs: {{gpu: optional}}\n  units: apart"),
+        ))
+        .unwrap_err();
+        assert!(e.contains("runs its units together"), "{e}");
+    }
+
+    /// Record 49, after review: a parameter that sets a unit's threads or
+    /// its memory is tied to what the unit declares; left out, it is the
+    /// declared value, and asked above it, the run is refused.
+    #[test]
+    fn a_thread_or_memory_parameter_is_held_to_the_unit_s_needs() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with =
+            |needs: &str| base.replace("  needs: {gpu: optional}", &format!("  needs: {needs}"));
+        let d = parse(&with(
+            "{cores: 2, memory-gb: 6, cores-input: dimension, memory-input: shrink}",
+        ))
+        .unwrap();
+        assert_eq!(d.needs.cores_input.as_deref(), Some("dimension"));
+        let p = d.resolve(&[]).unwrap();
+        assert_eq!(p["dimension"], 2, "{p:?}");
+        assert_eq!(p["shrink"], 6, "{p:?}");
+        let p = d.resolve(&[("dimension".into(), "2".into())]).unwrap();
+        assert_eq!(p["dimension"], 2);
+        let e = d.resolve(&[("dimension".into(), "3".into())]).unwrap_err();
+        assert!(e.contains("2 cores"), "{e}");
+        let e = d.resolve(&[("shrink".into(), "8".into())]).unwrap_err();
+        assert!(e.contains("6 GB"), "{e}");
+        for (needs, words) in [
+            ("{cores-input: nothing}", "names no parameter"),
+            ("{cores-input: verbose}", "a Number parameter"),
+        ] {
+            let e = parse(&with(needs)).unwrap_err();
+            assert!(e.contains(words), "{needs}: {e}");
+        }
+    }
+
+    /// Record 49 A3: a table output declares its format and typed columns,
+    /// a check its metric, comparison and value, and a bids input the pick
+    /// roles each unit needs.
+    #[test]
+    fn a_table_its_checks_and_the_roles_a_unit_needs_are_declared_and_checked() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with = |extra: &str, x: &str| {
+            let base = if x.contains("  input:") {
+                base.replace("  input: {layout: bids}\n", "")
+            } else {
+                base.clone()
+            };
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("{extra}  needs: {{gpu: optional, unit-minutes: 5}}\n{x}"),
+            )
+        };
+        let table = "    - id: vols\n      kind: table\n      path-template: \"sub-{subject}/ses-{session}/vols.csv\"\n      columns:\n        - {name: total_intracranial, unit: mm3}\n        - {name: third_ventricle, from: 3rd ventricle}\n        - {name: site, type: text}\n";
+        let d = parse(&with(
+            table,
+            "  qc: [\"total_intracranial >= 900000\", {metric: third_ventricle, op: \"<=\", value: 5000}]\n  input: {layout: bids, roles: [t1w, flair]}\n",
+        ))
+        .unwrap();
+        let t = d.outputs[1].table.as_ref().unwrap();
+        assert_eq!(t.format, "csv");
+        assert_eq!(t.columns[0].ty, ColumnType::Number);
+        assert_eq!(t.columns[1].from.as_deref(), Some("3rd ventricle"));
+        assert_eq!(t.columns[2].ty, ColumnType::Text);
+        assert_eq!(d.checks.len(), 2);
+        assert_eq!(d.checks[0].text(), "total_intracranial >= 900000");
+        assert!(d.checks[0].holds(1.0e6) && !d.checks[0].holds(8.0e5));
+        assert!(d.checks[1].holds(5000.0) && !d.checks[1].holds(5000.5));
+        assert_eq!(d.roles, ["t1w", "flair"]);
+        assert_eq!(d.unit_minutes, Some(5.0));
+        assert_eq!(fold(" Left-Hippocampus "), "left_hippocampus");
+        assert_eq!(fold("putamen+pallidum"), "putamen_pallidum");
+        for (extra, x, words) in [
+            (table.replace("vols.csv", "vols.txt"), String::new(), "extension names none"),
+            (table.replace("      columns:\n        - {name: total_intracranial, unit: mm3}\n        - {name: third_ventricle, from: 3rd ventricle}\n        - {name: site, type: text}\n", ""), String::new(), "declares its columns"),
+            (table.replace("name: site, type: text", "name: run"), String::new(), "ask's own word"),
+            (table.replace("type: text", "type: date"), String::new(), "type is one of"),
+            (table.replace("kind: table", "kind: output"), String::new(), "belongs to a table output"),
+            (format!("{table}      unit-column: bids_name\n"), String::new(), "belongs to a run's table"),
+            (table.replace("      path-template: \"sub-{subject}/ses-{session}/vols.csv\"", "      level: run\n      path-template: all.csv"), String::new(), "unit-column"),
+            (String::new(), "  qc: [\"snr => 8\"]\n".to_string(), "comparison is one of"),
+            (String::new(), "  qc: [\"snr >= high\"]\n".to_string(), "not a number"),
+            (String::new(), "  qc: [{metric: SNR, op: \">=\", value: 8}]\n".to_string(), "lowercase"),
+            (String::new(), "  qc: [\"snr >= 8\", \"snr >= 9\"]\n".to_string(), "declared twice"),
+            (String::new(), "  input: {layout: bids, roles: [T1w]}\n".to_string(), "pick role"),
+        ] {
+            let e = parse(&with(&extra, &x)).unwrap_err();
+            assert!(e.contains(words), "{words}: {e}");
+        }
+        // two tables may not both name one measure
+        let twice = format!(
+            "{table}{}",
+            table
+                .replace("id: vols", "id: more")
+                .replace("vols.csv", "more.csv")
+        );
+        assert!(
+            parse(&with(&twice, ""))
+                .unwrap_err()
+                .contains("declared by two tables")
         );
     }
 }

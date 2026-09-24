@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/job/v1/nils.job.schema.json",
   "title": "NILS pipeline descriptor (nils.job.yml)",
-  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
+  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. Record 49 A3 adds, in place and additively: the table output kind with its format and typed columns, the declared checks (x-nils.qc), the pick roles a unit of a bids input needs (x-nils.input.roles) and a unit's typical minutes (x-nils.needs.unit-minutes). A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
   "$defs": {
     "value_key": {
       "type": "string",
@@ -35,7 +35,7 @@
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
         "type": {
           "type": "string",
-          "pattern": "^(model|label_set|derivative:(mask|embedding|pyramid|output))$",
+          "pattern": "^(model|label_set|derivative:(mask|embedding|pyramid|output|table))$",
           "description": "What is mounted read-only under /inputs/<id>, with a line in /inputs/manifest.json: a registered model (nils run --model), a label set (nils run --labels) or derivatives of one kind. The selection itself is not one of these: it is the input the layout materialises"
         },
         "optional": {"type": "boolean"},
@@ -47,7 +47,10 @@
       "required": ["id", "kind", "path-template"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-        "kind": {"enum": ["mask", "embedding", "pyramid", "output", "model"], "description": "The derivative kind each file becomes. model is a run-level output only: the artifact of a model the run fitted, which the runner registers as a model (contracts/model/v1) from the card beside it, in state registered. (The registry's seeds kind is the runner's own, written from the results' seeds, and never declared)"},
+        "kind": {"enum": ["mask", "embedding", "pyramid", "output", "model", "table"], "description": "The derivative kind each file becomes. model is a run-level output only: the artifact of a model the run fitted, which the runner registers as a model (contracts/model/v1) from the card beside it, in state registered. table (record 49 A3): a file of numbers with declared, typed columns, one row per unit, whose rows the runner loads as the unit's measures, which the ask reads as measure.<pipeline>.<column> on the unit's grain. (The registry's seeds kind is the runner's own, written from the results' seeds, and never declared)"},
+        "format": {"enum": ["csv", "tsv", "json"], "description": "For a table output (record 49 A3): csv or tsv read by their header row, json as one object (a unit's table) or a list of objects. Absent, the path template's extension names it"},
+        "columns": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/column"}, "description": "For a table output: its columns. A column is found by the header (or key) its from names, or else by the header whose folded form (lowercase, each run of other characters one _) is its name; a column a file lacks is said in the run's summary, and a value not of its type is refused"},
+        "unit-column": {"type": "string", "description": "For a run-level table: the column that names each row's unit, as /inputs/manifest.json names it or with the unit as its prefix (sub-01_ses-a_T1w is unit sub-01_ses-a). A unit-level table is its unit's one row and has none"},
         "level": {"enum": ["unit", "run"], "default": "unit", "description": "unit: one file per work unit, which the template names by its placeholders. run (record 43): one file for the whole run, such as a model a train entry point fitted, whose template names no unit and which belongs to the run rather than to a subject"},
         "path-template": {
           "type": "string",
@@ -59,12 +62,54 @@
         "media-type": {"type": "string"}
       }
     },
+    "column": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": {"const": "run"}, "description": "The measure's name, which the ask reads as measure.<pipeline>.<name>; unique across the pipeline's tables. run is the ask's own word for the run a value came from"},
+        "from": {"type": "string", "description": "The header or key the value is read from, where its folded form is not the name"},
+        "type": {"enum": ["number", "integer", "text"], "default": "number"},
+        "unit": {"type": "string", "description": "The unit of measurement, such as mm3"},
+        "description": {"type": "string"}
+      }
+    },
+    "check": {
+      "description": "A declared check (record 49 A3): what a good value of a metric is. The metric is read from the unit's metrics in results.json, else from its tables' columns; a unit that succeeded and whose value breaks a check is one pipeline:qc review item, status breach, naming the metric, its value and the check. A metric a check reads from results.json is kept as a measure too",
+      "oneOf": [
+        {"type": "string", "pattern": "^[a-z][a-z0-9_]* (>=|<=|>|<) -?[0-9][0-9.eE+-]*$", "description": "metric op value, such as snr >= 8"},
+        {
+          "type": "object",
+          "required": ["metric", "op", "value"],
+          "properties": {
+            "metric": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+            "op": {"enum": [">=", "<=", ">", "<"]},
+            "value": {"type": "number"},
+            "description": {"type": "string"}
+          }
+        }
+      ]
+    },
     "needs": {
       "type": "object",
+      "description": "What one scheduling unit needs (record 49 A1): a unit where the units run apart, the whole run where they run together. The pipeline lane starts a unit only when its cores and memory fit in what the running units leave of the lane's budget, and a GPU unit only under a lease on the lane's card whose free memory covers gpu-memory-gb",
       "properties": {
-        "gpu": {"enum": ["none", "optional", "required"], "description": "optional runs on the CPU where the host has no GPU and records device cpu; required is refused on such a host"},
-        "memory-gb": {"type": "number", "minimum": 0},
-        "cores": {"type": "integer", "minimum": 1}
+        "gpu": {"enum": ["none", "optional", "required"], "description": "optional runs on the CPU where the host has no GPU, or the lane names no card, and records device cpu; required is refused there"},
+        "memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Of the lane's memory; 2 where absent"},
+        "cores": {"type": "integer", "minimum": 1, "description": "Of the lane's cores; 1 where absent. The container is told it as NILS_CORES, and the memory as NILS_MEMORY_GB, and is held to both by the runtime where the host's cgroups allow it"},
+        "gpu-memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A2: of the card's memory, for a unit that takes the GPU; 8 where absent. A unit waits while the card's free memory, less what the lane's own running units there declared, is below it"},
+        "cores-input": {"type": "string", "description": "Record 49, after review: the id of the Number parameter that tells the tool its threads. Left out of a run, it is set to cores; asked above cores, the run is refused"},
+        "memory-input": {"type": "string", "description": "Record 49, after review: the id of the Number parameter that tells the tool the memory, in GB, it plans within. Left out of a run, it is set to memory-gb; asked above memory-gb, the run is refused"},
+        "unit-minutes": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A3: the typical minutes a unit takes on the CPU, which the pre-flight estimates from until the pipeline has run on this engine, and from its own past runs after"}
+      }
+    },
+    "secret": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The secret's name, which the site sets to a file: nils pipeline secret set <id> --file <path>"},
+        "mount": {"type": "string", "pattern": "^/[^:,]*$", "default": "/secrets/<id>", "description": "Where the container sees the file, read-only; never at or under /input, /inputs, /output or /source"},
+        "env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "description": "An environment variable the container is given naming the mount, such as FS_LICENSE"},
+        "optional": {"type": "boolean", "description": "Run without it where the site has not set it; otherwise a run is refused before it starts"}
       }
     },
     "proposal": {
@@ -125,13 +170,25 @@
             "layout": {
               "enum": ["bids", "stacks"],
               "description": "bids: a release of the selection in the BIDS layout with the picks applied (record 43 R4), mounted read-only at /input, so a BIDS App meets one image per role and session. stacks: /input/stacks.json (stacks.schema.json) names each stack's files under the source places, mounted read-only at /source/<n>, with no conversion"
-            }
+            },
+            "roles": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "description": "Record 49 A3, bids layout only: the pick roles of the pack each unit needs (t1w, flair); the pre-flight names a unit without a pick of one, with the role it lacks"}
           }
         },
         "inputs": {"type": "array", "items": {"$ref": "#/$defs/typed_input"}},
         "outputs": {"type": "array", "items": {"$ref": "#/$defs/output"}, "minItems": 1},
         "needs": {"$ref": "#/$defs/needs"},
-        "proposals": {"type": "array", "items": {"$ref": "#/$defs/proposal"}, "description": "The axes the pipeline's results may propose values on; a proposal on an axis not declared here is not taken"}
+        "units": {
+          "enum": ["together", "apart"],
+          "default": "together",
+          "description": "Record 49 A1. together: one container for the whole run, as record 43 ran every pipeline. apart: a container per unit, which sees the dataset's top-level files and its own subject or session alone (bids) or a stacks.json of its own stack (stacks), with [ParticipantLabels] its one subject and NILS_UNIT its id, and writes its own folder, derivatives/<pipeline>/<run>/<unit>, with a results.json of its own; the lane runs several at once within its budget, and a run that stopped resumes with the units it finished kept. A pipeline with a run-level output runs its units together"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/secret"},
+          "description": "Record 49 R3: files the site keeps, such as a licence, that the engine reads at run time and mounts read-only into this pipeline's containers alone. After each container every file it left that holds the secret is removed and refused, and its log and results.json are written again with it replaced by [secret <id>]; a run records the secret's id, never its path or its bytes"
+        },
+        "proposals": {"type": "array", "items": {"$ref": "#/$defs/proposal"}, "description": "The axes the pipeline's results may propose values on; a proposal on an axis not declared here is not taken"},
+        "qc": {"type": "array", "items": {"$ref": "#/$defs/check"}, "description": "Record 49 A3: the checks each unit that succeeded is held to"}
       }
     }
   }

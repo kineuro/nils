@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ast::{Arg, Ask, Clause, Grain, Policy, SchemeRef, Set, Src};
+use crate::ast::{Arg, Ask, Clause, Grain, Level, Policy, SchemeRef, Set, Src};
 
 /// The class of a field (§4.4, rule 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -252,7 +252,17 @@ pub struct Validated {
     /// Topological order of the sets.
     pub order: Vec<String>,
     pub warnings: Vec<Issue>,
+    /// The sets whose totals show only for [`MEASURE_K`] scans or more:
+    /// below detail quasi, a group set that totals a measure or groups a
+    /// set filtered on one, and a set filtered on a measure whose count or
+    /// existence is the answer (Nima's ruling after record 49's review).
+    pub small_cells: BTreeSet<String>,
 }
+
+/// The smallest group of scans whose totals of a measure the ask shows
+/// below detail quasi: D27's federation default k, applied to a pipeline's
+/// measures alone (D51 stands for everything else).
+pub const MEASURE_K: i64 = 5;
 
 const ARITHMETIC: &[&str] = &["+", "-", "*", "/"];
 const COMPARISONS: &[&str] = &["=", "<>", ">", ">=", "<", "<=", "~=", "in", "not_in"];
@@ -541,6 +551,10 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
             }
         }
     }
+
+    measures_within_detail(ask, scope, &mut issues);
+    rows_within_detail(ask, scope, &mut issues);
+    out.small_cells = small_cells(ask, scope);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
         issues.into_iter().partition(|i| i.code.is_warning());
@@ -1700,6 +1714,200 @@ fn check_class(info: &FieldInfo, field: &str, path: &str, scope: &Scope, issues:
             "run at home, or drop the field",
         ));
     }
+}
+
+/// Whether a field path reads a pipeline run's measure (record 49 A3):
+/// `measure.<pipeline>.<name>`, on the set's own grain or through a level,
+/// a partner or an ancestor (`session.measure.synthseg.total_intracranial`).
+pub fn is_measure_path(path: &str) -> bool {
+    path.starts_with("measure.") || path.contains(".measure.")
+}
+
+/// Record 49 R4: a run's numbers are read per scan only by a caller whose
+/// detail reaches quasi identifying fields; below it, a measure is read as
+/// a total over a group, in an aggregate of a group set's binding (count,
+/// distinct, sum, avg, min or max, never list), and in a predicate, which
+/// answers a count. It is refused in a column, an order, a group's key and
+/// a binding of any other set, where it would be one scan's value.
+fn measures_within_detail(ask: &Ask, scope: &Scope, issues: &mut Vec<Issue>) {
+    if scope.classes.contains(&Class::QuasiIdentifying) {
+        return;
+    }
+    // the first measure a clause reads per row, outside a total
+    fn per_row(c: &Clause, totalled: bool, in_group: bool) -> Option<String> {
+        if c.op == "field"
+            && let Some(p) = c.ref_name()
+            && is_measure_path(p)
+            && !(totalled && in_group)
+        {
+            return Some(p.to_string());
+        }
+        let totals = AGGREGATES.contains(&c.op.as_str()) && c.op != "list";
+        let mut all: Vec<&Clause> = Vec::new();
+        for a in &c.args {
+            match a {
+                Arg::Clause(inner) => all.push(inner),
+                Arg::List(items) => {
+                    for i in items {
+                        if let Arg::Clause(inner) = i {
+                            all.push(inner);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        all.into_iter()
+            .find_map(|inner| per_row(inner, totalled || totals, in_group))
+    }
+    let refuse = |issues: &mut Vec<Issue>, path: String, field: String| {
+        issues.push(issue(
+            Code::ForbiddenField,
+            path,
+            format!(
+                "{field} is a scan's measure, read per row only at detail quasi (record 49 R4); at this detail the ask answers its totals"
+            ),
+            "group the set and bind count, sum, avg, min or max over it, or ask for detail quasi",
+        ));
+    };
+    for (name, set) in &ask.sets {
+        let in_group = set.grain == Grain::Group;
+        for (b, c) in &set.bind.0 {
+            if let Some(f) = per_row(c, false, in_group) {
+                refuse(issues, format!("sets.{name}.bind.{b}"), f);
+            }
+        }
+        if let Some(g) = &set.group {
+            for (i, c) in g.by.iter().enumerate() {
+                if let Some(f) = per_row(c, false, false) {
+                    refuse(issues, format!("sets.{name}.group.by[{i}]"), f);
+                }
+            }
+        }
+    }
+    let in_group = ask
+        .sets
+        .get(&ask.out.set)
+        .is_some_and(|s| s.grain == Grain::Group);
+    for (i, c) in ask.out.columns.iter().enumerate() {
+        if let Some(f) = per_row(c, false, in_group) {
+            refuse(issues, format!("out.columns[{i}]"), f);
+        }
+    }
+    for (i, o) in ask.out.order.iter().enumerate() {
+        if let Some(f) = per_row(&o.0, false, in_group) {
+            refuse(issues, format!("out.order[{i}]"), f);
+        }
+    }
+}
+
+/// Whether a JSON form of a clause, or of anything holding clauses, reads a
+/// measure: a `["field", {}, path]` whose path is one.
+fn reads_measure(v: &Value) -> bool {
+    match v {
+        Value::Array(items) => {
+            let is_field = items.first().and_then(Value::as_str) == Some("field");
+            (is_field
+                && items
+                    .iter()
+                    .skip(1)
+                    .any(|a| a.as_str().is_some_and(is_measure_path)))
+                || items.iter().any(reads_measure)
+        }
+        Value::Object(map) => map.values().any(reads_measure),
+        _ => false,
+    }
+}
+
+/// The sets whose totals are held to [`MEASURE_K`] (see
+/// [`Validated::small_cells`]): none at detail quasi or above.
+fn small_cells(ask: &Ask, scope: &Scope) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if scope.classes.contains(&Class::QuasiIdentifying) {
+        return out;
+    }
+    let filtered = measure_filtered(ask);
+    for (name, set) in &ask.sets {
+        if set.grain != Grain::Group {
+            continue;
+        }
+        let totals = set
+            .bind
+            .0
+            .iter()
+            .any(|(_, c)| serde_json::to_value(c).is_ok_and(|v| reads_measure(&v)));
+        let over_filtered = set.group.as_ref().is_some_and(|g| filtered.contains(&g.of));
+        if totals || over_filtered {
+            out.insert(name.clone());
+        }
+    }
+    // a count or an existence answered over a filtered set
+    if matches!(ask.out.level, Level::Count | Level::Boolean) && filtered.contains(&ask.out.set) {
+        out.insert(ask.out.set.clone());
+    }
+    out
+}
+
+/// Nima's ruling after record 49's review: below detail quasi, the rows of
+/// a set filtered on a measure are never listed, since the list says each
+/// member's measure against the bound; only the totals the k rule holds
+/// (a group's, a count, an existence) are answered over it.
+fn rows_within_detail(ask: &Ask, scope: &Scope, issues: &mut Vec<Issue>) {
+    if scope.classes.contains(&Class::QuasiIdentifying) {
+        return;
+    }
+    let Some(set) = ask.sets.get(&ask.out.set) else {
+        return;
+    };
+    if set.grain == Grain::Group
+        || !matches!(ask.out.level, Level::Record | Level::Aggregate)
+        || !measure_filtered(ask).contains(&ask.out.set)
+    {
+        return;
+    }
+    issues.push(issue(
+        Code::ForbiddenField,
+        "out.level",
+        format!(
+            "the set {} is filtered on a measure, and a list of its rows would say each one's measure against the bound; at this detail the ask answers only its count, or totals over groups of 5 scans or more (record 49 R4)",
+            ask.out.set
+        ),
+        "ask for level count, or group the set, or ask for detail quasi",
+    ));
+}
+
+/// The sets filtered on a measure: a set that reads one outside a group's
+/// totals, or that reads such a set.
+fn measure_filtered(ask: &Ask) -> BTreeSet<String> {
+    let mut filtered: BTreeSet<String> = BTreeSet::new();
+    loop {
+        let before = filtered.len();
+        for (name, set) in &ask.sets {
+            if filtered.contains(name) {
+                continue;
+            }
+            let own = if set.grain == Grain::Group {
+                set.where_
+                    .iter()
+                    .any(|c| serde_json::to_value(c).is_ok_and(|v| reads_measure(&v)))
+            } else {
+                let mut v = serde_json::to_value(set).unwrap_or(Value::Null);
+                // what a set binds is read per row, and is refused where it
+                // would show; a filter is what narrows it
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("bind");
+                }
+                reads_measure(&v)
+            };
+            if own || set.reads().iter().any(|r| filtered.contains(*r)) {
+                filtered.insert(name.clone());
+            }
+        }
+        if filtered.len() == before {
+            break;
+        }
+    }
+    filtered
 }
 
 /// Pin every bare `selection:<name>` to its current version (§8.2), inside

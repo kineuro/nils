@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 63;
+pub const SCHEMA_VERSION: i64 = 65;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +306,45 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 63,
         apply: a_reading_is_timed_and_a_certificate_unseals,
     },
+    Migration {
+        version: 64,
+        apply: a_run_s_units_are_scheduled_and_resumed,
+    },
+    Migration {
+        version: 65,
+        apply: a_run_s_numbers_are_measures_and_a_starter_says_so,
+    },
 ];
+
+/// Record 49 A1: pipeline runs have a lane of their own, their units run
+/// side by side within a budget, and a run that stopped is taken up again
+/// with the units it finished kept. A registry from before gains the unit
+/// table empty and three columns on the run, empty on every run before,
+/// which ran its units together, was never resumed and recorded no
+/// threshold of its own.
+fn a_run_s_units_are_scheduled_and_resumed(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pipeline_run", &["units", "resumes", "threshold"])?;
+    add_tables(store, kind, &["pipeline_unit"])
+}
+
+/// Record 49 A3 and A4: the measures a run's tables and declared metrics
+/// hold, which the ask reads, and a catalog entry's origin, `starter` where
+/// the engine seeded it. A registry from before gains the table empty, since
+/// no run before wrote a table, and the column empty, since every entry
+/// before was a person's.
+fn a_run_s_numbers_are_measures_and_a_starter_says_so(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pipeline", &["origin"])?;
+    add_tables(store, kind, &["measure"])
+}
 
 /// Record 48: an answer says how long it took, what the engine suggested
 /// and whether the answer changed it, and how it came (a claim or a
