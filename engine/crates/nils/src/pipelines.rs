@@ -417,6 +417,15 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
     if held_units {
         withheld.push("units");
     }
+    // the review items a run raised are one a unit: their ids are a count
+    if let Some(ids) = s["review_items"].as_array() {
+        let n = ids.len();
+        s["review_items"] = json!(n);
+        if held("n", n)["withheld"] == true {
+            s["review_items"] = Value::Null;
+            withheld.push("review_items");
+        }
+    }
     s["failures_by_reason"] = json!(held_list("reason", "units", by_reason));
     s["detail"] = json!("totals");
     s["withheld"] = json!(withheld);
@@ -451,25 +460,82 @@ pub(crate) fn job_totals_only(job: &mut Value) {
     plain(&mut job["result"]);
 }
 
-/// A `pipeline:qc` review item read below detail quasi: the run, the
-/// pipeline and the item's status, and not the unit, its ids, its values
-/// or the tool's words. Other kinds are left as they are.
-pub(crate) fn qc_item_totals_only(item: &mut Value) {
-    if item["kind"] != nils_registry::review::PIPELINE_QC_KIND {
-        return;
+/// The `pipeline:qc` items of a review list read below detail quasi
+/// (record 49 R4b, after review): never one a unit, since counting them
+/// would say a small number, but one entry a run, an item status and a
+/// check (a breach) or a reason (a failure), with its count of units held
+/// to [`SCANS_K`]. Other kinds are left as they are, in their order; a
+/// group stands where its first item stood.
+pub(crate) fn qc_items_grouped(rows: Vec<Value>) -> Vec<Value> {
+    type Key = (Option<i64>, String, String, String, Option<String>);
+    let mut out: Vec<Result<Value, Key>> = Vec::new();
+    let mut groups: BTreeMap<Key, (Value, usize)> = BTreeMap::new();
+    for r in rows {
+        if r["kind"] != nils_registry::review::PIPELINE_QC_KIND {
+            out.push(Ok(r));
+            continue;
+        }
+        let run = r["ref"]["run_id"].as_i64();
+        let pipeline = r["ref"]["pipeline"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let status = r["status"].as_str().unwrap_or_default().to_string();
+        let reason = r["evidence"]["status"]
+            .as_str()
+            .unwrap_or("failed")
+            .to_string();
+        let mut checks: Vec<Option<String>> = r["evidence"]["metrics"]["breaches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| {
+                b["check"]
+                    .as_str()
+                    .or_else(|| b["metric"].as_str())
+                    .map(|c| Some(c.to_string()))
+            })
+            .collect();
+        checks.sort();
+        checks.dedup();
+        if reason != "breach" || checks.is_empty() {
+            checks = vec![None];
+        }
+        for check in checks {
+            let key: Key = (run, pipeline.clone(), status.clone(), reason.clone(), check);
+            let g = groups.entry(key.clone()).or_insert_with(|| {
+                out.push(Err(key.clone()));
+                (r.clone(), 0)
+            });
+            g.1 += 1;
+        }
     }
-    let run = item["ref"]["run_id"].clone();
-    if item.get("ref").is_some() {
-        item["ref"] = json!({"run_id": run, "pipeline": item["ref"]["pipeline"]});
-    }
-    item["evidence"] = json!({"status": item["evidence"]["status"], "withheld": WITHHELD});
-    if item.get("group_key").is_some() {
-        item["group_key"] = run
-            .as_i64()
-            .map_or(Value::Null, |r| json!(format!("run:{r}")));
-    }
-    if item.get("about").is_some() {
-        item["about"] = json!(WITHHELD);
+    out.into_iter()
+        .map(|o| match o {
+            Ok(v) => v,
+            Err(key) => {
+                let (first, n) = groups.get(&key).cloned().unwrap_or((Value::Null, 0));
+                let mut v = held("units", n);
+                v["kind"] = json!(nils_registry::review::PIPELINE_QC_KIND);
+                v["scope"] = first["scope"].clone();
+                v["status"] = json!(key.2);
+                v["grouped"] = json!(true);
+                v["ref"] = json!({"run_id": key.0, "pipeline": key.1});
+                v["evidence"] = json!({"status": key.3, "check": key.4, "withheld": WITHHELD});
+                v["group_key"] = key.0.map_or(Value::Null, |r| json!(format!("run:{r}")));
+                v
+            }
+        })
+        .collect()
+}
+
+/// A count of units under `key` in `map`, held to [`SCANS_K`]: null when
+/// it stands for 1 to 4, and named under `withheld` beside it.
+pub(crate) fn hold_count(map: &mut Value, key: &str) {
+    if let Some(n) = map[key].as_u64()
+        && held("n", n as usize)["withheld"] == true
+    {
+        map[key] = Value::Null;
     }
 }
 
@@ -5172,6 +5238,10 @@ mod tests {
             s["refused_files"],
             json!([{"output": "model", "why": "the run wrote no model"}])
         );
+        assert!(
+            s["review_items"].is_null(),
+            "3 items stand for 3 units: {doc}"
+        );
         assert_eq!(doc["units_run"], json!([]));
         assert_eq!(doc["unit_states"]["over"], 12);
         assert_eq!(s["detail"], "totals");
@@ -5198,22 +5268,46 @@ mod tests {
         job_totals_only(&mut job);
         assert!(job["result"]["summary"]["numbers"]["checks"]["breaches"].is_null());
         assert!(!job.to_string().contains("stack-3") && !job.to_string().contains("4.5"));
-        let mut item = json!({
-            "id": 4, "kind": "pipeline:qc", "group_key": "run:9|unit:sub-P1",
-            "ref": {"run_id": 9, "pipeline": "volumes@1", "unit": "stack-3", "stack_id": 3,
-                    "subject_id": 1, "session_day": "2022-01-15"},
-            "evidence": {"status": "breach", "error": "snr is 4.5, and the check is snr >= 8",
-                         "metrics": {"breaches": [{"value": 4.5}], "metrics": {"snr": 4.5}}},
-        });
-        qc_item_totals_only(&mut item);
-        assert_eq!(item["ref"], json!({"run_id": 9, "pipeline": "volumes@1"}));
-        assert_eq!(item["evidence"]["status"], "breach");
-        assert_eq!(item["group_key"], "run:9");
-        let text = item.to_string();
-        assert!(!text.contains("4.5") && !text.contains("sub-") && !text.contains("2022"));
-        let mut other = json!({"kind": "classify:conflict", "evidence": {"axis": "a"}});
-        qc_item_totals_only(&mut other);
-        assert_eq!(other["evidence"]["axis"], "a");
+        // below detail quasi a review list says a run's items one a check
+        // or a reason with its count, never one a unit
+        let qc = |id: i64, unit: &str, status: &str, check: Option<&str>| {
+            json!({
+                "id": id, "kind": "pipeline:qc", "scope": "run", "status": "open",
+                "group_key": format!("run:9|unit:{unit}"),
+                "ref": {"run_id": 9, "pipeline": "volumes@1", "unit": unit, "stack_id": id},
+                "evidence": {"status": status, "error": "snr is 4.5, and the check is snr >= 8",
+                             "metrics": {"breaches": check.map_or(json!([]), |c| json!([{"check": c, "value": 4.5}]))}},
+            })
+        };
+        let mut rows =
+            vec![json!({"id": 1, "kind": "classify:conflict", "evidence": {"axis": "a"}})];
+        rows.extend((0..6).map(|i| qc(10 + i, &format!("stack-{i}"), "breach", Some("snr >= 8"))));
+        rows.push(qc(20, "sub-P1", "breach", Some("holes <= 200")));
+        rows.push(qc(21, "sub-P2", "failed", None));
+        let grouped = qc_items_grouped(rows);
+        assert_eq!(grouped.len(), 4, "{grouped:?}");
+        assert_eq!(grouped[0]["evidence"]["axis"], "a");
+        let of = |check: Option<&str>, reason: &str| {
+            grouped
+                .iter()
+                .find(|g| {
+                    g["evidence"]["check"].as_str() == check && g["evidence"]["status"] == reason
+                })
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(of(Some("snr >= 8"), "breach")["units"], 6);
+        assert_eq!(of(Some("holes <= 200"), "breach")["withheld"], true);
+        assert!(of(None, "failed")["units"].is_null());
+        assert_eq!(
+            of(None, "failed")["ref"],
+            json!({"run_id": 9, "pipeline": "volumes@1"})
+        );
+        let text = json!(grouped).to_string();
+        for leak in ["stack-", "sub-", "4.5", "the check is"] {
+            assert!(!text.contains(leak), "{leak} in {text}");
+        }
+        assert!(grouped[1..].iter().all(|g| g.get("id").is_none()), "{text}");
     }
 
     /// The second review of record 43: a folder whose name the runtimes'

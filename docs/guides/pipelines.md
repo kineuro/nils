@@ -221,7 +221,7 @@ A table output (`kind: table`) is a file of numbers a unit or a run writes, with
 
 A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metric, op, value}`. Each unit that succeeded is held to them, the metric read from its `results.json` metrics or else from its tables; a breach is one `pipeline:qc` review item, status `breach`, whose error names the metric, its value and the check. A breach does not make a run partial. A metric a check reads from `results.json` is kept as a measure too.
 
-> **Warning:** a check's breach says a scan's measure against a bound. Below detail quasi a run's doors, its job and its `pipeline:qc` items say the checks and the failures as counts, `summary.breaches_by_check` and `summary.failures_by_reason`, a count of 1 to 4 scans withheld, and name no unit, no value and no tool's error text.
+> **Warning:** a check's breach says a scan's measure against a bound. Below detail quasi a run's doors, its job and its `pipeline:qc` items say the checks and the failures as counts, `summary.breaches_by_check` and `summary.failures_by_reason`, a count of 1 to 4 scans withheld, and name no unit, no value and no tool's error text. The review list shows a run's `pipeline:qc` items as one entry a check or a reason with its count, never one a unit.
 
 ## Run a model and take its proposals
 

@@ -3667,22 +3667,46 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
             quiet(&all);
         }
     }
+    // the review list says the run's items one a check, a count of fewer
+    // than 5 withheld, never one a unit, and an item is not read by its id
     let (status, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, PLAIN_REVIEW);
     assert_eq!(status, 200, "{items}");
-    assert_eq!(items["count"], 1, "{items}");
     quiet(&items);
-    let item = &items["items"][0];
-    assert_eq!(item["evidence"]["status"], "breach", "{item}");
-    assert_eq!(item["ref"]["run_id"], run, "{item}");
-    assert!(item["ref"]["stack_id"].is_null(), "{item}");
-    let (status, one) = server.call(
+    assert_eq!(items["count"], 1, "{items}");
+    let group = &items["items"][0];
+    assert_eq!(group["grouped"], true, "{group}");
+    assert_eq!(group["evidence"]["status"], "breach", "{group}");
+    assert_eq!(group["evidence"]["check"], "snr >= 8", "{group}");
+    assert!(
+        group["units"].is_null() && group["withheld"] == true,
+        "{group}"
+    );
+    assert_eq!(
+        group["ref"],
+        json!({"run_id": run, "pipeline": "volumes@1"}),
+        "{group}"
+    );
+    assert!(group.get("id").is_none(), "{group}");
+    let (_, full_items) = server.call("GET", "/api/review?kind=pipeline:qc", None, OPERATOR);
+    let id = full_items["items"][0]["id"].as_i64().unwrap();
+    let (status, one) = server.call("GET", &format!("/api/review/{id}"), None, PLAIN_REVIEW);
+    assert_eq!(status, 404, "{one}");
+    quiet(&one);
+    let (status, sum) = server.call("GET", "/api/review/summary", None, PLAIN_REVIEW);
+    assert_eq!(status, 200, "{sum}");
+    assert!(
+        sum["by_kind"]["pipeline:qc"].is_null(),
+        "one open item: {sum}"
+    );
+    let (_, sum) = server.call("GET", "/api/review/summary", None, OPERATOR);
+    assert_eq!(sum["by_kind"]["pipeline:qc"], 1, "{sum}");
+    let (_, doc) = server.call(
         "GET",
-        &format!("/api/review/{}", item["id"]),
+        &format!("/api/pipeline-runs/{run}"),
         None,
         PLAIN_REVIEW,
     );
-    assert_eq!(status, 200, "{one}");
-    quiet(&one);
+    assert!(doc["summary"]["review_items"].is_null(), "{doc}");
     let (status, why) = server.call("GET", &format!("/api/explain/{low}"), None, PLAIN_REVIEW);
     assert!(status == 200 || status == 404, "{why}");
     quiet(&why);

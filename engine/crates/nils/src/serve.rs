@@ -1745,9 +1745,10 @@ fn routed(
                 Some(mut doc) => {
                     // the words a rule matched are text a stack carried
                     if caller.access.detail < Detail::Quasi {
-                        // record 49 R4: a pipeline's item as its totals
-                        for r in doc["review"].as_array_mut().into_iter().flatten() {
-                            crate::pipelines::qc_item_totals_only(r);
+                        // record 49 R4b: a pipeline's items are read as totals
+                        // on the review list, never one a unit
+                        if let Some(list) = doc["review"].as_array_mut() {
+                            list.retain(|r| r["kind"] != nils_registry::review::PIPELINE_QC_KIND);
                         }
                         for a in doc["axes"].as_array_mut().into_iter().flatten() {
                             for e in a["evidence"].as_array_mut().into_iter().flatten() {
@@ -2964,11 +2965,11 @@ fn routed(
                 rows.truncate(limit.max(1));
             }
             blind_review(registry.store(), caller, &mut rows)?;
-            // record 49 R4: a pipeline's item below detail quasi names no
-            // unit and says no value
+            // record 49 R4 and R4b: below detail quasi a pipeline's items
+            // are one entry a run and a check or reason, with a count held
+            // to 5 scans, never one a unit
             if !quasi {
-                rows.iter_mut()
-                    .for_each(crate::pipelines::qc_item_totals_only);
+                rows = crate::pipelines::qc_items_grouped(rows);
             }
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
@@ -2981,10 +2982,15 @@ fn routed(
             {
                 return Err(Reply::error(404, format!("no cohort named {name}")));
             }
-            Ok(Reply::ok(nils_registry::cohort::review_summary(
-                registry.store(),
-                cohort,
-            )?))
+            let mut doc = nils_registry::cohort::review_summary(registry.store(), cohort)?;
+            // record 49 R4b: the open pipeline items are units; 1 to 4 held
+            if !quasi {
+                crate::pipelines::hold_count(
+                    &mut doc["by_kind"],
+                    nils_registry::review::PIPELINE_QC_KIND,
+                );
+            }
+            Ok(Reply::ok(doc))
         }
         ["api", "review", _] if get => {
             let id = id_at(2)?;
@@ -3008,8 +3014,10 @@ fn routed(
                 "member_stacks": members,
             });
             blind_review(registry.store(), caller, std::slice::from_mut(&mut doc))?;
-            if !quasi {
-                crate::pipelines::qc_item_totals_only(&mut doc);
+            // record 49 R4b: below detail quasi a pipeline's item is not read
+            // one by one, and answers as an item that is not there
+            if !quasi && item.kind == nils_registry::review::PIPELINE_QC_KIND {
+                return Err(Reply::error(404, format!("no review item {id}")));
             }
             Ok(Reply::ok(doc))
         }
