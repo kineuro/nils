@@ -75,6 +75,15 @@ pub(crate) const fn req(name: &'static str, ty: Type) -> Column {
     }
 }
 
+/// A unique key over the rows a predicate names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partial {
+    pub name: &'static str,
+    pub columns: Vec<&'static str>,
+    /// SQL both dialects read the same, over the table's own columns.
+    pub predicate: &'static str,
+}
+
 /// One table: its columns in order, its unique keys and its indexes.
 #[derive(Debug, Clone)]
 pub struct Table {
@@ -84,6 +93,10 @@ pub struct Table {
     /// of the writer.
     pub uniques: Vec<Vec<&'static str>>,
     pub indexes: Vec<Vec<&'static str>>,
+    /// Unique indexes over part of the table: a name, the columns and the
+    /// predicate that says which rows the key holds for (record 43 S4: one
+    /// live embedding per stack, encoder and preprocessing).
+    pub partial_uniques: Vec<Partial>,
     /// A table whose primary key is a column of its own (`series_id` on the
     /// detail tables) instead of a generated id.
     pub primary: Option<&'static str>,
@@ -96,8 +109,23 @@ impl Table {
             columns,
             uniques: Vec::new(),
             indexes: Vec::new(),
+            partial_uniques: Vec::new(),
             primary: None,
         }
+    }
+
+    fn unique_where(
+        mut self,
+        name: &'static str,
+        cols: &[&'static str],
+        predicate: &'static str,
+    ) -> Table {
+        self.partial_uniques.push(Partial {
+            name,
+            columns: cols.to_vec(),
+            predicate,
+        });
+        self
     }
 
     fn unique(mut self, cols: &[&'static str]) -> Table {
@@ -1319,7 +1347,17 @@ fn build_registry() -> Vec<Table> {
         .index(&["stack_id"])
         .index(&["subject_id"])
         .index(&["kind"])
-        .index(&["sha256"]),
+        .index(&["sha256"])
+        // Record 43 S4: the embedding cache's key. One live embedding per
+        // stack, encoder and preprocessing version; a new preprocessing
+        // version is a new key, so its rows sit beside the old ones, and a
+        // withdrawn row frees its key. A row with no encoder or no version
+        // (one registered at the door before the cache) is outside the key.
+        .unique_where(
+            "embedding",
+            &["kind", "stack_id", "model_id", "preprocess_version"],
+            "kind = 'embedding' AND withdrawn_at IS NULL",
+        ),
         // Wave 3 §8.5: what a release did, as rows.
         //
         // Not a workbook beside the originals under a password kept in a
@@ -2362,7 +2400,12 @@ mod tests {
                 "{} needs exactly one primary key",
                 t.name
             );
-            for key in t.uniques.iter().chain(&t.indexes) {
+            for key in t
+                .uniques
+                .iter()
+                .chain(&t.indexes)
+                .chain(t.partial_uniques.iter().map(|p| &p.columns))
+            {
                 for c in key {
                     assert!(t.column(c).is_some(), "{}.{} indexed but absent", t.name, c);
                 }

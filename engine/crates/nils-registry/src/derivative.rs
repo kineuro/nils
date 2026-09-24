@@ -78,6 +78,11 @@ pub struct New<'a> {
     /// The registered model that made it (record 42 S2's table), when a
     /// model did; [`insert`] refuses an id the model table does not hold.
     pub model_id: Option<i64>,
+    /// The pipeline run that wrote it, when one did (record 43).
+    pub run_id: Option<i64>,
+    /// For an embedding, the preprocessing it was made under (record 43
+    /// S4); [`crate::embedding::register`] fills it with the encoder.
+    pub preprocess_version: Option<&'a str>,
     pub supersedes_id: Option<i64>,
     pub created_at: &'a str,
 }
@@ -217,6 +222,7 @@ fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64
                 "actor",
                 "model_id",
                 "run_id",
+                "preprocess_version",
                 "supersedes_id",
                 "created_at",
             ],
@@ -240,7 +246,8 @@ fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64
             Param::from(n.registered_by),
             n.actor.map_or(Param::Null, |a| Param::from(a.to_string())),
             n.model_id.map_or(Param::Null, Param::Int),
-            run_id.map_or(Param::Null, Param::Int),
+            run_id.or(n.run_id).map_or(Param::Null, Param::Int),
+            n.preprocess_version.map_or(Param::Null, Param::from),
             n.supersedes_id.map_or(Param::Null, Param::Int),
             Param::from(n.created_at),
         ]],
@@ -273,7 +280,7 @@ const COLUMNS: [&str; 20] = [
     "withdrawn_at",
 ];
 
-fn select(store: &mut Store) -> String {
+pub(crate) fn select(store: &mut Store) -> String {
     let d = store.dialect();
     let t = table("derivative");
     let cols: Vec<String> = COLUMNS
@@ -287,7 +294,7 @@ fn select(store: &mut Store) -> String {
     )
 }
 
-fn of(r: &Row) -> Result<Derivative, Error> {
+pub(crate) fn of(r: &Row) -> Result<Derivative, Error> {
     Ok(Derivative {
         id: r.int(0)?,
         kind: r.text(1)?.to_string(),
@@ -435,6 +442,8 @@ mod tests {
             registered_by: "ana@node",
             actor: Some(&actor),
             model_id: None,
+            run_id: None,
+            preprocess_version: None,
             supersedes_id: None,
             created_at: "2026-09-24T00:00:00Z",
         };

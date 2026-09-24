@@ -343,6 +343,8 @@ pub(crate) fn register(
             registered_by: a.principal,
             actor: a.actor,
             model_id,
+            run_id: None,
+            preprocess_version: None,
             supersedes_id: a.supersedes,
             created_at: &now,
         },

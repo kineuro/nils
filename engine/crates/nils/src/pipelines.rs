@@ -1733,6 +1733,8 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                     registered_by: x.who,
                     actor: Some(x.actor),
                     model_id: None,
+                    run_id: None,
+                    preprocess_version: None,
                     supersedes_id: None,
                     created_at: &now,
                 },

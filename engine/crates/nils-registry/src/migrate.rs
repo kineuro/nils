@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 59;
+pub const SCHEMA_VERSION: i64 = 60;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +290,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 59,
         apply: a_pipeline_has_a_catalog_and_its_runs,
     },
+    Migration {
+        version: 60,
+        apply: an_embedding_is_kept_once_per_encoder_and_preprocessing,
+    },
 ];
 
 /// Record 43 S1 and S2: the pipeline catalog and the runs. A registry from
@@ -300,6 +304,22 @@ fn a_pipeline_has_a_catalog_and_its_runs(store: &mut Store, kind: Kind) -> Resul
         return Ok(());
     }
     add_tables(store, kind, &["pipeline", "pipeline_run"])
+}
+
+/// Record 43 S4: the embedding cache's key, a unique index over the live
+/// embeddings by stack, encoder and preprocessing version. The column
+/// `preprocess_version` came with the table (migration 56), and every row
+/// written before has it null, since nothing wrote one: a null is outside
+/// the key, so no row of a registry from before stands in the index's way.
+fn an_embedding_is_kept_once_per_encoder_and_preprocessing(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "derivative", &["preprocess_version"])?;
+    add_indexes(store, "derivative")
 }
 
 /// Record 42 S2: the model registry. A registry from before gains the two

@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59],
+            [59, 60],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -1946,6 +1946,8 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
             registered_by: "ops@lab",
             actor: None,
             model_id: None,
+            run_id: None,
+            preprocess_version: None,
             supersedes_id: None,
             created_at: "2026-09-24T10:02:00Z",
         };

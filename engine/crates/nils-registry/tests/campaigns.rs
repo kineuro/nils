@@ -214,6 +214,8 @@ fn derivative(reg: &mut Registry, stack: i64, kind: &str) -> i64 {
             registered_by: "anna@lab",
             actor: None,
             model_id: None,
+            run_id: None,
+            preprocess_version: None,
             supersedes_id: None,
             created_at: "2026-09-24T10:00:00Z",
         },

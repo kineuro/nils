@@ -1850,6 +1850,7 @@ dependencies = [
  "nils-dicom",
  "nix",
  "postgres",
+ "regex",
  "rusqlite",
  "serde",
  "serde-saphyr",
