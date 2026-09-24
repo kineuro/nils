@@ -607,6 +607,19 @@ pub(crate) struct SetupArgs {
     /// Where releases come from; NILS_RELEASES sets the same thing
     #[arg(long, value_name = "URL")]
     channel: Option<String>,
+    /// A model server the stations use, by its OpenAI address: a Kvasir
+    /// serving a card, or any OpenAI compatible server. Kvasir holds it as
+    /// one backend; on an install or with --update, and with the assistant
+    #[arg(long, value_name = "URL", requires = "model_key_file")]
+    model_server: Option<String>,
+    /// With --model-server: a file holding its key, which Kvasir seals and
+    /// setup never writes anywhere
+    #[arg(long, value_name = "FILE", requires = "model_server")]
+    model_key_file: Option<PathBuf>,
+    /// With --model-server: the model the stations use, where not the first
+    /// one the server lists as proven
+    #[arg(long, value_name = "ID", requires = "model_server")]
+    model_server_model: Option<String>,
 }
 
 // ---------------------------------------------------------------- the parts
@@ -3835,6 +3848,67 @@ pub(crate) struct State {
     /// supervisor can say when it has gone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) node: String,
+    /// The model server the stations use, where one was named: its address
+    /// and the file its key is read from, never the key, which only Kvasir
+    /// holds. Recorded, so that an update and a repair keep the stations on
+    /// it and seal the key again from the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model_server: Option<ModelServer>,
+}
+
+/// A model server the stations use (record 47): its OpenAI address, the file
+/// its key is read from, and the model the stations are mapped to where one
+/// was named. The key itself is never here: it is read from the file when
+/// Kvasir is given it, and Kvasir seals it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelServer {
+    pub(crate) url: String,
+    pub(crate) key_file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+}
+
+/// The model server the flags name, its address checked and its key file
+/// read once to see that it holds a key; `None` where none is named.
+fn model_server_of(args: &SetupArgs) -> Result<Option<ModelServer>, String> {
+    let Some(url) = &args.model_server else {
+        return Ok(None);
+    };
+    let url = url.trim().trim_end_matches('/').to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "--model-server {url} is not an address starting with http:// or https://"
+        ));
+    }
+    let Some(file) = &args.model_key_file else {
+        return Err("--model-server needs --model-key-file, the file its key is in".to_string());
+    };
+    // an update or a service reads it again from elsewhere
+    let key_file = std::path::absolute(file).unwrap_or_else(|_| file.clone());
+    if read_model_key(&key_file).is_none() {
+        return Err(format!(
+            "no key could be read from {}: the file is missing, unreadable or empty",
+            key_file.display()
+        ));
+    }
+    let model = args
+        .model_server_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    Ok(Some(ModelServer {
+        url,
+        key_file,
+        model,
+    }))
+}
+
+/// A model server's key, read from its file; `None` where there is none.
+fn read_model_key(file: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let key = text.trim();
+    (!key.is_empty()).then(|| key.to_string())
 }
 
 impl State {
@@ -3997,6 +4071,9 @@ pub(crate) struct Plan {
     /// unit stays a matter of text. `None` where they do not run on this
     /// machine, or where no Node 22 is here.
     pub(crate) node: Option<PathBuf>,
+    /// The model server the stations use, where one was named: Kvasir
+    /// holds it as one backend once it answers (record 47).
+    pub(crate) model_server: Option<ModelServer>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -4266,6 +4343,7 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         // root's, after the install, so every run that writes units looks
         closed: Vec::new(),
         node: None,
+        model_server: state.model_server.clone(),
     };
     let node = node_for(&plan, Some(&state.node));
     (Plan { node, ..plan }, read)
@@ -6373,6 +6451,20 @@ fn questions(
              which needs Node 22, and run in {NODE_IMAGE} beside the others"
         ));
     }
+    // A model server named with the flags is what the stations use, and no
+    // model is asked for; the model on it is asked where none was named and
+    // the server lists none as proven (record 47).
+    let mut model_server = model_server_of(args).map_err(usage)?;
+    if model_server.is_some() && !parts.contains(&Part::Assistant) {
+        return Err(usage(
+            "--model-server is for the assistant's stations, and the assistant is not installed",
+        )
+        .into());
+    }
+    // one on record stays, while the assistant does, unless the flags name another
+    if model_server.is_none() && parts.contains(&Part::Assistant) {
+        model_server = existing.and_then(|s| s.model_server.clone());
+    }
     // The model the assistant asks for is kept unless another is chosen, and
     // a rerun is how the model is changed; with none named yet, it is asked.
     let on_record = if parts.contains(&Part::Assistant) {
@@ -6381,6 +6473,7 @@ fn questions(
         None
     };
     let choose = parts.contains(&Part::Assistant)
+        && model_server.is_none()
         && match &on_record {
             Some(model) => {
                 let talks_to = if model == CHATGPT_WORDS {
@@ -6408,6 +6501,15 @@ fn questions(
             &chosen.model
         });
         answers.model = Some(chosen);
+    } else if let Some(server) = &mut model_server {
+        if server.model.is_none() && console.interactive() && !args.print {
+            server.model = ask_server_model(console, server)?;
+        }
+        console.said(&format!(
+            "{} at {}",
+            server.model.as_deref().unwrap_or("a proven model"),
+            server.url
+        ));
     } else {
         // The install's ChatGPT subscription, kept, is chosen again: signed
         // in once Kvasir runs where it is not, which is how a sign-in that did
@@ -6637,6 +6739,7 @@ fn questions(
         site,
         closed: Vec::new(),
         node: None,
+        model_server,
     };
     plan.node = node_for(&plan, existing.map(|s| s.node.as_str()));
     // Every path a unit would keep a part out of is looked at here, as root,
@@ -6736,6 +6839,23 @@ fn what_is_there(state: &State) -> String {
 /// names, brought to the newest release, without a question.
 fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
+    // a model server named now takes the place of the one on record; the
+    // model named for the same server before is kept where none is named now
+    if let Some(mut server) = model_server_of(args).map_err(usage)? {
+        if !plan.has(Part::Assistant) {
+            return Err(usage(
+                "--model-server is for the assistant's stations, and this install has no assistant",
+            ));
+        }
+        if server.model.is_none() {
+            server.model = state
+                .model_server
+                .as_ref()
+                .filter(|was| was.url == server.url)
+                .and_then(|was| was.model.clone());
+        }
+        plan.model_server = Some(server);
+    }
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
@@ -7110,6 +7230,9 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     }
     if plan.has(Part::Assistant) {
         rows.push((LLAMA_PART, llama_row(plan)));
+    }
+    if let Some(server) = &plan.model_server {
+        rows.push(("model server", model_server_row(server)));
     }
     rows.push((
         "registry",
@@ -7675,6 +7798,7 @@ fn do_it(
             .as_ref()
             .map(|node| node.display().to_string())
             .unwrap_or_default(),
+        model_server: plan.model_server.clone(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -11516,6 +11640,135 @@ fn list_models(url: &str, key: Option<&str>) -> Option<Vec<String>> {
     Some(ids)
 }
 
+/// The plan's row for a model server: its address, where its key is read
+/// from, and the model the stations go to. Never the key.
+fn model_server_row(server: &ModelServer) -> String {
+    format!(
+        "{}, its key read from {} and sealed in Kvasir; the stations on {}",
+        server.url,
+        server.key_file.display(),
+        server
+            .model
+            .as_deref()
+            .unwrap_or("the first model it lists as proven")
+    )
+}
+
+/// The models an OpenAI compatible server lists, each as the server
+/// describes it, when it answers at all.
+fn server_offer(url: &str, key: Option<&str>) -> Option<Vec<serde_json::Value>> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(2)))
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build()
+        .into();
+    let mut request = agent.get(&format!("{url}/models"));
+    if let Some(key) = key {
+        request = request.header("authorization", &format!("Bearer {key}"));
+    }
+    let text = request.call().ok()?.body_mut().read_to_string().ok()?;
+    let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
+    answer["data"].as_array().cloned()
+}
+
+/// The first model a server lists as proven for the stations, as its own
+/// entry says or as the specs Kvasir read from it say.
+fn first_proven(models: &[serde_json::Value]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| m["proven"] == true || m["spec"]["proven"] == true)
+        .and_then(|m| m["id"].as_str())
+        .map(str::to_string)
+}
+
+/// What a person reads beside a model a server offers: whether it is
+/// loaded, and how long a context it takes.
+fn offer_words(model: &serde_json::Value) -> String {
+    let mut words = Vec::new();
+    if let Some(status) = model["status"].as_str() {
+        words.push(status.to_string());
+    }
+    if let Some(context) = model["context_length"].as_u64() {
+        words.push(format!("{context} tokens of context"));
+    }
+    words.join(", ")
+}
+
+/// The model the stations use on a model server, where the flags named
+/// none: the first one the server lists as proven, else the one a person
+/// picks from its list. `None` where the server does not answer from here,
+/// and Kvasir's own reading of the list decides once it runs.
+fn ask_server_model(console: &mut Console, server: &ModelServer) -> Result<Option<String>, Stop> {
+    let key = read_model_key(&server.key_file);
+    let url = server.url.clone();
+    let listed = console.probe(
+        &format!("offered {url} {}", key.as_deref().map_or(0, key_mark)),
+        || server_offer(&url, key.as_deref()),
+    );
+    let Some(models) = listed.filter(|m| !m.is_empty()) else {
+        console.note(&format!(
+            "{url} did not list its models from here, so Kvasir takes the first it lists as \
+             proven once it runs"
+        ));
+        return Ok(None);
+    };
+    if let Some(proven) = first_proven(&models) {
+        console.note(&format!("{url} lists {proven} as proven for the stations"));
+        return Ok(Some(proven));
+    }
+    let shown: Vec<(String, String)> = models
+        .iter()
+        .take(12)
+        .filter_map(|m| Some((m["id"].as_str()?.to_string(), offer_words(m))))
+        .collect();
+    let options: Vec<(&str, &str)> = shown
+        .iter()
+        .map(|(id, words)| (id.as_str(), words.as_str()))
+        .collect();
+    let at = console.ask_choice("Which model do the stations use?", &options, 0)?;
+    Ok(shown.get(at).map(|(id, _)| id.clone()))
+}
+
+/// The name Kvasir holds a model server under where it holds none for it
+/// yet, made from the server's host the way Kvasir makes one.
+fn server_backend_id(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    let mut id = String::new();
+    for c in host.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c);
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id: String = id.trim_matches('-').chars().take(40).collect();
+    let id = id.trim_end_matches('-');
+    if id.is_empty() {
+        "model-server".to_string()
+    } else {
+        id.to_string()
+    }
+}
+
+/// A value put into a query string.
+fn query_value(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 /// No model named yet: Kvasir holds none, and the assistant answers once
 /// nils setup names one, or one is added from the desk.
 fn model_later(console: &mut Console) -> ModelChoice {
@@ -12571,10 +12824,13 @@ fn ready_kvasir(
         return Ok(path.exists());
     };
     if !kvasir_up(plan, console, 30) {
-        let kept: Vec<String> = to_add(plan)
+        let mut kept: Vec<String> = to_add(plan)
             .iter()
             .filter_map(|b| b["id"].as_str().map(str::to_string))
             .collect();
+        if let Some(server) = &plan.model_server {
+            kept.push(format!("the model server at {}", server.url));
+        }
         if !kept.is_empty() {
             console.say("once it runs, nils setup and then repair adds them");
             console.broken(&format!(
@@ -12600,6 +12856,9 @@ fn ready_kvasir(
         .unwrap_or(0);
     let added = hold_backends(plan, &kvasir, console)?;
     admit_local_models(plan, &kvasir, console, &added, since)?;
+    if let Some(server) = &plan.model_server {
+        use_model_server(plan, &kvasir, console, server)?;
+    }
     if plan.mode == Mode::Off && chosen.is_some_and(|c| c.chatgpt) {
         sign_in_to_chatgpt(&kvasir, console)?;
     } else {
@@ -12686,6 +12945,218 @@ impl Kvasir {
         let text = response.body_mut().read_to_string().unwrap_or_default();
         Some((status, text))
     }
+}
+
+/// How long Kvasir may take to admit a model server's model: a cold model
+/// loads on the server first, and admission asks the model itself.
+const SERVER_WAIT_SECONDS: u64 = 3_600;
+
+/// A model server the stations use, held by Kvasir as one backend (record
+/// 47): its key sealed under the backend's name, the model the stations use
+/// admitted from the server's list, and each of the stations' purposes
+/// mapped to that model. The key is read from its file here and goes to
+/// Kvasir's credential door alone; it is never said or written. A key that
+/// cannot be read, a model the server does not offer or that does not
+/// answer, and no model named or proven, leave the stations with no model,
+/// which stops an install and is said on an update.
+fn use_model_server(
+    plan: &Plan,
+    kvasir: &Kvasir,
+    console: &Console,
+    server: &ModelServer,
+) -> Result<(), Exit> {
+    let url = server.url.trim_end_matches('/');
+    let Some(key) = read_model_key(&server.key_file) else {
+        console.say("put the key in that file and run nils setup --update");
+        return console.broken(&format!(
+            "no key could be read from {}, so Kvasir does not use the model server at {url}",
+            server.key_file.display()
+        ));
+    };
+    // the backend Kvasir holds for this server already, at the address as it
+    // dials it, else one named from the server's host
+    let dialled = model_address_for(plan.runtime, url);
+    let id = kvasir
+        .call("GET", "/v1/backends", None, 10)
+        .and_then(|answer| {
+            answer["backends"].as_array()?.iter().find_map(|b| {
+                let at = b["base_url"].as_str()?.trim_end_matches('/');
+                (at == url || at == dialled.trim_end_matches('/'))
+                    .then(|| b["id"].as_str().map(str::to_string))
+                    .flatten()
+            })
+        })
+        .unwrap_or_else(|| server_backend_id(url));
+    match kvasir.answer(
+        "PUT",
+        &format!("/v1/credentials/{}", query_value(&id)),
+        Some(&serde_json::json!({ "secret": key })),
+        10,
+    ) {
+        Some((200, _)) => {
+            console.progress(&format!("the key of {url} is sealed in Kvasir as {id}"))
+        }
+        other => {
+            let why = other.map_or_else(
+                || "it did not answer".to_string(),
+                |(status, said)| refusal(status, &said),
+            );
+            return console.broken(&format!(
+                "Kvasir did not seal the key of {url} ({why}), so it does not use that server"
+            ));
+        }
+    }
+    let offer = match kvasir.answer(
+        "GET",
+        &format!(
+            "/v1/servers/models?url={}&key_ref={}",
+            query_value(url),
+            query_value(&id)
+        ),
+        None,
+        30,
+    ) {
+        Some((200, said)) => said,
+        other => {
+            let why = other.map_or_else(
+                || "it did not answer".to_string(),
+                |(status, said)| refusal(status, &said),
+            );
+            return console.broken(&format!(
+                "Kvasir could not read the models {url} offers ({why}), so the stations have no \
+                 model"
+            ));
+        }
+    };
+    let offered = offer["models"].as_array().cloned().unwrap_or_default();
+    let named = |m: &serde_json::Value, name: &str| {
+        m["id"] == name
+            || m["aliases"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x == name))
+    };
+    let ids: Vec<&str> = offered.iter().filter_map(|m| m["id"].as_str()).collect();
+    let model = match &server.model {
+        Some(name) => {
+            if !offered.iter().any(|m| named(m, name)) {
+                console.say(&format!("it offers {}", ids.join(", ")));
+                return console.broken(&format!(
+                    "{url} offers no model named {name}, so the stations have no model"
+                ));
+            }
+            name.clone()
+        }
+        None => match first_proven(&offered) {
+            Some(proven) => {
+                console.note(&format!("{url} lists {proven} as proven for the stations"));
+                proven
+            }
+            None => {
+                console.say(&format!(
+                    "name the one the stations use with --model-server-model, from {}",
+                    ids.join(", ")
+                ));
+                return console.broken(&format!(
+                    "{url} lists no model as proven, so the stations have no model"
+                ));
+            }
+        },
+    };
+    // admitted on the server's one backend: asked one short question, which
+    // loads a cold model on the server first, and put through the suite
+    let started = std::time::Instant::now();
+    let asked = kvasir.clone();
+    let body = serde_json::json!({ "url": url, "id": id, "key_ref": id, "models": [model] });
+    let run = std::thread::spawn(move || {
+        asked.answer("POST", "/v1/servers", Some(&body), SERVER_WAIT_SECONDS)
+    });
+    while !run.is_finished() {
+        console.waiting(&format!("Kvasir admitting {model} from {url}"), started);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    console.waited();
+    let answered = run.join().ok().flatten();
+    let result = answered.as_ref().and_then(|(_, said)| {
+        said["results"]
+            .as_array()?
+            .iter()
+            .find(|r| r["id"] == model.as_str())
+            .cloned()
+    });
+    let backend = match (&answered, &result) {
+        (Some((201, said)), Some(r)) if r["answered"] == true && r["admitted"] != false => {
+            said["backend"]["id"].as_str().unwrap_or(&id).to_string()
+        }
+        (Some(_), Some(r)) if r["answered"] == true => {
+            console.say(
+                "Kvasir does not offer it until it passes; nils setup --update runs the suite \
+                 again",
+            );
+            return console.broken(&format!(
+                "{model} from {url} did not pass Kvasir's admission, so the stations have no \
+                 model they may use"
+            ));
+        }
+        (_, Some(r)) => {
+            let why = r["error"]["message"].as_str().unwrap_or("no answer");
+            return console.broken(&format!(
+                "{model} at {url} did not answer Kvasir ({why}), so the stations have no model"
+            ));
+        }
+        (other, None) => {
+            let why = other.as_ref().map_or_else(
+                || "it did not answer".to_string(),
+                |(status, said)| refusal(*status, said),
+            );
+            return console.broken(&format!(
+                "Kvasir did not take {model} from {url} ({why}), so the stations have no model"
+            ));
+        }
+    };
+    console.progress(&format!("Kvasir holds {model} from {url} as {backend}"));
+    // each of the stations' purposes goes to that model
+    let Some(table) = kvasir.call("GET", "/v1/purposes", None, 10) else {
+        return console.broken(&format!(
+            "Kvasir did not list its purposes, so the stations are not mapped to {model}"
+        ));
+    };
+    let mut mapped = 0;
+    let mut refused = Vec::new();
+    for row in table["purposes"].as_array().into_iter().flatten() {
+        let Some(purpose) = row["purpose"].as_str() else {
+            continue;
+        };
+        if !purpose.starts_with("assistant.") {
+            continue;
+        }
+        if row["backend"] == backend.as_str() && row["model"] == model.as_str() {
+            mapped += 1;
+            continue;
+        }
+        match kvasir.answer(
+            "PUT",
+            &format!("/v1/purposes/{purpose}/policy"),
+            Some(&serde_json::json!({ "backend": backend, "model": model })),
+            10,
+        ) {
+            Some((200, _)) => mapped += 1,
+            other => refused.push(format!(
+                "{purpose} ({})",
+                other.map_or_else(
+                    || "it did not answer".to_string(),
+                    |(status, said)| refusal(status, &said)
+                )
+            )),
+        }
+    }
+    console.progress(&format!("{mapped} station purpose(s) go to {model}"));
+    if !refused.is_empty() {
+        console.broken(&format!(
+            "Kvasir did not map {} to {model}",
+            refused.join(", ")
+        ))?;
+    }
+    Ok(())
 }
 
 /// The model ids a backend or a catalog names, each given as a name or as
@@ -17777,6 +18248,7 @@ mod tests {
             site: None,
             closed: Vec::new(),
             node: Some(PathBuf::from("/opt/node/bin/node")),
+            model_server: None,
         }
     }
 
@@ -18414,6 +18886,10 @@ mod tests {
         purposes: serde_json::Value,
         admission: Vec<serde_json::Value>,
         signing_in: Vec<&'static str>,
+        /// What a model server offers through Kvasir's `/v1/servers/models`.
+        offered: Vec<serde_json::Value>,
+        /// The credentials sealed, by name.
+        sealed: BTreeMap<String, String>,
     }
 
     /// Kvasir's doors over what it holds. A backend is added unless one of
@@ -18486,6 +18962,82 @@ mod tests {
                 ("DELETE", p) if p.starts_with("/v1/keys/") => (204, String::new()),
                 ("GET", "/v1/purposes") => ok(json!({ "purposes": held.purposes })),
                 ("PUT", p) if p.ends_with("/policy") => ok(json!({})),
+                ("PUT", p) if p.starts_with("/v1/credentials/") => {
+                    let name = p["/v1/credentials/".len()..].to_string();
+                    let secret = sent["secret"].as_str().unwrap_or_default().to_string();
+                    held.sealed.insert(name.clone(), secret);
+                    ok(json!({"provider": name, "stored": true, "shown": "never"}))
+                }
+                ("GET", p) if p.starts_with("/v1/servers/models?") => {
+                    let named = p.split("key_ref=").nth(1).unwrap_or_default();
+                    if !held.sealed.contains_key(named) {
+                        return (
+                            404,
+                            json!({"error": {"message": format!("no key is sealed as {named}")}})
+                                .to_string(),
+                        );
+                    }
+                    ok(json!({"url": "", "models": held.offered, "server": null}))
+                }
+                // a ticked model named `silent` does not answer, and one named
+                // `unfit` does not pass admission
+                ("POST", "/v1/servers") => {
+                    let id = sent["id"].as_str().unwrap_or("server").to_string();
+                    let models = model_ids(&sent["models"]);
+                    let results: Vec<serde_json::Value> = models
+                        .iter()
+                        .map(|m| match m.as_str() {
+                            "silent" => json!({"id": m, "answered": false, "admitted": null,
+                                "error": {"kind": "unreachable", "message": "fetch failed"}}),
+                            "unfit" => {
+                                json!({"id": m, "answered": true, "admitted": false, "error": null})
+                            }
+                            _ => {
+                                json!({"id": m, "answered": true, "admitted": true, "error": null})
+                            }
+                        })
+                        .collect();
+                    if results.iter().all(|r| r["answered"] != true) {
+                        return (
+                            422,
+                            json!({"backend": null, "results": results}).to_string(),
+                        );
+                    }
+                    let taken: Vec<String> = results
+                        .iter()
+                        .filter(|r| r["answered"] == true)
+                        .filter_map(|r| r["id"].as_str().map(str::to_string))
+                        .collect();
+                    match held.backends.iter_mut().find(|b| b["id"] == id.as_str()) {
+                        Some(b) => {
+                            let mut had = model_ids(&b["models"]);
+                            had.extend(
+                                taken
+                                    .iter()
+                                    .filter(|m| !had.contains(m))
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            );
+                            b["models"] = json!(had);
+                        }
+                        None => held.backends.push(json!({
+                            "id": id, "locality": "local", "base_url": sent["url"],
+                            "models": taken, "builtin": false, "server": true,
+                        })),
+                    }
+                    // an admitted model is listed, as Kvasir lists it
+                    let admitted: Vec<String> = results
+                        .iter()
+                        .filter(|r| r["admitted"] == true)
+                        .filter_map(|r| r["id"].as_str().map(str::to_string))
+                        .collect();
+                    held.listed.extend(admitted);
+                    (
+                        201,
+                        json!({"backend": {"id": id, "models": models}, "results": results})
+                            .to_string(),
+                    )
+                }
                 ("POST", "/v1/subscriptions/chatgpt/sign-in") => ok(json!({
                     "state": "waiting", "user_code": "WXYZ-1234",
                     "verification_uri": "https://auth.openai.com/codex/device",
@@ -18538,6 +19090,297 @@ mod tests {
             .filter_map(|c| c.strip_prefix("POST /v1/backends "))
             .map(|body| serde_json::from_str(body).unwrap())
             .collect()
+    }
+
+    /// What a model server offers: the default is not the model the
+    /// stations were proven on, which the server marks.
+    fn offered_by_the_card() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"id": "flash-next", "default": true, "status": "loaded",
+                               "context_length": 262_144}),
+            serde_json::json!({"id": "qwen38-27b", "aliases": ["qwen38-27b-fast"], "status": "cold",
+                               "context_length": 262_144, "spec": {"proven": true}}),
+        ]
+    }
+
+    /// Every file under a directory, with what it holds.
+    fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    out.push((path, bytes));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_model_server_is_held_its_key_sealed_and_the_stations_mapped() {
+        use serde_json::json;
+        // this test reaches nothing of the machine's own: its record, if
+        // there is one where this run looks, is the same after it
+        let record_before = std::fs::read(state_path()).ok();
+        let dir = kvasir_dir(
+            "model-server",
+            json!([
+                {"id": "assistant.ask-help", "content": "rows"},
+                {"id": "assistant.operator", "content": "catalog"}
+            ]),
+        );
+        const SECRET: &str = "kvs_card0.the-servers-own-secret";
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, format!("{SECRET}\n")).unwrap();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: json!([
+                {"purpose": "assistant.operator", "content": "catalog", "backend": null},
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null},
+                {"purpose": "desk.search", "content": "rows", "backend": null}
+            ]),
+            offered: offered_by_the_card(),
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        plan.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: None,
+        });
+        let console = Console::new(true);
+        console.strict.set(true);
+
+        // with no model named, the one the server lists as proven: the key
+        // sealed under the backend's name, the model admitted, and each of
+        // the stations' purposes mapped to it
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let seen = calls.lock().unwrap().clone();
+        assert_eq!(
+            held.lock()
+                .unwrap()
+                .sealed
+                .get("models-example-org")
+                .map(String::as_str),
+            Some(SECRET),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter().any(|c| c.starts_with(
+                "GET /v1/servers/models?url=https%3A%2F%2Fmodels.example.org%2Fv1&key_ref=models-example-org "
+            )),
+            "{seen:?}"
+        );
+        let admitted: Vec<serde_json::Value> = seen
+            .iter()
+            .filter_map(|c| c.strip_prefix("POST /v1/servers "))
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect();
+        assert_eq!(
+            admitted,
+            vec![
+                json!({"url": "https://models.example.org/v1", "id": "models-example-org",
+                        "key_ref": "models-example-org", "models": ["qwen38-27b"]})
+            ]
+        );
+        for purpose in ["assistant.operator", "assistant.ask-help"] {
+            assert!(
+                seen.iter().any(
+                    |c| c.starts_with(&format!("PUT /v1/purposes/{purpose}/policy"))
+                        && c.contains(r#""backend":"models-example-org""#)
+                        && c.contains(r#""model":"qwen38-27b""#)
+                ),
+                "{purpose}: {seen:?}"
+            );
+        }
+        assert!(
+            !seen.iter().any(|c| c.contains("desk.search/policy")),
+            "only the stations' purposes are mapped: {seen:?}"
+        );
+        // the key went to Kvasir's credential door and nowhere else
+        let carrying: Vec<&String> = seen.iter().filter(|c| c.contains(SECRET)).collect();
+        assert_eq!(carrying.len(), 1, "{carrying:?}");
+        assert!(carrying[0].starts_with("PUT /v1/credentials/models-example-org "));
+        // and nothing setup wrote holds it: only the file it was read from
+        for (path, bytes) in files_under(&dir) {
+            if path != key_file {
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains(SECRET),
+                    "{} holds the key",
+                    path.display()
+                );
+            }
+        }
+
+        // a model named goes the same way, on the backend Kvasir holds for
+        // that server already
+        calls.lock().unwrap().clear();
+        plan.model_server.as_mut().unwrap().model = Some("flash-next".to_string());
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|c| c.starts_with("POST /v1/servers ")
+                && c.contains(r#""models":["flash-next"]"#)
+                && c.contains(r#""id":"models-example-org""#)),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter().any(
+                |c| c.starts_with("PUT /v1/purposes/assistant.operator/policy")
+                    && c.contains(r#""model":"flash-next""#)
+            ),
+            "{seen:?}"
+        );
+
+        // a model the server does not offer, one that does not pass
+        // admission, one that does not answer, none named and none proven,
+        // and a key that is not there, each stop an install
+        for (model, offered, said) in [
+            (
+                Some("gone"),
+                offered_by_the_card(),
+                "offers no model named gone",
+            ),
+            (
+                Some("unfit"),
+                vec![json!({"id": "unfit"})],
+                "did not pass Kvasir's admission",
+            ),
+            (
+                Some("silent"),
+                vec![json!({"id": "silent"})],
+                "did not answer Kvasir",
+            ),
+            (
+                None,
+                vec![json!({"id": "flash-next", "default": true})],
+                "lists no model as proven",
+            ),
+        ] {
+            held.lock().unwrap().offered = offered;
+            plan.model_server.as_mut().unwrap().model = model.map(str::to_string);
+            let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
+            assert!(stopped.message.contains(said), "{}", stopped.message);
+            assert!(!stopped.message.contains(SECRET));
+        }
+        std::fs::remove_file(&key_file).unwrap();
+        let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
+        assert!(
+            stopped.message.contains("no key could be read from"),
+            "{}",
+            stopped.message
+        );
+
+        assert_eq!(
+            std::fs::read(state_path()).ok(),
+            record_before,
+            "the machine's own record changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_record_keeps_a_model_servers_address_and_key_file_and_never_its_key() {
+        use clap::Parser as _;
+        const SECRET: &str = "kvs_card0.never-in-the-record";
+        let dir = scratch("model-server-record");
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, SECRET).unwrap();
+        let parsed = |extra: &[&str]| {
+            let mut argv = vec!["nils", "--dir", "/x/nils"];
+            argv.extend_from_slice(extra);
+            Wizard::try_parse_from(argv).map(|w| w.setup)
+        };
+        let args = parsed(&[
+            "--model-server",
+            "https://models.example.org/v1/",
+            "--model-key-file",
+            key_file.to_str().unwrap(),
+        ])
+        .unwrap();
+        let server = model_server_of(&args).unwrap().unwrap();
+        assert_eq!(server.url, "https://models.example.org/v1");
+        assert_eq!(server.key_file, key_file);
+        assert_eq!(server.model, None);
+
+        // the record names the address and the file, never the key
+        let state = State {
+            dir: "/x/nils".to_string(),
+            mode: "off".to_string(),
+            model_server: Some(server.clone()),
+            ..State::default()
+        };
+        let text = toml::to_string(&state).unwrap();
+        assert!(text.contains("https://models.example.org/v1"), "{text}");
+        assert!(text.contains(key_file.to_str().unwrap()), "{text}");
+        assert!(!text.contains(SECRET), "{text}");
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.model_server.as_ref(), Some(&server));
+        // and so does the plan a print shows, which an update makes from it
+        let row = model_server_row(&server);
+        assert!(row.contains("the first model it lists as proven"), "{row}");
+        assert!(!row.contains(SECRET), "{row}");
+        let mut from_record = plan(Runtime::Machine);
+        from_record.model_server = back.model_server.clone();
+        assert!(
+            plan_rows(&from_record)
+                .iter()
+                .any(|(key, value)| *key == "model server" && *value == row)
+        );
+
+        // what the flags refuse
+        assert!(parsed(&["--model-server", "https://models.example.org/v1"]).is_err());
+        assert!(parsed(&["--model-server-model", "qwen38-27b"]).is_err());
+        let bad = |url: &str, file: &Path| {
+            model_server_of(
+                &parsed(&[
+                    "--model-server",
+                    url,
+                    "--model-key-file",
+                    file.to_str().unwrap(),
+                ])
+                .unwrap(),
+            )
+            .unwrap_err()
+        };
+        assert!(bad("models.example.org", &key_file).contains("http://"));
+        let empty = dir.join("empty.key");
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(bad("https://models.example.org/v1", &empty).contains("no key could be read"));
+        assert!(
+            bad("https://models.example.org/v1", &dir.join("missing"))
+                .contains("no key could be read")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_server_is_named_from_its_host_the_way_kvasir_names_one() {
+        assert_eq!(
+            server_backend_id("https://kvasir.kineuro.se/v1"),
+            "kvasir-kineuro-se"
+        );
+        assert_eq!(server_backend_id("http://127.0.0.1:30000/v1"), "127-0-0-1");
+        assert_eq!(
+            server_backend_id("http://u@Models.Example.org/"),
+            "models-example-org"
+        );
+        assert_eq!(server_backend_id("http://[::1]:8000/v1"), "1");
+        assert_eq!(server_backend_id("http:///v1"), "model-server");
+        assert_eq!(
+            query_value("https://a.b/v1?x=1 y"),
+            "https%3A%2F%2Fa.b%2Fv1%3Fx%3D1%20y"
+        );
+        let offered = offered_by_the_card();
+        assert_eq!(first_proven(&offered).as_deref(), Some("qwen38-27b"));
+        assert_eq!(first_proven(&offered[..1]), None);
+        assert_eq!(offer_words(&offered[0]), "loaded, 262144 tokens of context");
     }
 
     #[test]
