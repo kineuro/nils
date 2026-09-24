@@ -903,8 +903,11 @@ pub fn render_jpeg(
     wwidth: f64,
     blank: bool,
 ) -> Result<Vec<u8>, String> {
+    // a width below one (0 from a header, or a caller's) is one: a narrower
+    // window would divide into NaN or infinity and render black
+    let wwidth = if wwidth.is_finite() { wwidth.max(1.0) } else { 1.0 };
     let lo = center - wwidth / 2.0;
-    let scale = 255.0 / wwidth.max(f64::MIN_POSITIVE);
+    let scale = 255.0 / wwidth;
     let mut gray = Vec::with_capacity(pixels.len());
     let band = height / 8;
     // the value to grey as one line: stored * (slope * scale) + offset
@@ -1563,6 +1566,23 @@ mod tests {
         })
         .unwrap();
         assert_eq!((old.slope, old.intercept), (1.0, -32768.0));
+    }
+
+    #[test]
+    fn a_window_of_no_width_renders_as_one_of_width_one() {
+        // a window width of 0 (or a negative one) is floored at 1: a value
+        // above the centre is white, one below black, never NaN's black
+        let px = [100u16, 101, 99, 100];
+        let grey = |w: f64| {
+            let jpeg = render_jpeg(2, 2, &px, 1.0, 0.0, 100.0, w, false).unwrap();
+            image::load_from_memory(&jpeg).unwrap().to_luma8().into_raw()
+        };
+        for w in [0.0, -5.0] {
+            let g = grey(w);
+            assert!(g[1] > 200, "{w}: {g:?}");
+            assert!(g[2] < 50, "{w}: {g:?}");
+            assert_eq!(g, grey(1.0), "{w}");
+        }
     }
 
     #[test]
