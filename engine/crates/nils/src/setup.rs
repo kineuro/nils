@@ -12963,6 +12963,11 @@ impl Kvasir {
     }
 }
 
+/// The prefix Kvasir stages a model server's key under before it holds the
+/// server as a backend, and the only name besides that backend's own it
+/// reads a server's key from.
+const SERVER_STAGING: &str = "server-staging:";
+
 /// How long Kvasir may take to admit a model server's model: a cold model
 /// loads on the server first, and admission asks the model itself.
 const SERVER_WAIT_SECONDS: u64 = 3_600;
@@ -12992,26 +12997,40 @@ fn use_model_server(
     // the backend Kvasir holds for this server already, at the address as it
     // dials it, else one named from the server's host
     let dialled = model_address_for(plan.runtime, url);
-    let id = kvasir
+    let held = kvasir
         .call("GET", "/v1/backends", None, 10)
         .and_then(|answer| {
             answer["backends"].as_array()?.iter().find_map(|b| {
                 let at = b["base_url"].as_str()?.trim_end_matches('/');
-                (at == url || at == dialled.trim_end_matches('/'))
+                (b["server"] == true && (at == url || at == dialled.trim_end_matches('/')))
                     .then(|| b["id"].as_str().map(str::to_string))
                     .flatten()
             })
-        })
-        .unwrap_or_else(|| server_backend_id(url));
+        });
+    let id = held.clone().unwrap_or_else(|| server_backend_id(url));
+    // Kvasir takes a key for a model server it holds under that backend's own
+    // name, which replaces the one it had; for one it does not hold yet, the
+    // key is staged, and Kvasir moves it onto the backend once it holds it
+    let key_ref = if held.is_some() {
+        id.clone()
+    } else {
+        format!("{SERVER_STAGING}{id}")
+    };
+    // a staged key Kvasir did not take is not left behind
+    let unstage = || {
+        if held.is_none() {
+            let _ = kvasir.call("DELETE", &format!("/v1/credentials/{key_ref}"), None, 10);
+        }
+    };
     match kvasir.answer(
         "PUT",
-        &format!("/v1/credentials/{}", query_value(&id)),
+        &format!("/v1/credentials/{key_ref}"),
         Some(&serde_json::json!({ "secret": key })),
         10,
     ) {
-        Some((200, _)) => {
-            console.progress(&format!("the key of {url} is sealed in Kvasir as {id}"))
-        }
+        Some((200, _)) => console.progress(&format!(
+            "the key of {url} is sealed in Kvasir as {key_ref}"
+        )),
         other => {
             let why = other.map_or_else(
                 || "it did not answer".to_string(),
@@ -13027,13 +13046,14 @@ fn use_model_server(
         &format!(
             "/v1/servers/models?url={}&key_ref={}",
             query_value(url),
-            query_value(&id)
+            query_value(&key_ref)
         ),
         None,
         30,
     ) {
         Some((200, said)) => said,
         other => {
+            unstage();
             let why = other.map_or_else(
                 || "it did not answer".to_string(),
                 |(status, said)| refusal(status, &said),
@@ -13062,6 +13082,7 @@ fn use_model_server(
         {
             Some(id) => id.to_string(),
             None => {
+                unstage();
                 console.say(&format!("it offers {}", ids.join(", ")));
                 return console.broken(&format!(
                     "{url} offers no model named {name}, so the stations have no model"
@@ -13069,6 +13090,7 @@ fn use_model_server(
             }
         },
         None => {
+            unstage();
             console.say(&format!(
                 "name the one the stations use with --model-server-model; it offers {}",
                 ids.join(", ")
@@ -13082,7 +13104,7 @@ fn use_model_server(
     // loads a cold model on the server first, and put through the suite
     let started = std::time::Instant::now();
     let asked = kvasir.clone();
-    let body = serde_json::json!({ "url": url, "id": id, "key_ref": id, "models": [model] });
+    let body = serde_json::json!({ "url": url, "id": id, "key_ref": key_ref, "models": [model] });
     let run = std::thread::spawn(move || {
         asked.answer("POST", "/v1/servers", Some(&body), SERVER_WAIT_SECONDS)
     });
@@ -13092,6 +13114,10 @@ fn use_model_server(
     }
     console.waited();
     let answered = run.join().ok().flatten();
+    // Kvasir holds no backend for the server, so the staged key is not moved
+    if !matches!(answered, Some((201, _))) {
+        unstage();
+    }
     let result = answered.as_ref().and_then(|(_, said)| {
         said["results"]
             .as_array()?
@@ -18984,20 +19010,36 @@ mod tests {
                     held.sealed.insert(name.clone(), secret);
                     ok(json!({"provider": name, "stored": true, "shown": "never"}))
                 }
+                ("DELETE", p) if p.starts_with("/v1/credentials/") => {
+                    let name = &p["/v1/credentials/".len()..];
+                    let status = if held.sealed.remove(name).is_some() {
+                        204
+                    } else {
+                        404
+                    };
+                    (status, String::new())
+                }
                 ("GET", p) if p.starts_with("/v1/servers/models?") => {
-                    let named = p.split("key_ref=").nth(1).unwrap_or_default();
-                    if !held.sealed.contains_key(named) {
-                        return (
-                            404,
-                            json!({"error": {"message": format!("no key is sealed as {named}")}})
-                                .to_string(),
-                        );
+                    let query = |name: &str| {
+                        p.split(['?', '&'])
+                            .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+                            .map(decoded)
+                            .unwrap_or_default()
+                    };
+                    if let Err(refused) = server_key(&held, &query("key_ref"), &query("url")) {
+                        return refused;
                     }
-                    ok(json!({"url": "", "models": held.offered, "server": null}))
+                    ok(json!({"url": query("url"), "models": held.offered, "server": null}))
                 }
                 // a ticked model named `silent` does not answer, and one named
                 // `unfit` does not pass admission
                 ("POST", "/v1/servers") => {
+                    let key_ref = sent["key_ref"].as_str().unwrap_or_default().to_string();
+                    let url = sent["url"].as_str().unwrap_or_default().to_string();
+                    let key = match server_key(&held, &key_ref, &url) {
+                        Ok(key) => key,
+                        Err(refused) => return refused,
+                    };
                     let id = sent["id"].as_str().unwrap_or("server").to_string();
                     let models = model_ids(&sent["models"]);
                     let results: Vec<serde_json::Value> = models
@@ -19036,10 +19078,18 @@ mod tests {
                             );
                             b["models"] = json!(had);
                         }
-                        None => held.backends.push(json!({
-                            "id": id, "locality": "local", "base_url": sent["url"],
-                            "models": taken, "builtin": false, "server": true,
-                        })),
+                        // the key sealed under the backend's own id, once
+                        None => {
+                            held.backends.push(json!({
+                                "id": id, "locality": "local", "base_url": sent["url"],
+                                "models": taken, "builtin": false, "server": true,
+                            }));
+                            held.sealed.insert(id.clone(), key);
+                        }
+                    }
+                    // a staged key goes once the backend holds its own
+                    if key_ref.starts_with(SERVER_STAGING) {
+                        held.sealed.remove(&key_ref);
                     }
                     // an admitted model is listed, as Kvasir lists it
                     let admitted: Vec<String> = results
@@ -19073,6 +19123,54 @@ mod tests {
                 _ => (404, json!({"error": {"code": "no_such_door"}}).to_string()),
             }
         })
+    }
+
+    /// A model server's key as Kvasir reads it for its doors: named by a stage
+    /// (`server-staging:<name>`) or by the id of that server's own backend at
+    /// the same address, and sealed; a refusal as Kvasir answers it otherwise.
+    fn server_key(held: &Held, key_ref: &str, url: &str) -> Result<String, (u16, String)> {
+        let own = held
+            .backends
+            .iter()
+            .any(|b| b["server"] == true && b["id"] == key_ref && b["base_url"] == url);
+        if !key_ref.starts_with(SERVER_STAGING) && !own {
+            return Err((
+                400,
+                serde_json::json!({"error": {"message": format!(
+                    "key_ref names a key staged for a model server ({SERVER_STAGING}<name>) or the id \
+                     of this server's own backend; {key_ref} is neither"
+                )}})
+                .to_string(),
+            ));
+        }
+        held.sealed.get(key_ref).cloned().ok_or_else(|| {
+            (
+                404,
+                serde_json::json!({"error": {"message": format!("no key is sealed as {key_ref}")}})
+                    .to_string(),
+            )
+        })
+    }
+
+    /// A query string's value as it was before it was put there.
+    fn decoded(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && let Some(b) = value
+                    .get(i + 1..i + 3)
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).to_string()
     }
 
     /// A setup directory whose kvasir.json holds the installer's token and
@@ -19173,23 +19271,19 @@ mod tests {
         let console = Console::new(true);
         console.strict.set(true);
 
-        // the model named, by its alias: the key sealed under the backend's
-        // name, the model admitted, and each of the stations' purposes
-        // mapped to it
+        // the model named, by its alias: the key staged, then moved by
+        // Kvasir onto the backend it holds for the server, the model
+        // admitted, and each of the stations' purposes mapped to it
         assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
         let seen = calls.lock().unwrap().clone();
         assert_eq!(
-            held.lock()
-                .unwrap()
-                .sealed
-                .get("models-example-org")
-                .map(String::as_str),
-            Some(SECRET),
-            "{seen:?}"
+            held.lock().unwrap().sealed,
+            BTreeMap::from([("models-example-org".to_string(), SECRET.to_string())]),
+            "the key is the backend's alone, and the stage is gone: {seen:?}"
         );
         assert!(
             seen.iter().any(|c| c.starts_with(
-                "GET /v1/servers/models?url=https%3A%2F%2Fmodels.example.org%2Fv1&key_ref=models-example-org "
+                "GET /v1/servers/models?url=https%3A%2F%2Fmodels.example.org%2Fv1&key_ref=server-staging%3Amodels-example-org "
             )),
             "{seen:?}"
         );
@@ -19202,7 +19296,7 @@ mod tests {
             admitted,
             vec![
                 json!({"url": "https://models.example.org/v1", "id": "models-example-org",
-                        "key_ref": "models-example-org", "models": ["qwen38-27b"]})
+                        "key_ref": "server-staging:models-example-org", "models": ["qwen38-27b"]})
             ]
         );
         for purpose in ["assistant.operator", "assistant.ask-help"] {
@@ -19222,7 +19316,7 @@ mod tests {
         // the key went to Kvasir's credential door and nowhere else
         let carrying: Vec<&String> = seen.iter().filter(|c| c.contains(SECRET)).collect();
         assert_eq!(carrying.len(), 1, "{carrying:?}");
-        assert!(carrying[0].starts_with("PUT /v1/credentials/models-example-org "));
+        assert!(carrying[0].starts_with("PUT /v1/credentials/server-staging:models-example-org "));
         // and nothing setup wrote holds it: only the file it was read from
         for (path, bytes) in files_under(&dir) {
             if path != key_file {
@@ -19235,16 +19329,29 @@ mod tests {
         }
 
         // a model named goes the same way, on the backend Kvasir holds for
-        // that server already
+        // that server already, whose key is replaced under its own name, as
+        // an update with a new key file does
         calls.lock().unwrap().clear();
+        const NEWER: &str = "kvs_card0.the-servers-newer-secret";
+        std::fs::write(&key_file, NEWER).unwrap();
         plan.model_server.as_mut().unwrap().model = Some("flash-next".to_string());
         assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
         let seen = calls.lock().unwrap().clone();
         assert!(
+            seen.iter()
+                .any(|c| c.starts_with("PUT /v1/credentials/models-example-org ")),
+            "{seen:?}"
+        );
+        assert!(
             seen.iter().any(|c| c.starts_with("POST /v1/servers ")
                 && c.contains(r#""models":["flash-next"]"#)
-                && c.contains(r#""id":"models-example-org""#)),
+                && c.contains(r#""id":"models-example-org""#)
+                && c.contains(r#""key_ref":"models-example-org""#)),
             "{seen:?}"
+        );
+        assert_eq!(
+            held.lock().unwrap().sealed,
+            BTreeMap::from([("models-example-org".to_string(), NEWER.to_string())]),
         );
         assert!(
             seen.iter().any(
@@ -19285,6 +19392,25 @@ mod tests {
             assert!(stopped.message.contains(said), "{}", stopped.message);
             assert!(!stopped.message.contains(SECRET));
         }
+        // a server Kvasir does not hold yet whose model does not answer:
+        // the key staged for it is taken back, and nothing else is sealed
+        plan.model_server = Some(ModelServer {
+            url: "https://other.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: Some("silent".to_string()),
+        });
+        held.lock().unwrap().offered = vec![json!({"id": "silent"})];
+        let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
+        assert!(
+            stopped.message.contains("did not answer Kvasir"),
+            "{}",
+            stopped.message
+        );
+        assert_eq!(
+            held.lock().unwrap().sealed.keys().collect::<Vec<_>>(),
+            vec!["models-example-org"],
+            "a staged key was left behind"
+        );
         std::fs::remove_file(&key_file).unwrap();
         let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
         assert!(
