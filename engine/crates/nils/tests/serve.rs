@@ -5423,3 +5423,27 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
         ]
     );
 }
+
+/// Record 42 S3 at the withdrawal as at the writing: a person's pick is a
+/// person's to withdraw, so a call whose X-Nils-Actor names an agent or a
+/// model is refused before anything is read.
+#[test]
+fn only_a_person_withdraws_a_person_s_pick() {
+    let home = registry();
+    let server = Server::start(&home, 2, &[], &[]);
+    for actor in [
+        r#"{"kind": "agent", "name": "helper"}"#,
+        r#"{"kind": "model", "model": "1"}"#,
+    ] {
+        let (status, doc) = server.request_with(
+            "POST",
+            "/api/picks/1/withdraw",
+            Some(r#"{"why": "not mine"}"#),
+            None,
+            &[("X-Nils-Actor", actor)],
+        );
+        assert_eq!(status, 403, "{actor}: {doc}");
+        assert!(doc["error"].as_str().unwrap().contains("a person"), "{doc}");
+    }
+    server.finish();
+}

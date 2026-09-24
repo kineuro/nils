@@ -396,7 +396,7 @@ paths:
   /api/picks/{id}/withdraw:
     post:
       summary: Withdraw a person's pick; the run's pick it overruled applies again (record 42 S3; nils pick withdraw)
-      description: "The row stays and stops applying. A run's pick is not withdrawn: a person overrules it with a pick of their own. `why`, optional, is kept on the audit row. Audited as pick.withdraw, which moves the epoch."
+      description: "The row stays and stops applying. A run's pick is not withdrawn: a person overrules it with a pick of their own. `why`, optional, is kept on the audit row. Only a person withdraws one, as only a person writes one: a call whose X-Nils-Actor names an agent or a model is refused 403. Audited as pick.withdraw, which moves the epoch."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {why: {type: string}}}}}}
       responses:

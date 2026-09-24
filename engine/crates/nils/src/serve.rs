@@ -3061,6 +3061,17 @@ fn routed(
             ))
         }
         ["api", "picks", _, "withdraw"] if post => {
+            // a person's pick is a person's to withdraw, as it is theirs to
+            // write
+            let (kind, _) = author_of(caller);
+            if kind != "person" {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "a pick is withdrawn by a person; X-Nils-Actor names a {kind} acting for {principal}"
+                    ),
+                ));
+            }
             let id = id_at(2)?;
             let doc = json_body(body)?;
             let done = nils_classify::picking::withdraw_person(
