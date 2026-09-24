@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61],
+            [59, 60, 61, 62],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2016,7 +2016,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61],
+            [61, 62],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
