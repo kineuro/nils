@@ -155,6 +155,16 @@ impl Dialect {
                     key.join(", ")
                 )
             })
+            .chain(t.partial_uniques.iter().map(|p| {
+                format!(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_{}_{} ON {} ({}) WHERE {}",
+                    t.name,
+                    p.name,
+                    qualified(schema, t.name),
+                    p.columns.join(", "),
+                    p.predicate
+                )
+            }))
             .collect()
     }
 

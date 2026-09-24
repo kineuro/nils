@@ -249,6 +249,15 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
             ),
         ));
     }
+    if derivative::RUN_KINDS.contains(&a.kind) {
+        return Err((
+            400,
+            format!(
+                "a derivative of kind {} is written by a pipeline run, not registered at the door",
+                a.kind
+            ),
+        ));
+    }
     if let Some(s) = a.sha256
         && !is_sha256(s)
     {
@@ -274,13 +283,13 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
         }
         // a successor is of what its predecessor was of: the same subject,
         // and the same stack where either names one
-        if prior.subject_id != Some(belongs.subject_id) || prior.stack_id != belongs.stack_id {
+        if prior.subject_id != belongs.subject_id || prior.stack_id != belongs.stack_id {
             return Err((
                 400,
                 format!(
                     "derivative {old} was made from {}; one made from {} does not supersede it",
                     made_from(prior.subject_id, prior.stack_id),
-                    made_from(Some(belongs.subject_id), belongs.stack_id)
+                    made_from(belongs.subject_id, belongs.stack_id)
                 ),
             ));
         }
@@ -343,6 +352,8 @@ pub(crate) fn register(
             registered_by: a.principal,
             actor: a.actor,
             model_id,
+            run_id: None,
+            preprocess_version: None,
             supersedes_id: a.supersedes,
             created_at: &now,
         },
@@ -371,18 +382,39 @@ pub(crate) fn register(
         .ok_or_else(|| (500, "the derivative was not written back".to_string()))
 }
 
-/// A derivative as the doors and `--json` answer it: the row, the place
-/// by name and the door its bytes are read from.
-pub(crate) fn doc(store: &mut Store, d: &Derivative) -> Value {
-    let place = place::show(store, d.place_id).ok().flatten();
-    doc_in(d, place.map(|p| p.name))
+/// The path a place declares its folder is reachable at by the clients
+/// that share its volume (record 43 S3): `share` in its guarantees.
+pub(crate) fn share_of(p: &Place) -> Option<String> {
+    p.guarantees["share"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| s.starts_with('/'))
+        .map(|s| s.trim_end_matches('/').to_string())
 }
 
-/// [`doc`] with its place's name read already.
-fn doc_in(d: &Derivative, place: Option<String>) -> Value {
+/// A derivative as the doors and `--json` answer it: the row, the place
+/// by name, the door its bytes are read from, and the transports it goes
+/// by: the door always, and a shared path where its place declares one
+/// (the path itself only at the content door, gated as the bytes are).
+pub(crate) fn doc(store: &mut Store, d: &Derivative) -> Value {
+    let place = place::show(store, d.place_id).ok().flatten();
+    doc_in(
+        d,
+        place.as_ref().map(|p| p.name.clone()),
+        place.as_ref().and_then(share_of).is_some(),
+    )
+}
+
+/// [`doc`] with its place's name and share read already.
+fn doc_in(d: &Derivative, place: Option<String>, shared: bool) -> Value {
     let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
     v["place"] = json!(place);
     v["content"] = json!(format!("/api/derivatives/{}/content", d.id));
+    v["transports"] = if shared {
+        json!(["door", "share"])
+    } else {
+        json!(["door"])
+    };
     v
 }
 
@@ -559,6 +591,7 @@ pub(crate) fn route(
                     kind: kind.as_deref(),
                     stack_id: int_of(query, "stack")?,
                     subject_id: int_of(query, "subject")?,
+                    run_id: int_of(query, "run")?,
                     limit: query
                         .get("limit")
                         .and_then(|l| l.parse().ok())
@@ -568,7 +601,7 @@ pub(crate) fn route(
             .map_err(|e| Reply::error(500, e.to_string()))?;
             let store = registry.store();
             // the places the rows live in, each read once
-            let mut places: std::collections::BTreeMap<i64, Option<String>> =
+            let mut places: std::collections::BTreeMap<i64, Option<(String, bool)>> =
                 std::collections::BTreeMap::new();
             for d in &rows {
                 if let std::collections::btree_map::Entry::Vacant(e) = places.entry(d.place_id) {
@@ -576,13 +609,20 @@ pub(crate) fn route(
                         place::show(store, d.place_id)
                             .ok()
                             .flatten()
-                            .map(|p| p.name),
+                            .map(|p| (p.name.clone(), share_of(&p).is_some())),
                     );
                 }
             }
             let docs: Vec<Value> = rows
                 .iter()
-                .map(|d| doc_in(d, places.get(&d.place_id).cloned().flatten()))
+                .map(|d| {
+                    let (name, shared) = places
+                        .get(&d.place_id)
+                        .cloned()
+                        .flatten()
+                        .map_or((None, false), |(n, s)| (Some(n), s));
+                    doc_in(d, name, shared)
+                })
                 .collect();
             Ok(Reply::ok(json!({
                 "derivatives": docs,
@@ -597,6 +637,54 @@ pub(crate) fn route(
             let d = one(registry, id_of(id)?)?;
             let path =
                 file_of(registry.store(), &d).map_err(|(status, m)| Reply::error(status, m))?;
+            // record 43 S3: the second transport, a path on a volume the
+            // caller shares with the engine, gated and audited as the bytes
+            match query.get("transport").map(|t| decoded(t)).as_deref() {
+                None | Some("door") => {}
+                Some("share") => {
+                    let p = place::show(registry.store(), d.place_id)
+                        .map_err(|e| Reply::error(500, e.to_string()))?
+                        .ok_or_else(|| {
+                            Reply::error(409, format!("the place of derivative {} is gone", d.id))
+                        })?;
+                    let Some(share) = share_of(&p) else {
+                        return Err(Reply::error(
+                            409,
+                            format!(
+                                "the place {} declares no share path, so derivative {} comes through this door alone; an operator declares one with nils place set --share <path>",
+                                p.name, d.id
+                            ),
+                        ));
+                    };
+                    let shared = format!("{share}/{}", d.path);
+                    nils_registry::audit::record(
+                        registry,
+                        &nils_registry::audit::Entry {
+                            principal: &caller.principal,
+                            action: nils_registry::audit::Action::DerivativeRead,
+                            scope: json!({
+                                "derivative": d.id, "kind": d.kind, "stack": d.stack_id,
+                                "subject": d.subject_id, "bytes": d.bytes,
+                            }),
+                            policy: None,
+                            job_id: None,
+                            details: Some(json!({"transport": "share", "place": p.name})),
+                        },
+                    )
+                    .map_err(|e| Reply::error(500, e.to_string()))?;
+                    return Ok(Reply::ok(json!({
+                        "derivative": d.id, "transport": "share", "path": shared,
+                        "place": p.name, "bytes": d.bytes, "sha256": d.sha256,
+                        "media_type": d.media_type,
+                    })));
+                }
+                Some(other) => {
+                    return Err(Reply::error(
+                        400,
+                        format!("transport is door or share, not {other}"),
+                    ));
+                }
+            }
             nils_registry::audit::record(
                 registry,
                 &nils_registry::audit::Entry {
@@ -681,6 +769,9 @@ pub(crate) enum DerivativeCommand {
         /// Only this subject's, by id
         #[arg(long, value_name = "ID")]
         subject: Option<i64>,
+        /// Only the files this pipeline run made
+        #[arg(long, value_name = "RUN")]
+        run: Option<i64>,
         /// At most this many
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -773,6 +864,7 @@ pub(crate) fn command(
             kind,
             stack,
             subject,
+            run,
             limit,
             json,
         } => {
@@ -782,6 +874,7 @@ pub(crate) fn command(
                     kind: kind.as_deref(),
                     stack_id: stack,
                     subject_id: subject,
+                    run_id: run,
                     limit,
                 },
             )
@@ -852,6 +945,20 @@ pub(crate) fn command(
             if let Some(old) = d.supersedes_id {
                 println!("  supersedes       {old}");
             }
+            if let Some(run) = d.run_id {
+                println!("  made by run      {run}");
+            }
+            println!(
+                "  transports       {}",
+                v["transports"]
+                    .as_array()
+                    .map(|a| a
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default()
+            );
             Ok(())
         }
     }

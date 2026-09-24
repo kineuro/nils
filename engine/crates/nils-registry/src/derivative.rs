@@ -20,22 +20,42 @@ use crate::store::{Error, Insert, Param, Row, Store};
 /// The kinds a derivative may be. A mask is an uploaded segmentation, an
 /// embedding one encoder's vectors for one stack, a pyramid the viewer's
 /// tiles (wave 43 moves them here), an output anything else a pipeline
-/// wrote.
-pub const KINDS: [&str; 4] = ["mask", "embedding", "pyramid", "output"];
+/// wrote. Record 43 adds two a run writes and a person does not: seeds,
+/// the suggestions a run made for a person to curate, and model, the
+/// artifact of a model a run fitted and the registry registered.
+pub const KINDS: [&str; 6] = ["mask", "embedding", "pyramid", "output", "seeds", "model"];
+
+/// The kinds only a pipeline run writes (record 43).
+pub const RUN_KINDS: [&str; 2] = ["seeds", "model"];
 
 /// Where the files of registered derivatives go under a working place.
 pub const TREE: &str = "derivatives";
 
 /// What a derivative belongs to, resolved against the registry: the scope
-/// and its ids, the subject always filled.
+/// and its ids, the subject filled for every scope but a run's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Belongs {
-    /// `stack`, `series`, `session` or `subject`.
+    /// `stack`, `series`, `session`, `subject`, or `run` for a file that is
+    /// a whole run's rather than any subject's (record 43: seeds, a model).
     pub scope: String,
     pub stack_id: Option<i64>,
     pub series_id: Option<i64>,
-    pub subject_id: i64,
+    pub subject_id: Option<i64>,
     pub session_day: Option<String>,
+}
+
+impl Belongs {
+    /// A file that is a whole pipeline run's (record 43): it names the run,
+    /// through the row's `run_id`, and no subject.
+    pub fn run() -> Belongs {
+        Belongs {
+            scope: "run".into(),
+            stack_id: None,
+            series_id: None,
+            subject_id: None,
+            session_day: None,
+        }
+    }
 }
 
 /// One derivative as the registry holds it.
@@ -78,6 +98,11 @@ pub struct New<'a> {
     /// The registered model that made it (record 42 S2's table), when a
     /// model did; [`insert`] refuses an id the model table does not hold.
     pub model_id: Option<i64>,
+    /// The pipeline run that wrote it, when one did (record 43).
+    pub run_id: Option<i64>,
+    /// For an embedding, the preprocessing it was made under (record 43
+    /// S4); [`crate::embedding::register`] fills it with the encoder.
+    pub preprocess_version: Option<&'a str>,
     pub supersedes_id: Option<i64>,
     pub created_at: &'a str,
 }
@@ -129,7 +154,7 @@ pub fn belongs(
             scope: "stack".into(),
             stack_id: Some(id),
             series_id: row.opt_int(0).map_err(Err)?,
-            subject_id: row.int(1).map_err(Err)?,
+            subject_id: Some(row.int(1).map_err(Err)?),
             session_day: None,
         });
     }
@@ -146,7 +171,7 @@ pub fn belongs(
             scope: "series".into(),
             stack_id: None,
             series_id: Some(id),
-            subject_id: row.int(0).map_err(Err)?,
+            subject_id: Some(row.int(0).map_err(Err)?),
             session_day: None,
         });
     }
@@ -168,7 +193,7 @@ pub fn belongs(
         scope: if day.is_some() { "session" } else { "subject" }.into(),
         stack_id: None,
         series_id: None,
-        subject_id: id,
+        subject_id: Some(id),
         session_day: day.map(str::to_string),
     })
 }
@@ -176,6 +201,29 @@ pub fn belongs(
 /// Write the row. Answers its id. A model named is one the registry holds:
 /// the column refers to the model table, which the store does not enforce.
 pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
+    insert_row(store, n, None)
+}
+
+/// [`insert`] for a file a pipeline run made (record 43 S2): the row names
+/// the run, which the registry holds.
+pub fn insert_of_run(store: &mut Store, n: &New<'_>, run_id: i64) -> Result<i64, Error> {
+    if n.belongs.scope == "run" && n.belongs.subject_id.is_some() {
+        return Err(Error::Message("a run's own file names no subject".into()));
+    }
+    if crate::pipeline::run(store, run_id)?.is_none() {
+        return Err(Error::Message(format!(
+            "no pipeline run {run_id} made this derivative"
+        )));
+    }
+    insert_row(store, n, Some(run_id))
+}
+
+fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64, Error> {
+    if n.belongs.subject_id.is_none() && (n.belongs.scope != "run" || run_id.is_none()) {
+        return Err(Error::Message(
+            "a derivative belongs to a subject, or is a pipeline run's own file".into(),
+        ));
+    }
     if let Some(model) = n.model_id
         && crate::model::get(store, model)?.is_none()
     {
@@ -201,6 +249,8 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
                 "registered_by",
                 "actor",
                 "model_id",
+                "run_id",
+                "preprocess_version",
                 "supersedes_id",
                 "created_at",
             ],
@@ -211,7 +261,7 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
             Param::from(n.belongs.scope.as_str()),
             n.belongs.stack_id.map_or(Param::Null, Param::Int),
             n.belongs.series_id.map_or(Param::Null, Param::Int),
-            Param::Int(n.belongs.subject_id),
+            n.belongs.subject_id.map_or(Param::Null, Param::Int),
             n.belongs
                 .session_day
                 .as_deref()
@@ -224,6 +274,8 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
             Param::from(n.registered_by),
             n.actor.map_or(Param::Null, |a| Param::from(a.to_string())),
             n.model_id.map_or(Param::Null, Param::Int),
+            run_id.or(n.run_id).map_or(Param::Null, Param::Int),
+            n.preprocess_version.map_or(Param::Null, Param::from),
             n.supersedes_id.map_or(Param::Null, Param::Int),
             Param::from(n.created_at),
         ]],
@@ -256,7 +308,7 @@ const COLUMNS: [&str; 20] = [
     "withdrawn_at",
 ];
 
-fn select(store: &mut Store) -> String {
+pub(crate) fn select(store: &mut Store) -> String {
     let d = store.dialect();
     let t = table("derivative");
     let cols: Vec<String> = COLUMNS
@@ -270,7 +322,7 @@ fn select(store: &mut Store) -> String {
     )
 }
 
-fn of(r: &Row) -> Result<Derivative, Error> {
+pub(crate) fn of(r: &Row) -> Result<Derivative, Error> {
     Ok(Derivative {
         id: r.int(0)?,
         kind: r.text(1)?.to_string(),
@@ -308,12 +360,43 @@ pub fn get(store: &mut Store, id: i64) -> Result<Option<Derivative>, Error> {
         .transpose()
 }
 
+/// The live derivatives of one kind of `stacks` in one place, read a few
+/// hundred stacks at a time (record 43: a run's derivative inputs).
+pub fn of_stacks(
+    store: &mut Store,
+    kind: &str,
+    stacks: &[i64],
+    place_id: i64,
+) -> Result<Vec<Derivative>, Error> {
+    let d = store.dialect();
+    let mut out = Vec::new();
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "{} WHERE kind = {} AND place_id = {} AND withdrawn_at IS NULL AND stack_id IN ({list}) ORDER BY id",
+            select(store),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::from(kind), Param::Int(place_id)])? {
+            out.push(of(&r)?);
+        }
+    }
+    Ok(out)
+}
+
 /// What a listing narrows to.
 #[derive(Debug, Clone, Default)]
 pub struct Filter<'a> {
     pub kind: Option<&'a str>,
     pub stack_id: Option<i64>,
     pub subject_id: Option<i64>,
+    /// Record 43: only the files one pipeline run made.
+    pub run_id: Option<i64>,
     pub limit: usize,
 }
 
@@ -340,6 +423,13 @@ pub fn list(store: &mut Store, f: &Filter<'_>) -> Result<Vec<Derivative>, Error>
         params.push(Param::Int(s));
         sql.push_str(&format!(
             " AND subject_id = {}",
+            d.param(params.len(), Type::Int)
+        ));
+    }
+    if let Some(r) = f.run_id {
+        params.push(Param::Int(r));
+        sql.push_str(&format!(
+            " AND run_id = {}",
             d.param(params.len(), Type::Int)
         ));
     }
@@ -394,7 +484,7 @@ mod tests {
             scope: "session".into(),
             stack_id: None,
             series_id: None,
-            subject_id: 3,
+            subject_id: Some(3),
             session_day: Some("2021-02-03".into()),
         };
         let actor = serde_json::json!({"kind": "person"});
@@ -409,6 +499,8 @@ mod tests {
             registered_by: "ana@node",
             actor: Some(&actor),
             model_id: None,
+            run_id: None,
+            preprocess_version: None,
             supersedes_id: None,
             created_at: "2026-09-24T00:00:00Z",
         };

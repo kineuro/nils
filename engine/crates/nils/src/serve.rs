@@ -1436,6 +1436,12 @@ fn routed(
     if let Some(r) = crate::derivatives::route(registry, caller, get, &segs, query) {
         return r;
     }
+    // record 43: the pipeline catalog and its runs
+    // a run names a unit by its subject or session only at detail quasi
+    let quasi = caller.allowed(path, need, Detail::Quasi).is_ok();
+    if let Some(r) = crate::pipelines::route(registry, quasi, get, &segs, query) {
+        return r;
+    }
     // record 42: the campaigns and the label sets
     if let Some(r) =
         crate::campaigns::route(doors, registry, ask, caller, method.as_str(), &segs, body)
@@ -2626,7 +2632,11 @@ fn routed(
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
-        ["api", "releases"] if get => Ok(Reply::ok(crate::releases_doc(registry, limit, None)?)),
+        ["api", "releases"] if get => {
+            // record 43: a run's input releases only when asked for
+            let runs = query.get("runs").is_some_and(|v| v == "true" || v == "1");
+            Ok(Reply::ok(crate::releases_doc(registry, limit, None, runs)?))
+        }
         ["api", "releases"] if post => {
             // Heavy: a queued `nils release`, 202.
             let doc = json_body(body)?;
@@ -3159,6 +3169,8 @@ const QUEUEABLE: &[&str] = &[
     // Wave 4b §12.2: `ask run` and `ask promote`, the unbounded path and
     // the promotion, both jobs.
     "ask",
+    // Record 43 S2: a pipeline over a frozen selection, a `pipeline` job.
+    "run",
 ];
 
 /// The grants of the verbs the door queues: `POST /api/jobs` needs any of
@@ -3275,6 +3287,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("pipelines:see"), Plain)
         }
         ("GET", ["api", "derivatives", _, "content"]) => (Need::One("pipelines:see"), Quasi),
+        // record 43: the catalog and the runs are the Pipelines page's
+        ("GET", ["api", "pipelines" | "pipeline-runs"])
+        | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
         ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
         ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
@@ -3329,6 +3344,8 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
         }
+        // record 43 S2: a pipeline reads pixels, which open at quasi
+        ("run", _) => ("pipelines:work", Detail::Quasi),
         ("backup" | "verify", _) => ("database:work", Detail::Plain),
         _ => return None,
     })
@@ -3711,6 +3728,7 @@ fn capabilities(
     ]
     .iter()
     .chain(crate::derivatives::DOORS.iter())
+    .chain(crate::pipelines::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
@@ -3756,6 +3774,7 @@ fn capabilities(
         "backup_dir": doors.backup_dir.is_some(),
         "places": crate::places::capabilities(registry.store()),
         "derivatives": crate::derivatives::capability(registry.store()),
+        "pipelines": crate::pipelines::capability(registry),
         "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
@@ -3957,6 +3976,9 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
             }
             return Ok(out);
         }
+        // record 43 S2: a run names a pipeline and a frozen selection, and
+        // the deployment's packs; never a path
+        "run" => return crate::pipelines::located(doors.pack_dir.as_deref(), command),
         _ => {}
     }
     let takes_a_tree =
@@ -4329,6 +4351,43 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one file",
             "Downloading a derivative",
             "Downloaded a derivative",
+        ),
+        // record 43: the pipeline catalog and its runs
+        row(
+            "GET /api/pipelines",
+            false,
+            false,
+            "bounded",
+            "the catalog",
+            "Listing pipelines",
+            "Listed pipelines",
+        ),
+        row(
+            "GET /api/pipelines/{id}",
+            false,
+            false,
+            "free",
+            "one pipeline",
+            "Reading a pipeline",
+            "Read a pipeline",
+        ),
+        row(
+            "GET /api/pipeline-runs",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing pipeline runs",
+            "Listed pipeline runs",
+        ),
+        row(
+            "GET /api/pipeline-runs/{id}",
+            false,
+            false,
+            "free",
+            "one run",
+            "Reading a pipeline run",
+            "Read a pipeline run",
         ),
         row(
             "GET /api/events",

@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# bodypart-train: v0's head, fitted on a label set, and calibrated. Scaler,
+# PCA chosen by cross-validation, balanced logistic regression (or a forest,
+# or an RBF SVM), then a calibration on every head: temperature scaling for
+# logistic regression, CalibratedClassifierCV for the others. It reports the
+# cross-validated accuracy, ECE and Brier score before and after calibration,
+# and writes the head with its model card (contracts/model/v1): a head of
+# kind `head`, task `axis:body_part`, trained on the label set by its digest,
+# reading every encoder of the chain in order (`encoders`), with the
+# threshold its proposals are staged at.
+#
+# The stacks layout gives each labelled stack's slice count, which picks the
+# three centre slices the features average; the selection is the label set's
+# stacks.
+#
+# The head is a run-level output of kind model (`level: run`): one file for
+# the whole run, which the runner registers as a model in state registered
+# from the card beside it, trained on the label set the run was given. A
+# person admits and promotes it.
+#
+# The image digest is a placeholder until CI publishes the image (see
+# bodypart-embed/nils.job.yml).
+name: bodypart-train
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  Fit a calibrated body-part head on a label set and the stacks' embeddings;
+  report cross-validated accuracy, ECE and Brier; write the head and its card.
+
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+inputs:
+  - id: estimator
+    name: Classifier
+    type: String
+    description: logreg (the default, written as JSON coefficients), rf or svm (written as a pickle).
+    value-key: "[ESTIMATOR]"
+    command-line-flag: --estimator
+    value-choices: ["logreg", "rf", "svm"]
+    default-value: "logreg"
+    optional: true
+  - id: classes
+    name: Classes
+    type: String
+    description: The values to train on, comma-separated; empty is every value the label set holds.
+    value-key: "[CLASSES]"
+    command-line-flag: --classes
+    optional: true
+  - id: auto_tune
+    name: Cross-validated tuning
+    type: String
+    description: Choose PCA and the regularisation by stratified cross-validation (at 20 samples or more).
+    value-key: "[AUTOTUNE]"
+    command-line-flag: --auto-tune
+    value-choices: ["true", "false"]
+    default-value: "true"
+    optional: true
+  - id: min_per_class
+    name: Samples per class
+    type: Number
+    integer: true
+    minimum: 1
+    description: A class with fewer labelled stacks refuses the run, as v0 refused it.
+    value-key: "[MINPERCLASS]"
+    command-line-flag: --min-per-class
+    default-value: 5
+    optional: true
+  - id: threshold
+    name: Staging threshold
+    type: Number
+    minimum: 0.5
+    maximum: 1
+    description: Written on the card; the engine stages the head's proposals at or above it, and a run may raise it, never lower it.
+    value-key: "[THRESHOLD]"
+    command-line-flag: --threshold
+    default-value: 0.70
+    optional: true
+  - id: name
+    name: Model name
+    type: String
+    value-key: "[NAME]"
+    command-line-flag: --name
+    default-value: "bodypart-head"
+    optional: true
+  - id: random_state
+    name: Random state
+    type: Number
+    integer: true
+    value-key: "[RANDOM]"
+    command-line-flag: --random-state
+    default-value: 0
+    optional: true
+
+command-line: "nils-bodypart train --stacks [Manifest] --labels [Inputs]/labels --embeddings [Inputs]/embeddings --output [OutputLocation] [ESTIMATOR] [CLASSES] [AUTOTUNE] [MINPERCLASS] [THRESHOLD] [NAME] [RANDOM]"
+
+output-files:
+  - id: head
+    name: The head, as JSON coefficients or a joblib pickle, with its card beside it
+    path-template: "head/head.*"
+
+suggested-resources:
+  cpu-cores: 4
+  ram: 4
+  walltime-estimate: 0.3
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+  inputs:
+    - id: labels
+      type: label_set
+      description: A body_part label set (labels.tsv and provenance.json); a sealed set is refused
+    - id: embeddings
+      type: "derivative:embedding"
+      description: The stacks' BiomedCLIP and SigLIP2 embeddings, from bodypart-embed
+  outputs:
+    - id: head
+      kind: model
+      level: run
+      path-template: "head/head.*"
+      card: head/card.json
+  needs:
+    gpu: none
+    memory-gb: 4
+    cores: 4

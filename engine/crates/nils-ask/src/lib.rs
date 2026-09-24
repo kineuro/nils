@@ -98,6 +98,9 @@ pub fn parse_repaired(text: &str) -> Result<(Ask, Vec<Repair>), Error> {
 pub struct Prepared {
     pub ask: Ask,
     pub hash: String,
+    /// The hash of what it selects, its parameters' values bound in
+    /// ([`hash::bound_hash`]): a saved selection's.
+    pub bound_hash: String,
     pub pinned: Vec<(String, String, u64)>,
     pub validated: Validated,
 }
@@ -108,9 +111,11 @@ pub fn prepare(mut ask: Ask, names: &dyn Names, scope: &Scope) -> Result<Prepare
     let pinned = validate::pin_selections(&mut ask, names).map_err(|i| Error::Invalid(vec![i]))?;
     let validated = validate(&ask, names, scope).map_err(Error::Invalid)?;
     let hash = hash::content_hash_under(&ask, &names.locale());
+    let bound_hash = hash::bound_hash_under(&ask, &names.locale());
     Ok(Prepared {
         ask,
         hash,
+        bound_hash,
         pinned,
         validated,
     })

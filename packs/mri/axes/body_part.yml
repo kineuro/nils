@@ -3,6 +3,12 @@
 # What was scanned: the vocabulary only. v0 does not take the first
 # category that matches; it collects every one and then applies a
 # precedence, so the rules are longhand in rules/body_part.yml.
+#
+# `chest` is here for v0's image classifier, which predicted it (record 43
+# R3, carried from record 42), and which the nils-bodypart pipeline ports.
+# v0's keyword detector had no chest words and neither do the rules: no rule
+# writes it, and `nils pack shape` says so. A chest reaches a stack only as a
+# model's proposal that a person commits.
 
 axis: body_part
 kind: single
@@ -12,3 +18,4 @@ values:
   'spine': {}
   'brain': {}
   'brain-neck': {}
+  'chest': {}

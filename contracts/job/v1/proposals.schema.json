@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/proposals.schema.json",
+  "title": "NILS pipeline proposals",
+  "description": "Record 43 S6: the `proposals` member of a pipeline run's results.json, what a model says about the stacks it saw. The engine groups them into `<axis>:model` review items, one grouped question per axis, model, value and confidence band, and stages a decision by the model on each group at or above the task's threshold when the model is admitted or promoted and registered for the task `axis:<axis>`. Nothing is in force until a person commits it (record 42 R6). A group below the threshold is a review item only. The results schema of `contracts/job/v1` refers to this file for its `proposals` member; a results file with no proposals leaves the member out.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/proposal" },
+  "$defs": {
+    "proposal": {
+      "type": "object",
+      "required": ["stack_id", "axis", "value", "probabilities"],
+      "anyOf": [
+        { "required": ["model_id"] },
+        { "required": ["model_digest"] }
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stack_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The stack, by the id the run's stacks.json gave it"
+        },
+        "axis": {
+          "type": "string",
+          "pattern": "^[a-z_]+$",
+          "description": "An axis of the pack, such as body_part"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The value proposed, one of the axis's values in the pack the model was built for, and one of the classes in probabilities"
+        },
+        "probabilities": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 },
+          "description": "The probability of every class the model weighed, by value; they sum to 1 within 0.01. The probability of the value is the proposal's confidence, and the whole map is kept as the member's evidence"
+        },
+        "model_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The registered model that answered, by the id the run's model manifest gave it"
+        },
+        "model_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Or by its digest (contracts/model/v1), which the image can compute from the artifact it loaded. Given with model_id, the two name the same model"
+        },
+        "note": {
+          "type": "string",
+          "description": "Words a person reads beside the numbers, such as a rule the image applied after the model. Never a name, a code or a date of a person"
+        }
+      }
+    }
+  },
+  "examples": [
+    [
+      {
+        "stack_id": 41,
+        "axis": "body_part",
+        "value": "brain",
+        "probabilities": { "brain": 0.97, "brain-neck": 0.02, "neck": 0.005, "spine": 0.005 },
+        "model_id": 3
+      },
+      {
+        "stack_id": 42,
+        "axis": "body_part",
+        "value": "brain-neck",
+        "probabilities": { "brain": 0.41, "brain-neck": 0.44, "neck": 0.1, "spine": 0.05 },
+        "model_digest": "sha256:0f0e0d0c0b0a09080706050403020100f0e0d0c0b0a090807060504030201000",
+        "note": "axial brain-neck rule"
+      }
+    ]
+  ]
+}

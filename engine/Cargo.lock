@@ -1699,6 +1699,7 @@ dependencies = [
  "nils-dicom",
  "nils-digest",
  "nils-pack",
+ "nils-pipeline",
  "nils-pseudonymize",
  "nils-registry",
  "nils-release",
@@ -1807,6 +1808,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nils-pipeline"
+version = "1.0.0-alpha.37"
+dependencies = [
+ "glob",
+ "hex",
+ "libc",
+ "ring",
+ "serde-saphyr",
+ "serde_json",
+]
+
+[[package]]
 name = "nils-pseudonymize"
 version = "1.0.0-alpha.37"
 dependencies = [
@@ -1838,6 +1851,7 @@ dependencies = [
  "nils-dicom",
  "nix",
  "postgres",
+ "regex",
  "rusqlite",
  "serde",
  "serde-saphyr",

@@ -410,9 +410,21 @@ fn every_verb_answers_on_a_standalone_registry() {
     );
     let text = out.ok("selections save").to_string();
     assert!(text.contains("at version 1"), "{text}");
+    // the selection's hash is of what it selects: the yardstick binds its
+    // parameters, so the values are in it and the question's hash is not
+    // (record 43)
+    let out = run(
+        &home,
+        &["ask", "validate", "--file", y, "--pack-dir", p, "--json"],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(out.ok("validate --json")).unwrap();
+    assert_eq!(v["hash"], hash.as_str());
+    let bound = v["bound_hash"].as_str().unwrap();
+    assert_ne!(bound, hash, "the yardstick binds values");
     assert!(
-        text.contains(&hash),
-        "the selection stores the same hash: {text}"
+        text.contains(bound),
+        "the selection stores the hash of what it selects: {text}"
     );
     let listed = run(&home, &["ask", "selections", "list"], None);
     assert!(
@@ -1018,4 +1030,60 @@ fn hash_of_run(text: &str) -> String {
         .position(|f| *f == "hash")
         .unwrap_or_else(|| panic!("no hash in {text}"));
     fields[at + 1].to_string()
+}
+
+/// The reported fault (record 43): two selections whose documents differ
+/// only in the list a parameter binds, the ids they select, were saved
+/// under one hash, so a promotion's match by hash and the run cache could
+/// take one for the other. A parameter's value stays out of the question's
+/// hash (§4.4 rule 13); a saved selection's hash is of what it selects,
+/// with its values bound.
+#[test]
+fn selections_that_bind_different_ids_have_different_hashes() {
+    let home = synthetic();
+    let p = packs();
+    let p = p.to_str().unwrap();
+    let doc = |ids: &str| {
+        format!(
+            r#"{{"ast_version": 1, "params": {{"ids": {{"type": "list", "value": [{ids}]}}}},
+               "sets": {{"s": {{"grain": "stack", "where": [["in", {{}}, ["field", {{}}, "id"], ["param", {{}}, "ids"]]]}}}},
+               "out": {{"set": "s", "level": "record"}}}}"#
+        )
+    };
+    let mut hashes = Vec::new();
+    let mut questions = Vec::new();
+    for (name, ids) in [("first", "1, 2"), ("second", "3"), ("again", "1, 2")] {
+        let file = home.path().join(format!("{name}.ask.json"));
+        std::fs::write(&file, doc(ids)).unwrap();
+        let f = file.to_str().unwrap();
+        let out = run(
+            &home,
+            &[
+                "ask",
+                "selections",
+                "save",
+                "--name",
+                name,
+                "--file",
+                f,
+                "--pack-dir",
+                p,
+                "--json",
+            ],
+            None,
+        );
+        let saved: serde_json::Value = serde_json::from_str(out.ok("selections save")).unwrap();
+        hashes.push(saved["hash"].as_str().unwrap().to_string());
+        let out = run(
+            &home,
+            &["ask", "validate", "--file", f, "--pack-dir", p, "--json"],
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(out.ok("validate")).unwrap();
+        questions.push(v["hash"].as_str().unwrap().to_string());
+    }
+    assert_ne!(hashes[0], hashes[1], "different ids, different selections");
+    assert_eq!(hashes[0], hashes[2], "the same ids, the same selection");
+    // the question itself is one, whatever its parameter is bound to
+    assert_eq!(questions[0], questions[1]);
 }

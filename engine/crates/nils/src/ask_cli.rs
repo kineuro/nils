@@ -525,6 +525,7 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
             let prepared = nils_ask::prepare(ask, &l.catalog, &scope).map_err(refused)?;
             json!({
                 "hash": prepared.hash,
+                "bound_hash": prepared.bound_hash,
                 "warnings": prepared.validated.warnings,
                 "pinned": prepared.pinned.iter().map(|(s, n, v)| json!({"set": s, "selection": n, "version": v})).collect::<Vec<_>>(),
                 "repairs": repairs.iter().map(|r| json!({"path": r.path, "what": r.what})).collect::<Vec<_>>(),
@@ -1092,7 +1093,7 @@ fn selections(home: &Home, cmd: SelectionsCommand) -> Result<(), Exit> {
                         &mut l.registry,
                         &args.name,
                         &prepared.ask,
-                        &prepared.hash,
+                        &prepared.bound_hash,
                         &principal(),
                         args.note.as_deref(),
                         args.description.as_deref(),
@@ -1591,6 +1592,41 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
 /// opens the document and, where its grain is wider, the stacks or sessions
 /// under it are the answer, at record level so the handle keeps the keys.
 /// Answers the handle.
+/// Save an ask document as the next version of a selection, as `nils ask
+/// selections save` does from a file (record 43: a run's seeds become a
+/// selection a campaign starts from). Answers the name, version and hash.
+pub(crate) fn save_selection_doc(
+    home: &Home,
+    name: &str,
+    doc: &serde_json::Value,
+    pack_dir: Option<PathBuf>,
+    pack_name: &str,
+    note: Option<&str>,
+) -> Result<serde_json::Value, Exit> {
+    let at = Where {
+        server: None,
+        token: None,
+        pack_dir,
+        pack: pack_name.to_string(),
+        json: false,
+    };
+    let mut l = local(home, &at)?;
+    let ask =
+        parse(&doc.to_string()).map_err(|e| fail(format!("the selection's document: {e}")))?;
+    let prepared = nils_ask::prepare(ask, &l.catalog, &scope()).map_err(refused)?;
+    let saved = selection::save(
+        &mut l.registry,
+        name,
+        &prepared.ask,
+        &prepared.bound_hash,
+        &principal(),
+        note,
+        None,
+    )
+    .map_err(|e| usage(e.to_string()))?;
+    Ok(serde_json::to_value(saved).unwrap_or_default())
+}
+
 pub(crate) fn freeze_selection(
     home: &Home,
     spec: &str,

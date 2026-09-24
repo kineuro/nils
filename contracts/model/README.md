@@ -21,7 +21,7 @@ directory beside the old one, which stays.
 
 | document | what it fixes |
 |---|---|
-| `card.schema.json` | the card: identity by the digest of the canonical artifact, name and version, kind, task and slot, the encoder a head reads (by digest), the label set it was fitted on (by digest), the pack version, the image that runs it, metrics, preprocessing, parameters, intended use, limits and the runtime a check ran under |
+| `card.schema.json` | the card: identity by the digest of the canonical artifact, name and version, kind, task and slot, the encoders a head reads in order (by digest; record 43 lets a head read several), the threshold its proposals are staged at (record 43), the label set it was fitted on (by digest), the pack version, the image that runs it, metrics, preprocessing, parameters, intended use, limits and the runtime a check ran under |
 | `lifecycle.schema.json` | the four states, the transitions and their events, the check record that admits a model, and a registered model as the engine answers it |
 
 The rules both implementations keep:

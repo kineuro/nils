@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/nils.job.schema.json",
+  "title": "NILS pipeline descriptor (nils.job.yml)",
+  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
+  "$defs": {
+    "value_key": {
+      "type": "string",
+      "pattern": "^\\[[A-Za-z0-9_]+\\]$",
+      "description": "A placeholder in the command line, in brackets. The engine's own are [InputDataset] (/input), [OutputLocation] (/output), [AnalysisLevel] (participant), [ParticipantLabels] (the labels of the run's participants, one word each), [Manifest] (/input/stacks.json in the stacks layout) and [Inputs] (/inputs, the typed inputs and manifest.json); a parameter may not take one of them"
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["id", "name", "type"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "description": "What --param calls it, and the key it is recorded under on the run"},
+        "name": {"type": "string"},
+        "type": {"enum": ["Number", "String", "Flag"], "description": "A file reaches a pipeline as a typed input under x-nils.inputs, never as a parameter"},
+        "description": {"type": "string"},
+        "value-key": {"$ref": "#/$defs/value_key"},
+        "command-line-flag": {"type": "string", "description": "Written before the value where the value-key stands; a Flag is written alone when true and not at all when false"},
+        "default-value": {"type": ["number", "string", "boolean"]},
+        "optional": {"type": "boolean"},
+        "integer": {"type": "boolean"},
+        "minimum": {"type": "number"},
+        "maximum": {"type": "number"},
+        "value-choices": {"type": "array", "items": {"type": ["number", "string"]}, "minItems": 1},
+        "unit": {"type": "string"}
+      }
+    },
+    "typed_input": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "type": {
+          "type": "string",
+          "pattern": "^(model|label_set|derivative:(mask|embedding|pyramid|output))$",
+          "description": "What is mounted read-only under /inputs/<id>, with a line in /inputs/manifest.json: a registered model (nils run --model), a label set (nils run --labels) or derivatives of one kind. The selection itself is not one of these: it is the input the layout materialises"
+        },
+        "optional": {"type": "boolean"},
+        "description": {"type": "string"}
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["id", "kind", "path-template"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "kind": {"enum": ["mask", "embedding", "pyramid", "output", "model"], "description": "The derivative kind each file becomes. model is a run-level output only: the artifact of a model the run fitted, which the runner registers as a model (contracts/model/v1) from the card beside it, in state registered. (The registry's seeds kind is the runner's own, written from the results' seeds, and never declared)"},
+        "level": {"enum": ["unit", "run"], "default": "unit", "description": "unit: one file per work unit, which the template names by its placeholders. run (record 43): one file for the whole run, such as a model a train entry point fitted, whose template names no unit and which belongs to the run rather than to a subject"},
+        "path-template": {
+          "type": "string",
+          "pattern": "^[^/].*$",
+          "description": "Where a file lies under /output: for a unit-level output a relative path with {subject} and {session} (the labels without sub- and ses-) or {stack} (the stack's id) standing for the unit, for a run-level one a path with no placeholder, and * for any run of characters inside one path segment, never right beside a placeholder, which would let one unit take another's file (stack 4 and 45.nii). It is how the runner finds the outputs when the pipeline writes no results.json, and which kind a file named in results.json is"
+        },
+        "encoders": {"type": "array", "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "description": "For an embedding output (record 43): the encoders, by weight digest, whose embeddings it may make. The runner keeps an embedding only by one of these or by an encoder the run was given as a model, and registers it from the card the results carry"},
+        "card": {"type": "string", "pattern": "^[^/].*$", "description": "For a model output: the path under /output of the model's card (contracts/model/v1), whose digest is the artifact's. The runner fills trained_on with the label set the run was given, and refuses a card that names another"},
+        "media-type": {"type": "string"}
+      }
+    },
+    "needs": {
+      "type": "object",
+      "properties": {
+        "gpu": {"enum": ["none", "optional", "required"], "description": "optional runs on the CPU where the host has no GPU and records device cpu; required is refused on such a host"},
+        "memory-gb": {"type": "number", "minimum": 0},
+        "cores": {"type": "integer", "minimum": 1}
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "required": ["axis"],
+      "properties": {
+        "axis": {"type": "string", "pattern": "^[a-z_]+$", "description": "The pack axis the pipeline proposes values on"},
+        "description": {"type": "string"}
+      }
+    }
+  },
+  "type": "object",
+  "required": ["name", "schema-version", "tool-version", "container-image", "x-nils"],
+  "properties": {
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$", "description": "The pipeline's name in the catalog; `nils run <name>` runs its newest version"},
+    "schema-version": {"const": "0.5", "description": "The Boutiques schema band the descriptor keeps"},
+    "tool-version": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "container-image": {
+      "type": "object",
+      "required": ["type", "image"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "docker", "description": "An OCI image; podman, apptainer and docker all run it"},
+        "image": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$",
+          "description": "The image by its registry manifest digest, repository@sha256:<hex> (record 43 R3). A tag moves and an image id (docker inspect's .Id, a config digest) names nothing a registry can serve, so neither pins; a descriptor without the digest is refused. container-hash is not a key: v0 learned it poisons provenance"
+        }
+      }
+    },
+    "inputs": {"type": "array", "items": {"$ref": "#/$defs/parameter"}, "description": "The parameters: declared, typed, with defaults and ranges, and recorded whole on every run"},
+    "command-line": {"type": "string", "description": "The command the image runs, split as a shell splits words (quotes and backslashes, no expansion), with the value-keys replaced word by word. Absent, it is the BIDS-Apps shape: [InputDataset] [OutputLocation] [AnalysisLevel] --participant_label [ParticipantLabels]"},
+    "output-files": {"type": "array", "description": "Boutiques' outputs, kept for a Boutiques reader; the runner reads x-nils.outputs"},
+    "suggested-resources": {
+      "type": "object",
+      "properties": {
+        "cpu-cores": {"type": "integer"},
+        "ram": {"type": "number"},
+        "walltime-estimate": {"type": "number"}
+      }
+    },
+    "groups": {"type": "array"},
+    "error-codes": {"type": "array"},
+    "x-nils": {
+      "type": "object",
+      "required": ["analysis-level", "input", "outputs"],
+      "properties": {
+        "contract": {"const": 1, "description": "The job contract version the descriptor was written to"},
+        "analysis-level": {
+          "enum": ["participant", "session", "stack"],
+          "description": "The work unit: a participant or one of its sessions in the bids layout, a stack in the stacks layout. A failed unit is one pipeline:qc review item"
+        },
+        "input": {
+          "type": "object",
+          "required": ["layout"],
+          "properties": {
+            "layout": {
+              "enum": ["bids", "stacks"],
+              "description": "bids: a release of the selection in the BIDS layout with the picks applied (record 43 R4), mounted read-only at /input, so a BIDS App meets one image per role and session. stacks: /input/stacks.json (stacks.schema.json) names each stack's files under the source places, mounted read-only at /source/<n>, with no conversion"
+            }
+          }
+        },
+        "inputs": {"type": "array", "items": {"$ref": "#/$defs/typed_input"}},
+        "outputs": {"type": "array", "items": {"$ref": "#/$defs/output"}, "minItems": 1},
+        "needs": {"$ref": "#/$defs/needs"},
+        "proposals": {"type": "array", "items": {"$ref": "#/$defs/proposal"}, "description": "The axes the pipeline's results may propose values on; a proposal on an axis not declared here is not taken"}
+      }
+    }
+  }
+}

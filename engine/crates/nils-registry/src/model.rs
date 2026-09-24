@@ -73,6 +73,9 @@ pub struct Model {
     pub state: String,
     pub card: Value,
     pub encoder_model_id: Option<i64>,
+    /// Every encoder it reads, in the order it concatenates their features
+    /// (record 43); the first is `encoder_model_id`.
+    pub encoder_model_ids: Vec<i64>,
     /// The digest of the label set it was fitted on.
     pub trained_on: Option<String>,
     pub pack_version: Option<String>,
@@ -107,6 +110,12 @@ impl Model {
         matches!(self.state.as_str(), "admitted" | "promoted")
     }
 
+    /// The probability at or above which its proposals are staged (record
+    /// 43), as its card says; none when the card says nothing.
+    pub fn threshold(&self) -> Option<f64> {
+        self.card["threshold"].as_f64()
+    }
+
     /// The name, version and digest, which is how a decision, an explain
     /// and a release name it.
     pub fn named(&self) -> Value {
@@ -130,6 +139,8 @@ impl Model {
             "state": self.state,
             "card": self.card,
             "encoder_model_id": self.encoder_model_id,
+            "encoder_model_ids": self.encoder_model_ids,
+            "threshold": self.threshold(),
             "trained_on": self.trained_on,
             "pack_version": self.pack_version,
             "check": self.check,
@@ -223,6 +234,7 @@ fn of(r: &Row) -> Result<Model, StoreError> {
         state: r.text(7)?.to_string(),
         card: json(r.opt_text(8)?).unwrap_or(Value::Null),
         encoder_model_id: r.opt_int(9)?,
+        encoder_model_ids: Vec::new(),
         trained_on: text(10)?,
         pack_version: text(11)?,
         check: json(r.opt_text(12)?),
@@ -238,14 +250,48 @@ fn of(r: &Row) -> Result<Model, StoreError> {
     })
 }
 
+/// Fill each model's encoders from `model_encoder`, in their order.
+fn with_encoders(store: &mut Store, mut models: Vec<Model>) -> Result<Vec<Model>, StoreError> {
+    let heads: Vec<String> = models
+        .iter()
+        .filter(|m| m.encoder_model_id.is_some())
+        .map(|m| m.id.to_string())
+        .collect();
+    for chunk in heads.chunks(500) {
+        let sql = format!(
+            "SELECT model_id, encoder_model_id FROM {} WHERE model_id IN ({}) ORDER BY model_id, position",
+            store.qualified("model_encoder"),
+            chunk.join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            let (model, encoder) = (r.int(0)?, r.int(1)?);
+            if let Some(m) = models.iter_mut().find(|m| m.id == model) {
+                m.encoder_model_ids.push(encoder);
+            }
+        }
+    }
+    for m in &mut models {
+        if m.encoder_model_ids.is_empty()
+            && let Some(e) = m.encoder_model_id
+        {
+            m.encoder_model_ids.push(e);
+        }
+    }
+    Ok(models)
+}
+
+fn one_model(store: &mut Store, sql: &str, params: &[Param]) -> Result<Option<Model>, StoreError> {
+    let Some(m) = store.query_opt(sql, params)?.map(|r| of(&r)).transpose()? else {
+        return Ok(None);
+    };
+    Ok(with_encoders(store, vec![m])?.pop())
+}
+
 /// One model by its id.
 pub fn get(store: &mut Store, id: i64) -> Result<Option<Model>, StoreError> {
     let d = store.dialect();
     let sql = select_sql(store, &format!(" WHERE id = {}", d.param(1, Type::Int)));
-    store
-        .query_opt(&sql, &[Param::Int(id)])?
-        .map(|r| of(&r))
-        .transpose()
+    one_model(store, &sql, &[Param::Int(id)])
 }
 
 /// One model by its digest.
@@ -255,10 +301,7 @@ pub fn by_digest(store: &mut Store, digest: &str) -> Result<Option<Model>, Store
         store,
         &format!(" WHERE digest = {}", d.param(1, Type::Text)),
     );
-    store
-        .query_opt(&sql, &[Param::from(digest)])?
-        .map(|r| of(&r))
-        .transpose()
+    one_model(store, &sql, &[Param::from(digest)])
 }
 
 /// A model as a person or a header names it: its id, its digest
@@ -283,10 +326,7 @@ pub fn resolve(store: &mut Store, reference: &str) -> Result<Option<Model>, Stor
             d.param(2, Type::Text)
         ),
     );
-    store
-        .query_opt(&sql, &[Param::from(name), Param::from(version)])?
-        .map(|r| of(&r))
-        .transpose()
+    one_model(store, &sql, &[Param::from(name), Param::from(version)])
 }
 
 /// What a listing is narrowed to.
@@ -314,7 +354,12 @@ pub fn list(store: &mut Store, f: &Filter<'_>) -> Result<Vec<Model>, StoreError>
         format!(" WHERE {}", wheres.join(" AND "))
     };
     let sql = select_sql(store, &filter);
-    store.query(&sql, &params)?.iter().map(of).collect()
+    let models = store
+        .query(&sql, &params)?
+        .iter()
+        .map(of)
+        .collect::<Result<Vec<_>, _>>()?;
+    with_encoders(store, models)
 }
 
 /// A model's transitions, in order.
@@ -469,6 +514,18 @@ fn checked_slot(store: &mut Store, card: &Value) -> Result<String, Error> {
             )));
         }
     }
+    // Record 43: the threshold its proposals are staged at, a probability.
+    match card.get("threshold") {
+        None | Some(Value::Null) => {}
+        Some(t) => {
+            let ok = t.as_f64().is_some_and(|p| p > 0.0 && p <= 1.0);
+            if !ok {
+                return Err(invalid(format!(
+                    "threshold is a probability above 0 and at most 1, not {t}"
+                )));
+            }
+        }
+    }
     if let Some(t) = card.get("trained_on").filter(|v| !v.is_null()) {
         let set = t["label_set"].as_str().unwrap_or("");
         if !is_digest(set) {
@@ -515,36 +572,12 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
             held.id, held.digest
         )));
     }
-    // A head names its encoder, which must be registered: a new encoder
-    // makes its heads stale, and the edge is what says which.
-    let encoder = match card.get("encoder").filter(|v| !v.is_null()) {
-        Some(e) => {
-            let d = e["digest"].as_str().unwrap_or("");
-            if !is_digest(d) {
-                return Err(invalid("encoder names its model by digest"));
-            }
-            let Some(m) = by_digest(store, d)? else {
-                return Err(Error::Unknown(format!(
-                    "the encoder {d} is not registered; register it first"
-                )));
-            };
-            if m.kind != "encoder" {
-                return Err(invalid(format!(
-                    "model {} ({}) is a {}, not an encoder",
-                    m.id,
-                    m.label(),
-                    m.kind
-                )));
-            }
-            Some(m.id)
-        }
-        None if kind == "head" => {
-            return Err(invalid(
-                "a head names the encoder whose features it reads (encoder.digest)",
-            ));
-        }
-        None => None,
-    };
+    // A head names its encoders, which must be registered: a new encoder
+    // makes its heads stale, and the edges are what say which. Record 43:
+    // `encoders` lists them in order; `encoder` alone is the one, and
+    // given beside the list it is one of them.
+    let encoders = encoders_of(store, card, &kind)?;
+    let encoder = encoders.first().copied();
     let trained_on = card["trained_on"]["label_set"].as_str().map(str::to_string);
     // Record 40 R3 and 42 S7: the labels a model was fitted on are a label
     // set this registry wrote, and none drawn from a sealed certification
@@ -606,6 +639,19 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
             .first()
             .ok_or_else(|| StoreError::Message("the model was not written back".into()))?
             .int(0)?;
+        for (position, e) in encoders.iter().enumerate() {
+            store.insert(
+                &Insert::new(
+                    table("model_encoder"),
+                    &["model_id", "encoder_model_id", "position"],
+                ),
+                &[vec![
+                    Param::Int(id),
+                    Param::Int(*e),
+                    Param::Int(position as i64),
+                ]],
+            )?;
+        }
         event(store, id, "registered", who, &now, None)?;
         Ok(id)
     })?;
@@ -615,9 +661,75 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
         Action::ModelRegister,
         who,
         &m,
-        json!({ "kind": m.kind, "encoder_model_id": m.encoder_model_id, "trained_on": m.trained_on }),
+        json!({
+            "kind": m.kind, "encoder_model_id": m.encoder_model_id,
+            "encoder_model_ids": m.encoder_model_ids, "trained_on": m.trained_on,
+        }),
     )?;
     Ok(m)
+}
+
+/// The encoders a card names, resolved to registered encoders in order:
+/// `encoders`, or `encoder` alone. Refused for a digest that is not one,
+/// an encoder not registered or not an encoder, one named twice, an
+/// `encoder` beside a list that does not hold it, and a head naming none.
+fn encoders_of(store: &mut Store, card: &Value, kind: &str) -> Result<Vec<i64>, Error> {
+    let digest_of = |e: &Value| -> Result<String, Error> {
+        let d = e["digest"].as_str().unwrap_or("");
+        if !is_digest(d) {
+            return Err(invalid("an encoder is named by its digest"));
+        }
+        Ok(d.to_string())
+    };
+    let single = match card.get("encoder").filter(|v| !v.is_null()) {
+        Some(e) => Some(digest_of(e)?),
+        None => None,
+    };
+    let listed: Vec<String> = match card.get("encoders").filter(|v| !v.is_null()) {
+        None => single.iter().cloned().collect(),
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let list = items.iter().map(digest_of).collect::<Result<Vec<_>, _>>()?;
+            if let Some(one) = &single
+                && !list.contains(one)
+            {
+                return Err(invalid(format!(
+                    "encoder {one} is not one of the card's encoders"
+                )));
+            }
+            list
+        }
+        Some(_) => {
+            return Err(invalid(
+                "encoders is a list of the encoders a head reads, each by its digest",
+            ));
+        }
+    };
+    if listed.is_empty() && kind == "head" {
+        return Err(invalid(
+            "a head names the encoders whose features it reads (encoders, or encoder.digest)",
+        ));
+    }
+    let mut out = Vec::with_capacity(listed.len());
+    for d in &listed {
+        let Some(m) = by_digest(store, d)? else {
+            return Err(Error::Unknown(format!(
+                "the encoder {d} is not registered; register it first"
+            )));
+        };
+        if m.kind != "encoder" {
+            return Err(invalid(format!(
+                "model {} ({}) is a {}, not an encoder",
+                m.id,
+                m.label(),
+                m.kind
+            )));
+        }
+        if out.contains(&m.id) {
+            return Err(invalid(format!("the encoder {d} is named twice")));
+        }
+        out.push(m.id);
+    }
+    Ok(out)
 }
 
 /// Check a check against `contracts/model/v1/lifecycle.schema.json`: a
@@ -920,6 +1032,12 @@ pub fn retire(
         json!({ "why": why }),
     )?;
     Ok(m)
+}
+
+/// Name the job that fitted a model (record 43: a pipeline run's).
+pub fn set_job(store: &mut Store, id: i64, job_id: i64) -> Result<(), StoreError> {
+    store.update_by_id(table("model"), &[("job_id", Param::Int(job_id))], "id", id)?;
+    Ok(())
 }
 
 /// The model a model's answer names, refused unless it is registered and

@@ -103,23 +103,56 @@ struct Applied {
     selection: Option<Matched>,
 }
 
-/// Whether a version of the selection named so holds this ask: the
-/// selection is then the cohort's own source ask (Wave 4b §8.2).
-fn selection_holds(store: &mut Store, name: &str, hash: Option<&str>) -> Result<bool, StoreError> {
-    let Some(hash) = hash else {
-        return Ok(false);
+/// The newest selection version, of the selection named so or of any,
+/// that holds the ask a handle ran: one whose stored ask, its values bound,
+/// hashes as the handle's does (record 43). A version saved before the
+/// bound hash stored the question's hash, which two versions binding other
+/// values share; such a row is taken only where its own ask, hashed again,
+/// is the handle's, so an old selection still matches and never another's.
+fn holding(
+    store: &mut Store,
+    locale: &crate::hash::Locale,
+    name: Option<&str>,
+    h: &handle::Handle,
+) -> Result<Option<Matched>, StoreError> {
+    // under the registry's locale, as a save hashes (record 43 review)
+    let Some(ask) = h.ask.as_ref() else {
+        return Ok(None);
     };
+    let bound = crate::hash::bound_hash_under(ask, locale);
+    let question = crate::hash::content_hash_under(ask, locale);
     let d = store.dialect();
+    let ask = d.text_of(table("selection_version").column("ask").expect("ask"));
+    let mut params = vec![Param::from(bound.as_str()), Param::from(question.as_str())];
+    let mut by_name = String::new();
+    if let Some(n) = name {
+        params.push(Param::from(n));
+        by_name = format!(" AND s.name = {}", d.param(3, Type::Text));
+    }
     let sql = format!(
-        "SELECT 1 FROM {} sv JOIN {} s ON s.id = sv.selection_id WHERE s.name = {} AND sv.hash = {}",
+        "SELECT s.name, sv.version, s.id, s.current_version, sv.hash, {ask} FROM {} sv \
+         JOIN {} s ON s.id = sv.selection_id WHERE sv.hash IN ({}, {}){by_name} ORDER BY sv.id DESC",
         store.qualified("selection_version"),
         store.qualified("selection"),
         d.param(1, Type::Text),
-        d.param(2, Type::Text)
+        d.param(2, Type::Text),
     );
-    Ok(store
-        .query_opt(&sql, &[Param::from(name), Param::from(hash)])?
-        .is_some())
+    for r in store.query(&sql, &params)? {
+        let stored = r.text(4)?;
+        let holds = stored == bound
+            || r.opt_text(5)?
+                .and_then(|t| serde_json::from_str::<crate::ast::Ask>(t).ok())
+                .is_some_and(|a| crate::hash::bound_hash_under(&a, locale) == bound);
+        if holds {
+            return Ok(Some(Matched {
+                name: r.text(0)?.to_string(),
+                version: r.int(1)? as u64,
+                selection_id: r.int(2)?,
+                current_version: r.int(3)? as u64,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Promote a handle's subjects into a cohort, opening one so named when
@@ -163,6 +196,10 @@ pub fn promote(
         .into_iter()
         .collect();
     let ask_hash = h.ask_hash();
+    let locale = crate::hash::Locale {
+        timezone: registry.meta().timezone.clone(),
+        week_start: registry.meta().week_start.clone(),
+    };
     let store = registry.store();
     let existing = cohort::by_name(store, cohort)?;
     if let Some(c) = &existing
@@ -178,7 +215,7 @@ pub fn promote(
     if existing.is_none()
         && create
         && cohort::selection_named(store, cohort)?
-        && !selection_holds(store, cohort, ask_hash.as_deref())?
+        && holding(store, &locale, Some(cohort), &h)?.is_none()
     {
         return Err(PromoteError::Refused(format!(
             "{cohort} is a selection's name; a cohort cannot be named so (Wave 4b section 8.2)"
@@ -191,31 +228,8 @@ pub fn promote(
             None if create => (cohort::insert(store, cohort, actor, None)?, true),
             None => return Err(PromoteError::NoSuchCohort(cohort.to_string())),
         };
-        let d = store.dialect();
         // the selection whose version holds this ask, if any
-        let selection = match &ask_hash {
-            Some(hash) => {
-                let sql = format!(
-                    "SELECT s.name, sv.version, s.id, s.current_version FROM {} sv JOIN {} s ON s.id = sv.selection_id \
-                     WHERE sv.hash = {} ORDER BY sv.id DESC",
-                    store.qualified("selection_version"),
-                    store.qualified("selection"),
-                    d.param(1, Type::Text)
-                );
-                store
-                    .query_opt(&sql, &[Param::from(hash.as_str())])?
-                    .map(|r| {
-                        Ok::<_, StoreError>(Matched {
-                            name: r.text(0)?.to_string(),
-                            version: r.int(1)? as u64,
-                            selection_id: r.int(2)?,
-                            current_version: r.int(3)? as u64,
-                        })
-                    })
-                    .transpose()?
-            }
-            None => None,
-        };
+        let selection = holding(store, &locale, None, &h)?;
         // record 26 §9: the grain and the row count beside the parameters
         // as bound, so an interval says what kind of answer opened it
         let params = json!({

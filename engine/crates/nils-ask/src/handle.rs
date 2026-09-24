@@ -130,6 +130,12 @@ impl Handle {
     pub fn ask_hash(&self) -> Option<String> {
         self.ask.as_ref().map(crate::hash::content_hash)
     }
+
+    /// The hash of what the ask selected, its parameters' values bound in:
+    /// the key of the run cache and of a saved selection (record 43).
+    pub fn bound_hash(&self) -> Option<String> {
+        self.ask.as_ref().map(crate::hash::bound_hash)
+    }
 }
 
 /// Where a handle came from.
@@ -635,8 +641,9 @@ pub fn invalidated(store: &mut Store) -> Result<BTreeSet<i64>, HandleError> {
         .collect()
 }
 
-/// Wave 5 §12.8: the newest kept handle whose stored ask hashes to
-/// `ask_hash` at this epoch, pack version, scheme and scope (the same
+/// Wave 5 §12.8: the newest kept handle whose stored ask, with its
+/// parameters' values bound ([`Handle::bound_hash`]), hashes to `ask_hash`
+/// at this epoch, pack version, scheme and scope (the same
 /// suppression), whole (not truncated), with its rows, not withdrawn and
 /// not invalidated: the one a run of the same core answers again.
 pub fn find_cached(
@@ -659,7 +666,7 @@ pub fn find_cached(
         {
             continue;
         }
-        if h.ask_hash().as_deref() == Some(ask_hash) {
+        if h.bound_hash().as_deref() == Some(ask_hash) {
             return Ok(Some(h));
         }
     }
@@ -668,7 +675,8 @@ pub fn find_cached(
 
 /// Who pins a handle: a cohort promoted from it, a selection whose ask
 /// reads it, a campaign whose items it froze, a label set that covers it
-/// (record 42) and a sample sealed from it (record 40 R3). (A release or a job naming a handle is a later wave's
+/// (record 42), a sample sealed from it (record 40 R3) and a pipeline run
+/// over it (record 43 S2). (A release naming a handle is a later wave's
 /// column.)
 pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError> {
     let d = store.dialect();
@@ -692,6 +700,15 @@ pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError>
         for r in store.query(&sql, &[Param::Int(id)])? {
             out.push(format!("{what} {}", r.text(0)?));
         }
+    }
+    // record 43 S2: a pipeline run's frozen input
+    let sql = format!(
+        "SELECT id FROM {} WHERE handle_id = {} ORDER BY id",
+        store.qualified("pipeline_run"),
+        d.param(1, Type::Int)
+    );
+    for r in store.query(&sql, &[Param::Int(id)])? {
+        out.push(format!("pipeline run {}", r.int(0)?));
     }
     // record 40 R3: a sealed sample's frozen list
     let sql = format!(

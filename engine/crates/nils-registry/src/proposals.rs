@@ -1,0 +1,959 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! A pipeline's proposals (record 43 S6, study section 3.4): what a model
+//! says about the stacks it saw, as review items and staged decisions.
+//!
+//! A run's `results.json` carries `proposals`
+//! (`contracts/job/v1/proposals.schema.json`): per stack, an axis, the
+//! value proposed, the probability of every class, and the registered
+//! model that answered. [`ingest`] groups them into `<axis>:model` review
+//! items, one grouped question per axis, model, value and confidence band,
+//! the way the review spine groups a classifier run's questions
+//! ([`crate::review::group_run`]), each stack a member with its
+//! probabilities as its evidence.
+//!
+//! The bands split at the model's threshold and, above it, at
+//! [`BANDS`]. The threshold is the model card's (`threshold`,
+//! `contracts/model/v1`); whoever runs the model may raise it for a run and
+//! never lower it ([`threshold`]), and a model whose card names none has
+//! every proposal asked as a review item. A group at or above the threshold gets a staged group
+//! decision authored by the model (`author_kind` model, its `model_id`),
+//! written through the one write path, [`crate::review::apply_within`], so
+//! that it is refused for a model that is not admitted or promoted, or
+//! registered for another task. Nothing is in force: a model's answer is
+//! evidence until a person commits it (record 42 R6), by id, or by filter
+//! with `nils review commit --min-confidence`, which reads the group's
+//! `confidence`, the lowest of its members'. A group below the threshold
+//! is a review item and nothing more, open for a person or a campaign.
+//!
+//! A stack whose axis a person or an agent has decided, with the decision
+//! in force, is not asked again: it is counted, and left out.
+//!
+//! A newer run of a model supersedes what its earlier runs proposed on the
+//! same axis, on the stacks it proposes again, and nobody took: their
+//! `<axis>:model` items still open or staged are closed as `superseded`,
+//! and the staged decisions nobody committed are withdrawn, so stale
+//! proposals do not pile up. A stack the new run does not propose keeps its
+//! earlier proposal: where it shared a group with stacks proposed again, it
+//! is carried into an item of its own, staged again where the group was. A
+//! decision a person committed stays, and so does an item an unfinished
+//! campaign asks.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::Registry;
+use crate::labels::{self, DecisionQuery};
+use crate::model::{self, Model};
+use crate::review::{self, Apply, Author};
+use crate::schema::{Type, table};
+use crate::store::{Error as StoreError, Insert, Param, Store};
+use crate::time::now_iso;
+
+/// The edges above the threshold where one band ends and the next starts,
+/// so that a commit by minimum confidence can take the surest part of a
+/// value without the rest. An edge at or below the threshold is not one.
+pub const BANDS: [f64; 3] = [0.9, 0.95, 0.99];
+
+/// How far a stack's probabilities may sum from one.
+pub const SUM_TOLERANCE: f64 = 0.01;
+
+#[derive(Debug)]
+pub enum Error {
+    Store(StoreError),
+    /// The proposals are not what the contract says: the run's fault.
+    Invalid(String),
+    /// Well formed and not allowed as things are: a run already ingested,
+    /// a stack or a model that is not there.
+    Refused(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Store(e) => write!(f, "{e}"),
+            Error::Invalid(m) | Error::Refused(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<StoreError> for Error {
+    fn from(e: StoreError) -> Error {
+        Error::Store(e)
+    }
+}
+
+impl From<review::Error> for Error {
+    fn from(e: review::Error) -> Error {
+        match e {
+            review::Error::Store(s) => Error::Store(s),
+            review::Error::Refused(m) | review::Error::Forbidden(m) => Error::Refused(m),
+        }
+    }
+}
+
+fn invalid(m: impl Into<String>) -> Error {
+    Error::Invalid(m.into())
+}
+
+/// One proposal, as `results.json` carries it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proposal {
+    pub stack_id: i64,
+    pub axis: String,
+    pub value: String,
+    /// Every class the model weighed, with its probability.
+    pub probabilities: BTreeMap<String, f64>,
+    /// The registered model, by the id the runner's manifest gave it.
+    #[serde(default)]
+    pub model_id: Option<i64>,
+    /// Or by its digest, which the image can compute from what it loaded.
+    #[serde(default)]
+    pub model_digest: Option<String>,
+    /// Words a person reads beside the numbers, such as a rule the image
+    /// applied after the model (v0's axial brain-neck rule).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl Proposal {
+    /// The probability of the value proposed.
+    pub fn confidence(&self) -> f64 {
+        self.probabilities.get(&self.value).copied().unwrap_or(0.0)
+    }
+}
+
+/// The proposals of a whole `results.json`: none when it carries none.
+pub fn parse(results: &Value) -> Result<Vec<Proposal>, Error> {
+    match results.get("proposals") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(p) => serde_json::from_value(p.clone())
+            .map_err(|e| invalid(format!("the results' proposals are not proposals: {e}"))),
+    }
+}
+
+/// The run the proposals came from.
+#[derive(Debug, Clone)]
+pub struct Run<'a> {
+    /// The pipeline run's id.
+    pub id: i64,
+    /// The job that ran it, which the review items name.
+    pub job_id: Option<i64>,
+    /// Who the model's decisions are written by: the principal the run was
+    /// started for.
+    pub principal: &'a str,
+    /// The stacks of the run's selection; a proposal on another stack is
+    /// dropped and counted, never written. None takes every stack (a caller
+    /// with no selection, such as an import).
+    pub stacks: Option<&'a BTreeSet<i64>>,
+    /// The models the run may speak for: those it was given and those it
+    /// registered itself. A proposal by another is dropped and counted.
+    pub models: Option<&'a BTreeSet<i64>>,
+}
+
+/// One group written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub item: i64,
+    pub axis: String,
+    pub value: String,
+    pub model_id: i64,
+    /// `below`, or `p>=<edge>` for a band at or above the threshold.
+    pub band: String,
+    pub members: i64,
+    /// The lowest probability of the value among the members.
+    pub confidence: f64,
+    /// The staged decision, for a group at or above the threshold whose
+    /// model answers the axis.
+    pub staged: Option<i64>,
+}
+
+/// What an ingest did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ingested {
+    pub groups: Vec<Group>,
+    /// Members under the groups.
+    pub members: i64,
+    /// Members of staged groups.
+    pub staged_members: i64,
+    /// Proposals left out because a person's or an agent's decision on
+    /// the axis is in force on the stack.
+    pub decided: i64,
+    /// Why a group at or above the threshold was not staged, once per
+    /// model: not admitted or promoted, or registered for another task.
+    pub not_staged: Vec<String>,
+    /// The items of the model's earlier runs on the axis closed as
+    /// superseded, and the staged decisions of theirs withdrawn.
+    pub superseded: i64,
+    pub withdrawn: i64,
+    /// Items made for the members of a superseded group the run did not
+    /// propose again, which keep their earlier proposal.
+    pub carried: i64,
+    /// Proposals dropped because their stack is not the run's or their
+    /// model is not one the run was given or made, and why, once per kind.
+    pub out_of_run: i64,
+    pub out_of_run_why: Vec<String>,
+}
+
+impl Ingested {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "items": self.groups.len(),
+            "members": self.members,
+            "staged_members": self.staged_members,
+            "staged_decisions": self.groups.iter().filter(|g| g.staged.is_some()).count(),
+            "decided": self.decided,
+            "not_staged": self.not_staged,
+            "superseded": self.superseded,
+            "withdrawn": self.withdrawn,
+            "carried": self.carried,
+            "out_of_run": self.out_of_run,
+            "out_of_run_why": self.out_of_run_why,
+            "groups": self.groups.iter().map(|g| json!({
+                "item": g.item, "axis": g.axis, "value": g.value, "model_id": g.model_id,
+                "band": g.band, "members": g.members, "confidence": g.confidence,
+                "staged": g.staged,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+fn axis_ok(axis: &str) -> bool {
+    !axis.is_empty() && axis.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+}
+
+/// The band a probability falls in.
+pub fn band(p: f64, threshold: f64) -> String {
+    if p < threshold {
+        return "below".into();
+    }
+    let edge = BANDS
+        .iter()
+        .copied()
+        .filter(|e| *e > threshold && p >= *e)
+        .fold(threshold, f64::max);
+    format!("p>={edge}")
+}
+
+/// Check every proposal before anything is written, and resolve its model.
+fn checked(store: &mut Store, proposals: &[Proposal]) -> Result<Vec<(usize, Model)>, Error> {
+    let mut models: BTreeMap<String, Model> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(proposals.len());
+    for (i, p) in proposals.iter().enumerate() {
+        let at = format!("proposals[{i}]");
+        if !axis_ok(&p.axis) {
+            return Err(invalid(format!(
+                "{at}: {:?} is not an axis: lowercase letters and underscores",
+                p.axis
+            )));
+        }
+        if p.value.trim().is_empty() {
+            return Err(invalid(format!("{at}: the value is empty")));
+        }
+        if p.probabilities.is_empty() {
+            return Err(invalid(format!(
+                "{at}: a proposal carries the probability of every class"
+            )));
+        }
+        for (class, q) in &p.probabilities {
+            if !q.is_finite() || !(0.0..=1.0).contains(q) {
+                return Err(invalid(format!(
+                    "{at}: the probability of {class} is {q}, not one between 0 and 1"
+                )));
+            }
+        }
+        let sum: f64 = p.probabilities.values().sum();
+        if (sum - 1.0).abs() > SUM_TOLERANCE {
+            return Err(invalid(format!(
+                "{at}: the probabilities sum to {sum:.4}, not 1"
+            )));
+        }
+        if !p.probabilities.contains_key(&p.value) {
+            return Err(invalid(format!(
+                "{at}: the value {} is not among the classes weighed",
+                p.value
+            )));
+        }
+        let key = match (p.model_id, p.model_digest.as_deref()) {
+            (Some(id), _) => id.to_string(),
+            (None, Some(d)) => d.to_string(),
+            (None, None) => {
+                return Err(invalid(format!(
+                    "{at}: a proposal names its model, by model_id or model_digest"
+                )));
+            }
+        };
+        let m = match models.get(&key) {
+            Some(m) => m.clone(),
+            None => {
+                let m = model::resolve(store, &key)?.ok_or_else(|| {
+                    Error::Refused(format!("{at}: no registered model answers to {key}"))
+                })?;
+                models.insert(key, m.clone());
+                m
+            }
+        };
+        if let Some(d) = p.model_digest.as_deref()
+            && d != m.digest
+        {
+            return Err(invalid(format!(
+                "{at}: model {} has the digest {}, not {d}",
+                m.id, m.digest
+            )));
+        }
+        if !seen.insert((p.stack_id, p.axis.clone(), m.id)) {
+            return Err(invalid(format!(
+                "{at}: stack {} has a second proposal of model {} on {}",
+                p.stack_id, m.id, p.axis
+            )));
+        }
+        out.push((i, m));
+    }
+    // every stack is one the registry holds
+    let stacks: BTreeSet<i64> = proposals.iter().map(|p| p.stack_id).collect();
+    let ids: Vec<i64> = stacks.iter().copied().collect();
+    let mut found = BTreeSet::new();
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id FROM {} WHERE id IN ({list})",
+            store.qualified("stack")
+        );
+        for r in store.query(&sql, &[])? {
+            found.insert(r.int(0)?);
+        }
+    }
+    if let Some(missing) = stacks.difference(&found).next() {
+        return Err(Error::Refused(format!(
+            "stack {missing} is not in the registry"
+        )));
+    }
+    Ok(out)
+}
+
+/// Why a model's confident group is not staged, or nothing when it is.
+fn why_not(m: &Model, axis: &str) -> Option<String> {
+    if !m.answers() {
+        return Some(format!(
+            "model {} ({}) is {}; only an admitted or promoted model's answer is staged",
+            m.id,
+            m.label(),
+            m.state
+        ));
+    }
+    let task = format!("axis:{axis}");
+    (m.task != task).then(|| {
+        format!(
+            "model {} ({}) answers {}, not {task}",
+            m.id,
+            m.label(),
+            m.task
+        )
+    })
+}
+
+/// A group being gathered: the members' stacks, probabilities and evidence.
+#[derive(Default)]
+struct Gathered {
+    members: Vec<(i64, f64, Value)>,
+}
+
+/// The threshold a model's proposals are staged at in a run: its card's,
+/// or a higher one the caller asks for. Refused for a caller's value that
+/// is not a probability or is below the card's. None when the card names
+/// none: then nothing of the model is staged, whatever the caller asks,
+/// since a caller only raises the card's threshold.
+pub fn threshold(m: &Model, asked: Option<f64>) -> Result<Option<f64>, Error> {
+    if let Some(a) = asked
+        && (!a.is_finite() || a <= 0.0 || a > 1.0)
+    {
+        return Err(invalid(format!(
+            "the threshold asked is {a}, and a threshold is a probability above 0 and at most 1"
+        )));
+    }
+    let Some(card) = m.threshold() else {
+        return Ok(None);
+    };
+    match asked {
+        Some(a) if a < card => Err(Error::Refused(format!(
+            "model {} ({}) stages its proposals at {card}, as its card says; a run may raise that threshold, not lower it to {a}",
+            m.id,
+            m.label()
+        ))),
+        Some(a) => Ok(Some(a)),
+        None => Ok(Some(card)),
+    }
+}
+
+/// Turn a run's proposals into grouped `<axis>:model` review items, and
+/// stage a decision by the model on each group at or above the model's
+/// threshold ([`threshold`]: its card's, or higher where `asked` raises
+/// it), all in one transaction: every item and decision is written, or
+/// none. A run is ingested once; a second ingest of it is refused.
+pub fn ingest(
+    registry: &mut Registry,
+    run: &Run<'_>,
+    proposals: &[Proposal],
+    asked: Option<f64>,
+) -> Result<Ingested, Error> {
+    let store = registry.store();
+    let d = store.dialect();
+    let prefix = format!("run:{}|", run.id);
+    let held = store
+        .query_opt(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE group_key LIKE {}",
+                store.qualified("review_item"),
+                d.param(1, Type::Text)
+            ),
+            &[Param::from(format!("{prefix}%"))],
+        )?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0);
+    if held > 0 {
+        return Err(Error::Refused(format!(
+            "the proposals of run {} are in already, as {held} review item(s)",
+            run.id
+        )));
+    }
+    let resolved = checked(store, proposals)?;
+    // only the run's own stacks, and only the models it may speak for
+    let mut dropped: BTreeMap<String, i64> = BTreeMap::new();
+    let resolved: Vec<(usize, Model)> = resolved
+        .into_iter()
+        .filter(|(i, m)| {
+            let p = &proposals[*i];
+            let why = if run.stacks.is_some_and(|s| !s.contains(&p.stack_id)) {
+                Some("a stack outside the run's selection".to_string())
+            } else if run.models.is_some_and(|s| !s.contains(&m.id)) {
+                Some(format!(
+                    "model {} ({}), which the run was neither given nor made",
+                    m.id,
+                    m.label()
+                ))
+            } else {
+                None
+            };
+            if let Some(w) = why {
+                *dropped.entry(w).or_default() += 1;
+                return false;
+            }
+            true
+        })
+        .collect();
+    // each model's threshold, refused before anything is written
+    let mut thresholds: BTreeMap<i64, Option<f64>> = BTreeMap::new();
+    for (_, m) in &resolved {
+        if let std::collections::btree_map::Entry::Vacant(e) = thresholds.entry(m.id) {
+            e.insert(threshold(m, asked)?);
+        }
+    }
+    // the stacks a person or an agent decided, per axis
+    let mut decided: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+    let axes: BTreeSet<&str> = proposals.iter().map(|p| p.axis.as_str()).collect();
+    let persons = ["person".to_string(), "agent".to_string()];
+    for axis in axes {
+        let stacks: Vec<i64> = proposals
+            .iter()
+            .filter(|p| p.axis == axis)
+            .map(|p| p.stack_id)
+            .collect();
+        let labels = labels::decision_labels(
+            store,
+            &DecisionQuery {
+                axis,
+                stacks: Some(&stacks),
+                authors: &persons,
+                campaign: None,
+                staged_too: false,
+            },
+        )
+        .map_err(|e| match e {
+            labels::Error::Store(s) => Error::Store(s),
+            other => Error::Refused(other.to_string()),
+        })?;
+        decided.insert(
+            axis.to_string(),
+            labels.iter().filter_map(|l| l.stack_id).collect(),
+        );
+    }
+    let mut out = Ingested {
+        out_of_run: dropped.values().sum(),
+        out_of_run_why: dropped
+            .iter()
+            .map(|(w, n)| format!("{n} proposal(s) on {w}"))
+            .collect(),
+        ..Ingested::default()
+    };
+    // the stacks the run proposes again, per axis and model, which is what
+    // it supersedes of the model's earlier runs
+    let mut again: BTreeMap<(String, i64), BTreeSet<i64>> = BTreeMap::new();
+    for (i, m) in &resolved {
+        let p = &proposals[*i];
+        again
+            .entry((p.axis.clone(), m.id))
+            .or_default()
+            .insert(p.stack_id);
+    }
+    // (axis, model, value, band) -> members
+    let mut groups: BTreeMap<(String, i64, String, String), Gathered> = BTreeMap::new();
+    let mut models: BTreeMap<i64, Model> = BTreeMap::new();
+    for (i, m) in resolved {
+        let p = &proposals[i];
+        if decided
+            .get(&p.axis)
+            .is_some_and(|s| s.contains(&p.stack_id))
+        {
+            out.decided += 1;
+            continue;
+        }
+        let confidence = p.confidence();
+        let evidence = json!({
+            "axis": p.axis,
+            "value": p.value,
+            "confidence": confidence,
+            "probabilities": p.probabilities,
+            "model_id": m.id,
+            "run_id": run.id,
+            "note": p.note,
+        });
+        let at = thresholds[&m.id].unwrap_or(f64::INFINITY);
+        groups
+            .entry((p.axis.clone(), m.id, p.value.clone(), band(confidence, at)))
+            .or_default()
+            .members
+            .push((p.stack_id, confidence, evidence));
+        models.insert(m.id, m);
+    }
+    registry.store().begin()?;
+    match write(
+        registry,
+        run,
+        &thresholds,
+        &again,
+        groups,
+        &models,
+        &mut out,
+    ) {
+        Ok(()) => {
+            registry.store().commit()?;
+            Ok(out)
+        }
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(e)
+        }
+    }
+}
+
+fn write(
+    registry: &mut Registry,
+    run: &Run<'_>,
+    thresholds: &BTreeMap<i64, Option<f64>>,
+    again: &BTreeMap<(String, i64), BTreeSet<i64>>,
+    groups: BTreeMap<(String, i64, String, String), Gathered>,
+    models: &BTreeMap<i64, Model>,
+    out: &mut Ingested,
+) -> Result<(), Error> {
+    let now = now_iso();
+    let mut refusals: BTreeSet<String> = BTreeSet::new();
+    for ((axis, model_id), stacks) in again {
+        let done = supersede(registry, run, axis, *model_id, stacks, &now)?;
+        out.superseded += done.0;
+        out.withdrawn += done.1;
+        out.carried += done.2;
+    }
+    for ((axis, model_id, value, band), mut g) in groups {
+        let m = &models[&model_id];
+        let threshold = thresholds[&model_id];
+        if threshold.is_none() {
+            refusals.insert(format!(
+                "model {} ({}) names no threshold on its card, so its proposals are review items only",
+                m.id,
+                m.label()
+            ));
+        }
+        g.members.sort_by_key(|(stack, _, _)| *stack);
+        let confidence = g
+            .members
+            .iter()
+            .map(|(_, c, _)| *c)
+            .fold(f64::INFINITY, f64::min);
+        let mean = g.members.iter().map(|(_, c, _)| *c).sum::<f64>() / g.members.len() as f64;
+        let kind = format!("{axis}:model");
+        let key = format!("run:{}|{kind}|{value}|{band}|model:{model_id}", run.id);
+        let above = band != "below";
+        let evidence = json!({
+            "axis": axis,
+            "value": value,
+            "tier": band,
+            "confidence": confidence,
+            "mean_confidence": mean,
+            "threshold": threshold,
+            "model": m.named(),
+            "run_id": run.id,
+            "members": g.members.len(),
+            "group": key,
+        });
+        let store = registry.store();
+        let item = store
+            .insert(
+                &Insert::new(
+                    table("review_item"),
+                    &[
+                        "kind",
+                        "scope",
+                        "ref",
+                        "evidence",
+                        "status",
+                        "created_at",
+                        "job_id",
+                        "members",
+                        "group_key",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from(kind.as_str()),
+                    Param::from("group"),
+                    Param::from(json!({"group": key, "run_id": run.id}).to_string()),
+                    Param::from(evidence.to_string()),
+                    Param::from("open"),
+                    Param::from(now.as_str()),
+                    run.job_id.map_or(Param::Null, Param::Int),
+                    Param::Int(g.members.len() as i64),
+                    Param::from(key.as_str()),
+                ]],
+            )?
+            .first()
+            .ok_or_else(|| StoreError::Message("the group item was not written back".into()))?
+            .int(0)?;
+        let rows: Vec<Vec<Param>> = g
+            .members
+            .iter()
+            .map(|(stack, _, ev)| {
+                vec![
+                    Param::Int(item),
+                    Param::Int(*stack),
+                    Param::from(ev.to_string()),
+                ]
+            })
+            .collect();
+        for chunk in rows.chunks(500) {
+            store.insert(
+                &Insert::new(table("review_member"), &["item_id", "stack_id", "evidence"]),
+                chunk,
+            )?;
+        }
+        let members = g.members.len() as i64;
+        out.members += members;
+        let mut staged = None;
+        if above {
+            match why_not(m, &axis) {
+                Some(why) => {
+                    refusals.insert(why);
+                }
+                None => {
+                    let why = format!(
+                        "run {}: {} of {members} stack(s) at probability {confidence:.3} or more, threshold {}",
+                        run.id,
+                        value,
+                        threshold.unwrap_or(1.0)
+                    );
+                    let applied = review::apply_within(
+                        registry,
+                        &Apply {
+                            item,
+                            member: None,
+                            scope: "stack",
+                            value: Some(value.as_str()),
+                            author: Author {
+                                who: run.principal,
+                                kind: "model",
+                                version: None,
+                                model: Some(model_id),
+                            },
+                            stage: true,
+                            why: Some(why.as_str()),
+                            campaign: None,
+                        },
+                    )?;
+                    debug_assert!(applied.staged, "a model's answer is staged (R6)");
+                    staged = Some(applied.decision);
+                    out.staged_members += members;
+                }
+            }
+        }
+        out.groups.push(Group {
+            item,
+            axis,
+            value,
+            model_id,
+            band,
+            members,
+            confidence,
+            staged,
+        });
+    }
+    out.not_staged = refusals.into_iter().collect();
+    Ok(())
+}
+
+/// Close what a model's earlier runs proposed on an axis, on `stacks`, and
+/// nobody took: an item open or staged holding any of them becomes
+/// `superseded`, and its staged decision that nobody committed is
+/// withdrawn. Its members the run does not propose again, and no person
+/// decided on their own, are carried into a new item under the earlier
+/// run's key, staged by the model again where the item was staged and the
+/// model still answers. An item an unfinished campaign asks is left to the
+/// campaign. Answers the items superseded, the decisions withdrawn and the
+/// items carried.
+fn supersede(
+    registry: &mut Registry,
+    run: &Run<'_>,
+    axis: &str,
+    model_id: i64,
+    stacks: &BTreeSet<i64>,
+    now: &str,
+) -> Result<(i64, i64, i64), Error> {
+    let store = registry.store();
+    let d = store.dialect();
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT id, decision_id, status, group_key, {}, job_id FROM {ri} WHERE kind = {} \
+         AND status IN ('open', 'staged') AND group_key LIKE {} AND group_key NOT LIKE {} \
+         AND id NOT IN (SELECT ci.review_item_id FROM {ci} ci JOIN {c} c ON c.id = ci.campaign_id \
+         WHERE c.status IN ('open', 'closing'))",
+        d.text_of(t.column("evidence").expect("evidence")),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Text),
+        ri = store.qualified("review_item"),
+        ci = store.qualified("campaign_item"),
+        c = store.qualified("campaign"),
+    );
+    let stale = store.query(
+        &sql,
+        &[
+            Param::from(format!("{axis}:model")),
+            Param::from(format!("%|model:{model_id}")),
+            Param::from(format!("run:{}|%", run.id)),
+        ],
+    )?;
+    let why = json!({"superseded_by": {"run_id": run.id, "model_id": model_id}});
+    let (mut items, mut decisions, mut carried) = (0i64, 0i64, 0i64);
+    for r in &stale {
+        let (item, decision) = (r.int(0)?, r.opt_int(1)?);
+        let staged = r.text(2)? == "staged";
+        let key = r.text(3)?.to_string();
+        let evidence: Value = r
+            .opt_text(4)?
+            .and_then(|e| serde_json::from_str(e).ok())
+            .unwrap_or(Value::Null);
+        let job_id = r.opt_int(5)?;
+        let members = review::members(registry.store(), item)?;
+        if !members.iter().any(|m| stacks.contains(&m.stack_id)) {
+            continue;
+        }
+        // a staged group marks every member decided; an open one only the
+        // members a person answered on their own, which are theirs
+        let kept: Vec<&review::Member> = members
+            .iter()
+            .filter(|m| !stacks.contains(&m.stack_id) && (staged || m.decided_at.is_none()))
+            .collect();
+        let store = registry.store();
+        // who staged it, so a carried decision is the same author's
+        let mut author = run.principal.to_string();
+        if let Some(decision) = decision {
+            if let Some(row) = store.query_opt(
+                &format!(
+                    "SELECT actor FROM {} WHERE id = {}",
+                    store.qualified("decision"),
+                    d.param(1, Type::Int)
+                ),
+                &[Param::Int(decision)],
+            )? && let Some(a) = row.opt_text(0)?
+            {
+                author = a.to_string();
+            }
+            decisions += store.execute(
+                &format!(
+                    "UPDATE {} SET withdrawn_at = {} WHERE id = {} AND withdrawn_at IS NULL \
+                     AND staged_at IS NOT NULL AND committed_at IS NULL",
+                    store.qualified("decision"),
+                    d.param(1, Type::Timestamp),
+                    d.param(2, Type::Int)
+                ),
+                &[Param::from(now), Param::Int(decision)],
+            )? as i64;
+        }
+        items += store.execute(
+            &format!(
+                "UPDATE {} SET status = '{}', decided_at = {}, actor = {}, decision = {} WHERE id = {}",
+                store.qualified("review_item"),
+                review::RESOLVED,
+                d.param(1, Type::Timestamp),
+                d.param(2, Type::Text),
+                d.param(3, Type::Json),
+                d.param(4, Type::Int)
+            ),
+            &[
+                Param::from(now),
+                Param::from(run.principal),
+                Param::from(why.to_string()),
+                Param::Int(item),
+            ],
+        )? as i64;
+        if kept.is_empty() {
+            continue;
+        }
+        // the members not proposed again keep their proposal, in an item of
+        // their own under the earlier run's key
+        let tail = format!("|model:{model_id}");
+        let carried_key = format!(
+            "{}|carried:{item}{tail}",
+            key.strip_suffix(&tail).unwrap_or(&key)
+        );
+        let confidences: Vec<f64> = kept
+            .iter()
+            .filter_map(|m| m.evidence["confidence"].as_f64())
+            .collect();
+        let mut ev = evidence.clone();
+        ev["members"] = json!(kept.len());
+        ev["group"] = json!(carried_key);
+        ev["carried_from"] = json!(item);
+        if !confidences.is_empty() {
+            ev["confidence"] = json!(confidences.iter().copied().fold(f64::INFINITY, f64::min));
+            ev["mean_confidence"] =
+                json!(confidences.iter().sum::<f64>() / confidences.len() as f64);
+        }
+        let reference = json!({"group": carried_key, "run_id": evidence["run_id"]});
+        let new = store
+            .insert(
+                &Insert::new(
+                    table("review_item"),
+                    &[
+                        "kind",
+                        "scope",
+                        "ref",
+                        "evidence",
+                        "status",
+                        "created_at",
+                        "job_id",
+                        "members",
+                        "group_key",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from(format!("{axis}:model")),
+                    Param::from("group"),
+                    Param::from(reference.to_string()),
+                    Param::from(ev.to_string()),
+                    Param::from("open"),
+                    Param::from(now),
+                    job_id.map_or(Param::Null, Param::Int),
+                    Param::Int(kept.len() as i64),
+                    Param::from(carried_key.as_str()),
+                ]],
+            )?
+            .first()
+            .ok_or_else(|| StoreError::Message("the carried item was not written back".into()))?
+            .int(0)?;
+        let rows: Vec<Vec<Param>> = kept
+            .iter()
+            .map(|m| {
+                vec![
+                    Param::Int(new),
+                    Param::Int(m.stack_id),
+                    Param::from(m.evidence.to_string()),
+                ]
+            })
+            .collect();
+        for chunk in rows.chunks(500) {
+            store.insert(
+                &Insert::new(table("review_member"), &["item_id", "stack_id", "evidence"]),
+                chunk,
+            )?;
+        }
+        carried += 1;
+        // staged again only where it was and the model still answers;
+        // otherwise the carried item stays open for a person
+        if staged
+            && let Some(value) = evidence["value"].as_str()
+            && model::author(registry.store(), model_id).is_ok()
+        {
+            let why = format!(
+                "carried from review item {item}: run {} did not propose these stacks again",
+                run.id
+            );
+            review::apply_within(
+                registry,
+                &Apply {
+                    item: new,
+                    member: None,
+                    scope: "stack",
+                    value: Some(value),
+                    author: Author {
+                        who: &author,
+                        kind: "model",
+                        version: None,
+                        model: Some(model_id),
+                    },
+                    stage: true,
+                    why: Some(why.as_str()),
+                    campaign: None,
+                },
+            )?;
+        }
+    }
+    Ok((items, decisions, carried))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_band_is_below_the_threshold_or_the_highest_edge_reached() {
+        assert_eq!(band(0.5, 0.8), "below");
+        assert_eq!(band(0.8, 0.8), "p>=0.8");
+        assert_eq!(band(0.89, 0.8), "p>=0.8");
+        assert_eq!(band(0.9, 0.8), "p>=0.9");
+        assert_eq!(band(0.97, 0.8), "p>=0.95");
+        assert_eq!(band(1.0, 0.8), "p>=0.99");
+        // an edge at or under the threshold is not one
+        assert_eq!(band(0.93, 0.92), "p>=0.92");
+        assert_eq!(band(0.96, 0.95), "p>=0.95");
+    }
+
+    #[test]
+    fn proposals_parse_from_results_and_refuse_what_they_do_not_know() {
+        let r = json!({"units": [], "proposals": [{
+            "stack_id": 3, "axis": "body_part", "value": "brain",
+            "probabilities": {"brain": 0.9, "spine": 0.1}, "model_id": 2,
+        }]});
+        let p = parse(&r).unwrap();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].confidence(), 0.9);
+        assert!(parse(&json!({"units": []})).unwrap().is_empty());
+        let e = parse(
+            &json!({"proposals": [{"stack_id": 3, "axis": "a", "value": "b",
+            "probabilities": {"b": 1.0}, "model_id": 1, "extra": 1}]}),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("extra"), "{e}");
+    }
+}

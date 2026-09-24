@@ -466,11 +466,12 @@ fn promotion_opens_intervals_and_the_cohort_answers() {
         let out = go(&mut l, ask.clone(), None, false);
         let before = l.registry.meta().epoch;
         // a selection under the cohort's future name, then the promotion links them
+        // a saved selection's hash is of what it selects (record 43)
         let saved = selection::save(
             &mut l.registry,
             "converters",
             &out.handle.ask.clone().unwrap(),
-            &out.hash,
+            &out.handle.bound_hash().unwrap(),
             "tester",
             None,
             None,
@@ -585,7 +586,7 @@ fn promotion_opens_intervals_and_the_cohort_answers() {
             &mut l.registry,
             "converters",
             &out2.handle.ask.clone().unwrap(),
-            &out2.hash,
+            &out2.handle.bound_hash().unwrap(),
             "tester",
             Some("looser"),
             None,
@@ -779,5 +780,111 @@ fn the_measures_ride_on_the_answer() {
     if seen.len() == 2 {
         assert_eq!(seen[0].1, seen[1].1, "the shares differ between backends");
         assert_eq!(seen[0].2, seen[1].2, "the scalars differ between backends");
+    }
+}
+
+/// The review of record 43: a selection saved before the bound hash stored
+/// the question's hash. Promotion still finds the version that holds a
+/// handle's ask, by hashing that version's own ask again, and never takes
+/// a version that binds other values under the same question.
+#[test]
+fn a_selection_saved_under_the_question_s_hash_still_holds_its_handle() {
+    for mut l in labs() {
+        let ask = fixture("yardstick");
+        let out = go(&mut l, ask.clone(), None, false);
+        let stored = out.handle.ask.clone().unwrap();
+        assert_ne!(
+            out.handle.bound_hash().unwrap(),
+            out.hash,
+            "the yardstick binds values"
+        );
+        // another selection, the same question with another value bound,
+        // saved under the old scheme with the same question's hash
+        let mut other = stored.clone();
+        other.params.get_mut("age_from").unwrap().value = Some(json!(45));
+        selection::save(
+            &mut l.registry,
+            "elsewhere",
+            &other,
+            &out.hash,
+            "tester",
+            None,
+            None,
+        )
+        .unwrap();
+        // the old row of the selection that holds this ask
+        selection::save(
+            &mut l.registry,
+            "converters",
+            &stored,
+            &out.hash,
+            "tester",
+            None,
+            None,
+        )
+        .unwrap();
+        let p = promote::promote(
+            &mut l.registry,
+            out.handle.id,
+            "converters",
+            "tester",
+            Some("the old row"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            p.selection,
+            Some(("converters".to_string(), 1)),
+            "{}",
+            l.name
+        );
+    }
+}
+
+/// The second review of record 43: a selection is saved with the bound
+/// hash under the registry's locale, and promotion hashes the handle's
+/// ask under the same locale, so a registry off UTC still finds it.
+#[test]
+fn promotion_hashes_under_the_registry_s_locale() {
+    for mut l in labs() {
+        l.registry.set_meta("timezone", "Europe/Stockholm").unwrap();
+        l.registry.refresh_meta().unwrap();
+        let out = go(&mut l, fixture("yardstick"), None, false);
+        let stored = out.handle.ask.clone().unwrap();
+        let locale = nils_ask::hash::Locale {
+            timezone: "Europe/Stockholm".into(),
+            week_start: "monday".into(),
+        };
+        let bound = nils_ask::hash::bound_hash_under(&stored, &locale);
+        assert_ne!(
+            bound,
+            out.handle.bound_hash().unwrap(),
+            "the locale is in the hash"
+        );
+        selection::save(
+            &mut l.registry,
+            "converters",
+            &stored,
+            &bound,
+            "tester",
+            None,
+            None,
+        )
+        .unwrap();
+        let p = promote::promote(
+            &mut l.registry,
+            out.handle.id,
+            "converters",
+            "tester",
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            p.selection,
+            Some(("converters".to_string(), 1)),
+            "{}",
+            l.name
+        );
     }
 }

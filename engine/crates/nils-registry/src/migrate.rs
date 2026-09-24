@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 58;
+pub const SCHEMA_VERSION: i64 = 62;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +286,83 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 58,
         apply: labels_leave_with_their_provenance,
     },
+    Migration {
+        version: 59,
+        apply: a_pipeline_has_a_catalog_and_its_runs,
+    },
+    Migration {
+        version: 60,
+        apply: an_embedding_is_kept_once_per_encoder_and_preprocessing,
+    },
+    Migration {
+        version: 61,
+        apply: a_head_reads_its_encoders_in_order,
+    },
+    Migration {
+        version: 62,
+        apply: a_run_s_input_release_says_so,
+    },
 ];
+
+/// Record 43: the release a pipeline run materialised its bids input by
+/// says so, so the release history can leave it out. A registry from before
+/// gains the column, and the releases its runs name are marked.
+fn a_run_s_input_release_says_so(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["purpose"])?;
+    let (r, pr) = (store.qualified("release"), store.qualified("pipeline_run"));
+    store.batch(&format!(
+        "UPDATE {r} SET purpose = '{}' WHERE purpose IS NULL AND id IN \
+         (SELECT input_release_id FROM {pr} WHERE input_release_id IS NOT NULL)",
+        crate::pipeline::RUN_INPUT
+    ))?;
+    Ok(())
+}
+
+/// Record 43: a head reads several encoders. A registry from before gains
+/// the table with each head's one encoder as its first, so every reader of
+/// the list sees what the row said.
+fn a_head_reads_its_encoders_in_order(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["model_encoder"])?;
+    let (me, m) = (store.qualified("model_encoder"), store.qualified("model"));
+    store.batch(&format!(
+        "INSERT INTO {me} (model_id, encoder_model_id, position) \
+         SELECT id, encoder_model_id, 0 FROM {m} WHERE encoder_model_id IS NOT NULL \
+         AND id NOT IN (SELECT model_id FROM {me})"
+    ))?;
+    Ok(())
+}
+
+/// Record 43 S1 and S2: the pipeline catalog and the runs. A registry from
+/// before gains the two tables empty; with no pipeline added nothing runs,
+/// and every derivative from before keeps its null run.
+fn a_pipeline_has_a_catalog_and_its_runs(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["pipeline", "pipeline_run"])
+}
+
+/// Record 43 S4: the embedding cache's key, a unique index over the live
+/// embeddings by stack, encoder and preprocessing version. The column
+/// `preprocess_version` came with the table (migration 56), and every row
+/// written before has it null, since nothing wrote one: a null is outside
+/// the key, so no row of a registry from before stands in the index's way.
+fn an_embedding_is_kept_once_per_encoder_and_preprocessing(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "derivative", &["preprocess_version"])?;
+    add_indexes(store, "derivative")
+}
 
 /// Record 42 S2: the model registry. A registry from before gains the two
 /// tables empty, since no model was registered before there was a place to

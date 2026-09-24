@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# N4 bias field correction: the walking-skeleton anchor (record 43, the proof
+# of S2 and S3), v0's descriptor ported to contracts/job/v1.
+#
+# One session's T1-weighted image in, the same image with its low-frequency
+# intensity non-uniformity removed out, by ANTs N4BiasFieldCorrection. No
+# model, no GPU, no licence. The input is a release of the selection in the
+# BIDS layout with the picks applied (R4), so a session holds the one T1w
+# its pick chose; v0's wrapper refused any subject that held more than one,
+# which is why it "only works on narrow selections".
+#
+# What changed from v0:
+# - The image is the public ANTs image itself, pinned by its registry
+#   manifest digest (R3), the base v0's private wrapper was built FROM.
+#   Resolved 2026-09-24: docker manifest inspect answers this digest with a
+#   single-platform image manifest (linux/amd64), ANTs 2.6.5.dev1-gfdce4d2
+#   on Debian 12. v0's tool-version said 2.5.0, which the image is not.
+# - No wrapper script: the image carries bash, and the command below finds
+#   each session's T1w in the tree and writes its output beside the BIDS
+#   path it came from. No results.json is written, so the runner finds each
+#   session's output by the template under x-nils.outputs, and a session
+#   without one is a pipeline:qc review item.
+# - The work unit is the session (v0 had to use subject, since its renderer
+#   could not build a session's path); the parameters are substituted where
+#   they stand, since the engine splits the line into words itself and runs
+#   no shell of its own.
+#
+# Add it:  nils pipeline add pipelines/n4-bias-correction/nils.job.yml
+# Run it:  nils run n4-bias-correction --select selection:<name>@<v>
+name: n4-bias-correction
+schema-version: "0.5"
+tool-version: "2.6.5.dev1-gfdce4d2"
+description: >-
+  Correct the low-frequency intensity non-uniformity (bias field) of each
+  session's T1-weighted image with ANTs N4BiasFieldCorrection. One session is
+  one unit; no GPU, no licence.
+
+container-image:
+  type: docker
+  image: "docker.io/antsx/ants@sha256:59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3"
+
+inputs:
+  - id: dimension
+    name: Image dimensionality
+    type: Number
+    description: The image's dimensionality, 3 for a structural volume.
+    value-key: "[DIM]"
+    default-value: 3
+    integer: true
+    minimum: 2
+    maximum: 4
+  - id: shrink_factor
+    name: Shrink factor
+    type: Number
+    description: Downsampling that trades accuracy for speed; 4 is ANTs' default for a volume.
+    value-key: "[SHRINK]"
+    default-value: 4
+    integer: true
+    minimum: 1
+    maximum: 8
+
+command-line: >-
+  bash -c 'set -eu; shopt -s nullglob; cd [InputDataset]; n=0;
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz sub-*/ses-*/anat/*_T1w.nii; do
+  d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
+  b=$(basename "$f"); b=${b%.gz}; b=${b%.nii}; b=${b%_T1w};
+  N4BiasFieldCorrection -d [DIM] -s [SHRINK] -i "$f" -o "$d/${b}_desc-n4_T1w.nii.gz";
+  n=$((n+1)); done; echo "N4 corrected $n images"'
+
+output-files:
+  - id: n4_image
+    name: N4 bias-corrected T1w
+    path-template: "sub-[SubjectLabel]/ses-[SessionLabel]/anat/*_desc-n4_T1w.nii.gz"
+
+suggested-resources:
+  cpu-cores: 2
+  ram: 4
+  walltime-estimate: 0.2
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+  outputs:
+    - id: n4_image
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz"
+      media-type: application/x-nifti+gzip
+  needs:
+    gpu: none
+    memory-gb: 4
+    cores: 2

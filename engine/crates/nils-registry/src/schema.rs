@@ -75,6 +75,15 @@ pub(crate) const fn req(name: &'static str, ty: Type) -> Column {
     }
 }
 
+/// A unique key over the rows a predicate names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partial {
+    pub name: &'static str,
+    pub columns: Vec<&'static str>,
+    /// SQL both dialects read the same, over the table's own columns.
+    pub predicate: &'static str,
+}
+
 /// One table: its columns in order, its unique keys and its indexes.
 #[derive(Debug, Clone)]
 pub struct Table {
@@ -84,6 +93,10 @@ pub struct Table {
     /// of the writer.
     pub uniques: Vec<Vec<&'static str>>,
     pub indexes: Vec<Vec<&'static str>>,
+    /// Unique indexes over part of the table: a name, the columns and the
+    /// predicate that says which rows the key holds for (record 43 S4: one
+    /// live embedding per stack, encoder and preprocessing).
+    pub partial_uniques: Vec<Partial>,
     /// A table whose primary key is a column of its own (`series_id` on the
     /// detail tables) instead of a generated id.
     pub primary: Option<&'static str>,
@@ -96,8 +109,23 @@ impl Table {
             columns,
             uniques: Vec::new(),
             indexes: Vec::new(),
+            partial_uniques: Vec::new(),
             primary: None,
         }
+    }
+
+    fn unique_where(
+        mut self,
+        name: &'static str,
+        cols: &[&'static str],
+        predicate: &'static str,
+    ) -> Table {
+        self.partial_uniques.push(Partial {
+            name,
+            columns: cols.to_vec(),
+            predicate,
+        });
+        self
     }
 
     fn unique(mut self, cols: &[&'static str]) -> Table {
@@ -1223,7 +1251,8 @@ fn build_registry() -> Vec<Table> {
                 req("state", Type::Text),
                 // the card as it was registered, kept whole
                 req("card", Type::Json),
-                // a head names the encoder whose features it reads
+                // a head names the encoder whose features it reads; the
+                // first of them, when it reads several (model_encoder)
                 col("encoder_model_id", Type::Int),
                 // the digest of the label set it was fitted on (C7)
                 col("trained_on", Type::Text),
@@ -1263,6 +1292,21 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["model_id"]),
+        // Record 43: every encoder a head reads, in the order it
+        // concatenates their features. A small table rather than a list
+        // in the model row, so that the heads a new encoder makes stale are
+        // one read; `model.encoder_model_id` keeps the first.
+        Table::new(
+            "model_encoder",
+            vec![
+                col("id", Type::Id),
+                req("model_id", Type::Int),
+                req("encoder_model_id", Type::Int),
+                req("position", Type::Int),
+            ],
+        )
+        .unique(&["model_id", "position"])
+        .index(&["encoder_model_id"]),
         Table::new(
             "pick_stack",
             vec![
@@ -1302,7 +1346,7 @@ fn build_registry() -> Vec<Table> {
                 // Who made it. A person's upload names the principal and who
                 // acted for it; a model by its id in the model table (record
                 // 42 S2), checked when the row is written; a pipeline run by
-                // id once its table exists (wave 43), and null until then.
+                // its id in pipeline_run (record 43 S2), null for an upload.
                 col("registered_by", Type::Text),
                 col("actor", Type::Json),
                 col("model_id", Type::Int),
@@ -1319,7 +1363,17 @@ fn build_registry() -> Vec<Table> {
         .index(&["stack_id"])
         .index(&["subject_id"])
         .index(&["kind"])
-        .index(&["sha256"]),
+        .index(&["sha256"])
+        // Record 43 S4: the embedding cache's key. One live embedding per
+        // stack, encoder and preprocessing version; a new preprocessing
+        // version is a new key, so its rows sit beside the old ones, and a
+        // withdrawn row frees its key. A row with no encoder or no version
+        // (one registered at the door before the cache) is outside the key.
+        .unique_where(
+            "embedding",
+            &["kind", "stack_id", "model_id", "preprocess_version"],
+            "kind = 'embedding' AND withdrawn_at IS NULL",
+        ),
         // Wave 3 §8.5: what a release did, as rows.
         //
         // Not a workbook beside the originals under a password kept in a
@@ -1421,6 +1475,11 @@ fn build_registry() -> Vec<Table> {
                 // force on the stacks of the tree, each by name, version and
                 // digest. Null on a row written before this.
                 col("models", Type::Json),
+                // Record 43: why the tree was made. Null for a release a
+                // person asked for; `run_input` for the bids input a
+                // pipeline run materialised, which the history leaves out
+                // unless asked (the run names it as `input_release_id`).
+                col("purpose", Type::Text),
             ],
         )
         .index(&["name"]),
@@ -2112,6 +2171,81 @@ fn build_registry() -> Vec<Table> {
         .unique(&["sample", "stack_id"])
         .index(&["stack_id"])
         .index(&["subject_id"]),
+        // Record 43 S1: the pipeline catalog. One row per version of a
+        // descriptor (`contracts/job/v1`), kept whole with its digest; a
+        // name's next version is a descriptor that differs, and the same
+        // descriptor added again is the version it already is. The image is
+        // pinned by its registry manifest digest, or it was refused.
+        Table::new(
+            "pipeline",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("version", Type::Int),
+                req("tool_version", Type::Text),
+                req("descriptor", Type::Json),
+                // sha256:<hex> of the descriptor's canonical JSON
+                req("descriptor_digest", Type::Text),
+                // repository@sha256:<hex>, and the digest alone
+                req("image", Type::Text),
+                req("image_digest", Type::Text),
+                // bids | stacks, and participant | session | stack
+                req("layout", Type::Text),
+                req("level", Type::Text),
+                // active | retired
+                req("state", Type::Text),
+                req("added_by", Type::Text),
+                req("added_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["name", "version"])
+        .index(&["descriptor_digest"]),
+        // Record 43 S2: one run of a pipeline over a frozen selection, with
+        // everything it needs to be run again: every parameter with its
+        // default filled, the runtime and its version, the host and the
+        // device, the models and the label set it read, the handle it
+        // pinned, where its outputs went, and the digest of what it said.
+        Table::new(
+            "pipeline_run",
+            vec![
+                col("id", Type::Id),
+                req("pipeline_id", Type::Int),
+                col("job_id", Type::Int),
+                // the frozen list of stacks it ran over, pinned while the
+                // run's row stands, and the selection it was frozen from
+                col("handle_id", Type::Int),
+                col("selection", Type::Text),
+                req("params", Type::Json),
+                // podman | apptainer | docker
+                req("runtime", Type::Text),
+                req("runtime_version", Type::Text),
+                req("host", Type::Text),
+                // cpu | cuda:<name>
+                req("device", Type::Text),
+                req("model_ids", Type::Json),
+                col("label_set_id", Type::Int),
+                // running | done | partial | failed | cancelled
+                req("status", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+                col("exit_code", Type::Int),
+                // sha256:<hex> of the results as the engine read them
+                col("results_digest", Type::Text),
+                // the working place and the output folder under it
+                col("place_id", Type::Int),
+                col("output", Type::Text),
+                // the release a bids input was materialised by
+                col("input_release_id", Type::Int),
+                // units by status, derivatives, review items, proposals
+                col("summary", Type::Json),
+                req("principal", Type::Text),
+                col("actor", Type::Json),
+                col("error", Type::Text),
+            ],
+        )
+        .index(&["pipeline_id"])
+        .index(&["handle_id"])
+        .index(&["job_id"]),
     ]
 }
 
@@ -2287,7 +2421,12 @@ mod tests {
                 "{} needs exactly one primary key",
                 t.name
             );
-            for key in t.uniques.iter().chain(&t.indexes) {
+            for key in t
+                .uniques
+                .iter()
+                .chain(&t.indexes)
+                .chain(t.partial_uniques.iter().map(|p| &p.columns))
+            {
                 for c in key {
                     assert!(t.column(c).is_some(), "{}.{} indexed but absent", t.name, c);
                 }

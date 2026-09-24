@@ -111,6 +111,13 @@ pub enum Action {
     LabelsImport,
     /// Record 40 R3: a sample sealed for certification, never training data.
     LabelsSeal,
+    /// Record 43: a descriptor added to the pipeline catalog, a pipeline
+    /// run over a frozen selection (its derivatives and review items with
+    /// it), and the runtime an operator chose. None changes a judgement: a
+    /// run's outputs are derivatives and its proposals evidence.
+    PipelineAdd,
+    PipelineRun,
+    PipelineRuntime,
 }
 
 impl Action {
@@ -169,6 +176,9 @@ impl Action {
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
+            Action::PipelineAdd => "pipeline.add",
+            Action::PipelineRun => "pipeline.run",
+            Action::PipelineRuntime => "pipeline.runtime",
         }
     }
 
@@ -201,6 +211,9 @@ impl Action {
                 | Action::CampaignClose
                 | Action::LabelsExport
                 | Action::LabelsSeal
+                | Action::PipelineAdd
+                | Action::PipelineRun
+                | Action::PipelineRuntime
         )
     }
 }

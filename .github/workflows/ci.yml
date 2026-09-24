@@ -2,7 +2,9 @@ name: ci
 # Runs on every pull request and on main. "ci" checks the text, the SPDX headers and
 # the sign-offs; "engine" formats, lints and tests the engine on both registry
 # backends; "v0-compare" tests the compare tool over a synthetic registry on both
-# backends; "build" is the six-target build of engine-build.yml, the way a release
+# backends; "bodypart" tests the body-part pipeline's rules, head and entry points
+# with stand-in encoders (record 43 S5); "build" is the six-target build of
+# engine-build.yml, the way a release
 # is made, whose binaries a release on main takes. Main requires all of them
 # (docs/decisions/15, R8; docs/specs/wave1-parse-and-digest.md, §12.6).
 on:
@@ -71,12 +73,17 @@ jobs:
       # write a tree need one. A deployment takes a current build from
       # rordenlab/dcm2niix; here the distribution's is enough to prove the
       # orchestration, and the tests say so and pass when it is absent.
-      - name: the tools a release and a handover need
+      # Record 43: rootless podman runs real pipeline containers (N4 on a
+      # synthetic release, and who a container's process is on the host);
+      # the runner's image has it, and the test says so and passes without.
+      - name: the tools a release, a handover and a pipeline need
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends dcm2niix p7zip-full
+          sudo apt-get install -y --no-install-recommends dcm2niix p7zip-full podman
           dcm2niix --version || true
           7z | head -2 || true
+          podman --version || true
+          podman info --format 'rootless {{.Host.Security.Rootless}}' || true
       - name: rust-version matches the toolchain
         run: |
           channel="${{ steps.toolchain.outputs.channel }}"
@@ -182,6 +189,25 @@ jobs:
         run: python -m pip install --quiet -e "tools/v0-compare[test]"
       - name: test
         working-directory: tools/v0-compare
+        run: python -m pytest -q
+
+  bodypart:
+    # The body-part pipeline image's Python (pipelines/nils-bodypart), without
+    # torch or weights: v0's seeding and composition rules, the calibrated
+    # head, the file formats, and each entry point on a synthetic manifest with
+    # the stand-in encoders. The image itself is built by the release.
+    name: bodypart
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install the package, pinned as the image pins it
+        run: python -m pip install --quiet -c pipelines/nils-bodypart/requirements.txt -e "pipelines/nils-bodypart[test]"
+      - name: test
+        working-directory: pipelines/nils-bodypart
         run: python -m pytest -q
 
   bench:

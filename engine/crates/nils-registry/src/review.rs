@@ -1763,6 +1763,70 @@ pub fn raise_pick_border(
     )
 }
 
+/// Record 43 S2: a unit of a pipeline run that failed, or that the run's
+/// results did not name (D9's QC hook, its minimal form: thresholds on
+/// metrics are Wave 7's). One item per run and unit.
+pub const PIPELINE_QC_KIND: &str = "pipeline:qc";
+
+/// What groups the item of one unit of one run.
+pub fn pipeline_qc_key(run_id: i64, unit: &str) -> String {
+    format!("run:{run_id}|unit:{unit}")
+}
+
+/// One unit a run could not vouch for.
+#[derive(Debug, Clone)]
+pub struct PipelineQc<'a> {
+    pub run_id: i64,
+    /// `name@version`.
+    pub pipeline: &'a str,
+    /// `sub-<s>`, `sub-<s>_ses-<t>` or `stack-<id>`, or `run` for the run's
+    /// own files.
+    pub unit: &'a str,
+    pub stack_id: Option<i64>,
+    pub subject_id: Option<i64>,
+    pub session_day: Option<&'a str>,
+    /// `failed`, `unreported` for a unit the results did not name, or
+    /// `refused` for a file the engine would not take (record 43 review).
+    pub status: &'a str,
+    pub error: Option<&'a str>,
+    pub metrics: &'a serde_json::Value,
+    pub job_id: Option<i64>,
+}
+
+/// Raise the `pipeline:qc` item of one unit of a run: scope `run`, `ref`
+/// naming the run, the pipeline and the unit with its registry ids, the
+/// evidence the unit's status, error and metrics. A second call for the
+/// same run and unit brings the open item up to date.
+pub fn raise_pipeline_qc(
+    store: &mut Store,
+    q: &PipelineQc<'_>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = pipeline_qc_key(q.run_id, q.unit);
+    let reference = serde_json::json!({
+        "run_id": q.run_id, "pipeline": q.pipeline, "unit": q.unit,
+        "stack_id": q.stack_id, "subject_id": q.subject_id, "session_day": q.session_day,
+    });
+    let evidence = serde_json::json!({
+        "status": q.status, "error": q.error, "metrics": q.metrics,
+    });
+    if let Some((id, _)) = open_item(store, PIPELINE_QC_KIND, &key)? {
+        refresh_item(store, id, &evidence, 1, q.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        PIPELINE_QC_KIND,
+        "run",
+        &key,
+        &reference,
+        &evidence,
+        1,
+        q.job_id,
+        now,
+    )
+}
+
 /// Close the open `pick.border` item of one occasion, if there is one:
 /// `superseded` when a later run found nothing to doubt, `accepted` when a
 /// person's pick answered it. Answers how many were closed.

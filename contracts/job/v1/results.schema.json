@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/results.schema.json",
+  "title": "NILS pipeline results (results.json)",
+  "description": "What a pipeline says of its run, written to /output/results.json: v0's schema (one entry per work unit with its status, its files, its metrics and its error) and the proposals. The runner reads it after the container exits. Without it, a unit whose declared outputs are found is taken as succeeded and one whose outputs are missing as failed. A unit the file does not name is failed, a file outside /output is refused, and a proposal is passed to the review spine, never written as a fact.",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": "1"},
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["unit_id", "status"],
+        "properties": {
+          "unit_id": {"type": "string", "description": "The unit as /inputs/manifest.json names it: sub-<s>, sub-<s>_ses-<t> or stack-<id> (sub-<s>/ses-<t> and a bare stack id are read too)"},
+          "work_unit": {"enum": ["participant", "session", "stack", "subject"]},
+          "status": {"enum": ["succeeded", "failed", "skipped"]},
+          "derivatives": {"type": "array", "items": {"type": "string", "pattern": "^[^/]"}, "description": "Files under /output, relative to it"},
+          "metrics": {"type": "object"},
+          "error": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "proposals": {
+      "$ref": "proposals.schema.json",
+      "description": "Values a model proposes, each on an axis the descriptor declares (proposals.schema.json); the review spine takes them as the model's evidence (record 43 S6)"
+    },
+    "models": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "The cards (contracts/model/v1) of the models the run used or made: the encoders an embedding names by digest, which the runner registers as encoders when the registry does not hold them, and the card of a model output"
+    },
+    "seeds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stack_id", "axis", "value"],
+        "properties": {
+          "stack_id": {"type": "integer", "minimum": 1},
+          "axis": {"type": "string", "pattern": "^[a-z_]+$"},
+          "value": {"type": "string", "minLength": 1, "description": "The value suggested"},
+          "margin": {"type": "number", "description": "How far the suggestion stands above the next value, in the pipeline's own measure"},
+          "source": {"type": "string", "description": "Which pool or rule suggested it"}
+        }
+      },
+      "description": "Record 43: suggestions of which stacks a person labels first and with what, distinct from proposals: never a model's decision and never a review item. The runner keeps them as one derivative of kind seeds for the run"
+    },
+    "selection": {
+      "type": "object",
+      "required": ["stacks"],
+      "properties": {
+        "stacks": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "The stacks a curation campaign starts from"},
+        "note": {"type": "string"}
+      },
+      "description": "Record 43: the stacks the pipeline suggests curating, which the runner can freeze into a handle for a campaign (nils pipeline seeds <run> --freeze)"
+    }
+  }
+}

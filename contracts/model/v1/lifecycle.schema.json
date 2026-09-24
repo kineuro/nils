@@ -84,7 +84,9 @@
     "slot": { "$ref": "card.schema.json#/$defs/slot" },
     "state": { "$ref": "#/$defs/state" },
     "card": { "$ref": "card.schema.json" },
-    "encoder_model_id": { "type": ["integer", "null"] },
+    "encoder_model_id": { "type": ["integer", "null"], "description": "The first encoder a head reads" },
+    "encoder_model_ids": { "type": "array", "items": { "type": "integer" }, "description": "Record 43: every encoder a head reads, in order" },
+    "threshold": { "type": ["number", "null"], "description": "Record 43: the card's threshold, at or above which the model's proposals are staged" },
     "trained_on": { "type": ["string", "null"] },
     "check": {
       "oneOf": [{ "$ref": "#/$defs/check" }, { "type": "null" }],
