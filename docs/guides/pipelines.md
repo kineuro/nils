@@ -67,7 +67,7 @@ A unit starts only when the cores and memory its descriptor declares (`x-nils.ne
 
 ## Use the starter catalog
 
-The engine seeds the first analyses of record 49 into its catalog each time it starts, when they are not there: N4, SynthStrip, SynthSeg, SAMSEG with lesions, MRIQC and FreeSurfer recon-all. Each is marked as a starter, and each image is pinned by its registry manifest digest.
+The engine seeds the first analyses of record 49 into its catalog each time it starts, when they are not there: N4, SynthStrip, SynthSeg, SAMSEG with lesions, MRIQC and FreeSurfer recon-all. Each is marked as a starter, and each image is pinned by its registry manifest digest. Each runs its sessions apart (`x-nils.units: apart`), a container a session, so the lane runs as many at once as its budget holds.
 
 1. See what the catalog holds of each:
 
@@ -151,6 +151,8 @@ curl -X POST http://127.0.0.1:8437/api/pipelines/samseg-lesions/preflight \
   -H 'content-type: application/json' \
   -d '{"select": "selection:ms-baseline@1", "params": {"lesion": "on"}}'
 ```
+
+The pre-flight's budget check reads the lane's own budget (see *Set the lane*).
 
 ## Take a run up again
 

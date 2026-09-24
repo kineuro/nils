@@ -10,11 +10,15 @@
 # Euler number falls, 200 marking a surface a person should look at.
 #
 # It reads the lab's FreeSurfer licence as a secret input (record 49 R3):
-# `x-nils.secrets`, the contract the parallel slice of the wave (A2)
-# builds, mounts the file read-only for the run alone and names it in
-# FS_LICENSE, never in an output, a log or the run's record. Until that
-# slice is in, the runner reads the key as one it does not know and keeps
-# it, and recon-all refuses to start without the licence.
+# `x-nils.secrets` mounts the file the site set with `nils pipeline secret
+# set freesurfer_license --file <path>` read-only into this pipeline's
+# containers alone and names it in FS_LICENSE, never in an output, a log or
+# the run's record. A run is refused before it starts where the site has
+# not set it.
+#
+# Each session runs in a container of its own (`x-nils.units: apart`), so
+# the lane runs as many side by side as its budget holds, and a run that
+# stopped keeps the sessions it finished.
 #
 # The image is FreeSurfer 8.2.0, pinned by its registry manifest digest,
 # resolved 2026-09-24 by a registry manifest request, not pulled.

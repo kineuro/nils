@@ -37,19 +37,6 @@ use crate::{Exit, usage};
 /// The door, as the capabilities list it.
 pub(crate) const DOOR: &str = "POST /api/pipelines/{name}/preflight";
 
-/// Where the registry keeps the lane's budget (record 49 R6): the cores and
-/// the memory NILS's runs may use together. Unset, the ruling's 48 cores and
-/// 512 GB, each no more than the host has.
-pub(crate) const LANE_CORES_KEY: &str = "pipeline_lane_cores";
-pub(crate) const LANE_MEMORY_KEY: &str = "pipeline_lane_memory_gb";
-pub(crate) const LANE_CORES: f64 = 48.0;
-pub(crate) const LANE_MEMORY_GB: f64 = 512.0;
-
-/// What a unit is taken to need where its descriptor says nothing: one core
-/// and 2 GB, as the lane takes it (record 49 A1).
-const DEFAULT_CORES: f64 = 1.0;
-const DEFAULT_MEMORY_GB: f64 = 2.0;
-
 /// How many of a pipeline's past runs the estimate reads.
 const PAST_RUNS: usize = 20;
 
@@ -61,60 +48,15 @@ pub(crate) struct Asked<'a> {
     pub params: &'a [(String, String)],
 }
 
-/// The cores and the memory of this host.
-fn host() -> (f64, Option<f64>) {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get() as f64)
-        .unwrap_or(1.0);
-    let memory = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| {
-        t.lines()
-            .find(|l| l.starts_with("MemTotal:"))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|kb| kb.parse::<f64>().ok())
-            .map(|kb| (kb / 1024.0 / 1024.0 * 10.0).round() / 10.0)
-    });
-    (cores, memory)
-}
-
-/// The lane's budget: the setting, else the ruling's cap, each no more than
-/// the host has.
-pub(crate) fn budget(registry: &mut Registry) -> Value {
-    let (host_cores, host_memory) = host();
-    let read = |registry: &mut Registry, key: &str| {
-        registry
-            .meta_value(key)
-            .ok()
-            .flatten()
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|v| *v > 0.0)
-    };
-    let set_cores = read(registry, LANE_CORES_KEY);
-    let set_memory = read(registry, LANE_MEMORY_KEY);
-    let cores = set_cores.unwrap_or(LANE_CORES).min(host_cores);
-    let memory = match host_memory {
-        Some(h) => set_memory.unwrap_or(LANE_MEMORY_GB).min(h),
-        None => set_memory.unwrap_or(LANE_MEMORY_GB),
-    };
-    json!({
-        "cores": cores, "memory_gb": memory,
-        "source": if set_cores.is_some() || set_memory.is_some() { "setting" } else { "ruling" },
-        "host": {"cores": host_cores, "memory_gb": host_memory},
-    })
-}
-
-/// What one unit needs (`x-nils.needs`), with the lane's defaults.
-fn needs(d: &Descriptor) -> (f64, f64) {
-    let n = &d.document["x-nils"]["needs"];
-    (
-        n["cores"]
-            .as_f64()
-            .filter(|c| *c >= 1.0)
-            .unwrap_or(DEFAULT_CORES),
-        n["memory-gb"]
-            .as_f64()
-            .filter(|m| *m > 0.0)
-            .unwrap_or(DEFAULT_MEMORY_GB),
-    )
+/// The lane's budget (record 49 A1, R6), as the lane itself reads it: the
+/// setting of `nils pipeline lane`, else the ruling's 48 cores and 512 GB,
+/// each no more than this machine or the container the engine runs in
+/// offers; and the card a GPU unit would lease.
+pub(crate) fn budget(registry: &mut Registry) -> (crate::pipelines::Lane, Value) {
+    let lane = crate::pipelines::lane_of(registry);
+    let mut doc = lane.doc();
+    doc["memory_gb"] = json!(lane.ledger.memory_mib as f64 / 1024.0);
+    (lane, doc)
 }
 
 /// One unit the run would have.
@@ -392,43 +334,56 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
                 .to_string(),
         );
     }
+    // the GPU as a run would take it: the runtime's, and only where the
+    // lane names a card to lease
+    let (lane, mut budget) = budget(registry);
     let card = detected.runtime.as_ref().and_then(|r| r.gpu.clone());
-    let device = match (d.gpu, &card) {
+    let offered = card.clone().filter(|_| lane.card.is_some());
+    let device = match (d.gpu, &offered) {
         (Gpu::None, _) | (Gpu::Optional, None) => Some("cpu".to_string()),
         (_, Some(g)) => Some(g.clone()),
         (Gpu::Required, None) => {
-            blockers.push(format!(
-                "{} needs a GPU, and this engine's runtime offers none",
-                p.label()
-            ));
+            blockers.push(if card.is_some() {
+                format!(
+                    "{} needs a GPU, and the pipeline lane uses no card here; nils pipeline lane --gpu-card <n> names the one it leases",
+                    p.label()
+                )
+            } else {
+                format!(
+                    "{} needs a GPU, and this engine's runtime offers none",
+                    p.label()
+                )
+            });
             None
         }
     };
 
     // what a unit needs, against the lane
-    let (cores, memory) = needs(&d);
-    let mut budget = budget(registry);
-    let (lane_cores, lane_memory) = (
-        budget["cores"].as_f64().unwrap_or(1.0),
-        budget["memory_gb"].as_f64().unwrap_or(0.0),
-    );
-    let fits = cores <= lane_cores && memory <= lane_memory;
+    let ask = nils_pipeline::lane::Ask {
+        cores: d.needs.cores,
+        memory_mib: nils_pipeline::lane::mib_of_gb(d.needs.memory_gb),
+    };
+    let (cores, memory) = (f64::from(d.needs.cores), d.needs.memory_gb);
+    let fits = lane.ledger.could(ask);
     budget["fits"] = json!(fits);
     if !fits {
         blockers.push(format!(
-            "a unit needs {} cores and {} GB, and the lane has {} cores and {} GB",
-            descriptor::number_text(cores),
+            "a unit needs {} cores and {} GB, and the lane has {} cores and {} GB{}",
+            d.needs.cores,
             descriptor::number_text(memory),
-            descriptor::number_text(lane_cores),
-            descriptor::number_text(lane_memory)
+            lane.ledger.cores,
+            descriptor::number_text(lane.ledger.memory_mib as f64 / 1024.0),
+            lane.why
+                .as_deref()
+                .map(|w| format!(" ({w})"))
+                .unwrap_or_default()
         ));
     }
-    let apart = d.document["x-nils"]["units"].as_str() == Some("apart");
+    let apart = d.units == descriptor::Units::Apart;
     let slots = if apart && fits {
-        ((lane_cores / cores)
-            .floor()
-            .min((lane_memory / memory).floor()))
-        .max(1.0)
+        f64::from(lane.ledger.cores / ask.cores.max(1))
+            .min((lane.ledger.memory_mib / ask.memory_mib.max(1)) as f64)
+            .max(1.0)
     } else {
         1.0
     };
@@ -477,7 +432,10 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             "units_apart": apart,
             "seconds": seconds,
         },
-        "gpu": {"need": d.gpu.name(), "available": card, "device": device},
+        "gpu": {
+            "need": d.gpu.name(), "available": card, "device": device, "card": lane.card,
+            "gpu_memory_gb": (device.as_deref().is_some_and(|d| d != "cpu")).then_some(d.needs.gpu_memory_gb),
+        },
         "needs": {"cores": cores, "memory_gb": memory},
         "budget": budget,
         "checks": d.checks.iter().map(|c| c.text()).collect::<Vec<_>>(),
@@ -695,12 +653,15 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         v["gpu"]["device"].as_str().unwrap_or("nothing")
     );
     println!(
-        "  a unit needs     {} cores, {} GB; the lane has {} cores, {} GB ({})",
+        "  a unit needs     {} cores, {} GB; the lane has {} cores, {} GB{}",
         v["needs"]["cores"],
         v["needs"]["memory_gb"],
         v["budget"]["cores"],
         v["budget"]["memory_gb"],
-        v["budget"]["source"].as_str().unwrap_or_default()
+        v["budget"]["why"]
+            .as_str()
+            .map(|w| format!(" ({w})"))
+            .unwrap_or_default()
     );
     if v["ready"] == true {
         println!(
