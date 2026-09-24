@@ -1731,6 +1731,44 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             "{axis}: {still}"
         );
     }
+    // kineuro/nils#94 review: the texts the signals call unresolved are
+    // read under the pack as the registry was classified, with the adopted
+    // overlay, so the stack the site's word resolved is no longer counted
+    // unresolved, and the stacks it counts are still the diagnostics'.
+    let server = Server::start(
+        &home,
+        1,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+        ],
+        &[],
+    );
+    let (status, signals) =
+        server.request("GET", "/api/classify/signals?scope=batch:1", None, reviewer);
+    server.finish();
+    assert_eq!(status, 200, "{signals}");
+    let unresolved = &signals["unresolved_texts"];
+    assert_eq!(unresolved["overlay"], "site@1.0.0", "{signals}");
+    assert_eq!(
+        unresolved["axes"]["post_contrast"]["stacks"], 1,
+        "{signals}"
+    );
+    let counted: i64 = unresolved["axes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|d| d["stacks"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        counted,
+        signals["diagnostics"]["axis_unresolved"]
+            .as_i64()
+            .unwrap_or(0),
+        "{signals}"
+    );
     let audited = run(
         &home,
         &["audit", "list", "--action", "overlay.adopt", "--json"],

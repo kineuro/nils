@@ -334,6 +334,7 @@ pub fn unresolved_texts(
         .collect();
     Ok(json!({
         "pack": format!("{}@{}", pack.name, pack.version),
+        "overlay": pack.overlay,
         "text": "search_text",
         "sample": sample,
         "read": read,

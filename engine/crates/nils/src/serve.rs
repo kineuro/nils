@@ -1518,6 +1518,7 @@ fn routed(
                 Some(dir) => {
                     let pack = nils_pack::load(&dir, None)
                         .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+                    let pack = with_adopted_overlay(registry, &dir, pack)?;
                     let sample = nils_classify::rehearse::sample_of(
                         query.get("sample").and_then(|s| s.parse().ok()),
                     );
@@ -3080,6 +3081,34 @@ fn author_of(caller: &Caller) -> (&str, Option<&str>) {
 /// Wave 4c §6.6: an overlay from a body, rehearsed over a scope. The pack
 /// it amends is loaded bare and amended; the overlay's own cases are judged
 /// and their failure is part of the answer, not a refusal.
+/// The pack as the registry was classified under it: with the overlay the
+/// site adopted for it last, because adopting an overlay reclassifies under
+/// that overlay (`classify --overlay-id`). Without one, or where the adopted
+/// overlay no longer loads on the pack served, the pack as it is; the
+/// answer names the overlay it read, so the two are told apart.
+fn with_adopted_overlay(
+    registry: &mut Registry,
+    dir: &std::path::Path,
+    pack: nils_pack::Pack,
+) -> Result<nils_pack::Pack, Reply> {
+    let last = nils_registry::overlay::list(registry.store())?
+        .into_iter()
+        .filter(|o| o.status == nils_registry::overlay::ADOPTED && o.pack == pack.name)
+        .max_by(|a, b| {
+            a.decided_at
+                .cmp(&b.decided_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+    let Some(row) = last else {
+        return Ok(pack);
+    };
+    let adopted =
+        nils_pack::Overlay::parse(&format!("overlay {}", row.id), &row.document.to_string())
+            .ok()
+            .and_then(|o| nils_pack::load(dir, Some(&o)).ok());
+    Ok(adopted.unwrap_or(pack))
+}
+
 fn rehearsed(
     doors: &Doors,
     registry: &mut Registry,
