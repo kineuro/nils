@@ -29,7 +29,7 @@ derive:
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, swi, projection, r2star, magnitude, qsm_source_echo, qsm, fallback]
+order: [minip, mip, phase, swi, projection, r2star, magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -167,6 +167,20 @@ rules:
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
+
+  # A plane the console resliced from the acquisition, whose image type says
+  # MPR and names none of the outputs above. It is a reformat as every other
+  # MPR is, and the route's last resort called 375 of them the processed
+  # SWI image (record 41).
+  mpr:
+    clauses:
+      - {flag: is_mpr, tier: exclusive}
+    set:
+      base: SWI
+      construct: MPR
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.9
 
   fallback:
     clauses:

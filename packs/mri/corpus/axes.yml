@@ -552,3 +552,18 @@ cases:
       text_series_description: 't2_tse_sag spinal cord'
     axes:
       body_part: spine
+
+  # A plane the console resliced from a susceptibility acquisition is a
+  # reformat, as every other MPR is. Its image type says MPR and holds no
+  # SWI token, and the route's last resort called 375 such planes the
+  # processed SWI image.
+  - name: a reformat of a susceptibility EPI is an MPR and not the SWI image
+    stack:
+      image_type: 'DERIVED\PRIMARY\MPR\NORM\DIS2D'
+      scanning_sequence: EP
+      text_series_description: 'Sag SWI EPI 0,65 mm iso_MPR_Tra'
+    axes:
+      provenance: SWIRecon
+      technique: EPI
+      construct: MPR
+      disposition: reformat
