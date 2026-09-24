@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.38] - 2026-09-24
+
+Records 41, 42, 43 and 47. The registry is at schema 62 after this update (51 at 1.0.0-alpha.37), and it migrates when this version first opens it. The linkage store migrates when it is first opened, and stays at its old version until then. The HTTP API contract is version 7, the grant suite version 3, and two contracts are new, `contracts/model/v1` and `contracts/job/v1`.
+
 ### Added
 
 - A model server for the stations from the command line (record 47, E1). `nils setup --model-server URL --model-key-file FILE [--model-server-model ID]`, on an install and with `--update`: once Kvasir runs, setup reads the key from the file and seals it in Kvasir (`PUT /v1/credentials/{name}`: staged as `server-staging:<id>` for a server Kvasir does not hold yet, which Kvasir moves onto the backend once it holds it, and taken back where it does not; under the backend's own id, replacing the key it had, for one it holds), reads the models the server offers (`GET /v1/servers/models`), admits the one the stations use (`POST /v1/servers`), which is the model named, by its id or an alias, else the one the wizard asks for, and maps each of the stations' purposes to it (`PUT /v1/purposes/{id}/policy` with `model`). With nobody to ask, as on every `--update`, a model not named stops the run before it changes anything and names the models the server offers. A model that is not offered, does not answer or does not pass admission stops an install and is said on an update. The key is never shown or written: the setup record keeps `[model_server]` with the address and the key file's path, so an update or a repair seals it again from the file, and `--print` shows both without the key.
@@ -121,6 +125,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The MRI pack is version 0.3.0, because the rules the five scanner protocols proved wrong now give other answers: RESOLVE, FlowComp, the t test map of an ASL series, the body part, the reformats of a susceptibility acquisition, and the disposition of what the scanner computed. Its vocabulary is unchanged, so a question asked of 0.2.0 means the same words here.
 
 - The MRI pack is version 0.4.0: `body_part` has the value `chest` (record 43 R3), which v0's image classifier predicted and the body-part pipeline proposes. No rule writes it, as v0's keyword detector had no chest words, so `nils pack shape` names it unreachable by a rule and a chest reaches a stack only as a model's proposal a person commits. A BIDS release names it `acq-Chest`. Every other value and rule is as it was.
+
+- An install fetches Kvasir at `v1.0.0-alpha.8` and the assistant at `v1.0.0-alpha.26` (record 47): Kvasir serves a model card and takes a model server as a backend, and the assistant reads Kvasir's pi-messages door at `/v1/pi`. `nils update --all` moves both.
 
 ## [1.0.0-alpha.37] - 2026-09-23
 

@@ -171,8 +171,8 @@ fn image_tag(version: &str) -> String {
 /// beside.
 const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
-const KVASIR_REF: &str = "v1.0.0-alpha.7";
-const ASSISTANT_REF: &str = "v1.0.0-alpha.25";
+const KVASIR_REF: &str = "v1.0.0-alpha.8";
+const ASSISTANT_REF: &str = "v1.0.0-alpha.26";
 
 /// llama.cpp's server, which runs the models Kvasir downloads once an admin
 /// starts one (record 24): the build this version takes, where its archives
@@ -20027,9 +20027,9 @@ mod tests {
 
     #[test]
     fn the_clones_are_pinned_to_release_tags_and_a_lab_may_name_another_ref() {
-        assert_eq!(KVASIR_REF, "v1.0.0-alpha.7");
-        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.25");
-        assert_eq!(source_ref(KVASIR_REF, None), "v1.0.0-alpha.7");
+        assert_eq!(KVASIR_REF, "v1.0.0-alpha.8");
+        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.26");
+        assert_eq!(source_ref(KVASIR_REF, None), "v1.0.0-alpha.8");
         assert_eq!(
             source_ref(KVASIR_REF, Some("models-held")),
             "models-held",
@@ -20037,7 +20037,7 @@ mod tests {
         );
         assert_eq!(
             source_ref(ASSISTANT_REF, Some("  ")),
-            "v1.0.0-alpha.25",
+            "v1.0.0-alpha.26",
             "an empty variable names nothing"
         );
 
@@ -20049,7 +20049,7 @@ mod tests {
                 "--depth",
                 "1",
                 "--branch",
-                "v1.0.0-alpha.7",
+                "v1.0.0-alpha.8",
                 "https://github.com/kineuro/kvasir",
                 "/home/x/nils/kvasir"
             ]],
@@ -20066,11 +20066,11 @@ mod tests {
         let steps = source_steps(ASSISTANT_REPO, ASSISTANT_REF, into, true);
         assert_eq!(
             source_label(&steps[0], "the assistant", ASSISTANT_REF),
-            "fetching the assistant at v1.0.0-alpha.25"
+            "fetching the assistant at v1.0.0-alpha.26"
         );
         assert_eq!(
             source_label(&steps[1], "Kvasir", KVASIR_REF),
-            "checking out Kvasir at v1.0.0-alpha.7"
+            "checking out Kvasir at v1.0.0-alpha.8"
         );
         assert_eq!(node_source("desk"), None, "only the two Node parts");
     }
@@ -22855,7 +22855,7 @@ mod tests {
         let clone = fetch_steps(&hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir, false);
         assert_eq!(clone.len(), 1);
         assert_eq!(
-            clone[0].0, "fetching Kvasir at v1.0.0-alpha.7",
+            clone[0].0, "fetching Kvasir at v1.0.0-alpha.8",
             "a person reads the line they always read"
         );
         assert_eq!(
@@ -22866,7 +22866,7 @@ mod tests {
                 "--depth",
                 "1",
                 "--branch",
-                "v1.0.0-alpha.7",
+                "v1.0.0-alpha.8",
                 "https://github.com/kineuro/kvasir",
                 "/srv/nils/kvasir"
             ])
@@ -22882,7 +22882,7 @@ mod tests {
                 "--depth",
                 "1",
                 "origin",
-                "v1.0.0-alpha.7"
+                "v1.0.0-alpha.8"
             ])
         );
         assert_eq!(
@@ -22993,7 +22993,7 @@ mod tests {
                 "--depth",
                 "1",
                 "--branch",
-                "v1.0.0-alpha.25",
+                "v1.0.0-alpha.26",
                 "https://github.com/kineuro/nils-assistant",
                 "/srv/nils/assistant"
             ],
@@ -23019,7 +23019,7 @@ mod tests {
                 "--depth",
                 "1",
                 "origin",
-                "v1.0.0-alpha.25"
+                "v1.0.0-alpha.26"
             ]
         );
         assert_eq!(
@@ -23086,7 +23086,7 @@ mod tests {
         let fetched = fetch_steps(&hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir, true);
         assert_eq!(
             fetched[0].1.shown(),
-            "git fetch --depth 1 origin v1.0.0-alpha.7",
+            "git fetch --depth 1 origin v1.0.0-alpha.8",
             "and a failure says the command it always said"
         );
         assert_eq!(fetched[1].1.shown(), "git checkout --detach FETCH_HEAD");
@@ -23373,8 +23373,8 @@ mod tests {
             [
                 "adopting Kvasir's folder",
                 "adopting Kvasir's folder",
-                "fetching Kvasir at v1.0.0-alpha.7",
-                "checking out Kvasir at v1.0.0-alpha.7"
+                "fetching Kvasir at v1.0.0-alpha.8",
+                "checking out Kvasir at v1.0.0-alpha.8"
             ]
         );
         for step in own.steps() {
@@ -23431,7 +23431,7 @@ mod tests {
         assert_eq!(
             adopted_said(into, "Kvasir", KVASIR_REF),
             "/srv/nils/kvasir held a copy of Kvasir that was not a checkout, and is adopted as a \
-             checkout of v1.0.0-alpha.7: the files the release tracks are its own now, and \
+             checkout of v1.0.0-alpha.8: the files the release tracks are its own now, and \
              whatever else the folder holds stays as it was"
         );
         assert_eq!(
@@ -23443,7 +23443,7 @@ mod tests {
                 "nils setup"
             ),
             "/srv/nils/kvasir is not a checkout, and adopting it as a checkout of Kvasir at \
-             v1.0.0-alpha.7 would replace what it keeps: kvasir.json, state/; the folder is left \
+             v1.0.0-alpha.8 would replace what it keeps: kvasir.json, state/; the folder is left \
              as it was, so move those out of it, or the folder aside, and run nils setup again"
         );
         let many: Vec<String> = (1..=7).map(|n| format!("card{n}.key")).collect();
