@@ -68,11 +68,18 @@ pub fn core(ask: &Ask) -> Value {
 /// The core under a registry's locale: the timezone and the week start
 /// join it when they are not the defaults.
 pub fn core_under(ask: &Ask, locale: &Locale) -> Value {
+    core_of(ask, locale, false)
+}
+
+/// The core, and with `bound` the values its parameters are bound to.
+fn core_of(ask: &Ask, locale: &Locale, bound: bool) -> Value {
     let mut v = serde_json::to_value(ask).expect("an ask serializes");
     if let Some(Value::Object(params)) = v.get_mut("params") {
         for (_, decl) in params.iter_mut() {
             if let Value::Object(d) = decl {
-                d.remove("value");
+                if !bound {
+                    d.remove("value");
+                }
                 d.remove("description");
             }
         }
@@ -100,7 +107,26 @@ pub fn content_hash(ask: &Ask) -> String {
 
 /// The hash under a registry's locale.
 pub fn content_hash_under(ask: &Ask, locale: &Locale) -> String {
-    let text = canonical_json(&core_under(ask, locale));
+    hash_of(&core_under(ask, locale))
+}
+
+/// The hash of what an ask selects: its core with the values its
+/// parameters are bound to. The content hash leaves a value out, since it
+/// names the question and not an answer (rule 13); two saved selections, or
+/// two runs, that bind different values select different rows, and are told
+/// apart by this one (record 43: two selections of different id lists had
+/// one hash). An ask that binds no value has its content hash here too.
+pub fn bound_hash(ask: &Ask) -> String {
+    bound_hash_under(ask, &Locale::default())
+}
+
+/// [`bound_hash`] under a registry's locale.
+pub fn bound_hash_under(ask: &Ask, locale: &Locale) -> String {
+    hash_of(&core_of(ask, locale, true))
+}
+
+fn hash_of(core: &Value) -> String {
+    let text = canonical_json(core);
     let mut hasher = Blake2b::<U32>::new();
     hasher.update(text.as_bytes());
     hex::encode(hasher.finalize())

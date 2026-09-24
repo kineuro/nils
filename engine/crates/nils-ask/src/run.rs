@@ -278,7 +278,9 @@ pub fn cached(
             }
         }
     }
-    let core = crate::hash::content_hash(&ask);
+    // the values bound in: a run of the same question over other values is
+    // another answer (record 43)
+    let core = crate::hash::bound_hash(&ask);
     let digest = scheme.digest();
     // the same scope: a handle written under another suppression is not
     // this caller's answer

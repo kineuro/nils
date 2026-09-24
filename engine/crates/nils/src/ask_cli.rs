@@ -525,6 +525,7 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
             let prepared = nils_ask::prepare(ask, &l.catalog, &scope).map_err(refused)?;
             json!({
                 "hash": prepared.hash,
+                "bound_hash": prepared.bound_hash,
                 "warnings": prepared.validated.warnings,
                 "pinned": prepared.pinned.iter().map(|(s, n, v)| json!({"set": s, "selection": n, "version": v})).collect::<Vec<_>>(),
                 "repairs": repairs.iter().map(|r| json!({"path": r.path, "what": r.what})).collect::<Vec<_>>(),
@@ -1092,7 +1093,7 @@ fn selections(home: &Home, cmd: SelectionsCommand) -> Result<(), Exit> {
                         &mut l.registry,
                         &args.name,
                         &prepared.ask,
-                        &prepared.hash,
+                        &prepared.bound_hash,
                         &principal(),
                         args.note.as_deref(),
                         args.description.as_deref(),

@@ -231,6 +231,17 @@ fn the_yardstick_desugars_into_the_named_sets_of_the_spec() {
     let mut other_decl = ask.clone();
     other_decl.params.remove("age_from");
     assert_ne!(content_hash(&ask), content_hash(&other_decl));
+    // what it selects does (record 43): the bound hash, the run cache's key
+    // and a saved selection's, keeps the values; with none bound it is the
+    // content hash
+    use nils_ask::hash::bound_hash;
+    assert_ne!(bound_hash(&ask), bound_hash(&other_value));
+    assert_ne!(bound_hash(&ask), content_hash(&ask));
+    let mut unbound = ask.clone();
+    for d in unbound.params.values_mut() {
+        d.value = None;
+    }
+    assert_eq!(bound_hash(&unbound), content_hash(&unbound));
     // the registry's locale is part of the core (Wave 5 section 12.6): the
     // default hashes as before, another timezone or week start is another
     // question

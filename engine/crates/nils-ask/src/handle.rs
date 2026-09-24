@@ -130,6 +130,12 @@ impl Handle {
     pub fn ask_hash(&self) -> Option<String> {
         self.ask.as_ref().map(crate::hash::content_hash)
     }
+
+    /// The hash of what the ask selected, its parameters' values bound in:
+    /// the key of the run cache and of a saved selection (record 43).
+    pub fn bound_hash(&self) -> Option<String> {
+        self.ask.as_ref().map(crate::hash::bound_hash)
+    }
 }
 
 /// Where a handle came from.
@@ -635,8 +641,9 @@ pub fn invalidated(store: &mut Store) -> Result<BTreeSet<i64>, HandleError> {
         .collect()
 }
 
-/// Wave 5 §12.8: the newest kept handle whose stored ask hashes to
-/// `ask_hash` at this epoch, pack version, scheme and scope (the same
+/// Wave 5 §12.8: the newest kept handle whose stored ask, with its
+/// parameters' values bound ([`Handle::bound_hash`]), hashes to `ask_hash`
+/// at this epoch, pack version, scheme and scope (the same
 /// suppression), whole (not truncated), with its rows, not withdrawn and
 /// not invalidated: the one a run of the same core answers again.
 pub fn find_cached(
@@ -659,7 +666,7 @@ pub fn find_cached(
         {
             continue;
         }
-        if h.ask_hash().as_deref() == Some(ask_hash) {
+        if h.bound_hash().as_deref() == Some(ask_hash) {
             return Ok(Some(h));
         }
     }

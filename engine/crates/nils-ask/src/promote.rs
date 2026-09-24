@@ -163,6 +163,9 @@ pub fn promote(
         .into_iter()
         .collect();
     let ask_hash = h.ask_hash();
+    // a saved selection's hash binds its values (record 43), so the version
+    // that holds this ask is found by what it selects
+    let selects = h.bound_hash();
     let store = registry.store();
     let existing = cohort::by_name(store, cohort)?;
     if let Some(c) = &existing
@@ -178,7 +181,7 @@ pub fn promote(
     if existing.is_none()
         && create
         && cohort::selection_named(store, cohort)?
-        && !selection_holds(store, cohort, ask_hash.as_deref())?
+        && !selection_holds(store, cohort, selects.as_deref())?
     {
         return Err(PromoteError::Refused(format!(
             "{cohort} is a selection's name; a cohort cannot be named so (Wave 4b section 8.2)"
@@ -193,7 +196,7 @@ pub fn promote(
         };
         let d = store.dialect();
         // the selection whose version holds this ask, if any
-        let selection = match &ask_hash {
+        let selection = match &selects {
             Some(hash) => {
                 let sql = format!(
                     "SELECT s.name, sv.version, s.id, s.current_version FROM {} sv JOIN {} s ON s.id = sv.selection_id \

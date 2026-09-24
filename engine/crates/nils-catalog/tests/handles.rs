@@ -466,11 +466,12 @@ fn promotion_opens_intervals_and_the_cohort_answers() {
         let out = go(&mut l, ask.clone(), None, false);
         let before = l.registry.meta().epoch;
         // a selection under the cohort's future name, then the promotion links them
+        // a saved selection's hash is of what it selects (record 43)
         let saved = selection::save(
             &mut l.registry,
             "converters",
             &out.handle.ask.clone().unwrap(),
-            &out.hash,
+            &out.handle.bound_hash().unwrap(),
             "tester",
             None,
             None,
@@ -585,7 +586,7 @@ fn promotion_opens_intervals_and_the_cohort_answers() {
             &mut l.registry,
             "converters",
             &out2.handle.ask.clone().unwrap(),
-            &out2.hash,
+            &out2.handle.bound_hash().unwrap(),
             "tester",
             Some("looser"),
             None,
