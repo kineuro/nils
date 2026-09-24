@@ -1300,9 +1300,9 @@ fn build_registry() -> Vec<Table> {
                 req("sha256", Type::Text),
                 req("media_type", Type::Text),
                 // Who made it. A person's upload names the principal and who
-                // acted for it; a model and a pipeline run are named by id
-                // once their tables exist (record 42 S2, wave 43), and null
-                // until then.
+                // acted for it; a model by its id in the model table (record
+                // 42 S2), checked when the row is written; a pipeline run by
+                // id once its table exists (wave 43), and null until then.
                 col("registered_by", Type::Text),
                 col("actor", Type::Json),
                 col("model_id", Type::Int),

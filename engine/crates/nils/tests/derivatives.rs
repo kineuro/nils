@@ -409,6 +409,70 @@ fn a_derivative_goes_round_and_is_refused_without_its_grant_or_its_place() {
     );
     assert!(!good);
     assert!(err.contains("does not supersede"), "{err}");
+
+    // A derivative a model made names it in the model table: an unknown
+    // model is refused before a byte is kept, a registered one is kept on
+    // the row by id.
+    let (good, _, err) = run(
+        &home,
+        &[
+            "derivative",
+            "add",
+            file.to_str().unwrap(),
+            "--kind",
+            "mask",
+            "--stack",
+            "1",
+            "--model",
+            "nobody@1",
+        ],
+        None,
+    );
+    assert!(!good);
+    assert!(
+        err.contains("no registered model answers to nobody@1"),
+        "{err}"
+    );
+    let weights = work.path().join("segmenter.onnx");
+    std::fs::write(&weights, b"not really a segmenter").unwrap();
+    let card = work.path().join("segmenter.json");
+    std::fs::write(
+        &card,
+        r#"{"name": "seg", "version": "1", "kind": "segmenter", "task": "segment:brain"}"#,
+    )
+    .unwrap();
+    let model: serde_json::Value = serde_json::from_str(&ok(
+        &home,
+        &[
+            "model",
+            "register",
+            "--card",
+            card.to_str().unwrap(),
+            "--artifact",
+            weights.to_str().unwrap(),
+            "--json",
+        ],
+    ))
+    .unwrap();
+    let by_model = work.path().join("by-model.nii.gz");
+    std::fs::write(&by_model, b"a model's mask").unwrap();
+    let made: serde_json::Value = serde_json::from_str(&ok(
+        &home,
+        &[
+            "derivative",
+            "add",
+            by_model.to_str().unwrap(),
+            "--kind",
+            "mask",
+            "--stack",
+            "1",
+            "--model",
+            "seg@1",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(made["model_id"], model["id"], "{made}");
     let custody: serde_json::Value =
         serde_json::from_str(&ok(&home, &["custody", "--json"])).unwrap();
     let row = custody["stores"]
@@ -417,10 +481,10 @@ fn a_derivative_goes_round_and_is_refused_without_its_grant_or_its_place() {
         .iter()
         .find(|s| s["store"] == "derivatives")
         .unwrap();
-    assert_eq!(row["counts"]["derivatives"], 2, "{row}");
+    assert_eq!(row["counts"]["derivatives"], 3, "{row}");
     assert_eq!(
         row["counts"]["bytes"],
-        (mask.len() + b"a corrected mask".len()) as i64,
+        (mask.len() + b"a corrected mask".len() + b"a model's mask".len()) as i64,
         "{row}"
     );
 }

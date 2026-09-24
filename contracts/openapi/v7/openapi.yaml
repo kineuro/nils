@@ -974,7 +974,7 @@ paths:
         "200": {description: "{derivatives: [...], capability}"}
     post:
       summary: Register a file as a derivative, into the working place (record 42 S4; nils derivative add)
-      description: "The body is the file, as it stands, and its media type is the request's Content-Type (application/octet-stream when none). The query says what it is: `kind` (mask, embedding, pyramid or output), exactly one of `stack`, `series` or `subject` (with `day`, YYYY-MM-DD, for one occasion of the subject), `sha256`, the digest of the body, which is required and checked before anything is registered, and optionally `supersedes`, a derivative of the same kind this one replaces (both stay), and `name`, of which only a plain extension is kept. The body is streamed into the working place and hashed on the way; the file is kept under `derivatives/<kind>/<two hex>/<sha256><extension>`, so the same content is one file, and its name never carries what a caller called it. The row records the bytes, the digest, the place, the principal and X-Nils-Actor; a model and a pipeline run are named once their tables exist. pipelines:work. Audited as derivative.register, which does not move the epoch."
+      description: "The body is the file, as it stands, and its media type is the request's Content-Type (application/octet-stream when none). The query says what it is: `kind` (mask, embedding, pyramid or output), exactly one of `stack`, `series` or `subject` (with `day`, YYYY-MM-DD, for one occasion of the subject), `sha256`, the digest of the body, which is required and checked before anything is registered, and optionally `supersedes`, a derivative of the same kind this one replaces (both stay), `model`, the registered model that made it (its id, its digest or name@version, refused with 400 when no model answers to it), and `name`, of which only a plain extension is kept. The body is streamed into the working place and hashed on the way; the file is kept under `derivatives/<kind>/<two hex>/<sha256><extension>`, so the same content is one file, and its name never carries what a caller called it. The row records the bytes, the digest, the place, the principal, X-Nils-Actor and the model's id; a pipeline run is named once its table exists. pipelines:work. Audited as derivative.register, which does not move the epoch."
       parameters:
         - {name: kind, in: query, required: true, schema: {type: string, enum: [mask, embedding, pyramid, output]}}
         - {name: sha256, in: query, required: true, schema: {type: string, pattern: "^[0-9a-fA-F]{64}$"}}
@@ -983,11 +983,12 @@ paths:
         - {name: subject, in: query, schema: {type: integer}}
         - {name: day, in: query, schema: {type: string, format: date}}
         - {name: supersedes, in: query, schema: {type: integer}}
+        - {name: model, in: query, schema: {type: string}, description: "The registered model that made it: its id, its sha256 digest or name@version"}
         - {name: name, in: query, schema: {type: string}}
       requestBody: {content: {application/octet-stream: {schema: {type: string, format: binary}}}}
       responses:
         "201": {description: "The derivative, as GET /api/derivatives/{id} answers it"}
-        "400": {description: "No kind or sha256, an unknown kind, not exactly one owner, an owner that does not exist, or a supersede of another kind"}
+        "400": {description: "No kind or sha256, an unknown kind, not exactly one owner, an owner that does not exist, a supersede of another kind, or a model no registered model answers to"}
         "403": {description: No pipelines:work}
         "409": {description: "No working place is bound: the capability is off"}
         "413": {description: Larger than upload_max_bytes}

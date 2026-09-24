@@ -215,6 +215,9 @@ pub(crate) struct Ask<'a> {
     pub day: Option<&'a str>,
     pub media_type: &'a str,
     pub supersedes: Option<i64>,
+    /// The registered model that made it: its id, its digest or
+    /// `name@version` (record 42 S2).
+    pub model: Option<&'a str>,
     pub name: Option<&'a str>,
     pub sha256: Option<&'a str>,
     pub principal: &'a str,
@@ -224,9 +227,17 @@ pub(crate) struct Ask<'a> {
 /// Why a registration was refused: a status and a sentence.
 pub(crate) type Refused = (u16, String);
 
+/// What an ask resolved to: what it belongs to, the place it goes into and
+/// the registered model that made it.
+pub(crate) struct Checked {
+    pub belongs: Belongs,
+    pub place: Place,
+    pub model_id: Option<i64>,
+}
+
 /// Check an ask before any byte is read: the kind, what it belongs to, the
-/// row it supersedes, and the place it goes into.
-pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<(Belongs, Place), Refused> {
+/// row it supersedes, the model that made it, and the place it goes into.
+pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> {
     let place = working(store).map_err(|m| (409, m))?;
     if !derivative::is_kind(a.kind) {
         return Err((
@@ -262,7 +273,20 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<(Belongs, Place), 
             ));
         }
     }
-    Ok((belongs, place))
+    let model_id = match a.model {
+        None => None,
+        Some(reference) => Some(
+            nils_registry::model::resolve(store, reference)
+                .map_err(|e| (500, e.to_string()))?
+                .ok_or_else(|| (400, format!("no registered model answers to {reference}")))?
+                .id,
+        ),
+    };
+    Ok(Checked {
+        belongs,
+        place,
+        model_id,
+    })
 }
 
 /// Register a derivative: check, write the bytes, write the row, audit.
@@ -271,7 +295,11 @@ pub(crate) fn register(
     a: &Ask<'_>,
     reader: &mut dyn Read,
 ) -> Result<Derivative, Refused> {
-    let (belongs, place) = check(registry.store(), a)?;
+    let Checked {
+        belongs,
+        place,
+        model_id,
+    } = check(registry.store(), a)?;
     let stored = store_file(Path::new(&place.path), a.kind, a.name, reader, a.sha256).map_err(
         |e| match e {
             StoreFail::Mismatch { .. } => (422, e.to_string()),
@@ -293,6 +321,7 @@ pub(crate) fn register(
             media_type: a.media_type,
             registered_by: a.principal,
             actor: a.actor,
+            model_id,
             supersedes_id: a.supersedes,
             created_at: &now,
         },
@@ -306,7 +335,7 @@ pub(crate) fn register(
             scope: json!({
                 "derivative": id, "kind": a.kind, "scope": belongs.scope,
                 "stack": belongs.stack_id, "series": belongs.series_id,
-                "subject": belongs.subject_id, "place": place.name,
+                "subject": belongs.subject_id, "place": place.name, "model": model_id,
             }),
             policy: None,
             job_id: None,
@@ -415,7 +444,7 @@ fn decoded(text: &str) -> String {
 
 /// `POST /api/derivatives`: the body is the file, and the query says what
 /// it is: `kind`, one of `stack`, `series` or `subject` (with `day` for one
-/// occasion), `sha256`, and optionally `supersedes` and `name`, whose
+/// occasion), `sha256`, and optionally `supersedes`, `model` and `name`, whose
 /// extension alone is kept. The media type is the request's content type.
 /// The bytes are read only once the caller, the place and the ask pass.
 pub(crate) fn upload(
@@ -464,6 +493,7 @@ pub(crate) fn upload(
         day: q.get("day").map(String::as_str),
         media_type: &media_type,
         supersedes: int_of(&q, "supersedes")?,
+        model: q.get("model").map(String::as_str),
         name: q.get("name").map(String::as_str),
         sha256: Some(&sha256),
         principal: &caller.principal,
@@ -588,6 +618,9 @@ pub(crate) enum DerivativeCommand {
         /// The derivative this one replaces; both stay
         #[arg(long, value_name = "ID")]
         supersedes: Option<i64>,
+        /// The registered model that made it: its id, digest or name@version
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
         /// The digest the file must have, checked before anything is registered
         #[arg(long, value_name = "HEX")]
         sha256: Option<String>,
@@ -646,6 +679,7 @@ pub(crate) fn command(
             day,
             media_type,
             supersedes,
+            model,
             sha256,
             json,
         } => {
@@ -659,6 +693,7 @@ pub(crate) fn command(
                 day: day.as_deref(),
                 media_type: &media_type,
                 supersedes,
+                model: model.as_deref(),
                 name: name.as_deref(),
                 sha256: sha256.as_deref(),
                 principal: &who,

@@ -75,6 +75,9 @@ pub struct New<'a> {
     pub media_type: &'a str,
     pub registered_by: &'a str,
     pub actor: Option<&'a serde_json::Value>,
+    /// The registered model that made it (record 42 S2's table), when a
+    /// model did; [`insert`] refuses an id the model table does not hold.
+    pub model_id: Option<i64>,
     pub supersedes_id: Option<i64>,
     pub created_at: &'a str,
 }
@@ -170,8 +173,16 @@ pub fn belongs(
     })
 }
 
-/// Write the row. Answers its id.
+/// Write the row. Answers its id. A model named is one the registry holds:
+/// the column refers to the model table, which the store does not enforce.
 pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
+    if let Some(model) = n.model_id
+        && crate::model::get(store, model)?.is_none()
+    {
+        return Err(Error::Message(format!(
+            "no registered model {model} made this derivative"
+        )));
+    }
     let rows = store.insert(
         &Insert::new(
             table("derivative"),
@@ -189,6 +200,7 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
                 "media_type",
                 "registered_by",
                 "actor",
+                "model_id",
                 "supersedes_id",
                 "created_at",
             ],
@@ -211,6 +223,7 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
             Param::from(n.media_type),
             Param::from(n.registered_by),
             n.actor.map_or(Param::Null, |a| Param::from(a.to_string())),
+            n.model_id.map_or(Param::Null, Param::Int),
             n.supersedes_id.map_or(Param::Null, Param::Int),
             Param::from(n.created_at),
         ]],
@@ -395,9 +408,20 @@ mod tests {
             media_type: "application/octet-stream",
             registered_by: "ana@node",
             actor: Some(&actor),
+            model_id: None,
             supersedes_id: None,
             created_at: "2026-09-24T00:00:00Z",
         };
+        // a model named is one the model table holds
+        let e = insert(
+            &mut store,
+            &New {
+                model_id: Some(42),
+                ..n.clone()
+            },
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("no registered model 42"), "{e}");
         let first = insert(&mut store, &n).unwrap();
         let second = insert(
             &mut store,
