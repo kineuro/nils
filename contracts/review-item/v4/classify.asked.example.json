@@ -1,0 +1,74 @@
+{
+  "id": 4812,
+  "kind": "classify.asked",
+  "scope": "stack",
+  "status": "open",
+  "actor": null,
+  "created_at": "2026-09-24T09:12:00Z",
+  "decided_at": null,
+  "ref": {"stack_id": 1207},
+  "evidence": {
+    "axes": ["base", "technique", "modifier"],
+    "candidates": [
+      {"values": {"base": "T1w", "technique": "MPRAGE", "modifier": ["FatSat"]}, "p": 0.71},
+      {"values": {"base": "T1w", "technique": "MPRAGE", "modifier": []}, "p": 0.22},
+      {"values": {"base": "T2w", "technique": "TSE", "modifier": ["FatSat"]}, "p": 0.04}
+    ],
+    "systems": {
+      "rules": {
+        "pack": "mri@0.4.0",
+        "axes": {
+          "base": {
+            "value": "T1w",
+            "rule_set": "base",
+            "rule": "technique:MPRAGE",
+            "votes": [
+              {"rule": "technique:MPRAGE", "value": "T1w"},
+              {"rule": "keyword:T1w", "value": "T1w"}
+            ],
+            "label_model_p": {"T1w": 0.97, "T2w": 0.03}
+          },
+          "technique": {
+            "value": "MPRAGE",
+            "rule_set": "technique",
+            "rule": "MPRAGE",
+            "votes": [{"rule": "MPRAGE", "value": "MPRAGE"}],
+            "label_model_p": {"MPRAGE": 0.95, "TSE": 0.05}
+          },
+          "modifier": {
+            "value": null,
+            "rule_set": "modifier",
+            "rule": null,
+            "votes": [],
+            "label_model_p": {}
+          }
+        }
+      },
+      "model": {
+        "model_id": 12,
+        "digest": "sha256:4b1d6f0c9a8e7d2c3b4a59687f0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6",
+        "name": "system1",
+        "version": "0.1.0",
+        "p": {
+          "base": {"T1w": 0.93, "T2w": 0.07},
+          "technique": {"MPRAGE": 0.9, "TSE": 0.1},
+          "modifier": {"FatSat": 0.76, "FLAIR": 0.02}
+        }
+      }
+    },
+    "agree": ["base", "technique"],
+    "certificate": {
+      "risk_level": 0.05,
+      "delta": 0.01,
+      "group": "siemens|3T|head",
+      "threshold": 0.9,
+      "score": 0.71,
+      "auto_decided": false
+    },
+    "confidence": 0.71
+  },
+  "decision": null,
+  "members": 1,
+  "group_key": "asked:stack:1207",
+  "accepted_by": null
+}

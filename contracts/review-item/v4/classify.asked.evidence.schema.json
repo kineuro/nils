@@ -1,0 +1,351 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/review-item/v4/classify.asked.evidence.schema.json",
+  "title": "The evidence of a classify.asked review item",
+  "description": "System 1's question about one stack (record 45 R5), fixed before anything writes it: the joint answers the pack allows with their probabilities, both systems' evidence, and what the stack's certificate says. Wave 44 writes it; the desk reads it. Choosing a candidate answers every axis at once: one decision per axis through apply, or one axes answer in a campaign. A kind is not a change to the review-item contract; this shape is written down beside it so both waves build against one.",
+  "type": "object",
+  "required": [
+    "axes",
+    "candidates",
+    "systems",
+    "agree",
+    "certificate",
+    "confidence"
+  ],
+  "properties": {
+    "axes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      },
+      "description": "The axes the stack is asked about, pack axis names."
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The joint answers the pack allows (its vocabulary, exclusion groups and implications, as an axes question's constraints), most probable first: the conformal set. No two are the same, and their probabilities sum to one or less.",
+      "items": {
+        "type": "object",
+        "required": [
+          "values",
+          "p"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "values": {
+            "type": "object",
+            "description": "Every axis of `axes`: a value (its identity), a list of values for a multi-valued axis, or null for no value.",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          "p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "The joint probability."
+          }
+        }
+      }
+    },
+    "systems": {
+      "type": "object",
+      "required": [
+        "rules",
+        "model"
+      ],
+      "description": "Both systems' evidence.",
+      "properties": {
+        "rules": {
+          "type": "object",
+          "required": [
+            "axes"
+          ],
+          "description": "The pack's: per axis the value the rules gave, the rule set and rule that decided it, every rule's vote, and the label model's probabilities.",
+          "properties": {
+            "pack": {
+              "type": "string",
+              "description": "name@version"
+            },
+            "axes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rule_set": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rule": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "votes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "rule",
+                        "value"
+                      ],
+                      "properties": {
+                        "rule": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "label_model_p": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "model": {
+          "type": "object",
+          "required": [
+            "p"
+          ],
+          "description": "The registered model's: named by `model_id` or `digest` (one at least), with its name and version, and per axis the probability of each value.",
+          "properties": {
+            "model_id": {
+              "type": "integer"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "p": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "model_id"
+              ]
+            },
+            {
+              "required": [
+                "digest"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "agree": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The axes where both systems name the same value; the desk marks the others."
+    },
+    "certificate": {
+      "type": "object",
+      "required": [
+        "risk_level",
+        "group",
+        "auto_decided"
+      ],
+      "description": "What the stack's certification says.",
+      "properties": {
+        "risk_level": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "description": "The risk the stack is held to (epsilon)."
+        },
+        "delta": {
+          "type": "number",
+          "description": "The confidence of that bound (delta)."
+        },
+        "group": {
+          "type": "string",
+          "description": "The group the certificate was calibrated in."
+        },
+        "threshold": {
+          "type": "number"
+        },
+        "score": {
+          "type": "number"
+        },
+        "auto_decided": {
+          "type": "boolean",
+          "description": "Whether the stack was decided without a person."
+        }
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "description": "The first candidate's probability, which the Review queue's cost order and a commit by minimum confidence read as they read every item's."
+    }
+  },
+  "examples": [
+    {
+      "axes": [
+        "base",
+        "technique",
+        "modifier"
+      ],
+      "candidates": [
+        {
+          "values": {
+            "base": "T1w",
+            "technique": "MPRAGE",
+            "modifier": [
+              "FatSat"
+            ]
+          },
+          "p": 0.71
+        },
+        {
+          "values": {
+            "base": "T1w",
+            "technique": "MPRAGE",
+            "modifier": []
+          },
+          "p": 0.22
+        },
+        {
+          "values": {
+            "base": "T2w",
+            "technique": "TSE",
+            "modifier": [
+              "FatSat"
+            ]
+          },
+          "p": 0.04
+        }
+      ],
+      "systems": {
+        "rules": {
+          "pack": "mri@0.4.0",
+          "axes": {
+            "base": {
+              "value": "T1w",
+              "rule_set": "base",
+              "rule": "technique:MPRAGE",
+              "votes": [
+                {
+                  "rule": "technique:MPRAGE",
+                  "value": "T1w"
+                },
+                {
+                  "rule": "keyword:T1w",
+                  "value": "T1w"
+                }
+              ],
+              "label_model_p": {
+                "T1w": 0.97,
+                "T2w": 0.03
+              }
+            },
+            "technique": {
+              "value": "MPRAGE",
+              "rule_set": "technique",
+              "rule": "MPRAGE",
+              "votes": [
+                {
+                  "rule": "MPRAGE",
+                  "value": "MPRAGE"
+                }
+              ],
+              "label_model_p": {
+                "MPRAGE": 0.95,
+                "TSE": 0.05
+              }
+            },
+            "modifier": {
+              "value": null,
+              "rule_set": "modifier",
+              "rule": null,
+              "votes": [],
+              "label_model_p": {}
+            }
+          }
+        },
+        "model": {
+          "model_id": 12,
+          "digest": "sha256:4b1d6f0c9a8e7d2c3b4a59687f0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6",
+          "name": "system1",
+          "version": "0.1.0",
+          "p": {
+            "base": {
+              "T1w": 0.93,
+              "T2w": 0.07
+            },
+            "technique": {
+              "MPRAGE": 0.9,
+              "TSE": 0.1
+            },
+            "modifier": {
+              "FatSat": 0.76,
+              "FLAIR": 0.02
+            }
+          }
+        }
+      },
+      "agree": [
+        "base",
+        "technique"
+      ],
+      "certificate": {
+        "risk_level": 0.05,
+        "delta": 0.01,
+        "group": "siemens|3T|head",
+        "threshold": 0.9,
+        "score": 0.71,
+        "auto_decided": false
+      },
+      "confidence": 0.71
+    }
+  ]
+}

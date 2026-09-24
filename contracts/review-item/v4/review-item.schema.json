@@ -19,7 +19,7 @@
     },
     "kind": {
       "type": "string",
-      "description": "What was found: `<area>.<what>` for an engine stage, `<axis>:<reason>` for the classifier and for a model's proposals (record 43), and `pipeline:qc` for a unit of a pipeline run no one can vouch for (record 43).",
+      "description": "What was found: `<area>.<what>` for an engine stage (among them `classify.asked`, System 1's question, whose evidence `classify.asked.evidence.schema.json` fixes, record 45), `<axis>:<reason>` for the classifier and for a model's proposals (record 43), and `pipeline:qc` for a unit of a pipeline run no one can vouch for (record 43).",
       "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|conflict|decision|vote|model)|pipeline:qc)$"
     },
     "scope": {
