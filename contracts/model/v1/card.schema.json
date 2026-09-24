@@ -58,7 +58,13 @@
     },
     "encoder": {
       "$ref": "#/$defs/reference",
-      "description": "The encoder a head reads the features of. Required of a head: a new encoder makes its heads stale"
+      "description": "The encoder a head reads the features of. A head names its encoders here or in encoders, at least one: a new encoder makes its heads stale"
+    },
+    "encoders": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/reference" },
+      "description": "Record 43: every encoder a head reads the features of, in the order it concatenates them, each registered before the head. An encoder given as well is one of them, and a card that names only encoder has that one"
     },
     "trained_on": {
       "type": "object",
@@ -76,6 +82,12 @@
         }
       },
       "description": "The exact labels, as a digest, not prose"
+    },
+    "threshold": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "Record 43: the probability at or above which the model's proposal is staged as its decision, for a person to commit; below it a proposal is a review item only. Whoever runs the model may raise it for a run and never lower it. A card without one has every proposal asked as a review item"
     },
     "pack_version": {
       "type": "string",

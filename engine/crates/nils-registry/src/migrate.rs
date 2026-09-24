@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 60;
+pub const SCHEMA_VERSION: i64 = 61;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,7 +294,28 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 60,
         apply: an_embedding_is_kept_once_per_encoder_and_preprocessing,
     },
+    Migration {
+        version: 61,
+        apply: a_head_reads_its_encoders_in_order,
+    },
 ];
+
+/// Record 43: a head reads several encoders. A registry from before gains
+/// the table with each head's one encoder as its first, so every reader of
+/// the list sees what the row said.
+fn a_head_reads_its_encoders_in_order(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["model_encoder"])?;
+    let (me, m) = (store.qualified("model_encoder"), store.qualified("model"));
+    store.batch(&format!(
+        "INSERT INTO {me} (model_id, encoder_model_id, position) \
+         SELECT id, encoder_model_id, 0 FROM {m} WHERE encoder_model_id IS NOT NULL \
+         AND id NOT IN (SELECT model_id FROM {me})"
+    ))?;
+    Ok(())
+}
 
 /// Record 43 S1 and S2: the pipeline catalog and the runs. A registry from
 /// before gains the two tables empty; with no pipeline added nothing runs,

@@ -531,7 +531,8 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
         .unwrap();
         let card = |v: &str, d: &str| {
             json!({"name": "bp-head", "version": v, "kind": "head", "digest": d,
-                   "task": "axis:body_part", "encoder": {"digest": enc.digest}})
+                   "task": "axis:body_part", "encoder": {"digest": enc.digest},
+                   "threshold": 0.8})
         };
         let head =
             nils_registry::model::register(reg, &card("1", &digest('1')), "anna@lab").unwrap();
@@ -595,25 +596,25 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
         let items_before = count(reg, "review_item", "");
         let mut bad = proposals.clone();
         bad[0].probabilities.insert("chest".into(), 0.5);
-        let e = proposals::ingest(reg, &run, &bad, 0.8).unwrap_err();
+        let e = proposals::ingest(reg, &run, &bad, None).unwrap_err();
         assert!(e.to_string().contains("sum to"), "{name}: {e}");
         let mut bad = proposals.clone();
         bad[0].stack_id = 9999;
-        let e = proposals::ingest(reg, &run, &bad, 0.8).unwrap_err();
+        let e = proposals::ingest(reg, &run, &bad, None).unwrap_err();
         assert!(e.to_string().contains("stack 9999"), "{name}: {e}");
         let mut bad = proposals.clone();
         bad[0].model_id = Some(9999);
-        let e = proposals::ingest(reg, &run, &bad, 0.8).unwrap_err();
+        let e = proposals::ingest(reg, &run, &bad, None).unwrap_err();
         assert!(e.to_string().contains("9999"), "{name}: {e}");
         let mut bad = proposals.clone();
         bad[1].model_digest = Some(digest('2'));
-        let e = proposals::ingest(reg, &run, &bad, 0.8).unwrap_err();
+        let e = proposals::ingest(reg, &run, &bad, None).unwrap_err();
         assert!(e.to_string().contains("not sha256"), "{name}: {e}");
-        let e = proposals::ingest(reg, &run, &proposals, 1.5).unwrap_err();
+        let e = proposals::ingest(reg, &run, &proposals, Some(1.5)).unwrap_err();
         assert!(e.to_string().contains("threshold"), "{name}: {e}");
         assert_eq!(count(reg, "review_item", ""), items_before, "{name}");
 
-        let done = proposals::ingest(reg, &run, &proposals, 0.8).unwrap();
+        let done = proposals::ingest(reg, &run, &proposals, None).unwrap();
         assert_eq!(done.decided, 1, "{name}: the person's stack is not asked");
         assert_eq!(done.members, 9, "{name}");
         let mut got: Vec<(String, i64, String, i64, bool)> = done
@@ -740,7 +741,7 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
         assert_eq!(in_force(reg, true).len(), 5, "{name}");
 
         // a run goes in once
-        let e = proposals::ingest(reg, &run, &proposals, 0.8).unwrap_err();
+        let e = proposals::ingest(reg, &run, &proposals, None).unwrap_err();
         assert!(e.to_string().contains("in already"), "{name}: {e}");
 
         // R6: an agent or a model does not commit them; a person commits
@@ -844,4 +845,292 @@ fn the_proposals_contract_is_what_the_engine_reads() {
     let emb = std::fs::read_to_string(contracts().join("job/v1/embedding.md")).unwrap();
     assert!(emb.contains(embedding::MEDIA_TYPE));
     assert!(emb.contains(std::str::from_utf8(embedding::MAGIC).unwrap()));
+}
+
+/// A registered encoder and an admitted head of `axis:body_part` whose card
+/// says `threshold`, or nothing.
+fn head(
+    reg: &mut Registry,
+    version: &str,
+    digest_char: char,
+    threshold: Option<f64>,
+) -> nils_registry::model::Model {
+    let enc = embedding::register_encoder(
+        reg,
+        &Encoder {
+            name: "biomedclip",
+            version: "9f2c1e",
+            weights_digest: &digest('b'),
+            image_digest: None,
+        },
+        "runner@lab",
+    )
+    .unwrap();
+    let mut card = json!({"name": "bp-head", "version": version, "kind": "head",
+        "digest": digest(digest_char), "task": "axis:body_part",
+        "encoder": {"digest": enc.digest}});
+    if let Some(t) = threshold {
+        card["threshold"] = json!(t);
+    }
+    let m = nils_registry::model::register(reg, &card, "anna@lab").unwrap();
+    let passed =
+        json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]});
+    nils_registry::model::admit(reg, m.id, &passed, "anna@lab").unwrap()
+}
+
+fn proposal(stack: i64, value: &str, p: f64, model: i64) -> proposals::Proposal {
+    let other = if value == "brain" { "spine" } else { "brain" };
+    proposals::Proposal {
+        stack_id: stack,
+        axis: "body_part".into(),
+        value: value.into(),
+        probabilities: [(value.to_string(), p), (other.to_string(), 1.0 - p)]
+            .into_iter()
+            .collect(),
+        model_id: Some(model),
+        model_digest: None,
+        note: None,
+    }
+}
+
+/// Record 43's ruling: the threshold a model's proposals are staged at is
+/// its card's; whoever runs it may raise it for a run, never lower it, and
+/// a model whose card names none has every proposal asked, none staged.
+#[test]
+fn a_model_s_card_sets_its_threshold_and_a_run_may_only_raise_it() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let a = head(reg, "1", '1', Some(0.9));
+        let b = head(reg, "2", '2', None);
+        let given = [
+            proposal(ids[0], "brain", 0.95, a.id),
+            proposal(ids[1], "brain", 0.85, a.id),
+            proposal(ids[2], "brain", 0.99, b.id),
+        ];
+        let run = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+        };
+        // lowering the card's threshold is refused, and nothing is written
+        let e = proposals::ingest(reg, &run(1), &given, Some(0.8)).unwrap_err();
+        assert!(e.to_string().contains("not lower it"), "{name}: {e}");
+        assert_eq!(count(reg, "review_item", ""), 0, "{name}");
+        // the card's threshold
+        let done = proposals::ingest(reg, &run(1), &given, None).unwrap();
+        let mut got: Vec<(i64, String, bool)> = done
+            .groups
+            .iter()
+            .map(|g| (g.model_id, g.band.clone(), g.staged.is_some()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (a.id, "below".to_string(), false),
+                (a.id, "p>=0.95".to_string(), true),
+                (b.id, "below".to_string(), false),
+            ],
+            "{name}"
+        );
+        assert!(
+            done.not_staged
+                .iter()
+                .any(|w| w.contains("names no threshold")),
+            "{name}: {:?}",
+            done.not_staged
+        );
+        let item = review::item(reg.store(), done.groups[0].item)
+            .unwrap()
+            .unwrap();
+        assert!(item.evidence["threshold"].is_number() || item.evidence["threshold"].is_null());
+        // a caller raises it: 0.95 is under 0.97, so it is asked, not staged
+        let raised = proposals::ingest(
+            reg,
+            &run(2),
+            &[proposal(ids[0], "brain", 0.95, a.id)],
+            Some(0.97),
+        )
+        .unwrap();
+        assert_eq!(raised.groups.len(), 1, "{name}");
+        assert_eq!(raised.groups[0].band, "below", "{name}");
+        assert!(raised.groups[0].staged.is_none(), "{name}");
+        let item = review::item(reg.store(), raised.groups[0].item)
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.evidence["threshold"], 0.97, "{name}");
+        // a card's threshold is a probability
+        let mut card = a.card.clone();
+        card["version"] = json!("9");
+        card["digest"] = json!(digest('9'));
+        card["threshold"] = json!(1.5);
+        let e = nils_registry::model::register(reg, &card, "anna@lab").unwrap_err();
+        assert!(e.to_string().contains("threshold"), "{name}: {e}");
+    }
+}
+
+/// Record 43's ruling: a newer run of a model withdraws what its earlier
+/// runs staged on the axis and nobody committed, and closes their items,
+/// so stale proposals do not pile up. What a person committed stays, and
+/// so does another model's.
+#[test]
+fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 3);
+        let a = head(reg, "1", '1', Some(0.8));
+        let c = head(reg, "2", '2', Some(0.8));
+        let run = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+        };
+        let first = proposals::ingest(
+            reg,
+            &run(1),
+            &[
+                proposal(ids[0], "brain", 0.95, a.id),
+                proposal(ids[1], "brain", 0.96, a.id),
+                proposal(ids[2], "spine", 0.5, a.id),
+                proposal(ids[3], "spine", 0.995, a.id),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(first.superseded, 0, "{name}");
+        let other =
+            proposals::ingest(reg, &run(3), &[proposal(ids[4], "brain", 0.9, c.id)], None).unwrap();
+        assert!(other.groups[0].staged.is_some(), "{name}");
+        // a person commits the surest group of run 1
+        let filter = CommitFilter {
+            min_confidence: Some(0.99),
+            campaign: None,
+        };
+        let committed = review::commit_where(reg, &filter, false, "anna@lab", "person").unwrap();
+        assert_eq!(committed.decisions.len(), 1, "{name}: {committed:?}");
+        let status = |reg: &mut Registry, item: i64| {
+            review::item(reg.store(), item).unwrap().unwrap().status
+        };
+        let of = |g: &str| first.groups.iter().find(|x| x.band == g).unwrap().clone();
+        let (brain, below, sure) = (of("p>=0.95"), of("below"), of("p>=0.99"));
+        assert_eq!(status(reg, brain.item), "staged", "{name}");
+        assert_eq!(status(reg, below.item), "open", "{name}");
+        assert_eq!(status(reg, sure.item), "accepted", "{name}");
+
+        // run 2 of the same model on the same axis
+        let second =
+            proposals::ingest(reg, &run(2), &[proposal(ids[0], "brain", 0.97, a.id)], None)
+                .unwrap();
+        assert_eq!(second.superseded, 2, "{name}: {second:?}");
+        assert_eq!(second.withdrawn, 1, "{name}");
+        assert_eq!(status(reg, brain.item), "superseded", "{name}");
+        assert_eq!(status(reg, below.item), "superseded", "{name}");
+        assert_eq!(
+            status(reg, sure.item),
+            "accepted",
+            "{name}: a person took it"
+        );
+        assert_eq!(
+            status(reg, other.groups[0].item),
+            "staged",
+            "{name}: another model's"
+        );
+        let withdrawn = |reg: &mut Registry, id: i64| -> bool {
+            let sql = format!(
+                "SELECT withdrawn_at IS NOT NULL FROM {} WHERE id = {id}",
+                reg.store().qualified("decision")
+            );
+            reg.store().query(&sql, &[]).unwrap()[0].int(0).unwrap() == 1
+        };
+        assert!(withdrawn(reg, brain.staged.unwrap()), "{name}");
+        assert!(!withdrawn(reg, sure.staged.unwrap()), "{name}");
+        assert!(!withdrawn(reg, other.groups[0].staged.unwrap()), "{name}");
+        assert!(!withdrawn(reg, second.groups[0].staged.unwrap()), "{name}");
+        // what is staged of model a now is run 2's alone
+        let staged: Vec<i64> = labels::decision_labels(
+            reg.store(),
+            &DecisionQuery {
+                axis: "body_part",
+                stacks: None,
+                authors: &["model".to_string()],
+                campaign: None,
+                staged_too: true,
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .filter_map(|l| l.stack_id)
+        .collect();
+        let mut staged = staged;
+        staged.sort();
+        let mut want = vec![ids[0], ids[3], ids[4]];
+        want.sort();
+        assert_eq!(staged, want, "{name}");
+    }
+}
+
+/// Record 43's ruling: a head reads several encoders, in order, each
+/// registered first; the row keeps the first and `model_encoder` the list.
+#[test]
+fn a_head_reads_several_encoders_in_the_order_its_card_lists_them() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let enc = |reg: &mut Registry, n: &str, c: char| {
+            embedding::register_encoder(
+                reg,
+                &Encoder {
+                    name: n,
+                    version: "1",
+                    weights_digest: &digest(c),
+                    image_digest: None,
+                },
+                "runner@lab",
+            )
+            .unwrap()
+        };
+        let (bc, sg) = (enc(reg, "biomedclip", 'b'), enc(reg, "siglip2", 'c'));
+        let card = |v: &str, d: char, extra: serde_json::Value| {
+            let mut c = json!({"name": "bp-head", "version": v, "kind": "head",
+                "digest": digest(d), "task": "axis:body_part"});
+            for (k, x) in extra.as_object().unwrap() {
+                c[k] = x.clone();
+            }
+            c
+        };
+        let two = json!({"encoders": [{"digest": sg.digest}, {"digest": bc.digest}]});
+        let m = nils_registry::model::register(reg, &card("1", '1', two), "anna@lab").unwrap();
+        assert_eq!(m.encoder_model_ids, [sg.id, bc.id], "{name}");
+        assert_eq!(m.encoder_model_id, Some(sg.id), "{name}");
+        let listed = nils_registry::model::list(reg.store(), &Default::default()).unwrap();
+        let again = listed.iter().find(|x| x.id == m.id).unwrap();
+        assert_eq!(again.encoder_model_ids, [sg.id, bc.id], "{name}");
+        // one encoder alone is a list of one
+        let one = json!({"encoder": {"digest": bc.digest}});
+        let m1 = nils_registry::model::register(reg, &card("2", '2', one), "anna@lab").unwrap();
+        assert_eq!(m1.encoder_model_ids, [bc.id], "{name}");
+        // refused: none, an encoder outside the list, one unregistered, one twice
+        for (extra, words) in [
+            (json!({}), "names the encoders"),
+            (
+                json!({"encoder": {"digest": digest('e')}, "encoders": [{"digest": bc.digest}]}),
+                "not one of",
+            ),
+            (
+                json!({"encoders": [{"digest": digest('e')}]}),
+                "not registered",
+            ),
+            (
+                json!({"encoders": [{"digest": bc.digest}, {"digest": bc.digest}]}),
+                "twice",
+            ),
+        ] {
+            let e = nils_registry::model::register(reg, &card("3", '3', extra), "anna@lab")
+                .unwrap_err();
+            assert!(e.to_string().contains(words), "{name}: {e}");
+        }
+    }
 }

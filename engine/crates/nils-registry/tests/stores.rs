@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60],
+            [59, 60, 61],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -1985,5 +1985,55 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         let again = review::raise_pipeline_qc(&mut store, &q, "2026-09-24T10:03:00Z").unwrap();
         assert_eq!(item, again, "{name}: one item per run and unit");
         assert_eq!(pipeline::totals(&mut store).unwrap(), (1, 1), "{name}");
+    }
+}
+
+/// Record 43, migration 61, on both backends: a registry from before gains
+/// `model_encoder`, and each head's one encoder becomes the first of its
+/// list.
+#[test]
+fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
+    use nils_registry::model;
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (m, me, meta) = (
+            store.qualified("model"),
+            store.qualified("model_encoder"),
+            store.qualified("registry_meta"),
+        );
+        let hex = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        store
+            .batch(&format!(
+                "INSERT INTO {m} (name, version, kind, digest, task, slot, state, card, registered_by, registered_at) \
+                 VALUES ('enc', '1', 'encoder', '{}', 'encoder', 'site', 'registered', '{{}}', 'a', '2026-09-24T00:00:00Z');
+                 INSERT INTO {m} (name, version, kind, digest, task, slot, state, card, encoder_model_id, registered_by, registered_at) \
+                 VALUES ('head', '1', 'head', '{}', 'axis:body_part', 'site', 'registered', '{{}}', 1, 'a', '2026-09-24T00:00:00Z');
+                 DROP TABLE {me};
+                 UPDATE {meta} SET value = '60' WHERE key = 'schema_version'",
+                hex('a'),
+                hex('b')
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [61],
+            "{name}"
+        );
+        let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
+        assert_eq!(
+            head.encoder_model_ids,
+            [head.encoder_model_id.unwrap()],
+            "{name}"
+        );
+        let rows = store
+            .query(&format!("SELECT COUNT(*) FROM {me}"), &[])
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 1, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
     }
 }

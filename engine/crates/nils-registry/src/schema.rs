@@ -1251,7 +1251,8 @@ fn build_registry() -> Vec<Table> {
                 req("state", Type::Text),
                 // the card as it was registered, kept whole
                 req("card", Type::Json),
-                // a head names the encoder whose features it reads
+                // a head names the encoder whose features it reads; the
+                // first of them, when it reads several (model_encoder)
                 col("encoder_model_id", Type::Int),
                 // the digest of the label set it was fitted on (C7)
                 col("trained_on", Type::Text),
@@ -1291,6 +1292,21 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["model_id"]),
+        // Record 43: every encoder a head reads, in the order it
+        // concatenates their features. A small table rather than a list
+        // in the model row, so that the heads a new encoder makes stale are
+        // one read; `model.encoder_model_id` keeps the first.
+        Table::new(
+            "model_encoder",
+            vec![
+                col("id", Type::Id),
+                req("model_id", Type::Int),
+                req("encoder_model_id", Type::Int),
+                req("position", Type::Int),
+            ],
+        )
+        .unique(&["model_id", "position"])
+        .index(&["encoder_model_id"]),
         Table::new(
             "pick_stack",
             vec![

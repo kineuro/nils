@@ -12,8 +12,11 @@
 //! ([`crate::review::group_run`]), each stack a member with its
 //! probabilities as its evidence.
 //!
-//! The bands split at the task's threshold and, above it, at
-//! [`BANDS`]. A group at or above the threshold gets a staged group
+//! The bands split at the model's threshold and, above it, at
+//! [`BANDS`]. The threshold is the model card's (`threshold`,
+//! `contracts/model/v1`); whoever runs the model may raise it for a run and
+//! never lower it ([`threshold`]), and a model whose card names none has
+//! every proposal asked as a review item. A group at or above the threshold gets a staged group
 //! decision authored by the model (`author_kind` model, its `model_id`),
 //! written through the one write path, [`crate::review::apply_within`], so
 //! that it is refused for a model that is not admitted or promoted, or
@@ -25,6 +28,13 @@
 //!
 //! A stack whose axis a person or an agent has decided, with the decision
 //! in force, is not asked again: it is counted, and left out.
+//!
+//! A newer run of a model supersedes what its earlier runs proposed on the
+//! same axis and nobody took: their `<axis>:model` items still open or
+//! staged are closed as `superseded`, and the staged decisions nobody
+//! committed are withdrawn, so stale proposals do not pile up. A decision a
+//! person committed stays, and so does an item an unfinished campaign
+//! asks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -167,6 +177,10 @@ pub struct Ingested {
     /// Why a group at or above the threshold was not staged, once per
     /// model: not admitted or promoted, or registered for another task.
     pub not_staged: Vec<String>,
+    /// The items of the model's earlier runs on the axis closed as
+    /// superseded, and the staged decisions of theirs withdrawn.
+    pub superseded: i64,
+    pub withdrawn: i64,
 }
 
 impl Ingested {
@@ -178,6 +192,8 @@ impl Ingested {
             "staged_decisions": self.groups.iter().filter(|g| g.staged.is_some()).count(),
             "decided": self.decided,
             "not_staged": self.not_staged,
+            "superseded": self.superseded,
+            "withdrawn": self.withdrawn,
             "groups": self.groups.iter().map(|g| json!({
                 "item": g.item, "axis": g.axis, "value": g.value, "model_id": g.model_id,
                 "band": g.band, "members": g.members, "confidence": g.confidence,
@@ -332,21 +348,44 @@ struct Gathered {
     members: Vec<(i64, f64, Value)>,
 }
 
+/// The threshold a model's proposals are staged at in a run: its card's,
+/// or a higher one the caller asks for. Refused for a caller's value that
+/// is not a probability or is below the card's. None when the card names
+/// none: then nothing of the model is staged, whatever the caller asks,
+/// since a caller only raises the card's threshold.
+pub fn threshold(m: &Model, asked: Option<f64>) -> Result<Option<f64>, Error> {
+    if let Some(a) = asked
+        && (!a.is_finite() || a <= 0.0 || a > 1.0)
+    {
+        return Err(invalid(format!(
+            "the threshold asked is {a}, and a threshold is a probability above 0 and at most 1"
+        )));
+    }
+    let Some(card) = m.threshold() else {
+        return Ok(None);
+    };
+    match asked {
+        Some(a) if a < card => Err(Error::Refused(format!(
+            "model {} ({}) stages its proposals at {card}, as its card says; a run may raise that threshold, not lower it to {a}",
+            m.id,
+            m.label()
+        ))),
+        Some(a) => Ok(Some(a)),
+        None => Ok(Some(card)),
+    }
+}
+
 /// Turn a run's proposals into grouped `<axis>:model` review items, and
-/// stage a decision by the model on each group at or above `threshold`,
-/// all in one transaction: every item and decision is written, or none.
-/// A run is ingested once; a second ingest of it is refused.
+/// stage a decision by the model on each group at or above the model's
+/// threshold ([`threshold`]: its card's, or higher where `asked` raises
+/// it), all in one transaction: every item and decision is written, or
+/// none. A run is ingested once; a second ingest of it is refused.
 pub fn ingest(
     registry: &mut Registry,
     run: &Run<'_>,
     proposals: &[Proposal],
-    threshold: f64,
+    asked: Option<f64>,
 ) -> Result<Ingested, Error> {
-    if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
-        return Err(invalid(format!(
-            "the threshold is {threshold}, and a threshold is a probability above 0 and at most 1"
-        )));
-    }
     let store = registry.store();
     let d = store.dialect();
     let prefix = format!("run:{}|", run.id);
@@ -369,6 +408,13 @@ pub fn ingest(
         )));
     }
     let resolved = checked(store, proposals)?;
+    // each model's threshold, refused before anything is written
+    let mut thresholds: BTreeMap<i64, Option<f64>> = BTreeMap::new();
+    for (_, m) in &resolved {
+        if let std::collections::btree_map::Entry::Vacant(e) = thresholds.entry(m.id) {
+            e.insert(threshold(m, asked)?);
+        }
+    }
     // the stacks a person or an agent decided, per axis
     let mut decided: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
     let axes: BTreeSet<&str> = proposals.iter().map(|p| p.axis.as_str()).collect();
@@ -421,20 +467,16 @@ pub fn ingest(
             "run_id": run.id,
             "note": p.note,
         });
+        let at = thresholds[&m.id].unwrap_or(f64::INFINITY);
         groups
-            .entry((
-                p.axis.clone(),
-                m.id,
-                p.value.clone(),
-                band(confidence, threshold),
-            ))
+            .entry((p.axis.clone(), m.id, p.value.clone(), band(confidence, at)))
             .or_default()
             .members
             .push((p.stack_id, confidence, evidence));
         models.insert(m.id, m);
     }
     registry.store().begin()?;
-    match write(registry, run, threshold, groups, &models, &mut out) {
+    match write(registry, run, &thresholds, groups, &models, &mut out) {
         Ok(()) => {
             registry.store().commit()?;
             Ok(out)
@@ -450,15 +492,30 @@ pub fn ingest(
 fn write(
     registry: &mut Registry,
     run: &Run<'_>,
-    threshold: f64,
+    thresholds: &BTreeMap<i64, Option<f64>>,
     groups: BTreeMap<(String, i64, String, String), Gathered>,
     models: &BTreeMap<i64, Model>,
     out: &mut Ingested,
 ) -> Result<(), Error> {
     let now = now_iso();
     let mut refusals: BTreeSet<String> = BTreeSet::new();
+    let pairs: BTreeSet<(String, i64)> =
+        groups.keys().map(|(a, m, _, _)| (a.clone(), *m)).collect();
+    for (axis, model_id) in &pairs {
+        let (items, decisions) = supersede(registry.store(), run, axis, *model_id, &now)?;
+        out.superseded += items;
+        out.withdrawn += decisions;
+    }
     for ((axis, model_id, value, band), mut g) in groups {
         let m = &models[&model_id];
+        let threshold = thresholds[&model_id];
+        if threshold.is_none() {
+            refusals.insert(format!(
+                "model {} ({}) names no threshold on its card, so its proposals are review items only",
+                m.id,
+                m.label()
+            ));
+        }
         g.members.sort_by_key(|(stack, _, _)| *stack);
         let confidence = g
             .members
@@ -541,8 +598,10 @@ fn write(
                 }
                 None => {
                     let why = format!(
-                        "run {}: {} of {members} stack(s) at probability {confidence:.3} or more, threshold {threshold}",
-                        run.id, value
+                        "run {}: {} of {members} stack(s) at probability {confidence:.3} or more, threshold {}",
+                        run.id,
+                        value,
+                        threshold.unwrap_or(1.0)
                     );
                     let applied = review::apply_within(
                         registry,
@@ -581,6 +640,75 @@ fn write(
     }
     out.not_staged = refusals.into_iter().collect();
     Ok(())
+}
+
+/// Close what a model's earlier runs proposed on an axis and nobody took:
+/// items open or staged become `superseded`, and their staged decisions
+/// that nobody committed are withdrawn. Answers the items and decisions.
+/// An item an unfinished campaign asks is left to the campaign.
+fn supersede(
+    store: &mut Store,
+    run: &Run<'_>,
+    axis: &str,
+    model_id: i64,
+    now: &str,
+) -> Result<(i64, i64), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, decision_id FROM {ri} WHERE kind = {} AND status IN ('open', 'staged') \
+         AND group_key LIKE {} AND group_key NOT LIKE {} \
+         AND id NOT IN (SELECT ci.review_item_id FROM {ci} ci JOIN {c} c ON c.id = ci.campaign_id \
+         WHERE c.status IN ('open', 'closing'))",
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Text),
+        ri = store.qualified("review_item"),
+        ci = store.qualified("campaign_item"),
+        c = store.qualified("campaign"),
+    );
+    let stale = store.query(
+        &sql,
+        &[
+            Param::from(format!("{axis}:model")),
+            Param::from(format!("%|model:{model_id}")),
+            Param::from(format!("run:{}|%", run.id)),
+        ],
+    )?;
+    let why = json!({"superseded_by": {"run_id": run.id, "model_id": model_id}});
+    let (mut items, mut decisions) = (0i64, 0i64);
+    for r in &stale {
+        let (item, decision) = (r.int(0)?, r.opt_int(1)?);
+        if let Some(decision) = decision {
+            decisions += store.execute(
+                &format!(
+                    "UPDATE {} SET withdrawn_at = {} WHERE id = {} AND withdrawn_at IS NULL \
+                     AND staged_at IS NOT NULL AND committed_at IS NULL",
+                    store.qualified("decision"),
+                    d.param(1, Type::Timestamp),
+                    d.param(2, Type::Int)
+                ),
+                &[Param::from(now), Param::Int(decision)],
+            )? as i64;
+        }
+        items += store.execute(
+            &format!(
+                "UPDATE {} SET status = '{}', decided_at = {}, actor = {}, decision = {} WHERE id = {}",
+                store.qualified("review_item"),
+                review::RESOLVED,
+                d.param(1, Type::Timestamp),
+                d.param(2, Type::Text),
+                d.param(3, Type::Json),
+                d.param(4, Type::Int)
+            ),
+            &[
+                Param::from(now),
+                Param::from(run.principal),
+                Param::from(why.to_string()),
+                Param::Int(item),
+            ],
+        )? as i64;
+    }
+    Ok((items, decisions))
 }
 
 #[cfg(test)]
