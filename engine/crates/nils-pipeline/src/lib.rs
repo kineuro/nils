@@ -14,14 +14,20 @@
 //! - [`results`]: `results.json`, what a pipeline says of its units.
 //! - [`files`]: what a run left under its output folder, found by the
 //!   descriptor's path templates and hashed.
+//! - [`lane`]: the pipeline lane's budget, what the machine offers, and the
+//!   GPU lease read from the card (record 49 A1, A2).
+//! - [`secrets`]: secret inputs, read at run time and swept from whatever a
+//!   container left (record 49 R3).
 //!
 //! The binary owns the registry side: the catalog and run rows, the input it
 //! materialises, the derivatives it registers and the review items it raises.
 
 pub mod descriptor;
 pub mod files;
+pub mod lane;
 pub mod results;
 pub mod runtime;
+pub mod secrets;
 pub mod words;
 
 pub use descriptor::Descriptor;

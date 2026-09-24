@@ -4,6 +4,11 @@
 //! actor the door recorded. `nils jobs work` runs it in the foreground, and
 //! `nils serve --worker` runs it beside the doors, so a job queued at a door
 //! runs without anyone starting a worker by hand.
+//!
+//! Record 49 A1: the queue has two lanes. The main lane runs every job but a
+//! pipeline run, and the pipeline lane runs those alone, so a run of hours
+//! never holds up a digest; `nils serve --worker` runs a worker for each, and
+//! the pipeline lane's worker also queues again a run whose engine went away.
 
 use std::collections::VecDeque;
 use std::io::{BufRead as _, Write as _};
@@ -59,14 +64,20 @@ fn tail_of(stderr: std::process::ChildStderr, quiet: bool) -> std::thread::JoinH
     })
 }
 
-/// Take the queue: a registry's queue has one worker at a time.
-pub(crate) fn claim(store: &mut Store, once: bool) -> Result<i64, job::Error> {
+/// Take a lane of the queue: a registry's lane has one worker at a time.
+/// The main lane's worker and a worker of every job are one kind, so the
+/// two never run side by side; the pipeline lane's is a kind of its own
+/// (record 49 A1).
+pub(crate) fn claim(store: &mut Store, once: bool, lane: job::Lane) -> Result<i64, job::Error> {
     job::claim(
         store,
         &job::Claim {
-            kind: "worker",
-            name: "queue",
-            args: serde_json::json!({ "once": once }),
+            kind: lane.worker_kind(),
+            name: match lane {
+                job::Lane::Pipelines => "pipelines",
+                _ => "queue",
+            },
+            args: serde_json::json!({ "once": once, "lane": lane.name() }),
         },
     )
 }
@@ -88,6 +99,8 @@ pub(crate) struct Options<'a> {
     /// lines go to stderr, written so that a closed stream never stops the
     /// queue.
     pub(crate) quiet: bool,
+    /// Which jobs it takes (record 49 A1).
+    pub(crate) lane: job::Lane,
 }
 
 /// Run queued jobs until `stop` says so, or with `once` until the queue is
@@ -115,7 +128,17 @@ pub(crate) fn run(
             Ok(_) => {}
             Err(e) => break Err(err(e)),
         }
-        let next = match job::next_queued(store) {
+        // record 49 A1: a pipeline run whose engine went away is taken up
+        // again by the lane that runs pipelines
+        if opts.lane != job::Lane::Main
+            && let Err(e) = crate::pipelines::take_up_interrupted(store)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "nils: the pipeline lane could not look for runs to take up again: {e}"
+            );
+        }
+        let next = match job::next_queued_in(store, opts.lane) {
             Ok(next) => next,
             Err(e) => break Err(err(e)),
         };

@@ -38,8 +38,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use nils_pipeline::descriptor::{self, Descriptor, Gpu, Layout, Level};
-use nils_pipeline::runtime::{self, Choice, Detected, Invocation, Mount, Runtime};
+use nils_pipeline::descriptor::{self, Descriptor, Gpu, Layout, Level, Units};
+use nils_pipeline::lane;
+use nils_pipeline::runtime::{self, Choice, Detected, ImageForm, Invocation, Mount, Runtime};
+use nils_pipeline::secrets;
 use nils_registry::derivative::{self, Belongs};
 use nils_registry::home::Home;
 use nils_registry::job;
@@ -65,6 +67,32 @@ pub(crate) const RUNTIME_KEY: &str = "pipeline_runtime";
 
 /// Where a run's input, typed inputs and log go under the working place.
 pub(crate) const RUNS: &str = "runs";
+
+/// Where apptainer's copies of images are kept under the working place, by
+/// digest (record 49 A2).
+pub(crate) const IMAGES: &str = "images";
+
+/// The lane's settings in the registry (record 49 A1, A2): its cores, its
+/// GB of memory, the card a GPU unit leases (`none` for no card), and how
+/// apptainer keeps an image.
+pub(crate) const LANE_CORES_KEY: &str = "pipeline_lane_cores";
+pub(crate) const LANE_MEMORY_KEY: &str = "pipeline_lane_memory_gb";
+pub(crate) const GPU_CARD_KEY: &str = "pipeline_gpu_card";
+pub(crate) const APPTAINER_IMAGE_KEY: &str = "pipeline_apptainer_image";
+
+/// A secret's file, as the site set it, under this prefix and its id
+/// (record 49 R3): the path, never the bytes.
+pub(crate) const SECRET_PREFIX: &str = "pipeline_secret:";
+
+/// How apptainer keeps an image here: `sif` until set.
+pub(crate) fn image_form(registry: &mut Registry) -> ImageForm {
+    registry
+        .meta_value(APPTAINER_IMAGE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| ImageForm::parse(&v))
+        .unwrap_or(ImageForm::Sif)
+}
 
 /// The operator's choice of runtime: `auto` until one is set.
 pub(crate) fn choice(registry: &mut Registry) -> Choice {
@@ -100,10 +128,56 @@ fn detect_cached(registry: &mut Registry) -> Detected {
 /// when either is not (D1).
 pub(crate) fn capability(registry: &mut Registry) -> Value {
     let d = detect_cached(registry);
-    capability_of(registry.store(), &d)
+    let extra = lane_doc(registry);
+    capability_with(registry.store(), &d, Some(extra))
 }
 
-fn capability_of(store: &mut Store, d: &Detected) -> Value {
+/// The capability with the lane (record 49): its budget, its card, how
+/// apptainer keeps images, and the secrets the site set, by id alone.
+fn capability_with(store: &mut Store, d: &Detected, extra: Option<Value>) -> Value {
+    let mut v = capability_base(store, d);
+    if let Some(Value::Object(more)) = extra {
+        for (k, x) in more {
+            v[k] = x;
+        }
+    }
+    v
+}
+
+/// The secrets the site set, by id.
+fn secret_ids(store: &mut Store) -> Vec<String> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT key, value FROM {} WHERE key LIKE {} ORDER BY key",
+        store.qualified("registry_meta"),
+        d.param(1, Type::Text)
+    );
+    store
+        .query(&sql, &[Param::from(format!("{SECRET_PREFIX}%"))])
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.text(1).is_ok_and(|v| !v.trim().is_empty()))
+        .filter_map(|r| {
+            r.text(0)
+                .ok()
+                .and_then(|k| k.strip_prefix(SECRET_PREFIX))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// What the lane adds to the capability.
+fn lane_doc(registry: &mut Registry) -> Value {
+    let lane = lane_of(registry);
+    let form = image_form(registry);
+    json!({
+        "lane": lane.doc(),
+        "apptainer_image": form.name(),
+        "secrets": secret_ids(registry.store()),
+    })
+}
+
+fn capability_base(store: &mut Store, d: &Detected) -> Value {
     let place = crate::derivatives::working(store);
     let catalog = rows::list(store)
         .map(|l| l.iter().filter(|p| p.state == "active").count())
@@ -147,9 +221,28 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
 /// A run as the doors and `--json` answer it: the row, the pipeline by its
 /// label, and the derivatives it made.
 pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
-    runs_docs(store, std::slice::from_ref(r))
+    let mut doc = runs_docs(store, std::slice::from_ref(r))
         .pop()
-        .unwrap_or(Value::Null)
+        .unwrap_or(Value::Null);
+    // record 49 A1: each unit as the lane scheduled it
+    let units = rows::units(store, r.id).unwrap_or_default();
+    let mut by_state: BTreeMap<String, usize> = BTreeMap::new();
+    for u in &units {
+        *by_state.entry(u.state.clone()).or_default() += 1;
+    }
+    doc["unit_states"] = json!(by_state);
+    doc["units_run"] = json!(
+        units
+            .iter()
+            .map(|u| json!({
+                "unit": u.unit, "state": u.state, "status": u.outcome["status"],
+                "attempts": u.attempts, "device": u.device, "gpu_card": u.gpu_card,
+                "cores": u.cores, "memory_mb": u.memory_mb, "exit_code": u.exit_code,
+                "started_at": u.started_at, "finished_at": u.finished_at,
+            }))
+            .collect::<Vec<_>>()
+    );
+    doc
 }
 
 /// The most runs one page of `GET /api/pipeline-runs` answers.
@@ -274,11 +367,13 @@ pub(crate) fn route(
 pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<Vec<String>, Reply> {
     let mut out = vec!["run".to_string()];
     let mut named = 0;
+    let mut resume = false;
     let mut it = command.into_iter().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--select" | "--handle" | "--param" | "--model" | "--labels" | "--pack"
-            | "--threshold" => {
+            | "--threshold" | "--resume" => {
+                resume |= arg == "--resume";
                 let value = it
                     .next()
                     .ok_or_else(|| Reply::error(400, format!("run {arg} takes a value")))?;
@@ -289,7 +384,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
                 return Err(Reply::error(
                     400,
                     format!(
-                        "run takes --select, --handle, --param, --model, --labels, --threshold and --pack, not {a}"
+                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack and --resume, not {a}"
                     ),
                 ));
             }
@@ -302,7 +397,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             }
         }
     }
-    if named == 0 {
+    if named == 0 && !resume {
         return Err(Reply::error(400, "run <pipeline>: the pipeline to run"));
     }
     if let Some(d) = pack_dir {
@@ -344,12 +439,41 @@ pub(crate) enum PipelineCommand {
     /// The container runtime pipelines run under: what was found, or the
     /// operator's choice. Docker is taken only when chosen here (D18)
     Runtime {
-        /// auto (rootless podman, then apptainer), podman, apptainer, docker or off
+        /// auto (rootless podman, then apptainer), apptainer-first (apptainer,
+        /// then podman), podman, apptainer, docker or off
         #[arg(long, value_name = "CHOICE")]
         set: Option<String>,
+        /// How apptainer keeps an image it builds from the pinned digest:
+        /// sif, or sandbox where there is no /dev/fuse (record 49 A2)
+        #[arg(long, value_name = "FORM")]
+        apptainer_image: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
+    },
+    /// The pipeline lane (record 49): the cores and memory its units run
+    /// within together, and the card a GPU unit leases
+    Lane {
+        /// The cores the lane's units hold together (48 until set)
+        #[arg(long)]
+        cores: Option<u32>,
+        /// The GB of memory they hold together (512 until set); never more
+        /// than this machine or its container offers
+        #[arg(long)]
+        memory_gb: Option<u64>,
+        /// The card a GPU unit leases, by index, or none for no card (0
+        /// until set)
+        #[arg(long, value_name = "CARD")]
+        gpu_card: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Secret inputs (record 49 R3): a file the site keeps, such as a
+    /// licence, that a pipeline declaring it reads at run time
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
     },
     /// A run's seeds (record 43): the values it suggests a person curate,
     /// and the stacks it suggests curating, which --save keeps as a
@@ -384,11 +508,43 @@ pub(crate) enum PipelineCommand {
     },
 }
 
+/// `nils pipeline secret`.
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum SecretCommand {
+    /// Set the file a secret is read from; the engine keeps its path and
+    /// never its bytes
+    Set {
+        /// The secret's id, as a descriptor declares it
+        id: String,
+        /// The file, an absolute path readable by the engine
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Forget a secret's file
+    Unset { id: String },
+    /// The secrets set, by id, and whether each file can be read now
+    List {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `nils run`: one pipeline over a frozen selection.
 #[derive(Debug, clap::Args)]
 pub(crate) struct RunArgs {
     /// The pipeline: its id, name@version, or a name for its newest version
-    pub(crate) pipeline: String,
+    #[arg(required_unless_present = "resume")]
+    pub(crate) pipeline: Option<String>,
+    /// Take up again a run that stopped, was cancelled or whose engine went
+    /// away (record 49 A1): the units it finished are kept, and those in
+    /// flight run again, with everything the run recorded
+    #[arg(
+        long,
+        value_name = "RUN",
+        conflicts_with_all = ["pipeline", "select", "handle", "params", "models", "labels", "threshold"]
+    )]
+    pub(crate) resume: Option<i64>,
     /// The selection to run over, frozen now into its stacks and pinned
     #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
     pub(crate) select: Option<String>,
@@ -486,7 +642,8 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             let list = rows::list(registry.store())?;
             let cap = {
                 let d = runtime::detect(choice(&mut registry), std::env::var_os("PATH").as_deref());
-                capability_of(registry.store(), &d)
+                let extra = lane_doc(&mut registry);
+                capability_with(registry.store(), &d, Some(extra))
             };
             if json {
                 return print(&json!({
@@ -561,7 +718,26 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             println!("  added by         {} at {}", p.added_by, p.added_at);
             Ok(())
         }
-        PipelineCommand::Runtime { set, json } => {
+        PipelineCommand::Runtime {
+            set,
+            apptainer_image,
+            json,
+        } => {
+            if let Some(word) = apptainer_image {
+                let form = ImageForm::parse(&word).ok_or_else(|| {
+                    usage(format!(
+                        "--apptainer-image is one of {}, not {word}",
+                        ImageForm::WORDS.join(", ")
+                    ))
+                })?;
+                registry.set_meta(APPTAINER_IMAGE_KEY, form.name())?;
+                crate::audit(
+                    &mut registry,
+                    nils_registry::audit::Action::PipelineRuntime,
+                    json!({"apptainer_image": form.name()}),
+                    None,
+                )?;
+            }
             if let Some(word) = set {
                 let c = Choice::parse(&word).ok_or_else(|| {
                     usage(format!(
@@ -578,7 +754,8 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 )?;
             }
             let d = runtime::detect(choice(&mut registry), std::env::var_os("PATH").as_deref());
-            let cap = capability_of(registry.store(), &d);
+            let extra = lane_doc(&mut registry);
+            let cap = capability_with(registry.store(), &d, Some(extra));
             if json {
                 return print(&cap);
             }
@@ -606,6 +783,138 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             }
             Ok(())
         }
+        PipelineCommand::Lane {
+            cores,
+            memory_gb,
+            gpu_card,
+            json,
+        } => {
+            let mut changed = serde_json::Map::new();
+            if let Some(c) = cores {
+                if c == 0 {
+                    return Err(usage("--cores is one or more"));
+                }
+                registry.set_meta(LANE_CORES_KEY, &c.to_string())?;
+                changed.insert("cores".into(), json!(c));
+            }
+            if let Some(m) = memory_gb {
+                if m == 0 {
+                    return Err(usage("--memory-gb is one or more"));
+                }
+                registry.set_meta(LANE_MEMORY_KEY, &m.to_string())?;
+                changed.insert("memory_gb".into(), json!(m));
+            }
+            if let Some(card) = gpu_card {
+                let word = card.trim();
+                if word != "none" && word.parse::<u32>().is_err() {
+                    return Err(usage(format!(
+                        "--gpu-card is a card's index, or none, not {word}"
+                    )));
+                }
+                registry.set_meta(GPU_CARD_KEY, word)?;
+                changed.insert("gpu_card".into(), json!(word));
+            }
+            if !changed.is_empty() {
+                crate::audit(
+                    &mut registry,
+                    nils_registry::audit::Action::PipelineRuntime,
+                    json!({"lane": Value::Object(changed)}),
+                    None,
+                )?;
+            }
+            let lane = lane_of(&mut registry);
+            if json {
+                return print(&lane.doc());
+            }
+            println!(
+                "lane     {} cores, {} GB of memory{}",
+                lane.ledger.cores,
+                lane.ledger.memory_mib / 1024,
+                lane.why
+                    .as_deref()
+                    .map(|w| format!(" ({w})"))
+                    .unwrap_or_default()
+            );
+            println!(
+                "card     {}",
+                lane.card
+                    .map_or("none: GPU units do not run".to_string(), |c| format!(
+                        "{c}, leased by free memory"
+                    ))
+            );
+            Ok(())
+        }
+        PipelineCommand::Secret { command } => match command {
+            SecretCommand::Set { id, file } => {
+                if !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    || id.is_empty()
+                {
+                    return Err(usage(format!(
+                        "a secret's id is lowercase letters, digits and _, not {id}"
+                    )));
+                }
+                if !file.is_absolute() {
+                    return Err(usage(format!(
+                        "{} is not an absolute path; the engine reads the file where it runs",
+                        file.display()
+                    )));
+                }
+                // read now, so a file the engine cannot read is said now
+                secrets::read(&id, &file).map_err(usage)?;
+                let path = file.display().to_string();
+                if path.contains(':') || path.contains(',') {
+                    return Err(usage(format!(
+                        "{path} holds a ':' or a ',', which a runtime's mount syntax splits on"
+                    )));
+                }
+                registry.set_meta(&format!("{SECRET_PREFIX}{id}"), &path)?;
+                crate::audit(
+                    &mut registry,
+                    nils_registry::audit::Action::PipelineRuntime,
+                    json!({"secret": id, "set": true}),
+                    None,
+                )?;
+                println!("secret {id} is read from its file at each run that declares it");
+                Ok(())
+            }
+            SecretCommand::Unset { id } => {
+                registry.set_meta(&format!("{SECRET_PREFIX}{id}"), "")?;
+                crate::audit(
+                    &mut registry,
+                    nils_registry::audit::Action::PipelineRuntime,
+                    json!({"secret": id, "set": false}),
+                    None,
+                )?;
+                println!("secret {id} is no longer set");
+                Ok(())
+            }
+            SecretCommand::List { json } => {
+                let ids = secret_ids(registry.store());
+                let mut docs = Vec::new();
+                for id in ids {
+                    let readable = secret_path(&mut registry, &id)
+                        .is_some_and(|p| secrets::read(&id, Path::new(&p)).is_ok());
+                    docs.push(json!({"id": id, "readable": readable}));
+                }
+                if json {
+                    return print(&json!(docs));
+                }
+                for d in &docs {
+                    println!(
+                        "{:<32} {}",
+                        d["id"].as_str().unwrap_or_default(),
+                        if d["readable"] == true {
+                            "set, readable"
+                        } else {
+                            "set, NOT readable now"
+                        }
+                    );
+                }
+                Ok(())
+            }
+        },
         PipelineCommand::Seeds {
             run,
             save,
@@ -953,6 +1262,11 @@ struct Materialised {
     stopped: bool,
     /// What the run was given of the source places (record 43 review).
     scope: Value,
+    /// For the stacks layout, each unit's entry of `stacks.json`, in the
+    /// order of `units`, and the sources it lists: what a unit that runs
+    /// apart is given of it (record 49 A1).
+    entries: Vec<Value>,
+    listed: Vec<Value>,
 }
 
 /// At most this many folders are bound one by one for a stacks input; a
@@ -1203,6 +1517,8 @@ fn materialise_stacks(
         release_id: None,
         stopped: false,
         scope,
+        entries,
+        listed,
     })
 }
 
@@ -1274,6 +1590,8 @@ fn materialise_bids(
             release_id: None,
             stopped: true,
             scope: Value::Null,
+            entries: Vec::new(),
+            listed: Vec::new(),
         });
     }
     if !status.success() {
@@ -1293,6 +1611,17 @@ fn materialise_bids(
         .as_i64()
         .ok_or("the release's report names no release")?;
     rows::set_input_release(registry.store(), run_id, release_id).map_err(|e| e.to_string())?;
+    released(registry, release_id, level)
+}
+
+/// The units of a run's bids input, read back from the release that wrote
+/// it: how a run materialises its input, and how a resumed run finds the
+/// units of the input it released before (record 49 A1).
+fn released(
+    registry: &mut Registry,
+    release_id: i64,
+    level: Level,
+) -> Result<Materialised, String> {
     let store = registry.store();
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -1354,6 +1683,8 @@ fn materialise_bids(
         release_id: Some(release_id),
         stopped: false,
         scope: json!({"sources": "release"}),
+        entries: Vec::new(),
+        listed: Vec::new(),
     })
 }
 
@@ -1366,14 +1697,311 @@ struct Outcome {
     files: Vec<String>,
 }
 
+/// The lane a run is scheduled in (record 49 A1, A2): its budget, as set
+/// and as this machine allows it, and the card a GPU unit leases.
+#[derive(Debug, Clone)]
+pub(crate) struct Lane {
+    pub(crate) ledger: lane::Ledger,
+    /// The cores and GB of memory set, before the machine had its say.
+    pub(crate) set: (u32, u64),
+    /// Why the budget is below the setting, where it is.
+    pub(crate) why: Option<String>,
+    /// The card a GPU unit leases; none where the lane uses no card.
+    pub(crate) card: Option<u32>,
+}
+
+impl Lane {
+    pub(crate) fn doc(&self) -> Value {
+        json!({
+            "cores": self.ledger.cores,
+            "memory_gb": self.ledger.memory_mib / 1024,
+            "set": {"cores": self.set.0, "memory_gb": self.set.1},
+            "why": self.why,
+            "gpu_card": self.card,
+        })
+    }
+}
+
+/// The lane as the registry's settings and this machine make it.
+pub(crate) fn lane_of(registry: &mut Registry) -> Lane {
+    let mut num = |key: &str| {
+        registry
+            .meta_value(key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    };
+    let cores = num(LANE_CORES_KEY).map_or(lane::DEFAULT_CORES, |c| c.clamp(1, 65_536) as u32);
+    let memory = num(LANE_MEMORY_KEY).map_or(lane::DEFAULT_MEMORY_GB, |m| m.max(1));
+    let card = match registry
+        .meta_value(GPU_CARD_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") => Some(0),
+        Some("none") => None,
+        Some(n) => n.parse().ok(),
+    };
+    let (ledger, why) = lane::budget(cores, memory, lane::host());
+    Lane {
+        ledger,
+        set: (cores, memory),
+        why,
+        card,
+    }
+}
+
+/// What one scheduling unit of a pipeline asks of the lane.
+fn ask_of(d: &Descriptor) -> lane::Ask {
+    lane::Ask {
+        cores: d.needs.cores,
+        memory_mib: lane::mib_of_gb(d.needs.memory_gb),
+    }
+}
+
+/// Refuse a pipeline whose unit could never fit in the lane.
+fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
+    if lane.ledger.could(ask_of(d)) {
+        return Ok(());
+    }
+    Err(usage(format!(
+        "{} asks {} cores and {} GB of memory for each of its {}, and the pipeline lane has {} cores and {} GB{}; nils pipeline lane --cores <n> --memory-gb <n> sets it",
+        p.label(),
+        d.needs.cores,
+        d.needs.memory_gb,
+        if d.units == Units::Apart {
+            "units"
+        } else {
+            "runs"
+        },
+        lane.ledger.cores,
+        lane.ledger.memory_mib / 1024,
+        lane.why
+            .as_deref()
+            .map(|w| format!(" ({w})"))
+            .unwrap_or_default()
+    )))
+}
+
+/// The device a run takes and whether it takes the GPU: a GPU where the
+/// pipeline asks, the runtime offers one and the lane names a card.
+fn device_for(
+    d: &Descriptor,
+    p: &Pipeline,
+    rt: &runtime::Cli,
+    lane: &Lane,
+) -> Result<(String, bool), Exit> {
+    let offered = rt.gpu().filter(|_| lane.card.is_some());
+    match (d.gpu, offered) {
+        (Gpu::None, _) | (Gpu::Optional, None) => Ok(("cpu".to_string(), false)),
+        (Gpu::Optional | Gpu::Required, Some(g)) => Ok((g.to_string(), true)),
+        (Gpu::Required, None) if rt.gpu().is_some() => Err(usage(format!(
+            "{} needs a GPU, and the pipeline lane uses no card here; nils pipeline lane --gpu-card <n> names the one it leases",
+            p.label()
+        ))),
+        (Gpu::Required, None) => Err(usage(format!(
+            "{} needs a GPU, and {} here offers none{}",
+            p.label(),
+            rt.kind.name(),
+            if rt.kind == runtime::Kind::Podman {
+                " (podman passes one through a CDI specification, which this host has not got)"
+            } else {
+                ""
+            }
+        ))),
+    }
+}
+
+/// A secret a run was given (record 49 R3): what the descriptor declares,
+/// the file the site set, and what is looked for in what the run leaves.
+#[derive(Debug, Clone)]
+pub(crate) struct Given {
+    secret: descriptor::Secret,
+    path: PathBuf,
+    held: secrets::Held,
+}
+
+/// The file the site set for a secret, where it set one.
+pub(crate) fn secret_path(registry: &mut Registry, id: &str) -> Option<String> {
+    registry
+        .meta_value(&format!("{SECRET_PREFIX}{id}"))
+        .ok()
+        .flatten()
+        .filter(|p| !p.trim().is_empty())
+}
+
+/// The secrets a pipeline reads, each read now from the file the site set;
+/// one it needs and the site has not set, or that cannot be read, is
+/// refused before anything runs.
+fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<Vec<Given>, Exit> {
+    let mut out = Vec::new();
+    for s in &d.secrets {
+        match secret_path(registry, &s.id) {
+            None if s.optional => {}
+            None => {
+                return Err(usage(format!(
+                    "{} reads the secret {}, which this site has not set: nils pipeline secret set {} --file <path>",
+                    p.label(),
+                    s.id,
+                    s.id
+                )));
+            }
+            Some(path) => {
+                let held = secrets::read(&s.id, Path::new(&path)).map_err(usage)?;
+                out.push(Given {
+                    secret: s.clone(),
+                    path: PathBuf::from(path),
+                    held,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a job is running now: not over, heard from within the freshness
+/// a claim allows, and its process on this host still there.
+fn job_alive(store: &mut Store, id: i64) -> bool {
+    match job::show(store, id) {
+        Ok(Some(j)) if !j.state.is_over() => {
+            let gone = j.host.as_deref() == Some(job::hostname().as_str())
+                && j.pid.is_some_and(|p| job::process_alive(p) == Some(false));
+            let fresh = j
+                .heartbeat_at
+                .as_deref()
+                .and_then(nils_registry::time::secs_of)
+                .is_some_and(|s| {
+                    nils_registry::time::now_secs().saturating_sub(s) < job::FRESH_SECS
+                });
+            fresh && !gone
+        }
+        _ => false,
+    }
+}
+
+/// How often the lane takes a run up again by itself before it leaves the
+/// run to a person, so a run that brings its engine down is not started
+/// forever.
+pub(crate) const AUTO_RESUMES: i64 = 3;
+
+/// Record 49 A1: a run whose engine went away with units in flight (its
+/// job is over, or no longer heard from, and the run still says running)
+/// is marked interrupted and queued once to be taken up again, under what
+/// the job that ran it recorded: its principal, its detail and its actor.
+/// A run someone asked to stop is closed as cancelled instead. Answers how
+/// many were queued.
+pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let mut queued = 0;
+    for r in rows::runs_in(store, "running").map_err(err)? {
+        if r.job_id.is_some_and(|j| job_alive(store, j)) {
+            continue;
+        }
+        let old = r.job_id.and_then(|j| job::show(store, j).ok().flatten());
+        if old
+            .as_ref()
+            .is_some_and(|j| matches!(j.state, job::State::Cancelling | job::State::Cancelled))
+        {
+            let now = nils_registry::time::now_iso();
+            rows::finish(
+                store,
+                r.id,
+                &rows::Finish {
+                    status: "cancelled",
+                    finished_at: &now,
+                    exit_code: None,
+                    results_digest: None,
+                    summary: &json!({"phase": "run"}),
+                    error: Some("stopped with its engine; nils run --resume goes on"),
+                },
+            )
+            .map_err(err)?;
+            continue;
+        }
+        let why = format!(
+            "the engine that ran it went away{}",
+            r.job_id.map(|j| format!(" (job {j})")).unwrap_or_default()
+        );
+        if !rows::interrupt(store, r.id, &why).map_err(err)? {
+            continue;
+        }
+        let resumes = r.resumes.unwrap_or(0);
+        if resumes >= AUTO_RESUMES {
+            let d = store.dialect();
+            let sql = format!(
+                "UPDATE {} SET error = {} WHERE id = {}",
+                store.qualified("pipeline_run"),
+                d.param(1, Type::Text),
+                d.param(2, Type::Int)
+            );
+            store
+                .execute(
+                    &sql,
+                    &[
+                        Param::from(format!(
+                            "{why}, after being taken up again {resumes} times; nils run --resume {} takes it up by hand",
+                            r.id
+                        )),
+                        Param::Int(r.id),
+                    ],
+                )
+                .map_err(err)?;
+            continue;
+        }
+        let mut extra = old.map(|j| j.args).unwrap_or_else(|| json!({}));
+        if let Some(map) = extra.as_object_mut() {
+            for key in [
+                "argv",
+                "queued",
+                "then",
+                "chain_before",
+                "chain_after",
+                "run",
+            ] {
+                map.remove(key);
+            }
+        } else {
+            extra = json!({});
+        }
+        // a run started at the keyboard recorded no detail, since the
+        // keyboard holds every class; its resume is given the least a run
+        // needs, quasi, and never more (a door's run keeps what it recorded)
+        if extra.get("detail").is_none() && extra.get("roles").is_none() {
+            extra["detail"] = json!("quasi");
+        }
+        let principal = extra["principal"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| r.principal.clone());
+        let argv = vec!["run".to_string(), "--resume".to_string(), r.id.to_string()];
+        job::enqueue_with(
+            store,
+            &argv,
+            Some(&format!("run {} taken up again", r.id)),
+            Some(&principal),
+            extra,
+        )
+        .map_err(|e| e.to_string())?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
 /// `nils run`.
 pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     detail_allows_pixels()?;
+    if let Some(run) = args.resume {
+        return resume_command(home, &args, run);
+    }
+    let name = args.pipeline.clone().ok_or_else(|| {
+        usage("run <pipeline>: the pipeline to run, or --resume <run> to take a run up again")
+    })?;
     let mut registry = crate::open(home)?;
-    let p = rows::resolve(registry.store(), &args.pipeline)?.ok_or_else(|| {
+    let p = rows::resolve(registry.store(), &name)?.ok_or_else(|| {
         usage(format!(
-            "no pipeline {} in the catalog; nils pipeline list names them",
-            args.pipeline
+            "no pipeline {name} in the catalog; nils pipeline list names them"
         ))
     })?;
     if p.state != "active" {
@@ -1395,22 +2023,12 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         .runtime
         .clone()
         .ok_or_else(|| usage(detected.reason.clone().unwrap_or_default()))?;
-    let (device, gpu) = match (d.gpu, rt.gpu()) {
-        (Gpu::None, _) | (Gpu::Optional, None) => ("cpu".to_string(), false),
-        (Gpu::Optional | Gpu::Required, Some(g)) => (g.to_string(), true),
-        (Gpu::Required, None) => {
-            return Err(usage(format!(
-                "{} needs a GPU, and {} here offers none{}",
-                p.label(),
-                rt.kind.name(),
-                if rt.kind == runtime::Kind::Podman {
-                    " (podman passes one through a CDI specification, which this host has not got)"
-                } else {
-                    ""
-                }
-            )));
-        }
-    };
+    // the lane it runs in: a unit that could never fit, a GPU it cannot
+    // lease and a secret the site has not set are refused before anything
+    let lane = lane_of(&mut registry);
+    let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
+    fits(&d, &p, &lane)?;
+    let given = secrets_for(&mut registry, &d, &p)?;
 
     // the typed inputs: models, a label set, derivatives of a kind
     let model_inputs: Vec<&descriptor::TypedInput> =
@@ -1508,27 +2126,17 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         ));
     }
 
-    // the job: one pipeline run at a time (R1)
+    // the job: one pipeline run at a time in the lane (R1, record 49 A1)
     let who = crate::actor();
     let actor = nils_registry::actor::current();
-    let job_id = job::claim(
+    let job_id = claim_run(
         registry.store(),
-        &job::Claim {
-            kind: "pipeline",
-            name: &p.label(),
-            args: json!({
-                "pipeline": p.label(), "select": args.select, "handle": handle_id,
-                "params": args.params, "models": args.models, "labels": args.labels,
-            }),
-        },
-    )
-    .map_err(|e| match e {
-        job::Error::Busy { .. } => Exit {
-            code: crate::BUSY,
-            message: e.to_string(),
-        },
-        other => fail(other.to_string()),
-    })?;
+        &p,
+        json!({
+            "pipeline": p.label(), "select": args.select, "handle": handle_id,
+            "params": args.params, "models": args.models, "labels": args.labels,
+        }),
+    )?;
     let params_value = Value::Object(params.clone());
     let model_ids: Vec<i64> = models.iter().map(|m| m.id).collect();
     let started = nils_registry::time::now_iso();
@@ -1552,6 +2160,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             started_at: &started,
         },
     )?;
+    rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
     let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
 
     let outcome = execute(
@@ -1566,6 +2175,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             place: &place,
             runtime: &rt,
             gpu,
+            device: &device,
             stacks: &stacks,
             models: &models,
             label_set: label_set.as_ref(),
@@ -1573,8 +2183,218 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             who: &who,
             actor: &actor,
             args: &args,
+            lane: &lane,
+            secrets: &given,
+            resume: None,
         },
     );
+    conclude(
+        &mut registry,
+        &Conclusion {
+            pipeline: &p,
+            run_id,
+            job_id,
+            handle_id,
+            runtime: rt.kind.name(),
+            device: &device,
+            who: &who,
+            json: args.json,
+            resumed: false,
+        },
+        outcome,
+    )
+}
+
+/// Claim the job a run is: one pipeline run at a time (record 43 R1).
+fn claim_run(store: &mut Store, p: &Pipeline, args: Value) -> Result<i64, Exit> {
+    job::claim(
+        store,
+        &job::Claim {
+            kind: "pipeline",
+            name: &p.label(),
+            args,
+        },
+    )
+    .map_err(|e| match e {
+        job::Error::Busy { .. } => Exit {
+            code: crate::BUSY,
+            message: e.to_string(),
+        },
+        other => fail(other.to_string()),
+    })
+}
+
+/// `nils run --resume <run>` (record 49 A1): a run that stopped, was
+/// cancelled or whose engine went away is taken up again with everything
+/// it recorded. The units it finished are kept, with their derivatives and
+/// their outcomes; the units in flight run again from a clean folder.
+fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> {
+    let mut registry = crate::open(home)?;
+    let r = rows::run(registry.store(), run_id)?
+        .ok_or_else(|| usage(format!("no pipeline run {run_id}")))?;
+    match r.status.as_str() {
+        "done" | "partial" => {
+            return Err(usage(format!(
+                "run {run_id} is {}: nothing is left to run",
+                r.status
+            )));
+        }
+        "failed" if r.results_digest.is_some() => {
+            return Err(usage(format!(
+                "run {run_id} failed after its containers ended, and its failures are review items; start a new run"
+            )));
+        }
+        "running" => {
+            if let Some(j) = r.job_id
+                && job_alive(registry.store(), j)
+            {
+                return Err(Exit {
+                    code: crate::BUSY,
+                    message: format!("run {run_id} is running, as job {j}"),
+                });
+            }
+        }
+        _ => {}
+    }
+    let p = rows::get(registry.store(), r.pipeline_id)?
+        .ok_or_else(|| fail(format!("run {run_id} names a pipeline the catalog lost")))?;
+    let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
+        fail(format!(
+            "{}: the catalog's descriptor no longer checks: {e}",
+            p.label()
+        ))
+    })?;
+    let params = r
+        .params
+        .as_object()
+        .cloned()
+        .ok_or_else(|| fail(format!("run {run_id} recorded no parameters")))?;
+    let place = r
+        .place_id
+        .and_then(|id| {
+            nils_registry::place::show(registry.store(), id)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| usage(format!("run {run_id} has no working place to go on in")))?;
+    let detected = runtime::detect(choice(&mut registry), std::env::var_os("PATH").as_deref());
+    let rt = detected
+        .runtime
+        .clone()
+        .ok_or_else(|| usage(detected.reason.clone().unwrap_or_default()))?;
+    if rt.kind.name() != r.runtime {
+        return Err(usage(format!(
+            "run {run_id} ran under {}, and pipelines here run under {} now; its units would not be alike, so start a new run",
+            r.runtime,
+            rt.kind.name()
+        )));
+    }
+    let lane = lane_of(&mut registry);
+    let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
+    if (r.device == "cpu") != (device == "cpu") {
+        return Err(usage(format!(
+            "run {run_id} ran on {}, and would go on on {device}; start a new run",
+            r.device
+        )));
+    }
+    fits(&d, &p, &lane)?;
+    let given = secrets_for(&mut registry, &d, &p)?;
+    let mut models = Vec::new();
+    for id in r
+        .model_ids
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+    {
+        models.push(
+            nils_registry::model::get(registry.store(), id)?
+                .ok_or_else(|| fail(format!("run {run_id} read model {id}, which is gone")))?,
+        );
+    }
+    let label_set = match r.label_set_id {
+        Some(id) => Some(
+            nils_registry::labels::get(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| fail(format!("run {run_id} read label set {id}, which is gone")))?,
+        ),
+        None => None,
+    };
+    let handle_id = r
+        .handle_id
+        .ok_or_else(|| fail(format!("run {run_id} pinned no handle")))?;
+    let stacks = handle_stacks(registry.store(), handle_id)?;
+    let who = crate::actor();
+    let actor = nils_registry::actor::current();
+    let job_id = claim_run(
+        registry.store(),
+        &p,
+        json!({"pipeline": p.label(), "resume": run_id, "handle": handle_id}),
+    )?;
+    rows::resume(registry.store(), run_id, job_id)?;
+    let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
+    let outcome = execute(
+        home,
+        &mut registry,
+        &Execution {
+            pipeline: &p,
+            descriptor: &d,
+            params: &params,
+            run_id,
+            job_id,
+            place: &place,
+            runtime: &rt,
+            gpu,
+            device: &device,
+            stacks: &stacks,
+            models: &models,
+            label_set: label_set.as_ref(),
+            threshold: r.threshold,
+            who: &who,
+            actor: &actor,
+            args,
+            lane: &lane,
+            secrets: &given,
+            resume: Some(&r),
+        },
+    );
+    conclude(
+        &mut registry,
+        &Conclusion {
+            pipeline: &p,
+            run_id,
+            job_id,
+            handle_id,
+            runtime: rt.kind.name(),
+            device: &device,
+            who: &who,
+            json: args.json,
+            resumed: true,
+        },
+        outcome,
+    )
+}
+
+/// What closing a run needs to say.
+struct Conclusion<'a> {
+    pipeline: &'a Pipeline,
+    run_id: i64,
+    job_id: i64,
+    handle_id: i64,
+    runtime: &'a str,
+    device: &'a str,
+    who: &'a str,
+    json: bool,
+    resumed: bool,
+}
+
+/// Close a run, audit it, finish its job and say how it ended.
+fn conclude(
+    registry: &mut Registry,
+    c: &Conclusion<'_>,
+    outcome: Result<Ended, String>,
+) -> Result<(), Exit> {
+    let run_id = c.run_id;
     let (status, summary, digest, exit_code, error) = match outcome {
         Ok(o) => o,
         Err(e) => ("failed", json!({}), None, None, Some(e)),
@@ -1593,18 +2413,19 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         },
     )?;
     nils_registry::audit::record(
-        &mut registry,
+        registry,
         &nils_registry::audit::Entry {
-            principal: &who,
+            principal: c.who,
             action: nils_registry::audit::Action::PipelineRun,
             scope: json!({
-                "run": run_id, "pipeline": p.label(), "handle": handle_id,
+                "run": run_id, "pipeline": c.pipeline.label(), "handle": c.handle_id,
                 "units": summary["units"], "derivatives": summary["derivatives"],
+                "resumed": c.resumed,
             }),
             policy: None,
-            job_id: Some(job_id),
+            job_id: Some(c.job_id),
             details: Some(json!({
-                "status": status, "runtime": rt.kind.name(), "device": device,
+                "status": status, "runtime": c.runtime, "device": c.device,
                 "results": digest, "review_items": summary["review_items"],
             })),
         },
@@ -1616,15 +2437,15 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     };
     let _ = job::set_result(
         registry.store(),
-        job_id,
+        c.job_id,
         &json!({"run": run_id, "status": status, "summary": summary, "results_digest": digest}),
     );
-    job::finish(registry.store(), job_id, job_state, error.as_deref())
+    job::finish(registry.store(), c.job_id, job_state, error.as_deref())
         .map_err(|e| fail(e.to_string()))?;
     let r = rows::run(registry.store(), run_id)?
         .ok_or_else(|| fail(format!("no pipeline run {run_id}")))?;
     let doc = run_doc(registry.store(), &r);
-    if args.json {
+    if c.json {
         print(&doc)?;
     } else {
         print_run(&doc);
@@ -1634,7 +2455,9 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         "done" | "partial" => Ok(()),
         "cancelled" => Err(Exit {
             code: crate::STOPPED,
-            message: format!("run {run_id} was cancelled"),
+            message: format!(
+                "run {run_id} was cancelled; the units it finished are kept, and nils run --resume {run_id} goes on"
+            ),
         }),
         _ => Err(fail(format!(
             "run {run_id} {}",
@@ -1651,8 +2474,9 @@ struct Execution<'a> {
     run_id: i64,
     job_id: i64,
     place: &'a nils_registry::place::Place,
-    runtime: &'a dyn Runtime,
+    runtime: &'a runtime::Cli,
     gpu: bool,
+    device: &'a str,
     stacks: &'a [i64],
     models: &'a [nils_registry::model::Model],
     label_set: Option<&'a nils_registry::labels::LabelSet>,
@@ -1662,6 +2486,12 @@ struct Execution<'a> {
     who: &'a str,
     actor: &'a Value,
     args: &'a RunArgs,
+    /// The lane's budget and card (record 49 A1, A2).
+    lane: &'a Lane,
+    /// The secrets it was given (record 49 R3).
+    secrets: &'a [Given],
+    /// The run as it stood, where this takes it up again.
+    resume: Option<&'a Run>,
 }
 
 /// How a run ended: its status, its summary, the digest of what it said,
@@ -1674,7 +2504,58 @@ type Ended = (
     Option<String>,
 );
 
-/// Materialise, run, and take in what the run left.
+/// One container the lane schedules: the whole run where its units run
+/// together, one unit where they run apart.
+struct Batch {
+    /// Indices into the run's units.
+    units: Vec<usize>,
+    /// The unit's id where it runs apart.
+    key: Option<String>,
+    /// The folder it writes, and the same under the working place.
+    out: PathBuf,
+    rel_out: String,
+    log: PathBuf,
+}
+
+/// A batch whose container runs.
+struct Running {
+    batch: Batch,
+    child: std::process::Child,
+    inv: Invocation,
+    gpu_mib: Option<u64>,
+}
+
+/// What every batch of a run shares.
+struct Shared {
+    run_dir: PathBuf,
+    input: PathBuf,
+    inputs: PathBuf,
+    /// Models and a label set, each at /inputs/<id>.
+    typed: Vec<Mount>,
+    /// The folders of the derivative inputs under the run's inputs.
+    derivative_dirs: Vec<(String, PathBuf)>,
+    manifest: Value,
+    local_image: Option<PathBuf>,
+}
+
+/// A unit's id as a folder name: the characters a unit's id is made of.
+fn folder_word(id: &str) -> Result<&str, String> {
+    let ok = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && !id.starts_with('.');
+    if ok {
+        Ok(id)
+    } else {
+        Err(format!(
+            "the unit {id} is not a name a folder can take, so its units cannot run apart"
+        ))
+    }
+}
+
+/// Materialise, schedule the containers in the lane, take in what each
+/// left as it ends, and close with what the run as a whole said.
 fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
     let p = x.pipeline;
     let d = x.descriptor;
@@ -1684,25 +2565,53 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     let inputs = run_dir.join("inputs");
     let rel_out = format!("{}/{}/{}", derivative::TREE, p.name, x.run_id);
     let out = working.join(&rel_out);
-    for dir in [&input, &inputs] {
-        std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
+    let err = |e: nils_registry::Error| e.to_string();
+    match x.resume {
+        None => {
+            for dir in [&input, &inputs] {
+                std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
+            }
+            if out.exists() {
+                return Err(format!(
+                    "the output folder {rel_out} is there already; a run writes a folder of its own"
+                ));
+            }
+            std::fs::create_dir_all(&out).map_err(|e| format!("the output folder: {e}"))?;
+            rows::set_output(registry.store(), x.run_id, &rel_out).map_err(err)?;
+        }
+        Some(r) => {
+            let before = rows::units(registry.store(), x.run_id).map_err(err)?;
+            stop_left(x, &before, &out);
+            // together, the units are all in flight or all past their
+            // container: the first run again from a clean folder, the second
+            // taken in from what the container left
+            let past = |u: &rows::Unit| u.state == "over" || u.state == "registering";
+            if d.units == Units::Together && !before.iter().any(past) && out.exists() {
+                std::fs::remove_dir_all(&out).map_err(|e| format!("the output folder: {e}"))?;
+            }
+            // a bids input a release did not finish is released again
+            if d.layout == Layout::Bids && r.input_release_id.is_none() && input.exists() {
+                std::fs::remove_dir_all(&input).map_err(|e| format!("the run's input: {e}"))?;
+            }
+            for dir in [&input, &inputs, &out] {
+                std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
+            }
+            if r.output.is_none() {
+                rows::set_output(registry.store(), x.run_id, &rel_out).map_err(err)?;
+            }
+        }
     }
-    if out.exists() {
-        return Err(format!(
-            "the output folder {rel_out} is there already; a run writes a folder of its own"
-        ));
-    }
-    std::fs::create_dir_all(&out).map_err(|e| format!("the output folder: {e}"))?;
-    rows::set_output(registry.store(), x.run_id, &rel_out).map_err(|e| e.to_string())?;
     let _ = job::beat(
         registry.store(),
         x.job_id,
         Some(&json!({"run": x.run_id, "phase": "materialise", "layout": d.layout.name()})),
     );
 
-    let m = match d.layout {
-        Layout::Stacks => materialise_stacks(registry.store(), x.stacks, &input)?,
-        Layout::Bids => materialise_bids(
+    let released_before = x.resume.and_then(|r| r.input_release_id);
+    let m = match (d.layout, released_before) {
+        (Layout::Stacks, _) => materialise_stacks(registry.store(), x.stacks, &input)?,
+        (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
+        (Layout::Bids, None) => materialise_bids(
             home, registry, x.run_id, x.job_id, d.level, x.stacks, &run_dir, &input, x.args,
         )?,
     };
@@ -1717,24 +2626,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     }
 
     // the typed inputs, each read-only, and the manifest
-    let mut mounts = vec![
-        Mount {
-            host: input.clone(),
-            container: "/input".into(),
-            read_only: true,
-        },
-        Mount {
-            host: inputs.clone(),
-            container: "/inputs".into(),
-            read_only: true,
-        },
-        Mount {
-            host: out.clone(),
-            container: "/output".into(),
-            read_only: false,
-        },
-    ];
-    mounts.extend(m.mounts.iter().cloned());
+    let mut typed: Vec<Mount> = Vec::new();
     let model_inputs: Vec<&descriptor::TypedInput> =
         d.inputs.iter().filter(|t| t.ty == "model").collect();
     let mut models_doc: Vec<Value> = Vec::new();
@@ -1745,7 +2637,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         if let Some(rel) = &artifact {
             let host = working.join(rel);
             if let Some(dir) = host.parent().filter(|d| d.is_dir()) {
-                mounts.push(Mount {
+                typed.push(Mount {
                     host: dir.to_path_buf(),
                     container: format!("/inputs/{}", t.id),
                     read_only: true,
@@ -1780,7 +2672,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 dir
             };
             if dir.is_dir() {
-                mounts.push(Mount {
+                typed.push(Mount {
                     host: dir,
                     container: format!("/inputs/{}", t.id),
                     read_only: true,
@@ -1792,6 +2684,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     // under the run's inputs (record 43 review): the container sees those
     // files and no other, and no bind reaches the derivatives tree
     let mut derivative_doc = serde_json::Map::new();
+    let mut derivative_dirs: Vec<(String, PathBuf)> = Vec::new();
     let taken = derivative_inputs(registry.store(), d, x.stacks, x.place.id)?;
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
@@ -1805,6 +2698,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         }
         let into = inputs.join(&t.id);
         std::fs::create_dir_all(&into).map_err(|e| format!("the run's inputs: {e}"))?;
+        derivative_dirs.push((t.id.clone(), into.clone()));
         let mut listed = Vec::new();
         let mut linked: std::collections::BTreeSet<String> = Default::default();
         for row in rows {
@@ -1833,6 +2727,9 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         "models": models_doc,
         "label_set": label_doc,
         "derivatives": derivative_doc,
+        // the secrets it reads, by id and where it sees them: never a path
+        // on the host or a byte of the file (record 49 R3)
+        "secrets": x.secrets.iter().map(|g| json!({"id": g.secret.id, "mount": g.secret.mount})).collect::<Vec<_>>(),
     });
     std::fs::write(
         inputs.join("manifest.json"),
@@ -1840,13 +2737,421 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     )
     .map_err(|e| format!("the run's folder: {e}"))?;
 
-    // the container
-    let participants: Vec<String> = {
-        let mut s: Vec<String> = m.units.iter().filter_map(|u| u.subject.clone()).collect();
-        s.sort();
-        s.dedup();
-        s
+    // the units, as the lane keeps them: a unit over stays over; one in
+    // flight when the run stopped runs again
+    let names: Vec<String> = m.units.iter().map(|u| u.id.clone()).collect();
+    for u in rows::ensure_units(registry.store(), x.run_id, &names).map_err(err)? {
+        if u.state == "running" {
+            rows::unit_requeued(registry.store(), u.id).map_err(err)?;
+        }
+    }
+    let unit_rows = rows::units(registry.store(), x.run_id).map_err(err)?;
+    let row_of: BTreeMap<String, (i64, String)> = unit_rows
+        .iter()
+        .map(|u| (u.unit.clone(), (u.id, u.state.clone())))
+        .collect();
+    let state_of = |id: &str| row_of.get(id).map_or("queued", |(_, s)| s.as_str());
+
+    // the image apptainer runs, built once from the pinned digest
+    let local_image = if x.runtime.kind == runtime::Kind::Apptainer {
+        match ensure_image(registry, x, &working, &run_dir)? {
+            Some(path) => Some(path),
+            None => {
+                return Ok(("cancelled", json!({"phase": "image"}), None, None, None));
+            }
+        }
+    } else {
+        None
     };
+    let shared = Shared {
+        run_dir: run_dir.clone(),
+        input: input.clone(),
+        inputs: inputs.clone(),
+        typed,
+        derivative_dirs,
+        manifest,
+        local_image,
+    };
+
+    // the batches: those whose container ended and whose taking in a stop
+    // cut short are taken in again now; the rest still to run
+    let batch_of = |units: Vec<usize>| -> Result<Batch, String> {
+        Ok(match d.units {
+            Units::Together => Batch {
+                units,
+                key: None,
+                out: out.clone(),
+                rel_out: rel_out.clone(),
+                log: run_dir.join("log.txt"),
+            },
+            Units::Apart => {
+                let key = folder_word(&m.units[units[0]].id)?.to_string();
+                Batch {
+                    units,
+                    out: out.join(&key),
+                    rel_out: format!("{rel_out}/{key}"),
+                    log: run_dir.join("units").join(&key).join("log.txt"),
+                    key: Some(key),
+                }
+            }
+        })
+    };
+    let group = |want: &dyn Fn(&str) -> bool| -> Vec<Vec<usize>> {
+        let idx: Vec<usize> = (0..m.units.len())
+            .filter(|i| want(state_of(&m.units[*i].id)))
+            .collect();
+        match d.units {
+            Units::Together if idx.is_empty() => Vec::new(),
+            Units::Together => vec![idx],
+            Units::Apart => idx.into_iter().map(|i| vec![i]).collect(),
+        }
+    };
+    let mut taken_files: std::collections::BTreeSet<PathBuf> = Default::default();
+    for units in group(&|s| s == "registering") {
+        let code = units
+            .first()
+            .and_then(|i| unit_rows.iter().find(|u| u.unit == m.units[*i].id))
+            .and_then(|u| u.exit_code)
+            .and_then(|c| i32::try_from(c).ok());
+        let b = batch_of(units)?;
+        take_in(registry, x, &m, &b, code, &row_of, &mut taken_files)?;
+    }
+    let mut pending: std::collections::VecDeque<Batch> = Default::default();
+    for units in group(&|s| s == "queued" || s == "running") {
+        pending.push_back(batch_of(units)?);
+    }
+
+    let mut running: Vec<Running> = Vec::new();
+    let scheduled = schedule(
+        registry,
+        x,
+        &m,
+        &shared,
+        &row_of,
+        &mut pending,
+        &mut running,
+        &mut taken_files,
+    );
+    // whatever ended the schedule, no container outlives it: a stop, a
+    // cancel and an error each give their units back to the queue
+    if !running.is_empty() {
+        for mut r in running.drain(..) {
+            x.runtime.stop(&r.inv);
+            let _ = runtime::kill(&mut r.child);
+            for i in &r.batch.units {
+                if let Some((id, _)) = row_of.get(&m.units[*i].id) {
+                    let _ = rows::unit_requeued(registry.store(), *id);
+                }
+            }
+        }
+    }
+    match scheduled? {
+        Scheduled::Cancelled => {
+            let over = rows::units(registry.store(), x.run_id)
+                .map_err(err)?
+                .iter()
+                .filter(|u| u.state == "over")
+                .count();
+            return Ok((
+                "cancelled",
+                json!({"phase": "run", "units": {"total": m.units.len(), "over": over}}),
+                None,
+                None,
+                None,
+            ));
+        }
+        Scheduled::Done => {}
+    }
+    finalize(registry, x, &m, &working, &out, &rel_out, &mut taken_files)
+}
+
+/// How the schedule ended.
+enum Scheduled {
+    Done,
+    Cancelled,
+}
+
+/// Run the batches within the lane's budget, a GPU batch only under a lease
+/// on the lane's card, and take in each as it ends. Those still running
+/// when it returns are the caller's to stop.
+#[allow(clippy::too_many_arguments)]
+fn schedule(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    m: &Materialised,
+    shared: &Shared,
+    row_of: &BTreeMap<String, (i64, String)>,
+    pending: &mut std::collections::VecDeque<Batch>,
+    running: &mut Vec<Running>,
+    taken_files: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Scheduled, String> {
+    let d = x.descriptor;
+    let ask = ask_of(d);
+    let gpu_need = x.gpu.then(|| lane::mib_of_gb(d.needs.gpu_memory_gb));
+    let smi = runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref());
+    let mut ledger = x.lane.ledger;
+    let total = m.units.len();
+    let mut waiting: Option<String> = None;
+    let mut card_asked: Option<Instant> = None;
+    let mut beaten: Option<Instant> = None;
+    let host = job::hostname();
+    loop {
+        // start what fits
+        while !pending.is_empty() {
+            if !ledger.fits(ask) {
+                waiting = Some(format!(
+                    "the lane's budget: {} of {} cores and {} of {} MiB held",
+                    ledger.held_cores, ledger.cores, ledger.held_memory_mib, ledger.memory_mib
+                ));
+                break;
+            }
+            let mut gpu_mib = None;
+            if let Some(need) = gpu_need {
+                if card_asked.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+                    break;
+                }
+                card_asked = Some(Instant::now());
+                let card = x.lane.card.unwrap_or(0);
+                let held: u64 = running.iter().filter_map(|r| r.gpu_mib).sum();
+                let free = match &smi {
+                    Some(smi) => lane::gpu_free_mib(smi, card),
+                    None => Err("nvidia-smi is not on the search path".into()),
+                };
+                match free {
+                    Ok(free) if lane::lease_fits(free, held, need) => gpu_mib = Some(need),
+                    Ok(free) => {
+                        waiting = Some(format!(
+                            "card {card}: {free} MiB free, {held} MiB held by this run's units, and a unit needs {need} MiB"
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        waiting = Some(format!("card {card}: {e}"));
+                        break;
+                    }
+                }
+            }
+            let Some(b) = pending.pop_front() else { break };
+            let mut inv = invocation_of(x, m, &b, shared)?;
+            inv.card = gpu_mib.and(x.lane.card);
+            if let Some(dir) = b.log.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
+            }
+            let child = runtime::spawn(x.runtime, &inv, &b.log)
+                .map_err(|e| format!("{} could not start the container: {e}", x.runtime.name()))?;
+            ledger.take(ask);
+            let now = nils_registry::time::now_iso();
+            for i in &b.units {
+                if let Some((id, _)) = row_of.get(&m.units[*i].id) {
+                    rows::unit_started(
+                        registry.store(),
+                        *id,
+                        &rows::UnitStart {
+                            cores: i64::from(ask.cores),
+                            memory_mb: ask.memory_mib as i64,
+                            gpu_card: gpu_mib.and(x.lane.card).map(i64::from),
+                            gpu_memory_mb: gpu_mib.map(|g| g as i64),
+                            device: if gpu_mib.is_some() { x.device } else { "cpu" },
+                            container: &inv.name,
+                            pid: Some(i64::from(child.id())),
+                            host: &host,
+                            started_at: &now,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            running.push(Running {
+                batch: b,
+                child,
+                inv,
+                gpu_mib,
+            });
+            waiting = None;
+        }
+        // the heart, and a cancel
+        if beaten.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+            beaten = Some(Instant::now());
+            let in_flight: usize = running.iter().map(|r| r.batch.units.len()).sum();
+            let queued: usize = pending.iter().map(|b| b.units.len()).sum();
+            let progress = json!({
+                "run": x.run_id, "phase": "run", "units": total,
+                "over": total - in_flight - queued, "running": in_flight, "queued": queued,
+                "waiting": waiting,
+                "lane": {
+                    "cores": ledger.cores, "held_cores": ledger.held_cores,
+                    "memory_mb": ledger.memory_mib, "held_memory_mb": ledger.held_memory_mib,
+                },
+            });
+            if let Ok(job::Asked::Cancel) = job::beat(registry.store(), x.job_id, Some(&progress)) {
+                return Ok(Scheduled::Cancelled);
+            }
+        }
+        // take in what ended
+        let mut i = 0;
+        while i < running.len() {
+            match running[i].child.try_wait() {
+                Ok(Some(status)) => {
+                    let r = running.remove(i);
+                    ledger.give(ask);
+                    take_in(registry, x, m, &r.batch, status.code(), row_of, taken_files)?;
+                }
+                Ok(None) => i += 1,
+                Err(e) => return Err(format!("a container of the run: {e}")),
+            }
+        }
+        if running.is_empty() && pending.is_empty() {
+            return Ok(Scheduled::Done);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The container of one batch: its folders made fresh where it runs one
+/// unit apart, its mounts, its command line and who it runs as.
+fn invocation_of(
+    x: &Execution<'_>,
+    m: &Materialised,
+    b: &Batch,
+    shared: &Shared,
+) -> Result<Invocation, String> {
+    let d = x.descriptor;
+    let p = x.pipeline;
+    let mut mounts: Vec<Mount>;
+    let participants: Vec<String>;
+    let mut env: Vec<(String, String)> = vec![
+        ("NILS_RUN_ID".into(), x.run_id.to_string()),
+        ("NILS_PIPELINE".into(), p.label()),
+        ("NILS_IMAGE_DIGEST".into(), p.image_digest.clone()),
+        ("NILS_CORES".into(), d.needs.cores.to_string()),
+        ("NILS_MEMORY_GB".into(), format!("{}", d.needs.memory_gb)),
+    ];
+    match &b.key {
+        None => {
+            mounts = vec![
+                Mount {
+                    host: shared.input.clone(),
+                    container: "/input".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: shared.inputs.clone(),
+                    container: "/inputs".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: b.out.clone(),
+                    container: "/output".into(),
+                    read_only: false,
+                },
+            ];
+            mounts.extend(m.mounts.iter().cloned());
+            mounts.extend(shared.typed.iter().cloned());
+            let mut s: Vec<String> = m.units.iter().filter_map(|u| u.subject.clone()).collect();
+            s.sort();
+            s.dedup();
+            participants = s;
+        }
+        Some(key) => {
+            let i = b.units[0];
+            let u = &m.units[i];
+            let udir = shared.run_dir.join("units").join(key);
+            if udir.exists() {
+                std::fs::remove_dir_all(&udir).map_err(|e| format!("the unit's folder: {e}"))?;
+            }
+            if b.out.exists() {
+                std::fs::remove_dir_all(&b.out)
+                    .map_err(|e| format!("the unit's output folder: {e}"))?;
+            }
+            let (uin, uinputs) = (udir.join("input"), udir.join("inputs"));
+            for dir in [&uin, &uinputs, &b.out] {
+                std::fs::create_dir_all(dir).map_err(|e| format!("the unit's folder: {e}"))?;
+            }
+            let mut sources: Vec<Mount> = Vec::new();
+            match d.layout {
+                Layout::Stacks => {
+                    let entry = m.entries.get(i).cloned().unwrap_or(Value::Null);
+                    let used: std::collections::BTreeSet<i64> = entry["files"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|f| f["source"].as_i64())
+                        .collect();
+                    let listed: Vec<Value> = m
+                        .listed
+                        .iter()
+                        .filter(|l| l["id"].as_i64().is_some_and(|n| used.contains(&n)))
+                        .cloned()
+                        .collect();
+                    let doc = json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": [entry]});
+                    std::fs::write(
+                        uin.join("stacks.json"),
+                        serde_json::to_vec_pretty(&doc).unwrap_or_default(),
+                    )
+                    .map_err(|e| format!("the unit's input: {e}"))?;
+                    sources = m
+                        .mounts
+                        .iter()
+                        .filter(|mt| {
+                            mt.container
+                                .strip_prefix("/source/")
+                                .and_then(|n| n.parse::<i64>().ok())
+                                .is_some_and(|n| used.contains(&n))
+                        })
+                        .cloned()
+                        .collect();
+                }
+                Layout::Bids => unit_input(&shared.input, &uin, u, d.level)?,
+            }
+            let mut manifest = shared.manifest.clone();
+            manifest["units"] = json!([u.doc()]);
+            manifest["unit"] = json!(u.id);
+            std::fs::write(
+                uinputs.join("manifest.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+            )
+            .map_err(|e| format!("the unit's folder: {e}"))?;
+            mounts = vec![
+                Mount {
+                    host: uin,
+                    container: "/input".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: uinputs,
+                    container: "/inputs".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: b.out.clone(),
+                    container: "/output".into(),
+                    read_only: false,
+                },
+            ];
+            mounts.extend(sources);
+            mounts.extend(shared.typed.iter().cloned());
+            for (id, dir) in &shared.derivative_dirs {
+                mounts.push(Mount {
+                    host: dir.clone(),
+                    container: format!("/inputs/{id}"),
+                    read_only: true,
+                });
+            }
+            participants = u.subject.iter().cloned().collect();
+            env.push(("NILS_UNIT".into(), u.id.clone()));
+        }
+    }
+    // a secret, read-only, in this pipeline's containers alone
+    for g in x.secrets {
+        mounts.push(Mount {
+            host: g.path.clone(),
+            container: g.secret.mount.clone(),
+            read_only: true,
+        });
+        if let Some(var) = &g.secret.env {
+            env.push((var.clone(), g.secret.mount.clone()));
+        }
+    }
     let argv = d.argv(x.params, &participants)?;
     // who the process is: for podman the engine's own account, which
     // `--userns keep-id` maps to itself, never the group of a shared
@@ -1860,7 +3165,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 Some(this_account())
             } else {
                 use std::os::unix::fs::MetadataExt;
-                std::fs::metadata(&out).ok().map(|m| (m.uid(), m.gid()))
+                std::fs::metadata(&b.out).ok().map(|m| (m.uid(), m.gid()))
             }
         }
         #[cfg(not(unix))]
@@ -1868,257 +3173,634 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             None
         }
     };
-    let inv = Invocation {
+    Ok(Invocation {
         name: format!("nils-run-{}-{}", x.run_id, nonce()),
         image: p.image.clone(),
         argv,
         mounts,
         gpu: x.gpu,
-        env: vec![
-            ("NILS_RUN_ID".into(), x.run_id.to_string()),
-            ("NILS_PIPELINE".into(), p.label()),
-            ("NILS_IMAGE_DIGEST".into(), p.image_digest.clone()),
-        ],
+        card: None,
+        local_image: shared.local_image.clone(),
+        env,
         user,
-    };
-    let progress = json!({"run": x.run_id, "phase": "run", "units": m.units.len()});
-    let store = registry.store();
-    let ended = runtime::run(x.runtime, &inv, &run_dir.join("log.txt"), &mut || {
-        !matches!(
-            job::beat(store, x.job_id, Some(&progress)),
-            Ok(job::Asked::Cancel)
-        )
     })
-    .map_err(|e| format!("{} could not start the container: {e}", x.runtime.name()))?;
-    let exit_code = ended.code.map(i64::from);
+}
+
+/// A bids unit's own input: the dataset's top-level files, and only its
+/// subject's folder, or of that only the top-level files and its session's
+/// folder, linked from the run's release (a copy across filesystems).
+fn unit_input(input: &Path, into: &Path, u: &Unit, level: Level) -> Result<(), String> {
+    let e = |e: std::io::Error| format!("the unit's input: {e}");
+    for entry in std::fs::read_dir(input).map_err(e)? {
+        let entry = entry.map_err(e)?;
+        if entry.file_type().map_err(e)?.is_file() {
+            link_file(&entry.path(), &into.join(entry.file_name()))?;
+        }
+    }
+    let Some(subject) = &u.subject else {
+        return Err(format!("the unit {} names no subject", u.id));
+    };
+    let sub = format!("sub-{subject}");
+    match (level, &u.session) {
+        (Level::Session, Some(session)) => {
+            let from = input.join(&sub);
+            std::fs::create_dir_all(into.join(&sub)).map_err(e)?;
+            for entry in std::fs::read_dir(&from).map_err(e)? {
+                let entry = entry.map_err(e)?;
+                if entry.file_type().map_err(e)?.is_file() {
+                    link_file(&entry.path(), &into.join(&sub).join(entry.file_name()))?;
+                }
+            }
+            let ses = format!("ses-{session}");
+            link_tree(&from.join(&ses), &into.join(&sub).join(&ses))
+        }
+        _ => link_tree(&input.join(&sub), &into.join(&sub)),
+    }
+}
+
+/// Link a folder's regular files, folder by folder; a link is left out.
+fn link_tree(from: &Path, to: &Path) -> Result<(), String> {
+    let e = |e: std::io::Error| format!("the unit's input: {e}");
+    std::fs::create_dir_all(to).map_err(e)?;
+    for entry in std::fs::read_dir(from).map_err(e)? {
+        let entry = entry.map_err(e)?;
+        let kind = entry.file_type().map_err(e)?;
+        if kind.is_dir() {
+            link_tree(&entry.path(), &to.join(entry.file_name()))?;
+        } else if kind.is_file() {
+            link_file(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+/// A hard link, or a copy where the two are not on one filesystem.
+fn link_file(from: &Path, to: &Path) -> Result<(), String> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => std::fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| format!("the unit's input: {e}")),
+        Err(e) => Err(format!("the unit's input: {e}")),
+    }
+}
+
+/// Stop what a run that went away left running: each unit in flight, by its
+/// container's name, and its process where it is this host's and is still
+/// the unit's (its command line names the container or the unit's folder).
+fn stop_left(x: &Execution<'_>, units: &[rows::Unit], out: &Path) {
+    let host = job::hostname();
+    for u in units.iter().filter(|u| u.state == "running") {
+        if let Some(name) = &u.container {
+            x.runtime.stop(&Invocation {
+                name: name.clone(),
+                image: String::new(),
+                argv: Vec::new(),
+                mounts: Vec::new(),
+                gpu: false,
+                card: None,
+                local_image: None,
+                env: Vec::new(),
+                user: None,
+            });
+        }
+        let Some(pid) = u.pid.filter(|_| u.host.as_deref() == Some(host.as_str())) else {
+            continue;
+        };
+        if job::process_alive(pid) != Some(true) {
+            continue;
+        }
+        let line = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let line = String::from_utf8_lossy(&line);
+        let folder = out.join(&u.unit).display().to_string();
+        let ours = u.container.as_deref().is_some_and(|n| line.contains(n))
+            || line.contains(&folder)
+            || (x.descriptor.units == Units::Together && line.contains(&out.display().to_string()));
+        if ours {
+            // the runtime's process led a group of its own
+            if let Ok(leader) = u32::try_from(pid) {
+                runtime::kill_group(leader);
+            }
+        }
+    }
+}
+
+/// The image apptainer runs (record 49 A2): built once from the pinned
+/// digest into the working place's image folder, as a SIF file or a
+/// sandbox folder, and kept there by the digest. Answers none when the run
+/// was cancelled while it built.
+fn ensure_image(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    working: &Path,
+    run_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let form = image_form(registry);
+    let dir = working.join(IMAGES);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("the image folder: {e}"))?;
+    let target = runtime::local_image(&dir, &x.pipeline.image_digest, form);
+    if target.exists() {
+        return Ok(Some(target));
+    }
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let part = dir.join(format!(".{name}.part-{}", nonce()));
+    let log = std::fs::File::create(run_dir.join("image.log"))
+        .map_err(|e| format!("the run's folder: {e}"))?;
+    let err_log = log
+        .try_clone()
+        .map_err(|e| format!("the run's folder: {e}"))?;
     let _ = job::beat(
         registry.store(),
         x.job_id,
-        Some(&json!({"run": x.run_id, "phase": "register"})),
+        Some(&json!({"run": x.run_id, "phase": "image", "image": x.pipeline.image})),
     );
-    if ended.stopped {
-        return Ok(("cancelled", json!({"phase": "run"}), None, exit_code, None));
+    let mut child = std::process::Command::new(&x.runtime.program)
+        .args(runtime::build_argv(&x.pipeline.image, &part, form))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(err_log))
+        .spawn()
+        .map_err(|e| format!("apptainer could not start a build: {e}"))?;
+    let (status, stopped) = wait_beating(
+        &mut child,
+        registry.store(),
+        x.job_id,
+        &json!({"run": x.run_id, "phase": "image", "image": x.pipeline.image}),
+    )?;
+    let clean = |p: &Path| {
+        let _ = std::fs::remove_dir_all(p);
+        let _ = std::fs::remove_file(p);
+    };
+    if stopped {
+        clean(&part);
+        return Ok(None);
     }
+    if !status.success() || !part.exists() {
+        clean(&part);
+        return Err(format!(
+            "apptainer could not build {} from its digest; its log is {RUNS}/{}/image.log",
+            x.pipeline.image, x.run_id
+        ));
+    }
+    if target.exists() {
+        // another run built it meanwhile
+        clean(&part);
+    } else {
+        std::fs::rename(&part, &target).map_err(|e| format!("the image folder: {e}"))?;
+    }
+    Ok(Some(target))
+}
 
-    // what the run said, or what its templates find
-    // read only where it lies inside the output folder: never through a
-    // link the container planted (record 43 review)
+/// What a run's `results.json` in a folder says, read only where it lies
+/// inside the folder, never through a link the container planted (record
+/// 43 review); or why it cannot be read; or neither, where there is none.
+fn read_results(out: &Path) -> (Option<nils_pipeline::Results>, Option<String>) {
     let results_path = out.join(nils_pipeline::results::FILE);
-    let (reported, unreadable) = if std::fs::symlink_metadata(&results_path).is_ok() {
-        match nils_pipeline::files::read_inside(&out, nils_pipeline::results::FILE)
-            .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
-            .and_then(|t| nils_pipeline::results::parse(&t))
+    if std::fs::symlink_metadata(&results_path).is_err() {
+        return (None, None);
+    }
+    match nils_pipeline::files::read_inside(out, nils_pipeline::results::FILE)
+        .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+        .and_then(|t| nils_pipeline::results::parse(&t))
+    {
+        Ok(r) => (Some(r), None),
+        Err(e) => (None, Some(e)),
+    }
+}
+
+/// What one unit's container said of it, or what its templates find.
+fn outcome_of(
+    u: &Unit,
+    reported: &Option<nils_pipeline::Results>,
+    unreadable: &Option<String>,
+    exit_code: Option<i64>,
+    unit_outputs: &[descriptor::Output],
+    run_outputs: &[descriptor::Output],
+    out: &Path,
+) -> Outcome {
+    let is_run_file = |rel: &str| nils_pipeline::files::which_output(run_outputs, rel).is_some();
+    if let Some(e) = unreadable {
+        return Outcome {
+            status: "failed",
+            error: Some(e.clone()),
+            metrics: json!({}),
+            files: Vec::new(),
+        };
+    }
+    if let Some(r) = reported {
+        return match r
+            .units
+            .iter()
+            .find(|e| nils_pipeline::results::normalise(&e.unit_id) == u.id)
         {
-            Ok(r) => (Some(r), None),
-            Err(e) => (None, Some(e)),
+            None => Outcome {
+                status: "unreported",
+                error: Some("the pipeline's results say nothing of this unit".into()),
+                metrics: json!({}),
+                files: Vec::new(),
+            },
+            Some(e) => {
+                let mut files: Vec<String> = e
+                    .derivatives
+                    .iter()
+                    .filter(|f| !is_run_file(f))
+                    .cloned()
+                    .collect();
+                if e.status == nils_pipeline::results::Status::Succeeded && files.is_empty() {
+                    files = found_for(unit_outputs, out, u);
+                }
+                Outcome {
+                    status: e.status.name(),
+                    error: e.error.clone(),
+                    metrics: e.metrics.clone(),
+                    files: if e.status == nils_pipeline::results::Status::Succeeded {
+                        files
+                    } else {
+                        Vec::new()
+                    },
+                }
+            }
+        };
+    }
+    if exit_code != Some(0) {
+        return Outcome {
+            status: "failed",
+            error: Some(format!(
+                "the container exited {} and wrote no results.json",
+                exit_code.map_or("by a signal".to_string(), |c| c.to_string())
+            )),
+            metrics: json!({}),
+            files: Vec::new(),
+        };
+    }
+    let files = found_for(unit_outputs, out, u);
+    if files.is_empty() {
+        Outcome {
+            status: "failed",
+            error: Some("no declared output was found for this unit".into()),
+            metrics: json!({}),
+            files,
         }
     } else {
-        (None, None)
-    };
-    // a run-level output is the run's own file, never a unit's (record 43)
+        Outcome {
+            status: "succeeded",
+            error: None,
+            metrics: json!({}),
+            files,
+        }
+    }
+}
+
+/// Take in what one batch left: its units marked registering, the secrets
+/// swept out, then each unit's files hashed by the engine and registered
+/// naming the run, and the unit marked over with its outcome. Taking in is
+/// idempotent (a file registered already is found, not registered again),
+/// so a resume that finds a unit registering takes it in again and runs
+/// nothing.
+fn take_in(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    m: &Materialised,
+    b: &Batch,
+    code: Option<i32>,
+    row_of: &BTreeMap<String, (i64, String)>,
+    taken_files: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let d = x.descriptor;
+    let exit_code = code.map(i64::from);
+    let now = nils_registry::time::now_iso();
+    for &i in &b.units {
+        if let Some((id, _)) = row_of.get(&m.units[i].id) {
+            rows::unit_registering(registry.store(), *id, exit_code).map_err(|e| e.to_string())?;
+        }
+    }
+    // record 49 R3: nothing a container left is read before what holds a
+    // secret is swept from it
+    let mut swept: Vec<Value> = Vec::new();
+    if !x.secrets.is_empty() {
+        let held: Vec<secrets::Held> = x.secrets.iter().map(|g| g.held.clone()).collect();
+        let results_path = b.out.join(nils_pipeline::results::FILE);
+        let done = secrets::sweep(&b.out, &held, &[results_path.as_path()])
+            .map_err(|e| format!("the sweep for secrets: {e}"))?;
+        for s in done {
+            match s {
+                secrets::Swept::Removed(rel) => swept.push(json!({
+                    "file": rel.to_string_lossy(),
+                    "why": "it held a secret input, and was removed",
+                })),
+                secrets::Swept::Redacted(rel) => {
+                    swept.push(json!({"file": rel.to_string_lossy(), "redacted": true}));
+                }
+            }
+        }
+        secrets::redact_file(&b.log, &held).map_err(|e| format!("the run's log: {e}"))?;
+    }
+    let (reported, unreadable) = read_results(&b.out);
     let unit_outputs: Vec<descriptor::Output> =
         d.outputs.iter().filter(|o| !o.run_level).cloned().collect();
     let run_outputs: Vec<descriptor::Output> =
         d.outputs.iter().filter(|o| o.run_level).cloned().collect();
-    let is_run_file = |rel: &str| nils_pipeline::files::which_output(&run_outputs, rel).is_some();
-    let mut outcomes: Vec<(usize, Outcome)> = Vec::new();
-    for (i, u) in m.units.iter().enumerate() {
-        let o = if let Some(e) = &unreadable {
-            Outcome {
-                status: "failed",
-                error: Some(e.clone()),
-                metrics: json!({}),
-                files: Vec::new(),
-            }
-        } else if let Some(r) = &reported {
-            match r
-                .units
-                .iter()
-                .find(|e| nils_pipeline::results::normalise(&e.unit_id) == u.id)
-            {
-                None => Outcome {
-                    status: "unreported",
-                    error: Some("the pipeline's results say nothing of this unit".into()),
-                    metrics: json!({}),
-                    files: Vec::new(),
-                },
-                Some(e) => {
-                    let mut files: Vec<String> = e
-                        .derivatives
-                        .iter()
-                        .filter(|f| !is_run_file(f))
-                        .cloned()
-                        .collect();
-                    if e.status == nils_pipeline::results::Status::Succeeded && files.is_empty() {
-                        files = found_for(&unit_outputs, &out, u);
-                    }
-                    Outcome {
-                        status: e.status.name(),
-                        error: e.error.clone(),
-                        metrics: e.metrics.clone(),
-                        files: if e.status == nils_pipeline::results::Status::Succeeded {
-                            files
-                        } else {
-                            Vec::new()
-                        },
-                    }
-                }
-            }
-        } else if exit_code != Some(0) {
-            Outcome {
-                status: "failed",
-                error: Some(format!(
-                    "the container exited {} and wrote no results.json",
-                    exit_code.map_or("by a signal".to_string(), |c| c.to_string())
-                )),
-                metrics: json!({}),
-                files: Vec::new(),
-            }
-        } else {
-            let files = found_for(&unit_outputs, &out, u);
-            if files.is_empty() {
-                Outcome {
-                    status: "failed",
-                    error: Some("no declared output was found for this unit".into()),
-                    metrics: json!({}),
-                    files,
-                }
-            } else {
-                Outcome {
-                    status: "succeeded",
-                    error: None,
-                    metrics: json!({}),
-                    files,
-                }
-            }
-        };
-        outcomes.push((i, o));
-    }
-
-    // every file hashed by the engine and registered, naming the run; an
-    // embedding under the cache's key (record 43 S4)
-    let now = nils_registry::time::now_iso();
+    // a container that failed as a whole, with no results.json to say more
+    let whole = reported.is_none() && (exit_code != Some(0) || unreadable.is_some());
     let cards: Vec<Value> = reported
         .as_ref()
         .map(|r| r.models.clone())
         .unwrap_or_default();
-    let mut registered = 0usize;
-    let mut bytes_total = 0u64;
-    let (mut embedded, mut cached) = (0usize, 0usize);
-    let mut refused: Vec<Value> = Vec::new();
-    let mut digest_units: Vec<Value> = Vec::new();
-    // one row per file on disk: a second name for a file already taken, a
-    // link from one unit's folder to another's, is refused
-    let mut taken_files: std::collections::BTreeSet<PathBuf> = Default::default();
-    for (i, o) in outcomes.iter_mut() {
-        let u = &m.units[*i];
-        let mut hashed: Vec<Value> = Vec::new();
-        let Some(belongs) = u.belongs() else {
-            o.status = "failed";
-            o.error = Some("the unit belongs to no subject the registry holds".into());
+    let log_rel = b
+        .log
+        .strip_prefix(&x.place.path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| format!("{RUNS}/{}/log.txt", x.run_id));
+    for (n, &i) in b.units.iter().enumerate() {
+        let u = &m.units[i];
+        let o = outcome_of(
+            u,
+            &reported,
+            &unreadable,
+            exit_code,
+            &unit_outputs,
+            &run_outputs,
+            &b.out,
+        );
+        let Some((row_id, _)) = row_of.get(&u.id) else {
             continue;
         };
-        let mut kept: Vec<String> = Vec::new();
-        let vars = u.vars();
-        let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        for rel in &o.files {
-            // a unit's file is one its own templates find, never another's
-            let Some(declared) = nils_pipeline::files::unit_output(&unit_outputs, rel, &pairs)
-            else {
-                refused.push(json!({
-                    "unit": u.id, "file": rel,
-                    "why": "not a file this unit's declared outputs name",
-                }));
+        let mut doc = match register_unit(
+            registry,
+            x,
+            u,
+            o,
+            &b.out,
+            &unit_outputs,
+            &cards,
+            taken_files,
+            &now,
+        ) {
+            Ok(doc) => doc,
+            Err(e) => {
+                json!({"status": "failed", "error": e, "metrics": {}, "files": [], "refused": []})
+            }
+        };
+        doc["whole"] = json!(whole);
+        if let Some(e) = &unreadable {
+            doc["unreadable"] = json!(e);
+        }
+        doc["log"] = json!(log_rel);
+        doc["out"] = json!(b.rel_out);
+        if n == 0 && !swept.is_empty() {
+            doc["swept"] = json!(swept);
+        }
+        rows::unit_over(registry.store(), *row_id, exit_code, &doc, &now)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Whether the run registered a file at this path already: a resume that
+/// takes a unit in again finds it rather than registering it twice.
+fn registered_already(store: &mut Store, run_id: i64, path: &str) -> Result<bool, String> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id FROM {} WHERE run_id = {} AND path = {}",
+        store.qualified("derivative"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text)
+    );
+    store
+        .query_opt(&sql, &[Param::Int(run_id), Param::from(path)])
+        .map(|r| r.is_some())
+        .map_err(|e| e.to_string())
+}
+
+/// Hash and register one unit's files; answers the unit's outcome as its
+/// row keeps it.
+#[allow(clippy::too_many_arguments)]
+fn register_unit(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    u: &Unit,
+    mut o: Outcome,
+    out: &Path,
+    unit_outputs: &[descriptor::Output],
+    cards: &[Value],
+    taken_files: &mut std::collections::BTreeSet<PathBuf>,
+    now: &str,
+) -> Result<Value, String> {
+    let working = PathBuf::from(&x.place.path);
+    let mut hashed: Vec<Value> = Vec::new();
+    let mut refused: Vec<Value> = Vec::new();
+    let (mut registered, mut bytes_total, mut embedded, mut cached) =
+        (0usize, 0u64, 0usize, 0usize);
+    let Some(belongs) = u.belongs() else {
+        return Ok(json!({
+            "status": "failed", "error": "the unit belongs to no subject the registry holds",
+            "metrics": o.metrics, "files": [], "refused": [],
+        }));
+    };
+    let vars = u.vars();
+    let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for rel in &o.files {
+        // a unit's file is one its own templates find, never another's
+        let Some(declared) = nils_pipeline::files::unit_output(unit_outputs, rel, &pairs) else {
+            refused.push(json!({
+                "unit": u.id, "file": rel,
+                "why": "not a file this unit's declared outputs name",
+            }));
+            continue;
+        };
+        let file = match nils_pipeline::files::inside(out, rel) {
+            Ok(f) => f,
+            Err(e) => {
+                refused.push(json!({"unit": u.id, "file": rel, "why": e}));
                 continue;
-            };
-            let file = match nils_pipeline::files::inside(&out, rel) {
-                Ok(f) => f,
-                Err(e) => {
-                    refused.push(json!({"unit": u.id, "file": rel, "why": e}));
+            }
+        };
+        if !taken_files.insert(file.clone()) {
+            refused.push(json!({
+                "unit": u.id, "file": rel,
+                "why": "the same file as another output of the run, by another name",
+            }));
+            continue;
+        }
+        let (bytes, sha) =
+            nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
+        let kind = declared.kind.as_str();
+        let media = nils_pipeline::files::media_type(rel, declared.media_type.as_deref());
+        // the row names the file where it is, never a link to it
+        let path = place_path(&working, &file)?;
+        if kind == nils_registry::embedding::KIND {
+            match register_embedding(
+                registry,
+                x,
+                u,
+                &declared.encoders,
+                &file,
+                &path,
+                bytes,
+                &sha,
+                cards,
+                now,
+            ) {
+                Ok(nils_registry::embedding::Registered::New(_)) => {
+                    embedded += 1;
+                    registered += 1;
+                    bytes_total += bytes;
+                }
+                Ok(nils_registry::embedding::Registered::Kept { .. }) => cached += 1,
+                Err(why) => {
+                    refused.push(json!({"unit": u.id, "file": rel, "why": why}));
                     continue;
                 }
-            };
-            if !taken_files.insert(file.clone()) {
-                refused.push(json!({
-                    "unit": u.id, "file": rel,
-                    "why": "the same file as another output of the run, by another name",
-                }));
-                continue;
             }
-            let (bytes, sha) =
-                nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
-            let kind = declared.kind.as_str();
-            let media = nils_pipeline::files::media_type(rel, declared.media_type.as_deref());
-            // the row names the file where it is, never a link to it
-            let path = place_path(&working, &file)?;
-            if kind == nils_registry::embedding::KIND {
-                match register_embedding(
-                    registry,
-                    x,
-                    u,
-                    &declared.encoders,
-                    &file,
-                    &path,
-                    bytes,
-                    &sha,
-                    &cards,
-                    &now,
-                ) {
-                    Ok(nils_registry::embedding::Registered::New(_)) => {
-                        embedded += 1;
-                        registered += 1;
-                        bytes_total += bytes;
-                    }
-                    Ok(nils_registry::embedding::Registered::Kept { .. }) => cached += 1,
-                    Err(why) => {
-                        refused.push(json!({"unit": u.id, "file": rel, "why": why}));
-                        continue;
-                    }
-                }
-            } else {
-                derivative::insert_of_run(
-                    registry.store(),
-                    &derivative::New {
-                        kind,
-                        belongs: &belongs,
-                        place_id: x.place.id,
-                        path: &path,
-                        bytes: bytes as i64,
-                        sha256: &sha,
-                        media_type: &media,
-                        registered_by: x.who,
-                        actor: Some(x.actor),
-                        model_id: None,
-                        run_id: None,
-                        preprocess_version: None,
-                        supersedes_id: None,
-                        created_at: &now,
-                    },
-                    x.run_id,
-                )
-                .map_err(|e| e.to_string())?;
-                registered += 1;
-                bytes_total += bytes;
-            }
-            hashed.push(json!({"path": rel, "sha256": sha}));
-            kept.push(rel.clone());
+        } else if registered_already(registry.store(), x.run_id, &path)? {
+            // taken in before a resume: the row stands
+            registered += 1;
+            bytes_total += bytes;
+        } else {
+            derivative::insert_of_run(
+                registry.store(),
+                &derivative::New {
+                    kind,
+                    belongs: &belongs,
+                    place_id: x.place.id,
+                    path: &path,
+                    bytes: bytes as i64,
+                    sha256: &sha,
+                    media_type: &media,
+                    registered_by: x.who,
+                    actor: Some(x.actor),
+                    model_id: None,
+                    run_id: None,
+                    preprocess_version: None,
+                    supersedes_id: None,
+                    created_at: now,
+                },
+                x.run_id,
+            )
+            .map_err(|e| e.to_string())?;
+            registered += 1;
+            bytes_total += bytes;
         }
-        o.files = kept;
-        hashed.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-        digest_units.push(json!({"unit": u.id, "status": o.status, "files": hashed}));
+        hashed.push(json!({"path": rel, "sha256": sha}));
+    }
+    hashed.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    o.files = hashed
+        .iter()
+        .filter_map(|h| h["path"].as_str().map(str::to_string))
+        .collect();
+    Ok(json!({
+        "status": o.status, "error": o.error, "metrics": o.metrics,
+        "files": hashed, "refused": refused, "registered": registered,
+        "bytes": bytes_total, "embedded": embedded, "cached": cached,
+    }))
+}
+
+/// Close a run over what its units left: the run's own files where its
+/// units ran together and the container completed, the seeds, the
+/// proposals, the review items, the digest and the summary.
+fn finalize(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    m: &Materialised,
+    working: &Path,
+    out: &Path,
+    rel_out: &str,
+    taken_files: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Ended, String> {
+    let p = x.pipeline;
+    let d = x.descriptor;
+    let now = nils_registry::time::now_iso();
+    let unit_rows = rows::units(registry.store(), x.run_id).map_err(|e| e.to_string())?;
+    let by_name: BTreeMap<&str, &rows::Unit> =
+        unit_rows.iter().map(|u| (u.unit.as_str(), u)).collect();
+    let apart = d.units == Units::Apart;
+    let mut digest_units: Vec<Value> = Vec::new();
+    let mut refused: Vec<Value> = Vec::new();
+    let (mut registered, mut bytes_total, mut embedded, mut cached) =
+        (0usize, 0u64, 0usize, 0usize);
+    let mut statuses: Vec<(usize, String, Option<String>, Value, bool)> = Vec::new();
+    for (i, u) in m.units.iter().enumerate() {
+        let Some(row) = by_name.get(u.id.as_str()) else {
+            continue;
+        };
+        let o = &row.outcome;
+        let status = o["status"].as_str().unwrap_or("failed").to_string();
+        digest_units.push(json!({"unit": u.id, "status": status, "files": o["files"]}));
+        refused.extend(o["refused"].as_array().cloned().unwrap_or_default());
+        for s in o["swept"].as_array().into_iter().flatten() {
+            if s["why"].is_string() {
+                refused.push(json!({
+                    "unit": if apart { u.id.as_str() } else { "run" },
+                    "file": s["file"], "why": s["why"],
+                }));
+            }
+        }
+        let n = |k: &str| o[k].as_u64().unwrap_or(0);
+        registered += n("registered") as usize;
+        bytes_total += n("bytes");
+        embedded += n("embedded") as usize;
+        cached += n("cached") as usize;
+        statuses.push((
+            i,
+            status,
+            o["error"].as_str().map(str::to_string),
+            o["metrics"].clone(),
+            o["whole"].as_bool().unwrap_or(false),
+        ));
     }
     digest_units.sort_by(|a, b| a["unit"].as_str().cmp(&b["unit"].as_str()));
+    // the run's exit: together, its one container's; apart, the first that
+    // did not exit 0, or 0
+    let exit_code = if apart {
+        unit_rows
+            .iter()
+            .map(|u| u.exit_code)
+            .find(|c| *c != Some(0))
+            .unwrap_or(Some(0))
+    } else {
+        unit_rows.first().and_then(|u| u.exit_code)
+    };
+    let whole_units = statuses.iter().filter(|s| s.4).count();
+    let unreadable: Option<String> = unit_rows
+        .iter()
+        .find_map(|u| u.outcome["unreadable"].as_str().map(str::to_string));
+    // together: the container failed as a whole; apart: every unit's did
+    let whole = !statuses.is_empty() && whole_units == statuses.len();
+    let completed = if apart { !whole } else { exit_code == Some(0) };
+
+    // what the containers said, read again from where each wrote it
+    let folders: Vec<PathBuf> = if apart {
+        m.units
+            .iter()
+            .filter(|u| {
+                by_name
+                    .get(u.id.as_str())
+                    .is_some_and(|r| r.state == "over")
+            })
+            .map(|u| out.join(&u.id))
+            .collect()
+    } else {
+        vec![out.to_path_buf()]
+    };
+    let reports: Vec<nils_pipeline::Results> =
+        folders.iter().filter_map(|f| read_results(f).0).collect();
 
     // the run's own files (record 43): a model it fitted, registered from
     // its card, and any other run-level output; only a run that completed
+    // with its units together
+    let run_outputs: Vec<descriptor::Output> =
+        d.outputs.iter().filter(|o| o.run_level).cloned().collect();
     let mut run_files: Vec<Value> = Vec::new();
     let mut models_made: Vec<Value> = Vec::new();
-    if exit_code == Some(0) {
+    if !apart && exit_code == Some(0) {
         for o in &run_outputs {
-            let found = nils_pipeline::files::found(&out, &o.template, &[]);
+            let found = nils_pipeline::files::found(out, &o.template, &[]);
             if o.kind == "model" {
                 match found.as_slice() {
-                    [rel] => match register_model(registry, x, o, &out, rel, &now) {
+                    [rel] => match register_model(registry, x, o, out, rel, &now) {
                         Ok((model, id, sha)) => {
                             registered += 1;
                             run_files.push(json!({"path": rel, "sha256": sha}));
@@ -2138,7 +3820,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 continue;
             }
             for rel in found {
-                let file = match nils_pipeline::files::inside(&out, &rel) {
+                let file = match nils_pipeline::files::inside(out, &rel) {
                     Ok(f) => f,
                     Err(why) => {
                         refused.push(json!({"output": o.id, "file": rel, "why": why}));
@@ -2161,7 +3843,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                         kind: &o.kind,
                         belongs: &Belongs::run(),
                         place_id: x.place.id,
-                        path: &place_path(&working, &file)?,
+                        path: &place_path(working, &file)?,
                         bytes: bytes as i64,
                         sha256: &sha,
                         media_type: &media,
@@ -2188,22 +3870,20 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     // run's one derivative of kind seeds, apart from any proposal
     let mut seeds_doc = Value::Null;
     let mut seeds_digest = Value::Null;
-    if let Some(r) = &reported
-        && (!r.seeds.is_empty() || r.selection.is_some())
-    {
+    let all_seeds: Vec<&nils_pipeline::results::Seed> =
+        reports.iter().flat_map(|r| r.seeds.iter()).collect();
+    let any_selection = reports.iter().any(|r| r.selection.is_some());
+    if !all_seeds.is_empty() || any_selection {
         let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
-        let taken: Vec<&Value> = r
-            .seeds
+        let taken: Vec<&Value> = all_seeds
             .iter()
             .filter(|s| ours.contains(&s.stack_id))
             .map(|s| &s.entry)
             .collect();
-        let outside = r.seeds.len() - taken.len();
-        let mut selection: Vec<i64> = r
-            .selection
+        let outside = all_seeds.len() - taken.len();
+        let mut selection: Vec<i64> = reports
             .iter()
-            .flatten()
-            .copied()
+            .flat_map(|r| r.selection.iter().flatten().copied())
             .filter(|s| ours.contains(s))
             .collect();
         selection.sort_unstable();
@@ -2216,10 +3896,24 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         // into a folder of the engine's own beside the output, which the
         // container never saw, created new and never through a link
         let own = working.join(format!("{rel_out}.nils"));
-        std::fs::create_dir(&own).map_err(|e| format!("the run's own folder: {e}"))?;
+        match std::fs::symlink_metadata(&own) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{rel_out}.nils is there already and is not a folder"
+                ));
+            }
+            Err(_) => {
+                std::fs::create_dir(&own).map_err(|e| format!("the run's own folder: {e}"))?
+            }
+        }
         let rel = format!("{rel_out}.nils/{}", nils_pipeline::results::SEEDS_FILE);
-        nils_pipeline::files::write_new(&working.join(&rel), text.as_bytes())
-            .map_err(|e| format!("{rel}: {e}"))?;
+        let at = working.join(&rel);
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_file()) {
+            // a resume writes what the run says now
+            let _ = std::fs::remove_file(&at);
+        }
+        nils_pipeline::files::write_new(&at, text.as_bytes()).map_err(|e| format!("{rel}: {e}"))?;
         let sha = hex_of(&nils_pipeline::sha256(text.as_bytes()));
         let id = derivative::insert_of_run(
             registry.store(),
@@ -2251,10 +3945,10 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         seeds_digest = json!(sha);
     }
 
-    let proposals = reported
-        .as_ref()
-        .map(|r| r.proposals.clone())
-        .unwrap_or_default();
+    let proposals: Vec<Value> = reports
+        .iter()
+        .flat_map(|r| r.proposals.iter().cloned())
+        .collect();
     let results_digest = nils_pipeline::sha256(
         nils_pipeline::canonical(&json!({
             "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
@@ -2265,15 +3959,19 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     // the units no one can vouch for become review items; a container
     // that failed as a whole, with no results.json to say more, is one
     // item of the run, not one per unit (wave 43's proof: three failed
-    // runs left 2,023 items, each run for a single cause)
+    // runs left 2,023 items, each run for a single cause), and so is a run
+    // whose every unit's container did
     let mut items: Vec<i64> = Vec::new();
     let label = p.label();
-    let whole = reported.is_none() && (exit_code != Some(0) || unreadable.is_some());
     if whole && !m.units.is_empty() {
-        let error = outcomes
+        let error = statuses
             .first()
-            .and_then(|(_, o)| o.error.clone())
+            .and_then(|s| s.2.clone())
             .unwrap_or_else(|| "the run failed".into());
+        let log = unit_rows
+            .first()
+            .and_then(|u| u.outcome["log"].as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{RUNS}/{}/log.txt", x.run_id));
         let id = nils_registry::review::raise_pipeline_qc(
             registry.store(),
             &nils_registry::review::PipelineQc {
@@ -2286,8 +3984,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 status: "failed",
                 error: Some(&error),
                 metrics: &json!({
-                    "units": m.units.len(), "exit_code": exit_code,
-                    "log": format!("{RUNS}/{}/log.txt", x.run_id),
+                    "units": m.units.len(), "exit_code": exit_code, "log": log,
                 }),
                 job_id: Some(x.job_id),
             },
@@ -2296,8 +3993,8 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         .map_err(|e| e.to_string())?;
         items.push(id);
     }
-    for (i, o) in &outcomes {
-        if whole || (o.status != "failed" && o.status != "unreported") {
+    for (i, status, error, metrics, _) in &statuses {
+        if whole || (status != "failed" && status != "unreported") {
             continue;
         }
         let u = &m.units[*i];
@@ -2310,9 +4007,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 stack_id: u.stack_id,
                 subject_id: u.subject_id,
                 session_day: u.session_day.as_deref(),
-                status: o.status,
-                error: o.error.as_deref(),
-                metrics: &o.metrics,
+                status: if status == "unreported" {
+                    "unreported"
+                } else {
+                    "failed"
+                },
+                error: error.as_deref(),
+                metrics,
                 job_id: Some(x.job_id),
             },
             &now,
@@ -2394,7 +4095,10 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         }
     }
 
-    let count = |s: &str| outcomes.iter().filter(|(_, o)| o.status == s).count();
+    let count = |s: &str| statuses.iter().filter(|x| x.1 == s).count();
+    let first_log = unit_rows
+        .first()
+        .and_then(|u| u.outcome["log"].as_str().map(str::to_string));
     let summary = json!({
         "units": {
             "total": m.units.len(), "succeeded": count("succeeded"), "failed": count("failed"),
@@ -2409,18 +4113,26 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         "refused_files": refused,
         "review_items": items,
         "proposals": proposed,
-        "results": match (&reported, &unreadable) {
-            (Some(_), _) => json!("results.json"),
-            (None, Some(e)) => json!(format!("unreadable: {e}")),
-            (None, None) => json!("none: found by the declared templates"),
+        "results": match (reports.is_empty(), unreadable) {
+            (false, _) if apart => json!("results.json, one per unit"),
+            (false, _) => json!("results.json"),
+            (true, Some(e)) => json!(format!("unreadable: {e}")),
+            (true, None) => json!("none: found by the declared templates"),
         },
         "input_release_id": m.release_id,
         // what the container was given of the sources: one bind per folder
         // of the selection's files, or the roots past the limit, and why
         "scope": m.scope,
-        "log": format!("{RUNS}/{}/log.txt", x.run_id),
+        "log": if apart { format!("{RUNS}/{}/units/<unit>/log.txt", x.run_id) } else { first_log.unwrap_or_else(|| format!("{RUNS}/{}/log.txt", x.run_id)) },
+        // record 49: how its units ran, in which lane, what it was taken up
+        // again, and the secrets it read, by id alone
+        "units_mode": d.units.name(),
+        "lane": x.lane.doc(),
+        "needs": {"cores": d.needs.cores, "memory_gb": d.needs.memory_gb, "gpu_memory_gb": x.gpu.then_some(d.needs.gpu_memory_gb)},
+        "resumed": x.resume.is_some(),
+        "secrets": x.secrets.iter().map(|g| g.secret.id.clone()).collect::<Vec<_>>(),
     });
-    if exit_code == Some(0) {
+    if completed {
         // record 43: a run that completed with units that failed or went
         // unreported, or a file it made that was refused, is partial; the
         // units are review items
@@ -2428,10 +4140,14 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         let status = if short { "partial" } else { "done" };
         Ok((status, summary, Some(results_digest), exit_code, None))
     } else {
+        let log = if apart {
+            format!("{RUNS}/{}/units/<unit>/log.txt", x.run_id)
+        } else {
+            format!("{RUNS}/{}/log.txt", x.run_id)
+        };
         let mut error = format!(
-            "the container exited {}; its log is {RUNS}/{}/log.txt in the working place {}",
+            "the container exited {}; its log is {log} in the working place {}",
             exit_code.map_or("by a signal".to_string(), |c| c.to_string()),
-            x.run_id,
             x.place.name
         );
         // 125 is podman's and docker's own failure, as when the image is
@@ -2899,5 +4615,30 @@ mod tests {
         assert!(link_input(&root, "derivatives/p/1/stack-2/x.emb", &into).is_err());
         assert_eq!(std::fs::read(&other).unwrap(), b"another");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Record 49 A1: the door queues a resume as it queues a run, and still
+    /// takes no flag of a caller's own.
+    #[test]
+    fn a_door_queues_a_resume_and_nothing_else() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let pack = Path::new("/packs");
+        assert_eq!(
+            located(Some(pack), words(&["run", "--resume", "7"])).ok(),
+            Some(words(&["run", "--resume", "7", "--pack-dir", "/packs"]))
+        );
+        assert!(located(None, words(&["run"])).is_err());
+        assert!(located(None, words(&["run", "--resume"])).is_err());
+        assert!(located(None, words(&["run", "--resume", "7", "--dcm2niix", "/x"])).is_err());
+    }
+
+    /// Record 49: a unit's id becomes a folder only where it is a plain word.
+    #[test]
+    fn a_unit_s_folder_is_a_plain_word() {
+        assert!(folder_word("sub-P1_ses-20220115").is_ok());
+        assert!(folder_word("stack-12").is_ok());
+        for bad in ["", "..", ".hidden", "a/b", "sub-1 x"] {
+            assert!(folder_word(bad).is_err(), "{bad}");
+        }
     }
 }

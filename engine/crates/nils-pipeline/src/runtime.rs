@@ -4,7 +4,11 @@
 //!
 //! The order is rootless podman, then apptainer, then docker only where an
 //! operator opted in (`nils pipeline runtime --set docker`), since docker's
-//! daemon is root on the host. None found is not an error: the capability is
+//! daemon is root on the host; `--set apptainer-first` looks for apptainer
+//! before podman, as an unprivileged container such as the group's NILS
+//! guest wants (record 49 A2). Apptainer runs an image the engine built from
+//! the pinned OCI digest into a SIF file or a sandbox folder, kept by that
+//! digest, so an image is fetched once and a run never pulls a tag. None found is not an error: the capability is
 //! off and says why (D1). Every run carries the same guarantees whatever the
 //! runtime: no network, the input and every typed input read-only, one
 //! output folder, and a process that is not root on the host (podman's
@@ -38,21 +42,31 @@ impl Kind {
     }
 }
 
-/// What an operator chose: find one (`auto`, podman then apptainer), only
-/// this one (the one way docker is taken), or none.
+/// What an operator chose: find one (`auto`, podman then apptainer, or
+/// `apptainer-first`, apptainer then podman), only this one (the one way
+/// docker is taken), or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
     Auto,
+    ApptainerFirst,
     Only(Kind),
     Off,
 }
 
 impl Choice {
-    pub const WORDS: [&'static str; 5] = ["auto", "podman", "apptainer", "docker", "off"];
+    pub const WORDS: [&'static str; 6] = [
+        "auto",
+        "apptainer-first",
+        "podman",
+        "apptainer",
+        "docker",
+        "off",
+    ];
 
     pub fn parse(text: &str) -> Option<Choice> {
         Some(match text.trim() {
             "" | "auto" => Choice::Auto,
+            "apptainer-first" => Choice::ApptainerFirst,
             "podman" => Choice::Only(Kind::Podman),
             "apptainer" => Choice::Only(Kind::Apptainer),
             "docker" => Choice::Only(Kind::Docker),
@@ -64,6 +78,7 @@ impl Choice {
     pub fn name(self) -> &'static str {
         match self {
             Choice::Auto => "auto",
+            Choice::ApptainerFirst => "apptainer-first",
             Choice::Only(k) => k.name(),
             Choice::Off => "off",
         }
@@ -89,6 +104,12 @@ pub struct Invocation {
     pub mounts: Vec<Mount>,
     /// Pass the host's GPU.
     pub gpu: bool,
+    /// The one card to pass, by index, where the lane leased one (record 49
+    /// A2); none passes every card the runtime offers.
+    pub card: Option<u32>,
+    /// For apptainer, the SIF file or sandbox folder built from the image's
+    /// digest; none runs `docker://<image>`.
+    pub local_image: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     /// The uid and gid the process runs as: the engine's user (for podman
     /// the engine process's own uid and gid, the ids keep-id maps). Docker
@@ -195,10 +216,15 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
                 ["--cap-drop", "all", "--security-opt", "no-new-privileges"].map(String::from),
             );
             if inv.gpu {
+                let card = inv.card.map_or("all".to_string(), |c| c.to_string());
                 if kind == Kind::Podman {
-                    a.extend(["--device", "nvidia.com/gpu=all"].map(String::from));
+                    a.extend(["--device".to_string(), format!("nvidia.com/gpu={card}")]);
                 } else {
-                    a.extend(["--gpus", "all"].map(String::from));
+                    a.extend([
+                        "--gpus".to_string(),
+                        inv.card
+                            .map_or("all".to_string(), |c| format!("device={c}")),
+                    ]);
                 }
             }
             for m in &inv.mounts {
@@ -212,9 +238,13 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             a.push(inv.image.clone());
         }
         Kind::Apptainer => {
+            // `run`, not `exec`: an image built from an OCI image runs its
+            // ENTRYPOINT with these words after it (its CMD where there are
+            // none), as podman and docker do; `exec` would skip the
+            // ENTRYPOINT (record 49 A2)
             a.extend(
                 [
-                    "exec",
+                    "run",
                     "--containall",
                     "--cleanenv",
                     "--no-home",
@@ -226,6 +256,10 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             );
             if inv.gpu {
                 a.push("--nv".into());
+                if let Some(c) = inv.card {
+                    a.push("--env".into());
+                    a.push(format!("CUDA_VISIBLE_DEVICES={c}"));
+                }
             }
             for m in &inv.mounts {
                 a.push("--bind".into());
@@ -235,7 +269,10 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
                 a.push("--env".into());
                 a.push(format!("{k}={v}"));
             }
-            a.push(format!("docker://{}", inv.image));
+            match &inv.local_image {
+                Some(local) => a.push(local.display().to_string()),
+                None => a.push(format!("docker://{}", inv.image)),
+            }
         }
     }
     a.extend(inv.argv.iter().cloned());
@@ -392,6 +429,7 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
             );
         }
         Choice::Auto => vec![Kind::Podman, Kind::Apptainer],
+        Choice::ApptainerFirst => vec![Kind::Apptainer, Kind::Podman],
         Choice::Only(k) => vec![k],
     };
     for kind in order {
@@ -451,7 +489,21 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
                     None
                 }
             }
-            Kind::Apptainer | Kind::Docker => nvidia(path),
+            Kind::Apptainer => {
+                // before 1.1 an unprivileged apptainer cannot keep a
+                // container off the network, which every run is
+                if !apptainer_isolates(&version) {
+                    looked.push((
+                        kind.name().into(),
+                        format!(
+                            "{version}, older than 1.1, which cannot run --network none unprivileged"
+                        ),
+                    ));
+                    continue;
+                }
+                nvidia(path)
+            }
+            Kind::Docker => nvidia(path),
         };
         looked.push((kind.name().into(), format!("{version}, taken")));
         return Detected {
@@ -490,6 +542,69 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
     none(choice, looked, reason, unknown)
 }
 
+/// Whether an apptainer version runs `--net --network none` for an
+/// unprivileged user: 1.1 and later.
+pub fn apptainer_isolates(version: &str) -> bool {
+    let mut parts = version
+        .trim_start_matches('v')
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    (major, minor) >= (1, 1)
+}
+
+/// How apptainer keeps an image: a SIF file, which needs squashfuse or a
+/// setuid install to run unprivileged, or a sandbox folder, which runs
+/// where there is no /dev/fuse, as in an unprivileged container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageForm {
+    Sif,
+    Sandbox,
+}
+
+impl ImageForm {
+    pub const WORDS: [&'static str; 2] = ["sif", "sandbox"];
+
+    pub fn parse(text: &str) -> Option<ImageForm> {
+        match text.trim() {
+            "" | "sif" => Some(ImageForm::Sif),
+            "sandbox" => Some(ImageForm::Sandbox),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ImageForm::Sif => "sif",
+            ImageForm::Sandbox => "sandbox",
+        }
+    }
+}
+
+/// Where apptainer's copy of an image is kept under the image folder: by
+/// the image's manifest digest, `<hex>.sif` or `<hex>.sandbox`.
+pub fn local_image(dir: &Path, digest: &str, form: ImageForm) -> PathBuf {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    dir.join(match form {
+        ImageForm::Sif => format!("{hex}.sif"),
+        ImageForm::Sandbox => format!("{hex}.sandbox"),
+    })
+}
+
+/// The words after `apptainer` that build an image's local copy at `target`
+/// from its pinned reference.
+pub fn build_argv(reference: &str, target: &Path, form: ImageForm) -> Vec<String> {
+    let mut a = vec!["build".to_string()];
+    if form == ImageForm::Sandbox {
+        a.push("--sandbox".into());
+    }
+    a.push(target.display().to_string());
+    a.push(format!("docker://{reference}"));
+    a
+}
+
 /// How an invocation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
@@ -507,16 +622,7 @@ pub fn run(
     log: &Path,
     tick: &mut dyn FnMut() -> bool,
 ) -> std::io::Result<Ended> {
-    check_mounts(&inv.mounts).map_err(std::io::Error::other)?;
-    prepare_mountpoints(&inv.mounts)?;
-    let out = std::fs::File::create(log)?;
-    let err = out.try_clone()?;
-    let mut child = rt
-        .command(inv)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()?;
+    let mut child = spawn(rt, inv, log)?;
     let mut ticked = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
@@ -529,8 +635,7 @@ pub fn run(
             ticked = Instant::now();
             if !tick() {
                 rt.stop(inv);
-                let _ = child.kill();
-                let status = child.wait()?;
+                let status = kill(&mut child)?;
                 return Ok(Ended {
                     code: status.code(),
                     stopped: true,
@@ -538,6 +643,56 @@ pub fn run(
             }
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Start an invocation and leave it running, its output and errors into
+/// `log`: how the lane runs several at once (record 49 A1).
+pub fn spawn(
+    rt: &dyn Runtime,
+    inv: &Invocation,
+    log: &Path,
+) -> std::io::Result<std::process::Child> {
+    check_mounts(&inv.mounts).map_err(std::io::Error::other)?;
+    prepare_mountpoints(&inv.mounts)?;
+    let out = std::fs::File::create(log)?;
+    let err = out.try_clone()?;
+    let mut c = rt.command(inv);
+    c.stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    // a group of its own, so a stop reaches every process the runtime
+    // started (apptainer's starter, a stand-in's child), not the client alone
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
+    c.spawn()
+}
+
+/// Stop a spawned invocation and every process in its group; answers how
+/// it ended.
+pub fn kill(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    kill_group(child.id());
+    let _ = child.kill();
+    child.wait()
+}
+
+/// Send SIGKILL to the process group a spawned invocation leads.
+pub fn kill_group(leader: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{leader}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = leader;
     }
 }
 
@@ -668,6 +823,8 @@ mod tests {
                 },
             ],
             gpu,
+            card: None,
+            local_image: None,
             env: vec![("NILS_RUN".into(), "7".into())],
             user: Some((1000, 1000)),
         }
@@ -705,7 +862,7 @@ mod tests {
         assert!(has(&d, &["--gpus", "all"]) && !d.iter().any(|w| w == "keep-id"));
 
         let a = argv(Kind::Apptainer, &inv(true));
-        assert_eq!(a[0], "exec");
+        assert_eq!(a[0], "run");
         assert!(has(&a, &["--network", "none"]) && a.iter().any(|w| w == "--nv"));
         assert!(has(&a, &["--bind", "/w/runs/7/input:/input:ro"]));
         assert!(a.iter().any(|w| w.starts_with("docker://busybox@sha256:")));
@@ -865,5 +1022,102 @@ mod tests {
         assert!(inputs.join("labels").is_dir());
         assert!(inputs.join("head/card.json").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Record 49 A2: a leased card is the one card passed, by each runtime
+    /// its own way, and apptainer runs the local copy it was given, with
+    /// the flags that keep it apart from the host.
+    #[test]
+    fn a_leased_card_is_the_one_passed_and_apptainer_runs_its_local_copy() {
+        let mut i = inv(true);
+        i.card = Some(1);
+        assert!(has(
+            &argv(Kind::Podman, &i),
+            &["--device", "nvidia.com/gpu=1"]
+        ));
+        assert!(has(&argv(Kind::Docker, &i), &["--gpus", "device=1"]));
+        i.local_image = Some(PathBuf::from("/w/images/abc.sif"));
+        let a = argv(Kind::Apptainer, &i);
+        assert_eq!(
+            &a[..7],
+            [
+                "run",
+                "--containall",
+                "--cleanenv",
+                "--no-home",
+                "--net",
+                "--network",
+                "none"
+            ]
+        );
+        assert!(has(&a, &["--env", "CUDA_VISIBLE_DEVICES=1"]) && a.iter().any(|w| w == "--nv"));
+        // the words after the image follow its ENTRYPOINT, as under podman:
+        // `run`, never `exec`, which would skip it
+        assert!(!a.iter().any(|w| w == "exec"), "{a:?}");
+        let image_at = a.iter().position(|w| w == "/w/images/abc.sif").unwrap();
+        assert_eq!(&a[image_at + 1..], ["sh", "-c", "ls /input > /output/x"]);
+        assert!(!a.iter().any(|w| w.starts_with("docker://")));
+        let target = local_image(
+            Path::new("/w/images"),
+            &format!("sha256:{}", "b".repeat(64)),
+            ImageForm::Sandbox,
+        );
+        assert_eq!(
+            target,
+            PathBuf::from(format!("/w/images/{}.sandbox", "b".repeat(64)))
+        );
+        assert_eq!(
+            build_argv("busybox@sha256:00", &target, ImageForm::Sandbox)[..2],
+            ["build", "--sandbox"]
+        );
+        assert_eq!(
+            build_argv("busybox@sha256:00", Path::new("/x.sif"), ImageForm::Sif),
+            ["build", "/x.sif", "docker://busybox@sha256:00"]
+        );
+        assert!(apptainer_isolates("1.3.4-1") && apptainer_isolates("1.1.0"));
+        assert!(!apptainer_isolates("1.0.3") && !apptainer_isolates("0.9"));
+        assert_eq!(
+            Choice::parse("apptainer-first"),
+            Some(Choice::ApptainerFirst)
+        );
+        assert_eq!(ImageForm::parse("sandbox"), Some(ImageForm::Sandbox));
+    }
+
+    /// `apptainer-first` looks for apptainer before podman; an apptainer
+    /// too old to isolate the network is passed over, with the reason.
+    #[test]
+    fn apptainer_first_prefers_apptainer_and_an_old_one_is_passed_over() {
+        let dir = std::env::temp_dir().join(format!("nils-apptainer-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let write = |name: &str, body: &str| {
+                let f = dir.join(name);
+                std::fs::write(&f, body).unwrap();
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            write(
+                "podman",
+                "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'podman version 5.0.0'; exit 0; }\necho true\n",
+            );
+            write("apptainer", "#!/bin/sh\necho 'apptainer version 1.3.4'\n");
+            write("nvidia-smi", "#!/bin/sh\nexit 1\n");
+            let path = Some(dir.as_os_str());
+            assert_eq!(
+                detect(Choice::Auto, path).runtime.unwrap().kind,
+                Kind::Podman
+            );
+            assert_eq!(
+                detect(Choice::ApptainerFirst, path).runtime.unwrap().kind,
+                Kind::Apptainer
+            );
+            write("apptainer", "#!/bin/sh\necho 'apptainer version 1.0.3'\n");
+            let d = detect(Choice::ApptainerFirst, path);
+            assert_eq!(d.runtime.unwrap().kind, Kind::Podman);
+            assert!(d.looked[0].1.contains("older than 1.1"), "{:?}", d.looked);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

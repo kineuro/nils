@@ -86,6 +86,7 @@ while i < len(a):
 keys = sorted(mounts, key=len, reverse=True)
 pattern = re.compile("(" + "|".join(re.escape(k) for k in keys) + r")(?=/|$|[^A-Za-z0-9_])")
 argv = [pattern.sub(lambda m: mounts[m.group(1)], w) for w in a[i:]]
+env = {k: pattern.sub(lambda m: mounts[m.group(1)], v) for k, v in env.items()}
 sys.exit(subprocess.call(argv, env=dict(os.environ, **env)))
 "#;
 
@@ -1076,6 +1077,51 @@ fn a_bids_run_meets_one_t1w_per_session_and_registers_one_output_per_session() {
     assert_eq!(rows[0]["id"], v["input_release_id"], "{all}");
     let text = lab.ok(&["release", "--history"], None);
     assert!(!text.contains("pipeline-run-"), "{text}");
+
+    // record 49 A1: units apart, each session in a container of its own
+    // that sees its own subject's session alone and is named its subject
+    let apart = BIDS_COPY
+        .replace("name: bids-copy", "name: bids-apart")
+        .replace(
+            "  src, out = sys.argv[1], sys.argv[2]\n",
+            "  src, out = sys.argv[1], sys.argv[2]\n  assert len(glob.glob(src + \"/sub-*/ses-*\")) == 1 and len(sys.argv) == 4, sys.argv\n",
+        )
+        .replace("  input: {layout: bids}\n", "  input: {layout: bids}\n  units: apart\n");
+    assert!(
+        apart.contains("units: apart") && apart.contains("assert len"),
+        "{apart}"
+    );
+    lab.add_descriptor("bids-apart", &apart);
+    let before = lab.podman_runs().len();
+    let v = lab.json(&[
+        "run",
+        "bids-apart",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "done", "{v}");
+    assert_eq!(v["summary"]["units"]["succeeded"], 2, "{v}");
+    assert_eq!(v["summary"]["derivatives"], 2, "{v}");
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len() - before, 2, "a container per session");
+    let id = v["id"].as_i64().unwrap();
+    for u in v["units_run"].as_array().unwrap() {
+        let unit = u["unit"].as_str().unwrap();
+        let input = lab
+            .work
+            .path()
+            .join(format!("runs/{id}/units/{unit}/input"));
+        let subjects: Vec<String> = std::fs::read_dir(&input)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(subjects.len(), 1, "{unit}: {subjects:?}");
+        assert!(unit.starts_with(&subjects[0]), "{unit}: {subjects:?}");
+        assert!(input.join("dataset_description.json").is_file());
+    }
 }
 
 /// A server with the worker beside the doors, on the lab's search path.
@@ -1097,6 +1143,10 @@ const READER: &str = "a-reader-token-of-its-length";
 
 impl Server {
     fn start(lab: &Lab) -> Server {
+        Server::start_with(lab, &[])
+    }
+
+    fn start_with(lab: &Lab, extra: &[&str]) -> Server {
         let tokens = [
             format!("{OPERATOR}=ops@lab:operator"),
             format!("{PLAIN}=pat@lab:pipelines:work,pipelines:see"),
@@ -1116,6 +1166,7 @@ impl Server {
                 "token",
             ])
             .args(["--pack-dir", packs().to_str().unwrap()])
+            .args(extra)
             .env("NILS_TOKENS", tokens)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -2361,4 +2412,927 @@ fn odd_folder_names_and_files_at_the_root_are_bound_and_said() {
     );
     let words = lab.podman_runs().pop().unwrap();
     assert!(!words.iter().any(|w| w.contains("t1:mprage")), "{words:?}");
+}
+
+// ------------------------------------------------------------ record 49
+
+/// A stand-in for apptainer, as the lane runs it (record 49 A2): it answers
+/// `--version`, keeps the words of every call, makes the SIF file or the
+/// sandbox folder a `build` names, and runs a `run`'s command on the host
+/// with every container path written as its host folder, once it has
+/// checked the local image it was given is there. It does not clear the
+/// environment as `--cleanenv` does; the words say that it was asked to.
+const FAKE_APPTAINER: &str = r#"#!/usr/bin/env python3
+import json, os, re, subprocess, sys
+a = sys.argv[1:]
+if not a or a[0] == "--version":
+    print("apptainer version 1.3.4"); sys.exit(0)
+with open(os.environ["FAKE_APPTAINER_ARGS"], "a") as log:
+    log.write(json.dumps(a) + "\n")
+if a[0] == "build":
+    target, source = a[-2], a[-1]
+    if "--sandbox" in a:
+        os.makedirs(target); open(os.path.join(target, "source"), "w").write(source)
+    else:
+        open(target, "w").write("SIF " + source)
+    sys.exit(0)
+if a[0] != "run":
+    sys.exit(0)
+mounts, env, i = {}, {}, 1
+while i < len(a):
+    w = a[i]
+    if w == "--bind":
+        host, ctr = a[i + 1].split(":")[:2]; mounts[ctr] = host; i += 2
+    elif w == "--env":
+        k, v = a[i + 1].split("=", 1); env[k] = v; i += 2
+    elif w == "--network":
+        i += 2
+    elif w.startswith("--"):
+        i += 1
+    else:
+        break
+image = a[i]; i += 1
+if not os.path.exists(image):
+    print("no image at " + image, file=sys.stderr); sys.exit(255)
+keys = sorted(mounts, key=len, reverse=True)
+pattern = re.compile("(" + "|".join(re.escape(k) for k in keys) + r")(?=/|$|[^A-Za-z0-9_])")
+argv = [pattern.sub(lambda m: mounts[m.group(1)], w) for w in a[i:]]
+env = {k: pattern.sub(lambda m: mounts[m.group(1)], v) for k, v in env.items()}
+sys.exit(subprocess.call(argv, env=dict(os.environ, **env)))
+"#;
+
+/// A stand-in for `nvidia-smi` (no card is touched on a laptop that has
+/// one): it names a card, answers a card's free memory from a file the test
+/// writes, and keeps each question it was asked.
+const FAKE_SMI: &str = r#"#!/bin/sh
+echo "$*" >> "$FAKE_GPU_ASKED"
+case "$1" in
+  --query-gpu=name) echo "Stand-in Card"; exit 0 ;;
+  --query-gpu=memory.free) echo "$(cat "$FAKE_GPU_FREE") MiB"; exit 0 ;;
+esac
+exit 1
+"#;
+
+/// A pipeline of the stacks layout whose units run apart (record 49 A1):
+/// each unit sees its own stack alone, notes when it starts and ends in the
+/// file `LANE_TRACE` names, sleeps, and writes one file.
+fn stack_slow(name: &str, needs: &str, extra: &str) -> String {
+    format!(
+        r#"name: {name}
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/{name}@sha256:{hex}"
+inputs:
+  - id: sleep
+    name: Seconds a unit takes
+    type: Number
+    value-key: "[SLEEP]"
+    default-value: 1
+command-line: |
+  python3 -c '
+  import json, os, sys, time
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  assert len(m["stacks"]) == 1, "a unit that runs apart sees its own stack"
+  man = json.load(open(sys.argv[4] + "/manifest.json"))
+  assert len(man["units"]) == 1 and man["unit"] == m["stacks"][0]["unit"]
+  def mark(w):
+      if not os.environ.get("LANE_TRACE"):
+          return
+      with open(os.environ["LANE_TRACE"], "a") as f:
+          f.write("%s %.6f %s %s %s\n" % (w, time.time(), os.environ["NILS_UNIT"], os.environ.get("CUDA_VISIBLE_DEVICES", "-"), os.environ["NILS_CORES"]))
+  mark("start")
+  time.sleep(float(sys.argv[3]))
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
+  json.dump({{"schema_version": "1", "units": [{{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]}}]}}, open(os.path.join(out, "results.json"), "w"))
+  mark("end")
+  ' [Manifest] [OutputLocation] [SLEEP] [Inputs]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  outputs:
+    - id: slow
+      kind: output
+      path-template: "stack-{{stack}}/out.txt"
+      media-type: text/plain
+  needs: {needs}
+{extra}"#,
+        hex = "c".repeat(64),
+    )
+}
+
+/// The trace a lane's units left: each start and end, in time order.
+fn trace(path: &Path) -> Vec<(String, f64, String, String)> {
+    let mut events: Vec<(String, f64, String, String)> = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            Some((
+                w[0].to_string(),
+                w[1].parse().ok()?,
+                w[2].to_string(),
+                w[3].to_string(),
+            ))
+        })
+        .collect();
+    events.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    events
+}
+
+/// The most units that ran at once, by the trace.
+fn most_at_once(path: &Path) -> usize {
+    let (mut now, mut most) = (0usize, 0usize);
+    for (w, ..) in trace(path) {
+        if w == "start" {
+            now += 1;
+            most = most.max(now);
+        } else {
+            now -= 1;
+        }
+    }
+    most
+}
+
+impl Lab {
+    fn traced(&self, trace: &Path, args: &[&str]) -> (bool, String, String) {
+        let child = self
+            .command(&self.path)
+            .args(args)
+            .env("LANE_TRACE", trace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    }
+
+    fn count(&self, sql: &str) -> i64 {
+        self.store().query(sql, &[]).unwrap()[0].int(0).unwrap()
+    }
+}
+
+/// Record 49 A1: a run whose units run apart runs them side by side, each
+/// in a container of its own that sees its own stack alone, as many at once
+/// as the lane's cores and memory allow and never more; a unit that could
+/// never fit is refused before anything runs.
+#[test]
+fn units_apart_fill_the_lane_s_budget_and_never_pass_it() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-budget");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 2, memory-gb: 1}", ""));
+    let t = lab.work.path().join("trace-cores");
+    // four cores: two units of two cores at once
+    lab.ok(
+        &["pipeline", "lane", "--cores", "4", "--memory-gb", "100"],
+        None,
+    );
+    let (ok, out, err) = lab.traced(
+        &t,
+        &[
+            "run",
+            "slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=1.2",
+            "--json",
+        ],
+    );
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["units"], "apart");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    assert_eq!(run["derivatives"].as_array().unwrap().len(), 4, "{run}");
+    assert_eq!(run["summary"]["lane"]["cores"], 4, "{run}");
+    assert_eq!(run["unit_states"]["over"], 4, "{run}");
+    assert_eq!(trace(&t).len(), 8);
+    assert_eq!(most_at_once(&t), 2, "{:?}", trace(&t));
+    // each unit had a container of its own, told its unit and its cores
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 4);
+    for words in &runs {
+        assert!(
+            words.iter().any(|w| w.starts_with("NILS_UNIT=stack-")),
+            "{words:?}"
+        );
+        assert!(words.iter().any(|w| w == "NILS_CORES=2"), "{words:?}");
+    }
+
+    // memory binds as cores do: three units of 1 GB in a lane of 3 GB
+    let t = lab.work.path().join("trace-memory");
+    lab.ok(
+        &["pipeline", "lane", "--cores", "64", "--memory-gb", "3"],
+        None,
+    );
+    let (ok, _, err) = lab.traced(
+        &t,
+        &[
+            "run",
+            "slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=1.2",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(most_at_once(&t), 3, "{:?}", trace(&t));
+
+    // a unit that could never fit is refused, and nothing runs
+    lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let (ok, _, err) = lab.run(&["run", "slow", "--select", "selection:every@1"], None);
+    assert!(!ok);
+    assert!(
+        err.contains("asks 2 cores") && err.contains("nils pipeline lane"),
+        "{err}"
+    );
+    assert_eq!(lab.podman_runs().len(), 8);
+    let lane: Value = serde_json::from_str(&lab.ok(&["pipeline", "lane", "--json"], None)).unwrap();
+    assert_eq!(lane["cores"], 1, "{lane}");
+    assert_eq!(lane["set"]["memory_gb"], 3, "{lane}");
+}
+
+/// Record 49 A1: a run whose engine is killed with units in flight is taken
+/// up where it stopped. The units it finished are kept with their
+/// derivatives and never run again; those in flight run again from a clean
+/// folder. The pipeline lane's worker finds the run by itself and queues it
+/// under what its job recorded; a run finished cannot be resumed.
+#[test]
+fn a_killed_run_is_taken_up_where_it_stopped() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-resume");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    lab.ok(
+        &["pipeline", "lane", "--cores", "2", "--memory-gb", "100"],
+        None,
+    );
+    let t = lab.work.path().join("trace");
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        lab.command(&lab.path)
+            .args([
+                "run",
+                "slow",
+                "--select",
+                "selection:every@1",
+                "--param",
+                "sleep=2",
+            ])
+            .env("LANE_TRACE", &t)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // a group of its own, so the kill takes its containers with it
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    };
+    // the first two units end, the next two start; then the engine dies
+    let started = std::time::Instant::now();
+    loop {
+        let over = lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'");
+        let marked = trace(&t).iter().filter(|e| e.0 == "start").count();
+        if over >= 2 && marked >= 3 {
+            break;
+        }
+        assert!(
+            started.elapsed().as_secs() < 60,
+            "the run never got half way"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let pgid = child.id();
+    Command::new("kill")
+        .args(["-KILL", &format!("-{pgid}")])
+        .status()
+        .unwrap();
+    let _ = child.wait();
+    let over_before: Vec<String> = lab
+        .store()
+        .query(
+            "SELECT unit FROM pipeline_unit WHERE state = 'over' ORDER BY unit",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert!(
+        over_before.len() >= 2 && over_before.len() < 4,
+        "{over_before:?}"
+    );
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline_run WHERE status = 'running'"),
+        1,
+        "a killed engine leaves its run saying running"
+    );
+    let derivatives_before = lab.count("SELECT COUNT(*) FROM derivative");
+    assert_eq!(derivatives_before, over_before.len() as i64);
+
+    // the pipeline lane's worker takes it up again by itself
+    let mut worker = lab.command(&lab.path);
+    worker
+        .args(["jobs", "work", "--lane", "pipelines", "--once"])
+        .env("LANE_TRACE", &t);
+    let out = worker.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run: Value =
+        serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["resumes"], 1, "{run}");
+    assert_eq!(run["summary"]["resumed"], true, "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+    assert_eq!(
+        lab.count("SELECT COUNT(DISTINCT path) FROM derivative"),
+        4,
+        "no unit registered twice"
+    );
+    // a unit over before the kill never started again
+    let events = trace(&t);
+    for unit in &over_before {
+        let starts = events
+            .iter()
+            .filter(|e| e.0 == "start" && &e.2 == unit)
+            .count();
+        assert_eq!(starts, 1, "{unit} ran again: {events:?}");
+    }
+    // every unit ended once at least, and the ones in flight twice started
+    let starts = events.iter().filter(|e| e.0 == "start").count();
+    assert!(starts > 4 && starts <= 6, "{events:?}");
+    let ends = events.iter().filter(|e| e.0 == "end").count();
+    assert_eq!(ends, 4, "a killed unit never ended: {events:?}");
+    let attempts: i64 = lab.count("SELECT SUM(attempts) FROM pipeline_unit");
+    assert_eq!(attempts as usize, starts, "{events:?}");
+    // the job that took it up ran as the one the killed run recorded
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let resumed = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["args"]["resume"] == 1)
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(resumed["state"], "done", "{resumed}");
+    assert_eq!(resumed["kind"], "pipeline", "{resumed}");
+    // a run that is done has nothing left to run
+    let (ok, _, err) = lab.run(&["run", "--resume", "1"], None);
+    assert!(!ok && err.contains("nothing is left to run"), "{err}");
+}
+
+/// Record 49 A1, the proof: a long run and a digest go on together. The
+/// pipeline lane runs the run while the main lane runs a digest queued after
+/// it, which ends first.
+#[test]
+fn a_long_run_and_a_digest_go_on_together() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-digest");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    // one unit at a time: four units of three seconds each
+    lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let src = format!("src={}", lab._src.path().display());
+    let server = Server::start_with(&lab, &["--ingest-root", &src]);
+    let (status, doc) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "slow", "--select", "selection:every@1", "--param", "sleep=3"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 202, "{doc}");
+    let run_job = doc["job"].as_i64().unwrap();
+    let job = |id: i64| {
+        server
+            .call("GET", &format!("/api/jobs/{id}"), None, OPERATOR)
+            .1
+    };
+    let started = std::time::Instant::now();
+    while job(run_job)["progress"]["running"].as_u64() != Some(1) {
+        assert!(started.elapsed().as_secs() < 60, "{}", job(run_job));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (status, doc) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["digest", "@src"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 202, "{doc}");
+    let digest_job = doc["job"].as_i64().unwrap();
+    let mut digest = Value::Null;
+    for _ in 0..600 {
+        digest = job(digest_job);
+        if matches!(
+            digest["state"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(digest["state"], "done", "{digest}");
+    // the run is still going when the digest queued after it is done
+    let during = job(run_job);
+    assert_eq!(during["state"], "running", "{during}");
+    assert!(during["progress"]["over"].as_u64().unwrap() < 4, "{during}");
+    let mut state = Value::Null;
+    for _ in 0..900 {
+        state = job(run_job);
+        if matches!(
+            state["state"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(state["state"], "done", "{state}");
+    // the two lanes' workers, each a row of its own kind
+    let (_, all) = server.call("GET", "/api/jobs?all=1", None, OPERATOR);
+    let text = all.to_string();
+    assert!(text.contains("\"pipeline-worker\""), "{all}");
+}
+
+/// Record 49 A2: under apptainer the image is built once from its pinned
+/// digest and kept by it; a GPU unit waits while the card's free memory is
+/// below its need and each holds a lease on the named card, so two units
+/// that would not fit together never run at once. No card is used: a
+/// stand-in nvidia-smi answers.
+#[test]
+fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the stand-ins need it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-gpu");
+    let fake = lab.bin.file("apptainer", FAKE_APPTAINER.as_bytes());
+    let smi = lab.bin.file("nvidia-smi", FAKE_SMI.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&fake, &smi] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let free = lab.work.path().join("gpu-free");
+    std::fs::write(&free, "2000").unwrap();
+    let asked = lab.work.path().join("gpu-asked");
+    let apptainer_args = lab.bin.path().join("apptainer.log");
+    let t = lab.work.path().join("trace");
+    lab.add_descriptor(
+        "gpu-slow",
+        &stack_slow(
+            "gpu-slow",
+            "{gpu: required, gpu-memory-gb: 4, cores: 1, memory-gb: 1}",
+            "",
+        ),
+    );
+    lab.ok(&["pipeline", "runtime", "--set", "apptainer"], None);
+    lab.ok(
+        &[
+            "pipeline",
+            "lane",
+            "--cores",
+            "8",
+            "--memory-gb",
+            "100",
+            "--gpu-card",
+            "1",
+        ],
+        None,
+    );
+    let child = lab
+        .command(&lab.path)
+        .args([
+            "run",
+            "gpu-slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=0.5",
+            "--json",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args)
+        .env("FAKE_GPU_FREE", &free)
+        .env("FAKE_GPU_ASKED", &asked)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // 2000 MiB free and 4096 needed: the units wait, and say why
+    let started = std::time::Instant::now();
+    loop {
+        let progress: String = lab
+            .store()
+            .query("SELECT progress FROM job WHERE kind = 'pipeline'", &[])
+            .unwrap()
+            .first()
+            .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+            .unwrap_or_default();
+        if progress.contains("card 1: 2000 MiB free") {
+            break;
+        }
+        assert!(started.elapsed().as_secs() < 60, "{progress}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(trace(&t).is_empty(), "a unit started without its lease");
+    // room for one unit's need, not two: one lease at a time
+    std::fs::write(&free, "6000").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["runtime"], "apptainer");
+    assert_eq!(run["device"], "cuda:Stand-in Card");
+    assert_eq!(most_at_once(&t), 1, "{:?}", trace(&t));
+    assert!(
+        trace(&t).iter().all(|e| e.3 == "1"),
+        "the leased card alone: {:?}",
+        trace(&t)
+    );
+    for u in run["units_run"].as_array().unwrap() {
+        assert_eq!(u["gpu_card"], 1, "{u}");
+    }
+    let questions = std::fs::read_to_string(&asked).unwrap();
+    assert!(
+        questions.contains("--query-gpu=memory.free --format=csv,noheader -i 1"),
+        "{questions}"
+    );
+    // the image: built once from the pinned digest, run from where it is kept
+    let calls: Vec<Vec<String>> = std::fs::read_to_string(&apptainer_args)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let builds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "build").collect();
+    assert_eq!(builds.len(), 1, "{calls:?}");
+    let sif = lab
+        .work
+        .path()
+        .join("images")
+        .join(format!("{}.sif", "c".repeat(64)));
+    assert!(sif.is_file());
+    assert_eq!(
+        builds[0].last().unwrap(),
+        &format!("docker://example.org/gpu-slow@sha256:{}", "c".repeat(64))
+    );
+    let execs: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "run").collect();
+    assert_eq!(execs.len(), 4);
+    let work = lab.work.path().canonicalize().unwrap();
+    for e in &execs {
+        assert_eq!(
+            &e[..7],
+            [
+                "run",
+                "--containall",
+                "--cleanenv",
+                "--no-home",
+                "--net",
+                "--network",
+                "none"
+            ]
+        );
+        assert!(e.iter().any(|w| w == "--nv"), "{e:?}");
+        assert!(pair(e, "--env", "CUDA_VISIBLE_DEVICES=1"), "{e:?}");
+        assert!(e.iter().any(|w| w == sif.to_str().unwrap()), "{e:?}");
+        // bound: the unit's own input, inputs and output, and the folders
+        // of its stack's files, nothing wider
+        let binds: Vec<&String> = e
+            .windows(2)
+            .filter(|w| w[0] == "--bind")
+            .map(|w| &w[1])
+            .collect();
+        for b in &binds {
+            let host = Path::new(b.split(':').next().unwrap());
+            let host = host.canonicalize().unwrap_or(host.to_path_buf());
+            let unit_side = host.starts_with(work.join("runs/1/units"))
+                || host
+                    .to_string_lossy()
+                    .starts_with(&format!("{}/derivatives/gpu-slow/1/stack-", work.display()));
+            let source = host.starts_with(lab._src.path().canonicalize().unwrap());
+            assert!(unit_side || source, "{b} is wider than the unit");
+        }
+        assert!(binds.iter().any(|b| b.ends_with(":/input:ro")));
+    }
+    // a second run finds the image kept and builds nothing
+    std::fs::write(&free, "99999").unwrap();
+    let mut again = lab.command(&lab.path);
+    again
+        .args([
+            "run",
+            "gpu-slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=0",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args)
+        .env("FAKE_GPU_FREE", &free)
+        .env("FAKE_GPU_ASKED", &asked);
+    assert!(again.output().unwrap().status.success());
+    let builds = std::fs::read_to_string(&apptainer_args)
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("[\"build\""))
+        .count();
+    assert_eq!(builds, 1);
+    // with no card named, a unit that needs one is refused before it runs
+    lab.ok(&["pipeline", "lane", "--gpu-card", "none"], None);
+    let mut refused = lab.command(&lab.path);
+    refused
+        .args(["run", "gpu-slow", "--select", "selection:every@1"])
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args)
+        .env("FAKE_GPU_ASKED", &asked);
+    let out = refused.output().unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("uses no card"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Record 49 R3: a secret the site sets is mounted read-only into the
+/// containers of the pipeline that declares it, and only those; it is never
+/// in an output, a log, the run's record or its results, even when the
+/// pipeline prints it, writes it into a file and reports it. A grep of every
+/// file under the working place, the registry and what the engine printed
+/// finds none of it.
+#[test]
+fn a_secret_is_mounted_for_its_run_alone_and_found_nowhere_after() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-secret");
+    const TOKEN: &str = "NILS-PLANTED-SECRET-7f3a9c1e2b";
+    const SECOND: &str = "Xk2vQ9pLm4sT8wZ1";
+    let secret_dir = TempDir::new("pipelines-secret-home");
+    let licence = secret_dir.file("license.txt", format!("{TOKEN}\n{SECOND}\n").as_bytes());
+    let leak = format!(
+        r#"name: leak
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/leak@sha256:{hex}"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  lic = open(os.environ["FS_LICENSE"]).read()
+  print("the licence reads: " + lic)
+  print("a line of it: " + lic.splitlines()[1], file=sys.stderr)
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
+  open(os.path.join(d, "copy.txt"), "w").write(lic)
+  json.dump({{"schema_version": "1", "units": [{{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt", u + "/copy.txt"], "metrics": {{"licence": lic.strip()}}}}]}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      env: FS_LICENSE
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{{stack}}/*.txt"
+      media-type: text/plain
+"#,
+        hex = "d".repeat(64)
+    );
+    lab.add_descriptor("leak", &leak);
+    // not set: the run is refused before anything runs, and says the cure
+    let (ok, _, err) = lab.run(&["run", "leak", "--select", "selection:every@1"], None);
+    assert!(!ok);
+    assert!(
+        err.contains("nils pipeline secret set freesurfer_license"),
+        "{err}"
+    );
+    lab.ok(
+        &[
+            "pipeline",
+            "secret",
+            "set",
+            "freesurfer_license",
+            "--file",
+            licence.to_str().unwrap(),
+        ],
+        None,
+    );
+    let listed: Value =
+        serde_json::from_str(&lab.ok(&["pipeline", "secret", "list", "--json"], None)).unwrap();
+    assert_eq!(
+        listed,
+        json!([{"id": "freesurfer_license", "readable": true}])
+    );
+    let (ok, out, err) = lab.run(
+        &["run", "leak", "--select", "selection:every@1", "--json"],
+        None,
+    );
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    // each copy was removed and refused; the clean file of each unit stands
+    assert_eq!(run["status"], "partial", "{run}");
+    assert_eq!(run["derivatives"].as_array().unwrap().len(), 4, "{run}");
+    assert_eq!(run["summary"]["secrets"], json!(["freesurfer_license"]));
+    let refused = run["summary"]["refused_files"].as_array().unwrap();
+    assert_eq!(
+        refused
+            .iter()
+            .filter(|r| r["why"]
+                .as_str()
+                .unwrap_or("")
+                .contains("held a secret input"))
+            .count(),
+        4,
+        "{run}"
+    );
+    // mounted read-only for this pipeline's containers
+    let mount = format!("{}:/secrets/freesurfer_license:ro", licence.display());
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 4);
+    assert!(runs.iter().all(|w| pair(w, "--volume", &mount)), "{runs:?}");
+    assert!(
+        runs.iter()
+            .all(|w| pair(w, "--env", "FS_LICENSE=/secrets/freesurfer_license"))
+    );
+    // and never for a pipeline that does not declare it
+    lab.add_descriptor(
+        "stack-echo",
+        &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+    );
+    lab.ok(
+        &["run", "stack-echo", "--select", "selection:every@1"],
+        None,
+    );
+    let runs = lab.podman_runs();
+    assert!(
+        !runs[4].iter().any(|w| w.contains("secrets")),
+        "{:?}",
+        runs[4]
+    );
+    // the logs say where it was, never what
+    let log =
+        std::fs::read_to_string(lab.work.path().join("runs/1/units/stack-1/log.txt")).unwrap();
+    assert!(log.contains("[secret freesurfer_license]"), "{log}");
+
+    // nothing anywhere holds a byte of it: every file the working place and
+    // the registry hold, and what the engine printed
+    let mut files = Vec::new();
+    let mut stack = vec![lab.work.path().to_path_buf(), lab.home.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(e.path());
+            } else if kind.is_file() {
+                files.push(e.path());
+            }
+        }
+    }
+    assert!(files.len() > 20, "{}", files.len());
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap();
+        for needle in [TOKEN, SECOND] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{} holds the secret",
+                f.display()
+            );
+        }
+    }
+    for text in [&out, &err] {
+        assert!(!text.contains(TOKEN) && !text.contains(SECOND));
+    }
+    // the rows say so too, read through the store
+    let mut store = lab.store();
+    for (table, cols) in [
+        ("pipeline_run", "summary || COALESCE(error, '') || params"),
+        ("pipeline_unit", "COALESCE(outcome, '')"),
+        ("review_item", "*"),
+        (
+            "job",
+            "COALESCE(args, '') || COALESCE(result, '') || COALESCE(progress, '') || COALESCE(error, '')",
+        ),
+        ("audit", "*"),
+    ] {
+        let sql = if cols == "*" {
+            format!("SELECT * FROM {table}")
+        } else {
+            format!("SELECT {cols} FROM {table}")
+        };
+        let rows = store.query(&sql, &[]).unwrap();
+        for r in rows {
+            for cell in &r.0 {
+                if let nils_registry::store::Cell::Text(t) = cell {
+                    assert!(!t.contains(TOKEN) && !t.contains(SECOND), "{table}: {t}");
+                }
+            }
+        }
+    }
+}
+
+/// Record 49 A1: a person's cancel stops the units in flight and closes the
+/// run as cancelled, with the units it finished kept; `nils run --resume`
+/// goes on from there.
+#[test]
+fn a_cancelled_run_keeps_its_units_and_goes_on() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-cancel");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let t = lab.work.path().join("trace");
+    let child = lab
+        .command(&lab.path)
+        .args([
+            "run",
+            "slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=1",
+        ])
+        .env("LANE_TRACE", &t)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'") < 1 {
+        assert!(started.elapsed().as_secs() < 60);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("nils run --resume 1"), "{err}");
+    let run: Value =
+        serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
+    assert_eq!(run["status"], "cancelled", "{run}");
+    let over = run["unit_states"]["over"].as_u64().unwrap();
+    assert!((1..4).contains(&over), "{run}");
+    assert!(
+        run["unit_states"].get("running").is_none(),
+        "none left in flight: {run}"
+    );
+    // taken up again by hand: the rest run, and nothing twice
+    let (ok, out, err) = lab.traced(&t, &["run", "--resume", "1", "--json"]);
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    assert_eq!(lab.count("SELECT COUNT(DISTINCT path) FROM derivative"), 4);
+    assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+    let ends = trace(&t).iter().filter(|e| e.0 == "end").count();
+    assert_eq!(ends, 4, "{:?}", trace(&t));
 }

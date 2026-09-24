@@ -22,6 +22,21 @@ pub const LAYOUTS: [&str; 2] = ["bids", "stacks"];
 /// What a pipeline needs of a GPU (`x-nils.needs.gpu`).
 pub const GPU: [&str; 3] = ["none", "optional", "required"];
 
+/// How a run's units meet their containers (`x-nils.units`, record 49 A1):
+/// all in one container, or each unit in a container of its own, so the
+/// lane runs them side by side within its budget.
+pub const UNITS: [&str; 2] = ["together", "apart"];
+
+/// What a unit is taken to need where the descriptor says nothing: one core
+/// and 2 GB of memory; a GPU unit 8 GB of the card's memory.
+pub const DEFAULT_CORES: u32 = 1;
+pub const DEFAULT_MEMORY_GB: f64 = 2.0;
+pub const DEFAULT_GPU_MEMORY_GB: f64 = 8.0;
+
+/// The container paths a secret may not be mounted at or under: the
+/// runner's own.
+pub const RUNNER_PATHS: [&str; 4] = ["/input", "/inputs", "/output", "/source"];
+
 /// The parameter types (the Boutiques inputs a runner takes).
 pub const PARAM_TYPES: [&str; 3] = ["Number", "String", "Flag"];
 
@@ -112,6 +127,52 @@ impl Gpu {
     }
 }
 
+/// How a run's units meet their containers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Units {
+    /// One container for the whole run (record 43, and what a descriptor
+    /// that says nothing gets): a pipeline that fits a model over every
+    /// unit, or loops over them itself.
+    Together,
+    /// A container per unit, each seeing only its own unit's input, so the
+    /// lane runs several at once and a run that stopped resumes with the
+    /// units it had not finished (record 49 A1).
+    Apart,
+}
+
+impl Units {
+    pub fn name(self) -> &'static str {
+        match self {
+            Units::Together => "together",
+            Units::Apart => "apart",
+        }
+    }
+}
+
+/// What a scheduling unit needs (`x-nils.needs`): a unit where units run
+/// apart, the whole run where they run together.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Needs {
+    pub cores: u32,
+    pub memory_gb: f64,
+    /// Of the card's memory, for a unit that takes the GPU.
+    pub gpu_memory_gb: f64,
+}
+
+/// A secret input (`x-nils.secrets`, record 49 R3): a file the site keeps,
+/// such as a licence, that the engine reads at run time and mounts
+/// read-only into this pipeline's containers alone, never into an output, a
+/// log, the run's record or its results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Secret {
+    pub id: String,
+    /// Where the container sees the file.
+    pub mount: String,
+    /// An environment variable that names `mount`, such as FS_LICENSE.
+    pub env: Option<String>,
+    pub optional: bool,
+}
+
 /// The image, by its registry manifest digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -186,6 +247,12 @@ pub struct Descriptor {
     pub inputs: Vec<TypedInput>,
     pub outputs: Vec<Output>,
     pub gpu: Gpu,
+    /// The cores, memory and card memory a scheduling unit needs.
+    pub needs: Needs,
+    /// Whether units run in one container or each in its own.
+    pub units: Units,
+    /// The secret inputs it reads.
+    pub secrets: Vec<Secret>,
     /// The axes its results may propose values on.
     pub proposals: Vec<String>,
     /// The document as it parsed, kept whole.
@@ -631,6 +698,96 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             ));
         }
     };
+    let n = &x["needs"];
+    if !n.is_null() && !n.is_object() {
+        return Err("x-nils.needs is a mapping: gpu, cores, memory-gb, gpu-memory-gb".into());
+    }
+    let cores = match &n["cores"] {
+        Value::Null => DEFAULT_CORES,
+        Value::Number(c) => match c.as_u64() {
+            Some(c) if (1..=4096).contains(&c) => c as u32,
+            _ => {
+                return Err(format!(
+                    "x-nils.needs.cores is a whole number from 1, not {c}"
+                ));
+            }
+        },
+        other => return Err(format!("x-nils.needs.cores is a whole number, not {other}")),
+    };
+    let positive = |key: &str, default: f64| -> Result<f64, String> {
+        match opt_number(n, key, "x-nils.needs.")? {
+            None => Ok(default),
+            Some(v) if v > 0.0 && v.is_finite() => Ok(v),
+            Some(v) => Err(format!("x-nils.needs.{key} is a number above 0, not {v}")),
+        }
+    };
+    let needs = Needs {
+        cores,
+        memory_gb: positive("memory-gb", DEFAULT_MEMORY_GB)?,
+        gpu_memory_gb: positive("gpu-memory-gb", DEFAULT_GPU_MEMORY_GB)?,
+    };
+    let units = match opt_text(x, "units", "x-nils.")?.as_deref() {
+        None | Some("together") => Units::Together,
+        Some("apart") => Units::Apart,
+        Some(other) => {
+            return Err(format!(
+                "x-nils.units is one of {}, not {other}",
+                UNITS.join(", ")
+            ));
+        }
+    };
+    if units == Units::Apart
+        && let Some(o) = outputs.iter().find(|o| o.run_level)
+    {
+        return Err(format!(
+            "x-nils.units apart runs each unit in a container of its own, and the output {} is the whole run's: a pipeline with a run-level output runs its units together",
+            o.id
+        ));
+    }
+    let mut secrets: Vec<Secret> = Vec::new();
+    for (i, s) in array(x, "secrets", "x-nils.")?.iter().enumerate() {
+        let at = format!("x-nils.secrets[{i}].");
+        let id = text(s, "id", &at)?.to_string();
+        if !is_ident(&id, true) {
+            return Err(format!("{at}id {id} is lowercase letters, digits and _"));
+        }
+        if secrets.iter().any(|q| q.id == id) {
+            return Err(format!("{at}id {id} is declared twice"));
+        }
+        let mount = opt_text(s, "mount", &at)?.unwrap_or_else(|| format!("/secrets/{id}"));
+        let clean = mount.starts_with('/')
+            && !mount.contains(':')
+            && !mount.contains(',')
+            && !mount.contains('\\')
+            && mount[1..]
+                .split('/')
+                .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
+        if !clean {
+            return Err(format!(
+                "{at}mount {mount} is an absolute container path, with no empty, . or .. segment and no ':' or ','"
+            ));
+        }
+        if let Some(own) = RUNNER_PATHS
+            .iter()
+            .find(|p| mount == **p || mount.starts_with(&format!("{p}/")))
+        {
+            return Err(format!(
+                "{at}mount {mount} is under {own}, which the runner mounts itself"
+            ));
+        }
+        let env = opt_text(s, "env", &at)?;
+        if let Some(e) = &env
+            && !(is_ident(e, false) && e.chars().all(|c| !c.is_ascii_lowercase()))
+        {
+            return Err(format!("{at}env {e} is an upper-case variable name"));
+        }
+        secrets.push(Secret {
+            id,
+            mount,
+            env,
+            optional: opt_bool(s, "optional", &at)?.unwrap_or(false),
+        });
+    }
     let mut proposals: Vec<String> = Vec::new();
     for (i, p) in array(x, "proposals", "x-nils.")?.iter().enumerate() {
         let axis = text(p, "axis", &format!("x-nils.proposals[{i}]."))?;
@@ -650,6 +807,9 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         inputs,
         outputs,
         gpu,
+        needs,
+        units,
+        secrets,
         proposals,
         document,
     })
@@ -1163,5 +1323,106 @@ x-nils:
                 "02"
             ]
         );
+    }
+
+    /// Record 49 A1 and A2: what a unit needs, whether units run apart, and
+    /// the secrets a pipeline reads, each checked where it is declared.
+    #[test]
+    fn needs_units_and_secrets_are_declared_and_checked() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let d = parse(&base).unwrap();
+        assert_eq!(d.units, Units::Together);
+        assert_eq!(d.needs.cores, DEFAULT_CORES);
+        assert_eq!(d.needs.memory_gb, DEFAULT_MEMORY_GB);
+        assert!(d.secrets.is_empty());
+        let with = |needs: &str, extra: &str| {
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("  needs: {needs}\n{extra}"),
+            )
+        };
+        let d = parse(&with(
+            "{gpu: required, cores: 4, memory-gb: 12, gpu-memory-gb: 6}",
+            "  units: apart\n  secrets:\n    - id: freesurfer_license\n      mount: /opt/fs/license.txt\n      env: FS_LICENSE\n",
+        ))
+        .unwrap();
+        assert_eq!(d.units, Units::Apart);
+        assert_eq!(
+            d.needs,
+            Needs {
+                cores: 4,
+                memory_gb: 12.0,
+                gpu_memory_gb: 6.0
+            }
+        );
+        assert_eq!(
+            d.secrets,
+            [Secret {
+                id: "freesurfer_license".into(),
+                mount: "/opt/fs/license.txt".into(),
+                env: Some("FS_LICENSE".into()),
+                optional: false,
+            }]
+        );
+        let d = parse(&with("{gpu: none}", "  secrets: [{id: key}]\n")).unwrap();
+        assert_eq!(d.secrets[0].mount, "/secrets/key");
+        for (needs, extra, words) in [
+            ("{cores: 0}", "", "whole number from 1"),
+            ("{cores: 1.5}", "", "whole number from 1"),
+            ("{memory-gb: -2}", "", "above 0"),
+            ("{gpu-memory-gb: 0}", "", "above 0"),
+            (
+                "{gpu: none}",
+                "  units: sometimes\n",
+                "x-nils.units is one of",
+            ),
+            ("{gpu: none}", "  secrets: [{id: Key}]\n", "lowercase"),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a}, {id: a}]\n",
+                "declared twice",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: /output/lic}]\n",
+                "runner mounts itself",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: /inputs}]\n",
+                "runner mounts itself",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: relative}]\n",
+                "absolute container path",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: \"/a:b\"}]\n",
+                "absolute container path",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, mount: /a/../b}]\n",
+                "absolute container path",
+            ),
+            (
+                "{gpu: none}",
+                "  secrets: [{id: a, env: fs_license}]\n",
+                "upper-case",
+            ),
+        ] {
+            let e = parse(&with(needs, extra)).unwrap_err();
+            assert!(e.contains(words), "{needs} {extra}: {e}");
+        }
+        // a run-level output is the whole run's: its units cannot run apart
+        let model = "    - id: head\n      kind: model\n      level: run\n      path-template: \"head/head.*\"\n      card: head/card.json\n";
+        let e = parse(&base.replace(
+            "  needs: {gpu: optional}",
+            &format!("{model}  needs: {{gpu: optional}}\n  units: apart"),
+        ))
+        .unwrap_err();
+        assert!(e.contains("runs its units together"), "{e}");
     }
 }

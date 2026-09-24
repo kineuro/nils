@@ -344,6 +344,22 @@ fn the_job_contract_is_the_runner_s() {
         strings(&job["$defs"]["output"]["properties"]["level"]["enum"]),
         descriptor::OUTPUT_LEVELS
     );
+    // record 49: how units meet their containers, what a unit needs of the
+    // lane and the card, and the secrets a pipeline reads
+    assert_eq!(strings(&x["units"]["enum"]), descriptor::UNITS);
+    for key in ["cores", "memory-gb", "gpu-memory-gb"] {
+        assert!(
+            job["$defs"]["needs"]["properties"].get(key).is_some(),
+            "{key}"
+        );
+    }
+    for key in ["id", "mount", "env", "optional"] {
+        assert!(
+            job["$defs"]["secret"]["properties"].get(key).is_some(),
+            "{key}"
+        );
+    }
+    assert_eq!(x["secrets"]["items"]["$ref"], "#/$defs/secret");
     assert_eq!(
         strings(&job["required"]),
         [

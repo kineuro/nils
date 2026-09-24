@@ -2288,11 +2288,54 @@ fn build_registry() -> Vec<Table> {
                 req("principal", Type::Text),
                 col("actor", Type::Json),
                 col("error", Type::Text),
+                // record 49 A1: together | apart, how often a run that
+                // stopped was taken up again, and the caller's threshold,
+                // which a resume keeps
+                col("units", Type::Text),
+                col("resumes", Type::Int),
+                col("threshold", Type::Double),
             ],
         )
         .index(&["pipeline_id"])
         .index(&["handle_id"])
         .index(&["job_id"]),
+        // Record 49 A1: one work unit of a run, as the lane schedules it.
+        // A unit over is kept when a run that stopped is taken up again; a
+        // unit in flight then runs again. What it declared of the lane's
+        // budget and the card it leased stand on the row while it runs.
+        Table::new(
+            "pipeline_unit",
+            vec![
+                col("id", Type::Id),
+                req("run_id", Type::Int),
+                // sub-<s>, sub-<s>_ses-<t> or stack-<id>
+                req("unit", Type::Text),
+                req("position", Type::Int),
+                // queued | running | registering | over
+                req("state", Type::Text),
+                req("attempts", Type::Int),
+                col("cores", Type::Int),
+                col("memory_mb", Type::Int),
+                // the card a lease holds and the card memory it declared
+                col("gpu_card", Type::Int),
+                col("gpu_memory_mb", Type::Int),
+                // cpu | cuda:<name>
+                col("device", Type::Text),
+                // the container's name, and the process that ran it, so a
+                // resume stops what a killed engine left running
+                col("container", Type::Text),
+                col("pid", Type::Int),
+                col("host", Type::Text),
+                col("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+                col("exit_code", Type::Int),
+                // status, error, metrics, the files hashed and registered,
+                // the files refused
+                col("outcome", Type::Json),
+            ],
+        )
+        .unique(&["run_id", "unit"])
+        .index(&["state"]),
     ]
 }
 

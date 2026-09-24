@@ -714,8 +714,67 @@ pub fn prune(store: &mut Store, keep_days: u32) -> Result<u64, Error> {
 
 /// The oldest queued job, if any.
 pub fn next_queued(store: &mut Store) -> Result<Option<Job>, Error> {
+    next_queued_in(store, Lane::All)
+}
+
+/// Which queued jobs a worker takes (record 49 A1): pipeline runs have a
+/// lane of their own, so a long run never holds up a digest, a classify
+/// or a release, which the main lane runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// Every queued job, oldest first: a worker started by hand.
+    All,
+    /// Every job but a pipeline run.
+    Main,
+    /// Pipeline runs only.
+    Pipelines,
+}
+
+impl Lane {
+    pub fn name(self) -> &'static str {
+        match self {
+            Lane::All => "all",
+            Lane::Main => "main",
+            Lane::Pipelines => "pipelines",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Lane> {
+        match text.trim() {
+            "all" => Some(Lane::All),
+            "main" => Some(Lane::Main),
+            "pipelines" => Some(Lane::Pipelines),
+            _ => None,
+        }
+    }
+
+    /// The kind of the worker's own row: one worker per lane at a time.
+    pub fn worker_kind(self) -> &'static str {
+        match self {
+            Lane::All | Lane::Main => "worker",
+            Lane::Pipelines => PIPELINE_WORKER,
+        }
+    }
+}
+
+/// The kind of the pipeline lane's worker row.
+pub const PIPELINE_WORKER: &str = "pipeline-worker";
+
+/// Whether a job's kind is a worker's own row, which the job lists leave
+/// out unless asked for everything.
+pub fn is_worker(kind: &str) -> bool {
+    kind == "worker" || kind == PIPELINE_WORKER
+}
+
+/// The oldest queued job a lane takes, if any.
+pub fn next_queued_in(store: &mut Store, lane: Lane) -> Result<Option<Job>, Error> {
+    let filter = match lane {
+        Lane::All => "",
+        Lane::Main => " AND kind <> 'pipeline'",
+        Lane::Pipelines => " AND kind = 'pipeline'",
+    };
     let sql = format!(
-        "SELECT {} FROM {} WHERE state = 'queued' ORDER BY id LIMIT 1",
+        "SELECT {} FROM {} WHERE state = 'queued'{filter} ORDER BY id LIMIT 1",
         select_columns(store),
         store.qualified("job")
     );

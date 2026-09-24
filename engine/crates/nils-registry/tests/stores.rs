@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63],
+            [59, 60, 61, 62, 63, 64],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2016,7 +2016,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63],
+            [61, 62, 63, 64],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2078,7 +2078,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63],
+            [63, 64],
             "{name}"
         );
         for (t, col) in [
@@ -2120,6 +2120,55 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
             )
             .unwrap();
         assert_eq!(rows[0].int(0).unwrap(), 1, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 49, migration 64, on both backends: a registry from before gains
+/// the unit table empty and the run's three columns empty; a run from
+/// before reads as before, with its units together.
+#[test]
+fn migration_64_schedules_a_run_s_units_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (r, u, meta) = (
+            store.qualified("pipeline_run"),
+            store.qualified("pipeline_unit"),
+            store.qualified("registry_meta"),
+        );
+        let mut sql = String::new();
+        for col in ["units", "resumes", "threshold"] {
+            sql.push_str(&format!("ALTER TABLE {r} DROP COLUMN {col};"));
+        }
+        sql.push_str(&format!(
+            "DROP TABLE {u};
+             UPDATE {meta} SET value = '63' WHERE key = 'schema_version'"
+        ));
+        store.batch(&sql).unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [64],
+            "{name}"
+        );
+        for col in ["units", "resumes", "threshold"] {
+            assert!(
+                migrate::column_exists(&mut store, "pipeline_run", col).unwrap(),
+                "{name} pipeline_run.{col}"
+            );
+        }
+        assert!(
+            migrate::table_exists(&mut store, "pipeline_unit").unwrap(),
+            "{name}"
+        );
+        let rows = store
+            .query(&format!("SELECT COUNT(*) FROM {u}"), &[])
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 0, "{name}");
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()

@@ -1,6 +1,6 @@
 # Pipelines
 
-A pipeline is a container image that takes a frozen selection and writes files the engine registers as derivatives. Its descriptor, `nils.job.yml`, says what it is; the contract is `contracts/job/v1`. The engine runs one pipeline at a time, rootless, with no network.
+A pipeline is a container image that takes a frozen selection and writes files the engine registers as derivatives. Its descriptor, `nils.job.yml`, says what it is; the contract is `contracts/job/v1`. The engine runs one pipeline at a time, rootless, with no network, in a lane of its own beside every other job, so a long run never holds up a digest; the units of a run run side by side within the lane's budget.
 
 ## Turn pipelines on
 
@@ -34,6 +34,36 @@ A pipeline is a container image that takes a frozen selection and writes files t
 > ```
 >
 > `--set auto` goes back to looking; `--set off` turns pipelines off.
+
+3. Where the engine runs in an unprivileged container, as the group's NILS guest does, take apptainer before podman, and keep images as sandbox folders where there is no `/dev/fuse`:
+
+   ```sh
+   nils pipeline runtime --set apptainer-first --apptainer-image sandbox
+   ```
+
+   Apptainer 1.1 or later is taken, since an older one cannot keep an unprivileged container off the network. Each image is built once from its pinned digest into `<working>/images/<digest>.sif` (or `.sandbox`) and run from there; the build's log is the run's `image.log`.
+
+## Set the lane
+
+Pipeline runs have a lane of their own: `nils serve --worker` runs them in a worker beside the one that runs every other job. The lane holds up to 48 cores and 512 GB of memory for all the units it runs at once, and never more than this machine, or the container the engine runs in, offers.
+
+1. Read the lane:
+
+   ```sh
+   nils pipeline lane
+   ```
+
+2. Set its budget and the card a GPU unit leases:
+
+   ```sh
+   nils pipeline lane --cores 48 --memory-gb 512 --gpu-card 1
+   ```
+
+   `--gpu-card none` uses no card: a unit that needs a GPU is refused, and one whose need is optional runs on the CPU.
+
+> **Warning:** the budget is the engine's own bookkeeping. Keep the container's own memory cap below the host's memory, so that what the lane is allowed is really there.
+
+A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units leave. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the lane's own running units there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. Each unit holds its lease until its container ends, and is given that card alone.
 
 ## Add a pipeline
 
@@ -76,6 +106,44 @@ curl -X POST http://127.0.0.1:8437/api/jobs \
   -H 'content-type: application/json' \
   -d '{"command": ["run", "n4-bias-correction", "--select", "selection:every-t1@1"]}'
 ```
+
+## Take a run up again
+
+A run whose units run apart (`x-nils.units: apart`) keeps each unit it finished. When the engine goes away mid-run, the pipeline lane's worker finds the run, marks it `interrupted`, and queues it to go on under what its job recorded; it does so three times at most, then leaves the run to a person.
+
+1. Cancel a run; the units in flight stop, and those finished stay:
+
+   ```sh
+   nils jobs cancel <job>
+   ```
+
+2. Go on where it stopped:
+
+   ```sh
+   nils run --resume <run>
+   ```
+
+   The units in flight when it stopped run again from a clean folder; a unit whose container had ended is taken in from what it left, and nothing is registered twice. `nils jobs resume <job>` of the run's job does the same. A run whose units run together goes on from the start, unless its container had ended, when it is taken in from what that left.
+
+## Give a pipeline a secret
+
+A pipeline that needs a licence, such as FreeSurfer, declares it under `x-nils.secrets`. The site keeps the file; the engine keeps its path.
+
+1. Set the file:
+
+   ```sh
+   nils pipeline secret set freesurfer_license --file /srv/nils/secrets/license.txt
+   ```
+
+2. Check that the engine can read it:
+
+   ```sh
+   nils pipeline secret list
+   ```
+
+The file is read when a run starts and mounted read-only into that pipeline's containers alone, at the path its descriptor names (`/secrets/<id>` by default), with the variable it names (such as `FS_LICENSE`) pointing there. A run that needs a secret the site has not set is refused before anything runs.
+
+> **Warning:** a container can print what it was given. After each container the engine removes every file it left that holds the secret, and refuses it as a `pipeline:qc` item, and writes its log and `results.json` again with the secret replaced by `[secret <id>]`. The run records the secret's id, never its path or its bytes.
 
 ## Run a model and take its proposals
 
@@ -205,16 +273,19 @@ What a run does, in order:
 | step | what |
 |---|---|
 | input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session. `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
+| lane | a run is one job in the pipeline lane; its containers start while the cores and memory each declares fit in the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
 | container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
-| GPU | passed through CDI (podman), `--nv` (apptainer) or `--gpus` (docker) where the descriptor needs one and the host has one; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |
+| GPU | the lane's card alone, passed through CDI (`nvidia.com/gpu=<card>`, podman), `--nv` with `CUDA_VISIBLE_DEVICES=<card>` (apptainer) or `--gpus device=<card>` (docker) where the descriptor needs one, the host has one and the lane names a card; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |
+| apptainer | `apptainer run --containall --cleanenv --no-home --net --network none`, each folder bound with `--bind`, so the image's ENTRYPOINT runs before the descriptor's command line as it does under podman, the image built once from its digest into `<working>/images/` |
+| secrets | each declared secret's file mounted read-only for this pipeline's containers alone; what a container left is swept of it |
 | results | `/output/results.json`, one entry per unit; without it, a unit's files are the ones the descriptor's path templates find, and a container that exits with an error registers nothing |
 | derivatives | every file hashed by the engine and registered, naming the run; a file outside `/output`, one reached through a link out of it, or one a unit's own templates do not name is refused and raised as a `pipeline:qc` item. An embedding is kept under its stack, encoder and preprocessing version, and a file for a key the registry holds already is not registered again |
 | run-level outputs | a file of the whole run (`level: run`). A `model` output is registered as a model in state registered from the card beside it: the card must name the artifact's digest, it is trained on the label set the run was given, and its encoders are the card's |
 | seeds | the `seeds` and `selection` of `results.json`, kept as the run's one derivative of kind `seeds`, never as proposals |
 | proposals | on the axes the descriptor declares, grouped into `<axis>:model` review items and staged at the model card's threshold, or refused whole when the file says what the contract does not |
-| review | a unit that failed, or that `results.json` did not name, is one `pipeline:qc` review item. A container that failed as a whole, exiting with an error and no `results.json`, or writing one that does not read, is one item of the run (unit `run`), not one per unit |
+| review | a unit that failed, or that `results.json` did not name, is one `pipeline:qc` review item. A container that failed as a whole, exiting with an error and no `results.json`, or writing one that does not read, is one item of the run (unit `run`), not one per unit; so is a run whose every unit's container did |
 | run | every parameter, the runtime and its version, the host, the device, the models, the label set, the handle, the summary and a digest of the results, which a re-run that makes the same files repeats. A run whose container exited 0 is `done`, or `partial` when units failed or went unreported or a file it made was refused |
 
 A bids input's release is marked as the run's input and left out of `nils release --history`; `--runs` lists it.
 
-The container's log is `<working>/runs/<run>/log.txt`, and a bids input's release log `release.log` beside it.
+The container's log is `<working>/runs/<run>/log.txt`, or `<working>/runs/<run>/units/<unit>/log.txt` for a unit that runs apart, and a bids input's release log `release.log` beside it.

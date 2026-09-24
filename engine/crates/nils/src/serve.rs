@@ -1107,15 +1107,28 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // registry's queue has one worker, so where another already holds it,
     // this one waits and looks again.
     let stop_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let queue = args.worker.then(|| {
-        let home = home.clone();
-        let roots = args.ingest_root.clone();
-        let stop = Arc::clone(&stop_queue);
-        // lab 26b, finding 4: a job this engine queues runs with the workers
-        // the engine was started with, where the caller named none
-        let workers = args.workers.max(1);
-        std::thread::spawn(move || queue_worker(&home, &roots, workers, &stop))
-    });
+    // Record 49 A1: pipeline runs have a lane of their own beside it, so a
+    // long run never holds up a digest, a classify or a release.
+    let queue: Vec<std::thread::JoinHandle<()>> = if args.worker {
+        [
+            nils_registry::job::Lane::Main,
+            nils_registry::job::Lane::Pipelines,
+        ]
+        .into_iter()
+        .map(|lane| {
+            let home = home.clone();
+            let roots = args.ingest_root.clone();
+            let stop = Arc::clone(&stop_queue);
+            // lab 26b, finding 4: a job this engine queues runs with the
+            // workers the engine was started with, where the caller
+            // named none
+            let workers = args.workers.max(1);
+            std::thread::spawn(move || queue_worker(&home, &roots, workers, lane, &stop))
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
     // Wave 5 §10.3: the backup schedule beside the queue that runs what it
     // queues, where there is a directory to write to.
     let schedule = args.backup_dir.clone().filter(|_| args.worker).map(|dir| {
@@ -1165,8 +1178,8 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let _ = h.join();
     }
     stop_queue.store(true, Ordering::SeqCst);
-    if let Some(queue) = queue {
-        let _ = queue.join();
+    for q in queue {
+        let _ = q.join();
     }
     if let Some(schedule) = schedule {
         let _ = schedule.join();
@@ -1181,6 +1194,7 @@ fn queue_worker(
     home: &Home,
     roots: &[String],
     workers: usize,
+    lane: nils_registry::job::Lane,
     stop: &std::sync::atomic::AtomicBool,
 ) {
     let stopped = || stop.load(Ordering::SeqCst);
@@ -1188,7 +1202,7 @@ fn queue_worker(
         let outcome = match home.open() {
             Ok(mut registry) => {
                 let store = registry.store();
-                match crate::worker::claim(store, false) {
+                match crate::worker::claim(store, false, lane) {
                     Ok(worker) => crate::worker::run(
                         home,
                         store,
@@ -1199,6 +1213,7 @@ fn queue_worker(
                             ingest_roots: roots,
                             workers: Some(workers),
                             quiet: true,
+                            lane,
                         },
                         &stopped,
                     )
@@ -1212,7 +1227,11 @@ fn queue_worker(
         };
         if let Err(why) = outcome {
             use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "nils serve: the queue's worker: {why}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "nils serve: the {} lane's worker: {why}",
+                lane.name()
+            );
         }
         for _ in 0..30 {
             if stopped() {
@@ -2521,7 +2540,7 @@ fn routed(
             let jobs: Vec<_> = nils_registry::job::list(registry.store(), all, limit)
                 .map_err(job_err)?
                 .into_iter()
-                .filter(|j| all || j.kind != "worker")
+                .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
                 .collect();
             Ok(Reply::ok(serde_json::json!({
                 "count": jobs.len(),
@@ -4081,7 +4100,7 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
         let jobs: Vec<_> = nils_registry::job::list(registry.store(), false, 50)
             .unwrap_or_default()
             .into_iter()
-            .filter(|j| all || j.kind != "worker")
+            .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
             .collect();
         let data = serde_json::json!({
             "epoch": registry.meta().epoch,
