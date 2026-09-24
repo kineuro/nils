@@ -1507,6 +1507,24 @@ fn a_lease_is_renewed_rating_is_blind_and_an_axes_answer_is_an_object() {
         assert_eq!(all["blind"], false, "{all}");
         assert_eq!(all["answers"].as_array().unwrap().len(), 2, "{all}");
     }
+    // a review item an open campaign holds is answered in the campaign, not
+    // at Review's apply doors, whole or by one value
+    let shown = server.ok("GET", &format!("/api/campaigns/{id}"), None, CURATOR);
+    let held = shown["items"][0]["review_item_id"].as_i64().unwrap();
+    for body in [
+        json!({"values": {"base": "T1w", "technique": "MPRAGE"}}),
+        json!({"value": "T1w"}),
+    ] {
+        let (status, doc) = server.call(
+            "POST",
+            &format!("/api/review/{held}/apply"),
+            Some(body),
+            CURATOR,
+        );
+        assert_eq!(status, 409, "{doc}");
+        assert!(doc.to_string().contains("blind"), "{doc}");
+    }
+
     // blind through the export too: a rater may not export the answers of
     // an open campaign, and a set of them another made while it was open
     // is read without its files until it closes

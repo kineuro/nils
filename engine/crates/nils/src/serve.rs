@@ -2920,6 +2920,7 @@ fn routed(
             let item = nils_registry::review::item(registry.store(), id)
                 .map_err(review_err)?
                 .ok_or_else(|| Reply::error(404, format!("no review item {id}")))?;
+            not_held(registry, id)?;
             let axes: Vec<String> = item.evidence["axes"]
                 .as_array()
                 .into_iter()
@@ -2991,6 +2992,7 @@ fn routed(
             if value.is_none() && !nothing {
                 return Err(Reply::error(400, "value, or nothing: true"));
             }
+            not_held(registry, id)?;
             let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
@@ -5194,6 +5196,22 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             }),
     )
     .collect()
+}
+
+/// Record 45: a review item an open campaign holds is answered in the
+/// campaign, held to the constraints it froze, and closed by its close;
+/// Review's apply doors refuse it and name the campaign.
+fn not_held(registry: &mut Registry, id: i64) -> Result<(), Reply> {
+    match nils_registry::campaign::holder(registry.store(), id) {
+        Ok(Some((campaign, name))) => Err(Reply::error(
+            409,
+            format!(
+                "review item {id} is asked by campaign {name} ({campaign}), which answers it and closes it; answer it there"
+            ),
+        )),
+        Ok(None) => Ok(()),
+        Err(e) => Err(Reply::error(500, e.to_string())),
+    }
 }
 
 #[cfg(test)]

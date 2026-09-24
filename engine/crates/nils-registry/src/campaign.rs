@@ -1483,6 +1483,48 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
 /// The review items an open campaign asks: the ones its items stand on,
 /// and those an axes item answers (`asks`, record 45), so one item is asked
 /// by one open campaign at a time.
+/// The open campaign that asks a review item, by id and name: one whose
+/// items stand on it, or whose axes item answers it (`asks`, record 45).
+/// Such an item is answered in the campaign and closed by its close, not
+/// at Review's apply doors.
+pub fn holder(store: &mut Store, review_item: i64) -> Result<Option<(i64, String)>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT c.id, c.name FROM {} i JOIN {} c ON c.id = i.campaign_id \
+         WHERE c.status IN ('open', 'closing') AND i.review_item_id = {} ORDER BY c.id",
+        store.qualified("campaign_item"),
+        store.qualified("campaign"),
+        d.param(1, Type::Int),
+    );
+    if let Some(r) = store.query(&sql, &[Param::Int(review_item)])?.first() {
+        return Ok(Some((r.int(0)?, r.text(1)?.to_string())));
+    }
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT c.id, c.name, {} FROM {} i JOIN {} c ON c.id = i.campaign_id JOIN {} r ON r.id = i.review_item_id \
+         WHERE c.status IN ('open', 'closing') AND r.kind = 'campaign.axes' ORDER BY c.id",
+        d.text_of(t.column("evidence").expect("evidence")),
+        store.qualified("campaign_item"),
+        store.qualified("campaign"),
+        store.qualified("review_item"),
+    );
+    for r in store.query(&sql, &[])? {
+        let ev: Value = r
+            .opt_text(2)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        if ev["asks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|x| x.as_i64() == Some(review_item))
+        {
+            return Ok(Some((r.int(0)?, r.text(1)?.to_string())));
+        }
+    }
+    Ok(None)
+}
+
 fn held_review_items(store: &mut Store) -> Result<BTreeSet<i64>, Error> {
     let sql = format!(
         "SELECT i.review_item_id FROM {} i JOIN {} c ON c.id = i.campaign_id WHERE c.status IN ('open', 'closing')",
