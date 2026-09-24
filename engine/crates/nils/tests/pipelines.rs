@@ -1910,6 +1910,10 @@ command-line: |
       units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]})
   if mode == "steal":
       units[1]["derivatives"].append(units[0]["unit_id"] + "/out.txt")
+  if mode == "alias":
+      b = os.path.join(out, units[1]["unit_id"], "out.txt")
+      os.remove(b)
+      os.symlink(os.path.join("..", units[0]["unit_id"], "out.txt"), b)
   doc = {"schema_version": "1", "units": units, "seeds": [{"stack_id": st[0]["stack_id"], "axis": "body_part", "value": "brain"}]}
   if mode == "seeds-link":
       os.symlink(victim, os.path.join(out, "nils-seeds.json"))
@@ -2008,6 +2012,21 @@ fn a_hostile_output_folder_is_refused_file_by_file_and_never_followed() {
             .unwrap()
             .contains("not a file this unit"),
         "{why}"
+    );
+
+    // a unit's file that is a link to another unit's is one file, one row
+    let alias = run("alias", "none");
+    assert_eq!(alias["status"], "partial", "{alias}");
+    assert_eq!(
+        alias["summary"]["derivatives"], 4,
+        "three outputs and the seeds: {alias}"
+    );
+    assert!(
+        alias["summary"]["refused_files"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("the same file"),
+        "{alias}"
     );
 
     // a run-level link out is refused as a review item, and the run goes on

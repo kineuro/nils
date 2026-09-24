@@ -1775,8 +1775,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         let into = inputs.join(&t.id);
         std::fs::create_dir_all(&into).map_err(|e| format!("the run's inputs: {e}"))?;
         let mut listed = Vec::new();
+        let mut linked: std::collections::BTreeSet<String> = Default::default();
         for row in rows {
             let rel = link_input(&working, &row.path, &into)?;
+            // two rows of one file are one input
+            if !linked.insert(rel.clone()) {
+                continue;
+            }
             listed.push(json!({
                 "id": row.id, "kind": row.kind, "stack_id": row.stack_id,
                 "subject_id": row.subject_id, "model_id": row.model_id,
@@ -1962,6 +1967,9 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     let (mut embedded, mut cached) = (0usize, 0usize);
     let mut refused: Vec<Value> = Vec::new();
     let mut digest_units: Vec<Value> = Vec::new();
+    // one row per file on disk: a second name for a file already taken, a
+    // link from one unit's folder to another's, is refused
+    let mut taken_files: std::collections::BTreeSet<PathBuf> = Default::default();
     for (i, o) in outcomes.iter_mut() {
         let u = &m.units[*i];
         let mut hashed: Vec<Value> = Vec::new();
@@ -1990,6 +1998,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                     continue;
                 }
             };
+            if !taken_files.insert(file.clone()) {
+                refused.push(json!({
+                    "unit": u.id, "file": rel,
+                    "why": "the same file as another output of the run, by another name",
+                }));
+                continue;
+            }
             let (bytes, sha) =
                 nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
             let kind = declared.kind.as_str();
@@ -2079,6 +2094,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                         continue;
                     }
                 };
+                if !taken_files.insert(file.clone()) {
+                    refused.push(json!({
+                        "output": o.id, "file": rel,
+                        "why": "the same file as another output of the run, by another name",
+                    }));
+                    continue;
+                }
                 let (bytes, sha) =
                     nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
                 let media = nils_pipeline::files::media_type(&rel, o.media_type.as_deref());
@@ -2441,8 +2463,23 @@ fn link_input(working: &Path, path: &str, into: &Path) -> Result<String, String>
     if let Some(parent) = at.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("the run's inputs: {e}"))?;
     }
-    if std::fs::hard_link(&real, &at).is_err() {
-        std::fs::copy(&real, &at).map_err(|e| format!("{path}: {e}"))?;
+    match std::fs::hard_link(&real, &at) {
+        Ok(()) => {}
+        // linked already, by an earlier row of the same file: nothing to do;
+        // anything else in its place is refused, never copied over
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !same_file(&real, &at) {
+                return Err(format!(
+                    "{path}: the run's inputs hold another file at {rel} already"
+                ));
+            }
+        }
+        // only across filesystems is it copied, onto nothing
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            let bytes = std::fs::read(&real).map_err(|e| format!("{path}: {e}"))?;
+            nils_pipeline::files::write_new(&at, &bytes).map_err(|e| format!("{path}: {e}"))?;
+        }
+        Err(e) => return Err(format!("{path}: {e}")),
     }
     Ok(rel.to_string())
 }
@@ -2455,6 +2492,22 @@ fn place_path(working: &Path, file: &Path) -> Result<String, String> {
     real.strip_prefix(&root)
         .map(|p| p.to_string_lossy().into_owned())
         .map_err(|_| format!("{} is outside the working place", file.display()))
+}
+
+/// Whether two paths are one file on disk.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+    }
 }
 
 /// `sha256:<hex>` to its hex, as the derivative rows keep a digest.
@@ -2653,5 +2706,46 @@ mod tests {
         assert_eq!(refused[1]["unit"], "stack-12");
         assert_eq!(doc["summary"]["units"]["total"], 3);
         assert!(!doc.to_string().contains("sub-"), "{doc}");
+    }
+
+    /// The second review of record 43: linking an input twice, or a file
+    /// already linked, never copies a file onto its own link, which would
+    /// empty it.
+    #[test]
+    fn an_input_linked_twice_keeps_its_bytes() {
+        let root = std::env::temp_dir().join(format!("nils-link-input-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = root.join("derivatives/p/1/stack-1/x.emb");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"the embedding").unwrap();
+        let into = root.join("runs/2/inputs/emb");
+        std::fs::create_dir_all(&into).unwrap();
+        for _ in 0..2 {
+            let rel = link_input(&root, "derivatives/p/1/stack-1/x.emb", &into).unwrap();
+            assert_eq!(rel, "p/1/stack-1/x.emb");
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"the embedding");
+        assert_eq!(
+            std::fs::read(into.join("p/1/stack-1/x.emb")).unwrap(),
+            b"the embedding"
+        );
+        // another file already at the link's place is refused, never overwritten
+        let other = root.join("derivatives/p/1/stack-2/x.emb");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, b"another").unwrap();
+        std::fs::write(
+            into.join("p/1/stack-2/x.emb")
+                .parent()
+                .map(|p| {
+                    std::fs::create_dir_all(p).unwrap();
+                    p.join("x.emb")
+                })
+                .unwrap(),
+            b"planted",
+        )
+        .unwrap();
+        assert!(link_input(&root, "derivatives/p/1/stack-2/x.emb", &into).is_err());
+        assert_eq!(std::fs::read(&other).unwrap(), b"another");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
