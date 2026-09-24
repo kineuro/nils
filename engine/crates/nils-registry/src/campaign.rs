@@ -1945,19 +1945,12 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
     if c.status != "open" {
         return Err(refused(format!("campaign {} is {}", c.name, c.status)));
     }
-    if a.state != "leased" {
+    // A repeat of an answer already given on this assignment is answered
+    // again; the lease and the state are held to it inside the transaction.
+    if a.state != "leased" && a.state != "submitted" {
         return Err(refused(format!(
             "assignment {} is {}; claim the item again",
             a.id, a.state
-        )));
-    }
-    if a.lease_until
-        .as_deref()
-        .is_some_and(|u| secs_of(u).zip(secs_of(now)).is_some_and(|(u, n)| u < n))
-    {
-        return Err(refused(format!(
-            "the lease of assignment {} ran out; claim again",
-            a.id
         )));
     }
     let question = c.question()?;
@@ -2005,8 +1998,58 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
         _ => g.value.map(|v| v.trim().to_string()),
     };
     store.begin()?;
+    let mut replayed = false;
     let done = (|| -> Result<Answered, Error> {
         lock(store, c.id)?;
+        // What the checks above read may have moved while this waited for
+        // the campaign: read it again under the lock.
+        let status = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
+        if status != "open" {
+            return Err(refused(format!("campaign {} is {status}", c.name)));
+        }
+        let a = assignment(store, a.id)?
+            .ok_or_else(|| Error::NotFound(format!("no assignment {}", a.id)))?;
+        // One answer per item, rater and round: the same answer on the same
+        // assignment again is the one given, anything else is refused.
+        if let Some(held) = answers_of_item(store, a.item_id)?
+            .into_iter()
+            .find(|x| x.principal == g.principal && x.round == a.round)
+        {
+            let same = held.assignment_id == a.id
+                && held.value == stored_value
+                && held.form.as_ref() == g.form
+                && held.derivative_id == g.derivative_id;
+            if !same {
+                return Err(refused(format!(
+                    "{} answered item {} in round {} already, as answer {}",
+                    g.principal, a.item_id, a.round, held.id
+                )));
+            }
+            let it = item(store, a.item_id)?
+                .ok_or_else(|| Error::NotFound(format!("no campaign item {}", a.item_id)))?;
+            replayed = true;
+            return Ok(Answered {
+                answer: held.id,
+                item: it.id,
+                state: it.state,
+                adjudication: None,
+            });
+        }
+        if a.state != "leased" {
+            return Err(refused(format!(
+                "assignment {} is {}; claim the item again",
+                a.id, a.state
+            )));
+        }
+        if a.lease_until
+            .as_deref()
+            .is_some_and(|u| secs_of(u).zip(secs_of(now)).is_some_and(|(u, n)| u < n))
+        {
+            return Err(refused(format!(
+                "the lease of assignment {} ran out; claim again",
+                a.id
+            )));
+        }
         let id = store
             .insert(
                 &Insert::new(
@@ -2121,6 +2164,9 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
         }
     };
     store.commit()?;
+    if replayed {
+        return Ok(answered);
+    }
     // the value of an axis or a pick is a word of the pack or stack ids; a
     // form's text and a free answer stay out of the audit row
     let shown = matches!(question, Question::Axis { .. } | Question::Pick { .. })
@@ -2275,6 +2321,18 @@ pub fn post_metric(
     store.begin()?;
     let done = (|| -> Result<Answered, Error> {
         lock(store, c.id)?;
+        // read again under the lock: another metric, or a close, may have
+        // come first
+        let status = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
+        if status != "open" {
+            return Err(refused(format!("campaign {} is {status}", c.name)));
+        }
+        let state = item(store, it.id)?.map(|x| x.state).unwrap_or_default();
+        if state != "awaiting_metric" {
+            return Err(refused(format!(
+                "item {item_id} is {state}; a metric is posted once its raters have all answered"
+            )));
+        }
         let metric = json!({"name": name, "value": value, "threshold": adj.threshold, "by": principal, "at": now});
         store.update_by_id(
             table("campaign_item"),
@@ -2567,6 +2625,52 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
         return Err(refused(format!("campaign {} is {}", c.name, c.status)));
     }
     let question = c.question()?;
+    // The close is one writer: it takes the campaign from open to closing in
+    // one statement before it writes anything, so a second close, and every
+    // claim, answer and metric, finds it no longer open. Each item is then
+    // written through `apply`, which keeps its own transaction; a close that
+    // fails part way opens the campaign again, and a close run again skips
+    // the items already resolved.
+    let store = registry.store();
+    let d = store.dialect();
+    let took = store.execute(
+        &format!(
+            "UPDATE {} SET status = 'closing' WHERE id = {} AND status = 'open'",
+            store.qualified("campaign"),
+            d.param(1, Type::Int)
+        ),
+        &[Param::Int(c.id)],
+    )?;
+    if took != 1 {
+        let now_is = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
+        return Err(refused(format!("campaign {} is {now_is}", c.name)));
+    }
+    match close_items(registry, cl, &c, &question, now) {
+        Ok(out) => Ok(out),
+        Err(e) => {
+            let store = registry.store();
+            store
+                .execute(
+                    &format!(
+                        "UPDATE {} SET status = 'open' WHERE id = {} AND status = 'closing'",
+                        store.qualified("campaign"),
+                        store.dialect().param(1, Type::Int)
+                    ),
+                    &[Param::Int(c.id)],
+                )
+                .ok();
+            Err(e)
+        }
+    }
+}
+
+fn close_items(
+    registry: &mut Registry,
+    cl: &Close<'_>,
+    c: &Campaign,
+    question: &Question,
+    now: &str,
+) -> Result<Closed, Error> {
     let staged = c.closes_into == "stage";
     let mut out = Closed::default();
     let mut staged_ones: Vec<i64> = Vec::new();

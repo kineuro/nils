@@ -1935,7 +1935,7 @@ fn build_registry() -> Vec<Table> {
                 col("id", Type::Id),
                 req("name", Type::Text),
                 req("owner", Type::Text),
-                // open | closed | archived
+                // open | closing (a close is writing it) | closed | archived
                 req("status", Type::Text),
                 // {kind: axis|pick|form|derivative|free, ...}
                 req("question", Type::Json),
@@ -2048,6 +2048,8 @@ fn build_registry() -> Vec<Table> {
                 col("supersedes_id", Type::Int),
             ],
         )
+        // one answer per item, rater and round: a repeat is the same answer
+        .unique(&["item_id", "principal", "round"])
         .index(&["item_id"])
         .index(&["campaign_id"]),
         // Record 42 S7 (C7): labels exported with their provenance. The

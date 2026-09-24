@@ -1539,3 +1539,123 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
         assert!(!staged, "{name}: in force");
     }
 }
+
+/// Hold the campaign's writers the way a second process would: a
+/// transaction on another connection that holds the campaign's row (on
+/// SQLite the immediate transaction holds the database), changes what it
+/// is given, and lets go after the call on this side has read the state it
+/// would act on.
+fn while_held<T: Send + 'static>(
+    home: &std::path::Path,
+    campaign: i64,
+    change: &str,
+    call: impl FnOnce(&mut Registry) -> T + Send + 'static,
+) -> T {
+    let mut holder = Home::new(home).open().unwrap();
+    let mut caller = Home::new(home).open().unwrap();
+    let store = holder.store();
+    store.begin().unwrap();
+    if matches!(store, Store::Postgres { .. }) {
+        let sql = format!(
+            "SELECT id FROM {} WHERE id = {campaign} FOR UPDATE",
+            store.qualified("campaign")
+        );
+        store.query(&sql, &[]).unwrap();
+    }
+    let t = std::thread::spawn(move || call(&mut caller));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let sql = change
+        .replace("{campaign}", &holder.store().qualified("campaign"))
+        .replace(
+            "{assignment}",
+            &holder.store().qualified("campaign_assignment"),
+        )
+        .replace("{item}", &holder.store().qualified("campaign_item"));
+    holder.store().batch(&sql).unwrap();
+    holder.store().commit().unwrap();
+    t.join().unwrap()
+}
+
+/// Record 42 S5 and S6 under a second writer: an answer and a metric read
+/// the lease and the state again inside their transaction, so a lease that
+/// ended or an item that moved on while they waited refuses them; an answer
+/// is one per item, rater and round, and a repeat of the same answer on the
+/// same assignment is answered again rather than written twice; and two
+/// closes cannot both write, since a close takes the campaign from open to
+/// closing before it writes anything.
+#[test]
+fn a_second_writer_never_gets_a_stale_answer_or_a_second_close_in() {
+    for mut l in labs() {
+        let name = l.name;
+        let home = l._dir.path().to_path_buf();
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "never", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new("race", &q, &adj, Items::Stacks(ids.clone()), 1, "decision"),
+        )
+        .unwrap();
+        let first = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        // the lease ends while the answer waits for the campaign
+        let a = first.assignment.id;
+        let e = while_held(
+            &home,
+            c.id,
+            &format!("UPDATE {{assignment}} SET state = 'expired' WHERE id = {a}"),
+            move |r| campaign::answer(r, &give(a, "anna@lab", "brain"), &at(1)).map(|x| x.answer),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("expired"), "{name}: {e}");
+        assert_eq!(count(reg, "campaign_answer", ""), 0, "{name}");
+
+        // a repeat of one answer on one assignment is the same answer
+        let again = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(2))
+            .unwrap()
+            .unwrap();
+        let one =
+            campaign::answer(reg, &give(again.assignment.id, "bo@lab", "brain"), &at(3)).unwrap();
+        let two =
+            campaign::answer(reg, &give(again.assignment.id, "bo@lab", "brain"), &at(3)).unwrap();
+        assert_eq!(one.answer, two.answer, "{name}");
+        let e = campaign::answer(reg, &give(again.assignment.id, "bo@lab", "spine"), &at(3))
+            .unwrap_err();
+        assert!(e.to_string().contains("answered"), "{name}: {e}");
+        assert_eq!(count(reg, "campaign_answer", ""), 1, "{name}");
+        // and the table holds one answer per item, rater and round
+        let dup = format!(
+            "INSERT INTO {} (campaign_id, item_id, assignment_id, principal, role, round, author_kind, answered_at) \
+             SELECT campaign_id, item_id, assignment_id, principal, role, round, author_kind, answered_at FROM {}",
+            reg.store().qualified("campaign_answer"),
+            reg.store().qualified("campaign_answer")
+        );
+        assert!(reg.store().batch(&dup).is_err(), "{name}");
+
+        // a close that waited behind another close writes nothing
+        let id = c.id;
+        let e = while_held(
+            &home,
+            c.id,
+            "UPDATE {campaign} SET status = 'closed'",
+            move |r| {
+                campaign::close(
+                    r,
+                    &Close {
+                        campaign: id,
+                        who: "cleo@lab",
+                        author_kind: "person",
+                        model: None,
+                        picks: None,
+                    },
+                    &at(4),
+                )
+                .map(|x| x.decisions.len())
+            },
+        );
+        assert!(e.is_err(), "{name}: {e:?}");
+        assert_eq!(count(reg, "decision", ""), 0, "{name}");
+    }
+}
