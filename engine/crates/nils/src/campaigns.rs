@@ -798,30 +798,41 @@ fn freeze_at_door(
 }
 
 /// Sessions as the pick question names them: the subject and the day the
-/// session opened, from the session cache the keys name.
+/// session opened, from the session cache the keys name, read five hundred
+/// at a time, in the keys' order.
 fn sessions_of(
     store: &mut Store,
     keys: &[(i64, Option<i64>)],
 ) -> Result<Vec<(i64, String)>, Reply> {
     let d = store.dialect();
     let t = nils_registry::schema::table("session_cache");
-    let sql = format!(
-        "SELECT subject_id, {} FROM {} WHERE id = {}",
-        d.text_of(t.column("first").expect("first")),
-        store.qualified("session_cache"),
-        d.param(1, Type::Int)
-    );
-    let mut out = Vec::new();
-    for (k, _) in keys {
-        let r = store.query_opt(&sql, &[Param::Int(*k)])?.ok_or_else(|| {
-            Reply::error(
-                409,
-                format!("session {k} is not in the cache; rebuild the sessions"),
-            )
-        })?;
-        out.push((r.int(0)?, r.text(1)?.to_string()));
+    let ids: Vec<i64> = keys.iter().map(|(k, _)| *k).collect();
+    let mut found: HashMap<i64, (i64, String)> = HashMap::new();
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, subject_id, {} FROM {} WHERE id IN ({list})",
+            d.text_of(t.column("first").expect("first")),
+            store.qualified("session_cache"),
+        );
+        for r in store.query(&sql, &[])? {
+            found.insert(r.int(0)?, (r.int(1)?, r.text(2)?.to_string()));
+        }
     }
-    Ok(out)
+    ids.iter()
+        .map(|k| {
+            found.get(k).cloned().ok_or_else(|| {
+                Reply::error(
+                    409,
+                    format!("session {k} is not in the cache; rebuild the sessions"),
+                )
+            })
+        })
+        .collect()
 }
 
 /// The content hash of a handle.

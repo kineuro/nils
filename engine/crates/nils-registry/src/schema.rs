@@ -1999,7 +1999,9 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["campaign_id", "position"])
         .index(&["review_item_id"])
-        .index(&["subject_id"]),
+        .index(&["subject_id"])
+        // a commit by filter and a label set read an item by its decision
+        .index(&["decision_id"]),
         Table::new(
             "campaign_assignment",
             vec![
@@ -2249,6 +2251,25 @@ mod tests {
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }
+    }
+
+    /// Record 42: a commit by filter and a label set find a campaign item
+    /// by the decision it closed into, and an item holds one answer per
+    /// rater and round.
+    #[test]
+    fn a_campaign_item_is_found_by_its_decision() {
+        assert!(
+            table("campaign_item")
+                .indexes
+                .iter()
+                .any(|k| k == &vec!["decision_id"])
+        );
+        assert!(
+            table("campaign_answer")
+                .uniques
+                .iter()
+                .any(|k| k == &vec!["item_id", "principal", "round"])
+        );
     }
 
     #[test]

@@ -871,35 +871,17 @@ pub fn commit_as(
     }
     let now = now_iso();
     let mut out = Committed::default();
+    let ids: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
     store.begin()?;
-    let written = (|| -> Result<(), StoreError> {
-        for (id, _) in &staged {
-            store.update_by_id(
-                table("decision"),
-                &[
-                    ("committed_at", Param::from(now.as_str())),
-                    ("committed_by", Param::from(who)),
-                ],
-                "id",
-                *id,
-            )?;
-            // The items this decision staged are accepted now. The item's
-            // decision JSON names the decision.
-            let sql = format!(
-                "UPDATE {} SET status = 'accepted' WHERE status = 'staged' AND decision_id = {}",
-                store.qualified("review_item"),
-                d.param(1, Type::Int)
-            );
-            out.items += store.execute(&sql, &[Param::Int(*id)])? as i64;
-            out.decisions.push(*id);
+    match put_in_force(store, &ids, who, &now) {
+        Ok(items) => out.items = items,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e.into());
         }
-        Ok(())
-    })();
-    if let Err(e) = written {
-        store.rollback().ok();
-        return Err(e.into());
     }
     store.commit()?;
+    out.decisions = ids;
     audit::record(
         registry,
         &Entry {
@@ -912,6 +894,41 @@ pub fn commit_as(
         },
     )?;
     Ok(out)
+}
+
+/// Put staged decisions in force, by who commits them, in a few statements
+/// whatever their number: the decisions, then the items they staged, which
+/// are accepted now (the item's decision JSON names the decision). Answers
+/// how many items were accepted. The caller holds the transaction.
+fn put_in_force(store: &mut Store, ids: &[i64], who: &str, now: &str) -> Result<i64, StoreError> {
+    store.update_by_ids(
+        table("decision"),
+        &[
+            ("committed_at", Param::from(now)),
+            ("committed_by", Param::from(who)),
+        ],
+        "id",
+        ids,
+    )?;
+    let mut items = 0i64;
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "UPDATE {} SET status = 'accepted' WHERE status = 'staged' AND decision_id IN ({})",
+            store.qualified("review_item"),
+            id_list(chunk)
+        );
+        items += store.execute(&sql, &[])? as i64;
+    }
+    Ok(items)
+}
+
+/// Ids as a list inside `IN (...)`: integers only, so nothing a caller said
+/// reaches the statement.
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Record 42 R6: a model's answer is put in force by a person, so a
@@ -1010,7 +1027,6 @@ pub fn commit_where(
     }
     let epoch = registry.meta().epoch;
     let store = registry.store();
-    let d = store.dialect();
     let staged: Vec<(i64, Option<i64>)> = store
         .query(
             &format!(
@@ -1023,41 +1039,60 @@ pub fn commit_where(
         .iter()
         .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
         .collect::<Result<_, StoreError>>()?;
-    // what each staged decision's confidence and campaign are
+    // what each staged decision's confidence and campaign are, read for
+    // all of them at once: the confidence its first review item names,
+    // and the agreement and campaign of the last campaign item closed into
+    // it, which wins
     let t = table("review_item");
-    let item_sql = format!(
-        "SELECT id, {} FROM {} WHERE decision_id = {} ORDER BY id LIMIT 1",
-        d.text_of(t.column("evidence").expect("evidence")),
-        store.qualified("review_item"),
-        d.param(1, Type::Int)
-    );
-    let campaign_sql = format!(
-        "SELECT campaign_id, agreement FROM {} WHERE decision_id = {} ORDER BY id DESC LIMIT 1",
-        store.qualified("campaign_item"),
-        d.param(1, Type::Int)
-    );
-    let mut chosen = Vec::new();
-    let mut left = 0i64;
-    for (id, epoch_staged) in &staged {
-        let mut confidence: Option<f64> = None;
-        let mut campaign: Option<i64> = None;
-        if let Some(r) = store.query_opt(&item_sql, &[Param::Int(*id)])? {
+    let d = store.dialect();
+    let mut confidence: BTreeMap<i64, f64> = BTreeMap::new();
+    let mut campaign_of: BTreeMap<i64, i64> = BTreeMap::new();
+    let all: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
+    for chunk in all.chunks(500) {
+        let sql = format!(
+            "SELECT decision_id, {} FROM {} WHERE decision_id IN ({}) ORDER BY id DESC",
+            d.text_of(t.column("evidence").expect("evidence")),
+            store.qualified("review_item"),
+            id_list(chunk)
+        );
+        // the lowest id is read last, so it is the one kept
+        for r in store.query(&sql, &[])? {
             let evidence: serde_json::Value = r
                 .opt_text(1)?
                 .and_then(|t| serde_json::from_str(t).ok())
                 .unwrap_or(serde_json::Value::Null);
-            confidence = evidence["confidence"].as_f64();
+            match evidence["confidence"].as_f64() {
+                Some(c) => confidence.insert(r.int(0)?, c),
+                None => confidence.remove(&r.int(0)?),
+            };
         }
-        if let Some(c) = store.query_opt(&campaign_sql, &[Param::Int(*id)])? {
-            campaign = Some(c.int(0)?);
-            if let Some(a) = c.opt_double(1)? {
-                confidence = Some(a);
+        let sql = format!(
+            "SELECT decision_id, campaign_id, agreement FROM {} WHERE decision_id IN ({}) ORDER BY id",
+            store.qualified("campaign_item"),
+            id_list(chunk)
+        );
+        // the highest id is read last, so it is the one kept
+        let mut agreement: BTreeMap<i64, Option<f64>> = BTreeMap::new();
+        for r in store.query(&sql, &[])? {
+            let id = r.int(0)?;
+            campaign_of.insert(id, r.int(1)?);
+            agreement.insert(id, r.opt_double(2)?);
+        }
+        for (id, a) in agreement {
+            if let Some(a) = a {
+                confidence.insert(id, a);
             }
         }
+    }
+    let mut chosen = Vec::new();
+    let mut left = 0i64;
+    for (id, epoch_staged) in &staged {
         let keep = filter
             .min_confidence
-            .is_none_or(|min| confidence.is_some_and(|c| c >= min))
-            && filter.campaign.is_none_or(|want| campaign == Some(want));
+            .is_none_or(|min| confidence.get(id).is_some_and(|c| *c >= min))
+            && filter
+                .campaign
+                .is_none_or(|want| campaign_of.get(id) == Some(&want));
         if keep {
             chosen.push((*id, *epoch_staged));
         } else {
@@ -1091,32 +1126,15 @@ pub fn commit_where(
     }
     let now = now_iso();
     store.begin()?;
-    let written = (|| -> Result<(), StoreError> {
-        for (id, _) in &chosen {
-            store.update_by_id(
-                table("decision"),
-                &[
-                    ("committed_at", Param::from(now.as_str())),
-                    ("committed_by", Param::from(who)),
-                ],
-                "id",
-                *id,
-            )?;
-            let sql = format!(
-                "UPDATE {} SET status = 'accepted' WHERE status = 'staged' AND decision_id = {}",
-                store.qualified("review_item"),
-                d.param(1, Type::Int)
-            );
-            out.items += store.execute(&sql, &[Param::Int(*id)])? as i64;
-            out.decisions.push(*id);
+    match put_in_force(store, &ids, who, &now) {
+        Ok(items) => out.items = items,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e.into());
         }
-        Ok(())
-    })();
-    if let Err(e) = written {
-        store.rollback().ok();
-        return Err(e.into());
     }
     store.commit()?;
+    out.decisions = ids;
     audit::record(
         registry,
         &Entry {

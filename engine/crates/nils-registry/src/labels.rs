@@ -261,18 +261,34 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
             by_subject.entry(subject).or_default().push(stack);
         }
     }
+    // the members of every group a decision answers, read at once
+    let groups: Vec<i64> = decisions
+        .iter()
+        .filter(|(s, _)| s.scope == "group")
+        .filter_map(|(_, r)| r.parse::<i64>().ok())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut members: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for chunk in groups.chunks(500) {
+        let sql = format!(
+            "SELECT item_id, stack_id FROM {} WHERE item_id IN ({}) ORDER BY item_id, stack_id",
+            store.qualified("review_member"),
+            join_ids(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            members.entry(r.int(0)?).or_default().push(r.int(1)?);
+        }
+    }
     let mut best: BTreeMap<i64, usize> = BTreeMap::new();
     for (i, (s, reference)) in decisions.iter().enumerate() {
         let reached: Vec<i64> = match s.scope.as_str() {
             "stack" => reference.parse::<i64>().ok().into_iter().collect(),
-            "group" => match reference.parse::<i64>() {
-                Ok(item) => review::members(store, item)
-                    .map_err(|e| Error::Invalid(e.to_string()))?
-                    .iter()
-                    .map(|m| m.stack_id)
-                    .collect(),
-                Err(_) => Vec::new(),
-            },
+            "group" => reference
+                .parse::<i64>()
+                .ok()
+                .and_then(|item| members.get(&item).cloned())
+                .unwrap_or_default(),
             "series" => reference
                 .parse::<i64>()
                 .ok()
@@ -378,6 +394,11 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
         .map(|i| (i.id, i))
         .collect();
     let answers = campaign::answers(store, campaign)?;
+    // the answers of each item, grouped once
+    let mut of_items: BTreeMap<i64, Vec<&campaign::Answer>> = BTreeMap::new();
+    for a in &answers {
+        of_items.entry(a.item_id).or_default().push(a);
+    }
     let mut out = Vec::new();
     match of {
         Of::Answers => {
@@ -403,7 +424,32 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
             }
         }
         Of::Outcomes => {
-            let d = store.dialect();
+            // the decisions the resolved items became, read at once
+            let decided: Vec<i64> = items
+                .values()
+                .filter(|i| i.state == "resolved")
+                .filter_map(|i| i.decision_id)
+                .collect();
+            let mut decisions: BTreeMap<i64, (Option<String>, String, String, Option<i64>)> =
+                BTreeMap::new();
+            for chunk in decided.chunks(500) {
+                let sql = format!(
+                    "SELECT id, value, actor, author_kind, model_id FROM {} WHERE id IN ({})",
+                    store.qualified("decision"),
+                    join_ids(chunk)
+                );
+                for r in store.query(&sql, &[])? {
+                    decisions.insert(
+                        r.int(0)?,
+                        (
+                            r.opt_text(1)?.map(str::to_string),
+                            r.text(2)?.to_string(),
+                            r.text(3)?.to_string(),
+                            r.opt_int(4)?,
+                        ),
+                    );
+                }
+            }
             for it in items.values().filter(|i| i.state == "resolved") {
                 let base = Label {
                     stack_id: it.stack_id,
@@ -414,17 +460,12 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     ..Label::default()
                 };
                 if let Some(decision) = it.decision_id {
-                    let sql = format!(
-                        "SELECT value, actor, author_kind, model_id FROM {} WHERE id = {}",
-                        store.qualified("decision"),
-                        d.param(1, Type::Int)
-                    );
-                    if let Some(r) = store.query_opt(&sql, &[Param::Int(decision)])? {
+                    if let Some((value, actor, kind, model)) = decisions.get(&decision) {
                         out.push(Label {
-                            value: r.opt_text(0)?.map(str::to_string),
-                            author: r.text(1)?.to_string(),
-                            author_kind: r.text(2)?.to_string(),
-                            model_id: r.opt_int(3)?,
+                            value: value.clone(),
+                            author: actor.clone(),
+                            author_kind: kind.clone(),
+                            model_id: *model,
                             decision_id: Some(decision),
                             ..base
                         });
@@ -432,7 +473,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     continue;
                 }
                 let of_item: Vec<&campaign::Answer> =
-                    answers.iter().filter(|a| a.item_id == it.id).collect();
+                    of_items.get(&it.id).cloned().unwrap_or_default();
                 let settled: Vec<&campaign::Answer> =
                     match of_item.iter().rev().find(|a| a.role == "adjudicator") {
                         Some(a) => vec![*a],
@@ -1220,12 +1261,12 @@ fn import_one(
     Ok(applied.decision)
 }
 
+/// Each series' stacks, as (stack, series, subject), by SeriesInstanceUID.
+type SeriesStacks = BTreeMap<String, Vec<(i64, i64, i64)>>;
+
 /// The stacks of each series the labels name, with the series and the
 /// subject, in one read per five hundred series.
-fn stacks_of_series(
-    store: &mut Store,
-    labels: &[V0Label],
-) -> Result<BTreeMap<String, Vec<(i64, i64, i64)>>, Error> {
+fn stacks_of_series(store: &mut Store, labels: &[V0Label]) -> Result<SeriesStacks, Error> {
     let uids: Vec<&str> = labels
         .iter()
         .map(|l| l.series_instance_uid.as_str())
@@ -1233,7 +1274,7 @@ fn stacks_of_series(
         .into_iter()
         .collect();
     let d = store.dialect();
-    let mut out: BTreeMap<String, Vec<(i64, i64, i64)>> = BTreeMap::new();
+    let mut out = SeriesStacks::new();
     for chunk in uids.chunks(500) {
         let marks: Vec<String> = (1..=chunk.len()).map(|i| d.param(i, Type::Text)).collect();
         let sql = format!(

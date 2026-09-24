@@ -354,8 +354,13 @@ pub(crate) fn register(
 /// by name and the door its bytes are read from.
 pub(crate) fn doc(store: &mut Store, d: &Derivative) -> Value {
     let place = place::show(store, d.place_id).ok().flatten();
+    doc_in(d, place.map(|p| p.name))
+}
+
+/// [`doc`] with its place's name read already.
+fn doc_in(d: &Derivative, place: Option<String>) -> Value {
     let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
-    v["place"] = json!(place.as_ref().map(|p| p.name.clone()));
+    v["place"] = json!(place);
     v["content"] = json!(format!("/api/derivatives/{}/content", d.id));
     v
 }
@@ -541,7 +546,23 @@ pub(crate) fn route(
             )
             .map_err(|e| Reply::error(500, e.to_string()))?;
             let store = registry.store();
-            let docs: Vec<Value> = rows.iter().map(|d| doc(store, d)).collect();
+            // the places the rows live in, each read once
+            let mut places: std::collections::BTreeMap<i64, Option<String>> =
+                std::collections::BTreeMap::new();
+            for d in &rows {
+                if let std::collections::btree_map::Entry::Vacant(e) = places.entry(d.place_id) {
+                    e.insert(
+                        place::show(store, d.place_id)
+                            .ok()
+                            .flatten()
+                            .map(|p| p.name),
+                    );
+                }
+            }
+            let docs: Vec<Value> = rows
+                .iter()
+                .map(|d| doc_in(d, places.get(&d.place_id).cloned().flatten()))
+                .collect();
             Ok(Reply::ok(json!({
                 "derivatives": docs,
                 "capability": capability(store),
