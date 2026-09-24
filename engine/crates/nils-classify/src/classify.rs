@@ -221,6 +221,7 @@ pub(crate) fn scoped_select(
             ),
         ))
         .chain(std::iter::once("k.first_batch_id".to_string()))
+        .chain(std::iter::once("f.subject_id".to_string()))
         .collect();
     let (stacks, scope_params) = scope.stacks_sql(store, 2);
     let mut params = vec![Param::from(modality)];
@@ -313,6 +314,12 @@ pub(crate) fn to_stack(
     };
     let private = private_values(pack, cell_text(r.get(first + FIELDS.len())).as_deref());
     Ok((ids, s, private))
+}
+
+/// The subject a row of [`scoped_select`] belongs to, which it carries
+/// after the batch; 0 where the fingerprint names none.
+pub(crate) fn subject_of(r: &Row) -> i64 {
+    r.opt_int(1 + FIELDS.len() + 2).ok().flatten().unwrap_or(0)
 }
 
 /// The batch column the select carries last (Wave 4c §6.6).
@@ -1464,6 +1471,19 @@ mod tests {
         for (i, (name, _)) in FIELDS.iter().enumerate() {
             assert_eq!(*name, nils_pack::stack::FIELDS[i], "field {i}");
         }
+    }
+
+    /// kineuro/nils#94 review: the signals door's text sample needs each
+    /// sampled stack's subject, and read it from every stack in scope
+    /// (with `pack:<version>`, the whole archive) on every GET. The sampled
+    /// select carries it instead.
+    #[test]
+    fn the_scoped_select_carries_each_stacks_subject_last() {
+        let store = Store::sqlite_in_memory().unwrap();
+        let scope = crate::scope::Scope::parse("batch:1").unwrap();
+        let (sql, _) = scoped_select(&store, "MR", &scope, 10);
+        let cols = sql.split(" FROM ").next().unwrap();
+        assert!(cols.trim_end().ends_with("f.subject_id"), "{sql}");
     }
 
     #[test]

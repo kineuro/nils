@@ -27,7 +27,7 @@ use nils_pack::{Evaluated, Pack};
 use nils_registry::store::{Error, Param, Store};
 use serde_json::{Value, json};
 
-use crate::classify::{scoped_select, to_stack};
+use crate::classify::{scoped_select, subject_of, to_stack};
 use crate::scope::Scope;
 
 /// The fingerprint fields summarised for the overridden stacks.
@@ -275,23 +275,15 @@ pub fn unresolved_texts(
     let rows = store.query(&sql, &params)?;
     let complete = rows.len() <= sample;
     let read = rows.len().min(sample);
-    // whose each stack in scope is, for the subject threshold
-    let (stacks_sql, stacks_params) = scope.stacks_sql(store, 1);
-    let owner_sql = format!(
-        "SELECT stack_id, subject_id FROM {} WHERE stack_id IN {stacks_sql}",
-        store.qualified("stack_fingerprint")
-    );
-    let mut owner: BTreeMap<i64, i64> = BTreeMap::new();
-    for r in store.query(&owner_sql, &stacks_params)? {
-        owner.insert(r.int(0)?, r.opt_int(1)?.unwrap_or(0));
-    }
     // axis -> text -> (stacks, subjects)
     type Covered = (i64, BTreeSet<i64>);
     let mut texts: BTreeMap<String, BTreeMap<String, Covered>> = BTreeMap::new();
     for r in rows.iter().take(sample) {
-        let (ids, stack, private) =
+        let (_, stack, private) =
             to_stack(r, false, pack).map_err(|e| Error::Message(e.to_string()))?;
-        let subject = owner.get(&ids.stack).copied().unwrap_or(0);
+        // whose the stack is, for the subject threshold, from the sampled
+        // row itself rather than from every stack in scope
+        let subject = subject_of(r);
         let evaluated = Evaluated::with_private(pack, &stack, private);
         let verdict = evaluated.classify();
         let text = evaluated.derived_text("search_text").unwrap_or_default();
