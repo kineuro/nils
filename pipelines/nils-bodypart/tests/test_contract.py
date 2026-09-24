@@ -143,3 +143,28 @@ def test_the_train_and_infer_descriptors_expose_what_a_small_set_and_a_pickle_ne
     assert params["allow_pickle"]["default-value"] == "false"
     assert params["allow_pickle"]["value-key"] in infer["command-line"]
     assert cli.parser().parse_args(container_argv(infer)[1:]).allow_pickle is False
+
+
+def test_the_descriptors_pin_one_published_image_and_real_encoder_weights():
+    """A catalog takes a descriptor as it is: all four name the same image
+    by its registry manifest digest, and the embeddings name the encoders'
+    weights as the image reports them (``python -m nils_bodypart.bake
+    verify``), never the placeholders the descriptors started with. A
+    release that publishes a new image repins them."""
+    import re
+
+    yaml = pytest.importorskip("yaml")
+    docs = {e: yaml.safe_load((HERE / e / "nils.job.yml").read_text()) for e in ENTRIES}
+    images = {doc["container-image"]["image"] for doc in docs.values()}
+    assert len(images) == 1, images
+    (image,) = images
+    m = re.fullmatch(r"ghcr\.io/kineuro/nils-bodypart@(sha256:[0-9a-f]{64})", image)
+    assert m, image
+    placeholder = re.compile(r"sha256:0{62}[0-9a-f]{2}")
+    assert not placeholder.fullmatch(m.group(1)), image
+    encoders = [
+        d for o in docs["bodypart-embed"]["x-nils"]["outputs"] for d in o.get("encoders", [])
+    ]
+    assert len(encoders) == 2 and len(set(encoders)) == 2, encoders
+    for d in encoders:
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", d) and not placeholder.fullmatch(d), d

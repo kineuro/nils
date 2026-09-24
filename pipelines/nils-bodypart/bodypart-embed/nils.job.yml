@@ -13,9 +13,9 @@
 # The selection is the eligible stacks, as v0 chose them: anatomical, not a
 # localizer, and not SyMRI, projection- or subtraction-derived.
 #
-# The image is pinned by its registry manifest digest (record 43 R3). The
-# digest below is a placeholder until CI publishes the image; the descriptor
-# is repinned from the published digest before it is added to a catalog.
+# The image is pinned by its registry manifest digest (record 43 R3): the
+# image the release workflow published as v1.0.0-alpha.38, by the digest it
+# printed. A release that publishes a new image repins all four descriptors.
 name: bodypart-embed
 schema-version: "0.5"
 tool-version: "0.1.0"
@@ -26,7 +26,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-bodypart@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:37a4efedc1d56b24a00570d8467e23ee6b25f975c29be104fa7d9d5ce0f7a268"
 
 inputs:
   - id: batch
@@ -87,19 +87,19 @@ x-nils:
       optional: true
       description: The embeddings the cache holds for these stacks under the image's encoders and preprocessing version
   outputs:
-    # The encoders' weight digests, as the image bakes them; the runner
-    # keeps an embedding by no other. Placeholders until the release pins
-    # the image and its weights, as the image digest above is.
+    # The encoders' weight digests, as the pinned image bakes them and
+    # reports them (`python -m nils_bodypart.bake verify`); the runner keeps
+    # an embedding by no other. They are repinned with the image.
     - id: biomedclip
       kind: embedding
       path-template: "embeddings/biomedclip/{stack}.emb"
       media-type: application/vnd.nils.embedding
-      encoders: ["sha256:0000000000000000000000000000000000000000000000000000000000000001"]
+      encoders: ["sha256:52cc993c5c5ff962bd0c60931874bc001e7e9b41666a385530f4a036294576be"]
     - id: siglip2
       kind: embedding
       path-template: "embeddings/siglip2/{stack}.emb"
       media-type: application/vnd.nils.embedding
-      encoders: ["sha256:0000000000000000000000000000000000000000000000000000000000000002"]
+      encoders: ["sha256:612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b"]
   needs:
     gpu: optional
     memory-gb: 6
