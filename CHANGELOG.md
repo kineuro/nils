@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.42] - 2026-09-25
+
+Every frame of a multi-frame file in the viewing pyramid, enhanced MR and CT included. The registry stays at schema 66, as at 1.0.0-alpha.41. The HTTP API contract stays version 7, amended in place with additive fields only; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.41.
+
 ### Fixed
 
 - The viewing pyramid reads every frame of a multi-frame file as a plane, where it read the first frame alone, so an enhanced MR or CT (the whole volume in one file) or a classic multi-frame file showed as one slice. Native data and every compressed syntax the pyramid decodes are read frame by frame, a frame spread over several fragments included. An enhanced object's frames are placed by their Plane Position and Plane Orientation, with their Pixel Measures and Pixel Value Transformation, per frame or shared, and ordered along the normal as single-frame files are. A stack may mix multi-frame and single-frame files, and a file whose frames the digest split between stacks gives each stack the frames the digest assigned it. A classic multi-frame file whose frames say no position of their own is stacked in frame order at its Spacing Between Slices or Slice Thickness.
