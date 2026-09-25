@@ -4021,7 +4021,12 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     assert_eq!(row("POST /api/ask/values")["grant"], "query:work");
     assert_eq!(row("POST /api/ask/values")["detail"], "quasi");
     let tiles = row("GET /api/instances/{stack}/tiles/{level}/{z}");
-    assert_eq!(tiles["grant"], "query:see", "{tiles}");
+    // record 48: or campaigns:work, for the stacks of one's own campaigns
+    assert_eq!(
+        tiles["grant"],
+        serde_json::json!(["query:see", "campaigns:work"]),
+        "{tiles}"
+    );
     assert_eq!(tiles["detail"], "quasi", "{tiles}");
     assert_eq!(
         row("GET /api/places")["grant"],

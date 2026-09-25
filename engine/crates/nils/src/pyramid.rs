@@ -23,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use dicom_dictionary_std::tags;
-use dicom_object::{InMemDicomObject, OpenFileOptions};
+use dicom_object::InMemDicomObject;
 use nils_registry::Param;
 use nils_registry::schema::Type;
 use nils_registry::store::Store;
@@ -306,14 +306,11 @@ fn text(obj: &InMemDicomObject, tag: dicom_core::Tag) -> Option<String> {
 const NATIVE: [&str; 2] = ["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"];
 
 fn read_slice(path: &Path) -> Result<Slice, String> {
-    let file = OpenFileOptions::new()
-        .open_file(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    let ts = file
-        .meta()
-        .transfer_syntax()
-        .trim_end_matches('\0')
-        .to_string();
+    // record 48: a file without the Part 10 preamble or meta group is read
+    // as the digest reads it, a bare data set, so one such file does not
+    // fail its stack's pyramid
+    let (file, ts) =
+        nils_dicom::read_whole(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !NATIVE.contains(&ts.as_str()) {
         return Err(format!(
             "transfer syntax {ts} is not native little endian; the pyramid reads uncompressed pixel data only"
@@ -1191,6 +1188,7 @@ fn note_open(
     registry: &mut nils_registry::Registry,
     caller: &Caller,
     stack: i64,
+    through: Option<i64>,
     level: u32,
     purpose: &str,
 ) -> Result<(), String> {
@@ -1240,7 +1238,12 @@ fn note_open(
         &Entry {
             principal: &caller.principal,
             action: Action::InstanceOpen,
-            scope: serde_json::json!({"stack": stack, "level": level, "purpose": purpose}),
+            scope: match through {
+                Some(c) => serde_json::json!({
+                    "stack": stack, "level": level, "purpose": purpose, "campaign": c,
+                }),
+                None => serde_json::json!({"stack": stack, "level": level, "purpose": purpose}),
+            },
             policy: None,
             job_id: None,
             details: None,
@@ -1308,16 +1311,16 @@ fn working_place_cached(store: &mut Store) -> Result<Place, String> {
 
 /// The gated instance door (Wave 5 §12.7): `manifest`, `tiles/{level}/{z}`,
 /// `slab/{level}/{z0}-{z1}`, `render/{level}/{z}` under a stack.
+/// `through` names the campaign a rater without query:see reads it through
+/// (record 48), which the audit row keeps.
 pub fn door(
     registry: &mut nils_registry::Registry,
     caller: &Caller,
-    stack: &str,
+    stack: i64,
+    through: Option<i64>,
     rest: &[&str],
     query: &std::collections::HashMap<String, String>,
 ) -> Result<Reply, Reply> {
-    let stack: i64 = stack
-        .parse()
-        .map_err(|_| Reply::error(404, "a stack is named by its id"))?;
     let working = working_place_cached(registry.store()).map_err(|m| Reply::error(409, m))?;
     let root = dir(Path::new(&working.path), stack);
     let m = manifest_cached(&root)
@@ -1366,7 +1369,8 @@ pub fn door(
     };
     match rest {
         ["manifest"] => {
-            note_open(registry, caller, stack, 0, "manifest").map_err(|e| Reply::error(500, e))?;
+            note_open(registry, caller, stack, through, 0, "manifest")
+                .map_err(|e| Reply::error(500, e))?;
             let mut doc = serde_json::to_value(&m).map_err(|e| Reply::error(500, e.to_string()))?;
             doc["place"] = serde_json::json!(working.name);
             doc["held"] = serde_json::json!(held);
@@ -1385,7 +1389,8 @@ pub fn door(
                     ),
                 ));
             }
-            note_open(registry, caller, stack, level, "tiles").map_err(|e| Reply::error(500, e))?;
+            note_open(registry, caller, stack, through, level, "tiles")
+                .map_err(|e| Reply::error(500, e))?;
             let bytes = plane_container(&root, &m, level, z).map_err(|e| Reply::error(404, e))?;
             Ok(Reply::raw(
                 CONTENT_TYPE,
@@ -1423,7 +1428,8 @@ pub fn door(
                     format!("the stack has {nz} planes at level {level}"),
                 ));
             }
-            note_open(registry, caller, stack, level, "slab").map_err(|e| Reply::error(500, e))?;
+            note_open(registry, caller, stack, through, level, "slab")
+                .map_err(|e| Reply::error(500, e))?;
             let bytes =
                 slab_container(&root, &m, level, z0, z1).map_err(|e| Reply::error(404, e))?;
             Ok(Reply::raw(
@@ -1450,7 +1456,7 @@ pub fn door(
                 .get("w")
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(m.window.width);
-            note_open(registry, caller, stack, level, "render")
+            note_open(registry, caller, stack, through, level, "render")
                 .map_err(|e| Reply::error(500, e))?;
             let (w, h, px) =
                 plane_along(&root, &m, level, axis, z).map_err(|e| Reply::error(404, e))?;

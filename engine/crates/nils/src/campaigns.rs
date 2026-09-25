@@ -383,11 +383,25 @@ pub(crate) fn route(
             .map_err(|_| Reply::error(404, format!("{s} is not an id")))
     };
     Some((|| -> Result<Reply, Reply> {
+        // record 48: a campaign's doors reach a campaign of the caller's own,
+        // unless the caller reads every campaign; one that is not theirs is
+        // answered as one that does not exist
+        if let ["api", "campaigns", which, ..] = segs
+            && !oversees(caller)
+        {
+            let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+            if !own(registry.store(), caller, &c)? {
+                return Err(Reply::error(404, format!("no campaign {which}")));
+            }
+        }
         match segs {
             ["api", "campaigns"] if get => {
                 let list = campaign::list(registry.store()).map_err(campaign_err)?;
                 let mut out = Vec::new();
                 for c in list {
+                    if !oversees(caller) && !own(registry.store(), caller, &c)? {
+                        continue;
+                    }
                     let mut v = c.as_json();
                     v["counts"] = campaign::counts(registry.store(), c.id).map_err(campaign_err)?;
                     out.push(v);
@@ -407,6 +421,9 @@ pub(crate) fn route(
                     for it in v["items"].as_array_mut().into_iter().flatten() {
                         plain_item(it, &c.grain, free);
                     }
+                }
+                if !sees_all(registry.store(), caller, principal, &c)? {
+                    blind_view(&mut v, principal);
                 }
                 Ok(Reply::ok(v))
             }
@@ -621,13 +638,16 @@ pub(crate) fn route(
                 no_sealed_flag(&doc)?;
                 // blind through the export too: every answer of an open
                 // campaign is for those who read them all at the answers door
-                if matches!(of, Of::Answers) && !sees_all(registry.store(), caller, principal, &c)?
-                {
+                // record 48: and so are the outcomes of an open campaign, which
+                // are its raters' answers, for a caller who reads only their own
+                // campaigns
+                if !sees_all(registry.store(), caller, principal, &c)? {
                     return Err(Reply::error(
                         403,
                         format!(
-                            "rating in {} is blind until it closes: its answers are exported by an adjudicator or a holder of review:work",
-                            c.name
+                            "rating in {} is blind until it closes: its {} are exported by an adjudicator or a holder of review:work",
+                            c.name,
+                            of.name()
                         ),
                     ));
                 }
@@ -900,17 +920,28 @@ pub(crate) fn route(
             }
             ["api", "label-sets"] if get => {
                 let list = labels::list(registry.store()).map_err(labels_err)?;
-                let out: Vec<Value> = list
-                    .iter()
-                    .map(|set| {
-                        let mut v = set.as_json();
-                        training_now(registry.store(), set, &mut v);
-                        v
-                    })
-                    .collect();
+                let mut out: Vec<Value> = Vec::new();
+                for set in &list {
+                    if !reads_set(registry.store(), caller, set)? {
+                        continue;
+                    }
+                    let mut v = set.as_json();
+                    training_now(registry.store(), set, &mut v);
+                    out.push(v);
+                }
                 Ok(Reply::ok(json!({"count": out.len(), "label_sets": out})))
             }
             ["api", "label-sets"] if post => {
+                // record 48: a set of decisions reads the review's decisions,
+                // every stack's, which a rater of a campaign does not read
+                if !caller.access.holds("review:see") {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "a label set of decisions reads the review's decisions and needs review:see; {principal} exports a campaign's labels through its export door"
+                        ),
+                    ));
+                }
                 let doc = json_body(body)?;
                 no_sealed_flag(&doc)?;
                 // record 48 R2: the development labels, everything usable
@@ -1022,6 +1053,7 @@ pub(crate) fn route(
                 let id = id_of(id)?;
                 let set = labels::get(registry.store(), id)
                     .map_err(labels_err)?
+                    .filter(|set| reads_set(registry.store(), caller, set).unwrap_or(false))
                     .ok_or_else(|| Reply::error(404, format!("no label set {id}")))?;
                 // a session's day is quasi-identifying
                 if set.what.starts_with("pick:") {
@@ -1035,7 +1067,7 @@ pub(crate) fn route(
                 }
                 // a set of a campaign's answers is as blind as its answers
                 // door while the campaign is open: metadata and counts only
-                if set.kind == Of::Answers.name()
+                if (set.kind == Of::Answers.name() || set.kind == Of::Outcomes.name())
                     && let Some(cid) = set.campaign_id
                 {
                     let c =
@@ -1246,6 +1278,162 @@ fn sees_all(
             .map_err(campaign_err)?
             .iter()
             .any(|a| a.role == "adjudicator" && a.principal.as_deref() == Some(principal)))
+}
+
+/// Record 48: whether the caller reads every campaign, as a holder of
+/// review:work reads every answer. Anyone else reads the campaigns of their
+/// own ([`own`]); `campaigns:see` alone does not open another's, since every
+/// holder of `campaigns:work` holds it.
+fn oversees(caller: &Caller) -> bool {
+    caller.access.holds("review:work")
+}
+
+/// Record 48: whether a campaign is the caller's own: they made it, it
+/// names them as a rater or an adjudicator, they hold an assignment in it,
+/// or it is open and names no raters, so that anyone holding campaigns:work
+/// rates in it.
+fn own(store: &mut Store, caller: &Caller, c: &campaign::Campaign) -> Result<bool, Reply> {
+    let p = caller.principal.as_str();
+    if c.owner == p || rates_in(caller, c) || (c.status == "open" && c.raters().is_empty()) {
+        return Ok(true);
+    }
+    Ok(campaign::assignments(store, c.id)
+        .map_err(campaign_err)?
+        .iter()
+        .any(|a| a.principal.as_deref() == Some(p)))
+}
+
+/// Whether the caller rates or adjudicates in a campaign as it stands:
+/// named in it, or it names no raters and the caller holds campaigns:work.
+fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
+    let p = caller.principal.as_str();
+    let raters = c.raters();
+    raters.iter().any(|r| r == p)
+        || c.adjudicators().iter().any(|a| a == p)
+        || (raters.is_empty() && caller.access.holds("campaigns:work"))
+}
+
+/// Record 48: a campaign as a caller reads it who does not read every
+/// answer: an item another person has been given keeps its state and loses
+/// its outcome, agreement and metric, which are that person's; only the
+/// caller's own assignments are listed; the open agreement is left out.
+fn blind_view(v: &mut Value, principal: &str) {
+    let mut others = std::collections::BTreeSet::new();
+    if let Some(list) = v["assignments"].as_array_mut() {
+        for a in list.iter() {
+            if a["principal"].as_str() != Some(principal)
+                && let Some(item) = a["item_id"].as_i64()
+            {
+                others.insert(item);
+            }
+        }
+        list.retain(|a| a["principal"].as_str() == Some(principal));
+    }
+    for it in v["items"].as_array_mut().into_iter().flatten() {
+        if it["id"].as_i64().is_some_and(|id| others.contains(&id))
+            && let Some(m) = it.as_object_mut()
+        {
+            for key in ["outcome", "agreement", "metric"] {
+                m.insert(key.into(), Value::Null);
+            }
+            m.insert("blind".into(), json!(true));
+        }
+    }
+    if let Some(m) = v.as_object_mut() {
+        m.remove("agreement");
+    }
+}
+
+/// Record 48: whether the caller reads a label set: a reader of the review
+/// reads every set; anyone else the sets they wrote and those of their own
+/// campaigns.
+fn reads_set(store: &mut Store, caller: &Caller, set: &LabelSet) -> Result<bool, Reply> {
+    if caller.access.holds("review:see") || set.created_by == caller.principal {
+        return Ok(true);
+    }
+    match set.campaign_id {
+        Some(cid) => match campaign::get(store, cid).map_err(campaign_err)? {
+            Some(c) => own(store, caller, &c),
+            None => Ok(false),
+        },
+        None => Ok(false),
+    }
+}
+
+/// Record 48: the open campaign through which a caller who does not hold
+/// query:see may read a stack's pictures: one they rate or adjudicate in
+/// whose items hold the stack, or for a campaign of sessions, a session the
+/// stack is of. None when there is no such campaign.
+pub(crate) fn pictures_through(
+    store: &mut Store,
+    caller: &Caller,
+    stack: i64,
+) -> Result<Option<i64>, Reply> {
+    let d = store.dialect();
+    let mut asked: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let sql = format!(
+        "SELECT DISTINCT i.campaign_id FROM {} i JOIN {} c ON c.id = i.campaign_id \
+         WHERE c.status = 'open' AND i.stack_id = {}",
+        store.qualified("campaign_item"),
+        store.qualified("campaign"),
+        d.param(1, Type::Int)
+    );
+    for r in store.query(&sql, &[Param::Int(stack)])? {
+        asked.insert(r.int(0)?);
+    }
+    // the sessions the stack is of, each its subject and its day
+    let sql = format!(
+        "SELECT DISTINCT sc.subject_id, {} FROM {} k JOIN {} r ON r.id = k.series_id \
+         JOIN {} cs ON cs.study_id = r.study_id JOIN {} sc ON sc.id = cs.session_id \
+         WHERE k.id = {}",
+        d.text_of_qualified(
+            Some("sc"),
+            nils_registry::schema::table("session_cache")
+                .column("first")
+                .expect("first"),
+        ),
+        store.qualified("stack"),
+        store.qualified("series"),
+        store.qualified("session_cache_study"),
+        store.qualified("session_cache"),
+        d.param(1, Type::Int),
+    );
+    let day = |t: &str| t.chars().take(10).collect::<String>();
+    let mut sessions: Vec<(i64, String)> = Vec::new();
+    for r in store.query(&sql, &[Param::Int(stack)])? {
+        if let Some(first) = r.opt_text(1)? {
+            sessions.push((r.int(0)?, day(first)));
+        }
+    }
+    for (subject, first) in sessions {
+        let sql = format!(
+            "SELECT i.campaign_id, {} FROM {} i JOIN {} c ON c.id = i.campaign_id \
+             WHERE c.status = 'open' AND i.subject_id = {}",
+            d.text_of_qualified(
+                Some("i"),
+                nils_registry::schema::table("campaign_item")
+                    .column("session_day")
+                    .expect("session_day"),
+            ),
+            store.qualified("campaign_item"),
+            store.qualified("campaign"),
+            d.param(1, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::Int(subject)])? {
+            if r.opt_text(1)?.is_some_and(|t| day(t) == first) {
+                asked.insert(r.int(0)?);
+            }
+        }
+    }
+    for id in asked {
+        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
+            && c.status == "open"
+            && rates_in(caller, &c)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 fn plain(caller: &Caller) -> bool {
@@ -1653,9 +1841,22 @@ fn create_at_door(
         let (h, keys) = freeze_at_door(doors, registry, ask, caller, spec, want)?;
         (items_of(registry.store(), want, &keys)?, Some(h))
     } else if let Some(h) = source["handle"].as_i64() {
+        // record 48: a handle is the ask's result, read by those who read
+        // the ask, so a rater cannot name stacks into a campaign of theirs
+        caller.allowed(
+            "a campaign over a handle",
+            Need::One("query:see"),
+            Detail::Plain,
+        )?;
         let keys = handle_keys(registry.store(), h, want)?;
         (items_of(registry.store(), want, &keys)?, Some(h))
     } else if source["review"].is_object() {
+        // and the open review items are the review's to read
+        caller.allowed(
+            "a campaign over review items",
+            Need::One("review:see"),
+            Detail::Plain,
+        )?;
         let r = &source["review"];
         let found = campaign::review_items(
             registry.store(),

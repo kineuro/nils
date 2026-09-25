@@ -547,6 +547,7 @@ impl Drop for Served {
 
 const CURATOR: &str = "a-curator-token-of-its-length";
 const PLAIN: &str = "a-plain-campaigns-token-long";
+const RATER: &str = "a-rater-of-campaigns-token";
 
 impl Served {
     fn start(home: &Home) -> Served {
@@ -554,6 +555,7 @@ impl Served {
         let tokens = [
             format!("{CURATOR}=cleo@lab:reviewer,campaigns:work"),
             format!("{PLAIN}=pat@lab:campaigns:see"),
+            format!("{RATER}=rae@lab:campaigns:work"),
         ]
         .join(",");
         let mut child = nils()
@@ -675,6 +677,22 @@ fn candidates_round(home: &Home) {
         }
     }
     assert!(with_a_pick > 0, "the run picked on some occasion");
+    // record 48: a rater without query:see reaches the pictures of a
+    // session's stacks through the open campaign that asks the session (here
+    // as far as the working place, which this registry has none of), and of
+    // no other stack
+    let item = items[0]["id"].as_i64().unwrap();
+    let (_, doc) = server.get(
+        &format!("/api/campaigns/{campaign}/items/{item}/candidates"),
+        CURATOR,
+    );
+    let stack = doc["candidates"][0]["stack_id"].as_i64().unwrap();
+    let (status, doc) = server.get(&format!("/api/instances/{stack}/manifest"), RATER);
+    assert_eq!(status, 409, "{doc}");
+    let (status, doc) = server.get("/api/instances/999999/manifest", RATER);
+    assert_eq!(status, 403, "{doc}");
+    let (status, doc) = server.get(&format!("/api/instances/{stack}/manifest"), PLAIN);
+    assert_eq!(status, 403, "{doc}");
 }
 
 #[test]

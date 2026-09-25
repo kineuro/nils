@@ -1814,7 +1814,28 @@ fn routed(
         }
         // Wave 5 §12.7: the gated instance door, shaped by the viewer study.
         ["api", "instances", stack, rest @ ..] if get => {
-            crate::pyramid::door(registry, caller, stack, rest, query)
+            let stack: i64 = stack
+                .parse()
+                .map_err(|_| Reply::error(404, "a stack is named by its id"))?;
+            // record 48: without query:see, the pictures open through a
+            // campaign the caller rates in, for its stacks alone, before
+            // anything of the stack is looked up
+            let through = if caller.access.holds("query:see") {
+                None
+            } else {
+                Some(
+                    crate::campaigns::pictures_through(registry.store(), caller, stack)?
+                        .ok_or_else(|| {
+                            Reply::error(
+                                403,
+                                format!(
+                                    "the pictures of stack {stack} open with query:see, or to a rater of an open campaign that asks it; {principal} rates in none"
+                                ),
+                            )
+                        })?,
+                )
+            };
+            crate::pyramid::door(registry, caller, stack, through, rest, query)
         }
         ["api", "backups"] if get => {
             // Wave 5 §10.3: the archives in the backup directory, each with
@@ -3433,8 +3454,12 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
                 | "diagnose" | "preview" | "profile" | "describe" | "start",
             ],
         ) => (Need::One("query:see"), Plain),
-        // Wave 5 §12.7: the viewer's pixels are quasi-identifying
-        ("GET", ["api", "instances", _, ..]) => (Need::One("query:see"), Quasi),
+        // Wave 5 §12.7: the viewer's pixels are quasi-identifying; record
+        // 48: a rater without query:see reads the pictures of the stacks of
+        // their own open campaigns, checked at the door itself
+        ("GET", ["api", "instances", _, ..]) => {
+            (Need::AnyOf(&["query:see", "campaigns:work"]), Quasi)
+        }
         ("GET", ["api", "depends" | "timeline", _, _]) => {
             (Need::AnyOf(&["data:see", "query:see"]), Plain)
         }
