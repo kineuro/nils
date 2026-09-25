@@ -52,6 +52,15 @@ rusqlite.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
+# the pyramid decodes compressed pixel data: JPEG (baseline, extended at 8
+# bits, lossless), RLE and deflate in Rust through the registry's codecs,
+# JPEG-LS in Rust through pure_jpegls, and JPEG 2000 through OpenJPEG's C
+# source, compiled into the binary by the cc crate as ring's C is (no CMake).
+# The Rust port of OpenJPEG (feature openjp2) frees a null pointer when a
+# decoder is dropped, which debug builds abort on.
+dicom-encoding.workspace = true
+dicom-transfer-syntax-registry = { workspace = true, features = ["jpeg", "rle", "deflate", "openjpeg-sys"] }
+pure_jpegls = "2"
 openjph-core = "0.1.0"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 

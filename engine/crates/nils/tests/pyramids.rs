@@ -141,18 +141,21 @@ struct Lab {
 }
 
 fn lab(name: &str) -> Lab {
+    lab_over(name, |src| {
+        series(src, "1.2.3.A", "1.2.3.A.1", AXIAL, [-14.0, -18.0, 30.0]);
+        series(src, "1.2.3.B", "1.2.3.B.1", oblique(), [-14.0, -18.0, 12.0]);
+        series(src, "1.2.3.C", "1.2.3.C.1", AXIAL, [0.0, 0.0, 0.0]);
+    })
+}
+
+/// A lab over the files `fill` writes, digested, classified, with a
+/// working place and the selection of every stack; the third series of
+/// [`lab`] loses its files after the digest where there is one.
+fn lab_over(name: &str, fill: impl FnOnce(&TempDir)) -> Lab {
     let home = TempDir::new(&format!("{name}-home"));
     let src = TempDir::new(&format!("{name}-src"));
     let work = TempDir::new(&format!("{name}-work"));
-    series(&src, "1.2.3.A", "1.2.3.A.1", AXIAL, [-14.0, -18.0, 30.0]);
-    series(
-        &src,
-        "1.2.3.B",
-        "1.2.3.B.1",
-        oblique(),
-        [-14.0, -18.0, 12.0],
-    );
-    series(&src, "1.2.3.C", "1.2.3.C.1", AXIAL, [0.0, 0.0, 0.0]);
+    fill(&src);
     let mut child = nils()
         .arg("--registry")
         .arg(home.path())
@@ -185,7 +188,9 @@ fn lab(name: &str) -> Lab {
     let packs = packs.to_str().unwrap();
     ok(&home, &["classify", "--pack-dir", packs]);
     // the third series' files go, so its pyramid cannot be read
-    std::fs::remove_dir_all(src.path().join("1.2.3.C")).unwrap();
+    if src.path().join("1.2.3.C").exists() {
+        std::fs::remove_dir_all(src.path().join("1.2.3.C")).unwrap();
+    }
     ok(
         &home,
         &[
@@ -388,6 +393,68 @@ fn a_selection_s_pyramids_build_once_and_an_oblique_stack_reports_its_orientatio
     assert_eq!(read["orientation"], json!(AXIAL), "{listed}");
     assert_eq!(read["orientation_known"], false, "{listed}");
     assert_eq!(read["frame"], Value::Null, "{listed}");
+}
+
+/// Compressed stacks at the keyboard: the fixtures of
+/// tests/fixtures/compressed (synthetic planes in every syntax the pyramid
+/// decodes) build, a lossy stack's manifest says so, and the two stacks
+/// that cannot be read, a twelve-bit JPEG extended plane and a stack with
+/// one broken JPEG 2000 plane among good ones, are counted by reason.
+#[test]
+fn compressed_stacks_build_and_the_ones_that_cannot_are_counted_by_reason() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compressed");
+    let lab = lab_over("pyramids-compressed", |src| {
+        for entry in std::fs::read_dir(&fixtures).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "dcm") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let mut bytes = std::fs::read(&path).unwrap();
+            if name == "f2.dcm" {
+                // the JPEG 2000 codestream's start is gone
+                let at = bytes
+                    .windows(4)
+                    .position(|w| w == [0xFF, 0x4F, 0xFF, 0x51])
+                    .unwrap();
+                bytes[at..at + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+            src.file(&name, &bytes);
+        }
+    });
+    let packs = packs();
+    let args = [
+        "pyramid",
+        "build",
+        "--select",
+        "selection:every@1",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--workers",
+        "2",
+    ];
+    let out: Value = serde_json::from_str(ok(&lab.home, &args).trim()).unwrap();
+    assert_eq!(out["stacks"], 6, "{out}");
+    assert_eq!(out["built"], 4, "{out}");
+    assert_eq!(out["failed"], 2, "{out}");
+    assert_eq!(
+        out["failures_by_reason"],
+        json!({"undecodable": 2}),
+        "{out}"
+    );
+    let src = lab._src.path().to_str().unwrap().to_string();
+    assert!(!out.to_string().contains(&src), "{out}");
+    let manifests: Vec<Value> = (1..=6).filter_map(|s| lab.manifest(s)).collect();
+    assert_eq!(manifests.len(), 4);
+    let lossy: Vec<&Value> = manifests.iter().filter(|m| m["lossy"] == true).collect();
+    assert_eq!(lossy.len(), 1, "{manifests:?}");
+    assert_eq!(lossy[0]["dtype"], "uint16");
+    assert!(
+        manifests
+            .iter()
+            .any(|m| m["source_syntaxes"].as_array().unwrap().len() == 8),
+        "{manifests:?}"
+    );
 }
 
 struct Server {
