@@ -125,6 +125,10 @@ pub enum Action {
     PipelineAdd,
     PipelineRun,
     PipelineRuntime,
+    /// A repair of what an older engine left in the registry: stacks and
+    /// series that hold no instance removed (`nils repair empty-stacks`).
+    /// The rows gone are what an ask reads, so it moves the epoch.
+    RegistryRepair,
 }
 
 impl Action {
@@ -189,6 +193,7 @@ impl Action {
             Action::PipelineAdd => "pipeline.add",
             Action::PipelineRun => "pipeline.run",
             Action::PipelineRuntime => "pipeline.runtime",
+            Action::RegistryRepair => "registry.repair",
         }
     }
 

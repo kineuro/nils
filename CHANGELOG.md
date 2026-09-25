@@ -9,6 +9,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The reader finds a value by any name it goes by. An axis or an axes question as served (`GET /api/campaigns/{id}`) says `vocabulary`: for each value a rater may answer, its label where it differs, its description where the pack gives one, its `terms` and its `keywords`. It is the pack's vocabulary, the same for every stack, so a rater who reads blind has it too. It is never stored with the question, and a question that says it is refused.
 - The MRI pack gives its values `terms`, the other names a person knows them by: vendors' names for one sequence (BRAVO, IR-FSPGR, 3D TFE and TFL for MPRAGE; SPACE, CUBE and VISTA for 3D TSE; TrueFISP, FIESTA and bFFE for bSSFP), spellings and radiologists' words. They are display only: no rule reads them, and no verdict moves. An axis value may also say `description`. The pack door (`GET /api/packs/{name}`, `nils pack show --json`) says both.
 - `GET /api/campaigns/{id}/combinations`: how common each combination of an axes question's answered axes is across the registry's classifications, most common first, for the reader's whole-combination search. No stack of the campaign and no stack of a sample sealed now is counted, so a count says nothing of any stack a rater reads. A combination outside the question's vocabulary or forbidden by its constraints is left out and counted apart.
+- `nils repair empty-stacks [--dry-run] [--json]` removes the stacks and series that hold no instance, which an earlier digest left where every file of a series was a duplicate of an instance held under another series. A stack a decision, a pick, a seal, a campaign item, an answered review item, a release, a derivative or a measure names is kept and reported with the reason; what is derived from the stack alone (its fingerprint, its classification, the open review items raised on it) goes with it. Audited as `registry.repair`, and it moves the epoch.
 
 ### Changed
 
@@ -18,6 +19,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Fixed
 
 - A lease past its end holds nothing. `nils campaign requestion` was refused while a lease that had run out 25 minutes earlier was still written `leased`; a requestion and a close now end such a lease as expired first, the batches door no longer counts it against its item, and a release of it ends it as expired, whoever asks.
+- The digest no longer leaves stacks and series with no instance. A file whose instance another file holds under another series is filed as a duplicate after its series and stack were written; at the end of the run the stacks and series it alone made are removed, and the report counts them (`empty_stacks_removed`, `empty_series_removed`) apart from those created. `nils repair empty-stacks` removes the ones an earlier digest left.
 
 ## [1.0.0-alpha.43] - 2026-09-25
 

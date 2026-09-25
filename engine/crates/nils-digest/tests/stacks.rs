@@ -513,3 +513,59 @@ fn an_enhanced_file_whose_frames_hold_two_orientations_becomes_two_stacks() {
         );
     }
 }
+
+/// A file whose instance another file holds under another series is filed
+/// as a duplicate, and the series and stacks it alone made are gone at the
+/// end of the run (a real registry held 203 such stacks): every stack and
+/// series left holds an instance, and the report counts what went.
+#[test]
+fn a_series_made_only_of_duplicates_leaves_no_empty_stack_or_series() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-dup");
+        dir.file("a/1", &mr("A", "A.1", "A.1.1", "P1", &[echo_time("10")]));
+        dir.file("a/2", &mr("A", "A.1", "A.1.2", "P1", &[echo_time("10")]));
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // the same two instances under a second series, which splits them
+        // into two stacks of its own
+        dir.file("b/1", &mr("A", "A.2", "A.1.1", "P1", &[echo_time("10")]));
+        dir.file("b/2", &mr("A", "A.2", "A.1.2", "P1", &[echo_time("30")]));
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.clone().unwrap();
+        assert_eq!((w.ingested, w.duplicate), (0, 2), "{name}");
+        assert_eq!((w.series_created, w.stacks_created), (0, 0), "{name}");
+        assert_eq!(
+            (w.empty_series_removed, w.empty_stacks_removed),
+            (1, 2),
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack} s WHERE NOT EXISTS \
+                 (SELECT 1 FROM {instance} i WHERE i.stack_id = s.id)"
+            ),
+            0,
+            "{name}: an empty stack is left"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {series} se WHERE NOT EXISTS \
+                 (SELECT 1 FROM {instance} i WHERE i.series_id = se.id)"
+            ),
+            0,
+            "{name}: an empty series is left"
+        );
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {series}"), 1, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 1, "{name}");
+        assert_eq!(one(&mut reg, "SELECT n_stacks FROM {series}"), 1, "{name}");
+        // a third run over the same tree makes nothing and removes nothing
+        let again = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = again.written.unwrap();
+        assert_eq!((w.stacks_created, w.empty_stacks_removed), (0, 0), "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 1, "{name}");
+    }
+}

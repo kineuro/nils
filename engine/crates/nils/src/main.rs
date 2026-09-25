@@ -196,6 +196,11 @@ enum Command {
         #[command(subcommand)]
         command: LinkageCommand,
     },
+    /// Mend what an older engine left in the registry
+    Repair {
+        #[command(subcommand)]
+        command: RepairCommand,
+    },
     /// The files a digest refused, with the reason (§5.3)
     Quarantine {
         #[command(subcommand)]
@@ -1410,6 +1415,23 @@ enum SchemeCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum RepairCommand {
+    /// Remove the stacks and series that hold no instance, which a digest
+    /// before 1.0.0-alpha.44 left where every file of a series was a
+    /// duplicate of an instance held under another series. A stack a
+    /// decision, a pick, a seal, a campaign, an answered review item, a
+    /// release, a derivative or a measure names is kept and reported
+    EmptyStacks {
+        /// Say what would go and what would be kept, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum QuarantineCommand {
     /// The quarantined files, by batch and path
     List {
@@ -1868,6 +1890,7 @@ fn main() -> ExitCode {
         Command::Verify(args) => verify_command(&home, args),
         Command::Restore(args) => restore_command(&home, args),
         Command::Linkage { command } => linkage_command(&home, command),
+        Command::Repair { command } => repair_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
         Command::Model { command } => model_cli::model_command(&home, command),
@@ -4715,6 +4738,68 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
 
 /// `nils quarantine list`: the paths a digest refused, with the class and
 /// the detail, joined to the root of their source.
+fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
+    let RepairCommand::EmptyStacks { dry_run, json } = command;
+    let mut registry = open(home)?;
+    let principal = actor();
+    let store = registry.store();
+    store.begin().map_err(|e| fail(e.to_string()))?;
+    let done = (|| -> Result<nils_registry::empty::Swept, nils_registry::store::Error> {
+        let swept = nils_registry::empty::sweep(store, None, dry_run)?;
+        if !dry_run && swept.stacks + swept.series > 0 {
+            nils_registry::audit::record_in(
+                store,
+                &nils_registry::audit::Entry {
+                    principal: &principal,
+                    action: nils_registry::audit::Action::RegistryRepair,
+                    scope: serde_json::json!({"repair": "empty-stacks"}),
+                    policy: None,
+                    job_id: None,
+                    details: Some(serde_json::json!({
+                        "stacks_removed": swept.stacks,
+                        "series_removed": swept.series,
+                        "stacks_kept": swept.kept_stacks.len(),
+                        "series_kept": swept.kept_series.len(),
+                    })),
+                },
+            )?;
+        }
+        Ok(swept)
+    })();
+    let swept = match done {
+        Ok(s) if !dry_run => {
+            store.commit().map_err(|e| fail(e.to_string()))?;
+            s
+        }
+        Ok(s) => {
+            store.rollback().ok();
+            s
+        }
+        Err(e) => {
+            store.rollback().ok();
+            return Err(fail(e.to_string()));
+        }
+    };
+    if json {
+        let mut doc = swept.as_json();
+        doc["dry_run"] = dry_run.into();
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return Ok(());
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    println!(
+        "nils repair empty-stacks   {verb} {} stack(s) and {} series that hold no instance",
+        swept.stacks, swept.series
+    );
+    for (id, why) in &swept.kept_stacks {
+        println!("  kept stack {id}: {why}");
+    }
+    for (id, why) in &swept.kept_series {
+        println!("  kept series {id}: {why}");
+    }
+    Ok(())
+}
+
 fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exit> {
     let QuarantineCommand::List { batch, class, json } = command;
     let mut registry = open(home)?;
@@ -5523,10 +5608,10 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "technical: everything else the catalogue declares",
             ],
             "counts": { "subjects": subjects, "studies": studies, "series": series, "instances": instances, "source_files": source_files },
-            "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows",
+            "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",
             "commands": {
                 "read": ["nils status [--batch <id>]", "nils quarantine list", "nils review list"],
-                "change": ["nils digest <root>"],
+                "change": ["nils digest <root>", "nils repair empty-stacks"],
                 "export": ["none in Wave 1: the file (or the schema) is the export"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },
