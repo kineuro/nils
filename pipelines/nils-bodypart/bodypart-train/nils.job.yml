@@ -29,7 +29,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-bodypart@sha256:a9c1765b9c87b2237cb1cd22e3f9e583da9570de5cac195b6717d0eebd0ea4ff"
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:e3761351309a90f8cb465e7bdda075a28af9c45598fa7db55226bfbdea3564cf"
 
 inputs:
   - id: estimator
