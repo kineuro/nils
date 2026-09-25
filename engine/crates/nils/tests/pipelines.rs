@@ -2456,7 +2456,7 @@ while i < len(a):
         host, ctr = a[i + 1].split(":")[:2]; mounts[ctr] = host; i += 2
     elif w == "--env":
         k, v = a[i + 1].split("=", 1); env[k] = v; i += 2
-    elif w in ("--network", "--cpus", "--memory"):
+    elif w in ("--network", "--cpus", "--memory", "--pwd"):
         i += 2
     elif w.startswith("--"):
         i += 1
@@ -3058,12 +3058,15 @@ fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
     let work = lab.work.path().canonicalize().unwrap();
     for e in &execs {
         assert_eq!(
-            &e[..7],
+            &e[..10],
             [
                 "run",
                 "--containall",
                 "--cleanenv",
                 "--no-home",
+                "--no-eval",
+                "--pwd",
+                "/",
                 "--net",
                 "--network",
                 "none"

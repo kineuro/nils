@@ -16,6 +16,10 @@
 # runs before every command line; it takes one image a call and cannot
 # walk a run's sessions. FreeSurfer 8.2.0 is also the image of SynthSeg,
 # SAMSEG and recon-all, so one pull serves four starters.
+#
+# Memory: mri_synthstrip on the CPU peaked at 5.7 GB on a 1 mm MPRAGE, so a
+# unit declares 8 GB. At 4 GB, where the runtime holds a unit to what it
+# declares, every unit was killed while it processed its frame.
 name: synthstrip
 schema-version: "0.5"
 tool-version: "freesurfer-8.2.0"
@@ -93,5 +97,5 @@ x-nils:
     cores-input: threads
     gpu: none
     cores: 2
-    memory-gb: 4
+    memory-gb: 8
     unit-minutes: 1

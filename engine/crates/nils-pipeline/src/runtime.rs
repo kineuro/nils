@@ -251,13 +251,22 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             // `run`, not `exec`: an image built from an OCI image runs its
             // ENTRYPOINT with these words after it (its CMD where there are
             // none), as podman and docker do; `exec` would skip the
-            // ENTRYPOINT (record 49 A2)
+            // ENTRYPOINT (record 49 A2). `--no-eval` hands those words to
+            // the ENTRYPOINT as they are: without it the image's runscript
+            // quotes them in double quotes and evaluates them through a
+            // shell first, so a `bash -c '...'` command has its `$(..)`,
+            // `$f` and inner quotes taken apart before it runs. `--pwd /`
+            // starts in the image's root, since the engine's own working
+            // folder is not in a contained image.
             a.extend(
                 [
                     "run",
                     "--containall",
                     "--cleanenv",
                     "--no-home",
+                    "--no-eval",
+                    "--pwd",
+                    "/",
                     "--net",
                     "--network",
                     "none",
@@ -1145,6 +1154,29 @@ mod tests {
         assert!(a.iter().any(|w| w.starts_with("docker://busybox@sha256:")));
     }
 
+    /// Record 49 slice G: apptainer's runscript for an OCI image evaluates
+    /// the words after the image through a shell unless told `--no-eval`,
+    /// so a starter's `bash -c '...'` lost its `$(..)`, `$f` and inner
+    /// quotes and every unit failed. The words reach the image as they
+    /// are, after the image, with `--no-eval` before it.
+    #[test]
+    fn apptainer_hands_a_shell_command_over_unevaluated() {
+        let script = r#"set -eu; cd /input; for f in sub-*/anat/*_T1w.nii.gz; do d=/output/$(dirname "$f"); mkdir -p "$d"; done; echo "N4 corrected $n images""#;
+        let mut i = inv(false);
+        i.local_image = Some(PathBuf::from("/w/images/abc.sandbox"));
+        i.argv = vec!["bash".into(), "-c".into(), script.into()];
+        let a = argv(Kind::Apptainer, &i);
+        let image_at = a.iter().position(|w| w == "/w/images/abc.sandbox").unwrap();
+        let no_eval = a.iter().position(|w| w == "--no-eval").expect("--no-eval");
+        assert!(no_eval < image_at, "{a:?}");
+        assert!(has(&a[..image_at], &["--pwd", "/"]), "{a:?}");
+        assert_eq!(&a[image_at + 1..], ["bash", "-c", script]);
+        // the other runtimes pass words as they are already
+        let p = argv(Kind::Podman, &i);
+        assert!(!p.iter().any(|w| w == "--no-eval"), "{p:?}");
+        assert_eq!(&p[p.len() - 3..], ["bash", "-c", script]);
+    }
+
     #[test]
     fn choices_and_versions_read_as_written() {
         assert_eq!(Choice::parse("docker"), Some(Choice::Only(Kind::Docker)));
@@ -1316,12 +1348,15 @@ mod tests {
         i.local_image = Some(PathBuf::from("/w/images/abc.sif"));
         let a = argv(Kind::Apptainer, &i);
         assert_eq!(
-            &a[..7],
+            &a[..10],
             [
                 "run",
                 "--containall",
                 "--cleanenv",
                 "--no-home",
+                "--no-eval",
+                "--pwd",
+                "/",
                 "--net",
                 "--network",
                 "none"
