@@ -1914,6 +1914,44 @@ impl Writer<'_> {
     }
 }
 
+impl Writer<'_> {
+    /// The stacks and series this run made that hold no instance: a file
+    /// whose instance another file holds under another series is filed as a
+    /// duplicate after its series and stack were written, and they would
+    /// describe nothing. Removed in one transaction, which moves the epoch,
+    /// and taken off what the run says it created.
+    pub fn sweep_empty(&mut self) -> Result<(), HomeError> {
+        let store = self.registry.store();
+        store.begin()?;
+        let swept = match nils_registry::empty::sweep(store, Some(self.batch_id), false) {
+            Ok(s) => s,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(e.into());
+            }
+        };
+        if swept.stacks == 0 && swept.series == 0 {
+            store.rollback().ok();
+            return Ok(());
+        }
+        let epoch = match nils_registry::home::next_epoch_in(store) {
+            Ok(e) => e,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(e.into());
+            }
+        };
+        store.commit()?;
+        self.registry.refresh_meta()?;
+        self.written.epoch = epoch;
+        self.written.stacks_created = self.written.stacks_created.saturating_sub(swept.stacks);
+        self.written.series_created = self.written.series_created.saturating_sub(swept.series);
+        self.written.empty_stacks_removed += swept.stacks;
+        self.written.empty_series_removed += swept.series;
+        Ok(())
+    }
+}
+
 pub fn run(
     writer: &mut Writer<'_>,
     rx: &Receiver<Batch>,
@@ -1939,6 +1977,7 @@ pub fn run(
     // Every file has been seen, so every ballot is complete.
     if !writer.cancel.abort() {
         writer.settle_dates()?;
+        writer.sweep_empty()?;
     }
     Ok(())
 }

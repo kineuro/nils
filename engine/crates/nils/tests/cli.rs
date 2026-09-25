@@ -1699,7 +1699,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.4.0"),
+            .any(|p| p["pack"] == "mri@0.5.0"),
         "{listed}"
     );
 
@@ -5504,4 +5504,170 @@ fn an_agent_stages_and_withdraws_only_its_own_staged_decision() {
     assert!(!out.status.success(), "{}", stdout(&out));
     assert!(stderr(&out).contains("a person"), "{}", stderr(&out));
     ok(&["review", "withdraw", &theirs], false);
+}
+
+/// `nils repair empty-stacks`: a registry an older digest left with stacks
+/// that hold no instance loses them, and their series where nothing else is
+/// in it; a stack a pick or a seal names is kept and reported, and a dry
+/// run writes nothing. The repair is audited and moves the epoch.
+#[test]
+fn repair_removes_the_empty_stacks_and_keeps_what_a_person_named() {
+    let home = home();
+    let dir = tree();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "2", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let db = home.path().join("registry.db");
+    // what a digest before this repair left: an empty series of two empty
+    // stacks, and two empty stacks beside an instance's in a series that
+    // stays, one of them picked and one sealed
+    {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        let q = |store: &mut nils_registry::Store, sql: &str| -> i64 {
+            store.query(sql, &[]).unwrap()[0].int(0).unwrap()
+        };
+        let series = q(&mut store, "SELECT MIN(id) FROM series");
+        let study = q(
+            &mut store,
+            "SELECT study_id FROM series WHERE id = (SELECT MIN(id) FROM series)",
+        );
+        let subject = q(
+            &mut store,
+            "SELECT subject_id FROM series WHERE id = (SELECT MIN(id) FROM series)",
+        );
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO series (study_id, subject_id, series_instance_uid, n_instances, n_stacks, first_batch_id) \
+                     VALUES ({study}, {subject}, '1.2.3.Z.9', 0, 2, 1)"
+                ),
+                &[],
+            )
+            .unwrap();
+        let empty = q(&mut store, "SELECT MAX(id) FROM series");
+        for (sid, key, index) in [
+            (empty, "z1", 0),
+            (empty, "z2", 1),
+            (series, "e1", 7),
+            (series, "e2", 8),
+            (series, "e3", 9),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO stack (series_id, stack_index, stack_key, modality, orientation, n_instances, first_batch_id) \
+                         VALUES ({sid}, {index}, '{key}', 'MR', 'axial', 0, 1)"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        store
+            .execute(
+                &format!("UPDATE series SET n_stacks = n_stacks + 3 WHERE id = {series}"),
+                &[],
+            )
+            .unwrap();
+        let e1 = q(&mut store, "SELECT id FROM stack WHERE stack_key = 'e1'");
+        let e2 = q(&mut store, "SELECT id FROM stack WHERE stack_key = 'e2'");
+        store
+            .execute(
+                &format!("INSERT INTO pick_stack (pick_id, stack_id) VALUES (1, {e1})"),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO sealed_stack (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {e2}, {subject}, 'anna', '2026-09-25T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let stacks_before = {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        store.query("SELECT COUNT(*) FROM stack", &[]).unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+
+    let run = |extra: &[&str]| -> serde_json::Value {
+        let out = nils()
+            .args(registry)
+            .args(["repair", "empty-stacks", "--json"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let dry = run(&["--dry-run"]);
+    assert_eq!(dry["stacks_removed"], 3, "{dry}");
+    assert_eq!(dry["series_removed"], 1, "{dry}");
+    assert_eq!(dry["stacks_kept"].as_array().unwrap().len(), 2, "{dry}");
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    let count = |store: &mut nils_registry::Store, sql: &str| -> i64 {
+        store.query(sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    assert_eq!(
+        count(&mut store, "SELECT COUNT(*) FROM stack"),
+        stacks_before
+    );
+    drop(store);
+
+    let done = run(&[]);
+    assert_eq!(done["stacks_removed"], 3, "{done}");
+    assert_eq!(done["series_removed"], 1, "{done}");
+    let kept: Vec<&str> = done["stacks_kept"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["why"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kept,
+        ["a pick names it", "it is of a sealed sample"],
+        "{done}"
+    );
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    assert_eq!(
+        count(&mut store, "SELECT COUNT(*) FROM stack"),
+        stacks_before - 3
+    );
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM series WHERE series_instance_uid = '1.2.3.Z.9'"
+        ),
+        0
+    );
+    // the series that stays counts the two kept beside its own
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT n_stacks FROM series WHERE id = (SELECT MIN(id) FROM series)"
+        ),
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM stack WHERE series_id = (SELECT MIN(id) FROM series)"
+        )
+    );
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM audit WHERE action = 'registry.repair' AND epoch IS NOT NULL"
+        ),
+        1
+    );
+    drop(store);
+    // nothing is left to do
+    let again = run(&[]);
+    assert_eq!(again["stacks_removed"], 0, "{again}");
 }

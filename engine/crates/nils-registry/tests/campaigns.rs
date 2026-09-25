@@ -3258,3 +3258,103 @@ fn can_t_tell_is_an_answer_that_never_becomes_a_decision() {
         assert_eq!(decided.len(), 1, "{name}: item 1's base only");
     }
 }
+
+/// A lease past its end holds nothing (2026-09-25, found when a requestion
+/// was refused over a lease that had ended 25 minutes before): a
+/// requestion goes ahead and ends it as expired, a close ends it as
+/// expired rather than released, and the campaign's owner or an operator
+/// who oversees campaigns gives back a live claim of another rater's,
+/// audited with its holder, which anyone else is refused.
+#[test]
+fn an_expired_lease_never_blocks_and_an_operator_releases_another_s_claim() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = axes_question();
+        let adj = json!({"when": "disagree", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new("expiry", &q, &adj, Items::Stacks(ids), 1, "decision"),
+        )
+        .unwrap();
+
+        // anna's lease (ten minutes) ends at 10:10; at 10:35 it holds nothing
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        let mut fewer = axes_question();
+        fewer["axes"] = json!(["base", "technique"]);
+        let moved = campaign::requestion(reg, &c.id.to_string(), &fewer, "cleo@lab", &at(35));
+        assert!(moved.is_ok(), "{name}: {moved:?}");
+        let state = |reg: &mut Registry, id: i64| {
+            campaign::assignments(reg.store(), c.id)
+                .unwrap()
+                .into_iter()
+                .find(|x| x.id == id)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(reg, a.assignment.id), "expired", "{name}");
+
+        // a live lease still stands in a requestion's way
+        let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(40))
+            .unwrap()
+            .unwrap();
+        assert!(
+            campaign::requestion(reg, &c.id.to_string(), &fewer, "cleo@lab", &at(41)).is_err(),
+            "{name}"
+        );
+        // another rater may not give bo's claim back; nor may an operator
+        // who does not oversee campaigns
+        assert!(
+            campaign::release(reg, b.assignment.id, "anna@lab", &at(41)).is_err(),
+            "{name}"
+        );
+        assert!(
+            campaign::release_as(reg, b.assignment.id, "dan@lab", false, &at(41)).is_err(),
+            "{name}"
+        );
+        assert_eq!(state(reg, b.assignment.id), "leased", "{name}");
+        // the campaign's owner may, and the audit names the holder
+        let r = campaign::release(reg, b.assignment.id, "cleo@lab", &at(42)).unwrap();
+        assert_eq!(r.state, "released", "{name}");
+        let audit = select(reg, |s| {
+            format!(
+                "SELECT principal, details FROM {} WHERE action = 'campaign.release' ORDER BY id",
+                s.qualified("audit")
+            )
+        });
+        let last = audit.last().unwrap();
+        assert_eq!(last.text(0).unwrap(), "cleo@lab", "{name}");
+        assert!(last.text(1).unwrap().contains("bo@lab"), "{name}");
+
+        // a holder of review:work may too
+        let d = campaign::claim(reg, c.id, "dan@lab", Role::Rater, &at(43))
+            .unwrap()
+            .unwrap();
+        let r = campaign::release_as(reg, d.assignment.id, "eve@lab", true, &at(44)).unwrap();
+        assert_eq!(r.state, "released", "{name}");
+
+        // an expired lease is no one's claim: anyone ends it, as expired
+        let f = campaign::claim(reg, c.id, "fay@lab", Role::Rater, &at(45))
+            .unwrap()
+            .unwrap();
+        let g = campaign::claim(reg, c.id, "gus@lab", Role::Rater, &at(46))
+            .unwrap()
+            .unwrap();
+        assert_ne!(f.item.id, g.item.id, "{name}");
+        let r = campaign::release(reg, f.assignment.id, "gus@lab", &at(56)).unwrap();
+        assert_eq!(r.state, "expired", "{name}");
+        assert_eq!(state(reg, g.assignment.id), "leased", "{name}");
+
+        // and a close ends a lease past its time as expired, a live one as
+        // released
+        let h = campaign::claim(reg, c.id, "hal@lab", Role::Rater, &at(57))
+            .unwrap()
+            .unwrap();
+        campaign::close(reg, &person_closes(c.id), &at(58)).unwrap();
+        assert_eq!(state(reg, g.assignment.id), "expired", "{name}");
+        assert_eq!(state(reg, h.assignment.id), "released", "{name}");
+    }
+}

@@ -667,7 +667,16 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let a = id_of(a)?;
                 belongs(registry.store(), c.id, "campaign_assignment", a)?;
-                let done = campaign::release(registry, a, principal, &now).map_err(campaign_err)?;
+                // the campaign's owner and a holder of review:work give
+                // back another's claim, audited with its holder
+                let done = campaign::release_as(
+                    registry,
+                    a,
+                    principal,
+                    caller.access.holds("review:work"),
+                    &now,
+                )
+                .map_err(campaign_err)?;
                 Ok(Reply::ok(done.as_json()))
             }
             ["api", "campaigns", which, "items", item, "metric"] if post => {
@@ -2778,7 +2787,9 @@ pub(crate) enum CampaignCommand {
         #[arg(long)]
         unsure: bool,
     },
-    /// Give a claimed item back unanswered
+    /// Give a claimed item back unanswered: your own, or as the operator
+    /// any rater's, which the audit records with its holder. A lease that
+    /// ran out is ended as expired
     Release { assignment: i64 },
     /// Post an external metric for an item whose raters all answered (a
     /// Dice over their masks); below the campaign's threshold the item goes
@@ -3397,8 +3408,15 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
         }
         CampaignCommand::Release { assignment } => {
             let mut registry = crate::open(home)?;
-            campaign::release(&mut registry, assignment, &who(), &now).map_err(cerr)?;
-            println!("gave back assignment {assignment}");
+            // the operator at the keyboard holds the registry itself, so
+            // gives back any claim; the audit names the holder
+            let a = campaign::release_as(&mut registry, assignment, &who(), true, &now)
+                .map_err(cerr)?;
+            if a.state == "expired" {
+                println!("assignment {assignment}'s lease had run out; it is ended as expired");
+            } else {
+                println!("gave back assignment {assignment}");
+            }
             Ok(())
         }
         CampaignCommand::Metric { item, name, value } => {

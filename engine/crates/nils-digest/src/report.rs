@@ -509,6 +509,13 @@ pub struct Written {
     /// which stack, for the files whose frames made more than one.
     #[serde(default)]
     pub frame_groups: u64,
+    /// Stacks and series the run made and removed at its end because they
+    /// hold no instance: every file of theirs was a duplicate of an
+    /// instance held under another series. Not counted in the created.
+    #[serde(default)]
+    pub empty_stacks_removed: u64,
+    #[serde(default)]
+    pub empty_series_removed: u64,
 }
 
 /// Record 26 §8: what feeding the dataset's cohort did. Every subject the
@@ -797,6 +804,14 @@ impl fmt::Display for Report {
                     n => format!("   frame groups {}", thousands(n)),
                 },
             )?;
+            if w.empty_stacks_removed + w.empty_series_removed > 0 {
+                writeln!(
+                    f,
+                    "  removed empty    series {}   stacks {}   (every file of theirs a duplicate held under another series)",
+                    thousands(w.empty_series_removed),
+                    thousands(w.empty_stacks_removed),
+                )?;
+            }
             writeln!(
                 f,
                 "  identity         known {}   attached {}",

@@ -4368,16 +4368,17 @@ x-nils:
 
 /// Record 49 A3, as the group's install found it: the pre-flight counted
 /// one unit more than the run had, and called three sessions ready whose
-/// T1w pick the release writes as a FLAIR, which the run then failed. Two
-/// synthetic people beside the two whole sessions: P3 holds only a
-/// T1-weighted FLAIR, which the pack's role rule takes as its T1w and its
-/// BIDS mapping names FLAIR; P4 holds that and a T2 FLAIR, which the
-/// release names alike and so keeps both in sourcedata/, leaving P4 no
-/// session in the input at all. The pre-flight now counts the units the
-/// release makes, names P3's session as missing its T1w, and the run skips
-/// it rather than failing it.
+/// T1w pick the release writes as a FLAIR, which the run then failed. Since
+/// Nima's ruling on T1-weighted FLAIR (record 49, mri@0.5.0) a T1-FLAIR is
+/// no candidate T1w, so it is never picked and never released as the T1w.
+/// Two synthetic people beside the two whole sessions: P3 holds only a
+/// T1-weighted FLAIR, which no pick takes, so the input leaves it out and
+/// P3 is no unit; P4 holds only a T2 FLAIR, picked as its FLAIR, so P4 is a
+/// unit with no T1w. The pre-flight counts the units the release makes,
+/// names P4's session as missing its T1w, and the run skips it rather than
+/// failing it.
 #[test]
-fn the_preflight_and_the_run_agree_on_units_and_a_t1w_released_as_flair() {
+fn the_preflight_and_the_run_agree_on_units_and_a_t1_flair_is_no_t1w() {
     if !have("python3") || !have("dcm2niix") {
         eprintln!(
             "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
@@ -4403,10 +4404,7 @@ fn the_preflight_and_the_run_agree_on_units_and_a_t1w_released_as_flair() {
                 "P4",
                 "20230519",
                 "1.2.826.0.1.3680043.8.498.74",
-                &[
-                    ("1", "t1_flair_sag", "T1 FLAIR"),
-                    ("2", "t2_flair_sag", "FLAIR"),
-                ],
+                &[("2", "t2_flair_sag", "FLAIR")],
             ),
         ],
     );
@@ -4420,27 +4418,24 @@ fn the_preflight_and_the_run_agree_on_units_and_a_t1w_released_as_flair() {
         "--preflight",
         "--json",
     ]);
-    assert_eq!(pre["stacks"], 7, "{pre}");
-    // P4's two FLAIRs share one BIDS name, so the release keeps both in
-    // sourcedata/ and P4 is no unit of the run's input
+    assert_eq!(pre["stacks"], 6, "{pre}");
     assert_eq!(pre["units"]["total"], 3, "{pre}");
-    assert_eq!(pre["left_out"]["stacks"], 2, "{pre}");
+    // P3's T1-FLAIR is picked for no role, so the input leaves it out
+    assert_eq!(pre["left_out"]["stacks"], 1, "{pre}");
     assert!(
         pre["left_out"]["why"]
             .as_str()
             .unwrap()
-            .contains("sourcedata"),
+            .contains("no live pick takes it"),
         "{pre}"
     );
-    // P3's T1w pick is a T1-weighted FLAIR, which the release names FLAIR
+    // P4 has no T1w
     assert_eq!(pre["units"]["missing"], 1, "{pre}");
     assert_eq!(pre["units"]["ready"], 2, "{pre}");
     let missing = pre["missing"][0]["unit"].as_str().unwrap().to_string();
     let why = pre["missing"][0]["why"][0].as_str().unwrap();
-    assert!(
-        why.contains("t1w pick is released as FLAIR, not T1w"),
-        "{pre}"
-    );
+    assert!(why.contains("t1w"), "{pre}");
+    assert!(!why.contains("released as FLAIR"), "{pre}");
     assert!(lab.podman_runs().is_empty());
 
     // the run has the units the pre-flight counted, runs the two ready and

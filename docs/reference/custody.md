@@ -24,9 +24,9 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | where | `<home>/registry.db`, mode 600 (SQLite keeps registry.db-wal and registry.db-shm beside it while a connection is open) |
 | holds | quasi-identifying: birth dates, sex, study dates and times, station and institution names, descriptions and comments, source paths<br>technical: everything else the catalogue declares |
 | owner | the registry's operator, for the research group that owns the archive |
-| kept | until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows |
+| kept | until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed |
 | read | `nils status [--batch <id>]`<br>`nils quarantine list`<br>`nils review list` |
-| change | `nils digest <root>` |
+| change | `nils digest <root>`<br>`nils repair empty-stacks` |
 | export | none in Wave 1: the file (or the schema) is the export |
 | delete | remove `<home>/registry.db` (nils has no command for it) |
 

@@ -148,6 +148,23 @@ cases:
       disposition: acquisition
       role: flair
 
+  # Record 49: a T1-weighted FLAIR is not a session's main T1w, and its base
+  # is T1w, so it is not a candidate FLAIR either.
+  - name: a T1-FLAIR is a candidate for no role
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      text_sequence_name: '*tir2d1_7'
+      text_series_description: 'ax T1 FLAIR'
+      image_role: original_primary
+    axes:
+      base: T1w
+      modifier: FLAIR
+      directory_type: anat
+      disposition: acquisition
+      role: ''
+
   # v0 spends four query conditions on this: the intent is anatomical, the
   # stack is not a localizer, and its construct holds none of MIP, MPR,
   # Reformat or Synthetic. Once the disposition exists, one condition does it.
