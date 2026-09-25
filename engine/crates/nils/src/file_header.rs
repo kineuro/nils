@@ -377,9 +377,18 @@ pub(crate) fn whole(
         let got = row(store, name, key, id, &columns)?;
         for (column, source) in shown {
             if let Some(v) = got.get(column) {
+                // the element's keyword and tag, as the source names them first
+                let keyword = source
+                    .split([' ', ',', '[', '.'])
+                    .next()
+                    .unwrap_or_default();
+                let tag = source
+                    .find('(')
+                    .and_then(|i| source.get(i..i + 11))
+                    .filter(|t| t.ends_with(')'));
                 fields.push(json!({
                     "level": level.name(), "column": column, "source": source,
-                    "value": v,
+                    "keyword": keyword, "tag": tag, "value": v,
                 }));
             }
         }

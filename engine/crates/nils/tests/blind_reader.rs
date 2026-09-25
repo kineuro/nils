@@ -479,6 +479,15 @@ fn a_blind_reader_sees_the_file_and_answers_what_needs_a_person() {
         &anna,
     );
     assert_eq!(head["stack"], stack, "{head}");
+    let sd = head["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["column"] == "series_description")
+        .unwrap()
+        .clone();
+    assert_eq!(sd["keyword"], "SeriesDescription", "{sd}");
+    assert_eq!(sd["tag"], "(0008,103E)", "{sd}");
     assert_eq!(head["blind"], true, "{head}");
     let fields = head["fields"].as_array().unwrap();
     let column = |c: &str| {
