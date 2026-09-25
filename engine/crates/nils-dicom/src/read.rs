@@ -159,10 +159,32 @@ pub fn read_whole(path: &Path) -> Result<(InMemDicomObject, String), ReadFailure
         Sniff::Unreadable(e) => Err(ReadFailure::Unreadable(io_text(&e))),
         Sniff::Other => Err(ReadFailure::NotDicom),
         Sniff::Part10 => {
-            let file = OpenFileOptions::new()
+            let file = match OpenFileOptions::new()
                 .read_preamble(ReadPreamble::Auto)
                 .open_file(path)
-                .map_err(|e| classify(&e))?;
+            {
+                Ok(file) => file,
+                Err(e) => {
+                    let failure = classify(&e);
+                    // As the header's reader does: a length a fixed-size VR
+                    // cannot hold (a private UL of six bytes, as one
+                    // archive's writer left them) makes the file look
+                    // truncated when it is not. Repaired in memory, the
+                    // whole file this time, since its pixels are wanted.
+                    if matches!(
+                        failure,
+                        ReadFailure::Parse {
+                            kind: ParseKind::Truncated,
+                            ..
+                        }
+                    ) && let Some(file) = repaired_whole(path)
+                    {
+                        file
+                    } else {
+                        return Err(failure);
+                    }
+                }
+            };
             let ts = file
                 .meta()
                 .transfer_syntax()
@@ -650,8 +672,38 @@ fn bare_from_bytes(raw: &[u8], form: Form) -> Result<Header, ReadFailure> {
     bare_header(form, dataset)
 }
 
+/// A whole Part 10 file, pixel data included, read with the repair of
+/// [`repaired_part10`]: the file on disk is untouched.
+fn repaired_whole(path: &Path) -> Option<dicom_object::DefaultDicomObject> {
+    let raw = std::fs::read(path).ok()?;
+    let (fixed, _) = repair(&raw)?;
+    OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Auto)
+        .from_reader(io::Cursor::new(fixed))
+        .ok()
+}
+
 /// The repair of [`repaired_part10`], on bytes already in hand.
 fn repaired_bytes(raw: &[u8]) -> Option<Header> {
+    let (fixed, repaired) = repair(raw)?;
+    let opened = OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Auto)
+        .read_until(tags::PIXEL_DATA)
+        .from_reader(io::Cursor::new(fixed))
+        .ok()?;
+    let meta = opened.meta().clone();
+    Some(Header {
+        form: Form::Part10,
+        meta: Some(meta),
+        dataset: opened.into_inner(),
+        repaired,
+    })
+}
+
+/// The bytes of a Part 10 file with each element whose declared length its
+/// fixed-size VR cannot hold cut to the length it can, and how many were;
+/// none where there is none.
+fn repair(raw: &[u8]) -> Option<(Vec<u8>, usize)> {
     let start = dataset_start(raw)?;
     let (ragged, _end) = ragged_elements(raw, start);
     if ragged.is_empty() {
@@ -672,18 +724,7 @@ fn repaired_bytes(raw: &[u8]) -> Option<Header> {
         copied = r.value_at + r.declared;
     }
     fixed.extend_from_slice(&raw[copied..]);
-    let opened = OpenFileOptions::new()
-        .read_preamble(ReadPreamble::Auto)
-        .read_until(tags::PIXEL_DATA)
-        .from_reader(io::Cursor::new(fixed))
-        .ok()?;
-    let meta = opened.meta().clone();
-    Some(Header {
-        form: Form::Part10,
-        meta: Some(meta),
-        dataset: opened.into_inner(),
-        repaired: ragged.len(),
-    })
+    Some((fixed, ragged.len()))
 }
 
 /// Where the top-level pixel data element begins in an explicit VR little
@@ -975,6 +1016,50 @@ mod tests {
                 .and_then(|e| e.string().ok().map(str::trim)),
             Some("t1_mprage")
         );
+    }
+
+    #[test]
+    fn a_whole_file_with_an_element_of_a_ragged_length_is_read_with_its_pixels() {
+        // The viewer's read, as the pyramid makes it (Phase 0: eleven
+        // stacks of one archive's old scanner, a private UL of six bytes in
+        // every file, were counted unreadable though their headers were
+        // read): the same repair, the whole file this time.
+        use crate::synth::{self, MetaFields, TempDir};
+        use dicom_core::{Tag, VR};
+        use dicom_dictionary_std::tags;
+
+        let dir = TempDir::new("ragged-whole");
+        let pixels: Vec<u8> = (0..2048u32).map(|i| (i % 251) as u8).collect();
+        let mut elems = synth::minimal_mr("1.2.3.1", "1.2.3.2", "1.2.3.3");
+        elems.push(synth::text(Tag(0x0009, 0x0010), VR::LO, "A VENDOR"));
+        elems.push(synth::bytes(
+            Tag(0x0009, 0x1213),
+            VR::UL,
+            vec![1, 0, 0, 0, 2, 0],
+        ));
+        elems.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1_mprage"));
+        elems.push(synth::bytes(tags::PIXEL_DATA, VR::OW, pixels.clone()));
+        let path = dir.file(
+            "a.dcm",
+            &synth::part10(&MetaFields::mr("1.2.3.3"), &elems, true),
+        );
+        let (dataset, ts) = read_whole(&path).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(ts, "1.2.840.10008.1.2.1");
+        assert_eq!(
+            dataset
+                .get(tags::SERIES_DESCRIPTION)
+                .and_then(|e| e.string().ok().map(str::trim)),
+            Some("t1_mprage")
+        );
+        let read = dataset
+            .get(tags::PIXEL_DATA)
+            .and_then(|e| e.to_bytes().ok())
+            .map(|b| b.to_vec());
+        assert_eq!(read.as_deref(), Some(pixels.as_slice()));
+        // and a file that is truly cut short is still refused
+        let bytes = std::fs::read(&path).unwrap();
+        let cut = dir.file("cut.dcm", &bytes[..bytes.len() - 1500]);
+        assert!(read_whole(&cut).is_err());
     }
 
     #[test]
