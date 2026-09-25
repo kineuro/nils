@@ -243,17 +243,13 @@ pub(crate) fn pick_roles(
 /// A unit's id as the runner names it from where the release put a stack:
 /// `sub-<s>_ses-<t>` at the session level, `sub-<s>` at the subject level;
 /// none for a stack outside a subject's folder.
-pub(crate) fn unit_of_dir(dir: &str, level: Level) -> Option<(String, String, Option<String>)> {
+fn unit_of_dir(dir: &str, level: Level) -> Option<String> {
     let mut parts = dir.split('/');
     let subject = parts.next()?.strip_prefix("sub-")?;
     let session = parts.next().and_then(|p| p.strip_prefix("ses-"));
     Some(match (level, session) {
-        (Level::Session, Some(s)) => (
-            format!("sub-{subject}_ses-{s}"),
-            subject.to_string(),
-            Some(s.to_string()),
-        ),
-        _ => (format!("sub-{subject}"), subject.to_string(), None),
+        (Level::Session, Some(s)) => format!("sub-{subject}_ses-{s}"),
+        _ => format!("sub-{subject}"),
     })
 }
 
@@ -348,8 +344,7 @@ fn bids_units(
                 ));
             }
             for p in &plan {
-                let Some((id, _, _)) = p.dir.as_deref().and_then(|dir| unit_of_dir(dir, d.level))
-                else {
+                let Some(id) = p.dir.as_deref().and_then(|dir| unit_of_dir(dir, d.level)) else {
                     left.push((
                         p.stack,
                         p.why
@@ -402,7 +397,10 @@ fn bids_units(
                         .or_default()
                         .entry(role.clone())
                         .or_default()
-                        .push(nils_release::run::role_suffix(role).map(str::to_string));
+                        .push(Some(
+                            nils_release::run::role_suffix(role)
+                                .map_or_else(|| role.clone(), str::to_string),
+                        ));
                 }
             }
         }
@@ -888,4 +886,61 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held(pairs: &[(&str, &[Option<&str>])]) -> BTreeMap<String, Vec<Option<String>>> {
+        pairs
+            .iter()
+            .map(|(r, s)| {
+                (
+                    r.to_string(),
+                    s.iter().map(|x| x.map(str::to_string)).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// A role is there when a stack picked for it is released under the
+    /// role's own suffix; a role the standard spells no suffix for, when a
+    /// stack picked for it is in the raw tree at all.
+    #[test]
+    fn a_role_is_there_only_under_its_own_suffix() {
+        let roles = vec!["t1w".to_string(), "flair".to_string()];
+        let ok = held(&[("t1w", &[Some("T1w")]), ("flair", &[Some("FLAIR")])]);
+        assert!(roles_missing(&roles, &ok).is_empty());
+        let as_flair = held(&[("t1w", &[Some("FLAIR")]), ("flair", &[Some("FLAIR")])]);
+        let why = roles_missing(&roles, &as_flair);
+        assert_eq!(why.len(), 1);
+        assert!(why[0].contains("released as FLAIR, not T1w"), "{why:?}");
+        let elsewhere = held(&[("t1w", &[None]), ("flair", &[Some("FLAIR")])]);
+        assert!(roles_missing(&roles, &elsewhere)[0].contains("outside"));
+        let none = held(&[("flair", &[Some("FLAIR")])]);
+        assert!(roles_missing(&roles, &none)[0].contains("no t1w is picked"));
+        // two picks of a role, one under its suffix, is the role there
+        let two = held(&[
+            ("t1w", &[Some("FLAIR"), Some("T1w")]),
+            ("flair", &[Some("FLAIR")]),
+        ]);
+        assert!(roles_missing(&roles, &two).is_empty());
+        // a role with no suffix of its own
+        let dixon = vec!["dixon".to_string()];
+        assert!(roles_missing(&dixon, &held(&[("dixon", &[Some("T1w")])])).is_empty());
+        assert!(!roles_missing(&dixon, &held(&[("dixon", &[None])])).is_empty());
+        assert_eq!(
+            unit_of_dir("sub-a/ses-b/anat", Level::Session).as_deref(),
+            Some("sub-a_ses-b")
+        );
+        assert_eq!(
+            unit_of_dir("sub-a/ses-b/anat", Level::Participant).as_deref(),
+            Some("sub-a")
+        );
+        assert_eq!(
+            unit_of_dir("sourcedata/sub-a/ses-b/anat", Level::Session),
+            None
+        );
+    }
 }
