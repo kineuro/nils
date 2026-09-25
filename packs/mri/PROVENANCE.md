@@ -155,3 +155,10 @@ directions from it, and it names the number of diffusion directions at
 `0051` elements the surveys found varying on every acquisition, which the
 pack names from what the console prints. Wave 4a slice 3 settles both against
 the surveys.
+
+## Versions after the transcription
+
+| version | what changed |
+|---|---|
+| 0.4.0 | `body_part` gains `chest`, which only a model's proposal writes. Values later gained `terms` and `description`, display only, which change no verdict and so no version. |
+| 0.5.0 | Role `t1w` does not take a T1-weighted FLAIR (a T1w whose modifier holds FLAIR): it is rare and special and is not used as a session's main T1w for analysis. A T1-FLAIR is a candidate for no role. |

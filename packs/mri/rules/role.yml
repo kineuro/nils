@@ -24,6 +24,14 @@
 # disposition means the disposition is `acquisition`, which is what this says.
 # The coupling to that default is deliberate and is the reason it is written
 # down here.
+#
+# One condition is this pack's and not v0's: a T1w whose modifier holds FLAIR
+# (a T1-FLAIR, which the modifier axis reads from `t1 flair`, `is_flair` or an
+# IR-FLAIR sequence) is not a candidate main T1w. T1-weighted FLAIR is rare
+# and special, and is not used as a session's main T1w for analysis (record 49,
+# Nima's ruling of 2026-09-25). Nor is it a candidate FLAIR, whose base is T2w,
+# so a T1-FLAIR stands for no role, and a session whose only T1 is one has no
+# T1w for the release and the pre-flight to name.
 
 rule_set: role
 decides: [role]
@@ -41,7 +49,8 @@ rules:
             - {axis: disposition, missing_or: acquisition}
             - {axis: directory_type, is: anat}
             - {axis: base, is: T1w}
-        cite: 'an anatomical T1w acquisition'
+            - not: {axis: modifier, is: FLAIR}
+        cite: 'an anatomical T1w acquisition that is not a T1-FLAIR'
         source: axes
     set: {role: t1w}
 
