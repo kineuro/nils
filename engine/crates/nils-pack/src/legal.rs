@@ -221,6 +221,55 @@ pub fn constraints(
     }))
 }
 
+/// Record 48, the reader's search: every name a person may know each value
+/// of the asked axes by, so typing a vendor's name finds the value. Per axis,
+/// per value the question asks: its `label` where it differs from the
+/// identity, its `description` where the pack gives one, its `terms` (the
+/// pack's display synonyms) and its `keywords` (the words the pack's rules
+/// read for it, after any overlay). Generic vocabulary of the pack, the same
+/// for every stack, so it is served on a blind item alike. An axis the pack
+/// does not have, or a value its axis does not declare, is left out.
+pub fn vocabulary(pack: &Pack, values: &BTreeMap<String, Vec<String>>) -> Value {
+    let mut out = serde_json::Map::new();
+    for (name, listed) in values {
+        let Ok((_, a)) = axis(pack, name) else {
+            continue;
+        };
+        let mut per = serde_json::Map::new();
+        for id in listed {
+            let Some(v) = a.values.iter().find(|v| &v.id == id) else {
+                continue;
+            };
+            let mut seen: Vec<String> = Vec::new();
+            let mut fresh = |list: &[String]| -> Vec<String> {
+                let mut kept = Vec::new();
+                for t in list {
+                    let t = t.trim();
+                    let folded = t.to_lowercase();
+                    if t.is_empty() || seen.contains(&folded) || folded == v.id.to_lowercase() {
+                        continue;
+                    }
+                    seen.push(folded);
+                    kept.push(t.to_string());
+                }
+                kept
+            };
+            let terms = fresh(&v.terms);
+            let keywords = fresh(&v.keywords);
+            let mut e = json!({"terms": terms, "keywords": keywords});
+            if v.label != v.id {
+                e["label"] = json!(v.label);
+            }
+            if let Some(d) = &v.description {
+                e["description"] = json!(d);
+            }
+            per.insert(v.id.clone(), e);
+        }
+        out.insert(name.clone(), Value::Object(per));
+    }
+    Value::Object(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +315,53 @@ mod tests {
         let c = constraints(&pack, &["base".to_string()], &values).unwrap();
         assert_eq!(c["values"]["base"], json!(["T2starw"]));
         assert!(constraints(&pack, &["colour".to_string()], &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn the_vocabulary_finds_a_value_by_a_vendors_name() {
+        let pack = mri();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "technique".to_string(),
+            vec!["MPRAGE".to_string(), "3D-TSE".to_string()],
+        );
+        values.insert("base".to_string(), vec!["T2starw".to_string()]);
+        values.insert("colour".to_string(), vec!["red".to_string()]);
+        let v = vocabulary(&pack, &values);
+        let words = |axis: &str, value: &str, list: &str| -> Vec<String> {
+            v[axis][value][list]
+                .as_array()
+                .unwrap_or_else(|| panic!("{axis}.{value}.{list} in {v}"))
+                .iter()
+                .map(|x| x.as_str().unwrap().to_lowercase())
+                .collect()
+        };
+        // the pack's rules read ir spgr for MPRAGE, and a person knows it as MP-RAGE or TFL;
+        // a word both lists hold is served once, as a term
+        assert!(words("technique", "MPRAGE", "keywords").contains(&"ir spgr".to_string()));
+        assert!(words("technique", "MPRAGE", "terms").contains(&"bravo".to_string()));
+        assert!(!words("technique", "MPRAGE", "keywords").contains(&"bravo".to_string()));
+        assert!(words("technique", "MPRAGE", "terms").contains(&"mp-rage".to_string()));
+        assert!(words("technique", "MPRAGE", "terms").contains(&"tfl".to_string()));
+        // a word said twice is served once, and never the identity itself
+        let all: Vec<String> = [
+            words("technique", "MPRAGE", "terms"),
+            words("technique", "MPRAGE", "keywords"),
+        ]
+        .concat();
+        assert!(!all.contains(&"mprage".to_string()), "{all:?}");
+        let mut unique = all.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), all.len());
+        // a label that differs from the identity is said
+        assert_eq!(v["technique"]["3D-TSE"]["label"], "SPACE");
+        assert_eq!(v["base"]["T2starw"]["label"], "T2*w");
+        assert!(v["technique"]["MPRAGE"].get("label").is_none());
+        // longhand keyword rules count: base's words come from rules/base.yml
+        assert!(words("base", "T2starw", "keywords").contains(&"t2*-w".to_string()));
+        // only what the question asks, and nothing of an axis the pack lacks
+        assert!(v["technique"].get("TSE").is_none());
+        assert!(v.get("colour").is_none());
     }
 }

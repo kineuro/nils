@@ -63,6 +63,7 @@ order:
 
 values:
   ADC:
+    terms: ['apparent diffusion coefficient', 'ADC map']
     keywords:
       - adc
       - apparent diffusion coefficient
@@ -70,6 +71,7 @@ values:
     detection:
       exclusive: has_adc
   eADC:
+    terms: ['exponential ADC', 'eADC']
     keywords:
       - eadc
       - exp adc
@@ -77,12 +79,14 @@ values:
     detection:
       exclusive: has_eadc
   FA:
+    terms: ['fractional anisotropy', 'FA map', 'color FA', 'colFA']
     keywords:
       - fractional anisotropy
       - fa map
     detection:
       exclusive: has_fa
   Trace:
+    terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b']
     keywords:
       - trace
       - tracew
@@ -91,11 +95,13 @@ values:
     detection:
       exclusive: has_trace
   MD:
+    terms: ['mean diffusivity']
     keywords:
       - mean diffusivity
       - md map
       - mean diff
   CBF:
+    terms: ['cerebral blood flow', 'rCBF']
     keywords:
       - cbf
       - cerebral blood flow
@@ -104,6 +110,7 @@ values:
     detection:
       exclusive: has_cbf
   CBV:
+    terms: ['cerebral blood volume', 'rCBV']
     keywords:
       - cbv
       - cerebral blood volume
@@ -112,6 +119,7 @@ values:
     detection:
       exclusive: has_cbv
   MTT:
+    terms: ['mean transit time']
     keywords:
       - mtt
       - mean transit time
@@ -119,6 +127,7 @@ values:
     detection:
       exclusive: has_mtt
   Tmax:
+    terms: ['time to maximum', 'Tmax']
     keywords:
       - tmax
       - t max
@@ -126,12 +135,14 @@ values:
     detection:
       exclusive: has_tmax
   TTP:
+    terms: ['time to peak']
     keywords:
       - ttp
       - time to peak
     detection:
       exclusive: has_ttp
   Water:
+    terms: ['Dixon water', 'water only']
     keywords:
       - water only
       - water image
@@ -139,6 +150,7 @@ values:
     detection:
       exclusive: has_water
   Fat:
+    terms: ['Dixon fat', 'fat only']
     keywords:
       - fat only
       - fat image
@@ -146,12 +158,14 @@ values:
     detection:
       exclusive: has_fat
   InPhase:
+    terms: ['in phase', 'in-phase', 'IP']
     keywords:
       - in phase
       - inphase
     detection:
       exclusive: has_in_phase
   OutPhase:
+    terms: ['opposed phase', 'out of phase', 'out-phase', 'OP']
     keywords:
       - opposed phase
       - out of phase
@@ -166,6 +180,7 @@ values:
   # `QMAP T1`, `QMAP T2` and `QMAP PD` apart since it was written and read
   # none of the three.
   T1map:
+    terms: ['T1 map', 'T1 mapping', 'T1 relaxometry']
     group: QUANT_MAP
     priority: 1
     keywords:
@@ -177,6 +192,7 @@ values:
       exclusive: has_t1_map
       combination: [has_qmap_t1]
   T2map:
+    terms: ['T2 map', 'T2 mapping', 'T2 relaxometry']
     group: QUANT_MAP
     priority: 2
     keywords:
@@ -188,6 +204,7 @@ values:
       exclusive: has_t2_map
       combination: [has_qmap_t2]
   R1map:
+    terms: ['R1 map']
     group: QUANT_MAP
     priority: 3
     keywords:
@@ -196,6 +213,7 @@ values:
     detection:
       exclusive: has_r1
   R2map:
+    terms: ['R2 map']
     group: QUANT_MAP
     priority: 4
     keywords:
@@ -204,6 +222,7 @@ values:
     detection:
       exclusive: has_r2
   PDmap:
+    terms: ['PD map', 'proton density map']
     group: QUANT_MAP
     priority: 5
     keywords:
@@ -216,11 +235,13 @@ values:
   # A file that says it is a quantitative map and not of what. Last of the
   # group, so it is what is left when no quantity was named.
   Qmap:
+    terms: ['quantitative map', 'qMap']
     group: QUANT_MAP
     priority: 99
     detection:
       combination: [is_qmap]
   SyntheticT1w:
+    terms: ['synthetic T1', 'SyMRI T1']
     keywords:
       - synthetic t1
       - synt t1
@@ -228,6 +249,7 @@ values:
     detection:
       exclusive: has_t1_synthetic
   SyntheticT2w:
+    terms: ['synthetic T2', 'SyMRI T2']
     keywords:
       - synthetic t2
       - synt t2
@@ -235,18 +257,21 @@ values:
     detection:
       exclusive: has_t2_synthetic
   SyntheticFLAIR:
+    terms: ['synthetic FLAIR', 'SyMRI FLAIR']
     keywords:
       - synthetic flair
       - synt flair
     detection:
       exclusive: has_flair_synthetic
   SyntheticPDw:
+    terms: ['synthetic PD', 'SyMRI PD']
     keywords:
       - synthetic pd
       - synt pd
     detection:
       exclusive: has_pd_synthetic
   MyelinMap:
+    terms: ['myelin water fraction', 'MWF', 'myelin map']
     keywords:
       - myelin map
       - myelin
@@ -255,6 +280,7 @@ values:
     detection:
       exclusive: has_myelin
   QSM:
+    terms: ['quantitative susceptibility mapping', 'susceptibility map', 'QSM']
     keywords:
       - qsm
       - susceptibility map
@@ -262,6 +288,7 @@ values:
     detection:
       exclusive: has_qsm
   MIP:
+    terms: ['maximum intensity projection', 'MIP']
     keywords:
       - mip
       - maximum intensity projection
@@ -269,6 +296,7 @@ values:
     detection:
       exclusive: is_mip
   MinIP:
+    terms: ['minimum intensity projection', 'mIP', 'MinIP']
     keywords:
       - minip
       - minimum intensity projection
@@ -276,12 +304,14 @@ values:
     detection:
       exclusive: is_minip
   MPR:
+    terms: ['multiplanar reformat', 'MPR', 'reformat']
     keywords:
       - multiplanar reformat
       - reformatted
     detection:
       exclusive: is_mpr
   B0map:
+    terms: ['B0 map', 'field map', 'fieldmap']
     keywords:
       - b0 map
       - b0map
@@ -292,6 +322,7 @@ values:
   # `FLIP ANGLE MAP` reaches this through `has_b1_map`: a flip angle map is
   # a B1 map in degrees, and BIDS gives the two one suffix.
   B1map:
+    terms: ['B1 map', 'flip angle map']
     keywords:
       - b1 map
       - b1map
@@ -305,6 +336,7 @@ values:
   # flag nothing read. A whole-spine composed image and the station images it
   # was stitched from agree on every other axis there is.
   Composed:
+    terms: ['composed', 'composite', 'composing', 'stitched']
     detection:
       exclusive: is_composite
   # The image the scanner writes beside the echoes it combined, `MEAN` in the
@@ -313,6 +345,7 @@ values:
   # all, so without this nothing separates them: 308 colliding names, 931
   # stacks.
   EchoCombined:
+    terms: ['echo combined', 'combined echoes']
     detection:
       exclusive: is_mean
   # A statistic over a series rather than an image of the person. Its
@@ -322,35 +355,43 @@ values:
   # image of its 3D GRASE ASL, the label-control subtraction that is the
   # series' own image, and 249 of them were a t test map (record 41).
   TTestMap:
+    terms: ['t-test map', 't map', 'statistical map']
     requires: {not: is_asl}
     detection:
       exclusive: is_ttest
   Magnitude:
+    terms: ['magnitude', 'magnitude image']
     keywords:
       - magnitude image
       - magnitude only
   Real:
+    terms: ['real', 'real part']
     keywords:
       - real image
       - real component
     detection:
       exclusive: has_real
   Imaginary:
+    terms: ['imaginary', 'imaginary part']
     keywords:
       - imaginary image
       - imaginary component
     detection:
       exclusive: has_imaginary
   ORIG:
+    terms: ['original']
     detection:
       exclusive: is_ge_orig
   Filtered:
+    terms: ['filtered']
     detection:
       exclusive: is_ge_filtered
   ND:
+    terms: ['no distortion correction', 'not distortion corrected']
     detection:
       exclusive: has_nd
   INV1:
+    terms: ['first inversion', 'MP2RAGE INV1']
     keywords:
       - inv1
       - inv 1
@@ -358,6 +399,7 @@ values:
     detection:
       exclusive: is_mp2rage_inv1
   INV2:
+    terms: ['second inversion', 'MP2RAGE INV2']
     keywords:
       - inv2
       - inv 2
@@ -365,6 +407,7 @@ values:
     detection:
       exclusive: is_mp2rage_inv2
   Uniform:
+    terms: ['UNI', 'uniform image', 'MP2RAGE UNI']
     keywords:
       - uni image
       - uni images
@@ -373,6 +416,7 @@ values:
     detection:
       exclusive: has_uniform
   UniformDenoised:
+    terms: ['UNI-DEN', 'UNI denoised', 'MP2RAGE UNI-DEN']
     label: Denoised
     keywords:
       - uni - den
@@ -384,6 +428,7 @@ values:
     detection:
       exclusive: is_uniform_denoised
   SWI:
+    terms: ['susceptibility weighted imaging', 'SWI', 'SWAN', 'SWIp', 'VenoBOLD']
     keywords:
       - swi processed
       - swi combined
@@ -391,6 +436,7 @@ values:
     detection:
       combination: [has_swi, is_derived]
   Phase:
+    terms: ['phase', 'phase image']
     keywords:
       - phase
       - phase map
@@ -399,6 +445,7 @@ values:
     detection:
       exclusive: has_phase
   R2starmap:
+    terms: ['R2* map', 'R2star map', 'T2* map']
     keywords:
       - r2star
       - r2star map
@@ -411,15 +458,15 @@ values:
   # cascade tests for them, with nothing tying the two together. Three of them
   # are in the live corpus (SyntheticDIR 241, SyntheticPSIR 287,
   # SyntheticSTIR 28).
-  'SyntheticSTIR': {}
-  'SyntheticDIR': {}
-  'SyntheticPSIR': {}
+  'SyntheticSTIR': {terms: ['synthetic STIR', 'SyMRI STIR']}
+  'SyntheticDIR': {terms: ['synthetic DIR', 'SyMRI DIR']}
+  'SyntheticPSIR': {terms: ['synthetic PSIR', 'SyMRI PSIR']}
   # No rule writes it, in v0 or here, and v0's intent cascade tested for it
   # twice where it could never be; those tests are gone (record 41). The
   # value stays, because a vocabulary is a contract and a question asked of
   # an earlier version may name it. `nils pack shape` reports it unreachable.
-  'FatFraction': {}
+  'FatFraction': {terms: ['fat fraction', 'PDFF', 'proton density fat fraction']}
   # The SyMRI route writes it; v0 declares it nowhere and wrote it 170 times.
-  'MultiQmap': {}
+  'MultiQmap': {terms: ['multiple quantitative maps']}
   # The EPIMix route writes it; v0 declares it nowhere and wrote it 67 times.
-  'isoDWI': {}
+  'isoDWI': {terms: ['isotropic DWI', 'isoDWI']}

@@ -11,5 +11,5 @@ kind: single
 stores: label
 
 values:
-  given: {label: '1'}
-  not_given: {label: '0'}
+  given: {label: '1', terms: ['post contrast', 'post-contrast', 'contrast enhanced', 'gadolinium', 'Gd', '+C', 'CE', 'post gad', 'T1+C']}
+  not_given: {label: '0', terms: ['pre contrast', 'pre-contrast', 'native', 'non-contrast', 'no contrast', 'plain', 'pre gad']}

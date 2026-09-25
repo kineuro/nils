@@ -14,8 +14,8 @@ axis: body_part
 kind: single
 
 values:
-  'neck': {}
-  'spine': {}
-  'brain': {}
-  'brain-neck': {}
-  'chest': {}
+  'neck': {terms: ['neck', 'soft tissue neck']}
+  'spine': {terms: ['spine', 'spinal cord', 'cervical spine', 'thoracic spine', 'lumbar spine', 'C-spine', 'T-spine', 'L-spine', 'whole spine']}
+  'brain': {terms: ['brain', 'head', 'neuro']}
+  'brain-neck': {terms: ['head and neck', 'head-neck', 'brain and neck', 'brain and cervical spine']}
+  'chest': {terms: ['chest', 'thorax', 'lungs']}

@@ -48,6 +48,7 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/items/{item}/why",
     "GET /api/campaigns/{id}/items/{item}/header",
     "POST /api/campaigns/{id}/items/{item}/derive",
+    "GET /api/campaigns/{id}/combinations",
     "GET /api/campaigns/{id}/batches",
     "POST /api/campaigns/{id}/batches/{batch}/accept",
     "GET /api/campaigns/{id}/stats",
@@ -62,7 +63,15 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
     Some(match (method, segs) {
         ("GET", ["api", "campaigns"])
         | ("GET", ["api", "campaigns", _])
-        | ("GET", ["api", "campaigns", _, "answers" | "batches" | "stats"])
+        | (
+            "GET",
+            [
+                "api",
+                "campaigns",
+                _,
+                "answers" | "batches" | "stats" | "combinations",
+            ],
+        )
         | (
             "GET",
             [
@@ -305,6 +314,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Derived axes from an answer",
     ),
     (
+        "GET /api/campaigns/{id}/combinations",
+        false,
+        false,
+        "bounded",
+        "the registry's classifications, counted once",
+        "Counting the combinations of a question's axes",
+        "Counted the combinations of a question's axes",
+    ),
+    (
         "GET /api/campaigns/{id}/batches",
         false,
         false,
@@ -449,6 +467,12 @@ pub(crate) fn route(
             ["api", "campaigns", which] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let mut v = shown(registry.store(), &c)?;
+                // record 48, the reader's search: every name each asked value
+                // goes by, from the served pack; generic, served blind alike
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                if let Some(vocabulary) = vocabulary_of(&c.question, pack.as_deref()) {
+                    v["question"]["vocabulary"] = vocabulary;
+                }
                 if plain(caller) {
                     let free = c.question["kind"] == "free";
                     for it in v["items"].as_array_mut().into_iter().flatten() {
@@ -843,6 +867,21 @@ pub(crate) fn route(
                 Ok(Reply::ok(
                     json!({"item": item, "stack": stack, "derived": derived}),
                 ))
+            }
+            // record 48, the reader's whole-combination search: how common
+            // each combination of the answered axes is across the registry,
+            // never counting this campaign's stacks or a sealed one
+            ["api", "campaigns", which, "combinations"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let limit = query
+                    .get("limit")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(200)
+                    .clamp(1, 1000);
+                let doc = crate::reader::combinations(registry.store(), &c, pack.as_deref(), limit)
+                    .map_err(|(st, m)| Reply::error(st, m))?;
+                Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "batches"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -2056,6 +2095,12 @@ fn complete_axes(
     question: &mut Value,
     pack: Option<&nils_pack::Pack>,
 ) -> Result<(), (u16, String)> {
+    if question.get("vocabulary").is_some() {
+        return Err((
+            400,
+            "vocabulary is not the caller's to say: the engine serves the pack's names for each value with the question".into(),
+        ));
+    }
     if question["kind"] != "axes" {
         return Ok(());
     }
@@ -2093,6 +2138,50 @@ fn complete_axes(
     nils_pack::derive::check(pack, &axes, &derive).map_err(|e| (400, e))?;
     question["derive"] = json!(derive);
     Ok(())
+}
+
+/// Record 48, the reader's search: the names each value the question asks
+/// goes by in the served pack (`nils_pack::legal::vocabulary`), for an axis
+/// or an axes question; the axes it derives are never rows and get none.
+/// Nothing without a served pack.
+fn vocabulary_of(question: &Value, pack: Option<&nils_pack::Pack>) -> Option<Value> {
+    let pack = pack?;
+    let words = |v: &Value| strings(v);
+    let mut values: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let all = |axis: &str| -> Vec<String> {
+        pack.axes
+            .iter()
+            .find(|a| a.name == axis)
+            .map(|a| a.values.iter().map(|v| v.id.clone()).collect())
+            .unwrap_or_default()
+    };
+    match question["kind"].as_str() {
+        Some("axis") => {
+            let axis = question["axis"].as_str()?;
+            let listed = words(&question["values"]);
+            values.insert(
+                axis.to_string(),
+                if listed.is_empty() { all(axis) } else { listed },
+            );
+        }
+        Some("axes") => {
+            let derived = words(&question["derive"]);
+            for axis in words(&question["axes"]) {
+                if derived.contains(&axis) {
+                    continue;
+                }
+                let listed = words(&question["values"][axis.as_str()]);
+                let listed = if listed.is_empty() {
+                    all(&axis)
+                } else {
+                    listed
+                };
+                values.insert(axis, listed);
+            }
+        }
+        _ => return None,
+    }
+    Some(nils_pack::legal::vocabulary(pack, &values))
 }
 
 /// Record 48, after the first real read: the file's own text and physics

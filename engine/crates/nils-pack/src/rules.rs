@@ -302,6 +302,13 @@ pub struct AxisValue {
     pub bucket: Option<String>,
     /// How the value is reached other than by a word, as the pack wrote it.
     pub detection: Detection,
+    /// Other names a person knows the value by (record 48, the reader's
+    /// search): vendors' names for one sequence, spellings, the words a
+    /// radiologist uses. Display only: no rule reads them, so a term never
+    /// moves a stack; the words that do are `keywords`.
+    pub terms: Vec<String>,
+    /// What the value means, in a line, where the pack says.
+    pub description: Option<String>,
 }
 
 /// How an axis value is reached other than by a word, kept in the words the

@@ -1704,6 +1704,14 @@ fn load_axis(
             keywords: Vec::new(),
             bucket: None,
             detection: crate::rules::Detection::default(),
+            terms: match v.get("terms") {
+                Some(t) => f.blame(yaml::texts(t, &format!("{at}.terms")))?,
+                None => Vec::new(),
+            },
+            description: match v.get("description") {
+                Some(d) => Some(f.blame(yaml::text(d, &format!("{at}.description")))?),
+                None => None,
+            },
         });
     }
 
