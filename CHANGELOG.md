@@ -6,7 +6,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [1.0.0-alpha.40] - 2026-09-25
 
-Record 48's blind reading: raters read their own campaign's pictures without `query:see`, raters are blind to each other, and one bare DICOM file no longer fails a pyramid. The registry stays at schema 65. The HTTP API contract stays version 7, amended in place (descriptions only, and the instance doors' policy now names `query:see` or `campaigns:work`); the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.39.
+Record 48's blind reading. Raters read their own campaign's pictures without `query:see` and are blind to each other, a rater may answer can't tell on an axis and mark an answer unsure, and one bare DICOM file no longer fails a pyramid. The registry is at schema 66 after this update (65 at 1.0.0-alpha.39), and it migrates when this version first opens it. The HTTP API contract stays version 7, amended in place; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.39.
 
 ### Added
 
