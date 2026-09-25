@@ -1289,12 +1289,12 @@ fn oversees(caller: &Caller) -> bool {
 }
 
 /// Record 48: whether a campaign is the caller's own: they made it, it
-/// names them as a rater or an adjudicator, they hold an assignment in it,
-/// or it is open and names no raters, so that anyone holding campaigns:work
-/// rates in it.
+/// names them as a rater or an adjudicator, or they hold an assignment in
+/// it. It fails closed: a campaign that names no raters is no one's but its
+/// maker's, and is rated by those who read every campaign.
 fn own(store: &mut Store, caller: &Caller, c: &campaign::Campaign) -> Result<bool, Reply> {
     let p = caller.principal.as_str();
-    if c.owner == p || rates_in(caller, c) || (c.status == "open" && c.raters().is_empty()) {
+    if c.owner == p || rates_in(caller, c) {
         return Ok(true);
     }
     Ok(campaign::assignments(store, c.id)
@@ -1303,14 +1303,11 @@ fn own(store: &mut Store, caller: &Caller, c: &campaign::Campaign) -> Result<boo
         .any(|a| a.principal.as_deref() == Some(p)))
 }
 
-/// Whether the caller rates or adjudicates in a campaign as it stands:
-/// named in it, or it names no raters and the caller holds campaigns:work.
+/// Whether the caller is named in a campaign as a rater or an adjudicator.
+/// A campaign that names no raters opens nothing through this.
 fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
     let p = caller.principal.as_str();
-    let raters = c.raters();
-    raters.iter().any(|r| r == p)
-        || c.adjudicators().iter().any(|a| a == p)
-        || (raters.is_empty() && caller.access.holds("campaigns:work"))
+    c.raters().iter().any(|r| r == p) || c.adjudicators().iter().any(|a| a == p)
 }
 
 /// Record 48: a campaign as a caller reads it who does not read every
@@ -1361,8 +1358,8 @@ fn reads_set(store: &mut Store, caller: &Caller, set: &LabelSet) -> Result<bool,
 }
 
 /// Record 48: the open campaign through which a caller who does not hold
-/// query:see may read a stack's pictures: one they rate or adjudicate in
-/// whose items hold the stack, or for a campaign of sessions, a session the
+/// query:see may read a stack's pictures: one that names them as a rater or
+/// an adjudicator and whose items hold the stack, or for a campaign of sessions, a session the
 /// stack is of. None when there is no such campaign.
 pub(crate) fn pictures_through(
     store: &mut Store,

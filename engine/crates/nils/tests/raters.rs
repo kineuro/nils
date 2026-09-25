@@ -577,6 +577,37 @@ fn a_rater_reads_the_pictures_of_their_own_campaign_and_nothing_else() {
     assert!(!it["outcome"].is_null(), "{it}");
     assert!(it.get("blind").is_none(), "{it}");
 
+    // fail closed: an open campaign that names no raters opens neither its
+    // pictures nor itself to a holder of campaigns:work alone
+    server.ok(
+        "PUT",
+        "/api/ask/selections/third",
+        Some(selection_of(&[3])),
+        &cleo,
+    );
+    let mut unnamed = campaign("unnamed", &[]);
+    unnamed["source"] = json!({"selection": "third@1"});
+    unnamed.as_object_mut().unwrap().remove("raters");
+    server.ok("POST", "/api/campaigns", Some(unnamed), &cleo);
+    for token in [&anna, &bo] {
+        let (status, doc) = server.call("GET", "/api/instances/3/manifest", None, token);
+        assert_eq!(status, 403, "{doc}");
+        for (method, door) in [
+            ("GET", "/api/campaigns/unnamed"),
+            ("GET", "/api/campaigns/unnamed/batches"),
+            ("POST", "/api/campaigns/unnamed/claim"),
+        ] {
+            let body = (method == "POST").then(|| json!({}));
+            let (status, doc) = server.call(method, door, body, token);
+            assert_eq!(status, 404, "{method} {door}: {doc}");
+        }
+        let listed = server.ok("GET", "/api/campaigns", None, token);
+        assert!(!listed.to_string().contains("\"unnamed\""), "{listed}");
+    }
+    // its maker, who reads every campaign, still reads its pictures by query:see
+    let (status, _) = server.call("GET", "/api/instances/3/manifest", None, &cleo);
+    assert_eq!(status, 200);
+
     // once a campaign closes, its raters no longer read pictures through it
     ok(&home, &["campaign", "close", "read-anna"], None);
     ok(&home, &["campaign", "close", "shared"], None);

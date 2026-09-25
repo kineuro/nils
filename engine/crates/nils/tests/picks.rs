@@ -639,6 +639,10 @@ fn candidates_round(home: &Home) {
         "selection:visits@1",
         "--closes-into",
         "pick",
+        "--rater",
+        "rae@lab",
+        "--rater",
+        "pat@lab",
         "--pack-dir",
         &p,
         "--json",
@@ -678,7 +682,8 @@ fn candidates_round(home: &Home) {
     }
     assert!(with_a_pick > 0, "the run picked on some occasion");
     // record 48: a rater without query:see reaches the pictures of a
-    // session's stacks through the open campaign that asks the session (here
+    // session's stacks through the open campaign that names them and asks
+    // the session (here
     // as far as the working place, which this registry has none of), and of
     // no other stack
     let item = items[0]["id"].as_i64().unwrap();
