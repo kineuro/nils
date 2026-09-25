@@ -374,6 +374,7 @@ fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
             &Timing {
                 suggested: Some(" brain "),
                 batch: false,
+                derived: None,
             },
             &at(1, 30),
         )
@@ -388,6 +389,7 @@ fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
             &Timing {
                 suggested: Some("brain"),
                 batch: false,
+                derived: None,
             },
             &at(2, 30),
         )

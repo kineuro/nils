@@ -105,6 +105,9 @@ pub enum Action {
     CampaignRelease,
     CampaignMetric,
     CampaignClose,
+    /// Record 48, after the first real read: an open axes campaign's
+    /// question moved to fewer asked axes and more derived ones.
+    CampaignRequestion,
     /// Record 42 S7: a label set written out with its digest, and labels
     /// from v0 imported as person decisions.
     LabelsExport,
@@ -177,6 +180,7 @@ impl Action {
             Action::CampaignRelease => "campaign.release",
             Action::CampaignMetric => "campaign.metric",
             Action::CampaignClose => "campaign.close",
+            Action::CampaignRequestion => "campaign.requestion",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
@@ -215,6 +219,7 @@ impl Action {
                 | Action::CampaignRelease
                 | Action::CampaignMetric
                 | Action::CampaignClose
+                | Action::CampaignRequestion
                 | Action::LabelsExport
                 | Action::LabelsSeal
                 | Action::LabelsCertificate

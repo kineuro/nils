@@ -2133,6 +2133,11 @@ fn build_registry() -> Vec<Table> {
                 // Record 48: 1 where the rater marked the stack unsure (a
                 // second look wanted); it never bears on the answer's fit.
                 col("unsure", Type::Int),
+                // Record 48, after the first real read: the axes the engine
+                // derived from the answer through the pack, as
+                // {axis: value | [values] | null | "cant_tell"}; null where
+                // the question derives none.
+                col("derived", Type::Json),
             ],
         )
         // one answer per item, rater and round: a repeat is the same answer

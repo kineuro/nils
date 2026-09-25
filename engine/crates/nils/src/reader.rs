@@ -110,7 +110,7 @@ fn shown(field: &str) -> Option<&'static str> {
         .map(|(_, l)| *l)
 }
 
-fn cell_json(c: &Cell) -> Value {
+pub(crate) fn cell_json(c: &Cell) -> Value {
     match c {
         Cell::Null => Value::Null,
         Cell::Text(s) if s.is_empty() => Value::Null,
@@ -836,7 +836,9 @@ fn suggest_from(
                 None => Some(text),
             }
         }
-        Question::Axes { axes, constraints } => {
+        Question::Axes {
+            axes, constraints, ..
+        } => {
             let obj: serde_json::Map<String, Value> = axes
                 .iter()
                 .map(|a| (a.clone(), json!(rules.get(a).cloned().unwrap_or_default())))

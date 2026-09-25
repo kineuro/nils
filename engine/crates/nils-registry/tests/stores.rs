@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64, 65, 66, 67],
+            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2017,7 +2017,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66, 67],
+            [61, 62, 63, 64, 65, 66, 67, 68],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2079,7 +2079,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65, 66, 67],
+            [63, 64, 65, 66, 67, 68],
             "{name}"
         );
         for (t, col) in [
@@ -2153,7 +2153,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65, 66, 67],
+            [64, 65, 66, 67, 68],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2202,7 +2202,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65, 66, 67],
+            [65, 66, 67, 68],
             "{name}"
         );
         assert!(
@@ -2243,7 +2243,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66, 67],
+            [66, 67, 68],
             "{name}"
         );
         assert!(
@@ -2281,7 +2281,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [67],
+            [67, 68],
             "{name}"
         );
         assert!(
@@ -2292,6 +2292,38 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()
                 .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 48, after the first real read: an answer keeps the axes derived
+/// from it; a registry from before gains the column empty.
+#[test]
+fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (a, meta) = (
+            store.qualified("campaign_answer"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {a} DROP COLUMN derived;
+                 UPDATE {meta} SET value = '67' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert!(
+            !migrate::column_exists(&mut store, "campaign_answer", "derived").unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [68],
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "campaign_answer", "derived").unwrap(),
             "{name}"
         );
     }
