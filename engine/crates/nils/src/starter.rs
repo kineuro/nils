@@ -192,6 +192,13 @@ mod tests {
                 assert!(!d.checks.is_empty(), "{name} declares its checks");
             }
         }
+        // mri_synthstrip peaked at 5.7 GB on the CPU; a unit held to 4 GB
+        // was killed (record 49 slice G)
+        let strip = descriptor::parse(CATALOG[1].1).unwrap();
+        assert!(
+            strip.document["x-nils"]["needs"]["memory-gb"].as_f64() >= Some(8.0),
+            "synthstrip declares the memory it peaks at"
+        );
         let recon = descriptor::parse(CATALOG[5].1).unwrap();
         assert_eq!(
             recon.document["x-nils"]["secrets"][0]["env"], "FS_LICENSE",
