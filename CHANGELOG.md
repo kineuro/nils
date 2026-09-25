@@ -4,10 +4,19 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.41] - 2026-09-25
+
+Compressed DICOM in the viewing pyramid, and analyses that run under apptainer. The registry stays at schema 66, as at 1.0.0-alpha.40. The HTTP API contract stays version 7, amended in place with additive fields only; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.40.
+
 ### Added
 
 - The viewing pyramid decodes compressed pixel data: JPEG baseline and extended at eight bits, JPEG lossless (process 14 and its first-order prediction), JPEG-LS lossless and near-lossless, JPEG 2000 lossless and lossy, RLE, deflated explicit VR little endian and explicit VR big endian, as well as native little endian as before, and a stack may mix them. Signed samples and the rescale are read as for native data. The manifest names the stack's `source_syntaxes` and says `lossy` when a plane came from a lossy source (a syntax that may be lossy, or a file that says Lossy Image Compression 01). JPEG at twelve bits (extended, process 4) is not decoded yet.
 - `pyramid build` over a selection or a handle counts every failure by its reason in `failures_by_reason`, beside the first twenty it lists; a plane whose codec refused it is counted as `undecodable`, and `compressed` now means a transfer syntax the pyramid has no decoder for.
+
+### Fixed
+
+- A unit under apptainer gets its command as written: `apptainer run` is given `--no-eval`, so the image's runscript no longer evaluates the words after the image through a shell and a starter's `bash -c` script keeps its command substitutions, variables and inner quotes, and `--pwd /`, so a contained image starts in its own root. Podman and docker pass the words as before.
+- The SynthStrip starter declares 8 GB of memory, seeded as the name's next version: on the CPU it peaks near 6 GB, and a unit held to the 4 GB it declared before was killed.
 
 ## [1.0.0-alpha.40] - 2026-09-25
 
