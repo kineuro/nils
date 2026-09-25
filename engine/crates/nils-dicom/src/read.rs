@@ -149,6 +149,62 @@ pub fn read(path: &Path) -> Result<Header, ReadFailure> {
     }
 }
 
+/// A whole file, pixel data included, as a viewer reads it, and its transfer
+/// syntax: a Part 10 file through its meta group, with or without the
+/// preamble, and a bare data set as [`read`] reads its header, implicit or
+/// explicit VR little endian as its first bytes say, the other when that
+/// fails.
+pub fn read_whole(path: &Path) -> Result<(InMemDicomObject, String), ReadFailure> {
+    match sniff(path) {
+        Sniff::Unreadable(e) => Err(ReadFailure::Unreadable(io_text(&e))),
+        Sniff::Other => Err(ReadFailure::NotDicom),
+        Sniff::Part10 => {
+            let file = OpenFileOptions::new()
+                .read_preamble(ReadPreamble::Auto)
+                .open_file(path)
+                .map_err(|e| classify(&e))?;
+            let ts = file
+                .meta()
+                .transfer_syntax()
+                .trim_end_matches('\0')
+                .to_string();
+            Ok((file.into_inner(), ts))
+        }
+        Sniff::BareDataset => {
+            let order = if looks_explicit(path) {
+                [Form::BareExplicit, Form::BareImplicit]
+            } else {
+                [Form::BareImplicit, Form::BareExplicit]
+            };
+            let mut first_failure = None;
+            for form in order {
+                let ts = match form {
+                    Form::BareExplicit => EXPLICIT_VR_LE,
+                    _ => IMPLICIT_VR_LE,
+                };
+                let read = DicomCollectorOptions::new()
+                    .read_preamble(ReadPreamble::Never)
+                    .expected_ts(ts)
+                    .open_file(path)
+                    .and_then(|mut collector| {
+                        let mut dataset = InMemDicomObject::new_empty();
+                        collector.read_dataset_to_end(&mut dataset)?;
+                        Ok(dataset)
+                    })
+                    .map_err(|e| classify(&e))
+                    .and_then(|dataset| bare_header(form, dataset));
+                match read {
+                    Ok(header) => return Ok((header.dataset, ts.to_string())),
+                    Err(failure) => {
+                        first_failure.get_or_insert(failure);
+                    }
+                }
+            }
+            Err(first_failure.unwrap_or(ReadFailure::NotDicom))
+        }
+    }
+}
+
 fn read_part10(path: &Path) -> Result<Header, ReadFailure> {
     let opened = match OpenFileOptions::new()
         .read_preamble(ReadPreamble::Auto)

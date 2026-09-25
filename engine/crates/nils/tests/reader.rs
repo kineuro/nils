@@ -280,6 +280,7 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
             "question": {"kind": "axis", "axis": "base"},
             "source": {"selection": "every-stack@1"},
             "raters_per_item": 1,
+            "raters": ["anna@lab", "bo@lab"],
             "adjudication": {"when": "never"},
             "closes_into": "stage",
             "hold_back": 0.5,
