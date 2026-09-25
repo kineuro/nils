@@ -13,6 +13,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - The MRI pack is version 0.5.0: role `t1w` no longer takes a T1-weighted FLAIR. A T1w stack whose modifier holds FLAIR (a T1-FLAIR, however the modifier axis found it) is a candidate for no role, since T1-weighted FLAIR is rare and special and is not used as a session's main T1w for analysis; its base is T1w, so it is no candidate FLAIR either. A session whose only T1 is a T1-FLAIR has no T1w pick, and a pipeline's pre-flight leaves the stack out as picked by nothing. Picks made before stay until the stacks are classified again under this pack and `nils pick run` runs, which drops a T1-FLAIR from `t1w` and may pick another T1w of the session in its place; a person's pick of a T1-FLAIR stands. The `terms` and `description` its values gained above are display only and change no verdict. Every other value and rule is as it was.
+- The campaign's owner and a holder of review:work give back another rater's claim, at `POST /api/campaigns/{id}/assignments/{assignment}/release`, and the operator at the keyboard does with `nils campaign release <assignment>`. The audit row names the holder.
+
+### Fixed
+
+- A lease past its end holds nothing. `nils campaign requestion` was refused while a lease that had run out 25 minutes earlier was still written `leased`; a requestion and a close now end such a lease as expired first, the batches door no longer counts it against its item, and a release of it ends it as expired, whoever asks.
 
 ## [1.0.0-alpha.43] - 2026-09-25
 

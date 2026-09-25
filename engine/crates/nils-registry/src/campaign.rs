@@ -1884,24 +1884,27 @@ pub fn open_for(
 ) -> Result<Vec<Item>, Error> {
     let d = store.dialect();
     let a = store.qualified("campaign_assignment");
+    // a lease past its end holds its item for no one, as a claim finds it
     let sql = format!(
         "SELECT {} FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (i.held_back IS NULL OR i.held_back = 0) \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
-              AND a.state IN ('leased', 'submitted')) < {} \
+              AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < {} \
          AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
          ORDER BY i.position",
         select_list(store, "campaign_item", &ITEM_COLUMNS, Some("i")),
         store.qualified("campaign_item"),
         d.param(1, Type::Int),
-        d.param(2, Type::Int),
-        d.param(3, Type::Text),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Int),
+        d.param(4, Type::Text),
     );
     Ok(store
         .query(
             &sql,
             &[
                 Param::Int(campaign.id),
+                Param::from(now_iso().as_str()),
                 Param::Int(campaign.raters_per_item),
                 Param::from(principal),
             ],
@@ -2746,19 +2749,51 @@ pub fn renew(
 
 /// Give a leased item back unanswered. A rater's item returns to the pool
 /// for others (never to the same rater); an adjudicator's is offered again.
+/// Only its holder gives it back; [`release_as`] lets an operator give back
+/// another's.
 pub fn release(
     registry: &mut Registry,
     assignment_id: i64,
     principal: &str,
     now: &str,
 ) -> Result<Assignment, Error> {
+    release_as(registry, assignment_id, principal, false, now)
+}
+
+/// Whether a lease ran out by `now`: an expired lease holds nothing, even
+/// before the next claim writes it `expired`.
+fn ran_out(a: &Assignment, now: &str) -> bool {
+    a.state == "leased"
+        && a.lease_until
+            .as_deref()
+            .is_some_and(|u| secs_of(u).zip(secs_of(now)).is_some_and(|(u, n)| u < n))
+}
+
+/// [`release`], where `oversees` says the principal may give back another
+/// person's claim: a holder of review:work, which the caller checks. The
+/// campaign's owner may as well, which this checks. A lease that already
+/// ran out is no one's claim: it is written `expired`, as the next claim
+/// would write it, whoever asks. Every release is audited with the holder
+/// it took the item from.
+pub fn release_as(
+    registry: &mut Registry,
+    assignment_id: i64,
+    principal: &str,
+    oversees: bool,
+    now: &str,
+) -> Result<Assignment, Error> {
     let store = registry.store();
     let a = assignment(store, assignment_id)?
         .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
-    if a.principal.as_deref() != Some(principal) {
-        return Err(Error::Forbidden(format!(
-            "assignment {assignment_id} is not {principal}'s"
-        )));
+    let expired = ran_out(&a, now);
+    let own = a.principal.as_deref() == Some(principal);
+    if !own && !expired && !oversees {
+        let owner = get(store, a.campaign_id)?.is_some_and(|c| c.owner == principal);
+        if !owner {
+            return Err(Error::Forbidden(format!(
+                "assignment {assignment_id} is not {principal}'s; the campaign's owner or a holder of review:work gives back another's claim"
+            )));
+        }
     }
     if a.state != "leased" {
         return Err(refused(format!(
@@ -2769,6 +2804,10 @@ pub fn release(
     store.begin()?;
     let done = (|| -> Result<(), StoreError> {
         lock(store, a.campaign_id)?;
+        if expired {
+            expire_in(store, a.campaign_id, now)?;
+            return Ok(());
+        }
         store.update_by_id(
             table("campaign_assignment"),
             &[
@@ -2788,6 +2827,13 @@ pub fn release(
         return Err(e.into());
     }
     store.commit()?;
+    let mut details = json!({"role": a.role, "round": a.round});
+    if !own {
+        details["holder"] = json!(a.principal);
+    }
+    if expired {
+        details["expired"] = json!(true);
+    }
     audit::record(
         registry,
         &Entry {
@@ -2796,7 +2842,7 @@ pub fn release(
             scope: json!({"campaign": a.campaign_id, "item": a.item_id, "assignment": a.id}),
             policy: None,
             job_id: None,
-            details: Some(json!({"role": a.role, "round": a.round})),
+            details: Some(details),
         },
     )?;
     assignment(registry.store(), assignment_id)?
@@ -2998,13 +3044,16 @@ pub fn requestion(
     store.begin()?;
     let done = (|| -> Result<usize, Error> {
         lock(store, c.id)?;
+        // a lease past its end holds nothing: it ends here, as a claim
+        // would end it, and does not stand in the way
+        expire_in(store, c.id, now)?;
         let held = assignments(store, c.id)?
             .into_iter()
             .filter(|a| matches!(a.state.as_str(), "leased" | "offered"))
             .count();
         if held > 0 {
             return Err(refused(format!(
-                "{held} item(s) of {} are leased under the question as it stands; wait for them to be answered or released",
+                "{held} item(s) of {} are leased under the question as it stands; wait for them to be answered or released (nils campaign release <assignment>)",
                 c.name
             )));
         }
@@ -4365,6 +4414,18 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
         )));
     }
     let question = c.question()?;
+    // a lease past its end ends as expired, not as released by the close
+    {
+        let store = registry.store();
+        store.begin()?;
+        match lock(store, c.id).and_then(|()| expire_in(store, c.id, now)) {
+            Ok(_) => store.commit()?,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(e.into());
+            }
+        }
+    }
     // The close is one writer: it takes the campaign from open to closing in
     // one statement before it writes anything, so a second close, and every
     // claim, answer and metric, finds it no longer open. Each item is then

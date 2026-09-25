@@ -1371,7 +1371,7 @@ paths:
   /api/campaigns/{id}/assignments/{assignment}/release:
     post:
       summary: Give a claimed item back unanswered (record 42 S5; campaigns:work)
-      description: "A rater's item returns to the pool for others and never to the same rater; an adjudicator's is offered again. Audited as campaign.release."
+      description: "A rater's item returns to the pool for others and never to the same rater; an adjudicator's is offered again. Audited as campaign.release. The holder gives back their own claim; the campaign's owner and a holder of review:work give back anyone's, and the audit row names the holder. A lease past its end holds nothing: its release ends it as expired, whoever asks, and it blocks no requestion, claim or close."
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {name: assignment, in: path, required: true, schema: {type: integer}}
