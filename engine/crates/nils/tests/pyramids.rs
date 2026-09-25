@@ -536,6 +536,24 @@ impl Server {
         )
     }
 
+    /// A GET whose answer is bytes, such as the render door's JPEG.
+    fn bytes(&self, path: &str, token: &str) -> (u16, Vec<u8>) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        let at = bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("an HTTP answer");
+        let headers = String::from_utf8_lossy(&bytes[..at]).to_string();
+        let status: u16 = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, bytes[at + 4..].to_vec())
+    }
+
     fn job(&self, command: Value) -> Value {
         let (status, doc) = self.call(
             "POST",
@@ -642,6 +660,93 @@ fn a_selection_s_pyramids_are_one_job_at_the_door_and_a_campaign_counts_its_pict
     assert_eq!(m["orientation_known"], true, "{m}");
     assert_eq!(m["frame"]["parallel"], true, "{m}");
     assert!(m["origin"].is_array() && m["orientation"].is_array(), "{m}");
+}
+
+/// Multi-frame objects: every frame is a plane. The fixtures in
+/// `tests/fixtures/multiframe` (see its `make.sh`) are digested as they
+/// come: an enhanced MR of five frames in five syntaxes, one whose frames'
+/// positions run out of order, a classic multi-frame object with no
+/// position per frame, a stack of two enhanced files and a single-frame
+/// one, and a file whose frames the digest splits into an axial and a
+/// sagittal stack. Each stack's pyramid holds its own frames, and the
+/// render door draws all three planes with the stack's slice count.
+#[test]
+fn multi_frame_stacks_build_every_frame_and_render_on_every_axis() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multiframe");
+    let lab = lab_over("pyramids-multiframe", |src| {
+        for entry in std::fs::read_dir(&fixtures).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "dcm") {
+                let name = path.file_name().unwrap().to_str().unwrap().to_string();
+                src.file(&name, &std::fs::read(&path).unwrap());
+            }
+        }
+    });
+    let packs = packs();
+    let args = [
+        "pyramid",
+        "build",
+        "--select",
+        "selection:every@1",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--workers",
+        "2",
+    ];
+    let out: Value = serde_json::from_str(ok(&lab.home, &args).trim()).unwrap();
+    // g0-g4, h0, i0, the j stack and k0's two
+    assert_eq!(out["stacks"], 10, "{out}");
+    assert_eq!(out["built"], 10, "{out}");
+    let manifests: Vec<(i64, Value)> = (1..=10)
+        .map(|s| (s, lab.manifest(s).expect("every stack is built")))
+        .collect();
+    let mut seen: Vec<(u64, String, String)> = manifests
+        .iter()
+        .map(|(_, m)| {
+            (
+                m["shape"][0].as_u64().unwrap(),
+                m["order"].as_str().unwrap().to_string(),
+                m["plane"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    seen.sort();
+    let want = |n: u64, order: &str, plane: &str| (n, order.to_string(), plane.to_string());
+    let mut expected = vec![
+        want(3, "position", "axial"),
+        want(3, "position", "sagittal"),
+        want(4, "frames", "axial"),
+        want(7, "position", "axial"),
+    ];
+    expected.extend((0..6).map(|_| want(5, "position", "axial")));
+    expected.sort();
+    assert_eq!(seen, expected);
+    for (_, m) in &manifests {
+        let classic = m["order"] == "frames";
+        assert_eq!(m["orientation_known"], !classic, "{m}");
+        let spacing = m["spacing"][0].as_f64().unwrap();
+        assert!(close(spacing, if classic { 3.0 } else { 2.0 }), "{m}");
+        assert!(m["multiframe_files"].as_u64().unwrap() >= 1, "{m}");
+    }
+    // the render door, as the viewer asks for it: a plane of each axis,
+    // the slice count the stack's
+    let server = Server::start(&lab.home);
+    for (stack, m) in &manifests {
+        let nz = m["shape"][0].as_u64().unwrap() as u32;
+        for (axis, width, height) in [("z", 64, 48), ("y", 64, nz), ("x", 48, nz)] {
+            let (status, jpeg) = server.bytes(
+                &format!("/api/instances/{stack}/render/0/1?axis={axis}"),
+                OPERATOR,
+            );
+            assert_eq!(status, 200, "stack {stack} axis {axis}");
+            let img = image::load_from_memory(&jpeg).unwrap();
+            assert_eq!(
+                (img.width(), img.height()),
+                (width, height),
+                "stack {stack} axis {axis}"
+            );
+        }
+    }
 }
 
 /// A registry of `n` small stacks with their pyramids built, as a grid of

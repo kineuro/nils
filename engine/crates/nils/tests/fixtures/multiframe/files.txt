@@ -1,0 +1,18 @@
+# The multi-frame pyramid fixtures, one line per file: file name, series,
+# layout (make.py) and how make.sh encodes it.
+# Five frames in order, groups shared, in five syntaxes, a stack each.
+g0 11 ordered native
+g1 12 ordered j2k
+g2 13 ordered jpeg-ls
+g3 14 ordered rle
+g4 15 ordered jpeg-lossless-sv1
+# Five frames whose positions run out of order, the rescale per frame.
+h0 16 shuffled native
+# A classic multi-frame object with no position per frame.
+i0 17 classic native
+# One stack of two enhanced files and a single-frame file.
+j0 18 first native
+j1 18 second j2k
+j2 18 single native
+# One file whose frames are two stacks: axial and sagittal.
+k0 19 split native
