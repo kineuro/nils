@@ -180,16 +180,28 @@ fn tree() -> TempDir {
 
 /// [`tree`] with each file where `at` puts it.
 fn tree_at(at: impl Fn(&str, &str, u32) -> String) -> TempDir {
-    let dir = TempDir::new("pipelines-src");
-    let people = [
-        ("P1", "20220115", "1.2.826.0.1.3680043.8.498.71"),
-        ("P2", "20230310", "1.2.826.0.1.3680043.8.498.72"),
+    const BOTH: &[(&str, &str, &str)] = &[
+        ("1", "t1_mprage_sag", "MPRAGE"),
+        ("2", "t2_flair_sag", "FLAIR"),
     ];
-    for (patient, day, root) in people {
-        for (n, description, protocol) in [
-            ("1", "t1_mprage_sag", "MPRAGE"),
-            ("2", "t2_flair_sag", "FLAIR"),
-        ] {
+    tree_of(
+        at,
+        &[
+            ("P1", "20220115", "1.2.826.0.1.3680043.8.498.71", BOTH),
+            ("P2", "20230310", "1.2.826.0.1.3680043.8.498.72", BOTH),
+        ],
+    )
+}
+
+/// One person's session: the patient, the study's day, the UID root and
+/// each series as its number, description and protocol.
+type Person<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a str, &'a str)]);
+
+/// The files of these people's sessions, each file where `at` puts it.
+fn tree_of(at: impl Fn(&str, &str, u32) -> String, people: &[Person<'_>]) -> TempDir {
+    let dir = TempDir::new("pipelines-src");
+    for &(patient, day, root, series) in people {
+        for &(n, description, protocol) in series {
             let study = format!("{root}.1");
             let series = format!("{root}.1.{n}");
             for slice in 1..=12u32 {
@@ -4159,7 +4171,7 @@ fn the_preflight_counts_what_the_run_then_does() {
     assert_eq!(status, 404);
     drop(server);
 
-    // the run then has those units, and fails the one named
+    // the run then has those units, and skips the one named
     let v = lab.json(&[
         "run",
         "needs-flair",
@@ -4168,10 +4180,12 @@ fn the_preflight_counts_what_the_run_then_does() {
         "--json",
     ]);
     assert_eq!(v["summary"]["units"]["total"], pre["units"]["total"], "{v}");
+    // the unit missing an input is skipped, not failed (record 49 A3)
     assert_eq!(
-        v["summary"]["units"]["failed"], pre["units"]["missing"],
+        v["summary"]["units"]["skipped"], pre["units"]["missing"],
         "{v}"
     );
+    assert_eq!(v["summary"]["units"]["failed"], 0, "{v}");
     assert_eq!(
         v["summary"]["units"]["succeeded"], pre["units"]["ready"],
         "{v}"
@@ -4319,4 +4333,313 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
         text.contains("seeding at the engine's start: off"),
         "{text}"
     );
+}
+
+/// A pipeline of the bids layout that reads each session's T1w, one unit a
+/// session, as the N4 starter does.
+const NEEDS_T1W: &str = r#"name: needs-t1w
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/needs-t1w@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+command-line: |
+  python3 -c '
+  import glob, os, shutil, sys
+  src, out = sys.argv[1], sys.argv[2]
+  n = 0
+  for t in sorted(glob.glob(src + "/sub-*/ses-*/anat/*_T1w.nii.gz")):
+      rel = os.path.relpath(t, src)
+      d = os.path.join(out, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
+      shutil.copy(t, os.path.join(d, os.path.basename(rel).replace("_T1w", "_desc-n4_T1w")))
+      n += 1
+  sys.exit(0 if n else 3)
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids, roles: [t1w]}
+  units: apart
+  outputs:
+    - id: n4
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz"
+  needs: {cores: 1, memory-gb: 1, unit-minutes: 2}
+"#;
+
+/// Record 49 A3, as the group's install found it: the pre-flight counted
+/// one unit more than the run had, and called three sessions ready whose
+/// T1w pick the release writes as a FLAIR, which the run then failed. Two
+/// synthetic people beside the two whole sessions: P3 holds only a
+/// T1-weighted FLAIR, which the pack's role rule takes as its T1w and its
+/// BIDS mapping names FLAIR; P4 holds that and a T2 FLAIR, which the
+/// release names alike and so keeps both in sourcedata/, leaving P4 no
+/// session in the input at all. The pre-flight now counts the units the
+/// release makes, names P3's session as missing its T1w, and the run skips
+/// it rather than failing it.
+#[test]
+fn the_preflight_and_the_run_agree_on_units_and_a_t1w_released_as_flair() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    const BOTH: &[(&str, &str, &str)] = &[
+        ("1", "t1_mprage_sag", "MPRAGE"),
+        ("2", "t2_flair_sag", "FLAIR"),
+    ];
+    let src = tree_of(
+        |patient, n, slice| format!("{patient}/{n}/{slice}"),
+        &[
+            ("P1", "20220115", "1.2.826.0.1.3680043.8.498.71", BOTH),
+            ("P2", "20230310", "1.2.826.0.1.3680043.8.498.72", BOTH),
+            (
+                "P3",
+                "20230412",
+                "1.2.826.0.1.3680043.8.498.73",
+                &[("1", "t1_flair_sag", "T1 FLAIR")],
+            ),
+            (
+                "P4",
+                "20230519",
+                "1.2.826.0.1.3680043.8.498.74",
+                &[
+                    ("1", "t1_flair_sag", "T1 FLAIR"),
+                    ("2", "t2_flair_sag", "FLAIR"),
+                ],
+            ),
+        ],
+    );
+    let lab = Lab::with_tree("pipelines-t1w-as-flair", src);
+    lab.add_descriptor("needs-t1w", NEEDS_T1W);
+    let pre = lab.json(&[
+        "run",
+        "needs-t1w",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["stacks"], 7, "{pre}");
+    // P4's two FLAIRs share one BIDS name, so the release keeps both in
+    // sourcedata/ and P4 is no unit of the run's input
+    assert_eq!(pre["units"]["total"], 3, "{pre}");
+    assert_eq!(pre["left_out"]["stacks"], 2, "{pre}");
+    assert!(
+        pre["left_out"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("sourcedata"),
+        "{pre}"
+    );
+    // P3's T1w pick is a T1-weighted FLAIR, which the release names FLAIR
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    assert_eq!(pre["units"]["ready"], 2, "{pre}");
+    let missing = pre["missing"][0]["unit"].as_str().unwrap().to_string();
+    let why = pre["missing"][0]["why"][0].as_str().unwrap();
+    assert!(
+        why.contains("t1w pick is released as FLAIR, not T1w"),
+        "{pre}"
+    );
+    assert!(lab.podman_runs().is_empty());
+
+    // the run has the units the pre-flight counted, runs the two ready and
+    // skips the one missing its T1w, which is no failure and no review item
+    let v = lab.json(&[
+        "run",
+        "needs-t1w",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    let units = &v["summary"]["units"];
+    assert_eq!(units["total"], pre["units"]["total"], "{v}");
+    assert_eq!(units["succeeded"], pre["units"]["ready"], "{v}");
+    assert_eq!(units["skipped"], pre["units"]["missing"], "{v}");
+    assert_eq!(units["missing_input"], 1, "{v}");
+    assert_eq!(units["failed"], 0, "{v}");
+    assert_eq!(v["status"], "done", "{v}");
+    assert_eq!(v["exit_code"], 0, "{v}");
+    assert!(
+        v["summary"]["review_items"].as_array().unwrap().is_empty(),
+        "{v}"
+    );
+    assert_eq!(
+        lab.podman_runs().len(),
+        2,
+        "the skipped unit had no container"
+    );
+    let skipped: Vec<&Value> = v["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["status"] == "skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{v}");
+    assert_eq!(skipped[0]["unit"], missing.as_str(), "{v}");
+    assert_eq!(skipped[0]["attempts"], 0, "{v}");
+    let outcome = lab
+        .store()
+        .query("SELECT outcome FROM pipeline_unit WHERE attempts = 0", &[])
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert!(outcome.contains("missing an input"), "{outcome}");
+}
+
+/// Record 49 R7, as Nima corrected it: a run's outputs go to the lane's
+/// output place and its scratch to its scratch place. Unset, both are the
+/// first working place, as before; set, the derivatives a run registers
+/// lie under the output place and are its rows', and the run's input,
+/// units' folders and logs lie under the scratch place; the run records
+/// both, and a place that is not an active working place is refused.
+#[test]
+fn the_lane_puts_a_run_s_outputs_and_its_scratch_where_it_names() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-places");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    let results = TempDir::new("pipelines-places-results");
+    let results_path = results.path().to_str().unwrap().to_string();
+    lab.ok(
+        &[
+            "place",
+            "add",
+            "results",
+            &results_path,
+            "--role",
+            "working",
+            "--fast",
+        ],
+        None,
+    );
+    let id_of = |name: &str| {
+        lab.store()
+            .query(&format!("SELECT id FROM place WHERE name = '{name}'"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    let (scratch_id, results_id) = (id_of("scratch"), id_of("results"));
+
+    // unset: the first working place for both
+    let lane = lab.json(&["pipeline", "lane", "--json"]);
+    assert_eq!(lane["places"]["output"], "scratch", "{lane}");
+    assert_eq!(lane["places"]["scratch"], "scratch", "{lane}");
+    assert_eq!(lane["places"]["output_set"], false, "{lane}");
+    // a place that is not an active working place is refused
+    let (good, _, err) = lab.run(&["pipeline", "lane", "--output-place", "nowhere"], None);
+    assert!(!good && err.contains("no active working place"), "{err}");
+
+    // the outputs to results, the scratch where it was
+    let lane = lab.json(&["pipeline", "lane", "--output-place", "results", "--json"]);
+    assert_eq!(lane["places"]["output"], "results", "{lane}");
+    assert_eq!(lane["places"]["scratch"], "scratch", "{lane}");
+    let text = lab.ok(&["pipeline", "lane"], None);
+    assert!(text.contains("output   results"), "{text}");
+    assert!(
+        text.contains("scratch  scratch, the first working place"),
+        "{text}"
+    );
+    let pre = lab.json(&[
+        "run",
+        "slow",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["place"], "results", "{pre}");
+    assert_eq!(pre["scratch"], "scratch", "{pre}");
+    let run = lab.json(&[
+        "run",
+        "slow",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "sleep=0",
+        "--json",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["place_id"], results_id, "{run}");
+    assert_eq!(run["scratch_place_id"], scratch_id, "{run}");
+    let id = run["id"].as_i64().unwrap();
+    let out = results.path().join(format!("derivatives/slow/{id}"));
+    assert!(out.is_dir(), "the outputs are under the output place");
+    assert!(
+        !lab.work
+            .path()
+            .join(format!("derivatives/slow/{id}"))
+            .exists()
+    );
+    assert!(
+        lab.work.path().join(format!("runs/{id}/units")).is_dir(),
+        "the scratch is under the scratch place"
+    );
+    assert!(!results.path().join("runs").exists());
+    let rows = lab
+        .store()
+        .query(
+            &format!("SELECT place_id, path FROM derivative WHERE run_id = {id}"),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 4);
+    for r in &rows {
+        assert_eq!(r.int(0).unwrap(), results_id);
+        assert!(results.path().join(r.text(1).unwrap()).is_file());
+    }
+
+    // the other way round: the scratch to results, the outputs back
+    lab.ok(
+        &[
+            "pipeline",
+            "lane",
+            "--output-place",
+            "default",
+            "--scratch-place",
+            "results",
+        ],
+        None,
+    );
+    let run = lab.json(&[
+        "run",
+        "slow",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "sleep=0",
+        "--json",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["place_id"], scratch_id, "{run}");
+    assert_eq!(run["scratch_place_id"], results_id, "{run}");
+    let id = run["id"].as_i64().unwrap();
+    assert!(
+        lab.work
+            .path()
+            .join(format!("derivatives/slow/{id}"))
+            .is_dir()
+    );
+    assert!(results.path().join(format!("runs/{id}/units")).is_dir());
+    assert!(!lab.work.path().join(format!("runs/{id}")).exists());
+
+    // both unset again: one place, and the run records no scratch of its own
+    lab.ok(&["pipeline", "lane", "--scratch-place", "default"], None);
+    let run = lab.json(&[
+        "run",
+        "slow",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "sleep=0",
+        "--json",
+    ]);
+    assert_eq!(run["place_id"], scratch_id, "{run}");
+    assert!(run["scratch_place_id"].is_null(), "{run}");
 }

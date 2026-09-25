@@ -11,15 +11,20 @@
 //! It is `POST /api/pipelines/{name}/preflight` and `nils run --preflight`.
 //! It starts nothing and writes nothing but the handle a selection is frozen
 //! into, which a run would freeze the same way (and which is reused while
-//! the registry has not moved).
+//! the registry has not moved), and the session cache the release reads,
+//! which the release would build the same way.
 //!
 //! The units are counted the way the runner makes them: in the stacks
 //! layout one a stack; in the bids layout one a session (or a participant)
-//! of the picks the release takes, since the runner's input is a release
-//! with the picks applied (record 43 R4). A session is missing an input
-//! when it has no pick of a role the descriptor names under
-//! `x-nils.input.roles`; a stack when the registry holds no file of it, or
-//! no derivative a typed input needs.
+//! of the release's own tree, since the runner's input is a release with
+//! the picks applied (record 43 R4) and its units are that tree's folders.
+//! The release's plan says where each picked stack goes, so a stack it
+//! keeps in `sourcedata/` or holds is left out as the run leaves it out. A
+//! session is missing an input when no stack picked for a role the
+//! descriptor names under `x-nils.input.roles` is released under that
+//! role's own BIDS suffix (a `t1w` pick the release names `FLAIR` is no
+//! T1w), and the run skips it; a stack when the registry holds no file of
+//! it, or no derivative a typed input needs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -43,6 +48,9 @@ const PAST_RUNS: usize = 20;
 /// What the pre-flight is asked.
 pub(crate) struct Asked<'a> {
     pub pipeline: &'a str,
+    /// The pack the run's release names its stacks by; without it the bids
+    /// units are counted from the picks alone.
+    pub pack: Option<&'a nils_pack::Pack>,
     pub handle: i64,
     pub selection: Option<&'a str>,
     pub params: &'a [(String, String)],
@@ -62,6 +70,9 @@ pub(crate) fn budget(registry: &mut Registry) -> (crate::pipelines::Lane, Value)
 /// One unit the run would have.
 #[derive(Debug, Clone, Default)]
 struct Unit {
+    /// The run's own name for it, `sub-<s>_ses-<t>` or `sub-<s>`, where the
+    /// release's plan gave it one.
+    id: Option<String>,
     subject_id: Option<i64>,
     session_day: Option<String>,
     stack_id: Option<i64>,
@@ -72,6 +83,9 @@ struct Unit {
 
 impl Unit {
     fn name(&self) -> String {
+        if let Some(id) = &self.id {
+            return id.clone();
+        }
         match (self.stack_id, self.subject_id, &self.session_day) {
             (Some(s), _, _) => format!("stack-{s}"),
             (None, Some(sub), Some(day)) => format!("subject {sub}, session of {day}"),
@@ -94,7 +108,7 @@ fn stack_units(
     store: &mut Store,
     d: &Descriptor,
     stacks: &[i64],
-    place_id: Option<i64>,
+    place_ids: &[i64],
 ) -> Result<Vec<Unit>, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let mut with_files: BTreeSet<i64> = BTreeSet::new();
@@ -135,14 +149,17 @@ fn stack_units(
         .filter(|t| t.ty.starts_with("derivative:") && !t.optional)
     {
         let kind = t.ty.trim_start_matches("derivative:");
-        let have: BTreeSet<i64> = match place_id {
-            Some(place) => nils_registry::derivative::of_stacks(store, kind, stacks, place)
-                .map_err(err)?
-                .into_iter()
-                .filter_map(|r| r.stack_id)
-                .collect(),
-            None => BTreeSet::new(),
-        };
+        // where the runner looks: the lane's output place, then its
+        // scratch place (record 49 R7)
+        let mut have: BTreeSet<i64> = BTreeSet::new();
+        for place in place_ids {
+            have.extend(
+                nils_registry::derivative::of_stacks(store, kind, stacks, *place)
+                    .map_err(err)?
+                    .into_iter()
+                    .filter_map(|r| r.stack_id),
+            );
+        }
         derived.push((t.id.clone(), kind.to_string(), have));
     }
     Ok(stacks
@@ -172,18 +189,24 @@ fn stack_units(
         .collect())
 }
 
-/// The bids layout: the units the release of the picks makes, one a session
-/// (or a participant) that holds a live pick of a stack of the selection,
-/// missing where it has no pick of a role the descriptor names. Answers the
-/// units and the stacks no pick takes, which the input leaves out.
-fn bids_units(
+/// What the live picks say of one stack: the roles it was picked for, and
+/// the subject and the session's day the pick names.
+pub(crate) struct Picked {
+    pub(crate) roles: BTreeSet<String>,
+    subject: i64,
+    day: String,
+}
+
+/// The stacks the selection leaves out of a run's input, each with why.
+type LeftOut = Vec<(i64, String)>;
+
+/// The live picks among `stacks`, by stack.
+pub(crate) fn pick_roles(
     store: &mut Store,
-    d: &Descriptor,
     stacks: &[i64],
-) -> Result<(Vec<Unit>, Vec<i64>), String> {
+) -> Result<BTreeMap<i64, Picked>, String> {
     let err = |e: nils_registry::Error| e.to_string();
-    let mut units: BTreeMap<(i64, Option<String>), Unit> = BTreeMap::new();
-    let mut picked: BTreeSet<i64> = BTreeSet::new();
+    let mut out: BTreeMap<i64, Picked> = BTreeMap::new();
     let d_ = store.dialect();
     for chunk in stacks.chunks(500) {
         let sql = format!(
@@ -204,34 +227,190 @@ fn bids_units(
             let subject = r.int(1).map_err(err)?;
             let day = r.text(2).map_err(err)?.to_string();
             let role = r.text(3).map_err(err)?.to_string();
-            picked.insert(stack);
-            let day = (d.level == Level::Session).then_some(day);
-            let u = units.entry((subject, day.clone())).or_insert(Unit {
-                subject_id: Some(subject),
-                session_day: day,
-                ..Unit::default()
-            });
-            if !u.stacks.contains(&stack) {
-                u.stacks.push(stack);
-            }
-            u.roles.insert(role);
+            out.entry(stack)
+                .or_insert_with(|| Picked {
+                    roles: BTreeSet::new(),
+                    subject,
+                    day,
+                })
+                .roles
+                .insert(role);
         }
     }
-    let mut out: Vec<Unit> = units.into_values().collect();
-    for u in out.iter_mut() {
-        for role in &d.roles {
-            if !u.roles.contains(role) {
-                u.missing.push(format!(
-                    "no {role} is picked for it among the selection's stacks"
+    Ok(out)
+}
+
+/// A unit's id as the runner names it from where the release put a stack:
+/// `sub-<s>_ses-<t>` at the session level, `sub-<s>` at the subject level;
+/// none for a stack outside a subject's folder.
+fn unit_of_dir(dir: &str, level: Level) -> Option<String> {
+    let mut parts = dir.split('/');
+    let subject = parts.next()?.strip_prefix("sub-")?;
+    let session = parts.next().and_then(|p| p.strip_prefix("ses-"));
+    Some(match (level, session) {
+        (Level::Session, Some(s)) => format!("sub-{subject}_ses-{s}"),
+        _ => format!("sub-{subject}"),
+    })
+}
+
+/// What a unit lacks of the roles a descriptor names (record 49 A3), from
+/// what the release makes of the stacks picked for each role in it: the
+/// BIDS suffix of each in the raw tree, none for one the release puts
+/// elsewhere. A role is there when a stack picked for it is released under
+/// the role's own suffix (`t1w` as `T1w`); a role the standard spells no
+/// suffix for is there when a stack picked for it is in the raw tree. The
+/// pre-flight and the runner both judge a unit by this, so a session whose
+/// T1w pick the release writes as a FLAIR is missing its T1w before the
+/// run, and is not run.
+pub(crate) fn roles_missing(
+    roles: &[String],
+    held: &BTreeMap<String, Vec<Option<String>>>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for role in roles {
+        let got = held.get(role).map(Vec::as_slice).unwrap_or(&[]);
+        if got.is_empty() {
+            out.push(format!(
+                "no {role} is picked for it among the selection's stacks"
+            ));
+            continue;
+        }
+        let raw: Vec<&str> = got.iter().filter_map(|s| s.as_deref()).collect();
+        let want = nils_release::run::role_suffix(role);
+        let ok = match want {
+            Some(w) => raw.contains(&w),
+            None => !raw.is_empty(),
+        };
+        if ok {
+            continue;
+        }
+        let mut as_: Vec<&str> = raw.clone();
+        as_.sort_unstable();
+        as_.dedup();
+        out.push(match (want, as_.is_empty()) {
+            (_, true) => format!(
+                "its {role} pick is released outside the session's BIDS folders, so its input holds none"
+            ),
+            (Some(w), false) => format!(
+                "its {role} pick is released as {}, not {w}, so its input holds no {w}",
+                as_.join(" and ")
+            ),
+            (None, false) => unreachable!("a role with no suffix is there when anything is raw"),
+        });
+    }
+    out
+}
+
+/// The bids layout: the units the release of the picks makes, one a session
+/// (or a participant) that holds a live pick of a stack of the selection,
+/// missing where it has no pick of a role the descriptor names. Answers the
+/// units and the stacks no pick takes, which the input leaves out, with why.
+///
+/// With the pack, the units are the release's own (record 49 A3, found on
+/// the group's install): the plan of `nils release --layout bids --picked`
+/// says where each picked stack goes, so a session the release merges, a
+/// stack it routes to `sourcedata/` or holds, and a pick it names by
+/// another suffix are counted as the run will meet them.
+fn bids_units(
+    registry: &mut Registry,
+    d: &Descriptor,
+    stacks: &[i64],
+    pack: Option<&nils_pack::Pack>,
+) -> Result<(Vec<Unit>, LeftOut), String> {
+    let picks = pick_roles(registry.store(), stacks)?;
+    let unpicked = "no live pick takes it, so the release of the input leaves it out".to_string();
+    let mut left: LeftOut = stacks
+        .iter()
+        .filter(|s| !picks.contains_key(s))
+        .map(|s| (*s, unpicked.clone()))
+        .collect();
+    let mut held: BTreeMap<String, BTreeMap<String, Vec<Option<String>>>> = BTreeMap::new();
+    let mut units: BTreeMap<String, Unit> = BTreeMap::new();
+    match pack {
+        Some(pack) => {
+            let picked: Vec<i64> = picks.keys().copied().collect();
+            let plan = nils_release::run::plan_picked(
+                registry,
+                pack,
+                &nils_registry::session::Scheme::default(),
+                &picked,
+            )
+            .map_err(|e| format!("the plan of the input's release: {e}"))?;
+            let planned: BTreeSet<i64> = plan.iter().map(|p| p.stack).collect();
+            for s in picked.iter().filter(|s| !planned.contains(s)) {
+                left.push((
+                    *s,
+                    "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into(),
                 ));
             }
+            for p in &plan {
+                let Some(id) = p.dir.as_deref().and_then(|dir| unit_of_dir(dir, d.level)) else {
+                    left.push((
+                        p.stack,
+                        p.why
+                            .clone()
+                            .unwrap_or_else(|| format!("the release puts it in {}", p.route)),
+                    ));
+                    continue;
+                };
+                let Picked { roles, day, .. } = &picks[&p.stack];
+                let u = units.entry(id.clone()).or_insert(Unit {
+                    id: Some(id.clone()),
+                    subject_id: Some(p.subject_id),
+                    session_day: (d.level == Level::Session).then(|| day.clone()),
+                    ..Unit::default()
+                });
+                u.stacks.push(p.stack);
+                let suffix = (p.route == "raw").then(|| p.suffix.clone()).flatten();
+                for role in roles {
+                    u.roles.insert(role.clone());
+                    held.entry(id.clone())
+                        .or_default()
+                        .entry(role.clone())
+                        .or_default()
+                        .push(suffix.clone());
+                }
+            }
+        }
+        // no pack to plan with: the picks alone, as the pick names them
+        None => {
+            for (
+                stack,
+                Picked {
+                    roles,
+                    subject,
+                    day,
+                },
+            ) in &picks
+            {
+                let day = (d.level == Level::Session).then(|| day.clone());
+                let key = format!("{subject}/{}", day.clone().unwrap_or_default());
+                let u = units.entry(key.clone()).or_insert(Unit {
+                    subject_id: Some(*subject),
+                    session_day: day,
+                    ..Unit::default()
+                });
+                u.stacks.push(*stack);
+                for role in roles {
+                    u.roles.insert(role.clone());
+                    held.entry(key.clone())
+                        .or_default()
+                        .entry(role.clone())
+                        .or_default()
+                        .push(Some(
+                            nils_release::run::role_suffix(role)
+                                .map_or_else(|| role.clone(), str::to_string),
+                        ));
+                }
+            }
         }
     }
-    let left: Vec<i64> = stacks
-        .iter()
-        .copied()
-        .filter(|s| !picked.contains(s))
-        .collect();
+    let mut out = Vec::new();
+    for (key, mut u) in units {
+        u.missing = roles_missing(&d.roles, held.get(&key).unwrap_or(&BTreeMap::new()));
+        out.push(u);
+    }
+    left.sort();
     Ok((out, left))
 }
 
@@ -307,13 +486,19 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     };
     let stacks =
         crate::pipelines::handle_stacks(registry.store(), asked.handle).map_err(|e| e.message)?;
-    let place = crate::derivatives::working(registry.store()).ok();
+    let places = crate::pipelines::run_places(registry.store()).ok();
+    let mut place_ids: Vec<i64> = places.iter().map(|p| p.output.id).collect();
+    if let Some(p) = &places
+        && p.scratch.id != p.output.id
+    {
+        place_ids.push(p.scratch.id);
+    }
     let (units, left) = match d.layout {
         Layout::Stacks => (
-            stack_units(registry.store(), &d, &stacks, place.as_ref().map(|p| p.id))?,
-            Vec::new(),
+            stack_units(registry.store(), &d, &stacks, &place_ids)?,
+            LeftOut::new(),
         ),
-        Layout::Bids => bids_units(registry.store(), &d, &stacks)?,
+        Layout::Bids => bids_units(registry, &d, &stacks, asked.pack)?,
     };
     if units.is_empty() {
         blockers.push(match d.layout {
@@ -420,9 +605,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "roles": d.roles,
         "left_out": {
             "stacks": left.len(),
-            "why": (!left.is_empty()).then_some(
-                "no live pick takes these stacks, so the release of the input leaves them out"
-            ),
+            "why": left_why(&left),
         },
         "estimate": {
             "seconds_per_unit": per_unit.map(f64::round),
@@ -441,9 +624,27 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "checks": d.checks.iter().map(|c| c.text()).collect::<Vec<_>>(),
         "runtime": capability["runtime"],
         "place": capability["place"],
+        "scratch": capability["scratch"],
         "ready": ready,
         "blockers": blockers,
     }))
+}
+
+/// Why the stacks left out are, each reason once with its count.
+fn left_why(left: &[(i64, String)]) -> Value {
+    if left.is_empty() {
+        return Value::Null;
+    }
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, why) in left {
+        *by.entry(why.as_str()).or_insert(0) += 1;
+    }
+    json!(
+        by.iter()
+            .map(|(w, n)| format!("{n}: {w}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
 }
 
 /// A pre-flight read at detail plain: the counts and the reasons, no unit
@@ -526,10 +727,17 @@ pub(crate) fn route(
                 ));
             }
         };
+        let pack = pack_dir
+            .map(Path::to_path_buf)
+            .or_else(|| crate::pack_dir(home, None).ok())
+            .and_then(|dir| {
+                nils_pack::load(&dir.join(doc["pack"].as_str().unwrap_or("mri")), None).ok()
+            });
         let mut v = check(
             registry,
             &Asked {
                 pipeline: name,
+                pack: pack.as_ref(),
                 handle,
                 selection: selection.as_deref(),
                 params: &params,
@@ -584,11 +792,15 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
                 .ok_or_else(|| usage(format!("--param {w}: write it as id=value")))
         })
         .collect::<Result<_, _>>()?;
+    let pack = crate::pack_dir(home, args.pack_dir.clone())
+        .ok()
+        .and_then(|dir| crate::ask_cli::load_pack(&dir, &args.pack).ok());
     let mut registry = crate::open(home)?;
     let v = check(
         &mut registry,
         &Asked {
             pipeline,
+            pack: pack.as_ref(),
             handle,
             selection: args.select.as_deref(),
             params: &params,
@@ -674,4 +886,61 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held(pairs: &[(&str, &[Option<&str>])]) -> BTreeMap<String, Vec<Option<String>>> {
+        pairs
+            .iter()
+            .map(|(r, s)| {
+                (
+                    r.to_string(),
+                    s.iter().map(|x| x.map(str::to_string)).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// A role is there when a stack picked for it is released under the
+    /// role's own suffix; a role the standard spells no suffix for, when a
+    /// stack picked for it is in the raw tree at all.
+    #[test]
+    fn a_role_is_there_only_under_its_own_suffix() {
+        let roles = vec!["t1w".to_string(), "flair".to_string()];
+        let ok = held(&[("t1w", &[Some("T1w")]), ("flair", &[Some("FLAIR")])]);
+        assert!(roles_missing(&roles, &ok).is_empty());
+        let as_flair = held(&[("t1w", &[Some("FLAIR")]), ("flair", &[Some("FLAIR")])]);
+        let why = roles_missing(&roles, &as_flair);
+        assert_eq!(why.len(), 1);
+        assert!(why[0].contains("released as FLAIR, not T1w"), "{why:?}");
+        let elsewhere = held(&[("t1w", &[None]), ("flair", &[Some("FLAIR")])]);
+        assert!(roles_missing(&roles, &elsewhere)[0].contains("outside"));
+        let none = held(&[("flair", &[Some("FLAIR")])]);
+        assert!(roles_missing(&roles, &none)[0].contains("no t1w is picked"));
+        // two picks of a role, one under its suffix, is the role there
+        let two = held(&[
+            ("t1w", &[Some("FLAIR"), Some("T1w")]),
+            ("flair", &[Some("FLAIR")]),
+        ]);
+        assert!(roles_missing(&roles, &two).is_empty());
+        // a role with no suffix of its own
+        let dixon = vec!["dixon".to_string()];
+        assert!(roles_missing(&dixon, &held(&[("dixon", &[Some("T1w")])])).is_empty());
+        assert!(!roles_missing(&dixon, &held(&[("dixon", &[None])])).is_empty());
+        assert_eq!(
+            unit_of_dir("sub-a/ses-b/anat", Level::Session).as_deref(),
+            Some("sub-a_ses-b")
+        );
+        assert_eq!(
+            unit_of_dir("sub-a/ses-b/anat", Level::Participant).as_deref(),
+            Some("sub-a")
+        );
+        assert_eq!(
+            unit_of_dir("sourcedata/sub-a/ses-b/anat", Level::Session),
+            None
+        );
+    }
 }

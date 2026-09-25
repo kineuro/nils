@@ -289,6 +289,9 @@ pub struct Run {
     pub units: Option<String>,
     pub resumes: Option<i64>,
     pub threshold: Option<f64>,
+    /// Record 49 R7: the working place of its scratch, where it is not
+    /// `place_id`'s; none on a run from before, which kept both there.
+    pub scratch_place_id: Option<i64>,
 }
 
 /// A run to start.
@@ -306,12 +309,14 @@ pub struct NewRun<'a> {
     pub model_ids: &'a [i64],
     pub label_set_id: Option<i64>,
     pub place_id: Option<i64>,
+    /// The scratch's working place, where it is not `place_id`.
+    pub scratch_place_id: Option<i64>,
     pub principal: &'a str,
     pub actor: Option<&'a Value>,
     pub started_at: &'a str,
 }
 
-const RUN_COLUMNS: [&str; 27] = [
+const RUN_COLUMNS: [&str; 28] = [
     "id",
     "pipeline_id",
     "job_id",
@@ -339,6 +344,7 @@ const RUN_COLUMNS: [&str; 27] = [
     "units",
     "resumes",
     "threshold",
+    "scratch_place_id",
 ];
 
 fn select_runs(store: &mut Store) -> String {
@@ -384,6 +390,7 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         units: r.opt_text(24)?.map(str::to_string),
         resumes: r.opt_int(25)?,
         threshold: r.opt_double(26)?,
+        scratch_place_id: r.opt_int(27)?,
     })
 }
 
@@ -407,6 +414,7 @@ pub fn start(store: &mut Store, n: &NewRun<'_>) -> Result<i64, Error> {
                 "status",
                 "started_at",
                 "place_id",
+                "scratch_place_id",
                 "principal",
                 "actor",
             ],
@@ -427,6 +435,7 @@ pub fn start(store: &mut Store, n: &NewRun<'_>) -> Result<i64, Error> {
             Param::from("running"),
             Param::from(n.started_at),
             n.place_id.map_or(Param::Null, Param::Int),
+            n.scratch_place_id.map_or(Param::Null, Param::Int),
             Param::from(n.principal),
             n.actor.map_or(Param::Null, |a| Param::from(a.to_string())),
         ]],
@@ -910,6 +919,7 @@ mod tests {
                 model_ids: &[2, 3],
                 label_set_id: None,
                 place_id: Some(1),
+                scratch_place_id: None,
                 principal: "ops@lab",
                 actor: None,
                 started_at: "2026-09-24T00:00:00Z",
@@ -984,6 +994,7 @@ mod tests {
                 model_ids: &[],
                 label_set_id: None,
                 place_id: None,
+                scratch_place_id: None,
                 principal: "ops@lab",
                 actor: None,
                 started_at: "2026-09-24T00:00:00Z",

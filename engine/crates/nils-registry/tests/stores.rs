@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64, 65, 66],
+            [59, 60, 61, 62, 63, 64, 65, 66, 67],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -1899,6 +1899,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
                 model_ids: &[],
                 label_set_id: None,
                 place_id: Some(1),
+                scratch_place_id: None,
                 principal: "ops@lab",
                 actor: None,
                 started_at: "2026-09-24T10:01:00Z",
@@ -2016,7 +2017,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66],
+            [61, 62, 63, 64, 65, 66, 67],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2078,7 +2079,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65, 66],
+            [63, 64, 65, 66, 67],
             "{name}"
         );
         for (t, col) in [
@@ -2152,7 +2153,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65, 66],
+            [64, 65, 66, 67],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2201,7 +2202,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65, 66],
+            [65, 66, 67],
             "{name}"
         );
         assert!(
@@ -2242,11 +2243,49 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66],
+            [66, 67],
             "{name}"
         );
         assert!(
             migrate::column_exists(&mut store, "campaign_answer", "unsure").unwrap(),
+            "{name}"
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 49 R7: a registry from before gains the run's scratch place,
+/// empty on every run, which reads as scratch and output in one place.
+#[test]
+fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (r, meta) = (
+            store.qualified("pipeline_run"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {r} DROP COLUMN scratch_place_id;
+                 UPDATE {meta} SET value = '66' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert!(
+            !migrate::column_exists(&mut store, "pipeline_run", "scratch_place_id").unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [67],
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "pipeline_run", "scratch_place_id").unwrap(),
             "{name}"
         );
         assert!(

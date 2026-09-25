@@ -5417,13 +5417,15 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let schema = store.schema().map(str::to_string);
     let (derivative_rows, derivative_bytes) = nils_registry::derivative::totals(store)?;
     let (pipeline_rows, pipeline_runs) = nils_registry::pipeline::totals(store)?;
-    let runs_where = match derivatives::working(store) {
+    let runs_where = match pipelines::run_places(store) {
         Ok(p) => format!(
-            "rows of pipeline and pipeline_run in the registry; each run's input, manifest and container log under {}/<run> in the working place {} ({}), and its outputs under {}/<pipeline>/<run> there",
+            "rows of pipeline and pipeline_run in the registry; each run's input, manifest and container log under {}/<run> in the working place {} ({}), and its outputs under {}/<pipeline>/<run> in the working place {} ({})",
             pipelines::RUNS,
-            p.name,
-            p.path,
-            nils_registry::derivative::TREE
+            p.scratch.name,
+            p.scratch.path,
+            nils_registry::derivative::TREE,
+            p.output.name,
+            p.output.path,
         ),
         Err(_) => format!(
             "rows of pipeline and pipeline_run in the registry; a run's folders go under {}/<run> in a working place, and none is bound now, so no pipeline can run",
@@ -5824,7 +5826,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "pipelines",
             "owner": "the operator who added each pipeline; each run is its principal's",
-            "what": "the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; each unit of a run as the pipeline lane scheduled it (record 49); the lane's budget and card, and the path of each secret input the site set; in the working place, the input it was given (a release in the BIDS layout, or stacks.json, and each unit's own where units run apart), its manifest, its containers' logs and apptainer's copies of images, by digest",
+            "what": "the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; each unit of a run as the pipeline lane scheduled it (record 49); the lane's budget, card and places, and the path of each secret input the site set; in the lane's scratch place, the input it was given (a release in the BIDS layout, or stacks.json, and each unit's own where units run apart), its manifest, its containers' logs and apptainer's copies of images, by digest",
             "where": runs_where,
             "files": [],
             "holds": ["quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed", "technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times", "secret: none; a secret input's path is kept, never its bytes, and what a container left is swept of it"],
@@ -5832,7 +5834,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "the rows for good, since a derivative names the run that made it; a run's folder under runs until an operator removes it",
             "commands": {
                 "read": ["nils pipeline list", "nils pipeline show <pipeline>", "nils pipeline runs [<run>]"],
-                "change": ["nils pipeline add <nils.job.yml>", "nils pipeline runtime --set <choice>", "nils pipeline lane --cores <n> --memory-gb <n> --gpu-card <n|none>", "nils pipeline secret set <id> --file <path>", "nils run <pipeline> --select selection:<name>@<v>", "nils run --resume <run>"],
+                "change": ["nils pipeline add <nils.job.yml>", "nils pipeline runtime --set <choice>", "nils pipeline lane --cores <n> --memory-gb <n> --gpu-card <n|none> --output-place <place> --scratch-place <place>", "nils pipeline secret set <id> --file <path>", "nils run <pipeline> --select selection:<name>@<v>", "nils run --resume <run>"],
                 "export": ["nils pipeline show <pipeline> --json", "nils pipeline runs <run> --json"],
                 "delete": "with the registry and the working place; nils has no command for one",
             },

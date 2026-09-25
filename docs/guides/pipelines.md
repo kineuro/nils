@@ -61,6 +61,14 @@ Pipeline runs have a lane of their own: `nils serve --worker` runs them in a wor
 
    `--gpu-card none` uses no card: a unit that needs a GPU is refused, and one whose need is optional runs on the CPU.
 
+3. Name the working place a run's outputs go to, and the one its scratch goes to:
+
+   ```sh
+   nils pipeline lane --output-place results --scratch-place scratch
+   ```
+
+   The outputs are the derivatives and tables a run registers, under `derivatives/<pipeline>/<run>/` in the output place. The scratch is the run's input, each unit's folder, its log and apptainer's images, under `runs/<run>/` and `images/` in the scratch place. Each must be an active working place (`nils place add <name> <path> --role working`). Unset, or set to `default`, each is the first working place, as before. A run records both, so a run taken up again goes on in the places it started in, and a run reads derivative and model inputs from the output place first and the scratch place next.
+
 > **Warning:** the budget is the engine's own bookkeeping. Keep the container's own memory cap below the host's memory, so that what the lane is allowed is really there.
 
 A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units leave. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the lane's own running units there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. Each unit holds its lease until its container ends, and is given that card alone. Podman and docker hold each container to the cores and memory its unit declares (`--cpus`, `--memory`), and apptainer does where the host's cgroups delegate those controllers; elsewhere the budget is the engine's bookkeeping alone. A descriptor names the parameter its tool is told the threads by under `x-nils.needs.cores-input` (and the memory under `memory-input`): left out of a run it is the declared value, and asked above it the run is refused.
