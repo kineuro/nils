@@ -2284,7 +2284,8 @@ fn build_registry() -> Vec<Table> {
                 col("exit_code", Type::Int),
                 // sha256:<hex> of the results as the engine read them
                 col("results_digest", Type::Text),
-                // the working place and the output folder under it
+                // the working place of its outputs and the output folder
+                // under it
                 col("place_id", Type::Int),
                 col("output", Type::Text),
                 // the release a bids input was materialised by
@@ -2300,6 +2301,11 @@ fn build_registry() -> Vec<Table> {
                 col("units", Type::Text),
                 col("resumes", Type::Int),
                 col("threshold", Type::Double),
+                // record 49 R7: the working place of its scratch (its input,
+                // each unit's folder, its log, apptainer's images) where it
+                // is not the output's; none on a run from before, which
+                // kept both in place_id
+                col("scratch_place_id", Type::Int),
             ],
         )
         .index(&["pipeline_id"])

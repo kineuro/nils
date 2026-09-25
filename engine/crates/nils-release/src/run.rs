@@ -668,6 +668,15 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let mut stacks_planned = 0i64;
     // which policy each planned stack leaves under, read back with the plan
     let mut policy_of: HashMap<i64, usize> = HashMap::new();
+    let planner = Planner {
+        layout: settings.layout,
+        options: settings.places,
+        on_unknown: settings.on_unknown,
+        sessions: &settings.selection.sessions,
+        with_a_study: &with_a_study,
+        pixels: &pixels,
+        named: &named,
+    };
     for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
         let mine = select_subject(registry.store(), &settings.selection, subject)?;
         if mine.is_empty() {
@@ -683,101 +692,59 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             let under = policies.of_root(&instances[0].root);
             policy_of.insert(stack, under);
             let policy = &policies.all[under];
-            // Record 35 finding 1. Identity is asked before pixels, because a
-            // stack whose subject the engine cannot place is not a stack this
-            // release can describe at all. A subject on no timeline owns series
-            // and no study of its own; the session layer makes it no session
-            // and files `identity.no_study`, and the release says the same
-            // thing rather than writing it under a `ses-` no scheme produced.
-            // Never a silent drop: the stack is recorded in `release_absent`
-            // and the subject is named in the report.
-            if !with_a_study.contains(&subject) {
-                report.left_out += 1;
-                *report.without_a_session.entry(code.clone()).or_insert(0) += 1;
-                absent.push((
-                    stack,
-                    "no_session".to_string(),
-                    "the subject owns series and no study, so it is on no timeline and no \
-                     ses- name describes it; identity.no_study says so"
-                        .to_string(),
-                ));
-                continue;
-            }
-            // A study of a subject that does have sessions and is on none of
-            // them is a study with no date: it borrows nobody's session, and
-            // `unknown` says what it is.
-            let label = labels
-                .get(&study)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            // A subject and one of its sessions, matched here rather than in
-            // SQL because a session is derived from a scheme on read and is
-            // never a column (§5).
-            if !settings.selection.sessions.is_empty()
-                && !settings
-                    .selection
-                    .sessions
-                    .iter()
-                    .any(|(who, which)| *who == code && *which == label)
-            {
-                continue;
-            }
-            // §8.4. The engine does not look at pixels; it reads what the file
-            // says about them. What the file says is burned in is held, and a
-            // held stack is simply not in this version, so one an earlier
-            // version wrote is removed from the tree rather than left in it.
-            // What the file will not say either way is counted, every run,
-            // whether it is written or held, because the number is what the
-            // spec asks a release for and it is a fact about the archive and
-            // not about the setting.
-            match pixels
-                .get(&stack)
-                .copied()
-                .unwrap_or(crate::burned::Verdict::Unknown)
-            {
-                crate::burned::Verdict::Burned => {
+            let decided = planner.decide(stack, subject, &code, study, &labels);
+            let (unjudged, label, route, place, fallback) = match decided {
+                // Record 35 finding 1: never a silent drop, the stack is
+                // recorded in `release_absent` and the subject is named.
+                Decision::NoSession => {
+                    report.left_out += 1;
+                    *report.without_a_session.entry(code.clone()).or_insert(0) += 1;
+                    absent.push((
+                        stack,
+                        "no_session".to_string(),
+                        "the subject owns series and no study, so it is on no timeline and no \
+                         ses- name describes it; identity.no_study says so"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                Decision::NotAsked => continue,
+                // §8.4: a held stack is simply not in this version.
+                Decision::Held { burned: true } => {
                     held.insert(stack);
                     report.burned_in += 1;
                     continue;
                 }
-                crate::burned::Verdict::Unknown => {
+                Decision::Held { burned: false } => {
+                    held.insert(stack);
                     report.unjudged += 1;
-                    if settings.on_unknown == crate::burned::OnUnknown::Hold {
-                        held.insert(stack);
-                        continue;
-                    }
+                    continue;
                 }
-                crate::burned::Verdict::Clean => {}
+                // §9.3's fourth route. Never a silent drop: the stack is out
+                // of this version, so one an earlier version wrote is removed
+                // from the tree, and the reason is recorded and reported.
+                Decision::Nowhere { unjudged, why } => {
+                    if unjudged {
+                        report.unjudged += 1;
+                    }
+                    *report.nowhere.entry(why.kind().to_string()).or_insert(0) += 1;
+                    *report.routes.entry("nowhere".to_string()).or_insert(0) += 1;
+                    report.left_out += 1;
+                    absent.push((stack, why.kind().to_string(), why.to_string()));
+                    continue;
+                }
+                Decision::Placed {
+                    unjudged,
+                    label,
+                    route,
+                    place,
+                    fallback,
+                } => (unjudged, label, route, place, fallback),
+            };
+            if unjudged {
+                report.unjudged += 1;
             }
             let placed = named.get(&stack);
-            // §9.1. A stack with no name is one nothing classified, which is a
-            // stack the release should not silently rename into something
-            // readable.
-            let (folder, stem) = match placed {
-                Some(p) => (p.descriptive.folder.clone(), p.descriptive.name.clone()),
-                None => ("misc".to_string(), format!("stack-{stack:08}")),
-            };
-            let route = match settings.layout {
-                Layout::Descriptive => crate::bids::place::Route::Raw,
-                Layout::Bids => crate::bids::place::route(
-                    placed.and_then(|p| p.disposition.as_deref()),
-                    placed.is_some_and(|p| p.synthetic),
-                    &placed
-                        .map(|p| p.bids.clone())
-                        .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
-                    settings.places,
-                ),
-            };
-            // §9.3's fourth route. Never a silent drop: the stack is out of
-            // this version, so one an earlier version wrote is removed from
-            // the tree, and the reason is recorded and reported.
-            if let crate::bids::place::Route::Nowhere(why) = &route {
-                *report.nowhere.entry(why.kind().to_string()).or_insert(0) += 1;
-                *report.routes.entry("nowhere".to_string()).or_insert(0) += 1;
-                report.left_out += 1;
-                absent.push((stack, why.kind().to_string(), why.to_string()));
-                continue;
-            }
             let content = crate::version::content_of(
                 &subject_policy(settings, policy, &code),
                 &categories,
@@ -787,16 +754,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     .iter()
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
-            );
-            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
-            let fallback = place_of(
-                &crate::bids::place::Route::SourceData,
-                settings,
-                &code,
-                &label,
-                &folder,
-                &stem,
-                placed,
             );
             people.insert(code.clone());
             subjects_seen.insert(code.clone(), subject);
@@ -1792,13 +1749,287 @@ fn ask_about_tasks(
     )
 }
 
+/// What the plan decided for one stack of a subject: the one decision a
+/// release writes by and a pre-flight asks about (record 49 A3), so the two
+/// cannot disagree about where a stack goes.
+enum Decision {
+    /// Record 35 finding 1: the subject owns series and no study.
+    NoSession,
+    /// Not one of the sessions the selection names.
+    NotAsked,
+    /// §8.4: held for its pixels, burned in or, under `hold`, not judged.
+    Held { burned: bool },
+    /// §9.3's fourth route, with the reason.
+    Nowhere {
+        unjudged: bool,
+        why: crate::bids::name::Why,
+    },
+    /// Where it goes, and where it goes if the converter refuses it.
+    Placed {
+        unjudged: bool,
+        label: String,
+        route: crate::bids::place::Route,
+        place: Place,
+        fallback: Place,
+    },
+}
+
+/// What every stack's decision reads that is the same for the whole plan.
+struct Planner<'a> {
+    layout: Layout,
+    options: crate::bids::place::Options,
+    on_unknown: crate::burned::OnUnknown,
+    sessions: &'a [(String, String)],
+    with_a_study: &'a std::collections::HashSet<i64>,
+    pixels: &'a HashMap<i64, crate::burned::Verdict>,
+    named: &'a HashMap<i64, Placed>,
+}
+
+impl Planner<'_> {
+    /// Where one stack goes. Identity is asked before pixels, because a
+    /// stack whose subject the engine cannot place is not a stack this
+    /// release can describe at all; a study of a subject that has sessions
+    /// and is on none of them borrows nobody's session, and `unknown` says
+    /// what it is; a subject and one of its sessions are matched here rather
+    /// than in SQL because a session is derived from a scheme on read (§5).
+    fn decide(
+        &self,
+        stack: i64,
+        subject: i64,
+        code: &str,
+        study: i64,
+        labels: &HashMap<i64, String>,
+    ) -> Decision {
+        if !self.with_a_study.contains(&subject) {
+            return Decision::NoSession;
+        }
+        let label = labels
+            .get(&study)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        if !self.sessions.is_empty()
+            && !self
+                .sessions
+                .iter()
+                .any(|(who, which)| who == code && *which == label)
+        {
+            return Decision::NotAsked;
+        }
+        // §8.4. The engine does not look at pixels; it reads what the file
+        // says about them. What the file will not say either way is counted,
+        // whether it is written or held.
+        let unjudged = match self
+            .pixels
+            .get(&stack)
+            .copied()
+            .unwrap_or(crate::burned::Verdict::Unknown)
+        {
+            crate::burned::Verdict::Burned => return Decision::Held { burned: true },
+            crate::burned::Verdict::Unknown => {
+                if self.on_unknown == crate::burned::OnUnknown::Hold {
+                    return Decision::Held { burned: false };
+                }
+                true
+            }
+            crate::burned::Verdict::Clean => false,
+        };
+        let placed = self.named.get(&stack);
+        // §9.1. A stack with no name is one nothing classified, which is a
+        // stack the release should not silently rename into something
+        // readable.
+        let (folder, stem) = match placed {
+            Some(p) => (p.descriptive.folder.clone(), p.descriptive.name.clone()),
+            None => ("misc".to_string(), format!("stack-{stack:08}")),
+        };
+        let route = match self.layout {
+            Layout::Descriptive => crate::bids::place::Route::Raw,
+            Layout::Bids => crate::bids::place::route(
+                placed.and_then(|p| p.disposition.as_deref()),
+                placed.is_some_and(|p| p.synthetic),
+                &placed
+                    .map(|p| p.bids.clone())
+                    .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
+                self.options,
+            ),
+        };
+        if let crate::bids::place::Route::Nowhere(why) = route {
+            return Decision::Nowhere { unjudged, why };
+        }
+        let place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
+        let fallback = place_of(
+            &crate::bids::place::Route::SourceData,
+            self.layout,
+            code,
+            &label,
+            &folder,
+            &stem,
+            placed,
+        );
+        Decision::Placed {
+            unjudged,
+            label,
+            route,
+            place,
+            fallback,
+        }
+    }
+}
+
+/// Where a BIDS release of the picked stacks among `stacks` would put each
+/// of them, as `nils release --layout bids --picked` with its defaults
+/// decides it, from the registry alone (record 49 A3): what a pipeline
+/// run's input will hold, asked before the run. Stacks the selection's
+/// filters leave out are not in the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedStack {
+    pub stack: i64,
+    pub subject_id: i64,
+    /// The subject's code and the session's label, as the tree spells them.
+    pub subject: String,
+    pub session: String,
+    /// raw, sourcedata, derivatives, beside, unofficial or nowhere, and
+    /// held where its pixels hold it and no_session where no session
+    /// describes it.
+    pub route: String,
+    /// Where it goes, as `release_stack.dir` and `.stem` would hold it.
+    pub dir: Option<String>,
+    pub stem: Option<String>,
+    /// The BIDS suffix of a stack in the raw tree.
+    pub suffix: Option<String>,
+    /// Why it is not in the raw tree, where it is not.
+    pub why: Option<String>,
+}
+
+/// The plan of a BIDS release of the picked stacks among `stacks`, under
+/// `scheme` and the pack's mapping, with the release's default placements:
+/// what a pipeline run's input would hold (record 49 A3). Reads the
+/// session cache the release builds, and writes nothing else.
+pub fn plan_picked(
+    registry: &mut Registry,
+    pack: &nils_pack::pack::Pack,
+    scheme: &Scheme,
+    stacks: &[i64],
+) -> Result<Vec<PlannedStack>, Error> {
+    let anchors =
+        nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
+    nils_session::ensure(registry, scheme, &anchors, None, false).map_err(session_err)?;
+    let by_study = nils_session::labels_by_study(registry.store(), scheme).map_err(session_err)?;
+    let with_a_study = subjects_with_a_study(registry.store())?;
+    let pixels = pixel_verdicts(registry.store())?;
+    let Placements {
+        by_stack: named, ..
+    } = places(registry.store(), &by_study, pack, name::Naming::Bids)?;
+    let planner = Planner {
+        layout: Layout::Bids,
+        options: crate::bids::place::Options::default(),
+        on_unknown: crate::burned::OnUnknown::default(),
+        sessions: &[],
+        with_a_study: &with_a_study,
+        pixels: &pixels,
+        named: &named,
+    };
+    let selection = Selection {
+        stacks: stacks.to_vec(),
+        picked_only: true,
+        ..Selection::default()
+    };
+    let mut out = Vec::new();
+    for (subject, code) in selected_subjects(registry.store(), &selection)? {
+        let mine = select_subject(registry.store(), &selection, subject)?;
+        let labels = session_labels(&mine, &by_study, subject);
+        let mut studies: BTreeMap<i64, i64> = BTreeMap::new();
+        for i in &mine {
+            studies.entry(i.stack).or_insert(i.study);
+        }
+        for (stack, study) in studies {
+            let label = labels
+                .get(&study)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut p = PlannedStack {
+                stack,
+                subject_id: subject,
+                subject: code.clone(),
+                session: label,
+                route: String::new(),
+                dir: None,
+                stem: None,
+                suffix: None,
+                why: None,
+            };
+            match planner.decide(stack, subject, &code, study, &labels) {
+                Decision::NoSession => {
+                    p.route = "no_session".into();
+                    p.why = Some(
+                        "the subject owns series and no study, so no session describes it".into(),
+                    );
+                }
+                Decision::NotAsked => continue,
+                Decision::Held { burned } => {
+                    p.route = "held".into();
+                    p.why = Some(if burned {
+                        "its file says text is burned into its pixels, so the release holds it"
+                            .into()
+                    } else {
+                        "its file does not say whether text is burned into its pixels, and the release holds it".into()
+                    });
+                }
+                Decision::Nowhere { why, .. } => {
+                    p.route = "nowhere".into();
+                    p.why = Some(why.to_string());
+                }
+                Decision::Placed { route, place, .. } => {
+                    p.route = route.name().to_string();
+                    if route == crate::bids::place::Route::Raw {
+                        p.suffix = named
+                            .get(&stack)
+                            .and_then(|n| n.bids.as_ref().ok())
+                            .map(|n| n.suffix.to_string());
+                    } else {
+                        let named_why = named
+                            .get(&stack)
+                            .and_then(|n| n.bids.as_ref().err())
+                            .map(|w| format!(": {w}"))
+                            .unwrap_or_default();
+                        p.why = Some(format!(
+                            "the release puts it in {}, not under the session's own BIDS name{named_why}",
+                            route.name()
+                        ));
+                    }
+                    p.dir = Some(place.dir);
+                    p.stem = place.stem;
+                }
+            }
+            out.push(p);
+        }
+    }
+    Ok(out)
+}
+
+/// The BIDS suffix a pick role names, where the standard has one spelt the
+/// same but for case: `t1w` is `T1w`, `flair` is `FLAIR` (record 49 A3). A
+/// role the standard has no suffix for names none, and any stack placed in
+/// the raw tree stands for it.
+pub fn role_suffix(role: &str) -> Option<&'static str> {
+    crate::bids::schema::GROUPS
+        .iter()
+        .flat_map(|g| g.suffixes.iter())
+        .find(|s| s.eq_ignore_ascii_case(role))
+        .copied()
+}
+
+/// The suffix of a BIDS stem: its last `_` word.
+pub fn stem_suffix(stem: &str) -> &str {
+    stem.rsplit('_').next().unwrap_or(stem)
+}
+
 /// Where a stack's files go, given the route it took (§9.3).
 ///
 /// Both layouts end here, which is what lets §8.6 compare a place without
 /// knowing which layout it is in.
 fn place_of(
     route: &crate::bids::place::Route,
-    settings: &Settings,
+    layout: Layout,
     code: &str,
     label: &str,
     folder: &str,
@@ -1807,7 +2038,7 @@ fn place_of(
 ) -> Place {
     use crate::bids::place::Route;
     let session = format!("sub-{code}/ses-{label}");
-    if settings.layout == Layout::Descriptive {
+    if layout == Layout::Descriptive {
         return Place::dir(format!("{session}/{folder}/{stem}"));
     }
     match route {

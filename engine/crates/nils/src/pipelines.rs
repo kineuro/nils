@@ -80,6 +80,13 @@ pub(crate) const LANE_MEMORY_KEY: &str = "pipeline_lane_memory_gb";
 pub(crate) const GPU_CARD_KEY: &str = "pipeline_gpu_card";
 pub(crate) const APPTAINER_IMAGE_KEY: &str = "pipeline_apptainer_image";
 
+/// The lane's places (record 49 R7, as Nima corrected it: "result is for
+/// analysis pipeline output"): the working place, by name, a run's outputs
+/// go to, and the one its scratch goes to. Unset, each is the first active
+/// working place, as before.
+pub(crate) const OUTPUT_PLACE_KEY: &str = "pipeline_output_place";
+pub(crate) const SCRATCH_PLACE_KEY: &str = "pipeline_scratch_place";
+
 /// A secret's file, as the site set it, under this prefix and its id
 /// (record 49 R3): the path, never the bytes.
 pub(crate) const SECRET_PREFIX: &str = "pipeline_secret:";
@@ -170,33 +177,31 @@ fn secret_ids(store: &mut Store) -> Vec<String> {
 fn lane_doc(registry: &mut Registry) -> Value {
     let lane = lane_of(registry);
     let form = image_form(registry);
+    let places = run_places(registry.store()).ok();
     json!({
         "lane": lane.doc(),
+        "places": places.map(|p| p.doc()),
         "apptainer_image": form.name(),
         "secrets": secret_ids(registry.store()),
     })
 }
 
 fn capability_base(store: &mut Store, d: &Detected) -> Value {
-    let place = crate::derivatives::working(store);
+    let places = run_places(store);
     let catalog = rows::list(store)
         .map(|l| l.iter().filter(|p| p.state == "active").count())
         .unwrap_or(0);
-    let reason = d.reason.clone().or_else(|| {
-        place
-            .as_ref()
-            .err()
-            .map(|m| m.replacen("derivatives are off", "pipelines are off", 1))
-    });
+    let reason = d.reason.clone().or_else(|| places.as_ref().err().cloned());
     json!({
-        "enabled": d.runtime.is_some() && place.is_ok(),
+        "enabled": d.runtime.is_some() && places.is_ok(),
         "reason": reason,
         "runtime": d.runtime.as_ref().map(|r| json!({
             "name": r.kind.name(), "version": r.version, "gpu": r.gpu,
         })),
         "choice": d.choice.name(),
         "looked": d.looked.iter().map(|(k, s)| json!({"runtime": k, "found": s})).collect::<Vec<_>>(),
-        "place": place.ok().map(|p| p.name),
+        "place": places.as_ref().ok().map(|p| p.output.name.clone()),
+        "scratch": places.as_ref().ok().map(|p| p.scratch.name.clone()),
         "pipelines": catalog,
         "contract": nils_pipeline::CONTRACT,
         "grants": {"see": "pipelines:see", "run": "pipelines:work", "run_detail": "quasi"},
@@ -709,6 +714,16 @@ pub(crate) enum PipelineCommand {
         /// until set)
         #[arg(long, value_name = "CARD")]
         gpu_card: Option<String>,
+        /// The working place a run's outputs go to, the derivatives and
+        /// tables it registers, by name; default for the first working
+        /// place (record 49 R7)
+        #[arg(long, value_name = "PLACE")]
+        output_place: Option<String>,
+        /// The working place a run's scratch goes to, its input, each
+        /// unit's folder, its log and apptainer's images, by name; default
+        /// for the first working place
+        #[arg(long, value_name = "PLACE")]
+        scratch_place: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1052,6 +1067,8 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             cores,
             memory_gb,
             gpu_card,
+            output_place,
+            scratch_place,
             json,
         } => {
             let mut changed = serde_json::Map::new();
@@ -1079,6 +1096,37 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 registry.set_meta(GPU_CARD_KEY, word)?;
                 changed.insert("gpu_card".into(), json!(word));
             }
+            for (given, key, flag) in [
+                (output_place, OUTPUT_PLACE_KEY, "output"),
+                (scratch_place, SCRATCH_PLACE_KEY, "scratch"),
+            ] {
+                let Some(name) = given.map(|n| n.trim().to_string()) else {
+                    continue;
+                };
+                let value = if name == "default" {
+                    String::new()
+                } else {
+                    let working = nils_registry::place::active(registry.store())
+                        .map_err(|e| fail(e.to_string()))?
+                        .into_iter()
+                        .any(|p| p.name == name && p.role == nils_registry::place::Role::Working);
+                    if !working {
+                        return Err(usage(format!(
+                            "--{flag}-place {name}: no active working place is named so; nils place add {name} <path> --role working adds one, and nils place list shows them"
+                        )));
+                    }
+                    name
+                };
+                registry.set_meta(key, &value)?;
+                changed.insert(
+                    format!("{flag}_place"),
+                    json!(if value.is_empty() {
+                        "default"
+                    } else {
+                        value.as_str()
+                    }),
+                );
+            }
             if !changed.is_empty() {
                 crate::audit(
                     &mut registry,
@@ -1088,8 +1136,14 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 )?;
             }
             let lane = lane_of(&mut registry);
+            let places = run_places(registry.store());
             if json {
-                return print(&lane.doc());
+                let mut doc = lane.doc();
+                doc["places"] = match &places {
+                    Ok(p) => p.doc(),
+                    Err(e) => json!({"error": e}),
+                };
+                return print(&doc);
             }
             println!(
                 "lane     {} cores, {} GB of memory{}",
@@ -1107,6 +1161,14 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                         "{c}, leased by free memory"
                     ))
             );
+            match &places {
+                Ok(p) => {
+                    let how = |set: bool| if set { "" } else { ", the first working place" };
+                    println!("output   {}{}", p.output.name, how(p.named.0));
+                    println!("scratch  {}{}", p.scratch.name, how(p.named.1));
+                }
+                Err(e) => println!("places   {e}"),
+            }
             Ok(())
         }
         PipelineCommand::Secret { command } => match command {
@@ -1522,8 +1584,10 @@ pub(crate) fn release_target(store: &mut Store, run_id: i64, out: &Path) -> Resu
     if r.status != "running" {
         return Err(format!("--into-run {run_id}: the run is {}", r.status));
     }
+    // a run's input is scratch, under its scratch place (record 49 R7)
     let place = r
-        .place_id
+        .scratch_place_id
+        .or(r.place_id)
         .and_then(|id| nils_registry::place::show(store, id).ok().flatten())
         .ok_or_else(|| format!("--into-run {run_id}: the run has no working place"))?;
     let want = Path::new(&place.path)
@@ -1998,6 +2062,64 @@ fn released(
     })
 }
 
+/// The units of a bids input that lack a role the descriptor names, by
+/// the unit's id, with why (record 49 A3): what the release wrote of the
+/// stacks picked for each role in the unit, judged as the pre-flight
+/// judges it, so the two agree.
+fn units_missing(
+    store: &mut Store,
+    release_id: Option<i64>,
+    units: &[Unit],
+    roles: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let Some(release_id) = release_id else {
+        return Ok(BTreeMap::new());
+    };
+    let err = |e: nils_registry::Error| e.to_string();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT rs.stack_id, rs.stem, rs.route FROM {} r \
+         JOIN {} rs ON rs.dataset_id = r.dataset_id WHERE r.id = {}",
+        store.qualified("release"),
+        store.qualified("release_stack"),
+        d.param(1, Type::Int)
+    );
+    let mut suffix: BTreeMap<i64, Option<String>> = BTreeMap::new();
+    for r in store.query(&sql, &[Param::Int(release_id)]).map_err(err)? {
+        let raw = r.text(2).map_err(err)? == "raw";
+        let stem = r.opt_text(1).map_err(err)?;
+        suffix.insert(
+            r.int(0).map_err(err)?,
+            stem.filter(|_| raw)
+                .map(|s| nils_release::run::stem_suffix(s).to_string()),
+        );
+    }
+    let all: Vec<i64> = units
+        .iter()
+        .flat_map(|u| u.stacks.iter().copied())
+        .collect();
+    let picks = crate::preflight::pick_roles(store, &all)?;
+    let mut out = BTreeMap::new();
+    for u in units {
+        let mut held: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
+        for s in &u.stacks {
+            let Some(picked) = picks.get(s) else {
+                continue;
+            };
+            for role in &picked.roles {
+                held.entry(role.clone())
+                    .or_default()
+                    .push(suffix.get(s).cloned().flatten());
+            }
+        }
+        let why = crate::preflight::roles_missing(roles, &held);
+        if !why.is_empty() {
+            out.insert(u.id.clone(), why);
+        }
+    }
+    Ok(out)
+}
+
 /// What became of one unit after the container exited.
 struct Outcome {
     status: &'static str,
@@ -2030,6 +2152,81 @@ impl Lane {
             "gpu_card": self.card,
         })
     }
+}
+
+/// The two working places a run writes (record 49 R7).
+#[derive(Debug, Clone)]
+pub(crate) struct Places {
+    /// Its outputs: the derivatives and tables it registers.
+    pub(crate) output: nils_registry::place::Place,
+    /// Its scratch: its input, each unit's folder, its log and apptainer's
+    /// images.
+    pub(crate) scratch: nils_registry::place::Place,
+    /// Whether each was named by the lane, or is the first active working
+    /// place because it names none.
+    pub(crate) named: (bool, bool),
+}
+
+impl Places {
+    pub(crate) fn doc(&self) -> Value {
+        json!({
+            "output": self.output.name, "scratch": self.scratch.name,
+            "output_set": self.named.0, "scratch_set": self.named.1,
+        })
+    }
+}
+
+/// The lane's output and scratch places (record 49 R7): each the active
+/// working place the lane names, or the first active working place where
+/// it names none, as every run wrote before. A place the lane names that
+/// is not an active working place is refused in words naming the cure,
+/// never swapped for another.
+pub(crate) fn run_places(store: &mut Store) -> Result<Places, String> {
+    let first = crate::derivatives::working(store)
+        .map_err(|m| m.replacen("derivatives are off", "pipelines are off", 1))?;
+    let named = |store: &mut Store,
+                 key: &str,
+                 flag: &str|
+     -> Result<Option<nils_registry::place::Place>, String> {
+        let Some(name) = meta_text(store, key)?
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            return Ok(None);
+        };
+        let active = nils_registry::place::active(store).map_err(|e| e.to_string())?;
+        active
+            .into_iter()
+            .find(|p| p.name == name && p.role == nils_registry::place::Role::Working)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "pipelines are off: the lane's {flag} place is {name}, which is not an active working place; nils place add {name} <path> --role working adds it, or nils pipeline lane --{flag}-place default goes back to the first working place"
+                )
+            })
+    };
+    let output = named(store, OUTPUT_PLACE_KEY, "output")?;
+    let scratch = named(store, SCRATCH_PLACE_KEY, "scratch")?;
+    Ok(Places {
+        named: (output.is_some(), scratch.is_some()),
+        output: output.unwrap_or_else(|| first.clone()),
+        scratch: scratch.unwrap_or(first),
+    })
+}
+
+/// One `registry_meta` row, read through a store.
+fn meta_text(store: &mut Store, key: &str) -> Result<Option<String>, String> {
+    let sql = format!(
+        "SELECT value FROM {} WHERE key = {}",
+        store.qualified("registry_meta"),
+        store.dialect().param(1, Type::Text)
+    );
+    store
+        .query_opt(&sql, &[Param::from(key)])
+        .map_err(|e| e.to_string())?
+        .map(|r| r.text(0).map(str::to_string))
+        .transpose()
+        .map_err(|e| e.to_string())
 }
 
 /// The lane as the registry's settings and this machine make it.
@@ -2329,8 +2526,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     let params = d.resolve(&pairs(&args.params)?).map_err(usage)?;
 
     // where it goes and what runs it; either absent is the capability off
-    let place = crate::derivatives::working(registry.store())
-        .map_err(|m| usage(m.replacen("derivatives are off", "pipelines are off", 1)))?;
+    let places = run_places(registry.store()).map_err(usage)?;
     let detected = runtime::detect(choice(&mut registry), std::env::var_os("PATH").as_deref());
     let rt = detected
         .runtime
@@ -2467,7 +2663,8 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             device: &device,
             model_ids: &model_ids,
             label_set_id: label_set.as_ref().map(|s| s.id),
-            place_id: Some(place.id),
+            place_id: Some(places.output.id),
+            scratch_place_id: (places.scratch.id != places.output.id).then_some(places.scratch.id),
             principal: &who,
             actor: Some(&actor),
             started_at: &started,
@@ -2485,7 +2682,8 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             params: &params,
             run_id,
             job_id,
-            place: &place,
+            output: &places.output,
+            scratch: &places.scratch,
             runtime: &rt,
             gpu,
             device: &device,
@@ -2590,6 +2788,15 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
                 .flatten()
         })
         .ok_or_else(|| usage(format!("run {run_id} has no working place to go on in")))?;
+    // its scratch where it kept it: a run from before, or one whose lane
+    // named no other, kept it with its outputs
+    let scratch = match r.scratch_place_id {
+        None => place.clone(),
+        Some(id) => nils_registry::place::show(registry.store(), id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| usage(format!("run {run_id}'s scratch place {id} is gone")))?,
+    };
     let detected = runtime::detect(choice(&mut registry), std::env::var_os("PATH").as_deref());
     let rt = detected
         .runtime
@@ -2655,7 +2862,8 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             params: &params,
             run_id,
             job_id,
-            place: &place,
+            output: &place,
+            scratch: &scratch,
             runtime: &rt,
             gpu,
             device: &device,
@@ -2791,7 +2999,12 @@ struct Execution<'a> {
     params: &'a serde_json::Map<String, Value>,
     run_id: i64,
     job_id: i64,
-    place: &'a nils_registry::place::Place,
+    /// The working place of its outputs: the derivatives and tables it
+    /// registers, under `derivatives/<pipeline>/<run>/` (record 49 R7).
+    output: &'a nils_registry::place::Place,
+    /// The working place of its scratch: its input, each unit's folder,
+    /// its log and apptainer's images, under `runs/<run>/` and `images/`.
+    scratch: &'a nils_registry::place::Place,
     runtime: &'a runtime::Cli,
     gpu: bool,
     device: &'a str,
@@ -2880,8 +3093,11 @@ fn folder_word(id: &str) -> Result<&str, String> {
 fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
     let p = x.pipeline;
     let d = x.descriptor;
-    let working = PathBuf::from(&x.place.path);
-    let run_dir = working.join(RUNS).join(x.run_id.to_string());
+    // record 49 R7: the outputs under the output place, the scratch under
+    // the scratch place (one place where the lane names no other)
+    let working = PathBuf::from(&x.output.path);
+    let scratch_root = PathBuf::from(&x.scratch.path);
+    let run_dir = scratch_root.join(RUNS).join(x.run_id.to_string());
     let input = run_dir.join("input");
     let inputs = run_dir.join("inputs");
     let rel_out = format!("{}/{}/{}", derivative::TREE, p.name, x.run_id);
@@ -2954,22 +3170,28 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     for (model, t) in x.models.iter().zip(&model_inputs) {
         // a model a run fitted is that run's derivative of kind model
         // (record 43): its folder is the input, read-only
-        let artifact = model_artifact(registry.store(), model.id, x.place.id)?;
-        if let Some(rel) = &artifact {
-            let host = working.join(rel);
-            if let Some(dir) = host.parent().filter(|d| d.is_dir()) {
-                typed.push(Mount {
-                    host: dir.to_path_buf(),
-                    container: format!("/inputs/{}", t.id),
-                    read_only: true,
-                });
-            }
+        let artifact = lane_places(x)
+            .into_iter()
+            .map(|pl| {
+                model_artifact(registry.store(), model.id, pl.id)
+                    .map(|a| a.map(|rel| (Path::new(&pl.path).join(&rel), rel)))
+            })
+            .find_map(Result::transpose)
+            .transpose()?;
+        if let Some((host, _)) = &artifact
+            && let Some(dir) = host.parent().filter(|d| d.is_dir())
+        {
+            typed.push(Mount {
+                host: dir.to_path_buf(),
+                container: format!("/inputs/{}", t.id),
+                read_only: true,
+            });
         }
         models_doc.push(json!({
             "input": t.id, "model_id": model.id, "name": model.name, "version": model.version,
             "digest": model.digest, "kind": model.kind, "card": model.card,
             "encoder_model_ids": model.encoder_model_ids,
-            "artifact": artifact.as_deref().and_then(|a| Path::new(a).file_name())
+            "artifact": artifact.as_ref().and_then(|(_, a)| Path::new(a).file_name())
                 .map(|f| format!("/inputs/{}/{}", t.id, f.to_string_lossy())),
         }));
     }
@@ -3006,7 +3228,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     // files and no other, and no bind reaches the derivatives tree
     let mut derivative_doc = serde_json::Map::new();
     let mut derivative_dirs: Vec<(String, PathBuf)> = Vec::new();
-    let taken = derivative_inputs(registry.store(), d, x.stacks, x.place.id)?;
+    let taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x))?;
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
         let rows = taken.get(&t.id).cloned().unwrap_or_default();
@@ -3023,7 +3245,11 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         let mut listed = Vec::new();
         let mut linked: std::collections::BTreeSet<String> = Default::default();
         for row in rows {
-            let rel = link_input(&working, &row.path, &into)?;
+            let root = lane_places(x)
+                .into_iter()
+                .find(|pl| pl.id == row.place_id)
+                .map_or_else(|| working.clone(), |pl| PathBuf::from(&pl.path));
+            let rel = link_input(&root, &row.path, &into)?;
             // two rows of one file are one input
             if !linked.insert(rel.clone()) {
                 continue;
@@ -3066,6 +3292,25 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             rows::unit_requeued(registry.store(), u.id).map_err(err)?;
         }
     }
+    // record 49 A3: a unit whose input lacks a role the descriptor names,
+    // as the release wrote it, is not run: it is over as skipped, missing
+    // an input, as the pre-flight said it would be, and no review item
+    if d.layout == Layout::Bids && !d.roles.is_empty() {
+        let missing = units_missing(registry.store(), m.release_id, &m.units, &d.roles)?;
+        let now = nils_registry::time::now_iso();
+        for u in rows::units(registry.store(), x.run_id).map_err(err)? {
+            if let Some(why) = missing.get(&u.unit)
+                && (u.state == "queued" || u.state == "running")
+            {
+                let outcome = json!({
+                    "status": "skipped",
+                    "error": format!("missing an input: {}", why.join("; ")),
+                    "missing": why, "metrics": {}, "files": [], "refused": [],
+                });
+                rows::unit_over(registry.store(), u.id, None, &outcome, &now).map_err(err)?;
+            }
+        }
+    }
     let unit_rows = rows::units(registry.store(), x.run_id).map_err(err)?;
     let row_of: BTreeMap<String, (i64, String)> = unit_rows
         .iter()
@@ -3075,7 +3320,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
 
     // the image apptainer runs, built once from the pinned digest
     let local_image = if x.runtime.kind == runtime::Kind::Apptainer {
-        match ensure_image(registry, x, &working, &run_dir)? {
+        match ensure_image(registry, x, &scratch_root, &run_dir)? {
             Some(path) => Some(path),
             None => {
                 return Ok(("cancelled", json!({"phase": "image"}), None, None, None));
@@ -3856,7 +4101,7 @@ fn scratch_of(x: &Execution<'_>, b: &Batch) -> PathBuf {
             .map_or(b.rel_out.as_str(), |(r, _)| r),
         None => b.rel_out.as_str(),
     };
-    PathBuf::from(&x.place.path).join(format!("{run_rel}.nils"))
+    PathBuf::from(&x.output.path).join(format!("{run_rel}.nils"))
 }
 
 /// Sweep what a batch's container left of the secrets it was given (record
@@ -3942,7 +4187,7 @@ fn take_in(
         .unwrap_or_default();
     let log_rel = b
         .log
-        .strip_prefix(&x.place.path)
+        .strip_prefix(&x.scratch.path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| format!("{RUNS}/{}/log.txt", x.run_id));
     for (n, &i) in b.units.iter().enumerate() {
@@ -4039,7 +4284,7 @@ fn register_unit(
     now: &str,
     pulse: &mut Pulse,
 ) -> Result<Value, String> {
-    let working = PathBuf::from(&x.place.path);
+    let working = PathBuf::from(&x.output.path);
     let mut hashed: Vec<Value> = Vec::new();
     let mut refused: Vec<Value> = Vec::new();
     let mut tables: Vec<Value> = Vec::new();
@@ -4116,7 +4361,7 @@ fn register_unit(
                     &derivative::New {
                         kind,
                         belongs: &belongs,
-                        place_id: x.place.id,
+                        place_id: x.output.id,
                         path: &path,
                         bytes: bytes as i64,
                         sha256: &sha,
@@ -4258,20 +4503,31 @@ fn finalize(
     // the run's exit: together, its one container's; apart, the first that
     // did not exit 0, or 0
     let exit_code = if apart {
+        // a unit never started (one missing an input) has no exit of its own
         unit_rows
             .iter()
+            .filter(|u| u.attempts > 0)
             .map(|u| u.exit_code)
             .find(|c| *c != Some(0))
             .unwrap_or(Some(0))
     } else {
-        unit_rows.first().and_then(|u| u.exit_code)
+        unit_rows
+            .iter()
+            .find(|u| u.attempts > 0)
+            .and_then(|u| u.exit_code)
     };
     let whole_units = statuses.iter().filter(|s| s.4).count();
     let unreadable: Option<String> = unit_rows
         .iter()
         .find_map(|u| u.outcome["unreadable"].as_str().map(str::to_string));
     // together: the container failed as a whole; apart: every unit's did
-    let whole = !statuses.is_empty() && whole_units == statuses.len();
+    // a unit missing an input never ran, and says nothing of the containers
+    let missing_input = unit_rows
+        .iter()
+        .filter(|u| u.outcome["missing"].is_array())
+        .count();
+    let ran = statuses.len().saturating_sub(missing_input);
+    let whole = ran > 0 && whole_units == ran;
     let completed = if apart { !whole } else { exit_code == Some(0) };
 
     // what the containers said, read again from where each wrote it
@@ -4345,7 +4601,7 @@ fn finalize(
                     &derivative::New {
                         kind: &o.kind,
                         belongs: &Belongs::run(),
-                        place_id: x.place.id,
+                        place_id: x.output.id,
                         path: &place_path(working, &file)?,
                         bytes: bytes as i64,
                         sha256: &sha,
@@ -4448,7 +4704,7 @@ fn finalize(
             &derivative::New {
                 kind: "seeds",
                 belongs: &Belongs::run(),
-                place_id: x.place.id,
+                place_id: x.output.id,
                 path: &rel,
                 bytes: text.len() as i64,
                 sha256: &sha,
@@ -4707,6 +4963,7 @@ fn finalize(
         "units": {
             "total": m.units.len(), "succeeded": count("succeeded"), "failed": count("failed"),
             "skipped": count("skipped"), "unreported": count("unreported"),
+            "missing_input": missing_input,
         },
         "derivatives": registered,
         "bytes": bytes_total,
@@ -4755,7 +5012,7 @@ fn finalize(
         let mut error = format!(
             "the container exited {}; its log is {log} in the working place {}",
             exit_code.map_or("by a signal".to_string(), |c| c.to_string()),
-            x.place.name
+            x.scratch.name
         );
         // 125 is podman's and docker's own failure, as when the image is
         // not in the store it looked in: say which store (wave 43's proof:
@@ -4881,16 +5138,32 @@ fn derivative_inputs(
     store: &mut Store,
     d: &Descriptor,
     stacks: &[i64],
-    place_id: i64,
+    places: &[&nils_registry::place::Place],
 ) -> Result<BTreeMap<String, Vec<derivative::Derivative>>, String> {
     let mut out: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
-        let rows =
-            derivative::of_stacks(store, kind, stacks, place_id).map_err(|e| e.to_string())?;
+        let mut rows = Vec::new();
+        for pl in places {
+            rows.extend(
+                derivative::of_stacks(store, kind, stacks, pl.id).map_err(|e| e.to_string())?,
+            );
+        }
         out.insert(t.id.clone(), rows);
     }
     Ok(out)
+}
+
+/// The working places a run reads derivatives and models from: its output
+/// place first, then its scratch place where that is another, which is
+/// where a lane that had no output place of its own kept them (record 49
+/// R7).
+fn lane_places<'a>(x: &Execution<'a>) -> Vec<&'a nils_registry::place::Place> {
+    if x.scratch.id == x.output.id {
+        vec![x.output]
+    } else {
+        vec![x.output, x.scratch]
+    }
 }
 
 /// Link one derivative into a run's input folder at its path under the
@@ -5038,7 +5311,7 @@ fn register_embedding(
             stack_id: h.stack_id,
             encoder_id: encoder.id,
             preprocess_version: &h.preprocess_version,
-            place_id: x.place.id,
+            place_id: x.output.id,
             path,
             bytes: bytes as i64,
             sha256: sha,
@@ -5115,8 +5388,8 @@ fn register_model(
         &derivative::New {
             kind: "model",
             belongs: &Belongs::run(),
-            place_id: x.place.id,
-            path: &place_path(Path::new(&x.place.path), &file)?,
+            place_id: x.output.id,
+            path: &place_path(Path::new(&x.output.path), &file)?,
             bytes: bytes as i64,
             sha256: &sha,
             media_type: &media,
