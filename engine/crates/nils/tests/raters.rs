@@ -457,6 +457,7 @@ fn a_rater_reads_the_pictures_of_their_own_campaign_and_nothing_else() {
     );
     assert_eq!(status, 403, "{doc}");
     for source in [
+        json!({"selection": "two@1"}),
         json!({"handle": handle}),
         json!({"review": {"kind_prefix": ""}}),
     ] {
