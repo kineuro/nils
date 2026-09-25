@@ -238,6 +238,7 @@ fn give<'a>(assignment: i64, who: &'a str, value: &'a str) -> Given<'a> {
         form: None,
         derivative_id: None,
         why: None,
+        unsure: false,
     }
 }
 
@@ -589,6 +590,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                         form: Some(&form),
                         derivative_id: Some(file),
                         why: None,
+                        unsure: false,
                     },
                     &at(1),
                 )
@@ -614,6 +616,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                     form: Some(&form),
                     derivative_id: Some(file),
                     why: None,
+                    unsure: false,
                 },
                 &at(1),
             )
@@ -641,6 +644,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                 form: Some(&form),
                 derivative_id: Some(union),
                 why: Some("the union, trimmed"),
+                unsure: false,
             },
             &at(4),
         )
@@ -1301,6 +1305,7 @@ fn a_model_s_answer_keeps_its_model_on_the_decision() {
             form: None,
             derivative_id: None,
             why: None,
+            unsure: false,
         };
         let e = campaign::answer(reg, &by("model", None), &at(3)).unwrap_err();
         assert!(
@@ -1401,6 +1406,7 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
             form: None,
             derivative_id: None,
             why: None,
+            unsure: false,
         };
         let close = |reg: &mut Registry, id: i64, who: &str, kind: &str, minute: u32| {
             campaign::close(
@@ -3006,5 +3012,246 @@ fn a_grouped_item_is_asked_once_per_stack_by_an_axis_or_an_axes_campaign() {
             .unwrap()
             .unwrap();
         assert_eq!(g.status, "accepted", "{name}: both members decided");
+    }
+}
+
+/// Record 48, how the reference is read: a rater answers can't tell on an
+/// axis where the data give no clue, and may mark a stack unsure. Can't
+/// tell is an answer the pack's constraints never reject and that stands
+/// alone; two raters who say it agree, and one who says a value disagrees;
+/// the close writes no decision on it; it is counted per axis, and the
+/// label sets carry it as can't tell and carry the unsure mark.
+#[test]
+fn can_t_tell_is_an_answer_that_never_becomes_a_decision() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = axes_question();
+        let adj = json!({"when": "disagree", "metric": "kappa"});
+        let c = campaign::create(
+            reg,
+            &new(
+                "cant-tell",
+                &q,
+                &adj,
+                Items::Stacks(ids.clone()),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        // a pack that names the word as a value is refused
+        let mut clash = axes_question();
+        clash["constraints"]["values"]["base"] = json!(["T1w", "cant_tell"]);
+        let e = campaign::create(
+            reg,
+            &new("clash", &clash, &adj, Items::Stacks(ids.clone()), 1, "none"),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("never a value"), "{name}: {e}");
+        // the word is a rater's answer only: a suggestion, a candidate or
+        // the pack's own read of a joint refuses it
+        let constraints = &q["constraints"];
+        let axes: Vec<String> = ["base", "technique", "modifier"].map(String::from).to_vec();
+        let text = r#"{"base": "cant_tell", "technique": "TSE", "modifier": null}"#;
+        assert!(
+            campaign::joint_of(&axes, constraints, text).is_err(),
+            "{name}"
+        );
+        assert!(
+            campaign::answer_joint_of(&axes, constraints, text).is_ok(),
+            "{name}"
+        );
+
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        for (bad, says) in [
+            (
+                r#"{"base": "T1w", "technique": "TSE", "modifier": ["cant_tell", "FLAIR"]}"#,
+                "stands alone",
+            ),
+            (
+                r#"{"base": "cant_tell", "technique": "TSE"}"#,
+                "modifier is missing",
+            ),
+        ] {
+            let e =
+                campaign::answer(reg, &give(a.assignment.id, "anna@lab", bad), &at(1)).unwrap_err();
+            assert!(e.to_string().contains(says), "{name}: {bad}: {e}");
+        }
+        assert_eq!(count(reg, "campaign_answer", ""), 0, "{name}");
+
+        // item 0: both say can't tell on base; MPRAGE's implication on base
+        // does not reject it, and anna marks the stack unsure
+        let first = r#"{"base": "cant_tell", "technique": "MPRAGE", "modifier": null}"#;
+        let first_again = r#"{"modifier": [], "technique": "MPRAGE", "base": ["cant_tell"]}"#;
+        let done = campaign::answer(
+            reg,
+            &Given {
+                unsure: true,
+                ..give(a.assignment.id, "anna@lab", first)
+            },
+            &at(1),
+        )
+        .unwrap();
+        assert_eq!(done.state, "open", "{name}");
+        let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.item.position, 0, "{name}");
+        let done =
+            campaign::answer(reg, &give(b.assignment.id, "bo@lab", first_again), &at(2)).unwrap();
+        assert_eq!(done.state, "agreed", "{name}: two can't tells agree");
+
+        // item 1: can't tell against a value disagrees
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(3))
+            .unwrap()
+            .unwrap();
+        campaign::answer(
+            reg,
+            &give(
+                a.assignment.id,
+                "anna@lab",
+                r#"{"base": "T2w", "technique": "cant_tell", "modifier": ["FLAIR"]}"#,
+            ),
+            &at(3),
+        )
+        .unwrap();
+        let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(3))
+            .unwrap()
+            .unwrap();
+        let done = campaign::answer(
+            reg,
+            &give(
+                b.assignment.id,
+                "bo@lab",
+                r#"{"base": "T2w", "technique": "TSE", "modifier": ["FLAIR"]}"#,
+            ),
+            &at(4),
+        )
+        .unwrap();
+        assert_eq!(done.state, "needs_adjudication", "{name}");
+        let j = campaign::claim(reg, c.id, "cleo@lab", Role::Adjudicator, &at(4))
+            .unwrap()
+            .unwrap();
+        campaign::answer(
+            reg,
+            &give(
+                j.assignment.id,
+                "cleo@lab",
+                r#"{"base": "T2w", "technique": "TSE", "modifier": "FLAIR"}"#,
+            ),
+            &at(5),
+        )
+        .unwrap();
+
+        // the answers keep the word and the mark
+        let all = campaign::answers(reg.store(), c.id).unwrap();
+        assert_eq!(
+            all[0].value.as_deref(),
+            Some(r#"{"base":"cant_tell","modifier":[],"technique":"MPRAGE"}"#),
+            "{name}"
+        );
+        assert_eq!(
+            all[0].value, all[1].value,
+            "{name}: one text for one answer"
+        );
+        assert!(all[0].unsure && !all[1].unsure, "{name}");
+        assert_eq!(all[0].as_json()["unsure"], true, "{name}");
+        // counted per axis, a finding of its own, with the unsure marks
+        let agreement = campaign::agreement(reg.store(), c.id).unwrap();
+        assert_eq!(agreement["per_axis"]["base"]["cant_tell"], 2, "{name}");
+        assert_eq!(agreement["per_axis"]["technique"]["cant_tell"], 1, "{name}");
+        assert_eq!(agreement["per_axis"]["modifier"]["cant_tell"], 0, "{name}");
+        assert_eq!(agreement["per_axis"]["base"]["exact"], 1.0, "{name}");
+        assert_eq!(agreement["per_axis"]["technique"]["exact"], 0.5, "{name}");
+        assert_eq!(agreement["unsure"], 1, "{name}");
+
+        // the close: no decision on a can't-tell axis, and none says the word
+        let closed = campaign::close(reg, &person_closes(c.id), &at(6)).unwrap();
+        assert_eq!(closed.resolved, 2, "{name}: {:?}", closed.refused);
+        assert_eq!(
+            closed.decisions.len(),
+            5,
+            "{name}: two axes of item 0, three of item 1"
+        );
+        assert_eq!(
+            count(reg, "decision", " WHERE value LIKE '%cant_tell%'"),
+            0,
+            "{name}"
+        );
+        let base_of_first = select(reg, |s| {
+            format!(
+                "SELECT COUNT(*) FROM {} WHERE ref = '{}' AND axis = 'base'",
+                s.qualified("decision"),
+                ids[0]
+            )
+        });
+        assert_eq!(base_of_first[0].int(0).unwrap(), 0, "{name}");
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.state, "resolved", "{name}");
+        assert_eq!(it.outcome["cant_tell"], json!(["base"]), "{name}");
+        assert_eq!(
+            it.outcome["decisions"].as_object().unwrap().len(),
+            2,
+            "{name}"
+        );
+
+        // the label sets: can't tell as itself, with no decision, and the mark
+        let outcomes = labels::campaign_labels(reg.store(), c.id, Of::Outcomes).unwrap();
+        assert_eq!(outcomes.len(), 6, "{name}");
+        let base0 = outcomes
+            .iter()
+            .find(|l| l.stack_id == Some(ids[0]) && l.what == "base")
+            .unwrap();
+        assert_eq!(base0.value.as_deref(), Some("cant_tell"), "{name}");
+        assert_eq!(base0.decision_id, None, "{name}");
+        assert_eq!(base0.unsure, Some(true), "{name}: anna's answer settled it");
+        assert!(
+            outcomes
+                .iter()
+                .filter(|l| l.value.as_deref() != Some("cant_tell"))
+                .all(|l| l.decision_id.is_some()),
+            "{name}"
+        );
+        let answers = labels::campaign_labels(reg.store(), c.id, Of::Answers).unwrap();
+        assert_eq!(answers.len(), 15, "{name}: five answers, three axes");
+        assert_eq!(
+            answers
+                .iter()
+                .filter(|l| l.value.as_deref() == Some("cant_tell"))
+                .count(),
+            3,
+            "{name}"
+        );
+        assert_eq!(
+            answers.iter().filter(|l| l.unsure == Some(true)).count(),
+            3,
+            "{name}: anna's first answer, a row per axis"
+        );
+        let tsv = labels::tsv(&answers);
+        assert!(
+            tsv.lines().next().unwrap().ends_with("\tanswer_id\tunsure"),
+            "{name}"
+        );
+        assert!(tsv.contains("\tcant_tell\t"), "{name}");
+        // a decision's label set never holds the word
+        let decided = labels::decision_labels(
+            reg.store(),
+            &labels::DecisionQuery {
+                axis: "base",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            decided
+                .iter()
+                .all(|l| l.value.as_deref() != Some("cant_tell") && l.unsure.is_none()),
+            "{name}"
+        );
+        assert_eq!(decided.len(), 1, "{name}: item 1's base only");
     }
 }

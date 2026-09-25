@@ -252,6 +252,7 @@ fn give<'a>(assignment: i64, who: &'a str, value: &'a str) -> Given<'a> {
         form: None,
         derivative_id: None,
         why: None,
+        unsure: false,
     }
 }
 

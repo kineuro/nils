@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64, 65],
+            [59, 60, 61, 62, 63, 64, 65, 66],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2016,7 +2016,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65],
+            [61, 62, 63, 64, 65, 66],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2078,7 +2078,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65],
+            [63, 64, 65, 66],
             "{name}"
         );
         for (t, col) in [
@@ -2152,7 +2152,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65],
+            [64, 65, 66],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2201,7 +2201,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65],
+            [65, 66],
             "{name}"
         );
         assert!(
@@ -2213,6 +2213,44 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
         assert_eq!(kept[0].origin, None, "{name}");
         assert!(
             nils_registry::measure::families(&mut store)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 48, how the reference is read: a registry from before gains the
+/// answer's `unsure` column, empty, which reads as not unsure.
+#[test]
+fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (a, meta) = (
+            store.qualified("campaign_answer"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {a} DROP COLUMN unsure;
+                 UPDATE {meta} SET value = '65' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert!(
+            !migrate::column_exists(&mut store, "campaign_answer", "unsure").unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [66],
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "campaign_answer", "unsure").unwrap(),
+            "{name}"
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()
                 .is_empty(),
             "{name}"
