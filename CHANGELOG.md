@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.40] - 2026-09-25
+
+Record 48's blind reading: raters read their own campaign's pictures without `query:see`, raters are blind to each other, and one bare DICOM file no longer fails a pyramid. The registry stays at schema 65. The HTTP API contract stays version 7, amended in place (descriptions only, and the instance doors' policy now names `query:see` or `campaigns:work`); the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.39.
+
 ### Added
 
 - Pictures for a campaign's raters (record 48). The picture doors (`GET /api/instances/{stack}/manifest`, `tiles`, `slab` and `render`) open to a caller without `query:see` who holds `campaigns:work`, for exactly the stacks of an open campaign that names them as a rater or an adjudicator, at detail quasi as before. Any other stack is refused with a 403 before anything of it is looked up, and nothing else of the stack opens: not the ask, the explanation or the evidence line outside the campaign. The `instance.open` audit row names the campaign the pictures were read through.
