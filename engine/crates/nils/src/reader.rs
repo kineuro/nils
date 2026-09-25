@@ -1177,6 +1177,181 @@ pub(crate) fn held_back(items: &[i64], share: f64, seed: &str) -> BTreeSet<i64> 
     ranked.into_iter().take(n).map(|(_, i)| i).collect()
 }
 
+/// Record 48, the reader's whole-combination search: the combinations of an
+/// axes question's answered axes that the registry's classifications hold,
+/// each with how many stacks hold it, most common first, `limit` at most.
+///
+/// Generic, never a stack's: a count says how common a combination is
+/// across the registry, the same for every item, and no stack of this
+/// campaign, nor any stack of a sample sealed now, is counted, so the counts
+/// say nothing of any stack a rater reads, blind or not. Values are named by
+/// identity; a combination outside the question's vocabulary, or one the
+/// pack's constraints forbid, is left out and counted apart.
+pub(crate) fn combinations(
+    store: &mut Store,
+    c: &Campaign,
+    pack: Option<&nils_pack::Pack>,
+    limit: usize,
+) -> Result<Value, (u16, String)> {
+    let q = &c.question;
+    if q["kind"] != "axes" {
+        return Err((
+            400,
+            format!(
+                "campaign {} asks a {} question; combinations are an axes question's",
+                c.name,
+                q["kind"].as_str().unwrap_or("?")
+            ),
+        ));
+    }
+    let err = |e: StoreError| (500, e.to_string());
+    let words = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    let constraints = &q["constraints"];
+    let derived = words(&q["derive"]);
+    let axes: Vec<String> = words(&q["axes"])
+        .into_iter()
+        .filter(|a| !derived.contains(a))
+        .collect();
+    let multi = words(&constraints["multi"]);
+    let vocabulary: BTreeMap<String, BTreeSet<String>> = axes
+        .iter()
+        .map(|a| {
+            let listed = constraints["values"][a.as_str()].clone();
+            let listed = if listed.is_array() {
+                listed
+            } else {
+                q["values"][a.as_str()].clone()
+            };
+            (a.clone(), words(&listed).into_iter().collect())
+        })
+        .collect();
+    let names: BTreeMap<String, BTreeMap<String, String>> = axes
+        .iter()
+        .map(|a| (a.clone(), crate::campaigns::value_names(pack, Some(a))))
+        .collect();
+
+    // what is never counted: this campaign's stacks and every sealed one
+    let mut left_out: BTreeSet<i64> = campaign::items(store, c.id)
+        .map_err(|e| (500, e.to_string()))?
+        .iter()
+        .filter_map(|i| i.stack_id)
+        .collect();
+    let sql = format!(
+        "SELECT DISTINCT stack_id FROM {} WHERE unsealed_at IS NULL",
+        store.qualified("sealed_stack")
+    );
+    for r in store.query(&sql, &[]).map_err(err)? {
+        left_out.insert(r.int(0).map_err(err)?);
+    }
+
+    let sql = format!(
+        "SELECT MIN(stack_id), MAX(stack_id) FROM {}",
+        store.qualified("classification")
+    );
+    let rows = store.query(&sql, &[]).map_err(err)?;
+    let (lo, hi) = match rows.first() {
+        Some(r) => (r.opt_int(0).map_err(err)?, r.opt_int(1).map_err(err)?),
+        None => (None, None),
+    };
+    let d = store.dialect();
+    let axis_params: Vec<String> = (0..axes.len())
+        .map(|i| d.param(i + 3, Type::Text))
+        .collect();
+    let sql = format!(
+        "SELECT stack_id, axis, value FROM {} WHERE stack_id >= {} AND stack_id <= {} AND axis IN ({}) ORDER BY stack_id, axis, value",
+        store.qualified("classification_axis"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        axis_params.join(", ")
+    );
+    let mut counts: BTreeMap<String, (Value, u64)> = BTreeMap::new();
+    let (mut counted, mut outside, mut illegal) = (0u64, 0u64, 0u64);
+    const SPAN: i64 = 20_000;
+    if let (Some(lo), Some(hi)) = (lo, hi) {
+        let mut from = lo;
+        while from <= hi {
+            let to = from.saturating_add(SPAN - 1).min(hi);
+            let mut params = vec![Param::Int(from), Param::Int(to)];
+            params.extend(axes.iter().map(|a| Param::from(a.as_str())));
+            let mut by_stack: BTreeMap<i64, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+            for r in store.query(&sql, &params).map_err(err)? {
+                let stack = r.int(0).map_err(err)?;
+                if left_out.contains(&stack) {
+                    continue;
+                }
+                let axis = r.text(1).map_err(err)?.to_string();
+                let e = by_stack
+                    .entry(stack)
+                    .or_default()
+                    .entry(axis.clone())
+                    .or_default();
+                if let Some(v) = r.opt_text(2).map_err(err)?.filter(|v| !v.is_empty()) {
+                    e.insert(named(&names[&axis], v));
+                }
+            }
+            'stack: for (_, held) in by_stack {
+                let mut joint: campaign::Joint = BTreeMap::new();
+                let mut shown = serde_json::Map::new();
+                for a in &axes {
+                    let values: Vec<String> = held
+                        .get(a)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let is_multi = multi.contains(a);
+                    if values.iter().any(|v| !vocabulary[a].contains(v))
+                        || (!is_multi && values.len() > 1)
+                    {
+                        outside += 1;
+                        continue 'stack;
+                    }
+                    shown.insert(
+                        a.clone(),
+                        if is_multi {
+                            json!(values)
+                        } else {
+                            values.first().map_or(Value::Null, |v| json!(v))
+                        },
+                    );
+                    joint.insert(a.clone(), values);
+                }
+                if campaign::legal(constraints, &joint).is_err() {
+                    illegal += 1;
+                    continue;
+                }
+                counted += 1;
+                let key = serde_json::to_string(&joint).unwrap_or_default();
+                counts
+                    .entry(key)
+                    .or_insert_with(|| (Value::Object(shown), 0))
+                    .1 += 1;
+            }
+            from = to.saturating_add(1);
+        }
+    }
+    let distinct = counts.len();
+    let mut list: Vec<(Value, u64)> = counts.into_values().collect();
+    list.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+    });
+    list.truncate(limit);
+    Ok(json!({
+        "campaign": c.id,
+        "axes": axes,
+        "counted": counted,
+        "distinct": distinct,
+        "left_out": {"outside": outside, "illegal": illegal, "stacks": left_out.len()},
+        "combinations": list.into_iter().map(|(values, count)| json!({"values": values, "count": count})).collect::<Vec<_>>(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,6 +38,11 @@ contrast agent. Every word list here is a site's to amend that way: the four
 the order the values are tried in are this pack's, and an overlay that
 reaches for them is refused.
 
+A value's `terms` are other names a person knows it by (a vendor's name for a
+sequence, a spelling, a radiologist's word), and its `description` says what it
+means. Both are display only: the reader finds a value by them, and no rule
+reads them, so they change no verdict and no version.
+
     nils pack validate packs/mri
     nils pack shape packs/mri
     nils pack show mri --pack-dir packs

@@ -9743,6 +9743,8 @@ pub(crate) fn pack_document(
                     "family": v.family,
                     "tried": v.tried,
                     "keywords": v.keywords,
+                    "terms": v.terms,
+                    "description": v.description,
                     "bucket": v.bucket,
                     "list": amendable.then_some(&list),
                     "detection": {

@@ -38,6 +38,7 @@ order:
 
 values:
   FLAIR:
+    terms: ['fluid attenuated inversion recovery', 'dark fluid', 'darkfluid', 'T2 FLAIR', 'T1 FLAIR']
     group: IR_CONTRAST
     priority: 1
     keywords:
@@ -53,6 +54,7 @@ values:
     detection:
       exclusive: is_flair
   STIR:
+    terms: ['short tau inversion recovery', 'short TI inversion recovery', 'TIRM']
     group: IR_CONTRAST
     priority: 2
     keywords:
@@ -63,6 +65,7 @@ values:
     detection:
       exclusive: has_stir
   DIR:
+    terms: ['double inversion recovery', 'double IR']
     group: IR_CONTRAST
     priority: 3
     keywords:
@@ -73,6 +76,7 @@ values:
     detection:
       exclusive: is_dir
   PSIR:
+    terms: ['phase sensitive inversion recovery']
     group: IR_CONTRAST
     priority: 4
     keywords:
@@ -82,6 +86,7 @@ values:
     detection:
       exclusive: has_psir
   IR:
+    terms: ['inversion recovery', 'inversion prepared', 'IR prepared']
     group: IR_CONTRAST
     priority: 99
     keywords:
@@ -89,6 +94,7 @@ values:
     detection:
       exclusive: has_ir_se
   Radial:
+    terms: ['PROPELLER', 'BLADE', 'MultiVane', 'JET', 'radial']
     group: TRAJECTORY
     priority: 1
     keywords:
@@ -100,6 +106,7 @@ values:
     detection:
       exclusive: is_radial
   Spiral:
+    terms: ['spiral']
     group: TRAJECTORY
     priority: 2
     keywords:
@@ -107,6 +114,7 @@ values:
     detection:
       exclusive: is_spiral
   FatSat:
+    terms: ['fat saturation', 'fat suppression', 'fat suppressed', 'fat sat', 'SPIR', 'SPAIR', 'ChemSat', 'FS']
     keywords:
       - fatsat
       - fat sat
@@ -116,6 +124,7 @@ values:
     detection:
       exclusive: has_fat_sat
   WaterExcitation:
+    terms: ['water excitation', 'ProSet', 'WE']
     label: WaterExc
     keywords:
       - water excitation
@@ -125,6 +134,7 @@ values:
     detection:
       exclusive: has_water_excitation
   Dixon:
+    terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon']
     keywords:
       - dixon
       - ideal
@@ -136,6 +146,7 @@ values:
       exclusive: has_dixon
       combination: [has_in_phase, has_out_phase]
   MT:
+    terms: ['magnetization transfer', 'MT pulse', 'MTC']
     keywords:
       - magnetization transfer
       - mtc
@@ -147,19 +158,23 @@ values:
   # as a substring is inside far more words than it means. A site whose
   # names are reliable may give the value words through an overlay.
   FlowComp:
+    terms: ['flow compensation', 'flow comp', 'gradient moment nulling', 'GMN']
     detection:
       exclusive: has_flow_comp
   BlackBlood:
+    terms: ['black blood', 'dark blood', 'DANTE', 'vessel wall']
     keywords:
       - black blood
       - blackblood
       - dark blood
       - blood null
   BrightBlood:
+    terms: ['bright blood']
     keywords:
       - bright blood
       - brightblood
   MoCo:
+    terms: ['motion corrected', 'MoCo']
     keywords:
       - moco
       - mocoseries

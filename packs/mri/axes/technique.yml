@@ -61,8 +61,13 @@ order:
   - GRE
   - EPI
 
+# `terms` are other names a person knows a value by: vendors' names for the
+# same sequence and common spellings, so the reader finds MPRAGE by BRAVO.
+# Display only: no rule reads them, and they move no stack; the words that
+# decide are `keywords`.
 values:
   MS-EPI:
+    terms: ['readout-segmented EPI', 'readout segmented', 'IRIS']
     label: RESOLVE
     family: EPI
     keywords:
@@ -80,6 +85,7 @@ values:
     detection:
       exclusive: is_epi_diff_resolve
   DWI-EPI:
+    terms: ['ep2d_diff', 'diffusion weighted EPI', 'SS-EPI DWI']
     family: MIXED
     keywords:
       - dwi
@@ -96,6 +102,7 @@ values:
       - dwi-steam
       - diffusion steam
   BOLD-EPI:
+    terms: ['ep2d_bold', 'fMRI EPI', 'BOLD']
     label: BOLD
     family: MIXED
     keywords:
@@ -107,6 +114,7 @@ values:
     detection:
       exclusive: is_bold
   ASL-EPI:
+    terms: ['arterial spin labeling', '3D ASL', 'pCASL']
     label: ASL
     family: MIXED
     keywords:
@@ -118,6 +126,7 @@ values:
     detection:
       exclusive: is_asl
   Perfusion-EPI:
+    terms: ['ep2d_perf', 'DSC perfusion', 'bolus tracking']
     label: Perfusion
     family: MIXED
     keywords:
@@ -128,6 +137,7 @@ values:
     detection:
       exclusive: is_perfusion
   GRASE:
+    terms: ['gradient and spin echo', 'TGSE']
     family: MIXED
     keywords:
       - grase
@@ -148,6 +158,7 @@ values:
     detection:
       combination: [has_gre, has_epi]
   MRF:
+    terms: ['MR fingerprinting', 'magnetic resonance fingerprinting']
     family: MIXED
     keywords:
       - mrf
@@ -155,6 +166,7 @@ values:
     detection:
       exclusive: is_mrf
   MDME:
+    terms: ['QRAPMASTER', 'MAGiC', 'SyMRI acquisition']
     family: SE
     keywords:
       - mdme
@@ -177,6 +189,7 @@ values:
     detection:
       exclusive: is_mavric
   '3D-TSE':
+    terms: ['SPACE', 'CUBE', 'VISTA', '3D TSE', '3D FSE', 'MVOX', 'isoFSE', '3D FLAIR TSE', 'spc']
     label: SPACE
     family: SE
     keywords:
@@ -192,6 +205,7 @@ values:
       exclusive: is_space
       combination: [is_tse, is_3d]
   SS-TSE:
+    terms: ['HASTE', 'SSFSE', 'SSh TSE', 'single shot TSE', 'FASE', 'single-shot FSE']
     label: HASTE
     family: SE
     keywords:
@@ -204,6 +218,7 @@ values:
     detection:
       exclusive: is_haste
   IR-TSE:
+    terms: ['TIRM', 'FSE-IR', 'IR TSE', 'TSE-IR', 'turbo inversion recovery', 'TIR']
     label: TIRM
     family: SE
     keywords:
@@ -216,6 +231,7 @@ values:
     detection:
       combination: [has_ir, is_tse]
   ME-SE:
+    terms: ['multi-echo spin echo', 'MESE', 'dual echo']
     label: MESE
     family: SE
     keywords:
@@ -229,6 +245,7 @@ values:
       exclusive: is_me_se
       combination: [is_multi_echo, has_se]
   VFA-TSE:
+    terms: ['RESTORE', 'FRFSE', 'DRIVE', 'T2 Plus', 'driven equilibrium', 'fast recovery FSE']
     label: RESTORE
     family: SE
     keywords:
@@ -240,6 +257,7 @@ values:
       - t2 plus
       - hyperecho
   TSE:
+    terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE']
     family: SE
     keywords:
       - tse
@@ -252,12 +270,14 @@ values:
     detection:
       exclusive: is_tse
   SE:
+    terms: ['spin echo', 'SE', 'conventional spin echo']
     family: SE
     keywords:
       - spin-echo
     detection:
       exclusive: has_se
   QALAS:
+    terms: ['3D-QALAS']
     family: GRE
     keywords:
       - qalas
@@ -265,12 +285,14 @@ values:
     detection:
       exclusive: is_qalas
   MP2RAGE:
+    terms: ['MP2RAGE', 'MP2 RAGE']
     family: GRE
     keywords:
       - mp2rage
     detection:
       combination: [is_multi_ti, has_gre, has_ir, is_3d]
   MEMPRAGE:
+    terms: ['multi-echo MPRAGE', 'ME-MPRAGE']
     family: GRE
     keywords:
       - memprage
@@ -280,6 +302,7 @@ values:
     detection:
       combination: [is_multi_echo, has_ir, has_gre, is_3d]
   MPRAGE:
+    terms: ['MPRAGE', 'MP-RAGE', 'MP RAGE', 'BRAVO', 'FSPGR BRAVO', 'IR-FSPGR', '3D IR-FSPGR', '3D TFE', '3D T1 TFE', 'T1 TFE 3D', 'TFL', 'tfl3d', '3D MPRAGE', 'magnetization prepared rapid gradient echo']
     family: GRE
     keywords:
       - mprage
@@ -291,6 +314,7 @@ values:
       exclusive: is_mprage
       combination: [has_ir, has_gre, is_3d]
   TOF-MRA:
+    terms: ['time-of-flight', 'TOF MRA', 'inflow angiography', 'Inhance Inflow']
     label: TOF
     family: GRE
     keywords:
@@ -301,6 +325,7 @@ values:
     detection:
       exclusive: is_tof
   PC-MRA:
+    terms: ['phase-contrast MRA', 'PC angio', 'Qflow', '4D flow', 'flow quantification']
     label: PC
     family: GRE
     keywords:
@@ -311,6 +336,7 @@ values:
     detection:
       exclusive: is_pc
   comb-ME-GRE:
+    terms: ['MEDIC', 'MERGE', 'mFFE', 'combined multi-echo GRE']
     label: MEDIC
     family: GRE
     keywords:
@@ -321,6 +347,7 @@ values:
     detection:
       exclusive: is_medic
   ME-GRE:
+    terms: ['multi-echo GRE', 'MEGRE', 'multi-echo gradient echo']
     label: MEGRE
     family: GRE
     keywords:
@@ -331,6 +358,7 @@ values:
     detection:
       combination: [is_multi_echo, has_gre]
   CISS:
+    terms: ['CISS', 'FIESTA-C', '3D DRIVE']
     family: GRE
     keywords:
       - ciss
@@ -340,6 +368,7 @@ values:
     detection:
       exclusive: is_ciss
   bSSFP:
+    terms: ['TrueFISP', 'FIESTA', 'balanced FFE', 'bFFE', 'True SSFP', 'balanced SSFP', 'trufi']
     label: FIESTA
     family: GRE
     keywords:
@@ -354,11 +383,13 @@ values:
     detection:
       exclusive: is_ssfp
   DESS:
+    terms: ['double echo steady state', 'MENSA']
     family: GRE
     keywords:
       - dess
       - mensa
   SSFP:
+    terms: ['PSIF', 'T2-FFE', 'CE-FAST', 'reversed FISP']
     label: PSIF
     family: GRE
     keywords:
@@ -367,6 +398,7 @@ values:
       - t2-ffe
       - ce-fast
   VFA-GRE:
+    terms: ['DESPOT', 'variable flip angle GRE']
     family: GRE
     keywords:
       - vfa
@@ -375,6 +407,7 @@ values:
     detection:
       combination: [is_multi_fa, has_gre, is_3d]
   VI-GRE:
+    terms: ['VIBE', 'LAVA', 'THRIVE', 'Quick 3D', 'TIGRE', 'volumetric interpolated']
     label: VIBE
     family: GRE
     keywords:
@@ -385,6 +418,7 @@ values:
     detection:
       combination: [has_spoiled, is_3d, has_gre]
   FSP-GRE:
+    terms: ['TurboFLASH', 'FSPGR', 'TFE', 'turbo field echo', 'fast SPGR', 'TFL']
     label: TurboFLASH
     family: GRE
     keywords:
@@ -395,6 +429,7 @@ values:
     detection:
       exclusive: is_tfl
   SP-GRE:
+    terms: ['FLASH', 'SPGR', 'T1-FFE', 'spoiled gradient echo', 'spoiled GRE', 'RSSG']
     label: FLASH
     family: GRE
     keywords:
@@ -405,6 +440,7 @@ values:
       exclusive: is_flash
       combination: [has_spoiled, has_gre]
   SS-GRE:
+    terms: ['FISP', 'GRASS', 'FFE', 'steady state GRE']
     label: FISP
     family: GRE
     keywords:
@@ -413,6 +449,7 @@ values:
       - ss-gre
       - single shot gre
   GRE:
+    terms: ['gradient echo', 'gradient recalled echo', 'field echo', 'FE']
     family: GRE
     keywords:
       - gre
@@ -421,6 +458,7 @@ values:
     detection:
       exclusive: has_gre
   EPI:
+    terms: ['echo planar', 'echo-planar imaging']
     family: EPI
     keywords:
       - epi

@@ -34,6 +34,7 @@ order:
 
 values:
   SyMRI:
+    terms: ['synthetic MRI', 'MAGiC', 'SyMRI']
     keywords:
       - symri
       - magic
@@ -47,6 +48,7 @@ values:
     detection:
       combination: [is_synthetic, is_derived]
   EPIMix:
+    terms: ['EPIMix', 'NeuroMix']
     keywords:
       - epimix
       - ksepimix
@@ -55,9 +57,11 @@ values:
       - mix2
       - mix3
   STAGE:
+    terms: ['strategically acquired gradient echo']
     keywords:
       - stage
   SWIRecon:
+    terms: ['SWI reconstruction', 'SWAN', 'SWI']
     keywords:
       - swi
       - swan
@@ -69,6 +73,7 @@ values:
       exclusive: is_swi
       combination: [has_swi, is_derived]
   DTIRecon:
+    terms: ['diffusion reconstruction', 'tensor', 'DTI']
     keywords:
       - adc map
       - apparent diffusion
@@ -79,6 +84,7 @@ values:
     detection:
       exclusive: is_diffusion_derived
   PerfusionRecon:
+    terms: ['perfusion reconstruction', 'perfusion maps']
     keywords:
       - cerebral blood flow
       - cerebral blood volume
@@ -89,6 +95,7 @@ values:
     detection:
       exclusive: is_perfusion_derived
   ASLRecon:
+    terms: ['ASL reconstruction', 'CBF from ASL']
     keywords:
       - asl
       - pcasl
@@ -97,6 +104,7 @@ values:
     detection:
       exclusive: is_asl
   BOLDRecon:
+    terms: ['BOLD reconstruction', 'fMRI maps']
     keywords:
       - bold
       - fmri
@@ -106,6 +114,7 @@ values:
     detection:
       exclusive: is_bold
   Localizer:
+    terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer
       - scout
@@ -120,12 +129,14 @@ values:
     detection:
       exclusive: is_localizer
   ProjectionDerived:
+    terms: ['projection', 'MIP', 'MinIP', 'MPR', 'reformat']
     keywords:
       - maximum intensity
       - minimum intensity
       - multiplanar reformat
     alternative_flags: [is_mip, is_minip, is_mpr, is_projection]
   SubtractionDerived:
+    terms: ['subtraction', 'SUB', 'post minus pre']
     keywords:
       - subtraction
       - subtracted
@@ -133,4 +144,4 @@ values:
       - pre post
     detection:
       exclusive: is_subtraction
-  RawRecon: {}
+  RawRecon: {terms: ['acquired', 'scanner reconstruction', 'original acquisition', 'raw']}

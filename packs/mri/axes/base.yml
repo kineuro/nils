@@ -15,15 +15,16 @@ kind: single
 stores: label
 
 values:
-  'DWI': {}
-  'PWI': {}
-  'SWI': {}
-  'T1rho': {}
-  'T2rho': {}
+  'DWI': {terms: ['diffusion weighted', 'DWI', 'DTI']}
+  'PWI': {terms: ['perfusion weighted', 'PWI', 'DSC', 'DCE', 'ASL']}
+  'SWI': {terms: ['susceptibility weighted', 'SWI', 'SWAN']}
+  'T1rho': {terms: ['T1 rho', 'spin lock']}
+  'T2rho': {terms: ['T2 rho']}
   'T2starw':
+    terms: ['T2*', 'T2 star', 'T2star weighted', 'GRE T2*']
     label: 'T2*w'
-  'T2w': {}
-  'PDw': {}
-  'T1w': {}
-  'MTw': {}
-  'Unknown': {}
+  'T2w': {terms: ['T2', 'T2 weighted']}
+  'PDw': {terms: ['PD', 'proton density weighted']}
+  'T1w': {terms: ['T1', 'T1 weighted']}
+  'MTw': {terms: ['MT weighted', 'magnetization transfer weighted']}
+  'Unknown': {terms: ['unknown']}

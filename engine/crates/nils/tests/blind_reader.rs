@@ -835,3 +835,182 @@ fn an_open_campaign_moves_to_the_seven_asked_axes_keeping_its_answer() {
     assert!(good, "{err}");
     assert!(out.contains("\"derive\""), "{out}");
 }
+
+/// Record 48, the reader's search: every name a value goes by is served
+/// with the question, blind or not, and the combinations are counted over
+/// the registry without any stack of the campaign or of a sealed sample,
+/// so neither says anything of a stack a rater reads.
+#[test]
+fn the_reader_finds_values_by_their_names_and_combinations_by_how_common() {
+    let home = TempDir::new("search-home");
+    let src = TempDir::new("search-src");
+    for n in 1..=4 {
+        study(&src, n);
+    }
+    ok(
+        &home,
+        &["key", "add", "k"],
+        Some("a reader search test key\n"),
+    );
+    ok(&home, &["init", "--key", "k"], None);
+    ok(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "a",
+            "--no-private",
+            src.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    ok(&home, &["fingerprint"], None);
+    ok(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+
+    let server = Server::start(&home);
+    let cleo = token(
+        "cleo",
+        &["query:work", "data:see", "review:work", "campaigns:work"],
+        "quasi",
+    );
+    let anna = token("anna", &["campaigns:see", "campaigns:work"], "quasi");
+    let bo = token("bo", &["campaigns:see", "campaigns:work"], "quasi");
+    let (anna_p, bo_p) = ("anna@desk.example", "bo@desk.example");
+    server.ok(
+        "PUT",
+        "/api/ask/selections/two",
+        Some(selection_of(&[1, 2])),
+        &cleo,
+    );
+    server.ok(
+        "PUT",
+        "/api/ask/selections/other",
+        Some(selection_of(&[3, 4])),
+        &cleo,
+    );
+    let make = |name: &str, selection: &str, rater: &str| {
+        server.ok(
+            "POST",
+            "/api/campaigns",
+            Some(json!({
+                "name": name,
+                "question": {"kind": "axes", "axes": ASKED},
+                "source": {"selection": selection},
+                "raters": [rater], "raters_per_item": 1,
+                "adjudication": {"when": "never"}, "closes_into": "none",
+            })),
+            &cleo,
+        )
+    };
+    let made = make("search-anna", "two@1", anna_p);
+    make("search-bo", "other@1", bo_p);
+    // the names are the pack's to serve, never a caller's to store
+    assert!(made["question"].get("vocabulary").is_none(), "{made}");
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "bad", "question": {"kind": "axes", "axes": ASKED, "vocabulary": {}},
+            "source": {"selection": "two@1"}, "raters": [anna_p],
+        })),
+        &cleo,
+    );
+    assert_eq!(status, 400, "{doc}");
+
+    // ------------------------------------------------ the names, served blind alike
+    let handle = made["handle_id"].as_i64().unwrap();
+    let seen = |who: &str| server.ok("GET", "/api/campaigns/search-anna", None, who);
+    let before = seen(&anna);
+    ok(
+        &home,
+        &["labels", "seal", "--handle", &handle.to_string(), "--json"],
+        None,
+    );
+    let c = seen(&anna);
+    let v = &c["question"]["vocabulary"];
+    assert_eq!(
+        v, &before["question"]["vocabulary"],
+        "the same names, sealed or not"
+    );
+    let has = |axis: &str, value: &str, list: &str, word: &str| {
+        v[axis][value][list]
+            .as_array()
+            .unwrap_or_else(|| panic!("{axis}.{value}.{list}: {v}"))
+            .iter()
+            .any(|x| x.as_str().is_some_and(|x| x.eq_ignore_ascii_case(word)))
+    };
+    assert!(has("technique", "MPRAGE", "terms", "BRAVO"), "{v}");
+    assert!(has("technique", "MPRAGE", "keywords", "ir spgr"), "{v}");
+    assert!(has("technique", "3D-TSE", "terms", "CUBE"), "{v}");
+    assert_eq!(v["technique"]["3D-TSE"]["label"], "SPACE", "{v}");
+    for axis in ASKED {
+        assert!(v[axis].is_object(), "{axis}: {v}");
+    }
+    // a derived axis is never a row, and has no names
+    for axis in DERIVED {
+        assert!(v.get(axis).is_none(), "{axis}: {v}");
+    }
+    // nothing of a stack: the names are the same in every campaign
+    assert_eq!(
+        server.ok("GET", "/api/campaigns/search-bo", None, &bo)["question"]["vocabulary"],
+        *v
+    );
+
+    // ------------------------------------------------ the combinations
+    let combos = |name: &str, who: &str| {
+        server.ok(
+            "GET",
+            &format!("/api/campaigns/{name}/combinations"),
+            None,
+            who,
+        )
+    };
+    // anna's campaign counts neither its own stacks nor a sealed one: only 3 and 4
+    let a = combos("search-anna", &anna);
+    let total = |d: &Value| -> u64 {
+        d["combinations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["count"].as_u64().unwrap())
+            .sum()
+    };
+    let seen_of = |d: &Value| {
+        d["counted"].as_u64().unwrap()
+            + d["left_out"]["outside"].as_u64().unwrap()
+            + d["left_out"]["illegal"].as_u64().unwrap()
+    };
+    assert_eq!(seen_of(&a), 2, "{a}");
+    assert_eq!(total(&a), a["counted"].as_u64().unwrap(), "{a}");
+    assert!(a["counted"].as_u64().unwrap() >= 1, "{a}");
+    assert_eq!(a["left_out"]["stacks"], 2, "{a}");
+    let one = &a["combinations"][0];
+    assert_eq!(one["count"], 2, "four alike stacks: {a}");
+    let mut named: Vec<String> = one["values"].as_object().unwrap().keys().cloned().collect();
+    named.sort();
+    let mut want = words(ASKED);
+    want.sort();
+    assert_eq!(named, want, "{a}");
+    assert!(one["values"]["modifier"].is_array(), "{a}");
+    assert!(!one["values"]["technique"].is_array(), "{a}");
+    // bo's campaign holds 3 and 4, and 1 and 2 are sealed: nothing is counted
+    let b = combos("search-bo", &bo);
+    assert_eq!(seen_of(&b), 0, "{b}");
+    assert_eq!(b["combinations"], json!([]), "{b}");
+    assert_eq!(b["left_out"]["stacks"], 4, "{b}");
+    assert_eq!(combos("search-bo", &bo)["combinations"], b["combinations"]);
+    // a limit bounds the list, and a campaign not the caller's is not there
+    let limited = server.ok(
+        "GET",
+        "/api/campaigns/search-anna/combinations?limit=1",
+        None,
+        &anna,
+    );
+    assert!(limited["combinations"].as_array().unwrap().len() <= 1);
+    let (status, _) = server.call("GET", "/api/campaigns/search-anna/combinations", None, &bo);
+    assert_eq!(status, 404);
+}
