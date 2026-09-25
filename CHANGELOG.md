@@ -4,7 +4,9 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
-The reader after its first real read (record 48): blind hides the systems' answers, never the file, and a rater answers only what needs a person. The registry moves to schema 68 (an answer keeps what it derived). The HTTP API contract stays version 7, amended in place with additive fields and two new doors.
+## [1.0.0-alpha.43] - 2026-09-25
+
+The reader after its first real read (record 48): blind hides the systems' answers, never the file, and a rater answers only what needs a person. A pipeline run keeps its outputs apart from its scratch, and its pre-flight counts the units the release makes. The registry is at schema 68 after this update (66 at 1.0.0-alpha.42), and it migrates when this version first opens it. The HTTP API contract stays version 7, amended in place with additive fields and two new doors; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.42.
 
 ### Added
 
@@ -13,6 +15,15 @@ The reader after its first real read (record 48): blind hides the systems' answe
 - Asked and derived axes. An axes question may name `derive`, the axes the rater is not asked, which the engine computes from each answer through the served pack's own rules with the asked axes held at the answer, leaving out a route that reads the file's words to decide an asked axis (`nils_pack::derive`); without `derive` it derives the rest of the pack's axes where every one of them can be derived, and nothing otherwise. Over Phase 0's seven asked axes (provenance, technique, modifier, construct, base, body part, post contrast) that is directory type, disposition, convertible and role from the answer, and quality from ImageType. An axis whose rules read the file's numbers or words, or an axis nobody answered, is refused as derived, so a derived value is always the rater's answer carried through the pack. Can't tell on an asked axis makes can't tell of every derived axis that reads it. An answer keeps its `derived` values, the answer door says them, and an export marks each label `derived` true or false in a new `derived` column of labels.tsv.
 - `POST /api/campaigns/{id}/items/{item}/derive`: the derived axes of a partial or whole answer, for the reader to show as the rater answers; it writes nothing.
 - `nils campaign requestion <campaign> --axes A,B [--derive C,D]`: moves an open axes campaign to fewer asked axes and derives the rest, keeping its items and every answer. An answer given under the old form keeps its value as given, is read on the axes asked now, and gains what it derives. Refused while an item is leased, for an axis that was not asked before, and under another pack version than the campaign's.
+- `nils pipeline lane --output-place <place> --scratch-place <place>` names the working place a run's outputs go to (the derivatives and tables it registers, under `derivatives/<pipeline>/<run>/`) and the one its scratch goes to (its input, each unit's folder, its log and apptainer's images, under `runs/<run>/` and `images/`). Unset or `default`, each is the first active working place, as before, and a place that is not an active working place is refused. A run records both (schema 67), so a resumed run goes on where it started; derivative and model inputs are read from the output place first, then the scratch place. The capability, `nils pipeline lane` and the pre-flight name both places.
+
+### Changed
+
+- The pre-flight counts the units the release makes. It counted a BIDS input's units from the picks, where the run's units are the folders of the release that builds its input, so it could count a unit more than the run had and call a session ready whose T1w pick the pack's BIDS mapping releases as `FLAIR`. The release and the pre-flight now share one per-stack plan: a session whose picked stacks the release keeps in `sourcedata/`, holds or merges is counted as the run meets it, `left_out` says why, and a role counts only when a stack picked for it is released under the role's own suffix. A unit missing an input is not run: the run marks it `skipped`, counts it in `summary.units.missing_input` and raises no review item.
+
+### Fixed
+
+- The viewing pyramid reads a file whose private `UL` element declares a ragged length (six bytes, from some older scanners). The header reader already repaired such a length in memory; the whole-file read the pyramid uses now makes the same repair, pixel data included, when a parse comes back truncated, so those series' stacks are no longer counted `unreadable`. The file on disk is untouched, and a file that really is cut short is still refused.
 
 ## [1.0.0-alpha.42] - 2026-09-25
 
