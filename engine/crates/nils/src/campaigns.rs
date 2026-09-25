@@ -540,6 +540,13 @@ pub(crate) fn route(
                     ),
                     other => Some(other.to_string()),
                 };
+                // record 48: the rater's mark that the stack wants a second
+                // look, a boolean when given
+                let unsure = match &doc["unsure"] {
+                    Value::Null => false,
+                    Value::Bool(b) => *b,
+                    _ => return Err(Reply::error(400, "unsure: true or false")),
+                };
                 let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
                 // record 48 R1: what the engine suggested for the item, kept
                 // beside the answer with the time it took; the engine's own,
@@ -557,6 +564,7 @@ pub(crate) fn route(
                         form: form.as_ref(),
                         derivative_id: doc["derivative_id"].as_i64(),
                         why: doc["why"].as_str(),
+                        unsure,
                     },
                     &campaign::Timing {
                         suggested: suggested.as_deref(),
@@ -826,6 +834,7 @@ pub(crate) fn route(
                     form: None,
                     derivative_id: None,
                     why: None,
+                    unsure: false,
                 };
                 let done = campaign::accept_many(
                     registry,
@@ -2377,7 +2386,7 @@ pub(crate) enum CampaignCommand {
     Answer {
         /// The assignment a claim gave
         assignment: i64,
-        /// The value: an axis value, a pick's stack ids (12,14), a text, or for an axes question the joint answer as JSON ({"base": "T1w", "modifier": ["FatSat"]})
+        /// The value: an axis value, a pick's stack ids (12,14), a text, or for an axes question the joint answer as JSON ({"base": "T1w", "modifier": ["FatSat"]}), where any axis may be "cant_tell" when the data give no clue
         #[arg(long, value_name = "VALUE")]
         value: Option<String>,
         /// The form, as JSON
@@ -2388,6 +2397,9 @@ pub(crate) enum CampaignCommand {
         derivative: Option<i64>,
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
+        /// Mark the stack unsure: answered, and a second look wanted
+        #[arg(long)]
+        unsure: bool,
     },
     /// Give a claimed item back unanswered
     Release { assignment: i64 },
@@ -2891,6 +2903,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             form,
             derivative,
             why,
+            unsure,
         } => {
             let mut registry = crate::open(home)?;
             let form: Option<Value> = form
@@ -2938,6 +2951,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     form: form.as_ref(),
                     derivative_id: derivative,
                     why: why.as_deref(),
+                    unsure,
                 },
                 &campaign::Timing {
                     suggested: suggested.as_deref(),

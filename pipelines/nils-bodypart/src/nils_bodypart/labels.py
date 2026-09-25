@@ -18,6 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# The engine's word for a rater's can't tell on an axis (record 48): an
+# answer, never a value of the pack.
+CANT_TELL = "cant_tell"
+
+
 class LabelSetError(ValueError):
     pass
 
@@ -33,10 +38,13 @@ class LabelSet:
 
     def stack_labels(self, axis: str) -> tuple[dict[int, str], int]:
         """{stack: value} for one axis, and how many stacks were dropped
-        because their rows disagree."""
+        because their rows disagree. A rater's can't tell (record 48) is no
+        value and never a label: its rows are left out."""
         seen: dict[int, set[str]] = {}
         for r in self.rows:
             if r.get("what") != axis or not r.get("stack_id") or not r.get("value"):
+                continue
+            if r["value"] == CANT_TELL:
                 continue
             seen.setdefault(int(r["stack_id"]), set()).add(r["value"])
         out = {s: next(iter(v)) for s, v in seen.items() if len(v) == 1}

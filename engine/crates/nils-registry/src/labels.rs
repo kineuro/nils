@@ -83,10 +83,15 @@ pub struct Label {
     pub model_id: Option<i64>,
     /// For a set of a campaign's answers, the answer.
     pub answer_id: Option<i64>,
+    /// Record 48: for a campaign's answer, whether its rater marked the
+    /// stack unsure; for an outcome, whether any answer it settled on did.
+    /// Empty for a decision's label.
+    pub unsure: Option<bool>,
 }
 
-/// The columns of `labels.tsv`, in order.
-pub const COLUMNS: [&str; 12] = [
+/// The columns of `labels.tsv`, in order. `unsure` joined last (record
+/// 48); a set written before it has the other twelve, [`LEGACY_COLUMNS`].
+pub const COLUMNS: [&str; 13] = [
     "stack_id",
     "subject_id",
     "session_day",
@@ -99,7 +104,11 @@ pub const COLUMNS: [&str; 12] = [
     "campaign_id",
     "model_id",
     "answer_id",
+    "unsure",
 ];
+
+/// The columns of a `labels.tsv` written before `unsure` joined.
+pub const LEGACY_COLUMNS: usize = 12;
 
 fn cell(v: Option<String>) -> String {
     v.map(|s| s.replace(['\t', '\n', '\r'], " "))
@@ -147,6 +156,7 @@ pub fn tsv(labels: &[Label]) -> String {
             cell(l.campaign_id.map(|v| v.to_string())),
             cell(l.model_id.map(|v| v.to_string())),
             cell(l.answer_id.map(|v| v.to_string())),
+            cell(l.unsure.map(|v| v.to_string())),
         ];
         out.push_str(&line.join("\t"));
         out.push('\n');
@@ -342,6 +352,7 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
             campaign_id: campaign,
             model_id: s.model_id,
             answer_id: None,
+            unsure: None,
         });
     }
     Ok(out)
@@ -424,6 +435,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     campaign_id: Some(campaign),
                     model_id: a.model_id,
                     answer_id: Some(a.id),
+                    unsure: Some(a.unsure),
                 });
             }
         }
@@ -461,6 +473,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     session_day: it.session_day.clone(),
                     what: what.clone(),
                     campaign_id: Some(campaign),
+                    unsure: Some(settled_unsure(it, answers.iter())),
                     ..Label::default()
                 };
                 if let Some(decision) = it.decision_id {
@@ -536,6 +549,23 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
     Ok(out)
 }
 
+/// Whether any answer an item's outcome settled on marked the stack unsure
+/// (record 48).
+fn settled_unsure<'a>(
+    it: &crate::campaign::Item,
+    answers: impl Iterator<Item = &'a crate::campaign::Answer>,
+) -> bool {
+    let settled: BTreeSet<i64> = it.outcome["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .collect();
+    answers
+        .filter(|a| a.item_id == it.id && settled.contains(&a.id))
+        .any(|a| a.unsure)
+}
+
 /// An axes campaign's labels, one row per axis: every rater's answer on
 /// each axis, or what each resolved item came to on each, the decision it
 /// closed into where it closed into one.
@@ -560,7 +590,7 @@ fn axes_labels(
                 let Some(Ok(j)) = a
                     .value
                     .as_deref()
-                    .map(|v| campaign::joint_of(axes, constraints, v))
+                    .map(|v| campaign::answer_joint_of(axes, constraints, v))
                 else {
                     continue;
                 };
@@ -575,6 +605,7 @@ fn axes_labels(
                         campaign_id: Some(campaign),
                         model_id: a.model_id,
                         answer_id: Some(a.id),
+                        unsure: Some(a.unsure),
                         ..Label::default()
                     });
                 }
@@ -609,7 +640,7 @@ fn axes_labels(
                 }
                 let j = it.outcome["value"]
                     .as_str()
-                    .and_then(|v| campaign::joint_of(axes, constraints, v).ok())
+                    .and_then(|v| campaign::answer_joint_of(axes, constraints, v).ok())
                     .unwrap_or_default();
                 let settled: Vec<&campaign::Answer> = answers
                     .iter()
@@ -620,12 +651,14 @@ fn axes_labels(
                             .is_some_and(|l| l.iter().any(|x| x.as_i64() == Some(a.id)))
                     })
                     .collect();
+                let unsure = settled_unsure(it, answers.iter());
                 for axis in axes {
                     let base = Label {
                         stack_id: it.stack_id,
                         subject_id: it.subject_id,
                         what: axis.clone(),
                         campaign_id: Some(campaign),
+                        unsure: Some(unsure),
                         ..Label::default()
                     };
                     match decided.get(axis).and_then(Value::as_i64) {
@@ -952,7 +985,10 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
                 return refuse("has a labels.tsv that does not read".into());
             };
             let rows = keys_of_tsv(&text);
-            if text.lines().next() != Some(COLUMNS.join("\t").as_str())
+            let header = text.lines().next();
+            let known = header == Some(COLUMNS.join("\t").as_str())
+                || header == Some(COLUMNS[..LEGACY_COLUMNS].join("\t").as_str());
+            if !known
                 || rows.len() as i64 != set.rows
                 || rows
                     .iter()
@@ -2153,6 +2189,7 @@ pub fn imported_labels(store: &mut Store, axis: &str) -> Result<Vec<Label>, Erro
                 campaign_id: None,
                 model_id: None,
                 answer_id: None,
+                unsure: None,
             })
         })
         .collect::<Result<_, StoreError>>()

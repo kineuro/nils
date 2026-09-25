@@ -140,6 +140,11 @@ impl Question {
                         .collect::<Result<_, _>>()?,
                     _ => return Err(invalid("question.values: a list of words")),
                 };
+                if values.iter().any(|v| v == CANT_TELL) {
+                    return Err(invalid(format!(
+                        "question.values names {CANT_TELL}, the rater's can't tell on an axes question, never a value"
+                    )));
+                }
                 Question::Axis {
                     axis: axis.to_string(),
                     values,
@@ -265,6 +270,13 @@ impl Question {
             Question::Axis { axis, values } => {
                 let v =
                     value.ok_or_else(|| invalid(format!("the answer names a value of {axis}")))?;
+                // can't tell is an axes answer's word (record 48); on an axis
+                // question it would close into a decision that says it
+                if v.trim() == CANT_TELL {
+                    return Err(invalid(format!(
+                        "{CANT_TELL} is never a value of {axis}; an axes question takes it as an answer"
+                    )));
+                }
                 if !values.is_empty() && !values.iter().any(|x| x == v) {
                     return Err(invalid(format!(
                         "{v} is not a value of {axis} this campaign asks for: {}",
@@ -279,7 +291,7 @@ impl Question {
                         axes.join(", ")
                     ))
                 })?;
-                let joint = joint_of(axes, constraints, v)?;
+                let joint = answer_joint_of(axes, constraints, v)?;
                 legal(constraints, &joint).map_err(invalid)?;
             }
             Question::Pick { role, .. } => {
@@ -354,8 +366,41 @@ pub fn pick_stacks(v: &str) -> Result<Vec<i64>, Error> {
 
 /// A joint answer: each asked axis with its values, none for "the axis has
 /// no value here", one for a single-valued axis, a set for a multi-valued
-/// one, in identities.
+/// one, in identities. In a rater's answer an axis may hold [`CANT_TELL`]
+/// alone instead ([`answer_joint_of`]).
 pub type Joint = BTreeMap<String, Vec<String>>;
+
+/// The rater's "can't tell" on one axis of an axes answer (record 48, how
+/// the reference is read): the data give no clue, so the rater does not
+/// guess. It is an answer, distinct from an axis left out (refused) and
+/// from null (the axis has no value here), and distinct from a pack's own
+/// fallback value such as `Unknown`, which is the pipeline's. It is never a
+/// value of the pack: a question over a pack that names it is refused, the
+/// pack's constraints read such an axis as unnamed, and a close writes no
+/// decision on it. Two raters who both say it agree on the axis.
+pub const CANT_TELL: &str = "cant_tell";
+
+/// Whether an axis of a joint answer is the rater's can't tell.
+pub fn cant_tell(values: &[String]) -> bool {
+    values.len() == 1 && values[0] == CANT_TELL
+}
+
+/// The axes a joint answer says can't tell of, in order.
+pub fn cant_tell_axes(a: &Joint) -> Vec<String> {
+    a.iter()
+        .filter(|(_, v)| cant_tell(v))
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// A joint answer without its can't-tell axes: what the pack's constraints
+/// and a close read.
+pub fn told(a: &Joint) -> Joint {
+    a.iter()
+        .filter(|(_, v)| !cant_tell(v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
 
 /// The constraints an axes question carries are the shape
 /// `nils_pack::legal::constraints` writes: every asked axis's vocabulary,
@@ -370,6 +415,11 @@ fn check_constraints(axes: &[String], c: &Value) -> Result<(), Error> {
         if !c["values"][a].is_array() {
             return Err(invalid(format!(
                 "the constraints name no values of {a}, an axis the question asks"
+            )));
+        }
+        if words(&c["values"][a]).iter().any(|v| v == CANT_TELL) {
+            return Err(invalid(format!(
+                "{a} names {CANT_TELL} as a value, and {CANT_TELL} is the rater's can't tell, never a value"
             )));
         }
     }
@@ -392,8 +442,26 @@ fn words(v: &Value) -> Vec<String> {
 
 /// An axes answer, `{axis: value | [values] | null}`, read against the
 /// question: every asked axis and no other, each value one the question
-/// asks for, a single-valued axis one value at most.
+/// asks for, a single-valued axis one value at most. Values only: a
+/// suggestion, System 1's candidates and the pack's own reads never say
+/// [`CANT_TELL`], and are refused where they do.
 pub fn joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Joint, Error> {
+    read_joint(axes, constraints, text, false)
+}
+
+/// A rater's axes answer: as [`joint_of`], and any axis may be
+/// [`CANT_TELL`], alone. Every asked axis is still named, so an axis is
+/// never skipped by accident.
+pub fn answer_joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Joint, Error> {
+    read_joint(axes, constraints, text, true)
+}
+
+fn read_joint(
+    axes: &[String],
+    constraints: &Value,
+    text: &str,
+    may_cant_tell: bool,
+) -> Result<Joint, Error> {
     let v: Value = serde_json::from_str(text)
         .map_err(|_| invalid("an axes answer is an object, {axis: value | [values]}"))?;
     let given = v
@@ -431,6 +499,20 @@ pub fn joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Join
         };
         values.sort();
         values.dedup();
+        if values.iter().any(|v| v == CANT_TELL) {
+            if !may_cant_tell {
+                return Err(invalid(format!(
+                    "{CANT_TELL} is a rater's answer on {axis}, never a value of it"
+                )));
+            }
+            if values.len() > 1 {
+                return Err(invalid(format!(
+                    "{axis}: {CANT_TELL} stands alone, never beside a value"
+                )));
+            }
+            out.insert(axis.clone(), values);
+            continue;
+        }
         if values.len() > 1 && !multi.contains(axis) {
             return Err(invalid(format!(
                 "{axis} holds one value, and the answer names {}",
@@ -456,7 +538,9 @@ pub fn canonical_joint(constraints: &Value, a: &Joint) -> String {
     let multi = words(&constraints["multi"]);
     let mut m = serde_json::Map::new();
     for (axis, values) in a {
-        let v = if multi.contains(axis) {
+        let v = if cant_tell(values) {
+            json!(CANT_TELL)
+        } else if multi.contains(axis) {
             json!(values)
         } else {
             values.first().map_or(Value::Null, |v| json!(v))
@@ -509,6 +593,9 @@ fn holds(e: &Value, a: &Joint) -> Option<bool> {
 /// exclusion group, and what an implication whose condition holds sets.
 /// The words say which rule or group forbids it.
 pub fn legal(constraints: &Value, a: &Joint) -> Result<(), String> {
+    // a can't-tell axis is read as one the answer does not name: no group
+    // holds it and no implication reads or sets it
+    let a = &told(a);
     for (axis, groups) in constraints["groups"].as_object().into_iter().flatten() {
         let Some(held) = a.get(axis) else { continue };
         for (group, members) in groups.as_object().into_iter().flatten() {
@@ -871,13 +958,27 @@ impl Campaign {
         self.listed("adjudicators")
     }
 
+    /// The question as served: as stored, and what an answer to it may say
+    /// beside a value (record 48): `unsure` on any answer, and for an axes
+    /// question `cant_tell`, the word that says it on an axis.
+    pub fn served_question(&self) -> Value {
+        let mut q = self.question.clone();
+        if q.is_object() {
+            q["unsure"] = json!(true);
+            if q["kind"] == "axes" {
+                q["cant_tell"] = json!(CANT_TELL);
+            }
+        }
+        q
+    }
+
     pub fn as_json(&self) -> Value {
         json!({
             "id": self.id,
             "name": self.name,
             "owner": self.owner,
             "status": self.status,
-            "question": self.question,
+            "question": self.served_question(),
             "grain": self.grain,
             "source": self.source,
             "handle_id": self.handle_id,
@@ -2651,6 +2752,10 @@ pub struct Given<'a> {
     pub form: Option<&'a Value>,
     pub derivative_id: Option<i64>,
     pub why: Option<&'a str>,
+    /// Record 48: the rater answered and wants a second look at the stack.
+    /// Kept and exported with the answer; it never bears on whether the
+    /// answer fits.
+    pub unsure: bool,
 }
 
 /// An answer as kept.
@@ -2679,6 +2784,8 @@ pub struct Answer {
     pub suggested: Option<String>,
     pub changed: Option<bool>,
     pub via: Option<String>,
+    /// Record 48: the rater marked the stack unsure.
+    pub unsure: bool,
 }
 
 impl Answer {
@@ -2690,12 +2797,12 @@ impl Answer {
             "form": self.form, "derivative_id": self.derivative_id, "why": self.why,
             "actor_detail": self.actor_detail, "answered_at": self.answered_at,
             "model_id": self.model_id, "seconds": self.seconds, "suggested": self.suggested,
-            "changed": self.changed, "via": self.via,
+            "changed": self.changed, "via": self.via, "unsure": self.unsure,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 19] = [
+const ANSWER_COLUMNS: [&str; 20] = [
     "id",
     "campaign_id",
     "item_id",
@@ -2715,6 +2822,7 @@ const ANSWER_COLUMNS: [&str; 19] = [
     "suggested",
     "changed",
     "via",
+    "unsure",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -2739,6 +2847,7 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
         suggested: r.opt_text(16)?.map(str::to_string),
         changed: r.opt_int(17)?.map(|c| c != 0),
         via: r.opt_text(18)?.map(str::to_string),
+        unsure: r.opt_int(19)?.is_some_and(|u| u != 0),
     })
 }
 
@@ -2843,7 +2952,7 @@ fn kept_value(question: &Question, v: &str) -> Result<String, Error> {
     Ok(match question {
         Question::Pick { .. } => join_ids(&pick_stacks(v)?),
         Question::Axes { axes, constraints } => {
-            canonical_joint(constraints, &joint_of(axes, constraints, v)?)
+            canonical_joint(constraints, &answer_joint_of(axes, constraints, v)?)
         }
         _ => v.trim().to_string(),
     })
@@ -2948,7 +3057,8 @@ pub fn answer_with(
             let same = held.assignment_id == a.id
                 && held.value == stored_value
                 && held.form.as_ref() == g.form
-                && held.derivative_id == g.derivative_id;
+                && held.derivative_id == g.derivative_id
+                && held.unsure == g.unsure;
             if !same {
                 return Err(refused(format!(
                     "{} answered item {} in round {} already, as answer {}",
@@ -3032,6 +3142,7 @@ pub fn answer_with(
                 "derivative": g.derivative_id, "author_kind": g.author_kind,
                 "item_state": answered.state, "adjudication": answered.adjudication,
                 "via": if t.batch { "batch" } else { "claim" }, "changed": changed,
+                "unsure": g.unsure,
             })),
         },
     )?;
@@ -3104,6 +3215,7 @@ fn write_answer(
                     "suggested",
                     "changed",
                     "via",
+                    "unsure",
                 ],
             )
             .returning(&["id"]),
@@ -3132,6 +3244,7 @@ fn write_answer(
                     .map_or(Param::Null, Param::from),
                 w.changed.map_or(Param::Null, |c| Param::Int(i64::from(c))),
                 Param::from(if w.batch { "batch" } else { "claim" }),
+                Param::Int(i64::from(w.given.unsure)),
             ]],
         )?
         .first()
@@ -3748,14 +3861,25 @@ pub fn agreement(store: &mut Store, campaign: i64) -> Result<Value, Error> {
     let all = answers(store, campaign)?;
     let n = c.raters_per_item as usize;
     let mut out = measure(&all, n, |a| question.comparable(a));
-    // record 45: an axes campaign is measured whole and per axis
+    let raters: Vec<&Answer> = all.iter().filter(|a| a.role == "rater").collect();
+    // record 48: the stacks raters marked unsure are counted, to be read
+    // twice and reported apart
+    out["unsure"] = json!(raters.iter().filter(|a| a.unsure).count());
+    // record 45: an axes campaign is measured whole and per axis; record
+    // 48: with the count of can't-tell answers on each, a finding of its own
     if let Question::Axes { axes, .. } = &question {
+        let said = json!(CANT_TELL).to_string();
         let mut per = serde_json::Map::new();
         for axis in axes {
-            per.insert(
-                axis.clone(),
-                measure(&all, n, |a| axis_of_answer(a.value.as_deref(), axis)),
+            let mut m = measure(&all, n, |a| axis_of_answer(a.value.as_deref(), axis));
+            m["cant_tell"] = json!(
+                raters
+                    .iter()
+                    .filter(|a| axis_of_answer(a.value.as_deref(), axis).as_deref()
+                        == Some(said.as_str()))
+                    .count()
             );
+            per.insert(axis.clone(), m);
         }
         out["per_axis"] = Value::Object(per);
     }
@@ -4168,7 +4292,7 @@ fn close_items(
                 };
                 let joint = it.outcome["value"]
                     .as_str()
-                    .map(|v| joint_of(axes, constraints, v));
+                    .map(|v| answer_joint_of(axes, constraints, v));
                 let Some(Ok(joint)) = joint else {
                     out.refused
                         .push((it.id, "the item came to no joint answer".into()));
@@ -4572,7 +4696,13 @@ fn close_axes(
     let mut decided: Vec<(i64, bool)> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut by_axis = serde_json::Map::new();
+    // record 48: an axis the item came to can't tell on is left out, with
+    // no decision; its adopted question stays open
+    let unknown = cant_tell_axes(joint);
     for axis in axes {
+        if unknown.contains(axis) {
+            continue;
+        }
         if decided_meanwhile.contains(axis) {
             skipped.push(axis.clone());
             continue;
@@ -4635,13 +4765,16 @@ fn close_axes(
         own.id,
         if staged { "staged" } else { "accepted" },
         by.who,
-        &json!({"campaign": c.id, "decisions": by_axis, "value": joint}),
+        &json!({"campaign": c.id, "decisions": by_axis, "value": told(joint), "cant_tell": unknown}),
         first,
         now,
     )?;
     mark_review_item(store, own.id, "resolved")?;
     let mut outcome = it.outcome.clone();
     outcome["decisions"] = Value::Object(by_axis);
+    if !unknown.is_empty() {
+        outcome["cant_tell"] = json!(unknown);
+    }
     if !skipped.is_empty() {
         outcome["skipped"] = json!(skipped);
     }
@@ -4819,10 +4952,19 @@ mod tests {
             form: None,
             derivative_id: None,
             why: None,
+            unsure: false,
         };
         q.check(&given(Some("brain"))).unwrap();
         assert!(q.check(&given(Some("chest"))).is_err());
         assert!(q.check(&given(None)).is_err());
+        // record 48: can't tell is an axes answer's word, never an axis value
+        let open = Question::parse(&json!({"kind": "axis", "axis": "body_part"})).unwrap();
+        open.check(&given(Some("brain"))).unwrap();
+        assert!(open.check(&given(Some("cant_tell"))).is_err());
+        assert!(
+            Question::parse(&json!({"kind": "axis", "axis": "x", "values": ["a", "cant_tell"]}))
+                .is_err()
+        );
         let f = Question::parse(&json!({"kind": "form", "schema": {
             "properties": {"quality": {"enum": ["good", "poor"]}, "note": {"type": "string"}},
             "required": ["quality"]
