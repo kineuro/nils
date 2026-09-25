@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 65;
+pub const SCHEMA_VERSION: i64 = 66;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +314,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 65,
         apply: a_run_s_numbers_are_measures_and_a_starter_says_so,
     },
+    Migration {
+        version: 66,
+        apply: an_answer_may_be_unsure,
+    },
 ];
 
 /// Record 49 A1: pipeline runs have a lane of their own, their units run
@@ -344,6 +348,16 @@ fn a_run_s_numbers_are_measures_and_a_starter_says_so(
     }
     add_columns(store, "pipeline", &["origin"])?;
     add_tables(store, kind, &["measure"])
+}
+
+/// Record 48, how the reference is read: an answer says whether the rater
+/// marked the stack unsure. A registry from before gains the column empty,
+/// which reads as not unsure, since no answer before could say it.
+fn an_answer_may_be_unsure(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "campaign_answer", &["unsure"])
 }
 
 /// Record 48: an answer says how long it took, what the engine suggested

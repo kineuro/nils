@@ -1577,6 +1577,149 @@ fn a_lease_is_renewed_rating_is_blind_and_an_axes_answer_is_an_object() {
     assert!(all["answers"][0]["value"].is_object(), "{all}");
 }
 
+/// Record 48, how the reference is read, through the door: an axes
+/// question as served says the word for can't tell and that an answer may
+/// be marked unsure; every axis is still answered, can't tell being one
+/// answer; two raters who say it agree; the close writes no decision on
+/// that axis; the answers and their export carry the word and the mark.
+#[test]
+fn a_rater_answers_can_t_tell_and_unsure_at_the_door() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "reference",
+            "question": {"kind": "axes", "axes": ["base", "technique"]},
+            "source": {"selection": "every-stack@1"},
+            "closes_into": "decision",
+            "raters_per_item": 2,
+            "raters": ["anna@lab", "bo@lab"],
+            "lease_seconds": 600,
+        })),
+        CURATOR,
+    );
+    let id = made["id"].as_i64().unwrap().to_string();
+    let shown = server.ok("GET", &format!("/api/campaigns/{id}"), None, ANNA);
+    assert_eq!(shown["question"]["cant_tell"], "cant_tell", "{shown}");
+    assert_eq!(shown["question"]["unsure"], true, "{shown}");
+
+    let claimed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/claim"),
+        Some(json!({})),
+        ANNA,
+    );
+    let a = claimed["assignment"]["id"].as_i64().unwrap();
+    let door = format!("/api/campaigns/{id}/assignments/{a}/answer");
+    for (body, says) in [
+        (
+            json!({"value": {"base": "cant_tell"}}),
+            "technique is missing",
+        ),
+        (
+            json!({"value": {"base": "cant_tell", "technique": "MPRAGE"}, "unsure": "yes"}),
+            "unsure",
+        ),
+        (
+            json!({"value": {"base": ["cant_tell", "T1w"], "technique": "MPRAGE"}}),
+            "stands alone",
+        ),
+    ] {
+        let (status, doc) = server.call("POST", &door, Some(body), ANNA);
+        assert_eq!(status, 400, "{doc}");
+        assert!(doc.to_string().contains(says), "{says}: {doc}");
+    }
+    let joint = json!({"base": "cant_tell", "technique": "MPRAGE"});
+    server.ok(
+        "POST",
+        &door,
+        Some(json!({"value": joint, "unsure": true})),
+        ANNA,
+    );
+    let (claim_b, done) = rate(&server, &id, BO, json!({"value": joint}));
+    assert_eq!(claim_b["item"]["id"], claimed["item"]["id"]);
+    assert_eq!(done["state"], "agreed", "{done}: two can't tells agree");
+
+    let all = server.ok(
+        "GET",
+        &format!("/api/campaigns/{id}/answers"),
+        None,
+        CURATOR,
+    );
+    let list = all["answers"].as_array().unwrap();
+    assert_eq!(list.len(), 2, "{all}");
+    assert_eq!(list[0]["value"], joint, "{all}");
+    assert_eq!(list[0]["unsure"], true, "{all}");
+    assert_eq!(list[1]["unsure"], false, "{all}");
+
+    let out = TempDir::new("cant-tell-export");
+    server.ok(
+        "POST",
+        "/api/places",
+        Some(json!({"name": "reference-out", "role": "export", "path": out.path().to_str().unwrap()})),
+        CURATOR,
+    );
+    let closed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/close"),
+        Some(json!({})),
+        CURATOR,
+    );
+    assert_eq!(closed["resolved"], 1, "{closed}");
+    assert_eq!(
+        closed["decisions"].as_array().unwrap().len(),
+        1,
+        "{closed}: technique alone"
+    );
+    assert_eq!(
+        closed["agreement"]["per_axis"]["base"]["cant_tell"], 2,
+        "{closed}"
+    );
+    assert_eq!(closed["agreement"]["unsure"], 1, "{closed}");
+    let why = server.ok(
+        "GET",
+        &format!("/api/stacks/{}/why", claimed["item"]["stack_id"]),
+        None,
+        CURATOR,
+    );
+    assert!(!why.to_string().contains("cant_tell"), "{why}");
+
+    let set = server.ok(
+        "POST",
+        &format!("/api/campaigns/{id}/export"),
+        Some(json!({"of": "answers", "name": "reference-answers"})),
+        CURATOR,
+    );
+    let seen = server.ok(
+        "GET",
+        &format!("/api/label-sets/{}", set["id"]),
+        None,
+        CURATOR,
+    );
+    let tsv = seen["files"]["labels.tsv"].as_str().unwrap();
+    assert!(tsv.lines().next().unwrap().ends_with("\tunsure"), "{tsv}");
+    let base: Vec<&str> = tsv.lines().filter(|l| l.contains("\tbase\t")).collect();
+    assert_eq!(base.len(), 2, "{tsv}");
+    assert!(base.iter().all(|l| l.contains("\tcant_tell\t")), "{tsv}");
+    assert_eq!(
+        tsv.lines().filter(|l| l.ends_with("\ttrue")).count(),
+        2,
+        "{tsv}: anna's answer, a row per axis"
+    );
+}
+
 /// The command line as a principal with an actor in `NILS_ACTOR`, as a
 /// worker runs a verb; answers the output whatever the exit.
 fn cli_as(home: &TempDir, who: &str, actor: Option<&str>, args: &[&str]) -> std::process::Output {

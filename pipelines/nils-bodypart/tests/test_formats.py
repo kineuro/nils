@@ -144,10 +144,11 @@ def write_set(d, rows, **prov):
 
 
 def test_a_label_set_is_held_to_its_digest_and_its_seal(tmp_path):
-    write_set(tmp_path / "ok", [(1, "brain"), (2, "spine"), (3, "brain"), (3, "spine")])
+    write_set(tmp_path / "ok", [(1, "brain"), (2, "spine"), (3, "brain"), (3, "spine"), (4, "cant_tell"), (5, "cant_tell"), (5, "brain")])
     ls = labels.load(tmp_path / "ok")
     got, conflicted = ls.stack_labels("body_part")
-    assert got == {1: "brain", 2: "spine"} and conflicted == 1
+    # a rater's can't tell is never a label: stack 4 has none, stack 5 its value
+    assert got == {1: "brain", 2: "spine", 5: "brain"} and conflicted == 1
     assert ls.digest.startswith("sha256:") and ls.pack_version == "mri@0.4.0"
     write_set(tmp_path / "tampered", [(1, "brain")], digest={"sha256": "0" * 64})
     with pytest.raises(labels.LabelSetError):

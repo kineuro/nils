@@ -2130,6 +2130,9 @@ fn build_registry() -> Vec<Table> {
                 col("suggested", Type::Text),
                 col("changed", Type::Int),
                 col("via", Type::Text),
+                // Record 48: 1 where the rater marked the stack unsure (a
+                // second look wanted); it never bears on the answer's fit.
+                col("unsure", Type::Int),
             ],
         )
         // one answer per item, rater and round: a repeat is the same answer
