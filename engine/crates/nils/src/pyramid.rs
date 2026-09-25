@@ -21,6 +21,13 @@
 //! The planes are read from native pixel data (little endian, deflated or
 //! big endian) or decoded from JPEG, JPEG-LS, JPEG 2000 and RLE, and the
 //! manifest says when a plane came from a lossy source.
+//!
+//! Every frame of a multi-frame file is a plane. An enhanced object says
+//! each frame's position, orientation, pixel spacing and rescale in its
+//! functional groups; where the digest split a file's frames between stacks
+//! (`instance_frame`), a stack's pyramid takes the frames that are its own.
+//! A multi-frame file whose frames do not say where they are is stacked in
+//! frame order, and the manifest's `order` says so.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -188,6 +195,20 @@ pub struct Manifest {
     /// The transfer syntaxes the stack's files were read in, each once.
     #[serde(default)]
     pub source_syntaxes: Vec<String>,
+    /// How the planes were put in order: `position`, along the normal by
+    /// where each plane says it is (a frame of an enhanced object by its
+    /// functional groups); `instance`, by instance number, where a file
+    /// did not say; `frames`, the same with a multi-frame file's frames in
+    /// the file's order, where a frame did not say where it is (a classic
+    /// multi-frame file, a cine), and `spacing[0]` is then the file's
+    /// Spacing Between Slices or Slice Thickness, not measured. None in a
+    /// manifest from before.
+    #[serde(default)]
+    pub order: Option<String>,
+    /// How many of the stack's files held more than one frame, each frame
+    /// a plane; zero in a manifest from before.
+    #[serde(default)]
+    pub multiframe_files: u32,
 }
 
 fn plane_axial() -> String {
@@ -234,6 +255,10 @@ pub struct Volume {
     pub lossy: bool,
     /// The transfer syntaxes of the files, sorted, each once.
     pub syntaxes: Vec<String>,
+    /// How the planes were put in order ([`Manifest::order`]).
+    pub order: &'static str,
+    /// How many of the files held more than one frame.
+    pub multiframe_files: u32,
 }
 
 /// A stack's place in the patient, from its files.
@@ -256,38 +281,111 @@ pub fn dir(working: &Path, stack: i64) -> PathBuf {
     working.join("pyramids").join(stack.to_string())
 }
 
-/// Read a stack's files from the registry: the instances of the stack and
-/// their source files, ordered by position along the stack's normal (the
-/// third coordinate of Image Position, then the instance number).
-pub fn read_volume(store: &mut Store, stack: i64) -> Result<Volume, String> {
-    let sql = format!(
-        "SELECT so.root, f.path FROM {} i JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id WHERE i.stack_id = {}",
-        store.qualified("instance"),
-        store.qualified("source_file"),
-        store.qualified("source"),
-        store.dialect().param(1, Type::Int)
-    );
-    let rows = store
-        .query(&sql, &[Param::Int(stack)])
-        .map_err(|e| e.to_string())?;
-    if rows.is_empty() {
-        return Err(format!("stack {stack} has no files the registry can read"));
-    }
-    let mut files = Vec::with_capacity(rows.len());
-    for r in &rows {
-        let root = r.text(0).map_err(|e| e.to_string())?;
-        let path = r.text(1).map_err(|e| e.to_string())?;
-        files.push(Path::new(root).join(path));
-    }
-    read_files(&files)
+/// One file of a stack, and which of its frames are the stack's planes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackFile {
+    pub path: PathBuf,
+    /// The frames that are the stack's, counting from one, when the digest
+    /// split the file's frames between stacks (record 37 S8, the
+    /// `instance_frame` rows); none is every frame of the file.
+    pub frames: Option<Vec<u32>>,
 }
 
-/// The tags read from a file's header.
+impl StackFile {
+    pub fn whole(path: impl Into<PathBuf>) -> StackFile {
+        StackFile {
+            path: path.into(),
+            frames: None,
+        }
+    }
+}
+
+/// The frames a digest wrote down, `1-4,9,12-20`, as frame numbers.
+pub fn frame_list(list: &str) -> Result<Vec<u32>, String> {
+    let bad = || format!("the frame list {list:?} is not ranges of frame numbers");
+    let mut out = Vec::new();
+    for part in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        let (a, b): (u32, u32) = (
+            a.trim().parse().map_err(|_| bad())?,
+            b.trim().parse().map_err(|_| bad())?,
+        );
+        if a == 0 || b < a {
+            return Err(bad());
+        }
+        out.extend(a..=b);
+    }
+    if out.is_empty() {
+        return Err(bad());
+    }
+    Ok(out)
+}
+
+/// Read a stack's files from the registry and make them one volume. A
+/// file is the stack's whole when its instance is filed under the stack
+/// and the digest wrote no frame rows for it; a multi-frame file whose
+/// frames the digest split between stacks gives the frames its
+/// `instance_frame` row lists for this stack, whichever stack its instance
+/// row names. The planes are ordered along the stack's normal.
+pub fn read_volume(store: &mut Store, stack: i64) -> Result<Volume, String> {
+    let p = store.dialect().param(1, Type::Int);
+    let whole = format!(
+        "SELECT so.root, f.path FROM {i} i JOIN {f} f ON f.id = i.source_file_id \
+         JOIN {so} so ON so.id = f.source_id WHERE i.stack_id = {p} \
+         AND NOT EXISTS (SELECT 1 FROM {fr} fr WHERE fr.instance_id = i.id)",
+        i = store.qualified("instance"),
+        f = store.qualified("source_file"),
+        so = store.qualified("source"),
+        fr = store.qualified("instance_frame"),
+    );
+    let framed = format!(
+        "SELECT so.root, f.path, fr.frames FROM {fr} fr JOIN {i} i ON i.id = fr.instance_id \
+         JOIN {f} f ON f.id = i.source_file_id JOIN {so} so ON so.id = f.source_id \
+         WHERE fr.stack_id = {p}",
+        i = store.qualified("instance"),
+        f = store.qualified("source_file"),
+        so = store.qualified("source"),
+        fr = store.qualified("instance_frame"),
+    );
+    let mut files = Vec::new();
+    for r in store
+        .query(&whole, &[Param::Int(stack)])
+        .map_err(|e| e.to_string())?
+    {
+        let root = r.text(0).map_err(|e| e.to_string())?;
+        let path = r.text(1).map_err(|e| e.to_string())?;
+        files.push(StackFile::whole(Path::new(root).join(path)));
+    }
+    for r in store
+        .query(&framed, &[Param::Int(stack)])
+        .map_err(|e| e.to_string())?
+    {
+        let root = r.text(0).map_err(|e| e.to_string())?;
+        let path = r.text(1).map_err(|e| e.to_string())?;
+        let frames = frame_list(r.text(2).map_err(|e| e.to_string())?)?;
+        files.push(StackFile {
+            path: Path::new(root).join(path),
+            frames: Some(frames),
+        });
+    }
+    if files.is_empty() {
+        return Err(format!("stack {stack} has no files the registry can read"));
+    }
+    read_stack(&files)
+}
+
+/// One plane: a single-frame file, or one frame of a multi-frame file.
 struct Slice {
     z: f64,
     position: Option<[f64; 3]>,
     orientation: Option<[f64; 6]>,
     instance: i64,
+    /// The file's place in the stack's list, and the frame's in the file,
+    /// from zero: the order when nothing says where a plane is.
+    file: usize,
+    frame: u32,
+    /// The plane is a frame of a file that holds more than one.
+    multiframe: bool,
     rows: u32,
     cols: u32,
     signed: bool,
@@ -323,6 +421,11 @@ fn text(obj: &InMemDicomObject, tag: dicom_core::Tag) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// The first item of a sequence.
+fn first_item(obj: &InMemDicomObject, tag: dicom_core::Tag) -> Option<&InMemDicomObject> {
+    obj.element(tag).ok()?.items()?.first()
+}
+
 /// The transfer syntaxes whose pixel data the parser hands over as it is:
 /// little endian, explicit or implicit, deflated (the parser inflates the
 /// data set) and explicit big endian (the parser reads the words in their
@@ -354,6 +457,9 @@ const LOSSY: [&str; 8] = [
 /// JPEG-LS, lossless and near-lossless, which the pyramid decodes itself.
 const JPEG_LS: [&str; 2] = ["1.2.840.10008.1.2.4.80", "1.2.840.10008.1.2.4.81"];
 
+/// RLE Lossless, whose every frame is one fragment by the standard.
+const RLE: &str = "1.2.840.10008.1.2.5";
+
 fn lossy_syntax(ts: &str) -> bool {
     // the DCT processes .52 to .65 are retired lossy JPEG, the .100s video
     LOSSY.contains(&ts)
@@ -365,29 +471,116 @@ fn lossy_syntax(ts: &str) -> bool {
             })
 }
 
-/// The first frame of an encapsulated object's pixel data, decoded by the
-/// registry's codec for `ts` into little endian samples of the object's
-/// Bits Allocated. The words say which syntax and never the file.
-fn decode_first_frame(obj: InMemDicomObject, ts: &str) -> Result<Vec<u8>, String> {
-    let jpeg_ls = JPEG_LS.contains(&ts);
+/// The words for pixel data a codec refused: the syntax, never the file.
+fn undecodable(ts: &str, e: &dyn std::fmt::Display) -> String {
+    format!("pixel data in {ts} did not decode: {e}")
+}
+
+/// Refuse a syntax the pyramid has no decoder for, before its pixel data
+/// is looked at.
+fn decoder_for(ts: &str) -> Result<(), String> {
     let codec = TransferSyntaxRegistry
         .get(ts)
         .and_then(|entry| entry.pixel_data_reader());
-    if codec.is_none() && !jpeg_ls {
+    if codec.is_none() && !JPEG_LS.contains(&ts) {
         return Err(format!(
             "transfer syntax {ts} is one the pyramid has no decoder for"
         ));
     }
-    let failed = |e: &dyn std::fmt::Display| format!("pixel data in {ts} did not decode: {e}");
-    // the codecs read the syntax from a file's meta group; a stand-in for
-    // the SOP UIDs is replaced by the object's own where it has them
+    Ok(())
+}
+
+/// Which fragments of an encapsulated object are which frame: one each when
+/// there are as many as frames, else by the Basic Offset Table, else by
+/// where a codestream starts (a JPEG or JPEG-LS start of image, a JPEG
+/// 2000 start of codestream). A frame is a range of fragment indices.
+fn frame_fragments(
+    fragments: &[Vec<u8>],
+    table: &[u32],
+    frames: usize,
+    ts: &str,
+) -> Result<Vec<std::ops::Range<usize>>, String> {
+    if frames <= 1 {
+        return Ok(std::iter::once(0..fragments.len()).collect());
+    }
+    if fragments.len() == frames {
+        return Ok((0..frames).map(|i| i..i + 1).collect());
+    }
+    let apart = || {
+        undecodable(
+            ts,
+            &format!(
+                "{} fragments could not be told apart into {frames} frames",
+                fragments.len()
+            ),
+        )
+    };
+    let starts: Vec<usize> = if table.len() == frames {
+        // an offset is from the first fragment's item tag, eight bytes of
+        // item header before every fragment
+        let mut at = Vec::with_capacity(fragments.len());
+        let mut offset = 0u64;
+        for f in fragments {
+            at.push(offset);
+            offset += f.len() as u64 + 8;
+        }
+        table
+            .iter()
+            .map(|&o| at.iter().position(|&a| a == u64::from(o)).ok_or_else(apart))
+            .collect::<Result<_, _>>()?
+    } else if ts == RLE {
+        return Err(apart());
+    } else {
+        let marker: &[u8] = if ts.starts_with("1.2.840.10008.1.2.4.9")
+            || ts.starts_with("1.2.840.10008.1.2.4.20")
+        {
+            &[0xFF, 0x4F]
+        } else {
+            &[0xFF, 0xD8]
+        };
+        fragments
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.starts_with(marker))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    if starts.len() != frames || starts.first() != Some(&0) || !starts.is_sorted() {
+        return Err(apart());
+    }
+    Ok((0..frames)
+        .map(|i| starts[i]..starts.get(i + 1).copied().unwrap_or(fragments.len()))
+        .collect())
+}
+
+/// One frame's codestream, decoded by the registry's codec for `ts` (or
+/// the JPEG-LS decoder) into little endian samples of the object's Bits
+/// Allocated. `header` holds the image pixel attributes a codec reads; the
+/// frame is handed over as a single-frame object of its own, so a codec
+/// never copies the file's other frames. The words say which syntax and
+/// never the file.
+fn decode_frame(header: &InMemDicomObject, ts: &str, stream: Vec<u8>) -> Result<Vec<u8>, String> {
+    let failed = |e: &dyn std::fmt::Display| undecodable(ts, e);
+    let mut obj = header.clone();
+    obj.put(dicom_core::DataElement::new(
+        tags::PIXEL_DATA,
+        dicom_core::VR::OB,
+        dicom_core::DicomValue::from(dicom_core::value::PixelFragmentSequence::new_fragments(
+            vec![stream],
+        )),
+    ));
+    // the codecs read the syntax from a file's meta group; the SOP UIDs
+    // are stand-ins
     let meta = FileMetaTableBuilder::new()
         .transfer_syntax(ts)
         .media_storage_sop_class_uid("1.2")
         .media_storage_sop_instance_uid("1.2");
     let file = obj.with_meta(meta).map_err(|e| failed(&e))?;
     let mut out = Vec::new();
-    match codec {
+    match TransferSyntaxRegistry
+        .get(ts)
+        .and_then(|entry| entry.pixel_data_reader())
+    {
         Some(codec) => codec
             .decode_frame(&file, 0, &mut out)
             .map_err(|e| failed(&e))?,
@@ -397,7 +590,7 @@ fn decode_first_frame(obj: InMemDicomObject, ts: &str) -> Result<Vec<u8>, String
             let bits = int(&file, tags::BITS_ALLOCATED).unwrap_or(16);
             let frame = file
                 .frame_pixel_data(0)
-                .ok_or_else(|| failed(&"no first frame"))?;
+                .ok_or_else(|| failed(&"no frame"))?;
             let (samples, _, _) =
                 jpegls::decode(&jpeg_ls_trimmed(&frame), cols, rows).map_err(|e| failed(&e))?;
             out = if bits == 8 {
@@ -441,13 +634,38 @@ fn extend_sign(pixels: &mut [u8], stored: u16) {
     }
 }
 
-fn read_slice(path: &Path) -> Result<Slice, String> {
+/// The image pixel attributes a codec reads, copied from the file.
+const PIXEL_HEADER: [dicom_core::Tag; 9] = [
+    tags::ROWS,
+    tags::COLUMNS,
+    tags::SAMPLES_PER_PIXEL,
+    tags::PHOTOMETRIC_INTERPRETATION,
+    tags::PLANAR_CONFIGURATION,
+    tags::BITS_ALLOCATED,
+    tags::BITS_STORED,
+    tags::HIGH_BIT,
+    tags::PIXEL_REPRESENTATION,
+];
+
+/// The planes of one file: every frame, or the frames `wanted` names
+/// (counting from one), each with its own place in the patient. An
+/// enhanced object says a frame's position, orientation, pixel spacing and
+/// rescale in its Per-frame Functional Groups, with the Shared Functional
+/// Groups as the fallback, and a classic file at the top level. A frame of
+/// a multi-frame file that says no position of its own has none: the
+/// file's one position is its first frame's at best. `threads` decode
+/// compressed frames at once.
+fn read_frames(
+    path: &Path,
+    file_index: usize,
+    wanted: Option<&[u32]>,
+    threads: usize,
+) -> Result<Vec<Slice>, String> {
     // record 48: a file without the Part 10 preamble or meta group is read
     // as the digest reads it, a bare data set, so one such file does not
     // fail its stack's pyramid
-    let (file, ts) =
-        nils_dicom::read_whole(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let obj: &InMemDicomObject = &file;
+    let (obj, ts) = nils_dicom::read_whole(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let obj = &obj;
     let rows = int(obj, tags::ROWS).ok_or("no Rows")? as u32;
     let cols = int(obj, tags::COLUMNS).ok_or("no Columns")? as u32;
     let bits = int(obj, tags::BITS_ALLOCATED).unwrap_or(16) as u16;
@@ -464,84 +682,228 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
     let stored = int(obj, tags::BITS_STORED).unwrap_or(bits as i64) as u16;
     let lossy =
         lossy_syntax(&ts) || text(obj, tags::LOSSY_IMAGE_COMPRESSION).is_some_and(|s| s == "01");
-    if obj.element(tags::PIXEL_DATA).is_err() {
+    let Ok(pixel_data) = obj.element(tags::PIXEL_DATA) else {
         return Err("no Pixel Data".to_string());
-    }
-    let position = f64s(obj, tags::IMAGE_POSITION_PATIENT)
-        .filter(|v| v.len() >= 3)
-        .map(|v| [v[0], v[1], v[2]]);
-    let orientation = f64s(obj, tags::IMAGE_ORIENTATION_PATIENT)
-        .filter(|v| v.len() >= 6)
-        .map(|v| [v[0], v[1], v[2], v[3], v[4], v[5]]);
-    let instance = int(obj, tags::INSTANCE_NUMBER).unwrap_or(0);
-    let spacing = f64s(obj, tags::PIXEL_SPACING)
-        .map(|v| [v[0], *v.get(1).unwrap_or(&v[0])])
-        .unwrap_or([1.0, 1.0]);
-    let thickness = f64s(obj, tags::SPACING_BETWEEN_SLICES)
-        .or_else(|| f64s(obj, tags::SLICE_THICKNESS))
-        .map(|v| v[0])
-        .unwrap_or(1.0);
-    let burned_in = text(obj, tags::BURNED_IN_ANNOTATION).map(|s| s.eq_ignore_ascii_case("YES"));
-    let slope = f64s(obj, tags::RESCALE_SLOPE)
-        .and_then(|v| v.first().copied())
-        .filter(|s| s.is_finite() && *s != 0.0)
-        .unwrap_or(1.0);
-    let rescale_intercept = f64s(obj, tags::RESCALE_INTERCEPT)
-        .and_then(|v| v.first().copied())
-        .filter(|b| b.is_finite())
-        .unwrap_or(0.0);
-    let pixels = if NATIVE.contains(&ts.as_str()) {
-        obj.element(tags::PIXEL_DATA)
-            .map_err(|_| "no Pixel Data".to_string())?
-            .to_bytes()
-            .map_err(|e| e.to_string())?
-            .into_owned()
-    } else {
-        let mut px = decode_first_frame(file, &ts)?;
-        if signed && bits == 16 {
-            extend_sign(&mut px, stored);
-        }
-        px
     };
+    let count = int(obj, tags::NUMBER_OF_FRAMES)
+        .filter(|n| *n > 0)
+        .unwrap_or(1) as u32;
+    let frames: Vec<u32> = match wanted {
+        None => (0..count).collect(),
+        Some(w) => w
+            .iter()
+            .map(|&f| {
+                if f == 0 || f > count {
+                    Err(format!(
+                        "pixel data holds {count} frames, the stack names frame {f}"
+                    ))
+                } else {
+                    Ok(f - 1)
+                }
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    let multiframe = count > 1;
     let need = (rows * cols) as usize * (bits as usize / 8);
-    if pixels.len() < need {
+    // the pixels of each wanted frame, in the order of `frames`
+    let pixels: Vec<Vec<u8>> = if NATIVE.contains(&ts.as_str()) {
+        let all = pixel_data.to_bytes().map_err(|e| e.to_string())?;
+        frames
+            .iter()
+            .map(|&i| {
+                let at = i as usize * need;
+                all.get(at..at + need).map(<[u8]>::to_vec).ok_or_else(|| {
+                    format!(
+                        "pixel data holds {} bytes, the header says {}",
+                        all.len(),
+                        need * count as usize
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()?
+    } else {
+        decoder_for(&ts)?;
+        let dicom_core::DicomValue::PixelSequence(seq) = pixel_data.value() else {
+            return Err(undecodable(&ts, &"the pixel data is not encapsulated"));
+        };
+        let fragments = seq.fragments();
+        let ranges = frame_fragments(fragments, seq.offset_table(), count as usize, &ts)?;
+        let mut header = InMemDicomObject::new_empty();
+        for tag in PIXEL_HEADER {
+            if let Ok(e) = obj.element(tag) {
+                header.put(e.clone());
+            }
+        }
+        let streams: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|&i| fragments[ranges[i as usize].clone()].concat())
+            .collect();
+        let chunk = streams.len().div_ceil(threads.max(1)).max(1);
+        let (header, ts) = (&header, ts.as_str());
+        let decoded: Vec<Result<Vec<Vec<u8>>, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = streams
+                .chunks(chunk)
+                .map(|part| {
+                    s.spawn(move || {
+                        part.iter()
+                            .map(|stream| {
+                                let mut px = decode_frame(header, ts, stream.clone())?;
+                                if signed && bits == 16 {
+                                    extend_sign(&mut px, stored);
+                                }
+                                Ok(px)
+                            })
+                            .collect()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err("a decoder panicked".to_string()))
+                })
+                .collect()
+        });
+        let mut out = Vec::with_capacity(frames.len());
+        for part in decoded {
+            out.extend(part?);
+        }
+        out
+    };
+    if let Some(short) = pixels.iter().find(|p| p.len() < need) {
         return Err(format!(
             "pixel data holds {} bytes, the header says {need}",
-            pixels.len()
+            short.len()
         ));
     }
-    let z = position.map(|p| p[2]).unwrap_or(f64::NAN);
-    Ok(Slice {
-        syntax: ts,
-        lossy,
-        rescale: (slope, rescale_intercept),
-        z,
-        position,
-        orientation,
-        instance,
-        rows,
-        cols,
-        signed,
-        bits,
-        pixels,
-        spacing,
-        thickness,
-        burned_in,
-    })
+    // the file's own values, which a frame's functional groups override
+    let shared = first_item(obj, tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE);
+    let per_frame = obj
+        .element(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE)
+        .ok()
+        .and_then(|e| e.items());
+    let instance = int(obj, tags::INSTANCE_NUMBER).unwrap_or(0);
+    let burned_in = text(obj, tags::BURNED_IN_ANNOTATION).map(|s| s.eq_ignore_ascii_case("YES"));
+    let mut out = Vec::with_capacity(frames.len());
+    for (&i, pixels) in frames.iter().zip(pixels) {
+        let item = per_frame.and_then(|items| items.get(i as usize));
+        // a functional group of the frame's own, else the shared one
+        let group = |seq: dicom_core::Tag| {
+            item.and_then(|it| first_item(it, seq))
+                .or_else(|| shared.and_then(|s| first_item(s, seq)))
+        };
+        let in_group =
+            |seq: dicom_core::Tag, tag: dicom_core::Tag| group(seq).and_then(|g| f64s(g, tag));
+        let position = in_group(tags::PLANE_POSITION_SEQUENCE, tags::IMAGE_POSITION_PATIENT)
+            .or_else(|| {
+                // the file's one position is no frame's but a single frame's
+                (!multiframe)
+                    .then(|| f64s(obj, tags::IMAGE_POSITION_PATIENT))
+                    .flatten()
+            })
+            .filter(|v| v.len() >= 3)
+            .map(|v| [v[0], v[1], v[2]]);
+        let orientation = in_group(
+            tags::PLANE_ORIENTATION_SEQUENCE,
+            tags::IMAGE_ORIENTATION_PATIENT,
+        )
+        .or_else(|| f64s(obj, tags::IMAGE_ORIENTATION_PATIENT))
+        .filter(|v| v.len() >= 6)
+        .map(|v| [v[0], v[1], v[2], v[3], v[4], v[5]]);
+        let spacing = in_group(tags::PIXEL_MEASURES_SEQUENCE, tags::PIXEL_SPACING)
+            .or_else(|| f64s(obj, tags::PIXEL_SPACING))
+            .map(|v| [v[0], *v.get(1).unwrap_or(&v[0])])
+            .unwrap_or([1.0, 1.0]);
+        // the first of these that is a distance: a spacing some files
+        // write negative is its size
+        let thickness = [
+            in_group(tags::PIXEL_MEASURES_SEQUENCE, tags::SPACING_BETWEEN_SLICES),
+            f64s(obj, tags::SPACING_BETWEEN_SLICES),
+            in_group(tags::PIXEL_MEASURES_SEQUENCE, tags::SLICE_THICKNESS),
+            f64s(obj, tags::SLICE_THICKNESS),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|v| v[0].abs())
+        .find(|t| t.is_finite() && *t > 0.0)
+        .unwrap_or(1.0);
+        let transform = |tag| {
+            in_group(tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE, tag)
+                .or_else(|| f64s(obj, tag))
+                .and_then(|v| v.first().copied())
+        };
+        let slope = transform(tags::RESCALE_SLOPE)
+            .filter(|s| s.is_finite() && *s != 0.0)
+            .unwrap_or(1.0);
+        let rescale_intercept = transform(tags::RESCALE_INTERCEPT)
+            .filter(|b| b.is_finite())
+            .unwrap_or(0.0);
+        out.push(Slice {
+            z: position.map(|p| p[2]).unwrap_or(f64::NAN),
+            position,
+            orientation,
+            instance,
+            file: file_index,
+            frame: i,
+            multiframe,
+            rows,
+            cols,
+            signed,
+            bits,
+            pixels,
+            spacing,
+            thickness,
+            burned_in,
+            rescale: (slope, rescale_intercept),
+            syntax: ts.clone(),
+            lossy,
+        });
+    }
+    Ok(out)
 }
 
-/// The files of one stack into one volume, in order.
+/// The files of one stack into one volume, in order, every frame of each.
+#[cfg(test)]
 pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
+    let files: Vec<StackFile> = files.iter().map(StackFile::whole).collect();
+    read_stack(&files)
+}
+
+/// How a volume's planes were put in order ([`Manifest::order`]).
+pub const ORDER_POSITION: &str = "position";
+pub const ORDER_INSTANCE: &str = "instance";
+pub const ORDER_FRAMES: &str = "frames";
+
+/// The planes of one stack's files, and of the frames each names, into one
+/// volume, in order.
+pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
     // a compressed plane costs its decode, so the files are read a few at
-    // a time; the first file that fails, in the files' order, is the error
+    // a time, and the frames of a file a few at a time within it; the first
+    // file that fails, in the files' order, is the error
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .clamp(1, 8);
     let chunk = files.len().div_ceil(threads).max(1);
+    let within = (threads / files.len().min(threads).max(1)).max(1);
     let read: Vec<Result<Vec<Slice>, String>> = std::thread::scope(|s| {
         let handles: Vec<_> = files
             .chunks(chunk)
-            .map(|part| s.spawn(move || part.iter().map(|f| read_slice(f)).collect()))
+            .enumerate()
+            .map(|(c, part)| {
+                s.spawn(move || {
+                    let mut slices = Vec::new();
+                    for (k, f) in part.iter().enumerate() {
+                        slices.extend(read_frames(
+                            &f.path,
+                            c * chunk + k,
+                            f.frames.as_deref(),
+                            within,
+                        )?);
+                    }
+                    Ok(slices)
+                })
+            })
             .collect();
         handles
             .into_iter()
@@ -570,25 +932,34 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
     {
         return Err("the stack's files do not share one matrix".to_string());
     }
-    // Record 45 E2: along the normal of the planes when every file says
+    // Record 45 E2: along the normal of the planes when every plane says
     // where it is and how it is turned, which for an axial stack is the
     // third coordinate as before; else by that coordinate; else by the
-    // instance number. Each plane's distance along the normal is its z.
+    // instance number, and a multi-frame file's frames in the file's order.
+    // Each plane's distance along the normal is its z.
     let oriented = slices
         .iter()
         .all(|s| s.position.is_some() && s.orientation.is_some());
     if oriented {
-        let n = normal(&slices[0].orientation.expect("every file is oriented"));
+        let n = normal(&slices[0].orientation.expect("every plane is oriented"));
         for s in &mut slices {
-            let p = s.position.expect("every file has a position");
+            let p = s.position.expect("every plane has a position");
             s.z = p[0] * n[0] + p[1] * n[1] + p[2] * n[2];
         }
     }
-    if slices.iter().all(|s| s.z.is_finite()) {
+    let placed = slices.iter().all(|s| s.z.is_finite());
+    let order = if placed {
+        // stable: planes at one place keep the files' and frames' order
         slices.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
+        ORDER_POSITION
     } else {
-        slices.sort_by_key(|s| s.instance);
-    }
+        slices.sort_by_key(|s| (s.instance, s.file, s.frame));
+        if slices.iter().any(|s| s.multiframe) {
+            ORDER_FRAMES
+        } else {
+            ORDER_INSTANCE
+        }
+    };
     let nz = slices.len() as u32;
     let intercept: i64 = if signed { 32768 } else { 0 };
     let mut data = Vec::with_capacity((nz * rows * cols) as usize);
@@ -614,14 +985,16 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
             }
         }
     }
-    let dz = if nz > 1 && slices[0].z.is_finite() && slices[nz as usize - 1].z.is_finite() {
+    // measured along the normal where the planes say where they are, else
+    // the files' Spacing Between Slices or Slice Thickness
+    let dz = if nz > 1 && placed {
         ((slices[nz as usize - 1].z - slices[0].z) / (nz as f64 - 1.0)).abs()
     } else {
         slices[0].thickness
     };
     let burned_in = slices.iter().find_map(|s| s.burned_in);
     let geometry = if oriented {
-        let first = slices[0].orientation.expect("every file is oriented");
+        let first = slices[0].orientation.expect("every plane is oriented");
         let parallel = slices.iter().all(|s| {
             s.orientation.is_some_and(|o| {
                 o.iter()
@@ -640,7 +1013,7 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
         };
         Some(Geometry {
             orientation: first,
-            origin: slices[0].position.expect("every file has a position"),
+            origin: slices[0].position.expect("every plane has a position"),
             frame: Frame {
                 parallel,
                 evenly_spaced,
@@ -660,6 +1033,12 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
     let rescale_varies = slices
         .iter()
         .any(|s| (s.rescale.0 - rescale.0).abs() > 1e-9 || (s.rescale.1 - rescale.1).abs() > 1e-9);
+    let multiframe_files = slices
+        .iter()
+        .filter(|s| s.multiframe)
+        .map(|s| s.file)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u32;
     Ok(Volume {
         shape: [nz, rows, cols],
         spacing: [dz, slices[0].spacing[0], slices[0].spacing[1]],
@@ -671,6 +1050,8 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
         geometry,
         lossy,
         syntaxes,
+        order,
+        multiframe_files,
     })
 }
 
@@ -903,6 +1284,8 @@ pub fn build(
         oblique,
         lossy: vol.lossy,
         source_syntaxes: vol.syntaxes.clone(),
+        order: Some(vol.order.to_string()),
+        multiframe_files: vol.multiframe_files,
         stack,
         codec: CODEC.to_string(),
         tile: TILE,
@@ -1972,6 +2355,203 @@ mod tests {
         let why = read_files(&[f]).err().unwrap();
         assert!(why.contains("1.2.840.10008.1.2.4.112"), "{why}");
         assert_eq!(reason_of(&why, true), "compressed");
+    }
+
+    fn multiframe(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/multiframe")
+            .join(format!("{name}.dcm"))
+    }
+
+    /// The largest difference between a volume's planes and the planes of
+    /// the multi-frame fixtures' formula they should be, in order.
+    fn off_by(vol: &Volume, planes: &[usize]) -> i64 {
+        assert_eq!(vol.shape, [planes.len() as u32, FROWS as u32, FCOLS as u32]);
+        let mut worst = 0;
+        for (z, &p) in planes.iter().enumerate() {
+            let plane = vol.plane(z);
+            for y in 0..FROWS {
+                for x in 0..FCOLS {
+                    let got = plane[y * FCOLS + x] as i64 - vol.intercept;
+                    worst = worst.max((got - fixture_value("u12", x, y, p)).abs());
+                }
+            }
+        }
+        worst
+    }
+
+    fn close(a: [f64; 3], b: [f64; 3]) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6)
+    }
+
+    #[test]
+    fn an_enhanced_object_s_frames_are_its_planes_in_every_syntax() {
+        // native, JPEG 2000, JPEG-LS, RLE and JPEG lossless, five frames
+        // each, their geometry and rescale in the shared functional groups
+        for name in ["g0", "g1", "g2", "g3", "g4"] {
+            let vol = read_files(&[multiframe(name)]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(off_by(&vol, &[0, 1, 2, 3, 4]), 0, "{name}");
+            assert_eq!(vol.order, ORDER_POSITION, "{name}");
+            assert_eq!(vol.multiframe_files, 1, "{name}");
+            assert!(
+                close(vol.spacing, [2.0, 0.8, 0.8]),
+                "{name}: {:?}",
+                vol.spacing
+            );
+            assert_eq!(vol.rescale, (1.0, -1024.0), "{name}");
+            let g = vol.geometry.expect("the frames say where they are");
+            assert_eq!(g.orientation, AXIAL, "{name}");
+            assert!(close(g.origin, [0.0, 0.0, 0.0]), "{name}");
+            assert!(g.frame.parallel && g.frame.evenly_spaced, "{name}");
+        }
+        let dir = nils_dicom::synth::TempDir::new("pyramid-enhanced");
+        let vol = read_files(&[multiframe("g1")]).unwrap();
+        let m = build(&vol, 11, dir.path(), 2, None).unwrap();
+        assert_eq!(m.shape, [5, 48, 64]);
+        assert_eq!(m.order.as_deref(), Some(ORDER_POSITION));
+        assert_eq!(m.multiframe_files, 1);
+        assert!(m.orientation_known);
+        // a manifest from before says neither
+        let mut old = serde_json::to_value(&m).unwrap();
+        old.as_object_mut().unwrap().remove("order");
+        old.as_object_mut().unwrap().remove("multiframe_files");
+        let old: Manifest = serde_json::from_value(old).unwrap();
+        assert!(old.order.is_none() && old.multiframe_files == 0);
+    }
+
+    #[test]
+    fn frames_whose_positions_run_out_of_order_are_ordered_along_the_normal() {
+        // frame k holds plane [3, 0, 4, 1, 2][k] at its place; the rescale
+        // is in each frame's own functional groups
+        let vol = read_files(&[multiframe("h0")]).unwrap();
+        assert_eq!(off_by(&vol, &[0, 1, 2, 3, 4]), 0);
+        assert_eq!(vol.order, ORDER_POSITION);
+        assert_eq!(vol.rescale, (1.0, -1024.0));
+        assert!(!vol.rescale_varies);
+        assert!(close(vol.spacing, [2.0, 0.8, 0.8]));
+        assert!(vol.geometry.unwrap().frame.evenly_spaced);
+    }
+
+    #[test]
+    fn a_classic_multi_frame_object_is_stacked_in_frame_order_and_says_so() {
+        // four frames and one position for the file: the frames in order,
+        // Spacing Between Slices apart, and no claim of where they are
+        let vol = read_files(&[multiframe("i0")]).unwrap();
+        assert_eq!(off_by(&vol, &[0, 1, 2, 3]), 0);
+        assert_eq!(vol.order, ORDER_FRAMES);
+        assert!(vol.geometry.is_none());
+        assert!(close(vol.spacing, [3.0, 0.8, 0.8]), "{:?}", vol.spacing);
+        assert_eq!(vol.rescale, (1.0, -1024.0));
+        let dir = nils_dicom::synth::TempDir::new("pyramid-classic-frames");
+        let m = build(&vol, 17, dir.path(), 2, None).unwrap();
+        assert_eq!(m.order.as_deref(), Some(ORDER_FRAMES));
+        assert!(!m.orientation_known && m.frame.is_none());
+    }
+
+    #[test]
+    fn one_stack_of_several_multi_frame_files_and_a_single_frame_one() {
+        // two enhanced files, one of them JPEG 2000, and a classic plane,
+        // handed over in any order
+        let files: Vec<PathBuf> = ["j2", "j1", "j0"].iter().map(|n| multiframe(n)).collect();
+        let vol = read_files(&files).unwrap();
+        assert_eq!(off_by(&vol, &[0, 1, 2, 3, 4, 5, 6]), 0);
+        assert_eq!(vol.order, ORDER_POSITION);
+        assert_eq!(vol.multiframe_files, 2);
+        assert_eq!(vol.syntaxes.len(), 2, "{:?}", vol.syntaxes);
+        assert!(close(vol.spacing, [2.0, 0.8, 0.8]));
+        assert!(vol.geometry.unwrap().frame.evenly_spaced);
+    }
+
+    #[test]
+    fn a_file_split_between_stacks_gives_each_stack_its_frames() {
+        // frames 1-3 are axial planes 0-2, frames 4-6 sagittal planes 10-12
+        let part = |frames: Vec<u32>| StackFile {
+            path: multiframe("k0"),
+            frames: Some(frames),
+        };
+        let axial = read_stack(&[part(frame_list("1-3").unwrap())]).unwrap();
+        assert_eq!(off_by(&axial, &[0, 1, 2]), 0);
+        assert_eq!(axial.geometry.unwrap().orientation, AXIAL);
+        let sagittal = read_stack(&[part(frame_list("4-6").unwrap())]).unwrap();
+        // along the sagittal normal, which runs against x
+        assert_eq!(off_by(&sagittal, &[12, 11, 10]), 0);
+        let g = sagittal.geometry.unwrap();
+        assert_eq!(plane_of(&g.orientation).0, "sagittal");
+        assert!(g.frame.parallel && g.frame.evenly_spaced);
+        // the whole file is six planes that are not one volume
+        let whole = read_files(&[multiframe("k0")]).unwrap();
+        assert_eq!(whole.shape[0], 6);
+        assert!(!whole.geometry.unwrap().frame.parallel);
+        // a frame the file does not hold fails the stack without a path
+        let why = read_stack(&[part(vec![7])]).err().unwrap();
+        assert!(!why.contains("multiframe"), "{why}");
+        assert_eq!(reason_of(&why, true), "unsupported_pixels");
+    }
+
+    #[test]
+    fn frame_lists_read_as_the_digest_writes_them() {
+        assert_eq!(frame_list("1-4,9,12-13").unwrap(), [1, 2, 3, 4, 9, 12, 13]);
+        assert_eq!(frame_list("5").unwrap(), [5]);
+        for bad in ["", "0", "4-2", "a-3", "1-"] {
+            assert!(frame_list(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A copy of a fixture whose every frame is split over two fragments,
+    /// with a Basic Offset Table or without one.
+    fn fragmented(dir: &nils_dicom::synth::TempDir, name: &str, table: bool) -> PathBuf {
+        let mut file = dicom_object::open_file(multiframe(name)).unwrap();
+        let seq = match file.element(tags::PIXEL_DATA).unwrap().value() {
+            dicom_core::DicomValue::PixelSequence(seq) => seq.clone(),
+            _ => panic!("{name} is encapsulated"),
+        };
+        let (mut fragments, mut offsets) = (Vec::new(), Vec::new());
+        let mut at = 0u32;
+        for f in seq.fragments() {
+            offsets.push(at);
+            let half = (f.len() / 4) * 2;
+            for piece in [&f[..half], &f[half..]] {
+                at += piece.len() as u32 + 8;
+                fragments.push(piece.to_vec());
+            }
+        }
+        if !table {
+            offsets.clear();
+        }
+        file.put(dicom_core::DataElement::new(
+            tags::PIXEL_DATA,
+            dicom_core::VR::OB,
+            dicom_core::DicomValue::from(dicom_core::value::PixelFragmentSequence::new(
+                offsets, fragments,
+            )),
+        ));
+        let out = dir.path().join(format!(
+            "{name}-{}.dcm",
+            if table { "table" } else { "bare" }
+        ));
+        file.write_to_file(&out).unwrap();
+        out
+    }
+
+    #[test]
+    fn frames_spread_over_fragments_are_gathered_by_table_or_by_marker() {
+        let dir = nils_dicom::synth::TempDir::new("pyramid-fragments");
+        // JPEG-LS by its start of image, JPEG 2000 by its start of codestream
+        for name in ["g2", "g1"] {
+            for table in [true, false] {
+                let f = fragmented(&dir, name, table);
+                let vol = read_files(&[f]).unwrap_or_else(|e| panic!("{name} {table}: {e}"));
+                assert_eq!(off_by(&vol, &[0, 1, 2, 3, 4]), 0, "{name} {table}");
+            }
+        }
+        // RLE has one fragment a frame by the standard, and more cannot be
+        // told apart without a table
+        let f = fragmented(&dir, "g3", false);
+        let why = read_files(&[f]).err().unwrap();
+        assert_eq!(reason_of(&why, true), "undecodable", "{why}");
+        assert!(!why.contains(dir.path().to_str().unwrap()), "{why}");
+        let f = fragmented(&dir, "g3", true);
+        assert!(read_files(&[f]).is_ok());
     }
 
     #[test]
