@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.44] - 2026-09-25
+
+The reader looks an answer up: the pack's values carry the other names a person knows them by, a question serves its vocabulary, and a new door counts how common each whole answer is. The MRI pack is version 0.5.0, where a T1-weighted FLAIR is no candidate for role `t1w`. An expired lease never blocks, a campaign's owner may give back another rater's claim, and the digest leaves no empty stacks behind, with `nils repair empty-stacks` for those an earlier digest left. The registry stays at schema 68, as at 1.0.0-alpha.43. The HTTP API contract stays version 7, amended in place with additive fields and two new doors; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.43.
+
 ### Added
 
 - The reader finds a value by any name it goes by. An axis or an axes question as served (`GET /api/campaigns/{id}`) says `vocabulary`: for each value a rater may answer, its label where it differs, its description where the pack gives one, its `terms` and its `keywords`. It is the pack's vocabulary, the same for every stack, so a rater who reads blind has it too. It is never stored with the question, and a question that says it is refused.
