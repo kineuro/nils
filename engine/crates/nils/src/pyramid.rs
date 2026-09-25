@@ -17,13 +17,20 @@
 //! the normal the orientation gives. A manifest written before is read as
 //! axial with `orientation_known` false. E1: `nils pyramid build --select`
 //! builds a selection's pyramids as one job, skipping what is built.
+//!
+//! The planes are read from native pixel data (little endian, deflated or
+//! big endian) or decoded from JPEG, JPEG-LS, JPEG 2000 and RLE, and the
+//! manifest says when a plane came from a lossy source.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use dicom_dictionary_std::tags;
-use dicom_object::InMemDicomObject;
+use dicom_encoding::adapters::PixelDataObject;
+use dicom_encoding::transfer_syntax::TransferSyntaxIndex;
+use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
+use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use nils_registry::Param;
 use nils_registry::schema::Type;
 use nils_registry::store::Store;
@@ -172,6 +179,15 @@ pub struct Manifest {
     pub plane: String,
     #[serde(default)]
     pub oblique: bool,
+    /// Some of the pixels come from a lossy source: a transfer syntax that
+    /// may be lossy (JPEG baseline and extended, JPEG-LS near-lossless,
+    /// JPEG 2000 that is not lossless-only) or a file that says Lossy Image
+    /// Compression 01. False in a manifest from before.
+    #[serde(default)]
+    pub lossy: bool,
+    /// The transfer syntaxes the stack's files were read in, each once.
+    #[serde(default)]
+    pub source_syntaxes: Vec<String>,
 }
 
 fn plane_axial() -> String {
@@ -214,6 +230,10 @@ pub struct Volume {
     pub data: Vec<u16>,
     /// Where the planes are, when the files said (record 45 E2).
     pub geometry: Option<Geometry>,
+    /// Some plane came from a lossy source ([`Manifest::lossy`]).
+    pub lossy: bool,
+    /// The transfer syntaxes of the files, sorted, each once.
+    pub syntaxes: Vec<String>,
 }
 
 /// A stack's place in the patient, from its files.
@@ -277,6 +297,8 @@ struct Slice {
     thickness: f64,
     burned_in: Option<bool>,
     rescale: (f64, f64),
+    syntax: String,
+    lossy: bool,
 }
 
 fn f64s(obj: &InMemDicomObject, tag: dicom_core::Tag) -> Option<Vec<f64>> {
@@ -301,9 +323,123 @@ fn text(obj: &InMemDicomObject, tag: dicom_core::Tag) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// The native transfer syntaxes the pyramid reads: little endian, explicit
-/// or implicit; anything compressed is refused with the syntax named.
-const NATIVE: [&str; 2] = ["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"];
+/// The transfer syntaxes whose pixel data the parser hands over as it is:
+/// little endian, explicit or implicit, deflated (the parser inflates the
+/// data set) and explicit big endian (the parser reads the words in their
+/// order). Any other is encapsulated and decoded through the registry's
+/// codecs; one without a codec is refused with the syntax named.
+const NATIVE: [&str; 4] = [
+    "1.2.840.10008.1.2",
+    "1.2.840.10008.1.2.1",
+    "1.2.840.10008.1.2.1.99",
+    "1.2.840.10008.1.2.2",
+];
+
+/// The encapsulated syntaxes that may be lossy: JPEG baseline and extended
+/// and the other DCT processes, JPEG-LS near-lossless, JPEG 2000 and its
+/// part 2 and high-throughput forms that are not lossless-only, JPEG XL,
+/// and the video syntaxes. A plane read in one of them is marked lossy
+/// whatever the encoder chose, as is one whose file says so.
+const LOSSY: [&str; 8] = [
+    "1.2.840.10008.1.2.4.50",
+    "1.2.840.10008.1.2.4.51",
+    "1.2.840.10008.1.2.4.81",
+    "1.2.840.10008.1.2.4.91",
+    "1.2.840.10008.1.2.4.93",
+    "1.2.840.10008.1.2.4.203",
+    "1.2.840.10008.1.2.4.111",
+    "1.2.840.10008.1.2.4.112",
+];
+
+/// JPEG-LS, lossless and near-lossless, which the pyramid decodes itself.
+const JPEG_LS: [&str; 2] = ["1.2.840.10008.1.2.4.80", "1.2.840.10008.1.2.4.81"];
+
+fn lossy_syntax(ts: &str) -> bool {
+    // the DCT processes .52 to .65 are retired lossy JPEG, the .100s video
+    LOSSY.contains(&ts)
+        || ts
+            .strip_prefix("1.2.840.10008.1.2.4.")
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| {
+                (52..=56).contains(&n) || (58..=65).contains(&n) || (100..=108).contains(&n)
+            })
+}
+
+/// The first frame of an encapsulated object's pixel data, decoded by the
+/// registry's codec for `ts` into little endian samples of the object's
+/// Bits Allocated. The words say which syntax and never the file.
+fn decode_first_frame(obj: InMemDicomObject, ts: &str) -> Result<Vec<u8>, String> {
+    let jpeg_ls = JPEG_LS.contains(&ts);
+    let codec = TransferSyntaxRegistry
+        .get(ts)
+        .and_then(|entry| entry.pixel_data_reader());
+    if codec.is_none() && !jpeg_ls {
+        return Err(format!(
+            "transfer syntax {ts} is one the pyramid has no decoder for"
+        ));
+    }
+    let failed = |e: &dyn std::fmt::Display| format!("pixel data in {ts} did not decode: {e}");
+    // the codecs read the syntax from a file's meta group; a stand-in for
+    // the SOP UIDs is replaced by the object's own where it has them
+    let meta = FileMetaTableBuilder::new()
+        .transfer_syntax(ts)
+        .media_storage_sop_class_uid("1.2")
+        .media_storage_sop_instance_uid("1.2");
+    let file = obj.with_meta(meta).map_err(|e| failed(&e))?;
+    let mut out = Vec::new();
+    match codec {
+        Some(codec) => codec
+            .decode_frame(&file, 0, &mut out)
+            .map_err(|e| failed(&e))?,
+        None => {
+            let cols = int(&file, tags::COLUMNS).unwrap_or(0) as u32;
+            let rows = int(&file, tags::ROWS).unwrap_or(0) as u32;
+            let bits = int(&file, tags::BITS_ALLOCATED).unwrap_or(16);
+            let frame = file
+                .frame_pixel_data(0)
+                .ok_or_else(|| failed(&"no first frame"))?;
+            let (samples, _, _) =
+                jpegls::decode(&jpeg_ls_trimmed(&frame), cols, rows).map_err(|e| failed(&e))?;
+            out = if bits == 8 {
+                samples.iter().map(|&v| v as u8).collect()
+            } else {
+                samples.iter().flat_map(|v| v.to_le_bytes()).collect()
+            };
+        }
+    }
+    Ok(out)
+}
+
+/// A JPEG-LS codestream as the decoder takes it: an encapsulated fragment
+/// is padded to an even length, with a zero after the end-of-image marker
+/// or a fill byte before it (DCMTK's default writes FF FF D9), and the
+/// decoder wants the marker last and alone.
+fn jpeg_ls_trimmed(frame: &[u8]) -> Vec<u8> {
+    let mut end = frame.len();
+    while end > 0 && frame[end - 1] == 0 {
+        end -= 1;
+    }
+    let mut out = frame[..end].to_vec();
+    while out.len() >= 3 && out.ends_with(&[0xFF, 0xFF, 0xD9]) {
+        out.remove(out.len() - 3);
+    }
+    out
+}
+
+/// The words of 16-bit signed samples with fewer bits stored, extended
+/// from their sign bit: a JPEG lossless or JPEG-LS codec hands back the
+/// stored bits alone, where the native form has them extended already.
+fn extend_sign(pixels: &mut [u8], stored: u16) {
+    if !(1..16).contains(&stored) {
+        return;
+    }
+    let mask = (1u16 << stored) - 1;
+    let sign = 1u16 << (stored - 1);
+    for px in pixels.as_chunks_mut::<2>().0 {
+        let v = u16::from_le_bytes(*px) & mask;
+        *px = (if v & sign != 0 { v | !mask } else { v }).to_le_bytes();
+    }
+}
 
 fn read_slice(path: &Path) -> Result<Slice, String> {
     // record 48: a file without the Part 10 preamble or meta group is read
@@ -311,11 +447,6 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
     // fail its stack's pyramid
     let (file, ts) =
         nils_dicom::read_whole(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if !NATIVE.contains(&ts.as_str()) {
-        return Err(format!(
-            "transfer syntax {ts} is not native little endian; the pyramid reads uncompressed pixel data only"
-        ));
-    }
     let obj: &InMemDicomObject = &file;
     let rows = int(obj, tags::ROWS).ok_or("no Rows")? as u32;
     let cols = int(obj, tags::COLUMNS).ok_or("no Columns")? as u32;
@@ -330,18 +461,11 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
             "{samples} samples per pixel; the pyramid reads one"
         ));
     }
-    let pixels = obj
-        .element(tags::PIXEL_DATA)
-        .map_err(|_| "no Pixel Data".to_string())?
-        .to_bytes()
-        .map_err(|e| e.to_string())?
-        .into_owned();
-    let need = (rows * cols) as usize * (bits as usize / 8);
-    if pixels.len() < need {
-        return Err(format!(
-            "pixel data holds {} bytes, the header says {need}",
-            pixels.len()
-        ));
+    let stored = int(obj, tags::BITS_STORED).unwrap_or(bits as i64) as u16;
+    let lossy =
+        lossy_syntax(&ts) || text(obj, tags::LOSSY_IMAGE_COMPRESSION).is_some_and(|s| s == "01");
+    if obj.element(tags::PIXEL_DATA).is_err() {
+        return Err("no Pixel Data".to_string());
     }
     let position = f64s(obj, tags::IMAGE_POSITION_PATIENT)
         .filter(|v| v.len() >= 3)
@@ -349,7 +473,6 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
     let orientation = f64s(obj, tags::IMAGE_ORIENTATION_PATIENT)
         .filter(|v| v.len() >= 6)
         .map(|v| [v[0], v[1], v[2], v[3], v[4], v[5]]);
-    let z = position.map(|p| p[2]).unwrap_or(f64::NAN);
     let instance = int(obj, tags::INSTANCE_NUMBER).unwrap_or(0);
     let spacing = f64s(obj, tags::PIXEL_SPACING)
         .map(|v| [v[0], *v.get(1).unwrap_or(&v[0])])
@@ -367,7 +490,30 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
         .and_then(|v| v.first().copied())
         .filter(|b| b.is_finite())
         .unwrap_or(0.0);
+    let pixels = if NATIVE.contains(&ts.as_str()) {
+        obj.element(tags::PIXEL_DATA)
+            .map_err(|_| "no Pixel Data".to_string())?
+            .to_bytes()
+            .map_err(|e| e.to_string())?
+            .into_owned()
+    } else {
+        let mut px = decode_first_frame(file, &ts)?;
+        if signed && bits == 16 {
+            extend_sign(&mut px, stored);
+        }
+        px
+    };
+    let need = (rows * cols) as usize * (bits as usize / 8);
+    if pixels.len() < need {
+        return Err(format!(
+            "pixel data holds {} bytes, the header says {need}",
+            pixels.len()
+        ));
+    }
+    let z = position.map(|p| p[2]).unwrap_or(f64::NAN);
     Ok(Slice {
+        syntax: ts,
+        lossy,
         rescale: (slope, rescale_intercept),
         z,
         position,
@@ -386,9 +532,31 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
 
 /// The files of one stack into one volume, in order.
 pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
+    // a compressed plane costs its decode, so the files are read a few at
+    // a time; the first file that fails, in the files' order, is the error
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8);
+    let chunk = files.len().div_ceil(threads).max(1);
+    let read: Vec<Result<Vec<Slice>, String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(chunk)
+            .map(|part| s.spawn(move || part.iter().map(|f| read_slice(f)).collect()))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("a reader panicked".to_string()))
+            })
+            .collect()
+    });
     let mut slices = Vec::with_capacity(files.len());
-    for f in files {
-        slices.push(read_slice(f)?);
+    for part in read {
+        slices.extend(part?);
+    }
+    if slices.is_empty() {
+        return Err("stack has no files to read".to_string());
     }
     let (rows, cols, bits, signed) = (
         slices[0].rows,
@@ -481,6 +649,13 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
     } else {
         None
     };
+    let lossy = slices.iter().any(|s| s.lossy);
+    let syntaxes: Vec<String> = slices
+        .iter()
+        .map(|s| s.syntax.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let rescale = slices[0].rescale;
     let rescale_varies = slices
         .iter()
@@ -494,6 +669,8 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
         burned_in,
         data,
         geometry,
+        lossy,
+        syntaxes,
     })
 }
 
@@ -724,6 +901,8 @@ pub fn build(
         orientation_known: vol.geometry.is_some(),
         plane: plane.to_string(),
         oblique,
+        lossy: vol.lossy,
+        source_syntaxes: vol.syntaxes.clone(),
         stack,
         codec: CODEC.to_string(),
         tile: TILE,
@@ -973,14 +1152,21 @@ impl Many {
             "stopped": self.stopped,
             // the first few: a stack id and a reason class, never a path
             "failures": self.failed.iter().take(20).map(|(s, reason)| serde_json::json!({"stack": s, "reason": reason})).collect::<Vec<_>>(),
+            // and every failure, counted by its reason class
+            "failures_by_reason": self.failed.iter().fold(BTreeMap::<&str, usize>::new(), |mut by, (_, reason)| {
+                *by.entry(reason).or_default() += 1;
+                by
+            }),
         })
     }
 }
 
 /// The class of a reason a stack's pyramid was not built, from the
 /// reader's or the builder's words, which stay on the machine: `no_files`,
-/// `compressed`, `unsupported_pixels`, `mixed_matrix`, `unreadable` for a
-/// file that did not open or parse, or `build_failed`.
+/// `compressed` for a transfer syntax the pyramid has no decoder for,
+/// `undecodable` for pixel data its codec refused, `unsupported_pixels`,
+/// `mixed_matrix`, `unreadable` for a file that did not open or parse, or
+/// `build_failed`.
 pub fn reason_of(why: &str, reading: bool) -> &'static str {
     if !reading {
         return "build_failed";
@@ -989,6 +1175,8 @@ pub fn reason_of(why: &str, reading: bool) -> &'static str {
         "no_files"
     } else if why.starts_with("transfer syntax") {
         "compressed"
+    } else if why.starts_with("pixel data in") {
+        "undecodable"
     } else if why.contains("bits allocated")
         || why.contains("samples per pixel")
         || why.starts_with("no Rows")
@@ -1606,5 +1794,200 @@ mod tests {
         assert_eq!((off(0), off(1), off(2)), (16, 19, 19));
         assert_eq!(&c[off(0)..off(1)], &[1, 2, 3]);
         assert_eq!(&c[off(2)..], &[9]);
+    }
+
+    /// The compressed fixtures (tests/fixtures/compressed, written by its
+    /// make.sh from planes.txt): synthetic planes of 48 rows by 64 columns
+    /// whose pixels make.py computes as [`fixture_value`] does.
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/compressed")
+            .join(format!("{name}.dcm"))
+    }
+
+    fn fixtures(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| fixture(n)).collect()
+    }
+
+    const FROWS: usize = 48;
+    const FCOLS: usize = 64;
+
+    fn fixture_value(kind: &str, x: usize, y: usize, z: usize) -> i64 {
+        let wave = ((x * 37 + y * 101 + z * 613) % 4096) as i64;
+        match kind {
+            "u12" => wave,
+            "s16" => wave - 1024,
+            "s12" => wave - 2048,
+            "u8" => (20 + 2 * x + 2 * y + 5 * z) as i64,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Each stored value against the formula: the raw value, shifted by
+    /// 32768 when the volume is signed. Returns the largest difference.
+    fn largest_error(vol: &Volume, kind: &str, planes: &[usize]) -> i64 {
+        assert_eq!(vol.shape, [planes.len() as u32, FROWS as u32, FCOLS as u32]);
+        let mut worst = 0;
+        for (k, &z) in planes.iter().enumerate() {
+            let plane = vol.plane(k);
+            for y in 0..FROWS {
+                for x in 0..FCOLS {
+                    let raw = plane[y * FCOLS + x] as i64 - vol.intercept;
+                    worst = worst.max((raw - fixture_value(kind, x, y, z)).abs());
+                }
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn a_stack_in_eight_lossless_syntaxes_reads_as_its_native_values() {
+        // native explicit little endian, JPEG lossless (process 14 and its
+        // first-order prediction), JPEG-LS, JPEG 2000 lossless, RLE,
+        // deflated and explicit big endian, one plane each, in one stack
+        let names = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+        let vol = read_files(&fixtures(&names)).unwrap();
+        assert_eq!(vol.intercept, 0);
+        assert_eq!(largest_error(&vol, "u12", &[0, 1, 2, 3, 4, 5, 6, 7]), 0);
+        assert_eq!(vol.rescale, (1.0, -1024.0));
+        assert!(!vol.lossy);
+        assert_eq!(vol.syntaxes.len(), 8, "{:?}", vol.syntaxes);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-lossless");
+        let m = build(&vol, 1, dir.path(), 2, None).unwrap();
+        assert!(!m.lossy);
+        assert_eq!(m.source_syntaxes, vol.syntaxes);
+        assert_eq!(m.intercept, -1024.0);
+    }
+
+    #[test]
+    fn signed_compressed_planes_keep_their_sign() {
+        // sixteen bits stored: JPEG lossless, JPEG-LS, JPEG 2000, RLE
+        let vol = read_files(&fixtures(&["b0", "b1", "b2", "b3"])).unwrap();
+        assert_eq!(vol.intercept, 32768);
+        assert_eq!(largest_error(&vol, "s16", &[0, 1, 2, 3]), 0);
+        // twelve stored in sixteen, where the JPEG codecs hand back the
+        // stored bits alone and the native plane has them extended
+        let vol = read_files(&fixtures(&["c0", "c1", "c2", "c3"])).unwrap();
+        assert_eq!(largest_error(&vol, "s12", &[0, 1, 2, 3]), 0);
+        assert!(!vol.lossy);
+    }
+
+    #[test]
+    fn lossy_planes_read_close_and_mark_the_manifest_lossy() {
+        // JPEG baseline, JPEG extended at eight bits, JPEG-LS near-lossless
+        // and JPEG 2000 lossy
+        let vol = read_files(&fixtures(&["d0", "d1", "d2", "d3"])).unwrap();
+        let worst = largest_error(&vol, "u8", &[0, 1, 2, 3]);
+        assert!(worst <= 64, "{worst}");
+        assert!(vol.lossy);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-lossy");
+        let m = build(&vol, 4, dir.path(), 2, None).unwrap();
+        assert!(m.lossy);
+        let text = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        let back: Manifest = serde_json::from_str(&text).unwrap();
+        assert!(back.lossy);
+        assert_eq!(back.source_syntaxes.len(), 4);
+        // a manifest from before reads as not lossy
+        let mut old = serde_json::to_value(&m).unwrap();
+        old.as_object_mut().unwrap().remove("lossy");
+        old.as_object_mut().unwrap().remove("source_syntaxes");
+        let old: Manifest = serde_json::from_value(old).unwrap();
+        assert!(!old.lossy && old.source_syntaxes.is_empty());
+    }
+
+    #[test]
+    fn a_file_that_says_it_was_lossy_marks_its_stack_lossy() {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields, TempDir};
+        let dir = TempDir::new("pyramid-said-lossy");
+        let sop = "1.2.3.8.1";
+        let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+        let mut e = synth::minimal_mr("1.2.3", "1.2.3.8", sop);
+        e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+        e.push(us(tags::ROWS, 4));
+        e.push(us(tags::COLUMNS, 4));
+        e.push(us(tags::BITS_ALLOCATED, 16));
+        e.push(us(tags::BITS_STORED, 16));
+        e.push(us(tags::HIGH_BIT, 15));
+        e.push(us(tags::PIXEL_REPRESENTATION, 0));
+        e.push(synth::text(tags::LOSSY_IMAGE_COMPRESSION, VR::CS, "01"));
+        e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, vec![7; 32]));
+        let f = dir.file(sop, &synth::part10(&MetaFields::mr(sop), &e, true));
+        let vol = read_files(&[f]).unwrap();
+        assert!(vol.lossy);
+    }
+
+    #[test]
+    fn an_undecodable_plane_fails_its_stack_with_the_syntax_and_no_path() {
+        let dir = nils_dicom::synth::TempDir::new("pyramid-broken");
+        let mut files = Vec::new();
+        for name in ["f0", "f1", "f2"] {
+            let mut bytes = std::fs::read(fixture(name)).unwrap();
+            if name == "f2" {
+                // the codestream's start (SOC, SIZ) is gone
+                let at = bytes
+                    .windows(4)
+                    .position(|w| w == [0xFF, 0x4F, 0xFF, 0x51])
+                    .expect("a JPEG 2000 codestream");
+                bytes[at..at + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+            files.push(dir.file(&format!("{name}.dcm"), &bytes));
+        }
+        // the two good planes read
+        assert!(read_files(&files[..2]).is_ok());
+        let why = read_files(&files).err().unwrap();
+        assert!(why.contains("1.2.840.10008.1.2.4.90"), "{why}");
+        assert!(!why.contains(dir.path().to_str().unwrap()), "{why}");
+        assert_eq!(reason_of(&why, true), "undecodable");
+    }
+
+    #[test]
+    fn twelve_bit_jpeg_extended_is_named_undecodable() {
+        // the Rust JPEG decoder reads eight-bit DCT only; a twelve-bit
+        // extended plane is counted, not guessed at
+        let why = read_files(&fixtures(&["e0"])).err().unwrap();
+        assert!(why.contains("1.2.840.10008.1.2.4.51"), "{why}");
+        assert_eq!(reason_of(&why, true), "undecodable");
+    }
+
+    #[test]
+    fn a_syntax_without_a_decoder_is_counted_as_compressed() {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields, TempDir};
+        let dir = TempDir::new("pyramid-no-codec");
+        let sop = "1.2.3.7.1";
+        let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+        let mut e = synth::minimal_mr("1.2.3", "1.2.3.7", sop);
+        e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+        e.push(us(tags::ROWS, 4));
+        e.push(us(tags::COLUMNS, 4));
+        e.push(us(tags::BITS_ALLOCATED, 16));
+        e.push(us(tags::BITS_STORED, 16));
+        e.push(us(tags::HIGH_BIT, 15));
+        e.push(us(tags::PIXEL_REPRESENTATION, 0));
+        e.push(synth::bytes(tags::PIXEL_DATA, VR::OB, vec![0; 32]));
+        // JPEG XL, which the registry knows and this build has no codec for
+        let meta = MetaFields::with("1.2.840.10008.1.2.4.112", "1.2.840.10008.5.1.4.1.1.4", sop);
+        let f = dir.file(sop, &synth::part10(&meta, &e, true));
+        let why = read_files(&[f]).err().unwrap();
+        assert!(why.contains("1.2.840.10008.1.2.4.112"), "{why}");
+        assert_eq!(reason_of(&why, true), "compressed");
+    }
+
+    #[test]
+    fn every_failure_is_counted_by_its_reason() {
+        let many = Many {
+            failed: (0..30)
+                .map(|s| (s, if s % 3 == 0 { "compressed" } else { "no_files" }))
+                .collect(),
+            ..Many::default()
+        };
+        let j = many.as_json("scratch");
+        assert_eq!(j["failed"], 30);
+        assert_eq!(j["failures"].as_array().unwrap().len(), 20);
+        assert_eq!(
+            j["failures_by_reason"],
+            serde_json::json!({"compressed": 10, "no_files": 20})
+        );
     }
 }

@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The viewing pyramid decodes compressed pixel data: JPEG baseline and extended at eight bits, JPEG lossless (process 14 and its first-order prediction), JPEG-LS lossless and near-lossless, JPEG 2000 lossless and lossy, RLE, deflated explicit VR little endian and explicit VR big endian, as well as native little endian as before, and a stack may mix them. Signed samples and the rescale are read as for native data. The manifest names the stack's `source_syntaxes` and says `lossy` when a plane came from a lossy source (a syntax that may be lossy, or a file that says Lossy Image Compression 01). JPEG at twelve bits (extended, process 4) is not decoded yet.
+- `pyramid build` over a selection or a handle counts every failure by its reason in `failures_by_reason`, beside the first twenty it lists; a plane whose codec refused it is counted as `undecodable`, and `compressed` now means a transfer syntax the pyramid has no decoder for.
+
 ## [1.0.0-alpha.40] - 2026-09-25
 
 Record 48's blind reading. Raters read their own campaign's pictures without `query:see` and are blind to each other, a rater may answer can't tell on an axis and mark an answer unsure, and one bare DICOM file no longer fails a pyramid. The registry is at schema 66 after this update (65 at 1.0.0-alpha.39), and it migrates when this version first opens it. The HTTP API contract stays version 7, amended in place; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.39.

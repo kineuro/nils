@@ -1,0 +1,33 @@
+# The compressed pyramid fixtures, one line per plane: file name, series,
+# pixel kind (make.py), plane, rescale intercept, how make.sh encodes it.
+# Series 1: one lossless stack in eight syntaxes, a native plane among them.
+a0 1 u12 0 -1024 native
+a1 1 u12 1 -1024 jpeg-lossless
+a2 1 u12 2 -1024 jpeg-lossless-sv1
+a3 1 u12 3 -1024 jpeg-ls
+a4 1 u12 4 -1024 j2k
+a5 1 u12 5 -1024 rle
+a6 1 u12 6 -1024 deflate
+a7 1 u12 7 -1024 big-endian
+# Series 2: signed 16-bit, lossless.
+b0 2 s16 0 0 jpeg-lossless-sv1
+b1 2 s16 1 0 jpeg-ls
+b2 2 s16 2 0 j2k
+b3 2 s16 3 0 rle
+# Series 3: signed with 12 bits stored, lossless.
+c0 3 s12 0 0 native
+c1 3 s12 1 0 jpeg-lossless-sv1
+c2 3 s12 2 0 jpeg-ls
+c3 3 s12 3 0 j2k
+# Series 4: 8 bits, lossy.
+d0 4 u8 0 0 jpeg-baseline
+d1 4 u8 1 0 jpeg-extended
+d2 4 u8 2 0 jpeg-ls-near
+d3 4 u8 3 0 j2k-lossy
+# Series 5: JPEG extended at 12 bits.
+e0 5 u12 0 0 jpeg-extended
+e1 5 u12 1 0 jpeg-extended
+# Series 6: a stack a test breaks one file of.
+f0 6 u12 0 0 native
+f1 6 u12 1 0 j2k
+f2 6 u12 2 0 j2k
