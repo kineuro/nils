@@ -3233,7 +3233,10 @@ fn can_t_tell_is_an_answer_that_never_becomes_a_decision() {
         );
         let tsv = labels::tsv(&answers);
         assert!(
-            tsv.lines().next().unwrap().ends_with("\tanswer_id\tunsure"),
+            tsv.lines()
+                .next()
+                .unwrap()
+                .ends_with("\tanswer_id\tunsure\tderived"),
             "{name}"
         );
         assert!(tsv.contains("\tcant_tell\t"), "{name}");

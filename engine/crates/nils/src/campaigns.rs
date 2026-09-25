@@ -46,6 +46,8 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/decisions/commit",
     "GET /api/stacks/{stack}/why",
     "GET /api/campaigns/{id}/items/{item}/why",
+    "GET /api/campaigns/{id}/items/{item}/header",
+    "POST /api/campaigns/{id}/items/{item}/derive",
     "GET /api/campaigns/{id}/batches",
     "POST /api/campaigns/{id}/batches/{batch}/accept",
     "GET /api/campaigns/{id}/stats",
@@ -61,7 +63,20 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         ("GET", ["api", "campaigns"])
         | ("GET", ["api", "campaigns", _])
         | ("GET", ["api", "campaigns", _, "answers" | "batches" | "stats"])
-        | ("GET", ["api", "campaigns", _, "items", _, "candidates" | "why"]) => {
+        | (
+            "GET",
+            [
+                "api",
+                "campaigns",
+                _,
+                "items",
+                _,
+                "candidates" | "why" | "header",
+            ],
+        ) => (Need::One("campaigns:see"), Plain),
+        // record 48: what the pack derives from a partial answer, a reading
+        // that takes a body and writes nothing
+        ("POST", ["api", "campaigns", _, "items", _, "derive"]) => {
             (Need::One("campaigns:see"), Plain)
         }
         // record 48: why one stack was judged so, one line per axis, is a
@@ -270,6 +285,24 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "one line per axis",
         "Reading an item's evidence",
         "Read an item's evidence",
+    ),
+    (
+        "GET /api/campaigns/{id}/items/{item}/header",
+        false,
+        false,
+        "free",
+        "one instance's stored header",
+        "Reading an item's header",
+        "Read an item's header",
+    ),
+    (
+        "POST /api/campaigns/{id}/items/{item}/derive",
+        false,
+        true,
+        "free",
+        "one answer's derived axes",
+        "Deriving axes from an answer",
+        "Derived axes from an answer",
     ),
     (
         "GET /api/campaigns/{id}/batches",
@@ -553,6 +586,24 @@ pub(crate) fn route(
                 // never the caller's
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let suggested = suggested_for(registry.store(), &c, a, pack.as_deref())?;
+                // record 48: the axes derived from this answer through the
+                // pack, the engine's own computation, kept beside it
+                let derived = match value
+                    .as_deref()
+                    .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                    .filter(Value::is_object)
+                {
+                    Some(obj) => {
+                        let q = c.question().map_err(campaign_err)?;
+                        match assignment_stack(registry.store(), c.id, a)? {
+                            Some(stack) => {
+                                derived_for(registry.store(), pack.as_deref(), &q, stack, &obj)?
+                            }
+                            None => None,
+                        }
+                    }
+                    None => None,
+                };
                 let answered = campaign::answer_with(
                     registry,
                     &Given {
@@ -569,6 +620,7 @@ pub(crate) fn route(
                     &campaign::Timing {
                         suggested: suggested.as_deref(),
                         batch: false,
+                        derived: derived.as_ref(),
                     },
                     &now,
                 )
@@ -576,6 +628,7 @@ pub(crate) fn route(
                 Ok(Reply::ok(json!({
                     "answer": answered.answer, "item": answered.item,
                     "state": answered.state, "adjudication": answered.adjudication,
+                    "derived": derived,
                 })))
             }
             // record 45: the rating workspace's heartbeat
@@ -659,6 +712,8 @@ pub(crate) fn route(
                         ),
                     ));
                 }
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                fill_derived(registry, pack.as_deref(), &c)?;
                 let rows =
                     labels::campaign_labels(registry.store(), c.id, of).map_err(labels_err)?;
                 let name = doc["name"].as_str().unwrap_or(&c.name).to_string();
@@ -681,15 +736,18 @@ pub(crate) fn route(
                 let stack = id_of(stack)?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let hidden = blind_to(registry.store(), caller, stack)?;
-                crate::reader::why(
+                let mut doc = crate::reader::why(
                     registry.store(),
                     stack,
                     pack.as_deref(),
                     !plain(caller),
                     hidden,
                 )?
-                .map(Reply::ok)
-                .ok_or_else(|| Reply::error(404, format!("stack {stack} has not been classified")))
+                .ok_or_else(|| {
+                    Reply::error(404, format!("stack {stack} has not been classified"))
+                })?;
+                with_file(registry.store(), stack, !plain(caller), &mut doc)?;
+                Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "items", item, "why"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -726,6 +784,10 @@ pub(crate) fn route(
                 axes_value(&c.question, &mut s);
                 doc["item"] = json!(item);
                 doc["suggested"] = s;
+                // record 48, after the first real read: blind hides the
+                // systems' answers, never the file
+                with_file(registry.store(), stack, !plain(caller), &mut doc)?;
+                doc["header_door"] = json!(format!("/api/campaigns/{}/items/{item}/header", c.id));
                 doc["worth"] = if blind {
                     Value::Null
                 } else {
@@ -736,6 +798,51 @@ pub(crate) fn route(
                         .unwrap_or(Value::Null)
                 };
                 Ok(Reply::ok(doc))
+            }
+            // record 48, after the first real read: the whole stored header
+            // of a representative instance, less what names a person, for an
+            // item of the caller's own campaign
+            ["api", "campaigns", which, "items", item, "header"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                let stack = item_stack(registry.store(), item)?;
+                let mut doc = crate::file_header::whole(registry.store(), stack, !plain(caller))
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .ok_or_else(|| {
+                        Reply::error(404, format!("stack {stack} is not in the registry"))
+                    })?;
+                doc["item"] = json!(item);
+                doc["blind"] = json!(blind_to(registry.store(), caller, stack)?);
+                Ok(Reply::ok(doc))
+            }
+            // record 48: the axes the pack derives from an answer, partial or
+            // whole, so the reader shows them as the rater answers
+            ["api", "campaigns", which, "items", item, "derive"] if post => {
+                let doc = json_body(body)?;
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                let stack = item_stack(registry.store(), item)?;
+                let q = c.question().map_err(campaign_err)?;
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let value = match &doc["value"] {
+                    Value::Object(_) => doc["value"].clone(),
+                    Value::String(t) => serde_json::from_str::<Value>(t)
+                        .ok()
+                        .filter(Value::is_object)
+                        .ok_or_else(|| {
+                            Reply::error(400, "value: the answer so far, {axis: value}")
+                        })?,
+                    _ => return Err(Reply::error(400, "value: the answer so far, {axis: value}")),
+                };
+                let derived = derived_for(registry.store(), pack.as_deref(), &q, stack, &value)?
+                    .ok_or_else(|| {
+                        Reply::error(409, format!("campaign {} derives no axes", c.name))
+                    })?;
+                Ok(Reply::ok(
+                    json!({"item": item, "stack": stack, "derived": derived}),
+                ))
             }
             ["api", "campaigns", which, "batches"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -845,6 +952,8 @@ pub(crate) fn route(
                     &now,
                 )
                 .map_err(campaign_err)?;
+                // record 48: each accepted answer keeps what it derives
+                fill_derived(registry, pack.as_deref(), &c)?;
                 let accepted: Vec<Value> = done
                     .accepted
                     .iter()
@@ -1973,7 +2082,186 @@ fn complete_axes(
     let c = nils_pack::legal::constraints(pack, &axes, &values).map_err(|e| (400, e))?;
     question["values"] = c["values"].clone();
     question["constraints"] = c;
+    // record 48, after the first real read: the axes the pack computes from
+    // the answer, named by the caller and checked, or found in the pack
+    // when not named; `derive: []` derives nothing
+    let derive = match &question["derive"] {
+        Value::Null => nils_pack::derive::infer(pack, &axes).map_err(|e| (400, e))?,
+        Value::Array(_) => strings(&question["derive"]),
+        _ => return Err((400, "derive: a list of axis names".into())),
+    };
+    nils_pack::derive::check(pack, &axes, &derive).map_err(|e| (400, e))?;
+    question["derive"] = json!(derive);
     Ok(())
+}
+
+/// Record 48, after the first real read: the file's own text and physics
+/// beside a reader's document, blind or not. These are what a radiologist
+/// reads, never anything a system said of the stack.
+fn with_file(store: &mut Store, stack: i64, quasi: bool, doc: &mut Value) -> Result<(), Reply> {
+    let (texts, physics) = crate::file_header::texts_and_physics(store, stack, quasi)
+        .map_err(|e| Reply::error(500, e.to_string()))?;
+    doc["texts"] = Value::Object(texts);
+    doc["physics"] = Value::Object(physics);
+    Ok(())
+}
+
+/// The stack an item of stacks stands on.
+fn item_stack(store: &mut Store, item: i64) -> Result<i64, Reply> {
+    campaign::item(store, item)
+        .map_err(campaign_err)?
+        .ok_or_else(|| Reply::error(404, format!("no campaign item {item}")))?
+        .stack_id
+        .ok_or_else(|| {
+            Reply::error(
+                400,
+                format!("item {item} is a session's; only a stack's axes are derived"),
+            )
+        })
+}
+
+/// The stack the item of an assignment stands on, where it is a stack's.
+fn assignment_stack(
+    store: &mut Store,
+    campaign: i64,
+    assignment: i64,
+) -> Result<Option<i64>, Reply> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT i.stack_id FROM {} a JOIN {} i ON i.id = a.item_id WHERE a.id = {} AND a.campaign_id = {}",
+        store.qualified("campaign_assignment"),
+        store.qualified("campaign_item"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(assignment), Param::Int(campaign)])
+        .map_err(|e| Reply::error(500, e.to_string()))?
+        .and_then(|r| r.opt_int(0).ok().flatten()))
+}
+
+/// Record 48: the axes an axes question derives, computed for one stack
+/// from an answer (whole or partial, `{axis: value | [values] | null |
+/// "cant_tell"}`) through the served pack's own rules. None where the
+/// question derives nothing or no pack is served; an asked axis the answer
+/// does not name is taken as can't tell. Each derived axis comes back as
+/// a value, a list for a multi-valued axis, null for none, or `cant_tell`
+/// where an asked axis it reads was answered so.
+fn derived_for(
+    store: &mut Store,
+    pack: Option<&nils_pack::Pack>,
+    q: &campaign::Question,
+    stack: i64,
+    answer: &Value,
+) -> Result<Option<Value>, Reply> {
+    let campaign::Question::Axes { axes, derive, .. } = q else {
+        return Ok(None);
+    };
+    let Some(pack) = pack else {
+        return Ok(None);
+    };
+    if derive.is_empty() {
+        return Ok(None);
+    }
+    let Some((s, private)) = nils_classify::classify::stack_of(store, pack, stack)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+    else {
+        return Err(Reply::error(
+            409,
+            format!("stack {stack} has no fingerprint, so nothing is derived for it"),
+        ));
+    };
+    let mut given: BTreeMap<String, Option<Vec<String>>> = BTreeMap::new();
+    for axis in axes {
+        let names = value_names(Some(pack), Some(axis));
+        let one = |v: &str| names.get(v).cloned().unwrap_or_else(|| v.to_string());
+        let read = match &answer[axis] {
+            Value::Null if answer.get(axis).is_some() => Some(Vec::new()),
+            Value::String(t) if t == campaign::CANT_TELL => None,
+            Value::String(t) if t.trim().is_empty() => Some(Vec::new()),
+            Value::String(t) => Some(vec![one(t.trim())]),
+            Value::Array(list) => {
+                let w: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+                if w.contains(&campaign::CANT_TELL) {
+                    None
+                } else {
+                    Some(w.into_iter().map(one).collect())
+                }
+            }
+            _ => None,
+        };
+        given.insert(axis.clone(), read);
+    }
+    let got = nils_pack::derive::derive(pack, &s, private, axes, derive, &given);
+    let mut out = serde_json::Map::new();
+    for d in derive {
+        let multi = pack
+            .axis_index(d)
+            .map(|i| pack.axes[i].multi)
+            .unwrap_or(false);
+        let v = match got.get(d) {
+            Some(None) => json!(campaign::CANT_TELL),
+            Some(Some(vals)) if multi => json!(vals),
+            Some(Some(vals)) => match vals.as_slice() {
+                [] => Value::Null,
+                [one] => json!(one),
+                many => json!(many),
+            },
+            None => Value::Null,
+        };
+        out.insert(d.clone(), v);
+    }
+    Ok(Some(Value::Object(out)))
+}
+
+/// Record 48: every kept answer of an axes campaign that derives axes and
+/// has none kept yet (given to a batch, or before a requestion) gets what
+/// it derives, from its own value, through the served pack. What an answer
+/// derived once is never changed.
+fn fill_derived(
+    registry: &mut Registry,
+    pack: Option<&nils_pack::Pack>,
+    c: &campaign::Campaign,
+) -> Result<usize, Reply> {
+    let q = c.question().map_err(campaign_err)?;
+    let campaign::Question::Axes {
+        axes,
+        constraints,
+        derive,
+    } = &q
+    else {
+        return Ok(0);
+    };
+    if derive.is_empty() || pack.is_none() {
+        return Ok(0);
+    }
+    let items: BTreeMap<i64, Option<i64>> = campaign::items(registry.store(), c.id)
+        .map_err(campaign_err)?
+        .into_iter()
+        .map(|i| (i.id, i.stack_id))
+        .collect();
+    let mut n = 0;
+    for a in campaign::answers(registry.store(), c.id).map_err(campaign_err)? {
+        if a.derived.is_some() {
+            continue;
+        }
+        let (Some(v), Some(Some(stack))) = (a.value.as_deref(), items.get(&a.item_id)) else {
+            continue;
+        };
+        let Ok(joint) = campaign::stored_joint_of(axes, constraints, v) else {
+            continue;
+        };
+        let obj: serde_json::Map<String, Value> = joint
+            .iter()
+            .map(|(k, vals)| (k.clone(), json!(vals)))
+            .collect();
+        if let Some(d) = derived_for(registry.store(), pack, &q, *stack, &Value::Object(obj))?
+            && campaign::set_derived(registry.store(), a.id, &d).map_err(campaign_err)?
+        {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// The stacks a campaign's items stand on: an item's stack, a session's
@@ -2421,6 +2709,28 @@ pub(crate) enum CampaignCommand {
         #[arg(long, value_name = "DIR")]
         pack_dir: Option<PathBuf>,
         /// The pack a pick campaign's picks are written under
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move an open axes campaign to fewer asked axes, the rest derived
+    /// from each answer through the pack's rules (record 48). Its items and
+    /// every answer are kept; an answer given before is read on the axes
+    /// asked now and derives the rest
+    Requestion {
+        /// The campaign, by name or id
+        campaign: String,
+        /// The axes the rater answers now, each asked before
+        #[arg(long, value_name = "AXES", value_delimiter = ',', required = true)]
+        axes: Vec<String>,
+        /// The axes derived from the answer; the pack's own when not given
+        #[arg(long, value_name = "AXES", value_delimiter = ',')]
+        derive: Option<Vec<String>>,
+        /// Where the pack is
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// The pack the campaign was made under
         #[arg(long, default_value = "mri")]
         pack: String,
         #[arg(long)]
@@ -2935,11 +3245,35 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     let pack = crate::pack_dir(home, None)
                         .ok()
                         .and_then(|d| crate::reader::served_pack(Some(&d), &name));
-                    suggested_for(registry.store(), &c, assignment, pack.as_deref())
-                        .map_err(rerr)?
+                    let suggested =
+                        suggested_for(registry.store(), &c, assignment, pack.as_deref())
+                            .map_err(rerr)?;
+                    // record 48: what the answer derives, under the pack the
+                    // campaign was made under
+                    let pack = pack.filter(|p| {
+                        c.pack_version.as_deref()
+                            == Some(format!("{}@{}", p.name, p.version).as_str())
+                    });
+                    let obj = value
+                        .as_deref()
+                        .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                        .filter(Value::is_object);
+                    let derived = match (
+                        obj,
+                        assignment_stack(registry.store(), c.id, assignment).map_err(rerr)?,
+                    ) {
+                        (Some(obj), Some(stack)) => {
+                            let q = c.question().map_err(cerr)?;
+                            derived_for(registry.store(), pack.as_deref(), &q, stack, &obj)
+                                .map_err(rerr)?
+                        }
+                        _ => None,
+                    };
+                    (suggested, derived)
                 }
-                None => None,
+                None => (None, None),
             };
+            let (suggested, derived) = suggested;
             let done = campaign::answer_with(
                 &mut registry,
                 &Given {
@@ -2956,6 +3290,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 &campaign::Timing {
                     suggested: suggested.as_deref(),
                     batch: false,
+                    derived: derived.as_ref(),
                 },
                 &now,
             )
@@ -3032,6 +3367,73 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             println!("  agreement {}", closed.agreement);
             Ok(())
         }
+        CampaignCommand::Requestion {
+            campaign: which,
+            axes,
+            derive,
+            pack_dir,
+            pack,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let served = crate::pack_dir(home, pack_dir)
+                .ok()
+                .and_then(|d| nils_pack::load(&d.join(&pack), None).ok())
+                .ok_or_else(|| {
+                    usage(format!(
+                        "the {pack} pack is not found; name it with --pack-dir"
+                    ))
+                })?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            if let Some(v) = c.pack_version.as_deref()
+                && v != format!("{}@{}", served.name, served.version)
+            {
+                return Err(fail(format!(
+                    "campaign {} was made under {v}, and the pack found is {}@{}; requestion it under the pack it was made under",
+                    c.name, served.name, served.version
+                )));
+            }
+            // the vocabulary the campaign's maker chose stays, on the axes
+            // still asked
+            let mut values = serde_json::Map::new();
+            for a in &axes {
+                if let Some(v) = c.question["values"].get(a) {
+                    values.insert(a.clone(), v.clone());
+                }
+            }
+            let mut question = json!({"kind": "axes", "axes": axes, "values": values});
+            if let Some(d) = &derive {
+                question["derive"] = json!(d);
+            }
+            complete_axes(&mut question, Some(&served)).map_err(|(_, m)| usage(m))?;
+            let done = campaign::requestion(&mut registry, &which, &question, &who(), &now)
+                .map_err(cerr)?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            let filled = fill_derived(&mut registry, Some(&served), &c).map_err(rerr)?;
+            let out = json!({
+                "campaign": done.campaign, "name": c.name,
+                "asked_before": done.asked_before, "asked": done.asked,
+                "derive": done.derive, "answers_kept": done.answers,
+                "answers_derived": filled,
+            });
+            if json {
+                print(&out);
+            } else {
+                println!(
+                    "campaign {} asks {} and derives {}; {} answer(s) kept, {} derived now",
+                    c.name,
+                    done.asked.join(", "),
+                    if done.derive.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        done.derive.join(", ")
+                    },
+                    done.answers,
+                    filled
+                );
+            }
+            Ok(())
+        }
         CampaignCommand::Export {
             campaign: which,
             to,
@@ -3042,6 +3444,21 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let mut registry = crate::open(home)?;
             require_export(&mut registry, &to)?;
             let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            // record 48: answers without what they derive get it, under the
+            // pack the campaign was made under only
+            let pack_name = c
+                .pack_version
+                .as_deref()
+                .and_then(|v| v.split('@').next())
+                .unwrap_or("mri")
+                .to_string();
+            let served = crate::pack_dir(home, None)
+                .ok()
+                .and_then(|d| nils_pack::load(&d.join(&pack_name), None).ok())
+                .filter(|p| {
+                    c.pack_version.as_deref() == Some(format!("{}@{}", p.name, p.version).as_str())
+                });
+            fill_derived(&mut registry, served.as_ref(), &c).map_err(rerr)?;
             let of = if answers { Of::Answers } else { Of::Outcomes };
             let rows = labels::campaign_labels(registry.store(), c.id, of).map_err(lerr)?;
             let name = name.unwrap_or_else(|| c.name.clone());

@@ -98,6 +98,11 @@ pub enum Question {
     Axes {
         axes: Vec<String>,
         constraints: Value,
+        /// Record 48, after the first real read: the axes the rater is not
+        /// asked, which the engine computes from the answer through the
+        /// pack's rules (`nils_pack::derive`) and keeps beside it, marked
+        /// derived. Empty where the question derives nothing.
+        derive: Vec<String>,
     },
     /// Which stacks stand for a role in a session.
     Pick { role: String, scheme: String },
@@ -168,7 +173,32 @@ impl Question {
                 }
                 let constraints = v["constraints"].clone();
                 check_constraints(&axes, &constraints)?;
-                Question::Axes { axes, constraints }
+                let derive: Vec<String> = match &v["derive"] {
+                    Value::Null => Vec::new(),
+                    Value::Array(list) => list
+                        .iter()
+                        .map(|x| {
+                            x.as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .ok_or_else(|| invalid("question.derive: a list of axis names"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                    _ => return Err(invalid("question.derive: a list of axis names")),
+                };
+                if derive.iter().collect::<BTreeSet<_>>().len() != derive.len() {
+                    return Err(invalid("question.derive names an axis twice"));
+                }
+                if let Some(a) = derive.iter().find(|d| axes.contains(d)) {
+                    return Err(invalid(format!(
+                        "{a} is asked and derived at once: an asked axis is the rater's to answer"
+                    )));
+                }
+                Question::Axes {
+                    axes,
+                    constraints,
+                    derive,
+                }
             }
             "pick" => Question::Pick {
                 role: v["role"]
@@ -226,10 +256,20 @@ impl Question {
                 }
                 v
             }
-            Question::Axes { axes, constraints } => json!({
-                "kind": "axes", "axes": axes, "values": constraints["values"],
-                "constraints": constraints,
-            }),
+            Question::Axes {
+                axes,
+                constraints,
+                derive,
+            } => {
+                let mut v = json!({
+                    "kind": "axes", "axes": axes, "values": constraints["values"],
+                    "constraints": constraints,
+                });
+                if !derive.is_empty() {
+                    v["derive"] = json!(derive);
+                }
+                v
+            }
             Question::Pick { role, scheme } => {
                 json!({"kind": "pick", "role": role, "scheme": scheme})
             }
@@ -284,7 +324,9 @@ impl Question {
                     )));
                 }
             }
-            Question::Axes { axes, constraints } => {
+            Question::Axes {
+                axes, constraints, ..
+            } => {
                 let v = value.ok_or_else(|| {
                     invalid(format!(
                         "the answer names a value of each of {}, as {{axis: value}}",
@@ -331,7 +373,16 @@ impl Question {
     /// None where there is nothing the engine can compare (a mask).
     fn comparable(&self, a: &Answer) -> Option<String> {
         match self {
-            Question::Axis { .. } | Question::Axes { .. } | Question::Free => a.value.clone(),
+            // an answer kept from before a requestion is compared on the
+            // axes asked now
+            Question::Axes {
+                axes, constraints, ..
+            } => a.value.as_deref().map(|v| {
+                stored_joint_of(axes, constraints, v)
+                    .map(|j| canonical_joint(constraints, &j))
+                    .unwrap_or_else(|_| v.to_string())
+            }),
+            Question::Axis { .. } | Question::Free => a.value.clone(),
             Question::Pick { .. } => a
                 .value
                 .as_deref()
@@ -454,6 +505,21 @@ pub fn joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Join
 /// never skipped by accident.
 pub fn answer_joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Joint, Error> {
     read_joint(axes, constraints, text, true)
+}
+
+/// A kept answer read against the question as it stands: an answer given
+/// before `nils campaign requestion` moved an axis from asked to derived
+/// still names that axis, and is read on the axes asked now. The answer
+/// itself is never rewritten.
+pub fn stored_joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Joint, Error> {
+    let trimmed = match serde_json::from_str::<Value>(text) {
+        Ok(Value::Object(mut m)) => {
+            m.retain(|k, _| axes.contains(k));
+            Value::Object(m).to_string()
+        }
+        _ => text.to_string(),
+    };
+    read_joint(axes, constraints, &trimmed, true)
 }
 
 fn read_joint(
@@ -2786,6 +2852,8 @@ pub struct Answer {
     pub via: Option<String>,
     /// Record 48: the rater marked the stack unsure.
     pub unsure: bool,
+    /// Record 48: the axes derived from the answer through the pack.
+    pub derived: Option<Value>,
 }
 
 impl Answer {
@@ -2798,11 +2866,12 @@ impl Answer {
             "actor_detail": self.actor_detail, "answered_at": self.answered_at,
             "model_id": self.model_id, "seconds": self.seconds, "suggested": self.suggested,
             "changed": self.changed, "via": self.via, "unsure": self.unsure,
+            "derived": self.derived,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 20] = [
+const ANSWER_COLUMNS: [&str; 21] = [
     "id",
     "campaign_id",
     "item_id",
@@ -2823,6 +2892,7 @@ const ANSWER_COLUMNS: [&str; 20] = [
     "changed",
     "via",
     "unsure",
+    "derived",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -2848,6 +2918,161 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
         changed: r.opt_int(17)?.map(|c| c != 0),
         via: r.opt_text(18)?.map(str::to_string),
         unsure: r.opt_int(19)?.is_some_and(|u| u != 0),
+        derived: {
+            let d = json_at(r, 20)?;
+            (!d.is_null()).then_some(d)
+        },
+    })
+}
+
+/// Record 48: keep what the engine derived from a kept answer that has
+/// none yet (an answer given to a batch, or before its question derived
+/// anything). What an answer derived is never changed once kept; the
+/// answer's own value is never touched. True where it was written.
+pub fn set_derived(store: &mut Store, answer: i64, derived: &Value) -> Result<bool, Error> {
+    let d = store.dialect();
+    let n = store.execute(
+        &format!(
+            "UPDATE {} SET derived = {} WHERE id = {} AND derived IS NULL",
+            store.qualified("campaign_answer"),
+            d.param(1, Type::Json),
+            d.param(2, Type::Int)
+        ),
+        &[Param::from(derived.to_string()), Param::Int(answer)],
+    )?;
+    Ok(n > 0)
+}
+
+/// What [`requestion`] did.
+#[derive(Debug, Clone)]
+pub struct Requestioned {
+    pub campaign: i64,
+    pub asked_before: Vec<String>,
+    pub asked: Vec<String>,
+    pub derive: Vec<String>,
+    /// The answers kept, which are read on the axes asked now.
+    pub answers: usize,
+}
+
+/// Record 48, after the first real read: move an open axes campaign to a
+/// question that asks fewer axes and derives the rest, keeping its items
+/// and every answer given. Every axis asked now was asked before, so each
+/// kept answer answers it; an answer's axes that are derived now stay in
+/// its value as the rater gave them and are read no more, and the answer is
+/// never rewritten. Refused while an item is leased, since the rater holds
+/// the old form, and for any campaign that is not open or does not ask
+/// axes. The caller fills what each kept answer derives
+/// ([`set_derived`]).
+pub fn requestion(
+    registry: &mut Registry,
+    which: &str,
+    question: &Value,
+    who: &str,
+    now: &str,
+) -> Result<Requestioned, Error> {
+    let c = find(registry.store(), which)?;
+    if c.status != "open" {
+        return Err(refused(format!("campaign {} is {}", c.name, c.status)));
+    }
+    let Question::Axes { axes: before, .. } = c.question()? else {
+        return Err(refused(format!(
+            "campaign {} does not ask axes; only an axes question moves axes to derived",
+            c.name
+        )));
+    };
+    let next = Question::parse(question)?;
+    let Question::Axes {
+        axes,
+        constraints,
+        derive,
+    } = &next
+    else {
+        return Err(invalid("the new question asks axes"));
+    };
+    if let Some(a) = axes.iter().find(|a| !before.contains(a)) {
+        return Err(refused(format!(
+            "{a} was not asked before, so the answers kept do not answer it; a requestion only moves asked axes to derived"
+        )));
+    }
+    let store = registry.store();
+    store.begin()?;
+    let done = (|| -> Result<usize, Error> {
+        lock(store, c.id)?;
+        let held = assignments(store, c.id)?
+            .into_iter()
+            .filter(|a| matches!(a.state.as_str(), "leased" | "offered"))
+            .count();
+        if held > 0 {
+            return Err(refused(format!(
+                "{held} item(s) of {} are leased under the question as it stands; wait for them to be answered or released",
+                c.name
+            )));
+        }
+        // every kept answer still reads on the axes asked now
+        let kept = answers(store, c.id)?;
+        for a in &kept {
+            if let Some(v) = a.value.as_deref() {
+                let j = stored_joint_of(axes, constraints, v)?;
+                legal(constraints, &j).map_err(|e| {
+                    refused(format!(
+                        "answer {} does not read on the axes asked now: {e}",
+                        a.id
+                    ))
+                })?;
+            }
+        }
+        store.update_by_id(
+            table("campaign"),
+            &[("question", Param::from(next.to_json().to_string()))],
+            "id",
+            c.id,
+        )?;
+        // the items' own review items say which axes they ask
+        for it in items(store, c.id)? {
+            if let Some(ri) =
+                crate::review::item(store, it.review_item_id).map_err(|e| invalid(e.to_string()))?
+                && ri.evidence.get("axes").is_some()
+            {
+                let mut ev = ri.evidence.clone();
+                ev["axes"] = json!(axes);
+                store.update_by_id(
+                    table("review_item"),
+                    &[("evidence", Param::from(ev.to_string()))],
+                    "id",
+                    ri.id,
+                )?;
+            }
+        }
+        Ok(kept.len())
+    })();
+    let kept = match done {
+        Ok(n) => n,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e);
+        }
+    };
+    store.commit()?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::CampaignRequestion,
+            scope: json!({"campaign": c.id, "name": c.name}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "asked_before": before, "asked": axes, "derive": derive,
+                "answers_kept": kept, "at": now,
+            })),
+        },
+    )?;
+    Ok(Requestioned {
+        campaign: c.id,
+        asked_before: before,
+        asked: axes.clone(),
+        derive: derive.clone(),
+        answers: kept,
     })
 }
 
@@ -2944,6 +3169,11 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
 pub struct Timing<'a> {
     pub suggested: Option<&'a str>,
     pub batch: bool,
+    /// Record 48: the axes the engine derived from this answer through the
+    /// pack, `{axis: value | [values] | null | "cant_tell"}`, kept beside
+    /// it and marked derived. The engine computes them; a caller's own are
+    /// never taken.
+    pub derived: Option<&'a Value>,
 }
 
 /// An answer's text as it is kept: a pick's stacks as ids, an axes answer
@@ -2951,9 +3181,9 @@ pub struct Timing<'a> {
 fn kept_value(question: &Question, v: &str) -> Result<String, Error> {
     Ok(match question {
         Question::Pick { .. } => join_ids(&pick_stacks(v)?),
-        Question::Axes { axes, constraints } => {
-            canonical_joint(constraints, &answer_joint_of(axes, constraints, v)?)
-        }
+        Question::Axes {
+            axes, constraints, ..
+        } => canonical_joint(constraints, &answer_joint_of(axes, constraints, v)?),
         _ => v.trim().to_string(),
     })
 }
@@ -3103,6 +3333,7 @@ pub fn answer_with(
                 changed,
                 batch: t.batch,
                 actor_detail: &actor_detail,
+                derived: t.derived,
             },
             now,
         )
@@ -3160,6 +3391,8 @@ struct Written<'a> {
     changed: Option<bool>,
     batch: bool,
     actor_detail: &'a Value,
+    /// Record 48: what the engine derived from the answer, kept beside it.
+    derived: Option<&'a Value>,
 }
 
 /// Write an answer on a leased assignment and move its item on, inside the
@@ -3216,6 +3449,7 @@ fn write_answer(
                     "changed",
                     "via",
                     "unsure",
+                    "derived",
                 ],
             )
             .returning(&["id"]),
@@ -3245,6 +3479,8 @@ fn write_answer(
                 w.changed.map_or(Param::Null, |c| Param::Int(i64::from(c))),
                 Param::from(if w.batch { "batch" } else { "claim" }),
                 Param::Int(i64::from(w.given.unsure)),
+                w.derived
+                    .map_or(Param::Null, |d| Param::from(d.to_string())),
             ]],
         )?
         .first()
@@ -3508,6 +3744,7 @@ pub fn accept_many(
                     changed,
                     batch: true,
                     actor_detail: &actor_detail,
+                    derived: None,
                 },
                 now,
             )?;
@@ -4287,12 +4524,15 @@ fn close_items(
         }
         match c.closes_into.as_str() {
             "decision" | "stage" if matches!(question, Question::Axes { .. }) => {
-                let Question::Axes { axes, constraints } = question else {
+                let Question::Axes {
+                    axes, constraints, ..
+                } = question
+                else {
                     unreachable!("matched above");
                 };
                 let joint = it.outcome["value"]
                     .as_str()
-                    .map(|v| answer_joint_of(axes, constraints, v));
+                    .map(|v| stored_joint_of(axes, constraints, v));
                 let Some(Ok(joint)) = joint else {
                     out.refused
                         .push((it.id, "the item came to no joint answer".into()));

@@ -87,11 +87,16 @@ pub struct Label {
     /// stack unsure; for an outcome, whether any answer it settled on did.
     /// Empty for a decision's label.
     pub unsure: Option<bool>,
+    /// Record 48: for an axes campaign's label, whether the axis was derived
+    /// from the answer through the pack (true) or answered (false). Empty
+    /// for any other label.
+    pub derived: Option<bool>,
 }
 
-/// The columns of `labels.tsv`, in order. `unsure` joined last (record
-/// 48); a set written before it has the other twelve, [`LEGACY_COLUMNS`].
-pub const COLUMNS: [&str; 13] = [
+/// The columns of `labels.tsv`, in order. `unsure` joined (record 48),
+/// then `derived`; a set written before them has the first twelve,
+/// [`LEGACY_COLUMNS`], or the first thirteen, [`UNSURE_COLUMNS`].
+pub const COLUMNS: [&str; 14] = [
     "stack_id",
     "subject_id",
     "session_day",
@@ -105,10 +110,15 @@ pub const COLUMNS: [&str; 13] = [
     "model_id",
     "answer_id",
     "unsure",
+    "derived",
 ];
 
 /// The columns of a `labels.tsv` written before `unsure` joined.
 pub const LEGACY_COLUMNS: usize = 12;
+
+/// The columns of a `labels.tsv` written after `unsure` and before
+/// `derived` joined.
+pub const UNSURE_COLUMNS: usize = 13;
 
 fn cell(v: Option<String>) -> String {
     v.map(|s| s.replace(['\t', '\n', '\r'], " "))
@@ -157,6 +167,7 @@ pub fn tsv(labels: &[Label]) -> String {
             cell(l.model_id.map(|v| v.to_string())),
             cell(l.answer_id.map(|v| v.to_string())),
             cell(l.unsure.map(|v| v.to_string())),
+            cell(l.derived.map(|v| v.to_string())),
         ];
         out.push_str(&line.join("\t"));
         out.push('\n');
@@ -353,6 +364,7 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
             model_id: s.model_id,
             answer_id: None,
             unsure: None,
+            derived: None,
         });
     }
     Ok(out)
@@ -411,8 +423,21 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
         of_items.entry(a.item_id).or_default().push(a);
     }
     // record 45: an axes question is labelled axis by axis
-    if let campaign::Question::Axes { axes, constraints } = &question {
-        return axes_labels(store, campaign, axes, constraints, &items, &answers, of);
+    if let campaign::Question::Axes {
+        axes,
+        constraints,
+        derive,
+    } = &question
+    {
+        return axes_labels(
+            store,
+            campaign,
+            (axes, derive),
+            constraints,
+            &items,
+            &answers,
+            of,
+        );
     }
     let mut out = Vec::new();
     match of {
@@ -436,6 +461,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     model_id: a.model_id,
                     answer_id: Some(a.id),
                     unsure: Some(a.unsure),
+                    derived: None,
                 });
             }
         }
@@ -572,7 +598,7 @@ fn settled_unsure<'a>(
 fn axes_labels(
     store: &mut Store,
     campaign: i64,
-    axes: &[String],
+    (axes, derive): (&[String], &[String]),
     constraints: &Value,
     items: &BTreeMap<i64, crate::campaign::Item>,
     answers: &[crate::campaign::Answer],
@@ -590,10 +616,11 @@ fn axes_labels(
                 let Some(Ok(j)) = a
                     .value
                     .as_deref()
-                    .map(|v| campaign::answer_joint_of(axes, constraints, v))
+                    .map(|v| campaign::stored_joint_of(axes, constraints, v))
                 else {
                     continue;
                 };
+                let marked = (!derive.is_empty()).then_some(false);
                 for axis in axes {
                     out.push(Label {
                         stack_id: it.stack_id,
@@ -606,6 +633,24 @@ fn axes_labels(
                         model_id: a.model_id,
                         answer_id: Some(a.id),
                         unsure: Some(a.unsure),
+                        derived: marked,
+                        ..Label::default()
+                    });
+                }
+                // record 48: the axes derived from this answer, marked so
+                for axis in derive {
+                    out.push(Label {
+                        stack_id: it.stack_id,
+                        subject_id: it.subject_id,
+                        what: axis.clone(),
+                        value: a.derived.as_ref().and_then(|d| derived_text(&d[axis])),
+                        author_kind: a.author_kind.clone(),
+                        author: a.principal.clone(),
+                        campaign_id: Some(campaign),
+                        model_id: a.model_id,
+                        answer_id: Some(a.id),
+                        unsure: Some(a.unsure),
+                        derived: Some(true),
                         ..Label::default()
                     });
                 }
@@ -640,7 +685,7 @@ fn axes_labels(
                 }
                 let j = it.outcome["value"]
                     .as_str()
-                    .and_then(|v| campaign::answer_joint_of(axes, constraints, v).ok())
+                    .and_then(|v| campaign::stored_joint_of(axes, constraints, v).ok())
                     .unwrap_or_default();
                 let settled: Vec<&campaign::Answer> = answers
                     .iter()
@@ -652,6 +697,41 @@ fn axes_labels(
                     })
                     .collect();
                 let unsure = settled_unsure(it, answers.iter());
+                // record 48: a derived axis of an outcome is the value the
+                // answers it settled on derived, where they derived one
+                for axis in derive {
+                    let said: BTreeSet<Option<String>> = settled
+                        .iter()
+                        .map(|a| a.derived.as_ref().and_then(|d| derived_text(&d[axis])))
+                        .collect();
+                    let value = match said.len() {
+                        1 => said.into_iter().next().flatten(),
+                        _ => None,
+                    };
+                    out.push(Label {
+                        stack_id: it.stack_id,
+                        subject_id: it.subject_id,
+                        what: axis.clone(),
+                        value,
+                        author: settled
+                            .iter()
+                            .map(|a| a.principal.as_str())
+                            .collect::<Vec<_>>()
+                            .join("+"),
+                        author_kind: settled
+                            .iter()
+                            .map(|a| a.author_kind.as_str())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                            .join("+"),
+                        campaign_id: Some(campaign),
+                        unsure: Some(unsure),
+                        derived: Some(true),
+                        ..Label::default()
+                    });
+                }
+                let marked = (!derive.is_empty()).then_some(false);
                 for axis in axes {
                     let base = Label {
                         stack_id: it.stack_id,
@@ -659,6 +739,7 @@ fn axes_labels(
                         what: axis.clone(),
                         campaign_id: Some(campaign),
                         unsure: Some(unsure),
+                        derived: marked,
                         ..Label::default()
                     };
                     match decided.get(axis).and_then(Value::as_i64) {
@@ -696,6 +777,19 @@ fn axes_labels(
         }
     }
     Ok(out)
+}
+
+/// A derived axis's value as a label keeps it: a value, several joined by
+/// commas, `cant_tell`, or nothing for none.
+fn derived_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Array(list) => {
+            let w: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+            (!w.is_empty()).then(|| w.join(","))
+        }
+        _ => None,
+    }
 }
 
 // ------------------------------------------------------------- the sets
@@ -987,6 +1081,7 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
             let rows = keys_of_tsv(&text);
             let header = text.lines().next();
             let known = header == Some(COLUMNS.join("\t").as_str())
+                || header == Some(COLUMNS[..UNSURE_COLUMNS].join("\t").as_str())
                 || header == Some(COLUMNS[..LEGACY_COLUMNS].join("\t").as_str());
             if !known
                 || rows.len() as i64 != set.rows
@@ -2190,6 +2285,7 @@ pub fn imported_labels(store: &mut Store, axis: &str) -> Result<Vec<Label>, Erro
                 model_id: None,
                 answer_id: None,
                 unsure: None,
+                derived: None,
             })
         })
         .collect::<Result<_, StoreError>>()

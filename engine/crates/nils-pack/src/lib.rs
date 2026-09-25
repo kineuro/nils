@@ -14,6 +14,7 @@
 
 pub mod bids;
 pub mod corpus;
+pub mod derive;
 pub mod error;
 pub mod eval;
 pub mod expr;

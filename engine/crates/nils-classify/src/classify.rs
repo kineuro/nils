@@ -194,6 +194,26 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
     )
 }
 
+/// One stack as the pack sees it, with its series' private elements, for
+/// an evaluation of one stack outside a job (record 48: the axes derived
+/// from a person's answer). None where the stack has no fingerprint.
+pub fn stack_of(
+    store: &mut Store,
+    pack: &Pack,
+    stack: i64,
+) -> Result<Option<(Stack, Vec<String>)>, Error> {
+    let sql = select(store, None, false);
+    let rows = store.query(&sql, &[Param::Int(stack - 1), Param::Int(1)])?;
+    let Some(r) = rows.first() else {
+        return Ok(None);
+    };
+    if r.int(0)? != stack {
+        return Ok(None);
+    }
+    let (_, s, private) = to_stack(r, false, pack)?;
+    Ok(Some((s, private)))
+}
+
 /// The select of a bounded sample of stacks in a scope, in stack order,
 /// with the columns `select` reads without ids (Wave 4c §6.6). The
 /// parameters are the modality, the scope's own, then the limit.

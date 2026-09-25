@@ -232,7 +232,7 @@ struct Fired {
 impl Evaluated<'_> {
     /// The pack's verdict on this stack, with the evidence that made it.
     pub fn classify(&self) -> Verdict {
-        self.run(AxisPhase::Class, &[], false)
+        self.run(AxisPhase::Class, &[], &[], false)
     }
 
     /// The same verdict, with every rule's vote beside it (record 41, S2):
@@ -240,7 +240,7 @@ impl Evaluated<'_> {
     /// not the rule decided anything. The rest of the verdict is exactly
     /// what [`Evaluated::classify`] says.
     pub fn classify_with_votes(&self) -> Verdict {
-        self.run(AxisPhase::Class, &[], true)
+        self.run(AxisPhase::Class, &[], &[], true)
     }
 
     /// What to do with this stack, from what the rules and the passes decided
@@ -251,15 +251,70 @@ impl Evaluated<'_> {
     /// recomputed because the passes have run since, and a disposition worked
     /// out from the rules alone would be worked out from a gap.
     pub fn dispose(&self, decided: &[Vec<String>]) -> Verdict {
-        self.run(AxisPhase::Disposition, decided, false)
+        self.run(AxisPhase::Disposition, decided, &[], false)
     }
 
     /// [`Evaluated::dispose`], with every rule's vote beside it.
     pub fn dispose_with_votes(&self, decided: &[Vec<String>]) -> Verdict {
-        self.run(AxisPhase::Disposition, decided, true)
+        self.run(AxisPhase::Disposition, decided, &[], true)
     }
 
-    fn run(&self, phase: AxisPhase, seed: &[Vec<String>], voting: bool) -> Verdict {
+    /// Record 48: the pack's verdict with some axes held at a person's
+    /// answer. `pins` is one entry per axis of the pack, in the pack's
+    /// order; an axis with `Some` is taken as decided to those stored
+    /// values before any rule set runs, so every rule that reads it reads
+    /// the answer and none may change it. Both phases run, the class phase
+    /// and then the disposition from what it decided, and the passes do
+    /// not, since they read other stacks. The pinned axes come back as
+    /// given, of tier `answer`.
+    ///
+    /// `skip` names rules left out of the run, which never fire: the
+    /// derivation leaves out a route that decides an asked axis from the
+    /// file's own words, since its answer is the rater's now.
+    pub fn with_pins(
+        &self,
+        pins: &[Option<Vec<String>>],
+        skip: &dyn Fn(&crate::rules::RuleSet, &Rule) -> bool,
+    ) -> Verdict {
+        let class = self.run_skipping(AxisPhase::Class, &[], pins, false, skip);
+        let seed: Vec<Vec<String>> = self
+            .pack
+            .axes
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match pins.get(i).and_then(Option::as_ref) {
+                Some(p) => p.clone(),
+                None => class
+                    .axis(&a.name)
+                    .map(|v| v.values.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let mut out = self.run_skipping(AxisPhase::Disposition, &seed, pins, false, skip);
+        let mut axes = class.axes;
+        axes.append(&mut out.axes);
+        out.axes = axes;
+        out
+    }
+
+    fn run(
+        &self,
+        phase: AxisPhase,
+        seed: &[Vec<String>],
+        pins: &[Option<Vec<String>>],
+        voting: bool,
+    ) -> Verdict {
+        self.run_skipping(phase, seed, pins, voting, &|_, _| false)
+    }
+
+    fn run_skipping(
+        &self,
+        phase: AxisPhase,
+        seed: &[Vec<String>],
+        pins: &[Option<Vec<String>>],
+        voting: bool,
+        skip: &dyn Fn(&crate::rules::RuleSet, &Rule) -> bool,
+    ) -> Verdict {
         let pack = self.pack;
         let mut verdict = Verdict::default();
         {
@@ -287,6 +342,16 @@ impl Evaluated<'_> {
         // value and the citation.
         let mut decided_by: Vec<Option<(String, String, String, String)>> =
             vec![None; pack.axes.len()];
+        // Record 48: an axis held at a person's answer is decided before
+        // anything runs, and closed, so no rule set moves it.
+        for (i, pin) in pins.iter().enumerate().take(pack.axes.len()) {
+            if let Some(p) = pin {
+                closed[i] = true;
+                let mut d = self.decided.borrow_mut();
+                d[i].clear();
+                d[i].extend(p.iter().cloned());
+            }
+        }
 
         for set in &pack.rule_sets {
             if set.phase != phase {
@@ -310,6 +375,9 @@ impl Evaluated<'_> {
                 })
                 .collect();
             for (ri, rule) in set.rules.iter().enumerate() {
+                if skip(set, rule) {
+                    continue;
+                }
                 // A rule whose every axis is single-valued and already
                 // decided has nothing left to say. It is still evaluated,
                 // because a rule that would have said something different
@@ -474,6 +542,18 @@ impl Evaluated<'_> {
             // emitting them again would overwrite a pass's answer with the
             // seed it was read from.
             if axis.phase != phase {
+                continue;
+            }
+            if let Some(Some(p)) = pins.get(ai) {
+                let mut values = p.clone();
+                values.sort();
+                values.dedup();
+                verdict.axes.push(AxisVerdict {
+                    axis: axis.name.clone(),
+                    values,
+                    confidence: 1.0,
+                    tier: "answer".to_string(),
+                });
                 continue;
             }
             let mut hits = std::mem::take(&mut collected[ai]);

@@ -90,6 +90,29 @@ pub fn field_name(pack: &Pack, i: usize) -> Option<(String, bool)> {
         .map(|p| (p.name.clone(), false))
 }
 
+/// What a whole rule reads, with what gates it (record 48, derived axes):
+/// its clauses, its `requires`, the conditions on the values it sets, and
+/// its set's entry condition and derived values.
+pub fn rule_reads(pack: &Pack, set: &crate::rules::RuleSet, rule: &crate::rules::Rule) -> Reads {
+    let mut w = Walk::default();
+    for c in &rule.clauses {
+        w.clause(pack, c);
+    }
+    let mut exprs: Vec<&Expr> = Vec::new();
+    exprs.extend(rule.requires.iter());
+    exprs.extend(set.enter_when.iter());
+    for d in &set.derives {
+        exprs.extend(d.cases.iter().filter_map(|c| c.when.as_ref()));
+    }
+    for s in &rule.sets {
+        exprs.extend(s.values.iter().filter_map(|v| v.when.as_ref()));
+    }
+    for e in exprs {
+        w.expr(pack, e);
+    }
+    w.finish(pack)
+}
+
 /// What clause `clause` of rule `rule` in rule set `rule_set` reads; none
 /// when the pack has no such clause (a pack of another version).
 pub fn clause_reads(pack: &Pack, rule_set: &str, rule: &str, clause: usize) -> Option<Reads> {
@@ -97,46 +120,57 @@ pub fn clause_reads(pack: &Pack, rule_set: &str, rule: &str, clause: usize) -> O
     let r = set.rules.iter().find(|r| r.id == rule)?;
     let c = r.clauses.get(clause)?;
     let mut w = Walk::default();
-    match c {
-        Clause::Flag { flag, .. } => w.flag(pack, *flag),
-        Clause::Keywords { field, .. } => {
-            w.fields.insert(*field);
+    w.clause(pack, c);
+    Some(w.finish(pack))
+}
+
+impl Walk {
+    fn clause(&mut self, pack: &Pack, c: &Clause) {
+        match c {
+            Clause::Flag { flag, .. } => self.flag(pack, *flag),
+            Clause::Keywords { field, .. } => {
+                self.fields.insert(*field);
+            }
+            Clause::AnyFlag { flags, .. } | Clause::Combination { flags, .. } => {
+                for f in flags {
+                    self.flag(pack, *f);
+                }
+            }
+            Clause::When { expr, .. } => self.expr(pack, expr),
         }
-        Clause::AnyFlag { flags, .. } | Clause::Combination { flags, .. } => {
-            for f in flags {
-                w.flag(pack, *f);
+    }
+
+    fn finish(self, pack: &Pack) -> Reads {
+        let w = self;
+        let mut out = Reads::default();
+        for i in &w.fields {
+            match field_name(pack, *i) {
+                Some((name, true)) => out.texts.push(name),
+                Some((name, false)) => out.fields.push(name),
+                None => {}
             }
         }
-        Clause::When { expr, .. } => w.expr(pack, expr),
-    }
-    let mut out = Reads::default();
-    for i in &w.fields {
-        match field_name(pack, *i) {
-            Some((name, true)) => out.texts.push(name),
-            Some((name, false)) => out.fields.push(name),
-            None => {}
+        out.axes = w
+            .axes
+            .iter()
+            .filter_map(|a| pack.axes.get(*a).map(|x| x.name.clone()))
+            .collect();
+        out.flags = w
+            .flags
+            .iter()
+            .filter_map(|f| pack.flag_names.get(*f).cloned())
+            .collect();
+        for list in [
+            &mut out.fields,
+            &mut out.texts,
+            &mut out.axes,
+            &mut out.flags,
+        ] {
+            list.sort();
+            list.dedup();
         }
+        out
     }
-    out.axes = w
-        .axes
-        .iter()
-        .filter_map(|a| pack.axes.get(*a).map(|x| x.name.clone()))
-        .collect();
-    out.flags = w
-        .flags
-        .iter()
-        .filter_map(|f| pack.flag_names.get(*f).cloned())
-        .collect();
-    for list in [
-        &mut out.fields,
-        &mut out.texts,
-        &mut out.axes,
-        &mut out.flags,
-    ] {
-        list.sort();
-        list.dedup();
-    }
-    Some(out)
 }
 
 #[cfg(test)]
