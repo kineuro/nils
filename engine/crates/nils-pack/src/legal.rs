@@ -226,7 +226,8 @@ pub fn constraints(
 /// per value the question asks: its `label` where it differs from the
 /// identity, its `description` where the pack gives one, its `terms` (the
 /// pack's display synonyms) and its `keywords` (the words the pack's rules
-/// read for it, after any overlay). Generic vocabulary of the pack, the same
+/// read for it, after any overlay, less the words only a route's rule
+/// reads as its cue for a whole combination). Generic vocabulary of the pack, the same
 /// for every stack, so it is served on a blind item alike. An axis the pack
 /// does not have, or a value its axis does not declare, is left out.
 pub fn vocabulary(pack: &Pack, values: &BTreeMap<String, Vec<String>>) -> Value {
@@ -255,7 +256,14 @@ pub fn vocabulary(pack: &Pack, values: &BTreeMap<String, Vec<String>>) -> Value 
                 kept
             };
             let terms = fresh(&v.terms);
-            let keywords = fresh(&v.keywords);
+            // a route's cue for a whole combination is no name of each value it sets
+            let own: Vec<String> = v
+                .keywords
+                .iter()
+                .filter(|k| !v.route_words.contains(&k.trim().to_lowercase()))
+                .cloned()
+                .collect();
+            let keywords = fresh(&own);
             let mut e = json!({"terms": terms, "keywords": keywords});
             if v.label != v.id {
                 e["label"] = json!(v.label);
@@ -363,5 +371,56 @@ mod tests {
         // only what the question asks, and nothing of an axis the pack lacks
         assert!(v["technique"].get("TSE").is_none());
         assert!(v.get("colour").is_none());
+    }
+
+    #[test]
+    fn a_route_s_cue_is_no_name_of_every_value_it_sets() {
+        let pack = mri();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "technique".to_string(),
+            vec![
+                "EPI".to_string(),
+                "SE-EPI".to_string(),
+                "GRE-EPI".to_string(),
+            ],
+        );
+        values.insert(
+            "base".to_string(),
+            vec!["SWI".to_string(), "T2starw".to_string()],
+        );
+        let v = vocabulary(&pack, &values);
+        let words = |axis: &str, value: &str| -> Vec<String> {
+            ["terms", "keywords"]
+                .iter()
+                .flat_map(|l| v[axis][value][*l].as_array().cloned().unwrap_or_default())
+                .map(|x| x.as_str().unwrap().to_lowercase())
+                .collect()
+        };
+        // EPIMix reads swi for its 3D EPI SWI, yet SWI is no name of EPI
+        assert!(!words("technique", "EPI").contains(&"swi".to_string()));
+        assert!(!words("technique", "SE-EPI").contains(&"iso dwi".to_string()));
+        assert!(!words("technique", "GRE-EPI").contains(&"t2star".to_string()));
+        // the SWI route's words for its outputs are no name of base SWI
+        for w in ["minip", "magnitude", "qsm", "r2star"] {
+            assert!(!words("base", "SWI").contains(&w.to_string()), "{w}");
+        }
+        // base's own rules still find base SWI by its words
+        assert!(words("base", "SWI").contains(&"swan".to_string()));
+        // the packs door still shows every word that reaches the value
+        let (_, technique) = axis(&pack, "technique").unwrap();
+        let epi = technique.values.iter().find(|x| x.id == "EPI").unwrap();
+        assert!(epi.keywords.contains(&"swi".to_string()));
+        assert_eq!(epi.route_words, vec!["swi".to_string()]);
+        // a word the axis file lists for the value stays its name, though a route reads it too
+        values.insert("construct".to_string(), vec!["MyelinMap".to_string()]);
+        let v = vocabulary(&pack, &values);
+        let kw: Vec<String> = v["construct"]["MyelinMap"]["keywords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_lowercase())
+            .collect();
+        assert!(kw.contains(&"myelin".to_string()), "{kw:?}");
     }
 }

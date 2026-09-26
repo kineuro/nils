@@ -271,7 +271,7 @@ values:
     detection:
       exclusive: has_pd_synthetic
   MyelinMap:
-    terms: ['myelin water fraction', 'MWF', 'myelin map']
+    terms: ['myelin water fraction', 'MWF', 'myelin map', 'MyC']
     keywords:
       - myelin map
       - myelin
@@ -467,6 +467,6 @@ values:
   # an earlier version may name it. `nils pack shape` reports it unreachable.
   'FatFraction': {terms: ['fat fraction', 'PDFF', 'proton density fat fraction']}
   # The SyMRI route writes it; v0 declares it nowhere and wrote it 170 times.
-  'MultiQmap': {terms: ['multiple quantitative maps']}
+  'MultiQmap': {terms: ['multiple quantitative maps', 'qmaps']}
   # The EPIMix route writes it; v0 declares it nowhere and wrote it 67 times.
   'isoDWI': {terms: ['isotropic DWI', 'isoDWI']}

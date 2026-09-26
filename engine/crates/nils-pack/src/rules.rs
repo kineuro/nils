@@ -298,6 +298,12 @@ pub struct AxisValue {
     /// list a site amends as `lists.<axis>.<value>` (pack contract 5). The
     /// axis file's own list, or a longhand keyword rule's, or a bucket's.
     pub keywords: Vec<String>,
+    /// Record 48, the reader's search: the words among `keywords` that only
+    /// a route's rule reads (a rule set that is not the axis's own, such as
+    /// EPIMix or SWI), as its cue for the whole combination it sets. They
+    /// are no name of this value: `swi` sets technique EPI inside EPIMix,
+    /// yet SWI is not a name for EPI. The search leaves them out.
+    pub route_words: Vec<String>,
     /// The bucket the list is taken from, when the pack names one.
     pub bucket: Option<String>,
     /// How the value is reached other than by a word, as the pack wrote it.
@@ -372,6 +378,15 @@ pub fn amendable(axes: &[Axis], rule_sets: &[RuleSet]) -> Vec<String> {
 /// physics windows are written by the loader, which has them as written;
 /// a longhand rule's are its citation.
 pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
+    // the words each value's own axis reads for it, by (axis, value): the axis file's list first
+    let mut own_words: std::collections::BTreeSet<(usize, usize, String)> = Default::default();
+    for (a, axis) in axes.iter().enumerate() {
+        for (i, value) in axis.values.iter().enumerate() {
+            for w in &value.keywords {
+                own_words.insert((a, i, w.trim().to_lowercase()));
+            }
+        }
+    }
     for set in rule_sets {
         for rule in &set.rules {
             for s in &rule.sets {
@@ -389,6 +404,14 @@ pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
                     for c in &rule.clauses {
                         match c {
                             Clause::Keywords { list, bucket, .. } => {
+                                for w in list {
+                                    let w = w.trim().to_lowercase();
+                                    if own {
+                                        own_words.insert((s.axis, i, w));
+                                    } else if !value.route_words.contains(&w) {
+                                        value.route_words.push(w);
+                                    }
+                                }
                                 value.keywords = crate::overlay::merge(
                                     &value.keywords,
                                     &crate::overlay::Edit {
@@ -433,6 +456,14 @@ pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
                     }
                 }
             }
+        }
+    }
+    // a word the value's own axis also reads is its name after all
+    for (a, axis) in axes.iter_mut().enumerate() {
+        for (i, value) in axis.values.iter_mut().enumerate() {
+            value
+                .route_words
+                .retain(|w| !own_words.contains(&(a, i, w.clone())));
         }
     }
 }
