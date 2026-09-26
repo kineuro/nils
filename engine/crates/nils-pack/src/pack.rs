@@ -37,7 +37,9 @@ use crate::yaml::{self, File};
 /// (record 26, decision 12) changes no manifest key: it opens every axis
 /// value's word list to an overlay, as `lists.<axis>.<value>` beside the
 /// `buckets`, and writes the overlay document down as a schema of its own.
-pub const CONTRACT: u32 = 5;
+/// Version 6 (record 48) adds the optional `excludes` and `hints` keys:
+/// constraints between axes over axis values alone, hard and soft.
+pub const CONTRACT: u32 = 6;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -152,6 +154,12 @@ pub struct Pack {
     /// When a person is asked about an axis. The pack's call, not the
     /// engine's (§8.2): what counts as doubt is knowledge about the domain.
     pub review: Review,
+    /// Record 48 (pack contract 6): a value on one axis ruling values of
+    /// another out, hard, frozen into a campaign with the implications.
+    pub excludes: Vec<crate::rules::Exclude>,
+    /// Record 48 (pack contract 6): what is usual and never enforced, which
+    /// a reader shows with its reason.
+    pub hints: Vec<crate::rules::Hint>,
 }
 
 /// How near a confidence has to be to a threshold to be on it.
@@ -742,6 +750,43 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
     }
 
+    // --- record 48: what one axis rules out on another, and what is usual,
+    // both over axis values alone, once every axis exists
+    let mut excludes: Vec<crate::rules::Exclude> = Vec::new();
+    let mut hints: Vec<crate::rules::Hint> = Vec::new();
+    for f in files_of(m, &manifest, dir, "excludes")? {
+        load_cross(
+            &f,
+            "excludes",
+            &axes,
+            &derived,
+            &ingest,
+            &flag_ix,
+            &parsers,
+            &parser_ix,
+            &buckets,
+            &mut regexes,
+            &mut excludes,
+            &mut hints,
+        )?;
+    }
+    for f in files_of(m, &manifest, dir, "hints")? {
+        load_cross(
+            &f,
+            "hints",
+            &axes,
+            &derived,
+            &ingest,
+            &flag_ix,
+            &parsers,
+            &parser_ix,
+            &buckets,
+            &mut regexes,
+            &mut excludes,
+            &mut hints,
+        )?;
+    }
+
     // --- passes, last: a pass may name an axis and a flag, and both exist now
     let mut passes: Vec<Pass> = Vec::new();
     for pf in files_of(m, &manifest, dir, "passes")? {
@@ -785,6 +830,8 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         overlay_terms,
         cases: 0,
         review,
+        excludes,
+        hints,
     };
 
     // The pack's own corpus is the last thing between it and use, and it
@@ -1130,6 +1177,195 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                 value.clone(),
                 f.blame(yaml::text(yaml::get(bm, "why", &at)?, &at))?,
             );
+        }
+    }
+    Ok(())
+}
+
+/// Record 48: one file of cross-axis constraints, `excludes` (hard) or
+/// `hints` (soft), each a list of entries with an `id`, a `when` over axis
+/// values alone, what it rules out or suggests, `why` and `sources`.
+///
+/// An exclusion names the values it rules out as `{axis, is}`, `{axis,
+/// any: [..]}` or `{axis, family}`, the last every value of the axis whose
+/// `family` is that one; all three are values of the axis, by identity, by
+/// the time a campaign freezes them. A hint names one value as `suggest:
+/// {axis, value}`, and may cite `counter`, the sources that show it is not
+/// always so.
+#[allow(clippy::too_many_arguments)]
+fn load_cross(
+    f: &File,
+    key: &str,
+    axes: &[Axis],
+    derived: &[Normalizer],
+    ingest: &[crate::private::Ingest],
+    flag_ix: &HashMap<String, usize>,
+    parsers: &[ParserDef],
+    parser_ix: &HashMap<String, usize>,
+    buckets: &BTreeMap<String, Vec<String>>,
+    regexes: &mut Vec<Regex>,
+    excludes: &mut Vec<crate::rules::Exclude>,
+    hints: &mut Vec<crate::rules::Hint>,
+) -> R<()> {
+    let here = |e: Error| e.in_file(&f.path, Some(&f.source));
+    let top = f.blame(yaml::obj(&f.value, key))?;
+    for k in top.keys() {
+        if k != key {
+            return Err(here(Error::at(
+                k,
+                format!("a file of {key} holds `{key}:` and nothing else"),
+            )));
+        }
+    }
+    let axis_of = |name: &str, at: &str| -> R<usize> {
+        axes.iter()
+            .position(|a| a.name == name)
+            .ok_or_else(|| Error::at(at, format!("no axis named {name}")))
+    };
+    let value_of = |ai: usize, v: &str, at: &str| -> R<usize> {
+        let a = &axes[ai];
+        a.value_index(v)
+            .or_else(|| a.values.iter().position(|x| x.label == v))
+            .ok_or_else(|| Error::at(at, format!("{v} is not a value of the {} axis", a.name)))
+    };
+    let strings = |v: Option<&Value>, at: &str| -> R<Vec<String>> {
+        match v {
+            Some(v) => yaml::texts(v, at),
+            None => Ok(Vec::new()),
+        }
+    };
+    for (i, entry) in f
+        .blame(yaml::arr(yaml::get(top, key, key)?, key))?
+        .iter()
+        .enumerate()
+    {
+        let at = format!("{key}[{i}]");
+        let e = f.blame(yaml::obj(entry, &at))?;
+        let id = f.blame(yaml::text(yaml::get(e, "id", &at)?, &at))?;
+        let at = format!("{key}.{id}");
+        if excludes.iter().any(|x| x.id == id) || hints.iter().any(|x| x.id == id) {
+            return Err(here(Error::at(&at, "is declared twice")));
+        }
+        let allowed: &[&str] = if key == "excludes" {
+            &["id", "when", "excludes", "why", "sources"]
+        } else {
+            &["id", "when", "suggest", "why", "sources", "counter"]
+        };
+        for k in e.keys() {
+            if !allowed.contains(&k.as_str()) {
+                return Err(here(Error::at(
+                    &at,
+                    format!(
+                        "{k} is not a key of an entry of {key}; they are {}",
+                        allowed.join(", ")
+                    ),
+                )));
+            }
+        }
+        let mut sc = Scope {
+            derived,
+            ingest,
+            axes,
+            parsers,
+            parser_ix,
+            buckets,
+            within: None,
+            // a flag compiles, so the refusal below can say what is wrong
+            flags: Some(flag_ix),
+            regexes: &mut *regexes,
+            deps: HashSet::new(),
+        };
+        let when = f.blame(compile(
+            yaml::get(e, "when", &at).map_err(here)?,
+            &format!("{at}.when"),
+            &mut sc,
+        ))?;
+        if !when.reads_only_axes() {
+            return Err(here(Error::at(
+                format!("{at}.when"),
+                "reads something other than axis values; a constraint between axes is about the answer, never the file",
+            )));
+        }
+        let why = f.blame(yaml::text(yaml::get(e, "why", &at)?, &at))?;
+        let sources = f.blame(strings(e.get("sources"), &format!("{at}.sources")))?;
+        if key == "excludes" {
+            let tat = format!("{at}.excludes");
+            let t = f.blame(yaml::obj(yaml::get(e, "excludes", &at)?, &tat))?;
+            let ai = f.blame(axis_of(
+                &f.blame(yaml::text(yaml::get(t, "axis", &tat)?, &tat))?,
+                &tat,
+            ))?;
+            let mut values: Vec<usize> = Vec::new();
+            let mut ways = 0;
+            if let Some(v) = t.get("is") {
+                ways += 1;
+                values.push(f.blame(value_of(ai, &f.blame(yaml::text(v, &tat))?, &tat))?);
+            }
+            if let Some(v) = t.get("any") {
+                ways += 1;
+                for x in f.blame(yaml::texts(v, &tat))? {
+                    values.push(f.blame(value_of(ai, &x, &tat))?);
+                }
+            }
+            if let Some(v) = t.get("family") {
+                ways += 1;
+                let fam = f.blame(yaml::text(v, &tat))?;
+                values.extend(
+                    axes[ai]
+                        .values
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, x)| x.family.as_deref() == Some(fam.as_str()))
+                        .map(|(j, _)| j),
+                );
+                if values.is_empty() {
+                    return Err(here(Error::at(
+                        &tat,
+                        format!("no value of {} is of the family {fam}", axes[ai].name),
+                    )));
+                }
+            }
+            if ways != 1
+                || t.keys()
+                    .any(|k| !["axis", "is", "any", "family"].contains(&k.as_str()))
+            {
+                return Err(here(Error::at(
+                    &tat,
+                    "names its axis and one of is, any or family",
+                )));
+            }
+            values.sort_unstable();
+            values.dedup();
+            excludes.push(crate::rules::Exclude {
+                id,
+                when,
+                axis: ai,
+                values,
+                why,
+                sources,
+            });
+        } else {
+            let sat = format!("{at}.suggest");
+            let t = f.blame(yaml::obj(yaml::get(e, "suggest", &at)?, &sat))?;
+            let ai = f.blame(axis_of(
+                &f.blame(yaml::text(yaml::get(t, "axis", &sat)?, &sat))?,
+                &sat,
+            ))?;
+            let value = f.blame(value_of(
+                ai,
+                &f.blame(yaml::text(yaml::get(t, "value", &sat)?, &sat))?,
+                &sat,
+            ))?;
+            let counter = f.blame(strings(e.get("counter"), &format!("{at}.counter")))?;
+            hints.push(crate::rules::Hint {
+                id,
+                when,
+                axis: ai,
+                value,
+                why,
+                sources,
+                counter,
+            });
         }
     }
     Ok(())
@@ -1713,7 +1949,29 @@ fn load_axis(
                 Some(d) => Some(f.blame(yaml::text(d, &format!("{at}.description")))?),
                 None => None,
             },
+            aliases: match v.get("aliases") {
+                Some(t) => f.blame(yaml::texts(t, &format!("{at}.aliases")))?,
+                None => Vec::new(),
+            },
         });
+    }
+
+    // An alias is a name a value had before, so it names that value alone:
+    // never another value's identity, and never two values at once.
+    for (i, v) in values.iter().enumerate() {
+        for a in &v.aliases {
+            if values
+                .iter()
+                .enumerate()
+                .any(|(j, w)| w.id == *a || (j != i && w.aliases.contains(a)))
+            {
+                return Err(Error::at(
+                    format!("values.{}.aliases", v.id),
+                    format!("{a} already names another value of {name}"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+        }
     }
 
     let default = match m.get("default") {
@@ -1847,7 +2105,9 @@ fn load_axis(
             || !list.is_empty()
             || combination.is_some()
             || windowed.contains(id);
-        if tried && let Some(edit) = overlay.and_then(|o| o.list_edit(&name, id, &values[i].label))
+        if tried
+            && let Some(edit) =
+                overlay.and_then(|o| o.list_edit(&name, id, &values[i].label, &values[i].aliases))
         {
             list = crate::overlay::merge(&list, edit);
         }
@@ -2520,7 +2780,9 @@ fn load_rule_set(
                         continue;
                     };
                     let value = &axis.values[i];
-                    let Some(edit) = o.list_edit(&axis.name, &value.id, &value.label) else {
+                    let Some(edit) =
+                        o.list_edit(&axis.name, &value.id, &value.label, &value.aliases)
+                    else {
                         continue;
                     };
                     for c in clauses.iter_mut() {

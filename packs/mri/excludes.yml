@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Record 48 (pack contract 6): what a value on one axis rules out on another,
+# hard. Each is universal and cross-verified by at least two independent
+# sources (`studies/2026-09-25-pack-constraints/` in the design repository,
+# section 3.1; the ids are its sources, listed in PROVENANCE.md). A campaign
+# freezes them with the implications and refuses an answer that holds both
+# sides; a reader greys the excluded values out. None of them decides an
+# axis of a stack.
+#
+# The spin-echo family is the technique axis's `family: SE`: 3D-TSE, SS-TSE,
+# IR-TSE, ME-SE, VFA-TSE, TSE, SE, MAVRIC and MDME. GRASE (`MIXED`) is left
+# out on purpose: it is a hybrid.
+
+excludes:
+
+  # SWI needs gradient-echo phase, which a 180-degree refocusing pulse
+  # removes [MQ5, RP6, P8]
+  - id: swi-construct-not-spin-echo
+    when: {axis: construct, is: SWI}
+    excludes: {axis: technique, family: SE}
+    why: 'a susceptibility-weighted image needs gradient-echo phase, which a spin echo refocuses away'
+    sources: [MQ5, RP6, P8]
+
+  - id: swi-base-not-spin-echo
+    when: {axis: base, is: SWI}
+    excludes: {axis: technique, family: SE}
+    why: 'a susceptibility-weighted image needs gradient-echo phase, which a spin echo refocuses away'
+    sources: [MQ5, RP6, P8]
+
+  # T2* relaxation is seen only with a gradient echo [P8, IM2]
+  - id: t2star-not-spin-echo
+    when: {axis: base, is: T2starw}
+    excludes: {axis: technique, family: SE}
+    why: 'T2* weighting is seen only with a gradient echo; the 180-degree pulse of a spin echo reverses it'
+    sources: [P8, IM2]
+
+  # QSM and R2* come from multi-echo GRE, 3D EPI or Dixon GRE, never from a
+  # spin echo [P6, P7, D2, P8, IM2]
+  - id: qsm-r2star-not-spin-echo
+    when: {any: [{axis: construct, is: QSM}, {axis: construct, is: R2starmap}]}
+    excludes: {axis: technique, family: SE}
+    why: 'susceptibility and R2* maps are computed from gradient-echo phase or decay, which a spin echo refocuses away'
+    sources: [P6, P7, P8, IM2]
+
+  # A TOF is a short-TR spoiled gradient echo [RP7, MQ10]. It holds whether
+  # the base is T1w, as the pack says, or angiography, as DICOM and BIDS do.
+  - id: tof-not-t2w
+    when: {axis: technique, is: TOF-MRA}
+    excludes: {axis: base, is: T2w}
+    why: 'a time-of-flight angiogram is a short-TR spoiled gradient echo, never T2-weighted'
+    sources: [RP7, MQ10]
+
+  # A projection is not a raw reconstruction [RP10, W1]. Written as an
+  # exclusion and not as "MIP is ProjectionDerived", because the SWI route
+  # answers a MinIP of an SWI with provenance SWIRecon.
+  - id: projection-not-raw
+    when: {any: [{axis: construct, is: MIP}, {axis: construct, is: MinIP}]}
+    excludes: {axis: provenance, any: [RawRecon, Localizer]}
+    why: 'an intensity projection is computed from a volume, so it is neither a raw reconstruction nor a localizer'
+    sources: [RP10, W1]

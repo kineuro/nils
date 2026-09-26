@@ -34,7 +34,7 @@ order:
 
 values:
   SyMRI:
-    terms: ['synthetic MRI', 'MAGiC', 'SyMRI']
+    terms: ['synthetic MRI', 'MAGiC', 'SyMRI', 'SyntAc']  # SyntAc: Philips [P23, MQ19]
     keywords:
       - symri
       - magic

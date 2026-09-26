@@ -1699,7 +1699,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.5.0"),
+            .any(|p| p["pack"] == "mri@0.6.0"),
         "{listed}"
     );
 
@@ -1713,8 +1713,8 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert_eq!(shown["modality"], "MR");
     assert_eq!(shown["flags"], 145);
     assert_eq!(
-        shown["contract"], 4,
-        "Wave 4b slice 11: the mcp key (contract 4), after slice 4's levels key"
+        shown["contract"], 6,
+        "record 48: the excludes and hints keys (contract 6), after the mcp key of contract 4"
     );
     assert!(
         shown["buckets"]["diffusion_tokens"]

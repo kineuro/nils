@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Record 48 (pack contract 6): what is usual and not always so. A reader
+# shows a hint with its reason where its condition holds; nothing enforces
+# it, and an answer against it is an answer. Each is either cross-verified
+# as usual with a published counter-example (`counter`), or rests on one
+# source (`studies/2026-09-25-pack-constraints/` in the design repository,
+# sections 2 and 3.2; the ids are its sources, listed in PROVENANCE.md).
+
+hints:
+
+  # Gradient-echo BOLD is T2*-weighted; spin-echo BOLD (SE-EPI, 3D GRASE at
+  # 7 T) is T2-weighted [MQ1, RP1; counter P1]
+  - id: bold-usually-t2star
+    when: {axis: technique, is: BOLD-EPI}
+    suggest: {axis: base, value: T2starw}
+    why: 'gradient-echo BOLD is T2*-weighted; spin-echo BOLD (SE-EPI, 3D GRASE at 7 T) is T2-weighted'
+    sources: [MQ1, RP1]
+    counter: [P1]
+
+  # Most multi-echo GRE is R2*, QSM or SWI source echoes; a Dixon or an in
+  # and opposed phase one is T1-weighted [MQ8, P14, P16, P15]
+  - id: megre-usually-t2star
+    when: {all: [{axis: technique, is: ME-GRE}, {not: {axis: modifier, is: Dixon}}, {not: {axis: construct, is: InPhase}}, {not: {axis: construct, is: OutPhase}}]}
+    suggest: {axis: base, value: T2starw}
+    why: 'a multi-echo GRE is usually T2*-weighted; a Dixon or an in and opposed phase one is T1-weighted'
+    sources: [MQ8]
+    counter: [P14, P16, P15]
+
+  # STIR is not a fat suppression after gadolinium, yet a STIR has been
+  # repeated after contrast [MQ12, IM3; counter P26]
+  - id: stir-usually-before-contrast
+    when: {axis: modifier, is: STIR}
+    suggest: {axis: post_contrast, value: not_given}
+    why: 'STIR suppresses anything with a short T1, gadolinium-enhanced tissue too, so it is acquired before contrast; it is sometimes repeated after'
+    sources: [MQ12, IM3]
+    counter: [P26]
+
+  # ASL is acquired before gadolinium [RP5, P27]
+  - id: asl-usually-before-contrast
+    when: {axis: technique, is: ASL}
+    suggest: {axis: post_contrast, value: not_given}
+    why: 'gadolinium shortens the blood T1 the labelling relies on, so ASL is acquired before contrast'
+    sources: [RP5, P27]
+
+  # Synthetic contrasts usually come from a multi-dynamic multi-echo or a
+  # QALAS acquisition; MR fingerprinting and learned synthesis make them too
+  # [P21, P22, P23, P24; counter P25]
+  - id: synthetic-usually-symri
+    when: {any: [{axis: construct, is: SyntheticT1w}, {axis: construct, is: SyntheticT2w}, {axis: construct, is: SyntheticFLAIR}, {axis: construct, is: SyntheticPDw}, {axis: construct, is: SyntheticSTIR}, {axis: construct, is: SyntheticDIR}, {axis: construct, is: SyntheticPSIR}]}
+    suggest: {axis: provenance, value: SyMRI}
+    why: 'a synthetic contrast is usually synthesised from quantitative maps (MDME, MAGiC, SyntAc, QALAS); MR fingerprinting and learned synthesis make them too'
+    sources: [P21, P22, P23, P24]
+    counter: [P25]
+
+  # PSIR is usually a T1-weighted inversion recovery; a 3D real IR with a very
+  # long TR is heavily T2-weighted [P28, P29, RP11; counter P30]
+  - id: psir-usually-t1w
+    when: {axis: modifier, is: PSIR}
+    suggest: {axis: base, value: T1w}
+    why: 'phase-sensitive inversion recovery is usually T1-weighted; a 3D real IR with a very long TR is heavily T2-weighted'
+    sources: [P28, P29, RP11]
+    counter: [P30]
+
+  # One source only [RP12]: a brain DIR is read on T2-weighted images; a
+  # cardiac double-IR black blood is T1-weighted, but that is BlackBlood
+  - id: dir-usually-t2w
+    when: {axis: modifier, is: DIR}
+    suggest: {axis: base, value: T2w}
+    why: 'a double inversion recovery of the brain is T2-weighted (one source)'
+    sources: [RP12]
+
+  # HASTE is typically T2-weighted; with an inversion prepulse it takes some
+  # T1 or PD weighting [MQ13; counter P31]
+  - id: haste-usually-t2w
+    when: {axis: technique, is: SS-TSE}
+    suggest: {axis: base, value: T2w}
+    why: 'a single-shot TSE (HASTE) is typically T2-weighted; an inversion-prepared one can be T1-weighted'
+    sources: [MQ13]
+    counter: [P31]

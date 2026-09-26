@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Record 48: what a construct says of the technique and the modifiers. The
+# construct is decided after both, so these run after it (pack.yml `order`)
+# and fill only what is still open: an axis leaves alone what is already
+# decided. Each is also a constraint a campaign freezes, since it reads the
+# construct and nothing else. The ids in brackets are the sources of
+# `studies/2026-09-25-pack-constraints/` in the design repository, listed in
+# PROVENANCE.md.
+
+rule_set: implied_technique
+decides: [technique]
+
+order: ['construct:mp2rage']
+
+rules:
+
+  # INV1, INV2 and UNI are the outputs of the MP2RAGE sequence, FLAWS
+  # included [P9, MQ6, T2, B1].
+  'construct:mp2rage':
+    clauses:
+      - {when: {any: [{axis: construct, is: INV1}, {axis: construct, is: INV2}, {axis: construct, is: Uniform}, {axis: construct, is: UniformDenoised}]}, cite: 'an MP2RAGE output', source: construct}
+    set: {technique: 'MP2RAGE'}
+    confidence: 0.95
+    why: 'INV1, INV2 and UNI are the outputs of the MP2RAGE sequence'

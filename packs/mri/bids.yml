@@ -71,7 +71,7 @@ suffix:
     TOF-MRA: {datatype: anat, suffix: angio}
     PC-MRA: {datatype: anat, suffix: angio}
     BOLD-EPI: {datatype: func, suffix: bold}
-    ASL-EPI: {datatype: perf, suffix: asl}
+    ASL: {datatype: perf, suffix: asl}
   modifier:
     FLAIR: {datatype: anat, suffix: FLAIR}
   base:
@@ -182,7 +182,8 @@ acq:
       'DWI-EPI': DWIEPI
       'DWI-STEAM': DWISTEAM
       'BOLD-EPI': BOLDEPI
-      'ASL-EPI': ASLEPI
+      ASL: ASL
+      DCE: DCE
       'Perfusion-EPI': PerfusionEPI
       GRASE: GRASE
       'SE-EPI': SEEPI

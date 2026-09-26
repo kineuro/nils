@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Record 48: a water-only or fat-only image is made by chemical-shift
+# separation, so its modifiers hold Dixon [RP9, MQ11]. Runs after the
+# construct and adds to what the modifier axis's own rules said. An in-phase
+# or opposed-phase image is not enough: a routine dual-echo GRE makes them
+# without any separation [P16].
+
+rule_set: implied_modifier
+decides: [modifier]
+adds: [modifier]
+
+order: ['construct:dixon']
+
+rules:
+
+  'construct:dixon':
+    clauses:
+      - {when: {any: [{axis: construct, is: Water}, {axis: construct, is: Fat}]}, cite: 'a Dixon water or fat image', source: construct}
+    set: {modifier: [Dixon]}
+    confidence: 0.95
+    why: 'water-only and fat-only images are made by chemical-shift (Dixon, IDEAL) separation'

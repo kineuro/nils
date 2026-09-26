@@ -38,7 +38,7 @@ order:
 
 values:
   FLAIR:
-    terms: ['fluid attenuated inversion recovery', 'dark fluid', 'darkfluid', 'T2 FLAIR', 'T1 FLAIR']
+    terms: ['fluid attenuated inversion recovery', 'dark fluid', 'darkfluid', 'T2 FLAIR', 'T1 FLAIR', 'FastFLAIR']  # GE [V1, V2]
     group: IR_CONTRAST
     priority: 1
     keywords:
@@ -53,8 +53,12 @@ values:
       - da - fl
     detection:
       exclusive: is_flair
+  # TIRM is Siemens' inversion-recovery TSE for both a STIR and a dark-fluid
+  # FLAIR [V1, V2], so it is IR-TSE's term and not this value's. The word
+  # stays a keyword: a TIRM that says nothing of dark fluid is the short-TI
+  # one, and one that does is a FLAIR, which wins the group.
   STIR:
-    terms: ['short tau inversion recovery', 'short TI inversion recovery', 'TIRM']
+    terms: ['short tau inversion recovery', 'short TI inversion recovery', 'FastSTIR']
     group: IR_CONTRAST
     priority: 2
     keywords:
@@ -93,8 +97,11 @@ values:
       - inversion recovery
     detection:
       exclusive: has_ir_se
+  # PROPELLER is rotating blades, a hybrid rather than radial in the strict
+  # sense [MQ16]; RADAR is Hitachi's [V1, V2, S8]
   Radial:
-    terms: ['PROPELLER', 'BLADE', 'MultiVane', 'JET', 'radial']
+    terms: ['PROPELLER', 'BLADE', 'MultiVane', 'JET', 'radial', 'RADAR']
+    description: 'rotating blades (PROPELLER, BLADE) or radial k-space'
     group: TRAJECTORY
     priority: 1
     keywords:
@@ -113,18 +120,25 @@ values:
       - spiral
     detection:
       exclusive: is_spiral
+  # ASPIR is Canon's, MSOFT and SINC Hitachi's [V1, V2]. `fettsat` and
+  # `fat supp` are record 48's round 4 phrases. `spir` (36 stacks of the
+  # training sites, 34 Philips) stays a term: a keyword is a substring, and
+  # `spir` is inside `spiral` and `respiratory`. `fs` is read from the
+  # ScanOptions flag instead of the text.
   FatSat:
-    terms: ['fat saturation', 'fat suppression', 'fat suppressed', 'fat sat', 'SPIR', 'SPAIR', 'ChemSat', 'FS']
+    terms: ['fat saturation', 'fat suppression', 'fat suppressed', 'fat sat', 'SPIR', 'SPAIR', 'ChemSat', 'FS', 'ASPIR', 'MSOFT', 'SINC', 'fettsat', 'fettsattigad']
     keywords:
       - fatsat
       - fat sat
       - chemsat
       - chem sat
       - spair
+      - fettsat
+      - fat supp
     detection:
       exclusive: has_fat_sat
   WaterExcitation:
-    terms: ['water excitation', 'ProSet', 'WE']
+    terms: ['water excitation', 'ProSet', 'WE', 'PASTA']  # PASTA: Hitachi [V1, V2]
     label: WaterExc
     keywords:
       - water excitation
@@ -134,7 +148,8 @@ values:
     detection:
       exclusive: has_water_excitation
   Dixon:
-    terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon']
+    # WFS is Canon's, WFOP and FatSep Hitachi's, FLEX GE's [V1, V2]
+    terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon', 'WFS', 'WFOP', 'FatSep', 'FLEX']
     keywords:
       - dixon
       - ideal

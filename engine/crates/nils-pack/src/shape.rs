@@ -54,6 +54,13 @@ pub struct Shape {
     pub axes: Vec<AxisShape>,
     /// Every clause that only restates another axis, in rule order.
     pub implications: Vec<Implication>,
+    /// Record 48: the pack's cross-axis exclusions, hard, as a campaign
+    /// freezes them (`nils_pack::legal::cross` over every axis).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub excludes: Vec<serde_json::Value>,
+    /// Record 48: the pack's hints, what is usual and never enforced.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<serde_json::Value>,
 }
 
 /// One axis: how many of its values the rules reach, and which they do not.
@@ -453,10 +460,14 @@ pub fn shape(pack: &Pack) -> Shape {
         }
     }
 
+    let every: Vec<usize> = (0..pack.axes.len()).collect();
+    let (excludes, hints) = crate::legal::cross(pack, &every);
     Shape {
         pack: pack.id(),
         axes,
         implications,
+        excludes,
+        hints,
     }
 }
 
@@ -497,6 +508,14 @@ impl std::fmt::Display for Shape {
         }
         for (set, n) in per {
             writeln!(f, "  implications {set}: {n}")?;
+        }
+        if !self.excludes.is_empty() || !self.hints.is_empty() {
+            writeln!(
+                f,
+                "  {} exclusions between axes, {} hints",
+                self.excludes.len(),
+                self.hints.len()
+            )?;
         }
         Ok(())
     }

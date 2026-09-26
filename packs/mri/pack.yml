@@ -9,8 +9,8 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.5.0
-contract: 4
+version: 0.6.0
+contract: 6
 modality: MR
 
 parsers:
@@ -60,6 +60,8 @@ rules:
   - rules/symri.yml
   - rules/epimix.yml
   - rules/stage.yml
+  - rules/implied.yml
+  - rules/implied_modifier.yml
   - rules/base.yml
   - rules/post_contrast.yml
   - rules/body_part.yml
@@ -67,8 +69,22 @@ rules:
   - rules/disposition.yml
   - rules/role.yml
 
-# The order the rule sets run in.
-order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, quality, body_part, post_contrast, intent, disposition, role]
+# The order the rule sets run in. Record 48: base runs after construct, so
+# a base rule that reads the construct (an ADC map is DWI, INV2 is PDw) reads
+# what was decided rather than an empty axis; no modifier or construct rule
+# reads the base. The two `implied_` sets fill the technique and add to the
+# modifiers from the construct, for the same reason after it.
+order: [excluded, provenance, swi, symri, epimix, stage, technique, modifier, construct, implied_technique, implied_modifier, base, quality, body_part, post_contrast, intent, disposition, role]
+
+# Record 48 (pack contract 6): what one axis rules out on another, and what
+# is usual without being always so. Both read axis values alone; neither
+# decides an axis of a stack. A campaign freezes the exclusions with the
+# implications and refuses an answer that holds both sides; a reader shows
+# a hint with its reason and enforces nothing.
+excludes:
+  - excludes.yml
+hints:
+  - hints.yml
 
 # The phases that read more than one stack (spec section 7). A pack that
 # declares none gets none.
@@ -179,7 +195,22 @@ buckets:
   localizer_words: [scout, localizer, loc_]
   # The words that say contrast was given, and the words that say it was
   # not (Wave 4c section 6.6): a site's own agent name is added here.
+  #
+  # A word is matched as a substring of the normalized text, where `-` and
+  # `+` stand apart (`pre - gd`), `_` is a space and a letter outside a to z
+  # is a space (`före` reads `f re`). v0's spellings with a joined `-`, `+`
+  # or `_` can never match and are kept as v0 wrote them; the spellings
+  # after them, from `pre - contrast` on, are the ones that do. Record 48's
+  # round 4 phrases (`studies/2026-09-24-phase-0/keywords-proposal.md` in
+  # the design repository) are added in that form, the Swedish ones counted
+  # on the training sites: `kontrast` on 1,100 stacks, given on 90 per cent,
+  # and the rest are the words saying no, which are read first; `efter k` on
+  # 30, all left empty before. A bare short token (`km`, `ce`, `nc`, `mdc`,
+  # `inj`, `pre`, `m k`) or a common word (`enhanced`, `plain`, `simple`,
+  # `blanco`) would match inside other words, and is left out.
   contrast_negative:
-    ['utan gd', 'utan_gd', 'ej gd', 'utan kontrast', 'ej kontrast', 'utan k', 'ej k', 'ingen gd', 'ingen k', ' -k', ' -gd', ' -c', 'pre gd', 'pre-gd', 'pre contrast', 'pre-contrast', 'without contrast', 'no contrast', 'non-contrast', 'non contrast', 'no gd', 'ohne gd', 'ohne kontrast', 'ohne km', 'nativ', 'kein gd', 'sans gd', 'sans contraste', 'sans gado', 'senza gd', 'senza contrasto', 'uten gd', 'uden gd', 'zonder gd', 'geen gd', 'pre - gd']
+    ['utan gd', 'utan_gd', 'ej gd', 'utan kontrast', 'ej kontrast', 'utan k', 'ej k', 'ingen gd', 'ingen k', ' -k', ' -gd', ' -c', 'pre gd', 'pre-gd', 'pre contrast', 'pre-contrast', 'without contrast', 'no contrast', 'non-contrast', 'non contrast', 'no gd', 'ohne gd', 'ohne kontrast', 'ohne km', 'nativ', 'kein gd', 'sans gd', 'sans contraste', 'sans gado', 'senza gd', 'senza contrasto', 'uten gd', 'uden gd', 'zonder gd', 'geen gd', 'pre - gd',
+     'pre - contrast', 'non - contrast', 'precontrast', 'pre kontrast', 'fore k', 'f re k', 'innan kontrast', 'vor km', 'vor kontrast', 'senza mdc', 'pre mdc', 'pre gado', 'basale', 'kontrastfri', 'sans injection', 'sans inj', 'avant injection', 'sin contraste', 'pre contraste', 'zonder contrast', 'voor contrast']
   contrast_positive:
-    ['dotarem', 'clariscan', 'omniscan', 'magnevist', 'gadovist', 'prohance', 'multihance', 'optimark', 'eovist', 'primovist', 'gadavist', 'gadolinium', 'gadobutrol', 'gadoterate', 'gadoteridol', 'gadobenate', 'gadoxetate', ' gd', '_gd', '+k', '+gd', '+c', '+ gd', '+ k', 'k+', 'k +', '+contrast', 'med gd', 'med kontrast', 'med-kontrast', 'med_kontrast', 'med k', 'efter kontrast', 'spruta kontrast', 'gd direkt', 'post gd', 'post-gd', 'post contrast', 'post-contrast', 'with contrast', 'after contrast', 'contrast enhanced', 'mit gd', 'mit kontrast', 'nach gd', 'nach km', 'avec gd', 'avec contraste', 'post - gd']
+    ['dotarem', 'clariscan', 'omniscan', 'magnevist', 'gadovist', 'prohance', 'multihance', 'optimark', 'eovist', 'primovist', 'gadavist', 'gadolinium', 'gadobutrol', 'gadoterate', 'gadoteridol', 'gadobenate', 'gadoxetate', ' gd', '_gd', '+k', '+gd', '+c', '+ gd', '+ k', 'k+', 'k +', '+contrast', 'med gd', 'med kontrast', 'med-kontrast', 'med_kontrast', 'med k', 'efter kontrast', 'spruta kontrast', 'gd direkt', 'post gd', 'post-gd', 'post contrast', 'post-contrast', 'with contrast', 'after contrast', 'contrast enhanced', 'mit gd', 'mit kontrast', 'nach gd', 'nach km', 'avec gd', 'avec contraste', 'post - gd',
+     'post - contrast', 'med - kontrast', '+ contrast', ' c +', 'postcontrast', 'post gad', 'gado', 'kontrast', 'efter k', 'mit km', 'post km', '+ km', 'nach gabe', 'con mdc', 'post mdc', 'dopo mdc', '+ mdc', 'con gad', 'avec injection', 'apres injection', 'apr s injection', 'injecte', 'avec gado', 'post gado', 'con contraste', 'post contraste', 'tras contraste', 'met contrast', 'na contrast', 'met gado']

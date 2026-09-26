@@ -14,6 +14,7 @@ decides: [base]
 tiers: {exclusive: 0.9, keywords: 0.85, physics: 0.7}
 
 order:
+  - 'construct:inv2'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -21,7 +22,12 @@ order:
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
-  - 'technique:ASL-EPI'
+  - 'technique:ASL'
+  - 'technique:Perfusion-EPI'
+  - 'technique:DCE'
+  - 'construct:diffusion'
+  - 'construct:perfusion'
+  - 'construct:swi'
   - 'flag:dwi'
   - 'flag:pwi'
   - 'flag:swi'
@@ -35,6 +41,7 @@ order:
   - 'flag:t1_map'
   - 'flag:t2_map'
   - 'flag:mp2rage_inversion'
+  - 'flag:mp2rage_inv2'
   - 'flag:mp2rage_uniform'
   - 'flair:t1_text'
   - 'flair:t2_text'
@@ -63,13 +70,35 @@ order:
 
 rules:
 
-  # Tier 1. Some techniques physics-lock to a base contrast, and v0 takes
-  # them as authoritative: no conflict check, no keyword may override.
+  # Tier 1. Some techniques and some constructs lock the base contrast, and
+  # these are taken as authoritative: no conflict check, no keyword may
+  # override. Each is also a constraint a campaign freezes, since its
+  # condition reads other axes and nothing else, so it holds for a rater's
+  # answer as much as for the rules'.
   #
   # v0's map has ten entries and two of them name techniques its own technique
   # axis does not have (SWI, DSC-EPI), so they can never fire. A rule
   # that names a value outside an axis's vocabulary fails this pack at load,
   # which is how they were found.
+  #
+  # Record 48 checked each against at least two independent sources
+  # (`studies/2026-09-25-pack-constraints/` in the design repository; the ids
+  # in brackets are its sources, listed in PROVENANCE.md). This set runs
+  # after construct (pack.yml `order`), so a rule that reads construct reads
+  # what was decided.
+
+  # The second inversion of an MP2RAGE is proton-density weighted: its brain
+  # mask is made from "the raw proton density weighted image acquired at the
+  # second inversion time" [P10, MQ6, P9]. First, so the MP2RAGE rule below
+  # never reaches it.
+  'construct:inv2':
+    clauses:
+      - {when: {axis: construct, is: INV2}, cite: 'INV2', source: construct}
+    set: {base: 'PDw'}
+    confidence: 0.9
+    why: 'the second inversion of an MP2RAGE is proton-density weighted'
+
+  # 3D inversion-prepared rapid gradient echo [MQ6, B1, P11, S8]
   'technique:MPRAGE':
     clauses:
       - {when: {axis: technique, is: 'MPRAGE'}, cite: 'MPRAGE', source: technique}
@@ -77,6 +106,7 @@ rules:
     confidence: 0.95
     why: 'the MPRAGE technique implies a T1w base contrast'
 
+  # [P12, MQ6]
   'technique:MEMPRAGE':
     clauses:
       - {when: {axis: technique, is: 'MEMPRAGE'}, cite: 'MEMPRAGE', source: technique}
@@ -84,13 +114,18 @@ rules:
     confidence: 0.95
     why: 'the MEMPRAGE technique implies a T1w base contrast'
 
+  # UNI, INV1 and a T1 map are T1-weighted; INV2 is not [P9, MQ6, P10]
   'technique:MP2RAGE':
     clauses:
-      - {when: {axis: technique, is: 'MP2RAGE'}, cite: 'MP2RAGE', source: technique}
+      - {when: {all: [{axis: technique, is: 'MP2RAGE'}, {not: {axis: construct, is: INV2}}]}, cite: 'MP2RAGE', source: technique}
     set: {base: 'T1w'}
     confidence: 0.95
-    why: 'the MP2RAGE technique implies a T1w base contrast'
+    why: 'MP2RAGE UNI, INV1 and T1 map are T1-weighted; INV2 is proton-density weighted'
 
+  # The physics sources agree the stationary tissue of a TOF is T1-weighted
+  # [RP7, MQ7]; DICOM and BIDS give angiography a class of its own [D3, D4,
+  # B1]. Nima's ruling, 2026-09-26: T1w stays, and angiography is seen in the
+  # technique and the construct.
   'technique:TOF-MRA':
     clauses:
       - {when: {axis: technique, is: 'TOF-MRA'}, cite: 'TOF-MRA', source: technique}
@@ -98,13 +133,18 @@ rules:
     confidence: 0.9
     why: 'the TOF-MRA technique implies a T1w base contrast'
 
+  # Not always: a Dixon or an in and opposed phase multi-echo GRE is
+  # T1-weighted [MQ8, P14, P16, P15]. So it is no constraint (hints.yml says
+  # what is usual), and the rule reads the file's own Dixon and phase flags,
+  # which keeps it a reading of the stack rather than a law of the schema.
   'technique:ME-GRE':
     clauses:
-      - {when: {axis: technique, is: 'ME-GRE'}, cite: 'ME-GRE', source: technique}
+      - {when: {all: [{axis: technique, is: 'ME-GRE'}, {not: {any: [has_dixon, has_water, has_fat, has_in_phase, has_out_phase]}}]}, cite: 'ME-GRE', source: technique}
     set: {base: 'T2starw'}
     confidence: 0.85
-    why: 'the ME-GRE technique implies a T2*w base contrast'
+    why: 'a multi-echo GRE that is not a Dixon or an in and opposed phase is taken as T2*-weighted'
 
+  # MEDIC, MERGE and M-FFE are T2*-weighted [MQ9, P17, P18]
   'technique:comb-ME-GRE':
     clauses:
       - {when: {axis: technique, is: 'comb-ME-GRE'}, cite: 'comb-ME-GRE', source: technique}
@@ -112,6 +152,7 @@ rules:
     confidence: 0.9
     why: 'the comb-ME-GRE technique implies a T2*w base contrast'
 
+  # [D1, MQ3, RP8]
   'technique:DWI-EPI':
     clauses:
       - {when: {axis: technique, is: 'DWI-EPI'}, cite: 'DWI-EPI', source: technique}
@@ -119,12 +160,57 @@ rules:
     confidence: 0.95
     why: 'the DWI-EPI technique implies a DWI base contrast'
 
-  'technique:ASL-EPI':
+  # [RP5, MQ2, D1, D2]
+  'technique:ASL':
     clauses:
-      - {when: {axis: technique, is: 'ASL-EPI'}, cite: 'ASL-EPI', source: technique}
+      - {when: {axis: technique, is: 'ASL'}, cite: 'ASL', source: technique}
     set: {base: 'PWI'}
     confidence: 0.95
-    why: 'the ASL-EPI technique implies a PWI base contrast'
+    why: 'arterial spin labelling is perfusion-weighted imaging'
+
+  # DSC, DCE and ASL are the three perfusion-weighted techniques [RP2, MQ2,
+  # D3, P2]
+  'technique:Perfusion-EPI':
+    clauses:
+      - {when: {axis: technique, is: 'Perfusion-EPI'}, cite: 'Perfusion-EPI', source: technique}
+    set: {base: 'PWI'}
+    confidence: 0.95
+    why: 'a dynamic susceptibility contrast series is perfusion-weighted imaging'
+
+  'technique:DCE':
+    clauses:
+      - {when: {axis: technique, is: 'DCE'}, cite: 'DCE', source: technique}
+    set: {base: 'PWI'}
+    confidence: 0.95
+    why: 'a dynamic contrast enhanced series is perfusion-weighted imaging'
+
+  # ADC, eADC, FA, MD and trace images are computed from diffusion-weighted
+  # acquisitions [D2, D5, MQ3, MQ4, T1, P3]. isoDWI is trace under another
+  # name [MQ3, D2].
+  'construct:diffusion':
+    clauses:
+      - {when: {any: [{axis: construct, is: ADC}, {axis: construct, is: eADC}, {axis: construct, is: FA}, {axis: construct, is: MD}, {axis: construct, is: Trace}, {axis: construct, is: isoDWI}]}, cite: 'a diffusion map', source: construct}
+    set: {base: 'DWI'}
+    confidence: 0.95
+    why: 'ADC, eADC, FA, MD and trace images are computed from diffusion-weighted acquisitions'
+
+  # Perfusion parameters, from DSC, DCE or ASL alike, so they say no
+  # technique [D6, RP2, RP5, MQ2]
+  'construct:perfusion':
+    clauses:
+      - {when: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}]}, cite: 'a perfusion map', source: construct}
+    set: {base: 'PWI'}
+    confidence: 0.95
+    why: 'CBF, CBV, MTT, Tmax and TTP are perfusion parameters, from DSC, DCE or ASL'
+
+  # SWI, SWIp, SWAN, FSBB and BSI are the vendors' susceptibility-weighted
+  # images [MQ5, RP6, P4]
+  'construct:swi':
+    clauses:
+      - {when: {axis: construct, is: SWI}, cite: 'SWI', source: construct}
+    set: {base: 'SWI'}
+    confidence: 0.95
+    why: 'a susceptibility-weighted image is base SWI'
 
   # Tier 2. Flags that settle the base on their own.
   'flag:dwi':
@@ -202,9 +288,15 @@ rules:
   'flag:mp2rage_inversion':
     clauses:
       - {flag: is_mp2rage_inv1, tier: exclusive}
-      - {flag: is_mp2rage_inv2, tier: exclusive}
     set: {base: 'T1w'}
-    why: 'every MP2RAGE output is T1-weighted; which output it is, is a construct'
+    why: 'the first inversion of an MP2RAGE is T1-weighted'
+
+  # Record 48: the second inversion is proton-density weighted [P10, MQ6, P9]
+  'flag:mp2rage_inv2':
+    clauses:
+      - {flag: is_mp2rage_inv2, tier: exclusive}
+    set: {base: 'PDw'}
+    why: 'the second inversion of an MP2RAGE is proton-density weighted'
 
   'flag:mp2rage_uniform':
     clauses:

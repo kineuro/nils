@@ -116,11 +116,22 @@ impl Overlay {
     }
 
     /// The edit this overlay makes to one axis value's list, named by the
-    /// value's identity or its label.
-    pub fn list_edit(&self, axis: &str, id: &str, label: &str) -> Option<&Edit> {
+    /// value's identity, its label or an identity it had before a rename.
+    pub fn list_edit(
+        &self,
+        axis: &str,
+        id: &str,
+        label: &str,
+        aliases: &[String],
+    ) -> Option<&Edit> {
         self.lists
             .get(&format!("{axis}.{id}"))
             .or_else(|| self.lists.get(&format!("{axis}.{label}")))
+            .or_else(|| {
+                aliases
+                    .iter()
+                    .find_map(|a| self.lists.get(&format!("{axis}.{a}")))
+            })
     }
 
     fn of(f: File) -> R<Overlay> {
@@ -272,7 +283,9 @@ impl Overlay {
                     ),
                 ));
             };
-            let Some(v) = a.values.iter().find(|v| v.id == value || v.label == value) else {
+            let Some(v) = a.values.iter().find(|v| {
+                v.id == value || v.label == value || v.aliases.iter().any(|x| x == value)
+            }) else {
                 return Err(Error::at(at, format!("{axis} has no value named {value}")));
             };
             if !lists.iter().any(|l| *l == format!("{axis}.{}", v.id)) {
@@ -442,8 +455,8 @@ cases:
         .unwrap();
         assert_eq!(o.added_terms(), s(&["clariscan", "zzturbo"]));
         assert_eq!(o.lists["technique.TSE"].remove, s(&["turbo"]));
-        assert!(o.list_edit("technique", "TSE", "TSE").is_some());
-        assert!(o.list_edit("technique", "SE", "SE").is_none());
+        assert!(o.list_edit("technique", "TSE", "TSE", &[]).is_some());
+        assert!(o.list_edit("technique", "SE", "SE", &[]).is_none());
     }
 
     #[test]
