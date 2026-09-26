@@ -138,7 +138,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the research group that runs the campaign; each answer is its rater's |
 | kept | for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal's row stays when a certificate unseals it, naming the certificate |
 | read | `nils campaign list`<br>`nils campaign show <campaign> [--answers]`<br>`nils campaign stats <campaign>`<br>`nils labels list`<br>`nils labels show <id>`<br>`nils labels certificates` |
-| change | `nils campaign create \| claim \| answer \| release \| metric \| requestion \| close`<br>`nils labels import-v0 --tsv <file>`<br>`nils labels seal --select selection:<name>@<v>`<br>POST /api/certificates<br>POST /api/certificates/<id>/unseal |
+| change | `nils campaign create \| claim \| answer \| release \| metric \| requestion \| repack \| close`<br>`nils labels import-v0 --tsv <file>`<br>`nils labels seal --select selection:<name>@<v>`<br>POST /api/certificates<br>POST /api/certificates/<id>/unseal |
 | export | `nils campaign export <campaign> --to <dir> [--answers]`<br>`nils labels export --axis <axis> --to <dir>`<br>`nils labels export --for-training --to <dir>` |
 | delete | with the registry |
 

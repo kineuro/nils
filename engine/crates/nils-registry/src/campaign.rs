@@ -528,11 +528,28 @@ pub fn answer_joint_of(axes: &[String], constraints: &Value, text: &str) -> Resu
 /// A kept answer read against the question as it stands: an answer given
 /// before `nils campaign requestion` moved an axis from asked to derived
 /// still names that axis, and is read on the axes asked now. The answer
-/// itself is never rewritten.
+/// itself is never rewritten. An answer given before `nils campaign
+/// repack` moved the question to a pack that renamed a value names it by
+/// its old identity, which the constraints' `aliases` map to the new one.
 pub fn stored_joint_of(axes: &[String], constraints: &Value, text: &str) -> Result<Joint, Error> {
     let trimmed = match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(mut m)) => {
             m.retain(|k, _| axes.contains(k));
+            for (axis, v) in m.iter_mut() {
+                let map = &constraints["aliases"][axis.as_str()];
+                if !map.is_object() {
+                    continue;
+                }
+                let renamed = |x: &mut Value| {
+                    if let Some(new) = x.as_str().and_then(|s| map[s.trim()].as_str()) {
+                        *x = json!(new);
+                    }
+                };
+                match v {
+                    Value::Array(list) => list.iter_mut().for_each(renamed),
+                    other => renamed(other),
+                }
+            }
             Value::Object(m).to_string()
         }
         _ => text.to_string(),
@@ -3260,6 +3277,342 @@ pub fn requestion(
     })
 }
 
+/// What [`repack`] is asked to do.
+#[derive(Debug, Clone)]
+pub struct Repack<'a> {
+    /// The campaign's axes question as the served pack freezes it: the
+    /// same asked and derived axes, the served pack's constraints, and in
+    /// them `aliases`, `{axis: {old identity: identity}}`, where the pack
+    /// renamed a value.
+    pub question: &'a Value,
+    /// `name@version` of the served pack.
+    pub pack_version: &'a str,
+    /// Say what it would do and write nothing.
+    pub dry_run: bool,
+}
+
+/// What [`repack`] did, or would do.
+#[derive(Debug, Clone, Default)]
+pub struct Repacked {
+    pub campaign: i64,
+    pub name: String,
+    pub from: Option<String>,
+    pub to: String,
+    /// The answers kept, every one as given.
+    pub answers: usize,
+    /// `{axis: [values]}` the question takes now and did not before, and
+    /// the ones it took before and does not now.
+    pub values_added: BTreeMap<String, Vec<String>>,
+    pub values_dropped: BTreeMap<String, Vec<String>>,
+    /// `{answer, item, axis, from, to}`: an answer that names a value by an
+    /// identity the pack renamed, read through the alias.
+    pub aliased: Vec<Value>,
+    /// `{answer, item, why}`: a kept answer the new constraints would
+    /// refuse. It is kept, and its item is marked for a second look.
+    pub now_refused: Vec<Value>,
+    /// `{answer, item, why}`: a kept answer that does not read under the
+    /// new question at all (a value the pack dropped with no alias). Any
+    /// one of these refuses the repack.
+    pub unreadable: Vec<Value>,
+    /// Items leased under the question as it stands; any one refuses the
+    /// repack.
+    pub leased: usize,
+    pub dry_run: bool,
+}
+
+impl Repacked {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "campaign": self.campaign, "name": self.name,
+            "from": self.from, "to": self.to,
+            "answers_kept": self.answers,
+            "values_added": self.values_added, "values_dropped": self.values_dropped,
+            "aliased": self.aliased, "now_refused": self.now_refused,
+            "unreadable": self.unreadable, "leased": self.leased,
+            "dry_run": self.dry_run,
+        })
+    }
+}
+
+/// Move an open axes campaign's frozen question to the served pack's
+/// version: the constraints are frozen again from the served pack (the
+/// vocabulary a reader sees is already the served pack's), the asked and
+/// derived axes stay as they are, and the items and every answer are kept
+/// as given, never rewritten. Each kept answer is read against the new
+/// constraints: one that names a value by an identity the pack renamed is
+/// read through the pack's alias; one the new constraints would refuse is
+/// kept, reported, and its item's review item is marked for a second look,
+/// and a close does not turn it into a decision; one that does not read at
+/// all, because the pack dropped a value it uses and no alias maps it,
+/// refuses the repack. Refused while an item is leased (a lease past its
+/// end ends first), for a campaign that is not open or does not ask axes,
+/// and under the pack version it already has. A dry run writes nothing.
+pub fn repack(
+    registry: &mut Registry,
+    which: &str,
+    r: &Repack<'_>,
+    who: &str,
+    now: &str,
+) -> Result<Repacked, Error> {
+    let c = find(registry.store(), which)?;
+    if c.status != "open" {
+        return Err(refused(format!("campaign {} is {}", c.name, c.status)));
+    }
+    let Question::Axes {
+        axes: before,
+        constraints: old,
+        derive: derived_before,
+    } = c.question()?
+    else {
+        return Err(refused(format!(
+            "campaign {} does not ask axes; only an axes question freezes a pack's constraints",
+            c.name
+        )));
+    };
+    let pack_name = |v: &str| v.split('@').next().unwrap_or_default().to_string();
+    if c.pack_version.as_deref() == Some(r.pack_version) {
+        return Err(refused(format!(
+            "campaign {} is already under {}",
+            c.name, r.pack_version
+        )));
+    }
+    if let Some(v) = c.pack_version.as_deref()
+        && pack_name(v) != pack_name(r.pack_version)
+    {
+        return Err(refused(format!(
+            "campaign {} was made under {v}; a repack moves it to another version of that pack, not to {}",
+            c.name, r.pack_version
+        )));
+    }
+    let mut next = r.question.clone();
+    let Question::Axes {
+        axes,
+        constraints,
+        derive,
+    } = Question::parse(&next)?
+    else {
+        return Err(invalid("the new question asks axes"));
+    };
+    if axes != before {
+        return Err(invalid(format!(
+            "a repack keeps the axes asked ({}); nils campaign requestion moves them",
+            before.join(", ")
+        )));
+    }
+    if derive != derived_before {
+        return Err(invalid(format!(
+            "a repack keeps the axes derived ({}); nils campaign requestion moves them",
+            if derived_before.is_empty() {
+                "none".to_string()
+            } else {
+                derived_before.join(", ")
+            }
+        )));
+    }
+    // an alias the campaign already read through stays, pointed at the
+    // value its target is now
+    let mut constraints = constraints;
+    let mut aliases = constraints["aliases"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (axis, map) in old["aliases"].as_object().into_iter().flatten() {
+        let now_values = words(&constraints["values"][axis.as_str()]);
+        let mut entry = aliases
+            .get(axis)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (from, to) in map.as_object().into_iter().flatten() {
+            let Some(to) = to.as_str() else { continue };
+            let to = entry
+                .get(to)
+                .and_then(Value::as_str)
+                .unwrap_or(to)
+                .to_string();
+            if now_values.contains(&to) && !entry.contains_key(from) {
+                entry.insert(from.clone(), json!(to));
+            }
+        }
+        aliases.insert(axis.clone(), Value::Object(entry));
+    }
+    aliases.retain(|_, m| m.as_object().is_some_and(|m| !m.is_empty()));
+    if aliases.is_empty() {
+        constraints.as_object_mut().map(|m| m.remove("aliases"));
+    } else {
+        constraints["aliases"] = Value::Object(aliases);
+    }
+    next["constraints"] = constraints.clone();
+    next["values"] = constraints["values"].clone();
+    let next_q = Question::parse(&next)?;
+
+    let mut out = Repacked {
+        campaign: c.id,
+        name: c.name.clone(),
+        from: c.pack_version.clone(),
+        to: r.pack_version.to_string(),
+        dry_run: r.dry_run,
+        ..Repacked::default()
+    };
+    for a in &axes {
+        let was = words(&old["values"][a.as_str()]);
+        let is = words(&constraints["values"][a.as_str()]);
+        let added: Vec<String> = is.iter().filter(|v| !was.contains(v)).cloned().collect();
+        let dropped: Vec<String> = was.iter().filter(|v| !is.contains(v)).cloned().collect();
+        if !added.is_empty() {
+            out.values_added.insert(a.clone(), added);
+        }
+        if !dropped.is_empty() {
+            out.values_dropped.insert(a.clone(), dropped);
+        }
+    }
+
+    let store = registry.store();
+    store.begin()?;
+    let done = (|| -> Result<(), Error> {
+        lock(store, c.id)?;
+        // a lease past its end holds nothing: it ends here, as a claim
+        // would end it, and does not stand in the way
+        expire_in(store, c.id, now)?;
+        out.leased = assignments(store, c.id)?
+            .into_iter()
+            .filter(|a| matches!(a.state.as_str(), "leased" | "offered"))
+            .count();
+        if out.leased > 0 && !r.dry_run {
+            return Err(refused(format!(
+                "{} item(s) of {} are leased under the question as it stands; wait for them to be answered or released (nils campaign release <assignment>)",
+                out.leased, c.name
+            )));
+        }
+        let kept = answers(store, c.id)?;
+        out.answers = kept.len();
+        let mut second_look: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
+        for a in &kept {
+            let Some(v) = a.value.as_deref() else {
+                continue;
+            };
+            if let Ok(Value::Object(given)) = serde_json::from_str::<Value>(v) {
+                for (axis, map) in constraints["aliases"].as_object().into_iter().flatten() {
+                    let listed: Vec<String> = match given.get(axis) {
+                        Some(Value::String(s)) => vec![s.trim().to_string()],
+                        Some(Value::Array(l)) => l
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.trim().to_string())
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    for x in listed {
+                        if let Some(to) = map[x.as_str()].as_str() {
+                            out.aliased.push(json!({
+                                "answer": a.id, "item": a.item_id,
+                                "axis": axis, "from": x, "to": to,
+                            }));
+                        }
+                    }
+                }
+            }
+            let joint = match stored_joint_of(&axes, &constraints, v) {
+                Ok(j) => j,
+                Err(e) => {
+                    out.unreadable.push(json!({
+                        "answer": a.id, "item": a.item_id, "why": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+            if let Err(why) = legal(&constraints, &joint) {
+                out.now_refused.push(json!({
+                    "answer": a.id, "item": a.item_id, "why": why,
+                }));
+                second_look.entry(a.item_id).or_default().push(json!({
+                    "answer": a.id, "why": why, "pack": r.pack_version, "at": now,
+                }));
+            }
+        }
+        if !out.unreadable.is_empty() && !r.dry_run {
+            return Err(refused(format!(
+                "{} answer(s) of {} do not read under {}, which dropped a value they use and names no alias for it: {}",
+                out.unreadable.len(),
+                c.name,
+                r.pack_version,
+                out.unreadable
+                    .iter()
+                    .map(|u| format!(
+                        "answer {}: {}",
+                        u["answer"],
+                        u["why"].as_str().unwrap_or("")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
+        if r.dry_run {
+            return Ok(());
+        }
+        store.update_by_id(
+            table("campaign"),
+            &[
+                ("question", Param::from(next_q.to_json().to_string())),
+                ("pack_version", Param::from(r.pack_version)),
+            ],
+            "id",
+            c.id,
+        )?;
+        // the item's own review item says which answers want a second look
+        let by_item: BTreeMap<i64, i64> = items(store, c.id)?
+            .into_iter()
+            .map(|it| (it.id, it.review_item_id))
+            .collect();
+        for (item, looks) in second_look {
+            let Some(ri) = by_item.get(&item) else {
+                continue;
+            };
+            if let Some(ri) = crate::review::item(store, *ri).map_err(|e| invalid(e.to_string()))? {
+                let mut ev = ri.evidence.clone();
+                let mut list = ev["second_look"].as_array().cloned().unwrap_or_default();
+                list.extend(looks);
+                ev["second_look"] = Value::Array(list);
+                store.update_by_id(
+                    table("review_item"),
+                    &[("evidence", Param::from(ev.to_string()))],
+                    "id",
+                    ri.id,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = done {
+        store.rollback().ok();
+        return Err(e);
+    }
+    if r.dry_run {
+        // the dry run ends no lease either
+        store.rollback()?;
+        return Ok(out);
+    }
+    store.commit()?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::CampaignRepack,
+            scope: json!({"campaign": c.id, "name": c.name}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "from": out.from, "to": out.to, "answers_kept": out.answers,
+                "values_added": out.values_added, "values_dropped": out.values_dropped,
+                "aliased": out.aliased.len(),
+                "now_refused": out.now_refused.iter().map(|x| x["answer"].clone()).collect::<Vec<_>>(),
+                "at": now,
+            })),
+        },
+    )?;
+    Ok(out)
+}
+
 /// Every answer of a campaign, in the order given.
 pub fn answers(store: &mut Store, campaign: i64) -> Result<Vec<Answer>, Error> {
     let sql = format!(
@@ -4834,6 +5187,16 @@ fn close_items(
                     out.unresolved += 1;
                     continue;
                 };
+                // an answer kept across a repack that the pack now forbids
+                // wants a second look, never a decision
+                if let Err(why) = legal(constraints, &joint) {
+                    out.refused.push((
+                        it.id,
+                        format!("the item's answer is refused by the pack the campaign is under now: {why}"),
+                    ));
+                    out.unresolved += 1;
+                    continue;
+                }
                 // Every decision of the item, its review items and the
                 // item's link are one transaction: the item closes whole,
                 // one decision per axis, or not at all.

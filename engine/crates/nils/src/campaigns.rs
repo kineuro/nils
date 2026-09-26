@@ -2802,6 +2802,135 @@ fn fill_derived(
     Ok(n)
 }
 
+/// The question `nils campaign repack` moves a campaign to: the axes it
+/// asks and derives as they stand, frozen under the served pack, with the
+/// pack's aliases of the asked axes (`{axis: {old identity: identity}}`)
+/// so an answer given under an old name still reads. With `keep` the
+/// values the campaign asked for stay, each under its identity now; one
+/// the served pack no longer knows is left out and named in the second
+/// value, `{axis: [values]}`.
+fn repack_question(
+    c: &campaign::Campaign,
+    pack: &nils_pack::Pack,
+    keep: bool,
+) -> Result<(Value, Value), Exit> {
+    let campaign::Question::Axes {
+        axes,
+        constraints,
+        derive,
+    } = c.question().map_err(cerr)?
+    else {
+        return Err(fail(format!(
+            "campaign {} does not ask axes; only an axes question freezes a pack's constraints",
+            c.name
+        )));
+    };
+    let mut question = json!({"kind": "axes", "axes": axes, "derive": derive});
+    let mut unknown = serde_json::Map::new();
+    if keep {
+        let mut values = serde_json::Map::new();
+        for a in &axes {
+            let Some(axis) = pack.axis_index(a).map(|i| &pack.axes[i]) else {
+                continue;
+            };
+            let mut now: Vec<String> = Vec::new();
+            let mut lost: Vec<String> = Vec::new();
+            for v in strings(&constraints["values"][a.as_str()]) {
+                match axis.value_index(&v) {
+                    Some(i) if !now.contains(&axis.values[i].id) => {
+                        now.push(axis.values[i].id.clone())
+                    }
+                    Some(_) => {}
+                    None => lost.push(v),
+                }
+            }
+            values.insert(a.clone(), json!(now));
+            if !lost.is_empty() {
+                unknown.insert(a.clone(), json!(lost));
+            }
+        }
+        question["values"] = Value::Object(values);
+    }
+    complete_axes(&mut question, Some(pack)).map_err(|(_, m)| usage(m))?;
+    let mut aliases = serde_json::Map::new();
+    for a in &axes {
+        let Some(axis) = pack.axis_index(a).map(|i| &pack.axes[i]) else {
+            continue;
+        };
+        let map: serde_json::Map<String, Value> = axis
+            .values
+            .iter()
+            .flat_map(|v| v.aliases.iter().map(move |x| (x.clone(), json!(v.id))))
+            .collect();
+        if !map.is_empty() {
+            aliases.insert(a.clone(), Value::Object(map));
+        }
+    }
+    if !aliases.is_empty() {
+        question["constraints"]["aliases"] = Value::Object(aliases);
+    }
+    Ok((question, Value::Object(unknown)))
+}
+
+/// The kept answers whose derived axes, kept as recorded, the served
+/// pack's rules would derive otherwise now: `{answer, item, axis,
+/// recorded, now}` each. Nothing is written; a stack without a
+/// fingerprint is passed over.
+fn derived_differences(
+    registry: &mut Registry,
+    pack: &nils_pack::Pack,
+    c: &campaign::Campaign,
+    q: &campaign::Question,
+) -> Result<Vec<Value>, Reply> {
+    let campaign::Question::Axes {
+        axes,
+        constraints,
+        derive,
+    } = q
+    else {
+        return Ok(Vec::new());
+    };
+    if derive.is_empty() {
+        return Ok(Vec::new());
+    }
+    let items: BTreeMap<i64, Option<i64>> = campaign::items(registry.store(), c.id)
+        .map_err(campaign_err)?
+        .into_iter()
+        .map(|i| (i.id, i.stack_id))
+        .collect();
+    let mut out = Vec::new();
+    for a in campaign::answers(registry.store(), c.id).map_err(campaign_err)? {
+        let (Some(recorded), Some(v), Some(Some(stack))) = (
+            a.derived.as_ref(),
+            a.value.as_deref(),
+            items.get(&a.item_id),
+        ) else {
+            continue;
+        };
+        let Ok(joint) = campaign::stored_joint_of(axes, constraints, v) else {
+            continue;
+        };
+        let obj: serde_json::Map<String, Value> = joint
+            .iter()
+            .map(|(k, vals)| (k.clone(), json!(vals)))
+            .collect();
+        let Ok(Some(now)) =
+            derived_for(registry.store(), Some(pack), q, *stack, &Value::Object(obj))
+        else {
+            continue;
+        };
+        for d in derive {
+            if recorded.get(d) != now.get(d) {
+                out.push(json!({
+                    "answer": a.id, "item": a.item_id, "axis": d,
+                    "recorded": recorded.get(d), "now": now.get(d),
+                }));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The stacks a campaign's items stand on: an item's stack, a session's
 /// stacks, or the members of an adopted group.
 fn campaign_stacks(store: &mut Store, c: &campaign::Campaign) -> Result<Vec<i64>, Reply> {
@@ -3304,6 +3433,31 @@ pub(crate) enum CampaignCommand {
         /// The pack the campaign was made under
         #[arg(long, default_value = "mri")]
         pack: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move an open axes campaign's frozen question to the served pack's
+    /// version: its constraints are frozen again from the served pack, the
+    /// asked and derived axes stay, and its items and every answer are kept
+    /// as given. A kept answer the new constraints would refuse is reported
+    /// and its item marked for a second look; a value the pack renamed is
+    /// read through its alias; a value the pack dropped refuses the repack
+    Repack {
+        /// The campaign, by name or id
+        campaign: String,
+        /// Keep the values the campaign asked for (renamed ones under their
+        /// new identity) rather than every value the served pack has
+        #[arg(long)]
+        keep_values: bool,
+        /// Where the pack is
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// The pack; the one the campaign was made under when not given
+        #[arg(long)]
+        pack: Option<String>,
+        /// Say what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -4080,6 +4234,106 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     done.answers,
                     filled
                 );
+            }
+            Ok(())
+        }
+        CampaignCommand::Repack {
+            campaign: which,
+            keep_values,
+            pack_dir,
+            pack,
+            dry_run,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            let pack = pack.unwrap_or_else(|| {
+                c.pack_version
+                    .as_deref()
+                    .and_then(|v| v.split('@').next())
+                    .unwrap_or("mri")
+                    .to_string()
+            });
+            let served = crate::pack_dir(home, pack_dir)
+                .ok()
+                .and_then(|d| nils_pack::load(&d.join(&pack), None).ok())
+                .ok_or_else(|| {
+                    usage(format!(
+                        "the {pack} pack is not found; name it with --pack-dir"
+                    ))
+                })?;
+            let (question, report) = repack_question(&c, &served, keep_values)?;
+            let to = format!("{}@{}", served.name, served.version);
+            let done = campaign::repack(
+                &mut registry,
+                &which,
+                &campaign::Repack {
+                    question: &question,
+                    pack_version: &to,
+                    dry_run,
+                },
+                &who(),
+                &now,
+            )
+            .map_err(cerr)?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            // what each kept answer derived stays as recorded; where the
+            // served pack's rules derive otherwise now, the report says so
+            let q = campaign::Question::parse(&question).map_err(cerr)?;
+            let differ = derived_differences(&mut registry, &served, &c, &q).map_err(rerr)?;
+            let filled = if dry_run {
+                0
+            } else {
+                fill_derived(&mut registry, Some(&served), &c).map_err(rerr)?
+            };
+            let mut out = done.as_json();
+            out["derived_differ"] = json!(differ);
+            out["answers_derived"] = json!(filled);
+            out["values_unknown"] = report;
+            if json {
+                print(&out);
+                return Ok(());
+            }
+            println!(
+                "campaign {}{} from {} to {}: {} answer(s) kept as given, {} read through an alias, {} the pack now refuses (marked for a second look), {} derived otherwise now (kept as recorded){}",
+                c.name,
+                if dry_run { " would move" } else { " moved" },
+                done.from.as_deref().unwrap_or("no pack"),
+                done.to,
+                done.answers,
+                done.aliased.len(),
+                done.now_refused.len(),
+                differ.len(),
+                if dry_run {
+                    String::new()
+                } else {
+                    format!(", {filled} derived now")
+                }
+            );
+            for (axis, v) in &done.values_added {
+                println!("  {axis} takes {} now", v.join(", "));
+            }
+            for (axis, v) in &done.values_dropped {
+                println!("  {axis} no longer takes {}", v.join(", "));
+            }
+            for x in &done.now_refused {
+                println!(
+                    "  answer {} (item {}): {}",
+                    x["answer"],
+                    x["item"],
+                    x["why"].as_str().unwrap_or("")
+                );
+            }
+            for x in &done.unreadable {
+                println!(
+                    "  answer {} (item {}) does not read: {}",
+                    x["answer"],
+                    x["item"],
+                    x["why"].as_str().unwrap_or("")
+                );
+            }
+            if done.leased > 0 {
+                println!("  {} item(s) leased; a repack waits for them", done.leased);
             }
             Ok(())
         }

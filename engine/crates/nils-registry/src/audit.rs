@@ -108,6 +108,9 @@ pub enum Action {
     /// Record 48, after the first real read: an open axes campaign's
     /// question moved to fewer asked axes and more derived ones.
     CampaignRequestion,
+    /// An open axes campaign's frozen constraints moved to the served
+    /// pack's version, its answers kept as given.
+    CampaignRepack,
     /// Record 50 R3: answers suggested for a campaign's items from outside
     /// the engine, with their author, imported. A suggestion is no answer.
     CampaignSuggest,
@@ -188,6 +191,7 @@ impl Action {
             Action::CampaignMetric => "campaign.metric",
             Action::CampaignClose => "campaign.close",
             Action::CampaignRequestion => "campaign.requestion",
+            Action::CampaignRepack => "campaign.repack",
             Action::CampaignSuggest => "campaign.suggest",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
@@ -229,6 +233,7 @@ impl Action {
                 | Action::CampaignMetric
                 | Action::CampaignClose
                 | Action::CampaignRequestion
+                | Action::CampaignRepack
                 | Action::CampaignSuggest
                 | Action::LabelsExport
                 | Action::LabelsSeal
