@@ -1702,6 +1702,7 @@ fn load_axis(
             },
             tried: false,
             keywords: Vec::new(),
+            route_words: Vec::new(),
             bucket: None,
             detection: crate::rules::Detection::default(),
             terms: match v.get("terms") {
