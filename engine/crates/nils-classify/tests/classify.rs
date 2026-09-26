@@ -1849,3 +1849,82 @@ fn the_text_an_unresolved_axis_was_matched_against_is_sampled_bounded_and_withhe
         assert_eq!(two["complete"], false, "{name}: {two}");
     }
 }
+
+/// Record 48: the rules' own answer is held to the pack's exclusions and
+/// implications, as a rater's is. A T2*-weighted turbo spin echo breaks
+/// `t2star-not-spin-echo`: the values stay as the rules decided them, one
+/// item names the constraint with its reason and sources, the two axes it
+/// involves are written below every threshold, and the run counts it. The
+/// same stack without the star breaks nothing.
+#[test]
+fn an_answer_that_breaks_the_pack_s_own_constraint_is_kept_doubted_and_asked() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = one_stack("ax t2* tse", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]);
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        let (base, base_conf, _) = axis_of(&mut reg, "base");
+        let (technique, technique_conf, _) = axis_of(&mut reg, "technique");
+        assert_eq!(
+            (base.as_str(), technique.as_str()),
+            ("T2*w", "TSE"),
+            "{name}"
+        );
+        assert_eq!(
+            base_conf,
+            nils_classify::classify::BROKEN_CONFIDENCE,
+            "{name}"
+        );
+        assert_eq!(
+            technique_conf,
+            nils_classify::classify::BROKEN_CONFIDENCE,
+            "{name}"
+        );
+        // an axis the constraint does not involve keeps its confidence
+        let (_, contrast_conf, _) = axis_of(&mut reg, "provenance");
+        assert!(
+            contrast_conf > nils_classify::classify::BROKEN_CONFIDENCE,
+            "{name}"
+        );
+        assert_eq!(asked(&mut reg, "classify.excluded"), 1, "{name}");
+        let id = one(
+            &mut reg,
+            "SELECT MIN(id) FROM {review_item} WHERE kind = 'classify.excluded'",
+        );
+        let item = nils_registry::review::item(reg.store(), id)
+            .unwrap()
+            .expect("the item is there");
+        let e = item.evidence;
+        assert_eq!(e["constraint"], "t2star-not-spin-echo", "{name}: {e}");
+        assert!(
+            e["why"].as_str().unwrap().contains("gradient echo"),
+            "{name}: {e}"
+        );
+        assert_eq!(
+            e["sources"],
+            serde_json::json!(["P8", "IM2"]),
+            "{name}: {e}"
+        );
+        assert_eq!(e["decided"]["base"], "T2*w", "{name}: {e}");
+        assert_eq!(
+            report.broken.get("excluded:t2star-not-spin-echo"),
+            Some(&1),
+            "{name}"
+        );
+        assert_eq!(report.broken_stacks, 1, "{name}");
+        assert!(report.to_string().contains("against the pack"), "{name}");
+    }
+    for lab in labs() {
+        let name = lab.name;
+        let dir = one_stack("ax t2 tse", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]);
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(report.broken_stacks, 0, "{name}: {:?}", report.broken);
+        assert_eq!(asked(&mut reg, "classify.excluded"), 0, "{name}");
+    }
+}
