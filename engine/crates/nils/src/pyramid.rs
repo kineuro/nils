@@ -1440,10 +1440,11 @@ pub fn decode_plane(
 /// How far a sheared stack's planes shift in their own plane from one to
 /// the next, in mm along the rows' and the columns' directions; None when
 /// the step is along the normal, or the whole stack drifts less than a
-/// tenth of a pixel, or the manifest does not say.
+/// tenth of a pixel, or the planes are not parallel (not one volume), or
+/// the manifest does not say.
 pub fn shear(m: &Manifest) -> Option<(f64, f64)> {
     let step = m.step?;
-    if !m.orientation_known {
+    if !m.orientation_known || m.frame.is_some_and(|f| !f.parallel) {
         return None;
     }
     let o = &m.orientation;
@@ -2518,6 +2519,12 @@ mod tests {
         assert!(shear(&m2).is_none());
         m2.step = Some([0.0, 0.02, 4.0]);
         assert!(shear(&m2).is_some());
+        // planes that are not parallel are not one volume, and not a shear
+        m2.frame = Some(Frame {
+            parallel: false,
+            evenly_spaced: true,
+        });
+        assert!(shear(&m2).is_none());
     }
 
     /// Record 45: a signed stack with a rescale renders in the modality's
