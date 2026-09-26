@@ -4,6 +4,13 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A rater corrects their own answer while the campaign is open (record 48, after the first gold campaign). `GET /api/campaigns/{id}/mine` lists the caller's answers now, the latest first, filtered by value, and on a sealed stack shows only their own answer. `POST /api/campaigns/{id}/answers/{answer}/amend` writes the correction as a new answer, `via` amend, that supersedes the earlier; the earlier is kept, never deleted, and names it in `superseded_by`. Agreement, the item's outcome and the close read the correction, a correction that makes raters disagree offers the item to an adjudicator, and an export of answers holds both (labels.tsv gains `superseded_by`). Refused on a closed campaign, for another's answer, for one already corrected and on an item that went to an adjudicator. Audited as campaign.amend. Schema 70.
+- `nils campaign raters <campaign> --add <principal> --remove <principal>` and `POST /api/campaigns/{id}/raters` (the campaign's maker or a holder of review:work) change the raters of an open campaign that names them. A rater taken off keeps their answers and gives back a live claim; one added who answered the same stacks in another campaign is named in a warning. Audited as campaign.raters.
+- A claim with `alone` true offers only the items read one by one (held back from a batch, or of a sealed sample), and every rater's claim names `next`, the item the next claim would offer, so a reader fetches it ahead. The gallery says `held_back_open` and `alone`.
+- The manifest door and an item's header door send `Cache-Control: private, max-age=300`.
+
 ## [1.0.0-alpha.46] - 2026-09-26
 
 A campaign carries answers suggested from outside the engine, v0's labels or a model's proposals, each with its author and its confidence per class, brought in with `nils campaign suggest` or its door. A campaign that asks one axis has a gallery of a hundred items, the least certain first, accepted in one move with each item's own value, the suggestion and its author (`suggested_by`) kept beside each answer; a stack is drawn small at its thumb door. `nils campaign repack` moves an open axes campaign to the served pack's version and keeps every answer as given. The MRI pack is version 0.7.0, where `body_part` gains `other`. The registry is at schema 69. The HTTP API contract stays version 7, amended in place with additive fields and new doors; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.45.

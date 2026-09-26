@@ -1971,6 +1971,39 @@ pub fn open_for(
         .collect::<Result<_, _>>()?)
 }
 
+/// Record 48, after the first gold campaign: how many items a batch already
+/// held back are still open to a rater, to be read one by one.
+pub fn held_back_open(
+    store: &mut Store,
+    campaign: &Campaign,
+    principal: &str,
+) -> Result<usize, Error> {
+    let d = store.dialect();
+    let a = store.qualified("campaign_assignment");
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
+         AND i.held_back = 1 \
+         AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
+              AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < {} \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {})",
+        store.qualified("campaign_item"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Int),
+        d.param(4, Type::Text),
+    );
+    let r = store.query_opt(
+        &sql,
+        &[
+            Param::Int(campaign.id),
+            Param::from(now_iso().as_str()),
+            Param::Int(campaign.raters_per_item),
+            Param::from(principal),
+        ],
+    )?;
+    Ok(r.and_then(|r| r.opt_int(0).ok().flatten()).unwrap_or(0) as usize)
+}
+
 /// Record 48 R1: the seed the engine drew when the campaign was made, from
 /// which the items a batch holds back are chosen. Never returned by a door.
 pub fn hold_back_seed(store: &mut Store, campaign: i64) -> Result<String, Error> {
@@ -2159,6 +2192,11 @@ pub struct Claimed {
     pub item: Item,
     /// Whether the principal held this lease already.
     pub held: bool,
+    /// Record 48, after the first gold campaign: the item and its stack
+    /// the next claim in the same order would offer after this one, as it
+    /// stands now, so a reader fetches its pictures while this one is read.
+    /// A hint: nothing is held for it.
+    pub next: Option<(i64, Option<i64>)>,
 }
 
 impl Claimed {
@@ -2167,6 +2205,7 @@ impl Claimed {
             "assignment": self.assignment.as_json(),
             "item": self.item.as_json(),
             "held": self.held,
+            "next": self.next.map(|(item, stack)| json!({"item": item, "stack": stack})),
         })
     }
 }
@@ -2608,6 +2647,21 @@ pub fn claim_in(
     order: Order,
     now: &str,
 ) -> Result<Option<Claimed>, Error> {
+    claim_with(registry, campaign, principal, role, order, false, now)
+}
+
+/// [`claim_in`], and with `alone` a rater is offered only the items read
+/// one by one: those a batch holds back, or the campaign's seed would, and
+/// those of a sample sealed now (record 48, after the first gold campaign).
+pub fn claim_with(
+    registry: &mut Registry,
+    campaign: i64,
+    principal: &str,
+    role: Role,
+    order: Order,
+    alone: bool,
+    now: &str,
+) -> Result<Option<Claimed>, Error> {
     let c = get(registry.store(), campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     if c.status != "open" {
@@ -2627,6 +2681,7 @@ pub fn claim_in(
     let store = registry.store();
     let d = store.dialect();
     store.begin()?;
+    let mut next: Option<(i64, Option<i64>)> = None;
     let done = (|| -> Result<Option<(i64, bool)>, Error> {
         lock(store, campaign)?;
         expire_in(store, campaign, now)?;
@@ -2655,7 +2710,7 @@ pub fn claim_in(
         match role {
             Role::Rater => {
                 let sql = format!(
-                    "SELECT i.id, i.position, i.stack_id FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
+                    "SELECT i.id, i.position, i.stack_id, i.held_back FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
                      AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
                           AND a.state IN ('leased', 'submitted')) < {} \
                      AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
@@ -2663,55 +2718,91 @@ pub fn claim_in(
                     d.param(1, Type::Int),
                     d.param(2, Type::Int),
                     d.param(3, Type::Text),
-                    if order == Order::Position {
-                        " LIMIT 1"
+                    // the first two by position: the one offered and the
+                    // one after it
+                    if order == Order::Position && !alone {
+                        " LIMIT 2"
                     } else {
                         ""
                     }
                 );
-                let open: Vec<(i64, i64, Option<i64>)> = store
-                    .query(
-                        &sql,
-                        &[
-                            Param::Int(campaign),
-                            Param::Int(c.raters_per_item),
-                            Param::from(principal),
-                        ],
-                    )?
-                    .iter()
-                    .map(|r| Ok((r.int(0)?, r.int(1)?, r.opt_int(2)?)))
-                    .collect::<Result<_, StoreError>>()?;
-                let item = match order {
-                    Order::Position => open.first().map(|(id, ..)| *id),
+                let mut open: Vec<(i64, i64, Option<i64>)> = Vec::new();
+                let mut flagged: BTreeSet<i64> = BTreeSet::new();
+                for r in store.query(
+                    &sql,
+                    &[
+                        Param::Int(campaign),
+                        Param::Int(c.raters_per_item),
+                        Param::from(principal),
+                    ],
+                )? {
+                    let id = r.int(0)?;
+                    if r.opt_int(3)?.unwrap_or(0) != 0 {
+                        flagged.insert(id);
+                    }
+                    open.push((id, r.int(1)?, r.opt_int(2)?));
+                }
+                let stacks: Vec<i64> = open.iter().filter_map(|(.., s)| *s).collect();
+                let needs_seals = alone || order == Order::Value;
+                // record 48 R2: a stack of a sample sealed now is never
+                // ranked by what the systems said of it; it takes a place
+                // drawn from the campaign's seed
+                let sealed = if needs_seals {
+                    crate::labels::sealed_now(store, &stacks, &[])
+                        .map_err(|e| StoreError::Message(e.to_string()))?
+                        .0
+                } else {
+                    Default::default()
+                };
+                let seed = if needs_seals {
+                    Some(hold_back_seed(store, c.id)?)
+                } else {
+                    None
+                };
+                if alone {
+                    let seed = seed.as_deref().unwrap_or_default();
+                    open.retain(|(id, _, stack)| {
+                        flagged.contains(id)
+                            || drawn_back(seed, *id, c.hold_back)
+                            || stack.is_some_and(|s| sealed.contains(&s))
+                    });
+                }
+                let mut ranked: Vec<(i64, Option<i64>)> = match order {
+                    Order::Position => open.iter().map(|(id, _, s)| (*id, *s)).collect(),
                     Order::Value => {
-                        let stacks: Vec<i64> = open.iter().filter_map(|(.., s)| *s).collect();
                         let worth = worth(store, &stacks, &axes_of(&c.question()?))?;
-                        // record 48 R2: a stack of a sample sealed now is
-                        // never ranked by what the systems said of it; it
-                        // takes a place drawn from the campaign's seed
-                        let (sealed, _) = crate::labels::sealed_now(store, &stacks, &[])
-                            .map_err(|e| StoreError::Message(e.to_string()))?;
-                        let seed = hold_back_seed(store, c.id)?;
+                        let seed = seed.as_deref().unwrap_or_default();
                         // record 50 R7: where the campaign carries outside
                         // suggestions, their confidence says how sure the
                         // item is, the least certain first
                         let ids: Vec<i64> = open.iter().map(|(id, ..)| *id).collect();
                         let told = crate::suggestion::worth_of_items(store, c.id, &ids)?;
-                        open.iter()
-                            .min_by_key(|(id, position, stack)| match stack {
-                                Some(s) if sealed.contains(s) => (1, drawn(&seed, *id), *position),
-                                _ => {
-                                    let mine = stack.and_then(|s| worth.get(&s)).cloned();
-                                    let w = crate::suggestion::merged(mine, told.get(id));
-                                    by_value(w.as_ref(), *position)
-                                }
+                        type Keyed = ((u8, i64, i64), i64, Option<i64>);
+                        let mut keyed: Vec<Keyed> = open
+                            .iter()
+                            .map(|(id, position, stack)| {
+                                let key = match stack {
+                                    Some(s) if sealed.contains(s) => {
+                                        (1, drawn(seed, *id), *position)
+                                    }
+                                    _ => {
+                                        let mine = stack.and_then(|s| worth.get(&s)).cloned();
+                                        let w = crate::suggestion::merged(mine, told.get(id));
+                                        by_value(w.as_ref(), *position)
+                                    }
+                                };
+                                (key, *id, *stack)
                             })
-                            .map(|(id, ..)| *id)
+                            .collect();
+                        keyed.sort();
+                        keyed.into_iter().map(|(_, id, s)| (id, s)).collect()
                     }
                 };
-                let Some(item) = item else {
+                if ranked.is_empty() {
                     return Ok(None);
-                };
+                }
+                let (item, _) = ranked.remove(0);
+                next = ranked.first().copied();
                 let id = store
                     .insert(
                         &Insert::new(
@@ -2826,6 +2917,7 @@ pub fn claim_in(
         assignment: a,
         item: it,
         held,
+        next,
     }))
 }
 
@@ -3050,6 +3142,11 @@ pub struct Answer {
     /// Record 50 R3: who suggested `suggested`: an outside suggestion's
     /// author, or `rules`.
     pub suggested_by: Option<String>,
+    /// Record 48, after the first gold campaign: the earlier answer this
+    /// one corrects, and the later answer that corrected this one. An
+    /// answer no later one supersedes is the rater's answer now.
+    pub supersedes_id: Option<i64>,
+    pub superseded_by: Option<i64>,
 }
 
 impl Answer {
@@ -3063,11 +3160,12 @@ impl Answer {
             "model_id": self.model_id, "seconds": self.seconds, "suggested": self.suggested,
             "changed": self.changed, "via": self.via, "unsure": self.unsure,
             "derived": self.derived, "suggested_by": self.suggested_by,
+            "supersedes_id": self.supersedes_id, "superseded_by": self.superseded_by,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 22] = [
+const ANSWER_COLUMNS: [&str; 24] = [
     "id",
     "campaign_id",
     "item_id",
@@ -3090,6 +3188,8 @@ const ANSWER_COLUMNS: [&str; 22] = [
     "unsure",
     "derived",
     "suggested_by",
+    "supersedes_id",
+    "superseded_by",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -3120,6 +3220,8 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
             (!d.is_null()).then_some(d)
         },
         suggested_by: r.opt_text(21)?.map(str::to_string),
+        supersedes_id: r.opt_int(22)?,
+        superseded_by: r.opt_int(23)?,
     })
 }
 
@@ -3613,7 +3715,8 @@ pub fn repack(
     Ok(out)
 }
 
-/// Every answer of a campaign, in the order given.
+/// Every answer of a campaign, in the order given, a corrected one beside
+/// the answer that superseded it.
 pub fn answers(store: &mut Store, campaign: i64) -> Result<Vec<Answer>, Error> {
     let sql = format!(
         "SELECT {} FROM {} WHERE campaign_id = {} ORDER BY id",
@@ -3628,9 +3731,35 @@ pub fn answers(store: &mut Store, campaign: i64) -> Result<Vec<Answer>, Error> {
         .collect::<Result<_, _>>()?)
 }
 
+/// Record 48, after the first gold campaign: the answers of a campaign that
+/// no later answer supersedes, in the order given: what agreement, the
+/// outcome and the close read.
+pub fn current_answers(store: &mut Store, campaign: i64) -> Result<Vec<Answer>, Error> {
+    Ok(answers(store, campaign)?
+        .into_iter()
+        .filter(|a| a.superseded_by.is_none())
+        .collect())
+}
+
+/// One answer by its id.
+pub fn answer_by_id(store: &mut Store, id: i64) -> Result<Option<Answer>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE id = {}",
+        select_list(store, "campaign_answer", &ANSWER_COLUMNS, None),
+        store.qualified("campaign_answer"),
+        store.dialect().param(1, Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .map(|r| answer_of(&r))
+        .transpose()?)
+}
+
+/// The answers of an item that no later answer supersedes, in the order
+/// given.
 fn answers_of_item(store: &mut Store, item: i64) -> Result<Vec<Answer>, StoreError> {
     let sql = format!(
-        "SELECT {} FROM {} WHERE item_id = {} ORDER BY id",
+        "SELECT {} FROM {} WHERE item_id = {} AND superseded_by IS NULL ORDER BY id",
         select_list(store, "campaign_answer", &ANSWER_COLUMNS, None),
         store.qualified("campaign_answer"),
         store.dialect().param(1, Type::Int)
@@ -3922,6 +4051,506 @@ pub fn answer_with(
     Ok(answered)
 }
 
+/// A correction of one's own answer (record 48, after the first gold
+/// campaign).
+#[derive(Debug, Clone)]
+pub struct Amend<'a> {
+    /// The answer corrected: the rater's answer now, which no later one
+    /// supersedes.
+    pub answer: i64,
+    pub principal: &'a str,
+    pub author_kind: &'a str,
+    pub model: Option<i64>,
+    pub value: Option<&'a str>,
+    pub form: Option<&'a Value>,
+    pub derivative_id: Option<i64>,
+    pub why: Option<&'a str>,
+    pub unsure: bool,
+    /// What the engine derived from the new answer through the pack.
+    pub derived: Option<&'a Value>,
+}
+
+/// What a correction did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Amended {
+    /// The new answer, or the earlier where nothing changed.
+    pub answer: i64,
+    pub supersedes: i64,
+    pub item: i64,
+    /// The item's state after it.
+    pub state: String,
+    /// A round-two assignment it opened, when the raters now disagree.
+    pub adjudication: Option<i64>,
+    /// The value and the mark were the earlier answer's: nothing written.
+    pub unchanged: bool,
+}
+
+impl Amended {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "answer": self.answer, "supersedes": self.supersedes, "item": self.item,
+            "state": self.state, "adjudication": self.adjudication, "unchanged": self.unchanged,
+        })
+    }
+}
+
+/// Record 48, after the first gold campaign: a rater corrects their own
+/// answer while the campaign is open. The correction is a new answer on the
+/// same assignment, marked `via` amend, naming the one it supersedes; the
+/// earlier is kept and names the correction, never deleted. The item is
+/// moved on from the answers it holds now, so agreement, the outcome and
+/// the close read the correction. The suggestion the earlier answer was
+/// given beside is kept beside the correction, and `changed` says whether
+/// the correction differs from it. Refused on a campaign that is not open,
+/// for another's answer, for an answer already corrected (the latest is
+/// corrected), and for a rater's answer on an item that went to an
+/// adjudicator. The same value and mark again write nothing. Audited as
+/// `campaign.amend`.
+pub fn amend(registry: &mut Registry, m: &Amend<'_>, now: &str) -> Result<Amended, Error> {
+    let store = registry.store();
+    let earlier = answer_by_id(store, m.answer)?
+        .ok_or_else(|| Error::NotFound(format!("no answer {}", m.answer)))?;
+    if earlier.principal != m.principal {
+        return Err(Error::Forbidden(format!(
+            "answer {} is not {}'s; a rater corrects only their own",
+            earlier.id, m.principal
+        )));
+    }
+    let c = get(store, earlier.campaign_id)?
+        .ok_or_else(|| Error::NotFound(format!("no campaign {}", earlier.campaign_id)))?;
+    if c.status != "open" {
+        return Err(refused(format!(
+            "campaign {} is {}; an answer is corrected while its campaign is open",
+            c.name, c.status
+        )));
+    }
+    let question = c.question()?;
+    let given = Given {
+        assignment: earlier.assignment_id,
+        principal: m.principal,
+        author_kind: m.author_kind,
+        model: m.model,
+        value: m.value,
+        form: m.form,
+        derivative_id: m.derivative_id,
+        why: m.why,
+        unsure: m.unsure,
+    };
+    question.check(&given)?;
+    if let Question::Derivative {
+        derivative_kind, ..
+    } = &question
+        && let Some(id) = m.derivative_id
+    {
+        derivative_answers(store, earlier.item_id, id, derivative_kind)?;
+    }
+    if !["person", "agent", "model"].contains(&m.author_kind) {
+        return Err(invalid(format!(
+            "an author is a person, an agent or a model, not {}",
+            m.author_kind
+        )));
+    }
+    if (m.author_kind == "model") != m.model.is_some() {
+        return Err(invalid(
+            "a model's answer names the registered model that answered, and only a model's does (D15)",
+        ));
+    }
+    let adjudication = c.adjudication()?;
+    let stored_value = m.value.map(|v| kept_value(&question, v)).transpose()?;
+    let actor_detail = crate::actor::current();
+    store.begin()?;
+    let done = (|| -> Result<(Amended, Answer), Error> {
+        lock(store, c.id)?;
+        let status = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
+        if status != "open" {
+            return Err(refused(format!(
+                "campaign {} is {status}; an answer is corrected while its campaign is open",
+                c.name
+            )));
+        }
+        let earlier = answer_by_id(store, m.answer)?
+            .ok_or_else(|| Error::NotFound(format!("no answer {}", m.answer)))?;
+        if let Some(later) = earlier.superseded_by {
+            return Err(refused(format!(
+                "answer {} was corrected already, as answer {later}; correct that one",
+                earlier.id
+            )));
+        }
+        let it = item(store, earlier.item_id)?
+            .ok_or_else(|| Error::NotFound(format!("no campaign item {}", earlier.item_id)))?;
+        if earlier.role == "rater" && it.round > 1 {
+            return Err(refused(format!(
+                "item {} went to an adjudicator ({}); a rater's answer there is no longer theirs to correct",
+                it.id, it.state
+            )));
+        }
+        if it.decision_id.is_some() || it.pick_id.is_some() {
+            return Err(refused(format!("item {} is resolved", it.id)));
+        }
+        if earlier.value == stored_value
+            && earlier.form.as_ref() == m.form
+            && earlier.derivative_id == m.derivative_id
+            && earlier.unsure == m.unsure
+        {
+            return Ok((
+                Amended {
+                    answer: earlier.id,
+                    supersedes: earlier.id,
+                    item: it.id,
+                    state: it.state.clone(),
+                    adjudication: None,
+                    unchanged: true,
+                },
+                earlier,
+            ));
+        }
+        let changed = earlier
+            .suggested
+            .as_ref()
+            .map(|s| stored_value.as_deref() != Some(s.as_str()));
+        let id = store
+            .insert(
+                &Insert::new(
+                    table("campaign_answer"),
+                    &[
+                        "campaign_id",
+                        "item_id",
+                        "assignment_id",
+                        "principal",
+                        "role",
+                        "round",
+                        "author_kind",
+                        "value",
+                        "form",
+                        "derivative_id",
+                        "why",
+                        "actor_detail",
+                        "answered_at",
+                        "model_id",
+                        "suggested",
+                        "changed",
+                        "via",
+                        "unsure",
+                        "derived",
+                        "suggested_by",
+                        "supersedes_id",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::Int(c.id),
+                    Param::Int(it.id),
+                    Param::Int(earlier.assignment_id),
+                    Param::from(m.principal),
+                    Param::from(earlier.role.as_str()),
+                    Param::Int(earlier.round),
+                    Param::from(m.author_kind),
+                    stored_value.clone().map_or(Param::Null, Param::from),
+                    m.form.map_or(Param::Null, |f| Param::from(f.to_string())),
+                    m.derivative_id.map_or(Param::Null, Param::Int),
+                    m.why.map_or(Param::Null, Param::from),
+                    Param::from(actor_detail.to_string()),
+                    Param::from(now),
+                    m.model.map_or(Param::Null, Param::Int),
+                    earlier.suggested.clone().map_or(Param::Null, Param::from),
+                    changed.map_or(Param::Null, |c| Param::Int(i64::from(c))),
+                    Param::from("amend"),
+                    Param::Int(i64::from(m.unsure)),
+                    m.derived
+                        .map_or(Param::Null, |d| Param::from(d.to_string())),
+                    earlier
+                        .suggested_by
+                        .clone()
+                        .map_or(Param::Null, Param::from),
+                    Param::Int(earlier.id),
+                ]],
+            )?
+            .first()
+            .ok_or_else(|| StoreError::Message("the answer was not written back".into()))?
+            .int(0)?;
+        store.update_by_id(
+            table("campaign_answer"),
+            &[("superseded_by", Param::Int(id))],
+            "id",
+            earlier.id,
+        )?;
+        let (state, opened) = settle(store, &c, &question, &adjudication, &it, &earlier.role, now)?;
+        Ok((
+            Amended {
+                answer: id,
+                supersedes: earlier.id,
+                item: it.id,
+                state,
+                adjudication: opened,
+                unchanged: false,
+            },
+            earlier,
+        ))
+    })();
+    let (amended, earlier) = match done {
+        Ok(x) => x,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e);
+        }
+    };
+    store.commit()?;
+    if amended.unchanged {
+        return Ok(amended);
+    }
+    // the value of an axis or a pick is a word of the pack or stack ids; a
+    // form's text and a free answer stay out of the audit row
+    let shows = matches!(
+        question,
+        Question::Axis { .. } | Question::Axes { .. } | Question::Pick { .. }
+    );
+    audit::record(
+        registry,
+        &Entry {
+            principal: m.principal,
+            action: Action::CampaignAmend,
+            scope: json!({
+                "campaign": c.id, "item": amended.item, "assignment": earlier.assignment_id,
+                "answer": amended.answer, "supersedes": amended.supersedes,
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "role": earlier.role, "round": earlier.round,
+                "value": if shows { stored_value.clone() } else { None },
+                "earlier": if shows { earlier.value.clone() } else { None },
+                "author_kind": m.author_kind, "unsure": m.unsure,
+                "item_state": amended.state, "adjudication": amended.adjudication,
+            })),
+        },
+    )?;
+    Ok(amended)
+}
+
+/// Record 48, after the first gold campaign: a rater's own answers now
+/// (none a later one supersedes), the latest first.
+pub fn mine(store: &mut Store, campaign: i64, principal: &str) -> Result<Vec<Answer>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE campaign_id = {} AND principal = {} AND superseded_by IS NULL \
+         ORDER BY answered_at DESC, id DESC",
+        select_list(store, "campaign_answer", &ANSWER_COLUMNS, None),
+        store.qualified("campaign_answer"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+    );
+    Ok(store
+        .query(&sql, &[Param::Int(campaign), Param::from(principal)])?
+        .iter()
+        .map(answer_of)
+        .collect::<Result<_, _>>()?)
+}
+
+/// What a change of raters did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RatersChanged {
+    pub campaign: i64,
+    pub raters: Vec<String>,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    /// Live leases of a removed rater, given back.
+    pub released: u64,
+    /// For each rater added who answered another campaign's item on a stack
+    /// this campaign asks: how many such stacks, and the campaigns.
+    pub warnings: Vec<Value>,
+}
+
+impl RatersChanged {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "campaign": self.campaign, "raters": self.raters, "added": self.added,
+            "removed": self.removed, "released": self.released, "warnings": self.warnings,
+        })
+    }
+}
+
+/// Record 48, after the first gold campaign: add raters to an open campaign
+/// that names its raters, or take them off. A rater taken off keeps every
+/// answer given; a live lease they hold is given back so the item is
+/// offered again. Refused on a campaign that is not open, and on one that
+/// names no raters (anyone holding campaigns:work rates it, and naming one
+/// would shut out the rest). Blindness and the split that reads each stack
+/// once are the operator's to keep: a rater added who already answered
+/// another campaign's item on a stack this one asks is named in a warning.
+/// Audited as `campaign.raters`.
+pub fn set_raters(
+    registry: &mut Registry,
+    which: &str,
+    add: &[String],
+    remove: &[String],
+    who: &str,
+    now: &str,
+) -> Result<RatersChanged, Error> {
+    let c = find(registry.store(), which)?;
+    if c.status != "open" {
+        return Err(refused(format!(
+            "campaign {} is {}; raters change while a campaign is open",
+            c.name, c.status
+        )));
+    }
+    if add.is_empty() && remove.is_empty() {
+        return Err(invalid("name a rater to add or to remove"));
+    }
+    for p in add.iter().chain(remove) {
+        if p.trim().is_empty() || p.trim() != p {
+            return Err(invalid(format!("{p:?} is not a principal")));
+        }
+    }
+    if let Some(p) = add.iter().find(|p| remove.contains(p)) {
+        return Err(invalid(format!("{p} is both added and removed")));
+    }
+    let before = c.raters();
+    if before.is_empty() {
+        return Err(refused(format!(
+            "campaign {} names no raters, so anyone holding campaigns:work rates it; naming one would shut out the rest",
+            c.name
+        )));
+    }
+    let added: Vec<String> = add
+        .iter()
+        .filter(|p| !before.contains(p))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let removed: Vec<String> = remove
+        .iter()
+        .filter(|p| before.contains(p))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut raters: Vec<String> = before
+        .iter()
+        .filter(|p| !removed.contains(p))
+        .cloned()
+        .collect();
+    raters.extend(added.iter().cloned());
+    if raters.is_empty() {
+        return Err(refused(format!(
+            "campaign {} would name no raters, and anyone holding campaigns:work would rate it; add one first",
+            c.name
+        )));
+    }
+    let store = registry.store();
+    let d = store.dialect();
+    store.begin()?;
+    let done = (|| -> Result<(u64, Vec<Value>), Error> {
+        lock(store, c.id)?;
+        let now_c =
+            get(store, c.id)?.ok_or_else(|| Error::NotFound(format!("no campaign {}", c.id)))?;
+        if now_c.status != "open" {
+            return Err(refused(format!("campaign {} is {}", c.name, now_c.status)));
+        }
+        let mut policy = now_c.rater_policy.clone();
+        if !policy.is_object() {
+            policy = json!({});
+        }
+        policy["raters"] = json!(raters);
+        store.update_by_id(
+            table("campaign"),
+            &[("rater_policy", Param::from(policy.to_string()))],
+            "id",
+            c.id,
+        )?;
+        // a removed rater's live claims go back to the pool
+        let mut released = 0u64;
+        for p in &removed {
+            released += store.execute(
+                &format!(
+                    "UPDATE {} SET state = 'released', ended_at = {} WHERE campaign_id = {} AND principal = {} \
+                     AND role = 'rater' AND state = 'leased'",
+                    store.qualified("campaign_assignment"),
+                    d.param(1, Type::Timestamp),
+                    d.param(2, Type::Int),
+                    d.param(3, Type::Text),
+                ),
+                &[Param::from(now), Param::Int(c.id), Param::from(p.as_str())],
+            )?;
+        }
+        // who among those added already answered one of these stacks
+        // elsewhere
+        let mut warnings = Vec::new();
+        let i = store.qualified("campaign_item");
+        let a = store.qualified("campaign_answer");
+        let k = store.qualified("campaign");
+        for p in &added {
+            let sql = format!(
+                "SELECT k.name, COUNT(DISTINCT o.stack_id) FROM {a} x \
+                 JOIN {i} o ON o.id = x.item_id JOIN {k} k ON k.id = x.campaign_id \
+                 WHERE x.principal = {} AND x.campaign_id <> {} AND o.stack_id IN \
+                 (SELECT m.stack_id FROM {i} m WHERE m.campaign_id = {} AND m.stack_id IS NOT NULL) \
+                 GROUP BY k.name ORDER BY k.name",
+                d.param(1, Type::Text),
+                d.param(2, Type::Int),
+                d.param(3, Type::Int),
+            );
+            let rows = store.query(
+                &sql,
+                &[Param::from(p.as_str()), Param::Int(c.id), Param::Int(c.id)],
+            )?;
+            let mut per: Vec<Value> = Vec::new();
+            let mut n = 0i64;
+            for r in &rows {
+                let count = r
+                    .opt_int(1)
+                    .ok()
+                    .flatten()
+                    .or_else(|| r.opt_double(1).ok().flatten().map(|x| x as i64))
+                    .unwrap_or(0);
+                n += count;
+                per.push(json!({"campaign": r.text(0)?, "stacks": count}));
+            }
+            if n > 0 {
+                warnings.push(json!({
+                    "principal": p, "stacks": n, "campaigns": per,
+                    "why": format!(
+                        "{p} already answered {n} of the stacks campaign {} asks, in other campaigns; a stack read twice by one rater is no independent read, and a sealed stack they saw elsewhere is not read blind",
+                        c.name
+                    ),
+                }));
+            }
+        }
+        Ok((released, warnings))
+    })();
+    let (released, warnings) = match done {
+        Ok(x) => x,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e);
+        }
+    };
+    store.commit()?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::CampaignRaters,
+            scope: json!({"campaign": c.id, "name": c.name}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "before": before, "raters": raters, "added": added, "removed": removed,
+                "released": released, "warned": warnings.iter().map(|w| &w["principal"]).collect::<Vec<_>>(),
+                "at": now,
+            })),
+        },
+    )?;
+    Ok(RatersChanged {
+        campaign: c.id,
+        raters,
+        added,
+        removed,
+        released,
+        warnings,
+    })
+}
+
 /// What [`write_answer`] writes.
 struct Written<'a> {
     question: &'a Question,
@@ -4045,13 +4674,40 @@ fn write_answer(
     )?;
     let it = item(store, a.item_id)?
         .ok_or_else(|| Error::NotFound(format!("no campaign item {}", a.item_id)))?;
+    let (state, opened) = settle(store, c, w.question, w.adjudication, &it, &a.role, now)?;
+    Ok(Answered {
+        answer: id,
+        item: it.id,
+        state,
+        adjudication: opened,
+    })
+}
+
+/// Move an item on from the answers it holds now (the ones no later answer
+/// supersedes), after a `role`'s answer: once the last rater answered, it
+/// is agreed, or it waits for its metric, or a second round is offered to
+/// an adjudicator; an adjudicator's answer settles it. The item's state
+/// after it, and the round-two assignment it opened.
+fn settle(
+    store: &mut Store,
+    c: &Campaign,
+    question: &Question,
+    adjudication: &Adjudication,
+    it: &Item,
+    role: &str,
+    now: &str,
+) -> Result<(String, Option<i64>), Error> {
     let all = answers_of_item(store, it.id)?;
     let mut opened = None;
-    let state = if a.role == "adjudicator" {
-        let settled = all.last().expect("the answer just written");
-        let agreement = share_agreeing(w.question, &all, settled);
-        let mut outcome = outcome_of(w.question, std::slice::from_ref(settled));
-        per_axis(w.question, &all, settled, &mut outcome);
+    let state = if role == "adjudicator" {
+        let settled = all
+            .iter()
+            .rev()
+            .find(|x| x.role == "adjudicator")
+            .expect("the adjudicator's answer just written");
+        let agreement = share_agreeing(question, &all, settled);
+        let mut outcome = outcome_of(question, std::slice::from_ref(settled));
+        per_axis(question, &all, settled, &mut outcome);
         set_item(
             store,
             it.id,
@@ -4067,10 +4723,9 @@ fn write_answer(
         if (raters.len() as i64) < c.raters_per_item {
             it.state.clone()
         } else {
-            let keys: Vec<Option<String>> =
-                raters.iter().map(|x| w.question.comparable(x)).collect();
+            let keys: Vec<Option<String>> = raters.iter().map(|x| question.comparable(x)).collect();
             let agree = keys.iter().all(|k| k.is_some() && *k == keys[0]);
-            let next = match (w.adjudication.when, w.adjudication.metric) {
+            let next = match (adjudication.when, adjudication.metric) {
                 (When::Always, _) => "needs_adjudication",
                 (_, Metric::External) => "awaiting_metric",
                 (_, _) if agree => "agreed",
@@ -4081,24 +4736,19 @@ fn write_answer(
             let owned: Vec<Answer> = raters.iter().map(|x| (*x).clone()).collect();
             match next {
                 "agreed" => {
-                    let mut outcome = outcome_of(w.question, &owned);
-                    per_axis(w.question, &all, &owned[0], &mut outcome);
+                    let mut outcome = outcome_of(question, &owned);
+                    per_axis(question, &all, &owned[0], &mut outcome);
                     set_item(store, it.id, "agreed", 1, Some(1.0), Some(&outcome), now)?;
                 }
                 "needs_adjudication" => {
-                    opened = Some(adjudicate(store, c, &it, &owned, now)?);
+                    opened = Some(adjudicate(store, c, it, &owned, now)?);
                 }
                 other => set_item(store, it.id, other, 1, None, None, now)?,
             }
             next.to_string()
         }
     };
-    Ok(Answered {
-        answer: id,
-        item: it.id,
-        state,
-        adjudication: opened,
-    })
+    Ok((state, opened))
 }
 
 /// Record 48 R1: answer one item of a batch a rater accepted in one move
@@ -4455,7 +5105,9 @@ fn p90(mut v: Vec<f64>) -> Option<f64> {
 /// answers that had a suggestion, how many changed it and the share.
 /// Counts and times only: never a value.
 pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
-    let all = answers(store, campaign)?;
+    // record 48, after the first gold campaign: a rater's answers now; a
+    // correction counts once, as corrected, and is never timed
+    let all = current_answers(store, campaign)?;
     let mut by: BTreeMap<String, Vec<&Answer>> = BTreeMap::new();
     for a in &all {
         by.entry(a.principal.clone()).or_default().push(a);
@@ -4463,9 +5115,13 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
     let summary = |list: &[&Answer]| -> Value {
         let read: Vec<&&Answer> = list
             .iter()
-            .filter(|a| a.via.as_deref() != Some("batch"))
+            .filter(|a| !matches!(a.via.as_deref(), Some("batch" | "amend")))
             .collect();
-        let batched = list.len() - read.len();
+        let amended = list
+            .iter()
+            .filter(|a| a.via.as_deref() == Some("amend"))
+            .count();
+        let batched = list.len() - read.len() - amended;
         let seconds: Vec<f64> = read.iter().filter_map(|a| a.seconds).collect();
         let suggested = list.iter().filter(|a| a.changed.is_some()).count();
         let changed = list.iter().filter(|a| a.changed == Some(true)).count();
@@ -4474,6 +5130,7 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
             "answers": list.len(),
             "read": read.len(),
             "batched": batched,
+            "amended": amended,
             "timed": seconds.len(),
             "median_seconds": tenth(median(seconds.clone())),
             "p90_seconds": tenth(p90(seconds)),
@@ -4567,13 +5224,17 @@ fn set_item(
     outcome: Option<&Value>,
     _now: &str,
 ) -> Result<(), StoreError> {
-    let mut sets = vec![("state", Param::from(state)), ("round", Param::Int(round))];
-    if let Some(a) = agreement {
-        sets.push(("agreement", Param::Double(a)));
-    }
-    if let Some(o) = outcome {
-        sets.push(("outcome", Param::from(o.to_string())));
-    }
+    // none clears what an earlier state said: an answer corrected may take
+    // an agreed item back to a disagreement
+    let sets = vec![
+        ("state", Param::from(state)),
+        ("round", Param::Int(round)),
+        ("agreement", agreement.map_or(Param::Null, Param::Double)),
+        (
+            "outcome",
+            outcome.map_or(Param::Null, |o| Param::from(o.to_string())),
+        ),
+    ];
     store.update_by_id(table("campaign_item"), &sets, "id", id)?;
     Ok(())
 }
@@ -4731,7 +5392,8 @@ pub fn agreement(store: &mut Store, campaign: i64) -> Result<Value, Error> {
     let c =
         get(store, campaign)?.ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     let question = c.question()?;
-    let all = answers(store, campaign)?;
+    // record 48, after the first gold campaign: the answers now
+    let all = current_answers(store, campaign)?;
     let n = c.raters_per_item as usize;
     let mut out = measure(&all, n, |a| question.comparable(a));
     let raters: Vec<&Answer> = all.iter().filter(|a| a.role == "rater").collect();
@@ -5752,20 +6414,27 @@ pub fn counts(store: &mut Store, campaign: i64) -> Result<Value, Error> {
     )? {
         leases.insert(r.text(0)?.to_string(), json!(r.int(1)?));
     }
-    let answers = store
-        .query(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE campaign_id = {}",
-                store.qualified("campaign_answer"),
-                d.param(1, Type::Int)
-            ),
-            &[Param::Int(campaign)],
-        )?
-        .first()
-        .map(|r| r.int(0))
-        .transpose()?
-        .unwrap_or(0);
-    Ok(json!({"items": states, "assignments": leases, "answers": answers}))
+    // record 48, after the first gold campaign: the answers now, and how
+    // many a correction superseded
+    let (mut answers, mut corrected) = (0i64, 0i64);
+    for r in store.query(
+        &format!(
+            "SELECT CASE WHEN superseded_by IS NULL THEN 0 ELSE 1 END, COUNT(*) FROM {} \
+             WHERE campaign_id = {} GROUP BY CASE WHEN superseded_by IS NULL THEN 0 ELSE 1 END",
+            store.qualified("campaign_answer"),
+            d.param(1, Type::Int)
+        ),
+        &[Param::Int(campaign)],
+    )? {
+        if r.int(0)? == 0 {
+            answers = r.int(1)?;
+        } else {
+            corrected = r.int(1)?;
+        }
+    }
+    Ok(json!({
+        "items": states, "assignments": leases, "answers": answers, "corrected": corrected,
+    }))
 }
 
 #[cfg(test)]

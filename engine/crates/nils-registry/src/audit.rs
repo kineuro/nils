@@ -114,6 +114,11 @@ pub enum Action {
     /// Record 50 R3: answers suggested for a campaign's items from outside
     /// the engine, with their author, imported. A suggestion is no answer.
     CampaignSuggest,
+    /// Record 48, after the first gold campaign: a rater's answer corrected
+    /// by a new one that supersedes it, the earlier kept; and the raters of
+    /// an open campaign changed.
+    CampaignAmend,
+    CampaignRaters,
     /// Record 42 S7: a label set written out with its digest, and labels
     /// from v0 imported as person decisions.
     LabelsExport,
@@ -193,6 +198,8 @@ impl Action {
             Action::CampaignRequestion => "campaign.requestion",
             Action::CampaignRepack => "campaign.repack",
             Action::CampaignSuggest => "campaign.suggest",
+            Action::CampaignAmend => "campaign.amend",
+            Action::CampaignRaters => "campaign.raters",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
@@ -235,6 +242,8 @@ impl Action {
                 | Action::CampaignRequestion
                 | Action::CampaignRepack
                 | Action::CampaignSuggest
+                | Action::CampaignAmend
+                | Action::CampaignRaters
                 | Action::LabelsExport
                 | Action::LabelsSeal
                 | Action::LabelsCertificate

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 69;
+pub const SCHEMA_VERSION: i64 = 70;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +330,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 69,
         apply: a_campaign_carries_suggestions_from_outside,
     },
+    Migration {
+        version: 70,
+        apply: an_answer_may_be_corrected,
+    },
 ];
 
 /// Record 49 A1: pipeline runs have a lane of their own, their units run
@@ -403,6 +407,69 @@ fn a_campaign_carries_suggestions_from_outside(store: &mut Store, kind: Kind) ->
     }
     add_columns(store, "campaign_answer", &["suggested_by"])?;
     add_tables(store, kind, &["campaign_suggestion"])
+}
+
+/// Record 48, after the first gold campaign: a rater corrects their own
+/// answer while the campaign is open, and the correction is a new answer
+/// that supersedes the earlier, which is kept. The key of one answer per
+/// item, rater and round becomes one first answer per item, rater and
+/// round, and each answer is superseded once at most. Postgres drops the
+/// old key by its name; SQLite cannot drop a key its table declared, so
+/// the table is rebuilt with every row and its id as it was.
+fn an_answer_may_be_corrected(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    if !table_exists(store, "campaign_answer")? {
+        return add_tables(store, kind, &["campaign_answer"]);
+    }
+    add_columns(
+        store,
+        "campaign_answer",
+        &["supersedes_id", "superseded_by"],
+    )?;
+    const OLD_KEY: &str = "uq_campaign_answer_item_id_principal_round";
+    match store {
+        Store::Postgres { .. } => {
+            let t = store.qualified("campaign_answer");
+            store.batch(&format!(
+                "ALTER TABLE {t} DROP CONSTRAINT IF EXISTS {OLD_KEY}"
+            ))?;
+            add_indexes(store, "campaign_answer")
+        }
+        Store::Sqlite(_) => {
+            let declared = store
+                .query_opt(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'campaign_answer'",
+                    &[],
+                )?
+                .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+                .unwrap_or_default();
+            if !declared.contains(OLD_KEY) {
+                return add_indexes(store, "campaign_answer");
+            }
+            let dialect = store.dialect();
+            let schema_name = store.schema().map(str::to_string);
+            let old = store.qualified("campaign_answer");
+            let mut rebuilt = schema::table("campaign_answer").clone();
+            rebuilt.name = "campaign_answer_rebuilt";
+            store.batch(&dialect.create_table(schema_name.as_deref(), &rebuilt))?;
+            let new = store.qualified("campaign_answer_rebuilt");
+            let cols: Vec<&str> = rebuilt.columns.iter().map(|c| c.name).collect();
+            let cols = cols.join(", ");
+            store.batch(&format!(
+                "INSERT INTO {new} ({cols}) SELECT {cols} FROM {old} ORDER BY id"
+            ))?;
+            store.batch(&format!("DROP TABLE {old}"))?;
+            store.batch(&format!("ALTER TABLE {new} RENAME TO campaign_answer"))?;
+            for ix in
+                dialect.create_indexes(schema_name.as_deref(), schema::table("campaign_answer"))
+            {
+                store.batch(&ix)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Record 48: an answer says how long it took, what the engine suggested

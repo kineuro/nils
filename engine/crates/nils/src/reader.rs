@@ -1625,6 +1625,11 @@ pub(crate) fn gallery(
     }
     let total = rows.len();
     rows.truncate(limit.clamp(1, GALLERY_MAX));
+    // record 48, after the first gold campaign: what is read one by one,
+    // held back by an earlier batch or drawn by the seed for the next, and
+    // the stacks of a sealed sample
+    let flagged =
+        campaign::held_back_open(store, c, principal).map_err(|e| (500, e.to_string()))?;
     if let Ok(mut held) = shown_pages().lock() {
         held.insert(
             (c.id, principal.to_string()),
@@ -1642,6 +1647,8 @@ pub(crate) fn gallery(
         "open": open.len(),
         "sealed": n_sealed,
         "held_back": n_held,
+        "held_back_open": n_held + flagged,
+        "alone": n_held + flagged + n_sealed,
         "hold_back": c.hold_back,
         "left": total,
         "count": rows.len(),

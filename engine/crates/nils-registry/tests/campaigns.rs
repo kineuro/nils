@@ -3236,7 +3236,7 @@ fn can_t_tell_is_an_answer_that_never_becomes_a_decision() {
             tsv.lines()
                 .next()
                 .unwrap()
-                .ends_with("\tanswer_id\tunsure\tderived"),
+                .ends_with("\tanswer_id\tunsure\tderived\tsuperseded_by"),
             "{name}"
         );
         assert!(tsv.contains("\tcant_tell\t"), "{name}");
@@ -3640,5 +3640,378 @@ fn a_repack_refreezes_the_constraints_and_keeps_every_answer() {
             techniques.iter().any(|r| r.text(0).unwrap() == "SE2D"),
             "{name}"
         );
+    }
+}
+
+fn amend<'a>(answer: i64, who: &'a str, value: &'a str) -> campaign::Amend<'a> {
+    campaign::Amend {
+        answer,
+        principal: who,
+        author_kind: "person",
+        model: None,
+        value: Some(value),
+        form: None,
+        derivative_id: None,
+        why: None,
+        unsure: false,
+        derived: None,
+    }
+}
+
+/// Record 48, after the first gold campaign: a rater corrects their own
+/// answer while the campaign is open. The correction supersedes it, the
+/// earlier is kept and exported beside it, agreement and the close read
+/// the correction, and nothing is corrected once the campaign is closed.
+#[test]
+fn a_rater_corrects_an_answer_and_the_earlier_is_kept() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "disagree", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new("gold", &q, &adj, Items::Stacks(ids.clone()), 1, "decision"),
+        )
+        .unwrap();
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        let first =
+            campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(1)).unwrap();
+        assert_eq!(first.state, "agreed", "{name}");
+
+        // another's answer is not theirs to correct
+        let theirs = campaign::amend(reg, &amend(first.answer, "bo@lab", "spine"), &at(2));
+        assert!(
+            matches!(theirs, Err(campaign::Error::Forbidden(_))),
+            "{name}: {theirs:?}"
+        );
+        // the same answer again writes nothing
+        let same = campaign::amend(reg, &amend(first.answer, "anna@lab", "brain"), &at(2)).unwrap();
+        assert!(same.unchanged, "{name}");
+        assert_eq!(count(reg, "campaign_answer", ""), 1, "{name}");
+        // a value outside the question is refused
+        assert!(campaign::amend(reg, &amend(first.answer, "anna@lab", "knee"), &at(2)).is_err());
+
+        let fixed =
+            campaign::amend(reg, &amend(first.answer, "anna@lab", "spine"), &at(3)).unwrap();
+        assert!(!fixed.unchanged, "{name}");
+        assert_eq!(fixed.supersedes, first.answer, "{name}");
+        assert_eq!(fixed.state, "agreed", "{name}");
+        let it = campaign::item(reg.store(), fixed.item).unwrap().unwrap();
+        assert_eq!(
+            it.outcome["value"], "spine",
+            "{name}: the outcome reads the correction"
+        );
+        let earlier = campaign::answer_by_id(reg.store(), first.answer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(earlier.superseded_by, Some(fixed.answer), "{name}");
+        assert_eq!(
+            earlier.value.as_deref(),
+            Some("brain"),
+            "{name}: kept as given"
+        );
+        let now = campaign::answer_by_id(reg.store(), fixed.answer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(now.supersedes_id, Some(first.answer), "{name}");
+        assert_eq!(now.via.as_deref(), Some("amend"), "{name}");
+        assert_eq!(now.assignment_id, a.assignment.id, "{name}");
+        assert_eq!(now.seconds, None, "{name}: a correction is never timed");
+
+        // the earlier, once superseded, is not corrected again; the latest is
+        let stale = campaign::amend(reg, &amend(first.answer, "anna@lab", "neck"), &at(4));
+        assert!(
+            matches!(stale, Err(campaign::Error::Refused(_))),
+            "{name}: {stale:?}"
+        );
+        let again =
+            campaign::amend(reg, &amend(fixed.answer, "anna@lab", "brain-neck"), &at(5)).unwrap();
+        // the rater's answers now: one, the latest correction
+        let mine = campaign::mine(reg.store(), c.id, "anna@lab").unwrap();
+        assert_eq!(mine.len(), 1, "{name}");
+        assert_eq!(mine[0].id, again.answer, "{name}");
+        let counts = campaign::counts(reg.store(), c.id).unwrap();
+        assert_eq!(counts["answers"], 1, "{name}: {counts}");
+        assert_eq!(counts["corrected"], 2, "{name}: {counts}");
+        let stats = campaign::stats(reg.store(), c.id).unwrap();
+        assert_eq!(stats["all"]["answers"], 1, "{name}: {stats}");
+        assert_eq!(stats["all"]["amended"], 1, "{name}: {stats}");
+        assert_eq!(stats["all"]["read"], 0, "{name}: {stats}");
+        // audited, with the value and the one it replaced
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT details FROM {} WHERE action = 'campaign.amend' ORDER BY id",
+                s.qualified("audit")
+            )
+        });
+        assert_eq!(rows.len(), 2, "{name}");
+        let d: serde_json::Value = serde_json::from_str(rows[0].text(0).unwrap()).unwrap();
+        assert_eq!(d["value"], "spine", "{name}: {d}");
+        assert_eq!(d["earlier"], "brain", "{name}: {d}");
+
+        // the export of answers holds all three, each earlier naming what
+        // superseded it
+        let labels = labels::campaign_labels(reg.store(), c.id, Of::Answers).unwrap();
+        assert_eq!(labels.len(), 3, "{name}");
+        let chain: Vec<(Option<String>, Option<i64>)> = labels
+            .iter()
+            .map(|l| (l.value.clone(), l.superseded_by))
+            .collect();
+        assert_eq!(
+            chain,
+            [
+                (Some("brain".into()), Some(fixed.answer)),
+                (Some("spine".into()), Some(again.answer)),
+                (Some("brain-neck".into()), None),
+            ],
+            "{name}"
+        );
+        assert!(labels::tsv(&labels).starts_with(&labels::COLUMNS.join("\t")));
+        assert!(labels::COLUMNS.ends_with(&["derived", "superseded_by"]));
+
+        // the close decides on the correction
+        let closed = campaign::close(reg, &person_closes(c.id), &at(6)).unwrap();
+        assert_eq!(closed.decisions.len(), 1, "{name}: {closed:?}");
+        let v = select(reg, |s| {
+            format!(
+                "SELECT value FROM {} WHERE withdrawn_at IS NULL",
+                s.qualified("decision")
+            )
+        });
+        assert_eq!(v[0].text(0).unwrap(), "brain-neck", "{name}");
+        let outcomes = labels::campaign_labels(reg.store(), c.id, Of::Outcomes).unwrap();
+        assert_eq!(outcomes.len(), 1, "{name}");
+        assert_eq!(outcomes[0].value.as_deref(), Some("brain-neck"), "{name}");
+        // closed: nothing is corrected
+        let late = campaign::amend(reg, &amend(again.answer, "anna@lab", "brain"), &at(7));
+        assert!(
+            matches!(late, Err(campaign::Error::Refused(_))),
+            "{name}: {late:?}"
+        );
+    }
+}
+
+/// With two raters, a correction that makes them disagree sends the item
+/// to an adjudicator, and a rater's answer there is no longer theirs to
+/// correct.
+#[test]
+fn a_correction_that_disagrees_goes_to_an_adjudicator() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "disagree", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new(
+                "pair",
+                &q,
+                &adj,
+                Items::Stacks(ids[..1].to_vec()),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        let x = campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(1)).unwrap();
+        let y = campaign::answer(reg, &give(b.assignment.id, "bo@lab", "brain"), &at(2)).unwrap();
+        assert_eq!(y.state, "agreed", "{name}");
+        let fixed = campaign::amend(reg, &amend(x.answer, "anna@lab", "spine"), &at(3)).unwrap();
+        assert_eq!(fixed.state, "needs_adjudication", "{name}");
+        assert!(fixed.adjudication.is_some(), "{name}");
+        let it = campaign::item(reg.store(), fixed.item).unwrap().unwrap();
+        assert!(it.outcome.is_null(), "{name}: no stale outcome");
+        assert!(it.agreement.is_none(), "{name}: no stale agreement");
+        let late = campaign::amend(reg, &amend(y.answer, "bo@lab", "spine"), &at(4));
+        assert!(
+            matches!(late, Err(campaign::Error::Refused(_))),
+            "{name}: {late:?}"
+        );
+        let ag = campaign::agreement(reg.store(), c.id).unwrap();
+        assert_eq!(
+            ag["exact"], 0.0,
+            "{name}: agreement reads the correction: {ag}"
+        );
+    }
+}
+
+/// Record 48, after the first gold campaign: raters join an open campaign
+/// that names its raters, or leave it with their claims given back; a
+/// rater who read the same stacks elsewhere is warned of; nothing changes
+/// on a closed campaign or on one that names none.
+#[test]
+fn raters_join_and_leave_an_open_campaign() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = body_part();
+        let adj = json!({"when": "never", "metric": "exact"});
+        let mut n = new("dan", &q, &adj, Items::Stacks(ids.clone()), 1, "none");
+        n.raters = vec!["dan@lab".into()];
+        let c = campaign::create(reg, &n).unwrap();
+        // eve read the same stacks in a campaign of their own
+        let mut n2 = new("eve", &q, &adj, Items::Stacks(ids[..2].to_vec()), 1, "none");
+        n2.raters = vec!["eve@lab".into()];
+        let c2 = campaign::create(reg, &n2).unwrap();
+        let na = campaign::claim(reg, c2.id, "eve@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(na.assignment.id, "eve@lab", "brain"), &at(1)).unwrap();
+
+        // eve may not rate dan's yet
+        assert!(matches!(
+            campaign::claim(reg, c.id, "eve@lab", Role::Rater, &at(2)),
+            Err(campaign::Error::Forbidden(_))
+        ));
+        let r = campaign::claim(reg, c.id, "dan@lab", Role::Rater, &at(2))
+            .unwrap()
+            .unwrap();
+        let done = campaign::set_raters(
+            reg,
+            "dan",
+            &["eve@lab".to_string()],
+            &["dan@lab".to_string()],
+            "cleo@lab",
+            &at(3),
+        )
+        .unwrap();
+        assert_eq!(done.raters, ["eve@lab"], "{name}");
+        assert_eq!(done.released, 1, "{name}: dan's live claim is given back");
+        assert_eq!(done.warnings.len(), 1, "{name}: {:?}", done.warnings);
+        assert_eq!(done.warnings[0]["principal"], "eve@lab", "{name}");
+        assert_eq!(done.warnings[0]["stacks"], 1, "{name}");
+        let released = campaign::assignments(reg.store(), c.id)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == r.assignment.id)
+            .unwrap();
+        assert_eq!(released.state, "released", "{name}");
+        // eve claims now, dan no longer
+        assert!(
+            campaign::claim(reg, c.id, "eve@lab", Role::Rater, &at(4))
+                .unwrap()
+                .is_some(),
+            "{name}"
+        );
+        assert!(matches!(
+            campaign::claim(reg, c.id, "dan@lab", Role::Rater, &at(4)),
+            Err(campaign::Error::Forbidden(_))
+        ));
+        // audited
+        assert_eq!(
+            count(reg, "audit", " WHERE action = 'campaign.raters'"),
+            1,
+            "{name}"
+        );
+        // no one left, or nothing named, is refused
+        assert!(
+            campaign::set_raters(
+                reg,
+                "dan",
+                &[],
+                &["eve@lab".to_string()],
+                "cleo@lab",
+                &at(5)
+            )
+            .is_err()
+        );
+        assert!(campaign::set_raters(reg, "dan", &[], &[], "cleo@lab", &at(5)).is_err());
+        // a campaign that names no raters is not narrowed by one
+        let open = campaign::create(
+            reg,
+            &new("anyone", &q, &adj, Items::Stacks(ids.clone()), 1, "none"),
+        )
+        .unwrap();
+        assert!(matches!(
+            campaign::set_raters(
+                reg,
+                &open.name,
+                &["eve@lab".to_string()],
+                &[],
+                "cleo@lab",
+                &at(5)
+            ),
+            Err(campaign::Error::Refused(_))
+        ));
+        // closed: refused
+        campaign::close(reg, &person_closes(c2.id), &at(6)).unwrap();
+        assert!(matches!(
+            campaign::set_raters(reg, "eve", &["bo@lab".to_string()], &[], "cleo@lab", &at(7)),
+            Err(campaign::Error::Refused(_))
+        ));
+    }
+}
+
+/// Record 48, after the first gold campaign: a claim may ask only for the
+/// items read one by one (held back from a batch), and every claim names
+/// the item the next one would offer, for the reader to fetch ahead.
+#[test]
+fn a_claim_asks_for_the_held_back_and_names_the_next() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 5);
+        let q = body_part();
+        let adj = json!({"when": "never", "metric": "exact"});
+        let mut n = new("half", &q, &adj, Items::Stacks(ids.clone()), 1, "none");
+        n.hold_back = Some(0.5);
+        let c = campaign::create(reg, &n).unwrap();
+        let seed = campaign::hold_back_seed(reg.store(), c.id).unwrap();
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        let drawn: Vec<i64> = items
+            .iter()
+            .map(|it| it.id)
+            .filter(|i| campaign::drawn_back(&seed, *i, c.hold_back))
+            .collect();
+        assert!(!drawn.is_empty() && drawn.len() < items.len(), "{name}");
+        // the first by position, naming the second
+        let first = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.item.position, 0, "{name}");
+        assert_eq!(
+            first.next.map(|(i, _)| i),
+            Some(items[1].id),
+            "{name}: the next is named"
+        );
+        assert_eq!(first.next.and_then(|(_, s)| s), items[1].stack_id, "{name}");
+        campaign::answer(reg, &give(first.assignment.id, "anna@lab", "brain"), &at(1)).unwrap();
+        // alone: only what the seed holds back, in order, each naming the next
+        let mut seen = Vec::new();
+        let mut hinted = None;
+        for m in 2..20 {
+            let Some(cl) = campaign::claim_with(
+                reg,
+                c.id,
+                "bo@lab",
+                Role::Rater,
+                campaign::Order::Position,
+                true,
+                &at(m),
+            )
+            .unwrap() else {
+                break;
+            };
+            if let Some(h) = hinted {
+                assert_eq!(cl.item.id, h, "{name}: the hint was the next claim");
+            }
+            hinted = cl.next.map(|(i, _)| i);
+            seen.push(cl.item.id);
+            campaign::answer(reg, &give(cl.assignment.id, "bo@lab", "spine"), &at(m)).unwrap();
+        }
+        let want: Vec<i64> = drawn.into_iter().filter(|i| *i != items[0].id).collect();
+        assert_eq!(seen, want, "{name}");
     }
 }
