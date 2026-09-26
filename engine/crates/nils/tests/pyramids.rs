@@ -893,3 +893,43 @@ fn the_render_door_s_time_per_tile() {
         audit_rows(&home)
     );
 }
+
+/// Record 50 R3: a gallery's picture of a stack is one small JPEG, its own
+/// plane beside the two across it at their shape in millimetres, drawn
+/// from the pyramid and kept beside it, so the next look reads a file.
+#[test]
+fn a_gallery_s_picture_is_three_planes_small_and_kept() {
+    const GRID: usize = 3;
+    let (home, _src, work) = grid(GRID);
+    let server = Server::start(&home);
+    let (status, three) = server.bytes("/api/instances/1/thumb?size=64", OPERATOR);
+    assert_eq!(status, 200);
+    let img = image::load_from_memory(&three).unwrap();
+    assert_eq!(img.height(), 64);
+    // its own plane is 28.8 by 36 mm, the two across it 28.8 and 36 mm by
+    // 15 mm of stack, so the three are wider than they are high
+    assert!(img.width() > 3 * 64, "{}", img.width());
+    let (status, one) = server.bytes("/api/instances/1/thumb?size=64&planes=1", OPERATOR);
+    assert_eq!(status, 200);
+    let img = image::load_from_memory(&one).unwrap();
+    assert_eq!((img.width(), img.height()), (51, 64));
+    // kept beside the pyramid, and read from there the next time
+    let kept = work.path().join("pyramids").join("1").join("thumbs");
+    assert!(kept.join("64-3.jpg").is_file(), "{}", kept.display());
+    let (_, again) = server.bytes("/api/instances/1/thumb?size=64", OPERATOR);
+    assert_eq!(again, three);
+    // the default size, for every stack of the grid, in one pass
+    let t = std::time::Instant::now();
+    for s in 1..=GRID {
+        let (status, jpeg) = server.bytes(&format!("/api/instances/{s}/thumb"), OPERATOR);
+        assert_eq!(status, 200, "stack {s}");
+        assert_eq!(image::load_from_memory(&jpeg).unwrap().height(), 128);
+    }
+    eprintln!(
+        "{GRID} gallery pictures in {:.0} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    // a reader without the pixels' detail reads none
+    let (status, _) = server.bytes("/api/instances/1/thumb", READER);
+    assert_eq!(status, 403);
+}

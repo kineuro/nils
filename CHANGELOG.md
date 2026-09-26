@@ -4,6 +4,17 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A campaign carries answers suggested from outside the engine (record 50): v0's committed labels or a model's proposals, each with its author (`v0-model`, `v0-person`, a model id) and, where the source gave them, a confidence per class. `POST /api/campaigns/{id}/suggestions` (the campaign's maker, or a holder of review:work) and `nils campaign suggest <campaign> --file <tsv> [--author]` bring them in, by stack, item or SeriesInstanceUID, so v0's export reads as it is; `GET` counts them. A suggestion is never an answer, a stack of a sealed sample takes none, and an author's later import replaces its earlier one. Schema 69.
+- A gallery for a campaign that asks one axis: `GET /api/campaigns/{id}/gallery` lists up to 100 of the items open to the caller, each with the value suggested, who suggested it, the confidence of that value and of every class, and a small picture, least certain first (or grouped by value). `POST /api/campaigns/{id}/gallery/accept` accepts the page in one move with each item's own value, the suggestion or the person's correction: each item is its own answer by the person, `via` batch, with the engine's suggestion and its author (`suggested_by`) kept beside it, `changed` where it was corrected, and the page's time shared among the answers. A sealed item and an item the campaign's seed holds back are never shown or accepted in one move; they are read alone.
+- `GET /api/instances/{stack}/thumb`: a stack drawn small, its own plane beside the two across it at their true shape, from the coarsest level of the pyramid that fills it, kept beside the pyramid once drawn.
+
+### Changed
+
+- The MRI pack is version 0.7.0: `body_part` gains `other`, the unknown (record 50), which no rule writes, and `brain` and `brain-neck` gain the descriptions raters read them by.
+- Claims in order of value take an item's outside suggestion into account: its confidence stands for the item's, and suggesters that disagree come first.
+
 ## [1.0.0-alpha.45] - 2026-09-26
 
 The MRI pack's rules hold between axes: pack contract 6 lets a pack say exclusions and hints, and the MRI pack 0.6.0 carries constraints checked against public sources, technique DCE, ASL under its own name and some 40 vendors' names. A classification is held to the pack's own exclusions and implications: where the rules' answer for a stack breaks one, a `classify.excluded` or `classify.implied` review item names it and the axes it involves drop to confidence 0.3. The reader's search leaves out the words a route reads as its cue. The registry stays at schema 68, as at 1.0.0-alpha.44. The HTTP API contract stays version 7, amended in place with additive fields; the pack contract is version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.44.

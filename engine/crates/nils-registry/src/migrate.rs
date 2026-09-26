@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 68;
+pub const SCHEMA_VERSION: i64 = 69;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +326,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 68,
         apply: an_answer_keeps_what_it_derived,
     },
+    Migration {
+        version: 69,
+        apply: a_campaign_carries_suggestions_from_outside,
+    },
 ];
 
 /// Record 49 A1: pipeline runs have a lane of their own, their units run
@@ -386,6 +390,19 @@ fn an_answer_keeps_what_it_derived(store: &mut Store, kind: Kind) -> Result<(), 
         return Ok(());
     }
     add_columns(store, "campaign_answer", &["derived"])
+}
+
+/// Record 50 R3: a campaign carries answers suggested from outside the
+/// engine, each with its author and its confidences, and an answer says who
+/// suggested what it was given beside. A registry from before gains the
+/// table empty and the column empty, since no suggestion came from outside
+/// before and no answer said whose its suggestion was.
+fn a_campaign_carries_suggestions_from_outside(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "campaign_answer", &["suggested_by"])?;
+    add_tables(store, kind, &["campaign_suggestion"])
 }
 
 /// Record 48: an answer says how long it took, what the engine suggested

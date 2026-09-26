@@ -1492,6 +1492,171 @@ pub fn render_jpeg(
     Ok(out.into_inner())
 }
 
+/// Record 50 R3: the side of a gallery's picture, in pixels, by default,
+/// and the least and most a caller may ask.
+pub const THUMB_SIZE: u32 = 128;
+const THUMB_MIN: u32 = 32;
+const THUMB_MAX: u32 = 384;
+
+/// The coarsest level whose planes are at least `size` on their longer
+/// side, level 0 where none is: a gallery's picture reads the fewest bytes
+/// that still fill it.
+pub fn thumb_level(m: &Manifest, size: u32) -> u32 {
+    (0..m.levels)
+        .rev()
+        .find(|l| {
+            m.level_shapes
+                .get(*l as usize)
+                .is_some_and(|lv| lv.shape[1].max(lv.shape[2]) >= size)
+        })
+        .unwrap_or(0)
+}
+
+/// Record 50 R3: a stack drawn small for a gallery, as one JPEG `size`
+/// pixels high: the middle of its own plane and, with `planes` 3 and more
+/// than one plane, beside it the two planes across it through its middle,
+/// each at its true shape in millimetres, from the coarsest level that
+/// fills it. A plane across an axial stack is drawn with the head up. With
+/// `held`, the top and bottom eighths of its own plane, where burned-in
+/// annotation is held, are blank in every panel.
+pub fn thumb(
+    root: &Path,
+    m: &Manifest,
+    size: u32,
+    planes: u32,
+    held: bool,
+) -> Result<Vec<u8>, String> {
+    let size = size.clamp(THUMB_MIN, THUMB_MAX);
+    let level = thumb_level(m, size);
+    let lv = m
+        .level_shapes
+        .get(level as usize)
+        .ok_or_else(|| format!("level {level} is not in the pyramid"))?;
+    let [nz, ny, nx] = lv.shape;
+    if nz == 0 || ny == 0 || nx == 0 {
+        return Err("the pyramid holds no plane".into());
+    }
+    let window = m.window.width.max(1.0);
+    let lo = m.window.center - window / 2.0;
+    let scale = 255.0 / window;
+    let (k, offset) = (m.slope * scale, (m.intercept - lo) * scale);
+    let grey = |p: u16| (p as f64 * k + offset).clamp(0.0, 255.0) as u8;
+    let band = ny / 8;
+    let in_band = |y: u32| held && (y < band || y >= ny - band);
+    // millimetres across a plane's columns and rows at level 0, and along the stack
+    let [dz, dy, dx] = m.spacing;
+    let fallback = |d: f64| if d.is_finite() && d > 0.0 { d } else { 1.0 };
+    let (w_mm, h_mm) = (
+        m.shape[2] as f64 * fallback(dx),
+        m.shape[1] as f64 * fallback(dy),
+    );
+    let z_mm = m.shape[0] as f64 * fallback(dz);
+
+    let mut panels: Vec<(image::GrayImage, f64)> = Vec::new();
+    // its own plane, through the middle
+    let (_, _, px) = decode_plane(root, m, level, nz / 2)?;
+    let own: Vec<u8> = px
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| if in_band(i as u32 / nx) { 0 } else { grey(p) })
+        .collect();
+    panels.push((
+        image::GrayImage::from_raw(nx, ny, own).ok_or("the plane's size does not match")?,
+        w_mm / h_mm,
+    ));
+    if planes >= 3 && nz > 1 {
+        // at most `size` planes, evenly through the stack
+        let n = nz.min(size).max(2);
+        let picks: Vec<u32> = (0..n)
+            .map(|i| ((i as u64 * (nz as u64 - 1)) / (n as u64 - 1)) as u32)
+            .collect();
+        let (row, col) = (ny / 2, nx / 2);
+        let mut across_rows = Vec::with_capacity((n * nx) as usize);
+        let mut across_cols = Vec::with_capacity((n * ny) as usize);
+        for z in &picks {
+            let (w, _, px) = decode_plane(root, m, level, *z)?;
+            let at_row = if in_band(row) { 0 } else { 1 };
+            across_rows.extend(
+                px[(row * w) as usize..((row + 1) * w) as usize]
+                    .iter()
+                    .map(|&p| grey(p) * at_row),
+            );
+            across_cols.extend((0..ny).map(|y| {
+                if in_band(y) {
+                    0
+                } else {
+                    grey(px[(y * w + col) as usize])
+                }
+            }));
+        }
+        // the stack's planes run along its normal; across an axial stack
+        // whose normal points to the head, the first plane is the lowest
+        let up = normal(&m.orientation)[2] > 0.5;
+        for (pixels, width, across_mm) in [(across_rows, nx, w_mm), (across_cols, ny, h_mm)] {
+            let mut img = image::GrayImage::from_raw(width, n, pixels)
+                .ok_or("a plane across the stack does not match its size")?;
+            if up {
+                image::imageops::flip_vertical_in_place(&mut img);
+            }
+            panels.push((img, across_mm / z_mm));
+        }
+    }
+    const GAP: u32 = 2;
+    let sized: Vec<image::GrayImage> = panels
+        .into_iter()
+        .map(|(img, aspect)| {
+            let aspect = if aspect.is_finite() { aspect } else { 1.0 };
+            let w = ((size as f64 * aspect).round() as u32).clamp(size / 4, size * 2);
+            image::imageops::resize(&img, w, size, image::imageops::FilterType::Triangle)
+        })
+        .collect();
+    let total = sized.iter().map(|i| i.width()).sum::<u32>() + GAP * (sized.len() as u32 - 1);
+    let mut out = image::GrayImage::new(total, size);
+    let mut x = 0;
+    for img in &sized {
+        image::imageops::replace(&mut out, img, x as i64, 0);
+        x += img.width() + GAP;
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80)
+        .encode_image(&out)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes.into_inner())
+}
+
+/// [`thumb`], kept beside the pyramid once drawn, so a gallery's second
+/// look reads a file: the copy is used while it is newer than the manifest,
+/// and where it cannot be written the picture is drawn each time.
+pub fn thumb_cached(
+    root: &Path,
+    m: &Manifest,
+    size: u32,
+    planes: u32,
+    held: bool,
+) -> Result<Vec<u8>, String> {
+    let size = size.clamp(THUMB_MIN, THUMB_MAX);
+    let planes = if planes >= 3 { 3 } else { 1 };
+    let path = root.join("thumbs").join(format!(
+        "{size}-{planes}{}.jpg",
+        if held { "-held" } else { "" }
+    ));
+    let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if let (Some(t), Some(made)) = (stamp(&path), stamp(&root.join("manifest.json")))
+        && t >= made
+        && let Ok(bytes) = std::fs::read(&path)
+    {
+        return Ok(bytes);
+    }
+    let bytes = thumb(root, m, size, planes, held)?;
+    if std::fs::create_dir_all(root.join("thumbs")).is_ok() {
+        let part = path.with_extension(format!("jpg.{}", std::process::id()));
+        if std::fs::write(&part, &bytes).is_ok() {
+            std::fs::rename(&part, &path).ok();
+        }
+    }
+    Ok(bytes)
+}
+
 /// The pyramids a working place holds, by stack.
 pub fn built(working: &Path) -> BTreeMap<i64, Manifest> {
     let mut out = BTreeMap::new();
@@ -2040,10 +2205,37 @@ pub fn door(
                 headers(vec![("X-Nils-Held".to_string(), held.to_string())]),
             ))
         }
+        // record 50 R3: the stack small, for a gallery of many
+        ["thumb"] => {
+            let size = query
+                .get("size")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(THUMB_SIZE);
+            let planes = query
+                .get("planes")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(3);
+            note_open(
+                registry,
+                caller,
+                stack,
+                through,
+                thumb_level(&m, size),
+                "thumb",
+            )
+            .map_err(|e| Reply::error(500, e))?;
+            let jpeg =
+                thumb_cached(&root, &m, size, planes, held).map_err(|e| Reply::error(404, e))?;
+            Ok(Reply::raw(
+                "image/jpeg",
+                jpeg,
+                headers(vec![("X-Nils-Held".to_string(), held.to_string())]),
+            ))
+        }
         _ => Err(Reply::error(
             404,
             format!(
-                "GET /api/instances/{stack}/{} is not a door; manifest, tiles/{{level}}/{{z}}, slab/{{level}}/{{z0}}-{{z1}} and render/{{level}}/{{z}} are",
+                "GET /api/instances/{stack}/{} is not a door; manifest, tiles/{{level}}/{{z}}, slab/{{level}}/{{z0}}-{{z1}}, render/{{level}}/{{z}} and thumb are",
                 rest.join("/")
             ),
         )),

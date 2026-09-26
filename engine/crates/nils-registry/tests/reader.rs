@@ -373,6 +373,7 @@ fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
             &give(a.assignment.id, "anna@lab", "brain"),
             &Timing {
                 suggested: Some(" brain "),
+                suggested_by: None,
                 batch: false,
                 derived: None,
             },
@@ -388,6 +389,7 @@ fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
             &give(a.assignment.id, "anna@lab", "spine"),
             &Timing {
                 suggested: Some("brain"),
+                suggested_by: None,
                 batch: false,
                 derived: None,
             },

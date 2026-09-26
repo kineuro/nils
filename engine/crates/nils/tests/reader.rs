@@ -751,3 +751,309 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     let audit = server.ok("GET", "/api/audit?action=labels.unseal", None, CURATOR);
     assert!(audit.to_string().contains("labels.unseal"), "{audit}");
 }
+
+/// Record 50 through the door alone: suggestions from outside brought into
+/// a body-part campaign by its maker, each with its author and its
+/// confidences, never on a sealed stack; a gallery of the items with the
+/// least certain first; a page accepted in one move, each item its own
+/// answer with the suggestion and who made it beside it; and every refusal
+/// that keeps a sealed or held-back item out of a batch.
+#[test]
+fn a_gallery_takes_suggestions_from_outside_and_accepts_a_page() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "parts",
+            "question": {"kind": "axis", "axis": "body_part"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["anna@lab", "bo@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "stage",
+        })),
+        CURATOR,
+    );
+    let items: Vec<Value> = made["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 4, "{made}");
+    let stacks: Vec<i64> = items
+        .iter()
+        .map(|i| i["stack_id"].as_i64().unwrap())
+        .collect();
+    let item_of = |stack: i64| {
+        items.iter().find(|i| i["stack_id"] == stack).unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    // the first stack is of a sample sealed for a certificate
+    server.ok(
+        "PUT",
+        "/api/ask/selections/first",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "params": {"ids": {"type": "list", "value": [stacks[0]]}},
+            "sets": {"s": {"grain": "stack", "where": [["in", {}, ["field", {}, "id"], ["param", {}, "ids"]]]}},
+            "out": {"set": "s", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let (ok, _, err) = cli(
+        &home,
+        "cleo@lab",
+        &[
+            "labels",
+            "seal",
+            "--select",
+            "selection:first@1",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(ok, "{err}");
+
+    // ------------------------------------------------ suggestions
+    let mut tsv = String::from("stack_id\tvalue\tp:brain\tp:Brain-Neck\tp:spine\n");
+    for (i, s) in stacks.iter().enumerate() {
+        let p = [0.9, 0.55, 0.7, 0.8][i];
+        tsv.push_str(&format!("{s}\tBrain\t{p}\t{:.2}\t0\n", 1.0 - p));
+    }
+    tsv.push_str(&format!("{}\thand\t\t\t\n", stacks[1]));
+    // a rater does not bring suggestions into the campaign they rate
+    let (status, _) = server.call(
+        "POST",
+        "/api/campaigns/parts/suggestions",
+        Some(json!({"tsv": tsv, "author": "v0-model"})),
+        ANNA,
+    );
+    assert_eq!(status, 403);
+    let brought = server.ok(
+        "POST",
+        "/api/campaigns/parts/suggestions",
+        Some(json!({"tsv": tsv, "author": "v0-model", "source": "v0 committed"})),
+        CURATOR,
+    );
+    assert_eq!(brought["suggestions"], 3, "{brought}");
+    assert_eq!(brought["sealed"], 1, "{brought}");
+    assert_eq!(brought["refused_values"], 1, "{brought}");
+    let held = server.ok("GET", "/api/campaigns/parts/suggestions", None, CURATOR);
+    assert_eq!(held["count"], 3, "{held}");
+    let rows = held["suggestions"].as_array().unwrap();
+    assert!(rows.iter().all(|s| s["author"] == "v0-model"), "{held}");
+    assert!(rows.iter().all(|s| s["stack"] != stacks[0]), "{held}");
+    assert_eq!(rows[0]["source"], "v0 committed", "{held}");
+    // a rater reads the counts, never the rows
+    let counts = server.ok("GET", "/api/campaigns/parts/suggestions", None, ANNA);
+    assert!(counts.get("suggestions").is_none(), "{counts}");
+
+    // ------------------------------------------------ the gallery
+    let (status, _) = server.call(
+        "GET",
+        "/api/campaigns/parts/gallery?order=sideways",
+        None,
+        ANNA,
+    );
+    assert_eq!(status, 400);
+    let page = server.ok("GET", "/api/campaigns/parts/gallery", None, ANNA);
+    assert_eq!(page["axis"], "body_part", "{page}");
+    assert!(
+        page["values"].as_array().unwrap().contains(&json!("other")),
+        "{page}"
+    );
+    assert_eq!(page["open"], 4, "{page}");
+    assert_eq!(page["sealed"], 1, "{page}");
+    let listed = page["items"].as_array().unwrap().clone();
+    assert_eq!(
+        listed.len() as i64 + page["held_back"].as_i64().unwrap(),
+        3,
+        "{page}"
+    );
+    assert!(listed.iter().all(|i| i["stack"] != stacks[0]), "{page}");
+    for i in &listed {
+        assert_eq!(i["suggested"], "brain", "{i}");
+        assert_eq!(i["by"], "v0-model", "{i}");
+        assert!(i["confidences"]["brain-neck"].is_number(), "{i}");
+        assert_eq!(
+            i["thumb"],
+            format!("/api/instances/{}/thumb", i["stack"]),
+            "{i}"
+        );
+    }
+    // the least certain first
+    let sure: Vec<f64> = listed
+        .iter()
+        .map(|i| i["confidence"].as_f64().unwrap())
+        .collect();
+    assert!(sure.windows(2).all(|w| w[0] <= w[1]), "{sure:?}");
+    // the item's evidence names the suggestion and its author; the sealed
+    // one is read blind, with none
+    if let Some(first) = listed.first() {
+        let it = first["item"].as_i64().unwrap();
+        let why = server.ok(
+            "GET",
+            &format!("/api/campaigns/parts/items/{it}/why"),
+            None,
+            ANNA,
+        );
+        assert_eq!(why["suggested"], "brain", "{why}");
+        assert_eq!(why["suggested_by"], "v0-model", "{why}");
+        assert_eq!(why["suggestions"][0]["author"], "v0-model", "{why}");
+    }
+    let sealed_item = item_of(stacks[0]);
+    let blind = server.ok(
+        "GET",
+        &format!("/api/campaigns/parts/items/{sealed_item}/why"),
+        None,
+        ANNA,
+    );
+    assert_eq!(blind["blind"], true, "{blind}");
+    assert!(blind["suggested"].is_null(), "{blind}");
+    assert!(
+        blind
+            .get("suggestions")
+            .is_none_or(|s| s.as_array().is_some_and(Vec::is_empty)),
+        "{blind}"
+    );
+
+    // ------------------------------------------------ accepting a page
+    let (status, _) = server.call(
+        "POST",
+        "/api/campaigns/parts/gallery/accept",
+        Some(json!({"answers": [{"item": sealed_item, "value": "brain"}]})),
+        ANNA,
+    );
+    assert_eq!(status, 409, "a sealed item is never accepted in one move");
+    let (status, _) = server.call(
+        "POST",
+        "/api/campaigns/parts/gallery/accept",
+        Some(json!({"answers": [], "seconds": 3})),
+        ANNA,
+    );
+    assert_eq!(status, 400);
+    // an item the seed holds back is read alone
+    let shown: Vec<i64> = listed.iter().map(|i| i["item"].as_i64().unwrap()).collect();
+    if let Some(back) = stacks[1..]
+        .iter()
+        .map(|s| item_of(*s))
+        .find(|i| !shown.contains(i))
+    {
+        let (status, _) = server.call(
+            "POST",
+            "/api/campaigns/parts/gallery/accept",
+            Some(json!({"answers": [{"item": back, "value": "brain"}]})),
+            ANNA,
+        );
+        assert_eq!(status, 409);
+    }
+    if !shown.is_empty() {
+        // the first corrected, the rest as shown
+        let answers: Vec<Value> = shown
+            .iter()
+            .enumerate()
+            .map(|(n, i)| json!({"item": i, "value": if n == 0 { "other" } else { "brain" }}))
+            .collect();
+        let (status, _) = server.call(
+            "POST",
+            "/api/campaigns/parts/gallery/accept",
+            Some(json!({"answers": [{"item": shown[0], "value": "hand"}]})),
+            ANNA,
+        );
+        assert_eq!(
+            status, 400,
+            "a value the axis does not take refuses the move"
+        );
+        let done = server.ok(
+            "POST",
+            "/api/campaigns/parts/gallery/accept",
+            Some(json!({"answers": answers})),
+            ANNA,
+        );
+        let accepted = done["accepted"].as_array().unwrap();
+        assert_eq!(accepted.len(), shown.len(), "{done}");
+        assert_eq!(accepted[0]["changed"], true, "{done}");
+        assert!(
+            accepted[1..].iter().all(|a| a["changed"] == false),
+            "{done}"
+        );
+        let all = server.ok("GET", "/api/campaigns/parts/answers", None, CURATOR);
+        let list = all["answers"].as_array().unwrap();
+        assert_eq!(list.len(), shown.len(), "{all}");
+        for a in list {
+            assert_eq!(a["principal"], "anna@lab", "{a}");
+            assert_eq!(a["via"], "batch", "{a}");
+            assert_eq!(a["suggested"], "brain", "{a}");
+            assert_eq!(a["suggested_by"], "v0-model", "{a}");
+            assert!(a["seconds"].as_f64().is_some(), "{a}");
+        }
+        let corrected = list.iter().find(|a| a["item_id"] == shown[0]).unwrap();
+        assert_eq!(corrected["value"], "other", "{corrected}");
+        // what was accepted is no longer shown
+        let after = server.ok("GET", "/api/campaigns/parts/gallery", None, ANNA);
+        assert!(
+            after["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| !shown.contains(&i["item"].as_i64().unwrap())),
+            "{after}"
+        );
+    }
+
+    // ------------------------------------------------ the keyboard
+    let file = TempDir::new("suggest-file");
+    let path = file.path().join("people.tsv");
+    std::fs::write(
+        &path,
+        "SeriesInstanceUID\tvalue\tdate\nnone.such\tBrain\t2025-01-01\n",
+    )
+    .unwrap();
+    let (ok, out, err) = cli(
+        &home,
+        "cleo@lab",
+        &[
+            "campaign",
+            "suggest",
+            "parts",
+            "--file",
+            path.to_str().unwrap(),
+            "--author",
+            "v0-person",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(ok, "{err}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["unmatched"], 1, "{doc}");
+    assert_eq!(doc["suggestions"], 0, "{doc}");
+
+    // ------------------------------------------------ one axis only
+    server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "two-axes",
+            "question": {"kind": "axes", "axes": ["base", "body_part"]},
+            "source": {"selection": "every-stack@1"},
+            "raters": ["anna@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+        })),
+        CURATOR,
+    );
+    let (status, _) = server.call("GET", "/api/campaigns/two-axes/gallery", None, ANNA);
+    assert_eq!(status, 400);
+}

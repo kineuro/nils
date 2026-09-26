@@ -1352,6 +1352,308 @@ pub(crate) fn combinations(
     }))
 }
 
+/// Record 50 R3: who suggested an answer where the engine's own rules and
+/// System 1 did.
+pub(crate) const BY_RULES: &str = "rules";
+
+/// Record 50 R3: the answer suggested for a campaign's item, as an answer
+/// to its question is kept, and who suggested it: the latest suggestion
+/// from outside the campaign carries for the item, else the engine's own
+/// ([`suggestion`], by [`BY_RULES`]); none for a stack of a sample sealed
+/// now, which is read blind.
+pub(crate) fn item_suggestion(
+    store: &mut Store,
+    c: &Campaign,
+    item: i64,
+    stack: Option<i64>,
+    question: &Question,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Option<(String, String)>, StoreError> {
+    if let Some(s) = stack
+        && blind(store, s)?
+    {
+        return Ok(None);
+    }
+    let told = nils_registry::suggestion::of_items(store, c.id, &[item])
+        .map_err(|e| StoreError::Message(e.to_string()))?;
+    if let Some(p) = told
+        .get(&item)
+        .and_then(|l| nils_registry::suggestion::primary(l))
+    {
+        return Ok(Some((p.value.clone(), p.author.clone())));
+    }
+    match stack {
+        Some(s) => Ok(suggestion(store, s, question, pack)?.map(|v| (v, BY_RULES.to_string()))),
+        None => Ok(None),
+    }
+}
+
+/// What a gallery lists last for a rater of a campaign: when, and which
+/// items, so the accept that follows shares the time the page took among
+/// the answers it gives.
+type Shown = BTreeMap<(i64, String), (std::time::Instant, BTreeSet<i64>)>;
+
+fn shown_pages() -> &'static std::sync::Mutex<Shown> {
+    static SHOWN: std::sync::OnceLock<std::sync::Mutex<Shown>> = std::sync::OnceLock::new();
+    SHOWN.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// The seconds each of `n` answers took, from the page a rater was shown
+/// last that held every one of `items`: the page's time shared among
+/// them; none where the rater was shown no such page within the hour.
+pub(crate) fn page_seconds(campaign: i64, principal: &str, items: &[i64]) -> Option<f64> {
+    let held = shown_pages().lock().ok()?;
+    let (at, shown) = held.get(&(campaign, principal.to_string()))?;
+    let elapsed = at.elapsed().as_secs_f64();
+    (!items.is_empty() && elapsed < 3600.0 && items.iter().all(|i| shown.contains(i)))
+        .then(|| elapsed / items.len() as f64)
+}
+
+/// How a gallery orders its items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GalleryOrder {
+    /// Least certain first (record 50 R7): the items whose suggesters
+    /// disagree, then those with no suggestion, then by the confidence of
+    /// the value suggested, lowest first.
+    Uncertain,
+    /// Grouped by the value suggested, the least certain first in each.
+    Suggested,
+    /// As the items were listed.
+    Position,
+}
+
+impl GalleryOrder {
+    pub(crate) fn parse(s: &str) -> Result<GalleryOrder, (u16, String)> {
+        match s {
+            "uncertain" => Ok(GalleryOrder::Uncertain),
+            "suggested" => Ok(GalleryOrder::Suggested),
+            "position" => Ok(GalleryOrder::Position),
+            other => Err((
+                400,
+                format!("order: uncertain, suggested or position, not {other}"),
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            GalleryOrder::Uncertain => "uncertain",
+            GalleryOrder::Suggested => "suggested",
+            GalleryOrder::Position => "position",
+        }
+    }
+}
+
+/// The most a gallery shows at once, and what it shows unless asked.
+pub(crate) const GALLERY_MAX: usize = 200;
+pub(crate) const GALLERY_PAGE: usize = 100;
+
+/// The vocabulary of a single-axis question: the values it asks for, else
+/// the pack's.
+pub(crate) fn single_vocabulary(
+    question: &Question,
+    axis: &str,
+    pack: Option<&nils_pack::Pack>,
+) -> Vec<String> {
+    let listed: Vec<String> = match question {
+        Question::Axis { values, .. } => values.clone(),
+        Question::Axes { constraints, .. } => constraints["values"][axis]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !listed.is_empty() {
+        return listed;
+    }
+    pack.and_then(|p| p.axes.iter().find(|a| a.name == axis))
+        .map(|a| a.values.iter().map(|v| v.id.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Record 50 R3: the gallery of a single-axis campaign for a rater: up to
+/// `limit` of the items open to them, each with the value suggested for it,
+/// who suggested it, the confidence of that value and of every class where
+/// its source gave them, and the door to a small picture of it. A stack of
+/// a sample sealed now is never shown (it is read alone and blind), and
+/// neither is an item the campaign's seed holds back to be read alone
+/// (record 48 R1); both are counted.
+pub(crate) fn gallery(
+    store: &mut Store,
+    c: &Campaign,
+    principal: &str,
+    pack: Option<&nils_pack::Pack>,
+    order: GalleryOrder,
+    limit: usize,
+) -> Result<Value, (u16, String)> {
+    let e500 = |e: StoreError| (500, e.to_string());
+    let question = c.question().map_err(|e| (400, e.to_string()))?;
+    let Some(axis) = campaign::single_axis(&question) else {
+        return Err((
+            400,
+            format!(
+                "campaign {} asks more than one axis; a gallery is of a question with one",
+                c.name
+            ),
+        ));
+    };
+    let open: Vec<campaign::Item> = campaign::open_for(store, c, principal)
+        .map_err(|e| (500, e.to_string()))?
+        .into_iter()
+        .filter(|it| it.stack_id.is_some())
+        .collect();
+    let stacks: Vec<i64> = open.iter().filter_map(|it| it.stack_id).collect();
+    let (sealed, _) =
+        nils_registry::labels::sealed_now(store, &stacks, &[]).map_err(|e| (500, e.to_string()))?;
+    let seed = campaign::hold_back_seed(store, c.id).map_err(|e| (500, e.to_string()))?;
+    let (mut n_sealed, mut n_held) = (0usize, 0usize);
+    let mut left: Vec<&campaign::Item> = Vec::new();
+    for it in &open {
+        if it.stack_id.is_some_and(|s| sealed.contains(&s)) {
+            n_sealed += 1;
+        } else if campaign::drawn_back(&seed, it.id, c.hold_back) {
+            n_held += 1;
+        } else {
+            left.push(it);
+        }
+    }
+    let ids: Vec<i64> = left.iter().map(|it| it.id).collect();
+    let told =
+        nils_registry::suggestion::of_items(store, c.id, &ids).map_err(|e| (500, e.to_string()))?;
+    // the engine's own suggestion where nothing came from outside
+    let bare: Vec<i64> = left
+        .iter()
+        .filter(|it| !told.contains_key(&it.id))
+        .filter_map(|it| it.stack_id)
+        .collect();
+    let rules = rules_values(store, &bare, pack).map_err(e500)?;
+    let asked = asked_many(store, &bare).map_err(e500)?;
+    let worth = campaign::worth(store, &bare, std::slice::from_ref(&axis))
+        .map_err(|e| (500, e.to_string()))?;
+    let as_value = |kept: &str| campaign::single_value(&question, kept);
+    struct Shown {
+        item: i64,
+        stack: i64,
+        position: i64,
+        suggested: Option<String>,
+        by: Option<String>,
+        confidence: Option<f64>,
+        confidences: Value,
+        others: Vec<Value>,
+        disagree: bool,
+    }
+    let mut rows: Vec<Shown> = Vec::with_capacity(left.len());
+    for it in &left {
+        let stack = it.stack_id.expect("kept above");
+        let row = match told.get(&it.id) {
+            Some(list) => {
+                let p = nils_registry::suggestion::primary(list).expect("a list is never empty");
+                Shown {
+                    item: it.id,
+                    stack,
+                    position: it.position,
+                    suggested: as_value(&p.value),
+                    by: Some(p.author.clone()),
+                    confidence: p.confidence,
+                    confidences: p.confidences.clone(),
+                    others: list
+                        .iter()
+                        .filter(|s| s.id != p.id)
+                        .map(|s| json!({"by": s.author, "value": as_value(&s.value), "confidence": s.confidence}))
+                        .collect(),
+                    disagree: nils_registry::suggestion::disagree(list),
+                }
+            }
+            None => {
+                let ev = asked.get(&stack).map(|(_, ev)| ev);
+                let s = suggest_from(rules.get(&stack).unwrap_or(&BTreeMap::new()), ev, &question);
+                let w = worth.get(&stack);
+                // System 1's word on the axis, where it asked, as a
+                // confidence per class
+                let confidences: serde_json::Map<String, Value> = ev
+                    .and_then(|ev| s1_on(ev, &axis))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| Some((c["value"].as_str()?.to_string(), c["p"].clone())))
+                    .collect();
+                Shown {
+                    item: it.id,
+                    stack,
+                    position: it.position,
+                    by: s.as_ref().map(|_| BY_RULES.to_string()),
+                    suggested: s.as_deref().and_then(as_value),
+                    confidence: s.as_ref().and(w.map(|w| w.confidence)),
+                    confidences: if confidences.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Object(confidences)
+                    },
+                    others: Vec::new(),
+                    disagree: w.is_some_and(|w| w.disagree),
+                }
+            }
+        };
+        rows.push(row);
+    }
+    let sure = |r: &Shown| -> i64 {
+        match (&r.suggested, r.confidence) {
+            (None, _) => -1,
+            (Some(_), Some(c)) => (c.clamp(0.0, 1.0) * 1_000_000.0).round() as i64,
+            // a suggestion whose source gave no confidence ranks after
+            // every one that did
+            (Some(_), None) => 1_000_001,
+        }
+    };
+    match order {
+        GalleryOrder::Uncertain => {
+            rows.sort_by_key(|r| (!r.disagree, sure(r), r.position));
+        }
+        GalleryOrder::Suggested => {
+            rows.sort_by(|a, b| {
+                (a.suggested.is_none(), &a.suggested, sure(a), a.position).cmp(&(
+                    b.suggested.is_none(),
+                    &b.suggested,
+                    sure(b),
+                    b.position,
+                ))
+            });
+        }
+        GalleryOrder::Position => rows.sort_by_key(|r| r.position),
+    }
+    let total = rows.len();
+    rows.truncate(limit.clamp(1, GALLERY_MAX));
+    if let Ok(mut held) = shown_pages().lock() {
+        held.insert(
+            (c.id, principal.to_string()),
+            (
+                std::time::Instant::now(),
+                rows.iter().map(|r| r.item).collect(),
+            ),
+        );
+    }
+    Ok(json!({
+        "campaign": c.id,
+        "axis": axis,
+        "values": single_vocabulary(&question, &axis, pack),
+        "order": order.name(),
+        "open": open.len(),
+        "sealed": n_sealed,
+        "held_back": n_held,
+        "hold_back": c.hold_back,
+        "left": total,
+        "count": rows.len(),
+        "items": rows.iter().map(|r| json!({
+            "item": r.item, "stack": r.stack, "position": r.position,
+            "suggested": r.suggested, "by": r.by, "confidence": r.confidence,
+            "confidences": r.confidences, "others": r.others, "disagree": r.disagree,
+            "thumb": format!("/api/instances/{}/thumb", r.stack),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

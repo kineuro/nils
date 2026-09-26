@@ -108,6 +108,9 @@ pub enum Action {
     /// Record 48, after the first real read: an open axes campaign's
     /// question moved to fewer asked axes and more derived ones.
     CampaignRequestion,
+    /// Record 50 R3: answers suggested for a campaign's items from outside
+    /// the engine, with their author, imported. A suggestion is no answer.
+    CampaignSuggest,
     /// Record 42 S7: a label set written out with its digest, and labels
     /// from v0 imported as person decisions.
     LabelsExport,
@@ -185,6 +188,7 @@ impl Action {
             Action::CampaignMetric => "campaign.metric",
             Action::CampaignClose => "campaign.close",
             Action::CampaignRequestion => "campaign.requestion",
+            Action::CampaignSuggest => "campaign.suggest",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
@@ -225,6 +229,7 @@ impl Action {
                 | Action::CampaignMetric
                 | Action::CampaignClose
                 | Action::CampaignRequestion
+                | Action::CampaignSuggest
                 | Action::LabelsExport
                 | Action::LabelsSeal
                 | Action::LabelsCertificate

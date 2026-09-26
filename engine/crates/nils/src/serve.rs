@@ -3971,6 +3971,7 @@ fn capabilities(
         "GET /api/instances/{stack}/tiles/{level}/{z}",
         "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
         "GET /api/instances/{stack}/render/{level}/{z}",
+        "GET /api/instances/{stack}/thumb",
     ]
     .iter()
     .chain(crate::derivatives::DOORS.iter())
@@ -4866,6 +4867,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one image",
             "Rendering a plane of a stack",
             "Rendered a plane of a stack",
+        ),
+        row(
+            "GET /api/instances/{stack}/thumb",
+            false,
+            false,
+            "bounded",
+            "one small image",
+            "Drawing a stack small",
+            "Drew a stack small",
         ),
         row(
             "GET /api/places",

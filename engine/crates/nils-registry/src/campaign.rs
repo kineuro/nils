@@ -303,6 +303,22 @@ impl Question {
         }
     }
 
+    /// Whether a value fits the question as an answer's value would: a
+    /// suggestion from outside is held to it (record 50 R3).
+    pub fn check_value(&self, value: &str) -> Result<(), Error> {
+        self.check(&Given {
+            assignment: 0,
+            principal: "",
+            author_kind: "person",
+            model: None,
+            value: Some(value),
+            form: None,
+            derivative_id: None,
+            why: None,
+            unsure: false,
+        })
+    }
+
     /// Whether an answer fits the question.
     fn check(&self, a: &Given<'_>) -> Result<(), Error> {
         let value = a.value.filter(|v| !v.trim().is_empty());
@@ -2327,6 +2343,87 @@ pub fn axes_of(question: &Question) -> Vec<String> {
     }
 }
 
+/// Record 50 R3: the one axis a question asks, where it asks one: an axis
+/// question's, or an axes question's that asks a single axis. Such a
+/// question is read many items at a time, in a gallery.
+pub fn single_axis(question: &Question) -> Option<String> {
+    match question {
+        Question::Axis { axis, .. } => Some(axis.clone()),
+        Question::Axes { axes, .. } if axes.len() == 1 => Some(axes[0].clone()),
+        _ => None,
+    }
+}
+
+/// Whether a single-axis question's axis takes several values at once.
+fn single_is_multi(question: &Question, axis: &str) -> bool {
+    match question {
+        Question::Axes { constraints, .. } => {
+            words(&constraints["multi"]).iter().any(|a| a == axis)
+        }
+        _ => false,
+    }
+}
+
+/// Record 50 R3: a single-axis question's answer from the value of its one
+/// axis, as an answer to it is written: the value for an axis question,
+/// `{axis: value}` for an axes question (a list, split at commas, for an
+/// axis that takes several). None where the question asks more than one
+/// axis.
+pub fn single_answer(question: &Question, value: &str) -> Option<String> {
+    let axis = single_axis(question)?;
+    Some(match question {
+        Question::Axes { .. } => {
+            let v = value.trim();
+            let one = if v == CANT_TELL {
+                json!(v)
+            } else if single_is_multi(question, &axis) {
+                json!(
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|x| !x.is_empty())
+                        .collect::<Vec<_>>()
+                )
+            } else {
+                json!(v)
+            };
+            json!({ axis: one }).to_string()
+        }
+        _ => value.trim().to_string(),
+    })
+}
+
+/// Record 50 R3: the value of a single-axis question's one axis in an
+/// answer as kept: the value itself for an axis question, the axis's value
+/// of an axes answer (several joined by commas). None where the answer does
+/// not name it.
+pub fn single_value(question: &Question, kept: &str) -> Option<String> {
+    let axis = single_axis(question)?;
+    match question {
+        Question::Axes { .. } => {
+            let v: Value = serde_json::from_str(kept).ok()?;
+            match &v[axis.as_str()] {
+                Value::String(s) => Some(s.clone()),
+                Value::Array(list) => Some(
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                _ => None,
+            }
+        }
+        _ => Some(kept.to_string()),
+    }
+}
+
+/// Record 50 R3 (record 48 R1's hold-back, item by item): whether the
+/// campaign's seed draws an item to be read alone, the share of every item
+/// the campaign holds back. The same item and seed draw the same, whatever
+/// page or batch the item is shown in.
+pub fn drawn_back(seed: &str, item: i64, share: f64) -> bool {
+    (drawn(seed, item) as f64) < share.clamp(0.0, 1.0) * 1_000_000.0
+}
+
 /// How much each stack is worth a look (record 48 R1): from the open
 /// `classify.asked` item where System 1 asked (its confidence, and whether
 /// both systems agree on every axis asked), else from the rules (the lowest
@@ -2578,10 +2675,19 @@ pub fn claim_in(
                         let (sealed, _) = crate::labels::sealed_now(store, &stacks, &[])
                             .map_err(|e| StoreError::Message(e.to_string()))?;
                         let seed = hold_back_seed(store, c.id)?;
+                        // record 50 R7: where the campaign carries outside
+                        // suggestions, their confidence says how sure the
+                        // item is, the least certain first
+                        let ids: Vec<i64> = open.iter().map(|(id, ..)| *id).collect();
+                        let told = crate::suggestion::worth_of_items(store, c.id, &ids)?;
                         open.iter()
                             .min_by_key(|(id, position, stack)| match stack {
                                 Some(s) if sealed.contains(s) => (1, drawn(&seed, *id), *position),
-                                _ => by_value(stack.and_then(|s| worth.get(&s)), *position),
+                                _ => {
+                                    let mine = stack.and_then(|s| worth.get(&s)).cloned();
+                                    let w = crate::suggestion::merged(mine, told.get(id));
+                                    by_value(w.as_ref(), *position)
+                                }
                             })
                             .map(|(id, ..)| *id)
                     }
@@ -2924,6 +3030,9 @@ pub struct Answer {
     pub unsure: bool,
     /// Record 48: the axes derived from the answer through the pack.
     pub derived: Option<Value>,
+    /// Record 50 R3: who suggested `suggested`: an outside suggestion's
+    /// author, or `rules`.
+    pub suggested_by: Option<String>,
 }
 
 impl Answer {
@@ -2936,12 +3045,12 @@ impl Answer {
             "actor_detail": self.actor_detail, "answered_at": self.answered_at,
             "model_id": self.model_id, "seconds": self.seconds, "suggested": self.suggested,
             "changed": self.changed, "via": self.via, "unsure": self.unsure,
-            "derived": self.derived,
+            "derived": self.derived, "suggested_by": self.suggested_by,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 21] = [
+const ANSWER_COLUMNS: [&str; 22] = [
     "id",
     "campaign_id",
     "item_id",
@@ -2963,6 +3072,7 @@ const ANSWER_COLUMNS: [&str; 21] = [
     "via",
     "unsure",
     "derived",
+    "suggested_by",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -2992,6 +3102,7 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
             let d = json_at(r, 20)?;
             (!d.is_null()).then_some(d)
         },
+        suggested_by: r.opt_text(21)?.map(str::to_string),
     })
 }
 
@@ -3241,6 +3352,9 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
 #[derive(Debug, Clone, Default)]
 pub struct Timing<'a> {
     pub suggested: Option<&'a str>,
+    /// Record 50 R3: who suggested it: an outside suggestion's author, or
+    /// `rules` for the engine's own.
+    pub suggested_by: Option<&'a str>,
     pub batch: bool,
     /// Record 48: the axes the engine derived from this answer through the
     /// pack, `{axis: value | [values] | null | "cant_tell"}`, kept beside
@@ -3251,7 +3365,7 @@ pub struct Timing<'a> {
 
 /// An answer's text as it is kept: a pick's stacks as ids, an axes answer
 /// in its canonical order, any other value trimmed.
-fn kept_value(question: &Question, v: &str) -> Result<String, Error> {
+pub fn kept_value(question: &Question, v: &str) -> Result<String, Error> {
     Ok(match question {
         Question::Pick { .. } => join_ids(&pick_stacks(v)?),
         Question::Axes {
@@ -3403,8 +3517,10 @@ pub fn answer_with(
                 given: g,
                 stored_value: stored_value.as_deref(),
                 suggested: suggested.as_deref(),
+                suggested_by: suggested.as_ref().and(t.suggested_by),
                 changed,
                 batch: t.batch,
+                seconds: None,
                 actor_detail: &actor_detail,
                 derived: t.derived,
             },
@@ -3461,8 +3577,12 @@ struct Written<'a> {
     given: &'a Given<'a>,
     stored_value: Option<&'a str>,
     suggested: Option<&'a str>,
+    suggested_by: Option<&'a str>,
     changed: Option<bool>,
     batch: bool,
+    /// For an answer given to a batch, the seconds the engine measured for
+    /// it, where it measured any; a claim's are measured from its lease.
+    seconds: Option<f64>,
     actor_detail: &'a Value,
     /// Record 48: what the engine derived from the answer, kept beside it.
     derived: Option<&'a Value>,
@@ -3480,7 +3600,7 @@ fn write_answer(
     // to the millisecond where the lease kept its instant, else to the
     // second of its stamp
     let seconds = if w.batch {
-        None
+        w.seconds
     } else {
         let from_ms = store
             .query_opt(
@@ -3523,6 +3643,7 @@ fn write_answer(
                     "via",
                     "unsure",
                     "derived",
+                    "suggested_by",
                 ],
             )
             .returning(&["id"]),
@@ -3554,6 +3675,7 @@ fn write_answer(
                 Param::Int(i64::from(w.given.unsure)),
                 w.derived
                     .map_or(Param::Null, |d| Param::from(d.to_string())),
+                w.suggested_by.map_or(Param::Null, Param::from),
             ]],
         )?
         .first()
@@ -3668,6 +3790,57 @@ pub fn accept_many(
     suggested: Option<&str>,
     now: &str,
 ) -> Result<Accepted, Error> {
+    let value = g
+        .value
+        .ok_or_else(|| invalid("a batch is accepted with the value it suggested"))?;
+    let rows: Vec<Each<'_>> = items
+        .iter()
+        .map(|&item| Each {
+            item,
+            value,
+            suggested,
+            // a batch of like stacks is suggested by the engine's own rules
+            suggested_by: suggested.map(|_| "rules"),
+            seconds: None,
+        })
+        .collect();
+    accept_each(registry, campaign, &rows, g, now)
+}
+
+/// Record 50 R3: one item of a page a person accepted in one move, with the
+/// value it is accepted as, which is the suggestion shown or the person's
+/// correction of it, and the suggestion the engine showed beside it.
+#[derive(Debug, Clone)]
+pub struct Each<'a> {
+    pub item: i64,
+    pub value: &'a str,
+    /// The engine's suggestion for the item, as an answer says it.
+    pub suggested: Option<&'a str>,
+    /// Who suggested it: an outside suggestion's author, or `rules`.
+    pub suggested_by: Option<&'a str>,
+    /// The seconds the engine measured for this item, where it measured
+    /// any: a page's time shared among the items it answered.
+    pub seconds: Option<f64>,
+}
+
+/// Record 50 R3 (and record 48 R1, whose batch is the case of one value
+/// for every item): answer the items a person accepted in one move, each
+/// with its own value, in one transaction under the campaign's lock. Each
+/// item still wanting a rater, never given to this one, is leased to the
+/// rater as a claim would lease it and answered at once, marked as given to
+/// a batch, with the suggestion beside it and whether the value changed it;
+/// it is still its own item, closed into its own decision. Every value is
+/// held to the question before anything is written, and one that does not
+/// fit refuses the whole move. An item that no longer asks raters, has its
+/// raters or was the rater's already is left, with why. `g.value` and
+/// `g.assignment` are not read.
+pub fn accept_each(
+    registry: &mut Registry,
+    campaign: i64,
+    rows: &[Each<'_>],
+    g: &Given<'_>,
+    now: &str,
+) -> Result<Accepted, Error> {
     let c = get(registry.store(), campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     if c.status != "open" {
@@ -3692,22 +3865,51 @@ pub fn accept_many(
         ));
     }
     let question = c.question()?;
-    question.check(g)?;
     let adjudication = c.adjudication()?;
-    let stored_value = g.value.map(|v| kept_value(&question, v)).transpose()?;
-    let suggested = suggested
-        .filter(|v| !v.trim().is_empty())
-        .and_then(|v| kept_value(&question, v).ok());
-    let changed = suggested
-        .as_ref()
-        .map(|s| stored_value.as_deref() != Some(s.as_str()));
+    // every value is held to the question before anything is written
+    struct Kept {
+        item: i64,
+        value: String,
+        suggested: Option<String>,
+        suggested_by: Option<String>,
+        changed: Option<bool>,
+        seconds: Option<f64>,
+    }
+    let mut kept: Vec<Kept> = Vec::with_capacity(rows.len());
+    let mut seen = BTreeSet::new();
+    for r in rows {
+        if !seen.insert(r.item) {
+            return Err(invalid(format!("item {} is named twice", r.item)));
+        }
+        let given = Given {
+            value: Some(r.value),
+            ..g.clone()
+        };
+        question
+            .check(&given)
+            .map_err(|e| invalid(format!("item {}: {e}", r.item)))?;
+        let value = kept_value(&question, r.value)?;
+        let suggested = r
+            .suggested
+            .filter(|v| !v.trim().is_empty())
+            .and_then(|v| kept_value(&question, v).ok());
+        let changed = suggested.as_ref().map(|s| *s != value);
+        kept.push(Kept {
+            item: r.item,
+            value,
+            suggested_by: suggested.as_ref().and(r.suggested_by.map(str::to_string)),
+            suggested,
+            changed,
+            seconds: r.seconds.filter(|s| s.is_finite() && *s >= 0.0),
+        });
+    }
     let actor_detail = crate::actor::current();
     let until = plus_seconds(now, c.lease_seconds);
     let leased_ms = crate::time::millis_at(now);
     let store = registry.store();
     let d = store.dialect();
     store.begin()?;
-    let done = (|| -> Result<(Accepted, Vec<i64>), Error> {
+    let done = (|| -> Result<(Accepted, Vec<(i64, usize)>), Error> {
         lock(store, campaign)?;
         let status = get(store, c.id)?.map(|x| x.status).unwrap_or_default();
         if status != "open" {
@@ -3717,7 +3919,8 @@ pub fn accept_many(
         let mut out = Accepted::default();
         let mut assignments = Vec::new();
         let a_t = store.qualified("campaign_assignment");
-        for &item_id in items {
+        for (n, k) in kept.iter().enumerate() {
+            let item_id = k.item;
             let Some(it) = item(store, item_id)?.filter(|it| it.campaign_id == campaign) else {
                 out.refused.push((
                     item_id,
@@ -3804,6 +4007,10 @@ pub fn accept_many(
                 .int(0)?;
             let a = assignment(store, id)?
                 .ok_or_else(|| Error::NotFound(format!("no assignment {id}")))?;
+            let given = Given {
+                value: Some(&k.value),
+                ..g.clone()
+            };
             let answered = write_answer(
                 store,
                 &c,
@@ -3811,17 +4018,19 @@ pub fn accept_many(
                     question: &question,
                     adjudication: &adjudication,
                     assignment: &a,
-                    given: g,
-                    stored_value: stored_value.as_deref(),
-                    suggested: suggested.as_deref(),
-                    changed,
+                    given: &given,
+                    stored_value: Some(&k.value),
+                    suggested: k.suggested.as_deref(),
+                    suggested_by: k.suggested_by.as_deref(),
+                    changed: k.changed,
                     batch: true,
+                    seconds: k.seconds,
                     actor_detail: &actor_detail,
                     derived: None,
                 },
                 now,
             )?;
-            assignments.push(id);
+            assignments.push((id, n));
             out.accepted.push(answered);
         }
         Ok((out, assignments))
@@ -3834,10 +4043,9 @@ pub fn accept_many(
         }
     };
     store.commit()?;
-    let shown = matches!(question, Question::Axis { .. } | Question::Axes { .. })
-        .then(|| stored_value.clone())
-        .flatten();
-    for (answered, assignment) in out.accepted.iter().zip(&assignments) {
+    let shows_value = matches!(question, Question::Axis { .. } | Question::Axes { .. });
+    for (answered, (assignment, n)) in out.accepted.iter().zip(&assignments) {
+        let k = &kept[*n];
         audit::record(
             registry,
             &Entry {
@@ -3850,9 +4058,11 @@ pub fn accept_many(
                 policy: None,
                 job_id: None,
                 details: Some(json!({
-                    "role": "rater", "round": 1, "value": shown,
+                    "role": "rater", "round": 1,
+                    "value": if shows_value { Some(k.value.as_str()) } else { None },
                     "author_kind": g.author_kind, "item_state": answered.state,
-                    "adjudication": answered.adjudication, "via": "batch", "changed": changed,
+                    "adjudication": answered.adjudication, "via": "batch", "changed": k.changed,
+                    "suggested_by": k.suggested_by,
                 })),
             },
         )?;
