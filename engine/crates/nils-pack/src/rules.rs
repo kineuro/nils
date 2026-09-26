@@ -378,8 +378,15 @@ pub fn amendable(axes: &[Axis], rule_sets: &[RuleSet]) -> Vec<String> {
 /// physics windows are written by the loader, which has them as written;
 /// a longhand rule's are its citation.
 pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
-    // the words each value's own axis reads for it, by (axis, value)
+    // the words each value's own axis reads for it, by (axis, value): the axis file's list first
     let mut own_words: std::collections::BTreeSet<(usize, usize, String)> = Default::default();
+    for (a, axis) in axes.iter().enumerate() {
+        for (i, value) in axis.values.iter().enumerate() {
+            for w in &value.keywords {
+                own_words.insert((a, i, w.trim().to_lowercase()));
+            }
+        }
+    }
     for set in rule_sets {
         for rule in &set.rules {
             for s in &rule.sets {

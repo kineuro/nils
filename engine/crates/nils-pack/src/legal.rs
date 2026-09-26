@@ -412,5 +412,15 @@ mod tests {
         let epi = technique.values.iter().find(|x| x.id == "EPI").unwrap();
         assert!(epi.keywords.contains(&"swi".to_string()));
         assert_eq!(epi.route_words, vec!["swi".to_string()]);
+        // a word the axis file lists for the value stays its name, though a route reads it too
+        values.insert("construct".to_string(), vec!["MyelinMap".to_string()]);
+        let v = vocabulary(&pack, &values);
+        let kw: Vec<String> = v["construct"]["MyelinMap"]["keywords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_lowercase())
+            .collect();
+        assert!(kw.contains(&"myelin".to_string()), "{kw:?}");
     }
 }
