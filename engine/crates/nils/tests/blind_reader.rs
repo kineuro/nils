@@ -1014,3 +1014,184 @@ fn the_reader_finds_values_by_their_names_and_combinations_by_how_common() {
     let (status, _) = server.call("GET", "/api/campaigns/search-anna/combinations", None, &bo);
     assert_eq!(status, 404);
 }
+
+/// A copy of the packs with the MRI pack at another version and one more
+/// exclusion, which a FLAIR read as TSE breaks.
+fn next_packs(dir: &TempDir) -> std::path::PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let target = to.join(e.file_name());
+            if e.file_type().unwrap().is_dir() {
+                copy(&e.path(), &target);
+            } else {
+                std::fs::copy(e.path(), &target).unwrap();
+            }
+        }
+    }
+    let root = dir.path().join("packs");
+    copy(&packs(), &root);
+    let pack = root.join("mri/pack.yml");
+    let text = std::fs::read_to_string(&pack).unwrap();
+    let version = text
+        .lines()
+        .find(|l| l.starts_with("version: "))
+        .unwrap()
+        .to_string();
+    std::fs::write(&pack, text.replace(&version, "version: 9.0.0")).unwrap();
+    let excludes = root.join("mri/excludes.yml");
+    let mut text = std::fs::read_to_string(&excludes).unwrap();
+    text.push_str(
+        "\n  - id: test-flair-not-tse\n    when: {axis: modifier, is: FLAIR}\n    excludes: {axis: technique, is: TSE}\n    why: 'a rule of this test alone'\n",
+    );
+    std::fs::write(&excludes, text).unwrap();
+    root
+}
+
+/// `nils campaign repack` moves an open axes campaign to the served pack's
+/// version: a dry run says what would change and writes nothing, a live
+/// lease refuses it, and the move keeps the items and the answer as given,
+/// reports the answer the new pack refuses and marks it for a second look,
+/// and is audited. Under the new version a requestion goes ahead.
+#[test]
+fn a_campaign_moves_to_the_served_pack_keeping_its_answers() {
+    let home = TempDir::new("repack-home");
+    let src = TempDir::new("repack-src");
+    let lab = TempDir::new("repack-packs");
+    for n in 1..=3 {
+        study(&src, n);
+    }
+    ok(&home, &["key", "add", "k"], Some("a repack test key\n"));
+    ok(&home, &["init", "--key", "k"], None);
+    ok(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "a",
+            "--no-private",
+            src.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    ok(&home, &["fingerprint"], None);
+    ok(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    let server = Server::start(&home);
+    let cleo = token(
+        "cleo",
+        &["query:work", "data:see", "review:work", "campaigns:work"],
+        "quasi",
+    );
+    let anna = token("anna", &["campaigns:see", "campaigns:work"], "quasi");
+    server.ok(
+        "PUT",
+        "/api/ask/selections/three",
+        Some(selection_of(&[1, 2, 3])),
+        &cleo,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "read-p",
+            "question": {"kind": "axes", "axes": ASKED},
+            "source": {"selection": "three@1"},
+            "raters": ["anna@desk.example"], "raters_per_item": 1,
+            "adjudication": {"when": "never"}, "closes_into": "none",
+        })),
+        &cleo,
+    );
+    let from = made["pack_version"].as_str().unwrap().to_string();
+    let claimed = server.ok(
+        "POST",
+        "/api/campaigns/read-p/claim",
+        Some(json!({})),
+        &anna,
+    );
+    let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/read-p/assignments/{assignment}/answer"),
+        Some(json!({"value": flair().to_string()})),
+        &anna,
+    );
+    let before = server.ok("GET", "/api/campaigns/read-p/answers", None, &cleo);
+
+    let next = next_packs(&lab);
+    let dir = next.to_str().unwrap();
+    let repack = |more: &[&str]| {
+        let mut args = vec!["campaign", "repack", "read-p", "--pack-dir", dir, "--json"];
+        args.extend_from_slice(more);
+        run(&home, &args, None)
+    };
+    // a live lease refuses it; a dry run counts the lease and writes
+    // nothing
+    let held = server.ok(
+        "POST",
+        "/api/campaigns/read-p/claim",
+        Some(json!({})),
+        &anna,
+    );
+    let (good, _, err) = repack(&[]);
+    assert!(!good, "a repack ran while an item was leased");
+    assert!(err.contains("leased"), "{err}");
+    let (good, out, err) = repack(&["--dry-run"]);
+    assert!(good, "{err}");
+    let dry: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(dry["leased"], 1, "{dry}");
+    assert_eq!(dry["to"], "mri@9.0.0", "{dry}");
+    assert_eq!(dry["now_refused"].as_array().unwrap().len(), 1, "{dry}");
+    let same = server.ok("GET", "/api/campaigns/read-p", None, &cleo);
+    assert_eq!(same["pack_version"], from.as_str(), "{same}");
+    server.ok(
+        "POST",
+        &format!(
+            "/api/campaigns/read-p/assignments/{}/release",
+            held["assignment"]["id"]
+        ),
+        Some(json!({})),
+        &anna,
+    );
+
+    let (good, out, err) = repack(&[]);
+    assert!(good, "{err}");
+    let done: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(done["from"], from.as_str(), "{done}");
+    assert_eq!(done["answers_kept"], 1, "{done}");
+    assert_eq!(
+        done["now_refused"][0]["why"]
+            .as_str()
+            .map(|w| w.contains("test-flair-not-tse")),
+        Some(true),
+        "{done}"
+    );
+    assert_eq!(done["derived_differ"], json!([]), "{done}");
+    let now = server.ok("GET", "/api/campaigns/read-p", None, &cleo);
+    assert_eq!(now["pack_version"], "mri@9.0.0", "{now}");
+    assert_eq!(now["question"]["axes"], json!(ASKED), "{now}");
+    assert_eq!(now["question"]["derive"], json!(DERIVED), "{now}");
+    let after = server.ok("GET", "/api/campaigns/read-p/answers", None, &cleo);
+    assert_eq!(
+        after["answers"][0]["value"], before["answers"][0]["value"],
+        "{after}"
+    );
+    assert_eq!(
+        after["answers"][0]["derived"], before["answers"][0]["derived"],
+        "{after}"
+    );
+    // again under the same version is refused; the audit names the move
+    let (good, _, err) = repack(&[]);
+    assert!(!good && err.contains("already under"), "{err}");
+    let (good, out, err) = run(
+        &home,
+        &["audit", "list", "--action", "campaign.repack", "--json"],
+        None,
+    );
+    assert!(good, "{err}");
+    assert!(out.contains("campaign.repack"), "{out}");
+}

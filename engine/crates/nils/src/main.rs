@@ -5750,7 +5750,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed; a seal's row stays when a certificate unseals it, naming the certificate",
             "commands": {
                 "read": ["nils campaign list", "nils campaign show <campaign> [--answers]", "nils campaign stats <campaign>", "nils labels list", "nils labels show <id>", "nils labels certificates"],
-                "change": ["nils campaign create | claim | answer | release | metric | requestion | close", "nils labels import-v0 --tsv <file>", "nils labels seal --select selection:<name>@<v>", "POST /api/certificates", "POST /api/certificates/<id>/unseal"],
+                "change": ["nils campaign create | claim | answer | release | metric | requestion | repack | close", "nils labels import-v0 --tsv <file>", "nils labels seal --select selection:<name>@<v>", "POST /api/certificates", "POST /api/certificates/<id>/unseal"],
                 "export": ["nils campaign export <campaign> --to <dir> [--answers]", "nils labels export --axis <axis> --to <dir>", "nils labels export --for-training --to <dir>"],
                 "delete": "with the registry",
             },

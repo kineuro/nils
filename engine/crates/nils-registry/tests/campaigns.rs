@@ -3436,3 +3436,209 @@ fn an_exclusion_refuses_both_sides_and_a_hint_refuses_nothing() {
     )
     .unwrap();
 }
+
+/// An open axes campaign moves to another version of its pack: the
+/// constraints are frozen again, every answer is kept as given, one the
+/// new pack forbids is reported and marked for a second look and never
+/// closes into a decision, one that names a renamed value reads through
+/// the alias, and one whose value the pack dropped refuses the move. A
+/// dry run and a live lease write nothing.
+#[test]
+fn a_repack_refreezes_the_constraints_and_keeps_every_answer() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = axes_question();
+        let adj = json!({"when": "never", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new("repack", &q, &adj, Items::Stacks(ids), 1, "decision"),
+        )
+        .unwrap();
+        let given = [
+            r#"{"base": "T2w", "technique": "TSE", "modifier": ["FLAIR"]}"#,
+            r#"{"base": "T1w", "technique": "SE", "modifier": []}"#,
+        ];
+        let mut answered = Vec::new();
+        for (i, v) in given.iter().enumerate() {
+            let cl = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(i as u32))
+                .unwrap()
+                .unwrap();
+            campaign::answer(
+                reg,
+                &give(cl.assignment.id, "anna@lab", v),
+                &at(i as u32 + 1),
+            )
+            .unwrap();
+            answered.push(cl.item.id);
+        }
+        let kept: Vec<Option<String>> = campaign::answers(reg.store(), c.id)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.value)
+            .collect();
+
+        // the pack's next version: SE renamed SE2D, and FLAIR rules TSE out
+        let mut next = axes_question();
+        let cons = &mut next["constraints"];
+        cons["pack"] = json!("mri@0.4.0");
+        cons["values"]["technique"] = json!(["MPRAGE", "TSE", "SE2D", "GRE"]);
+        cons["aliases"] = json!({"technique": {"SE": "SE2D"}});
+        cons["excludes"] = json!([{
+            "id": "flair-not-tse", "when": {"axis": "modifier", "is": "FLAIR"},
+            "axis": "technique", "values": ["TSE"], "why": "a test rule"
+        }]);
+        cons["hints"] = json!([]);
+        let repack = |dry_run| campaign::Repack {
+            question: &next,
+            pack_version: "mri@0.4.0",
+            dry_run,
+        };
+        let audits = |reg: &mut Registry| count(reg, "audit", " WHERE action = 'campaign.repack'");
+
+        // a live lease stands in the way; a dry run counts it and writes
+        // nothing
+        let held = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(5))
+            .unwrap()
+            .unwrap();
+        let err = campaign::repack(reg, "repack", &repack(false), "cleo@lab", &at(6)).unwrap_err();
+        assert!(err.to_string().contains("leased"), "{name}: {err}");
+        let dry = campaign::repack(reg, "repack", &repack(true), "cleo@lab", &at(6)).unwrap();
+        assert_eq!(dry.leased, 1, "{name}");
+        assert_eq!(dry.answers, 2, "{name}");
+        assert_eq!(dry.now_refused.len(), 1, "{name}: {:?}", dry.now_refused);
+        assert_eq!(dry.now_refused[0]["item"], answered[0], "{name}");
+        assert_eq!(dry.aliased.len(), 1, "{name}: {:?}", dry.aliased);
+        assert_eq!(dry.aliased[0]["to"], "SE2D", "{name}");
+        assert_eq!(dry.values_added["technique"], vec!["SE2D", "GRE"], "{name}");
+        assert_eq!(dry.values_dropped["technique"], vec!["SE"], "{name}");
+        let same = campaign::find(reg.store(), "repack").unwrap();
+        assert_eq!(same.pack_version.as_deref(), Some("mri@0.3.0"), "{name}");
+        assert_eq!(same.question, c.question, "{name}");
+        assert_eq!(audits(reg), 0, "{name}");
+        campaign::release(reg, held.assignment.id, "bo@lab", &at(7)).unwrap();
+
+        // a dropped value no alias maps refuses the move
+        let mut lost = next.clone();
+        lost["constraints"]["aliases"] = json!({});
+        let err = campaign::repack(
+            reg,
+            "repack",
+            &campaign::Repack {
+                question: &lost,
+                pack_version: "mri@0.4.0",
+                dry_run: false,
+            },
+            "cleo@lab",
+            &at(8),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("do not read"), "{name}: {err}");
+        // another pack, or other axes, is no repack
+        for (q, v) in [(&next, "ct@1.0.0"), (&q, "mri@0.4.0")] {
+            let mut other = q.clone();
+            if v.starts_with("mri") {
+                other["axes"] = json!(["base", "technique"]);
+            }
+            assert!(
+                campaign::repack(
+                    reg,
+                    "repack",
+                    &campaign::Repack {
+                        question: &other,
+                        pack_version: v,
+                        dry_run: false
+                    },
+                    "cleo@lab",
+                    &at(8),
+                )
+                .is_err(),
+                "{name}: {v}"
+            );
+        }
+
+        let done = campaign::repack(reg, "repack", &repack(false), "cleo@lab", &at(9)).unwrap();
+        assert_eq!(done.now_refused.len(), 1, "{name}");
+        let moved = campaign::find(reg.store(), "repack").unwrap();
+        assert_eq!(moved.pack_version.as_deref(), Some("mri@0.4.0"), "{name}");
+        assert_eq!(
+            moved.question["constraints"]["excludes"][0]["id"], "flair-not-tse",
+            "{name}"
+        );
+        assert_eq!(moved.question["values"]["technique"][2], "SE2D", "{name}");
+        // every answer as given
+        let after: Vec<Option<String>> = campaign::answers(reg.store(), c.id)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.value)
+            .collect();
+        assert_eq!(after, kept, "{name}");
+        // the refused answer's item is marked for a second look
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        let first = items.iter().find(|i| i.id == answered[0]).unwrap();
+        let ri = nils_registry::review::item(reg.store(), first.review_item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ri.evidence["second_look"][0]["pack"], "mri@0.4.0", "{name}");
+        assert_eq!(audits(reg), 1, "{name}");
+        // the same version again is refused
+        assert!(
+            campaign::repack(reg, "repack", &repack(false), "cleo@lab", &at(10)).is_err(),
+            "{name}"
+        );
+        // a new answer is held to the new constraints and names the value
+        // as the pack does now
+        let cl = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(11))
+            .unwrap()
+            .unwrap();
+        campaign::answer(
+            reg,
+            &give(
+                cl.assignment.id,
+                "bo@lab",
+                r#"{"base": "T1w", "technique": "SE", "modifier": []}"#,
+            ),
+            &at(12),
+        )
+        .unwrap_err();
+        campaign::answer(
+            reg,
+            &give(
+                cl.assignment.id,
+                "bo@lab",
+                r#"{"base": "T2w", "technique": "TSE", "modifier": ["FLAIR"]}"#,
+            ),
+            &at(12),
+        )
+        .unwrap_err();
+        campaign::release(reg, cl.assignment.id, "bo@lab", &at(13)).unwrap();
+
+        // the close turns the aliased answer into decisions and leaves the
+        // refused one for a second look
+        let closed = campaign::close(reg, &person_closes(c.id), &at(14)).unwrap();
+        assert!(
+            closed
+                .refused
+                .iter()
+                .any(|(i, why)| *i == answered[0] && why.contains("refused")),
+            "{name}: {:?}",
+            closed.refused
+        );
+        assert!(
+            !closed.refused.iter().any(|(i, _)| *i == answered[1]),
+            "{name}: {:?}",
+            closed.refused
+        );
+        let techniques = select(reg, |s| {
+            format!(
+                "SELECT value FROM {} WHERE axis = 'technique' AND value IS NOT NULL",
+                s.qualified("decision")
+            )
+        });
+        assert!(
+            techniques.iter().any(|r| r.text(0).unwrap() == "SE2D"),
+            "{name}"
+        );
+    }
+}
