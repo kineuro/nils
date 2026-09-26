@@ -162,3 +162,62 @@ the surveys.
 |---|---|
 | 0.4.0 | `body_part` gains `chest`, which only a model's proposal writes. Values later gained `terms` and `description`, display only, which change no verdict and so no version. |
 | 0.5.0 | Role `t1w` does not take a T1-weighted FLAIR (a T1w whose modifier holds FLAIR): it is rare and special and is not used as a session's main T1w for analysis. A T1-FLAIR is a candidate for no role. |
+| 0.6.0 | Record 48: the constraints between axes, checked against public sources (`studies/2026-09-25-pack-constraints/` in the design repository, 74 sources, below), and the round 4 contrast phrases. Pack contract 6. **Vocabulary:** technique `DCE` is a value of its own (a T1-weighted 3D spoiled gradient echo, not EPI), and takes the word `dce` from `Perfusion-EPI`, which is now the DSC series; technique `ASL-EPI` is `ASL`, readout-neutral, and `ASL-EPI` stays an alias, so a campaign, an overlay or a decision that names it reads as `ASL`; the stored label `ASL` did not change, and its BIDS `acq-` token is `ASL` for `ASLEPI`. **Rules:** base runs after construct, so a base rule may read it; an ADC, eADC, FA, MD, trace or isoDWI construct is base DWI, a CBF, CBV, MTT, Tmax or TTP construct PWI, a SWI construct SWI; INV2 is PDw, not T1w, and an MP2RAGE is T1w except its INV2; an INV1, INV2 or UNI construct is technique MP2RAGE where nothing decided it; a water or fat image holds modifier Dixon; a DSC or DCE series is post-contrast; a multi-echo GRE is T2*-weighted only where the file says no Dixon or in and opposed phase, and no longer a constraint. **Exclusions (hard):** a SWI construct or base, a T2*w base and a QSM or R2* map rule out the spin-echo family; a TOF rules out base T2w; a MIP or MinIP rules out provenance RawRecon and Localizer. **Hints (soft):** BOLD and multi-echo GRE usually T2*w; STIR and ASL usually before contrast; a synthetic contrast usually SyMRI; PSIR usually T1w; DIR usually T2w (one source); HASTE usually T2w. **Words:** terms corrected (TIRM off STIR, bare TFL off MPRAGE, T2* map off R2* map, 3D DRIVE off CISS, `hyperecho` off RESTORE, bare `dual echo` off MESE) and some 40 Canon, Hitachi and Fujifilm names added; the keyword `3d drive` left CISS, and Inhance Inflow IR is no TOF. The contrast buckets gain the round 4 phrases in the spelling the normalizer leaves (`pre - contrast`, `f re k` for `före K`), including `kontrast` and `efter k`; `med k` does fire on a series' own words (a case in `corpus/` says so), so why the training sites' stacks that carry it came out empty is a question for those stacks, not the word. FatSat gains `fettsat` and `fat supp`. |
+
+## The sources of record 48
+
+The ids that `rules/base.yml`, `rules/post_contrast.yml`, `rules/implied*.yml`, `excludes.yml`, `hints.yml` and the axis files cite. Every rule a campaign holds an answer to rests on at least two independent publishers; a hint may rest on one, and cites its counter-examples. The full quotes are in the study.
+
+| id | source |
+|---|---|
+| D1 | DICOM PS3.3 C.8.13, Enhanced MR Image, Image Type values (NEMA, current) |
+| D2 | DICOM PS3.3 C.8.13, Table C.8-81, the former Value 4 terms (NEMA, 2018c) |
+| D3 | DICOM PS3.3 C.8.13.3, Table C.8-86, Acquisition Contrast (NEMA, current) |
+| D4 | DICOM PS3.16 CID 7180 (NEMA, current) |
+| D5 | DICOM PS3.16 CID 7263, 7271, 7272, diffusion (NEMA, current) |
+| D6 | DICOM PS3.16 CID 4107, 4108, 4109, perfusion (NEMA, current) |
+| B1 | BIDS specification schema, suffixes and anat |
+| S8 | Ellingson et al., Brain Tumor Imaging Protocol consensus, Neuro-Oncology 2015 |
+| MQ1 to MQ19 | mriquestions.com (A. D. Elster): BOLD sequences, DSC v DCE v ASL, trace and ADC, exponential ADC, making an SW image, MP-RAGE v MP2RAGE, TOF artifacts, multi-echo GRE, MERGE/MEDIC/M-FFE, TOF MRA, Dixon, STIR, HASTE, driven equilibrium, relaxation rate, PROPELLER, PSIF v FISP, DESS, synthetic MRI |
+| RP1 to RP13 | Radiopaedia: BOLD, MR perfusion, DCE, DSC, ASL, SWI, TOF angiography, DWI, Dixon, MIP, PSIR, DIR, pulse sequence abbreviations |
+| IM1 to IM4 | IMAIOS e-MRI: first-pass perfusion, the 180-degree pulse, STIR and FLAIR, sequence acronyms |
+| M1 | MR-TIP, a comparison of MRI acronyms used by manufacturers |
+| W1 | SIIM, maximum intensity projection |
+| V1 | Siemens Healthineers, MRI acronyms, cross-vendor comparisons v2 (2018) |
+| V2 | Fujifilm, MRI acronym guide (2024) |
+| V3 | Siemens, syngo MR pulse sequences application brochure (2013) |
+| V4 | GE HealthCare, Inhance suite |
+| T1 | dcm2niix source (rordenlab) |
+| T2 | BrainVoyager user's guide, MP2RAGE background noise |
+| P1 | Wang et al., spin-echo BOLD fMRI, NeuroImage 2021 |
+| P2 | Zhang et al., Quant Imaging Med Surg 2022 |
+| P3 | EADC and ADC, Appl Magn Reson 2013 |
+| P4 | Haller, Haacke, Thurnher, Barkhof, SWI technical essentials, Radiology 2021 |
+| P5 | Docampo et al., Neuroradiol J 2013 |
+| P6 | QSM consensus (Bilgic et al.), MRM 2024 |
+| P7 | Langkammer et al., fast QSM with 3D EPI, NeuroImage 2015 |
+| P8 | Chavhan et al., T2*-based MR imaging, RadioGraphics 2009 |
+| P9 | Marques et al., MP2RAGE, NeuroImage 2010 |
+| P10 | MP2RAGE v MPRAGE morphometry in focal epilepsy, PLoS One 2024 |
+| P11 | Brant-Zawadzki et al., MP RAGE, Radiology 1992 |
+| P12 | van der Kouwe et al., MEMPRAGE, NeuroImage 2008 |
+| P14 | Duffy et al., Pediatr Radiol 2021 |
+| P15 | Liu et al., IDEAL T1 bias, MRM 2007 |
+| P16 | Merkle and Nelson, dual gradient-echo in and opposed phase, RadioGraphics 2006 |
+| P17 | Asiri et al., J Med Radiat Sci 2021 |
+| P18 | Held et al., J Neuroradiol 2003 |
+| P20 | Alsop et al., ASL consensus, MRM 2015 |
+| P21 | Warntjes et al., MRM 2008 |
+| P22 | Hagiwara et al., SyMRI of the brain, Invest Radiol 2017 |
+| P23 | McCullum et al., J Appl Clin Med Phys 2025 |
+| P24 | Tanenbaum et al., MAGiC trial, AJNR 2017 |
+| P25 | Direct contrast synthesis from MR fingerprinting, arXiv 2022 |
+| P26 | Fischer et al., Skeletal Radiology 2021 |
+| P27 | Grade et al., a neuroradiologist's guide to ASL, Neuroradiology 2015 |
+| P28 | Poonawalla et al., Radiology 2008 |
+| P29 | Reis, Radiol Bras 2023 |
+| P30 | Naganawa et al., Jpn J Radiol 2026 |
+| P31 | Tang et al., IR-HASTE, J Magn Reson Imaging 1998 |
+| P48 | Byun et al., Korean J Radiol 2008 |
+| P49 | Headley et al., J Appl Clin Med Phys 2020 |
+| P50 | Tamada et al., Sci Rep 2022 |

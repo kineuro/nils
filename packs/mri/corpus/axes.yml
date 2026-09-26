@@ -627,3 +627,156 @@ cases:
       technique: EPI
       construct: MPR
       disposition: reformat
+
+  # --- record 48: the constraints checked against public sources
+  # (`studies/2026-09-25-pack-constraints/` in the design repository) and the
+  # round 4 phrases. Every stack is invented.
+
+  - name: the second inversion of an MP2RAGE is proton-density weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: 3D
+      text_series_description: 'mp2rage_sag_INV2'
+    axes:
+      construct: INV2
+      technique: MP2RAGE
+      base: PDw
+
+  - name: the first inversion of an MP2RAGE is T1-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: 3D
+      text_series_description: 'mp2rage_sag_INV1'
+    axes:
+      construct: INV1
+      technique: MP2RAGE
+      base: T1w
+
+  - name: an MP2RAGE output that says nothing else of its sequence is an MP2RAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+      text_series_description: 'sag INV2'
+    axes:
+      construct: INV2
+      technique: MP2RAGE
+      base: PDw
+
+  - name: a DCE series is a technique of its own, perfusion-weighted, and had contrast
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      text_series_description: 'ax dce 3d'
+    axes:
+      technique: DCE
+      base: PWI
+      post_contrast: '1'
+
+  - name: a DSC series had contrast whatever its name says of the bolus
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE'
+      scanning_sequence: EP
+      text_sequence_name: '*epfid2d1_128'
+      text_series_description: 'ep2d_perf pre gd'
+    axes:
+      technique: Perfusion
+      base: PWI
+      post_contrast: '1'
+
+  - name: an ASL series is stored as ASL, as before the identity lost its EPI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL\NONE'
+      text_series_description: 'pcasl 3d'
+    axes:
+      technique: ASL
+      base: PWI
+
+  - name: an in and opposed phase multi-echo GRE is not taken as T2 star weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D\IN_PHASE'
+      scanning_sequence: GR
+      text_series_description: 'ax dual echo'
+      echo_time: 4.6
+      split_reason: multi_echo
+    axes:
+      technique: MEGRE
+      construct: InPhase
+      base: T1w
+
+  - name: a multi-echo GRE that is no Dixon is still taken as T2 star weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      text_series_description: 'ax megre'
+      echo_time: 3.1
+      split_reason: multi_echo
+    axes:
+      technique: MEGRE
+      base: T2*w
+
+  - name: a water-only image is a Dixon image
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIXON\WATER'
+      scanning_sequence: GR
+      text_series_description: 'ax lava w'
+    axes:
+      construct: Water
+      modifier: Dixon
+
+  - name: GE's Inhance Inflow IR is not a time of flight
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      text_series_description: 'Inhance Inflow IR renal'
+    axes:
+      technique: Unknown
+
+  - name: a Swedish med K says contrast was given
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'T1 SE tra med K'
+    axes:
+      post_contrast: '1'
+
+  - name: a Swedish efter K says contrast was given
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'T1 SE tra efter K'
+    axes:
+      post_contrast: '1'
+
+  - name: kontrast alone says given, and före kontrast says not
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'T1 före kontrast'
+    axes:
+      post_contrast: '0'
+
+  - name: a German post KM and a hyphenated post-contrast say given
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 't1_mprage post-contrast'
+    axes:
+      post_contrast: '1'
+
+  - name: a hyphenated non-contrast says not given
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'T1 non-contrast'
+    axes:
+      post_contrast: '0'
+
+  - name: GE's plain Inhance Inflow is a time of flight
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      text_series_description: 'Inhance Inflow renal'
+    axes:
+      technique: TOF
+
+  - name: kontrast alone says given
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'T1 tra kontrast'
+    axes:
+      post_contrast: '1'

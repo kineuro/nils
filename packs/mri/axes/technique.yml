@@ -26,7 +26,8 @@ order:
   - DWI-EPI
   - DWI-STEAM
   - BOLD-EPI
-  - ASL-EPI
+  - ASL
+  - DCE
   - Perfusion-EPI
   - GRASE
   - SE-EPI
@@ -65,9 +66,19 @@ order:
 # same sequence and common spellings, so the reader finds MPRAGE by BRAVO.
 # Display only: no rule reads them, and they move no stack; the words that
 # decide are `keywords`.
+#
+# Record 48 checked the terms against six independent cross-vendor tables
+# and the literature (`studies/2026-09-25-pack-constraints/` in the design
+# repository, section 6). A comment `[V1, V2]` cites that study's source
+# ids: V1 the Siemens cross-vendor acronym table, V2 Fujifilm's acronym
+# guide, V3 Siemens' sequence brochure, M1 MR-TIP's comparison, IM4 IMAIOS'
+# acronyms, MQ mriquestions.com, RP Radiopaedia, S8 the brain tumour imaging
+# protocol consensus, P a paper. The table is in PROVENANCE.md.
 values:
   MS-EPI:
-    terms: ['readout-segmented EPI', 'readout segmented', 'IRIS']
+    # MUSE and IRIS are interleaved multishot EPI, RESOLVE readout-segmented;
+    # the value covers both, its label only the second [P50, V2]
+    terms: ['readout-segmented EPI', 'readout segmented', 'IRIS', 'MUSE', 'rs-EPI', 'segmented EPI DWI']
     label: RESOLVE
     family: EPI
     keywords:
@@ -113,9 +124,16 @@ values:
       - task
     detection:
       exclusive: is_bold
-  ASL-EPI:
-    terms: ['arterial spin labeling', '3D ASL', 'pCASL']
+  # Record 48: named for the labelling and not a readout. The consensus
+  # readouts are 3D GRASE and a 3D spiral fast spin echo, with 2D EPI an
+  # alternative [P20, RP5]. The identity was ASL-EPI before pack 0.6.0, and
+  # the alias keeps a campaign, an overlay or a decision that names it
+  # reading as this value; what a row stores, the label, did not change.
+  ASL:
+    terms: ['arterial spin labeling', 'arterial spin labelling', '3D ASL', 'pCASL', 'PASL', '3D GRASE ASL', 'spiral ASL']
     label: ASL
+    description: 'arterial spin labelling perfusion, any readout (3D GRASE, 3D spiral FSE, EPI)'
+    aliases: [ASL-EPI]
     family: MIXED
     keywords:
       - asl
@@ -125,19 +143,32 @@ values:
       - arterial spin
     detection:
       exclusive: is_asl
+  # Record 48: DCE is a T1-weighted 3D spoiled gradient echo, not EPI, and
+  # takes a value of its own [MQ2, RP3, D4]; `dce` moved here from
+  # Perfusion-EPI, which is now the dynamic susceptibility contrast series.
+  # Tried before it, so a series that says DCE is DCE whatever its image
+  # type says.
+  DCE:
+    terms: ['dynamic contrast enhanced', 'DCE-MRI', 'DCE perfusion', 'permeability']
+    description: 'dynamic contrast enhanced perfusion: a T1-weighted 3D spoiled gradient echo repeated through a bolus'
+    family: GRE
+    keywords:
+      - dce
+      - dynamic contrast enhanced
   Perfusion-EPI:
-    terms: ['ep2d_perf', 'DSC perfusion', 'bolus tracking']
+    terms: ['ep2d_perf', 'DSC perfusion', 'dynamic susceptibility contrast', 'bolus tracking']
     label: Perfusion
-    family: MIXED
+    description: 'dynamic susceptibility contrast (DSC) perfusion, a gradient- or spin-echo EPI through a bolus'
+    family: EPI
     keywords:
       - perfusion
       - dsc
-      - dce
       - pwi
     detection:
       exclusive: is_perfusion
   GRASE:
-    terms: ['gradient and spin echo', 'TGSE']
+    # Canon's name [V1, M1]
+    terms: ['gradient and spin echo', 'TGSE', 'Hybrid EPI']
     family: MIXED
     keywords:
       - grase
@@ -166,7 +197,7 @@ values:
     detection:
       exclusive: is_mrf
   MDME:
-    terms: ['QRAPMASTER', 'MAGiC', 'SyMRI acquisition']
+    terms: ['QRAPMASTER', 'MAGiC', 'SyMRI acquisition', 'SyntAc']  # SyntAc: Philips [P23, MQ19]
     family: SE
     keywords:
       - mdme
@@ -218,7 +249,9 @@ values:
     detection:
       exclusive: is_haste
   IR-TSE:
-    terms: ['TIRM', 'FSE-IR', 'IR TSE', 'TSE-IR', 'turbo inversion recovery', 'TIR']
+    # GE's name is FastIR [V1, V2, M1, IM4]; FSE-IR is IMAIOS' alone, and
+    # TIR also names a true (phase-sensitive) IR in V1 and V2
+    terms: ['TIRM', 'FSE-IR', 'IR TSE', 'TSE-IR', 'turbo inversion recovery', 'TIR', 'FastIR', 'Fast IR', 'FIR']
     label: TIRM
     family: SE
     keywords:
@@ -231,7 +264,8 @@ values:
     detection:
       combination: [has_ir, is_tse]
   ME-SE:
-    terms: ['multi-echo spin echo', 'MESE', 'dual echo']
+    # not bare `dual echo`, which is also a dual-echo GRE and DESS [V3]
+    terms: ['multi-echo spin echo', 'MESE', 'dual echo SE', 'double echo TSE']
     label: MESE
     family: SE
     keywords:
@@ -244,9 +278,15 @@ values:
     detection:
       exclusive: is_me_se
       combination: [is_multi_echo, has_se]
+  # RESTORE, FRFSE, DRIVE and T2 Plus are a 90-degree flip-back (driven
+  # equilibrium) TSE, not a variable flip angle [V1, V3, P48]; the identity
+  # keeps its name, since renaming it is a data change of its own.
+  # `hyperecho` is a refocusing flip angle scheme, not driven equilibrium
+  # [MQ14, V1], and is gone.
   VFA-TSE:
-    terms: ['RESTORE', 'FRFSE', 'DRIVE', 'T2 Plus', 'driven equilibrium', 'fast recovery FSE']
+    terms: ['RESTORE', 'FRFSE', 'DRIVE', 'T2 Plus', 'driven equilibrium', 'fast recovery FSE', 'DE-FSE', 'DE-FIR', 'Driven Equilibrium FSE']
     label: RESTORE
+    description: '90-degree flip-back (driven equilibrium) turbo spin echo'
     family: SE
     keywords:
       - restore
@@ -255,7 +295,6 @@ values:
       - de-fse
       - de-fir
       - t2 plus
-      - hyperecho
   TSE:
     terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE']
     family: SE
@@ -301,8 +340,13 @@ values:
       - multi-echo mprage
     detection:
       combination: [is_multi_echo, has_ir, has_gre, is_3d]
+  # Siemens `tfl` is TurboFLASH in 2D and 3D, so bare TFL is FSP-GRE's and
+  # only `tfl3d` stays here [V3, M1, V1]. Philips' 3D TFE is an MPRAGE only
+  # with the inversion prepulse, so IR-TFE is added and 3D TFE kept [S8,
+  # IM4]; 3D Fast FE and 3DFFE-IR are Canon's, 3D-GEIR Hitachi's [V1, V2].
   MPRAGE:
-    terms: ['MPRAGE', 'MP-RAGE', 'MP RAGE', 'BRAVO', 'FSPGR BRAVO', 'IR-FSPGR', '3D IR-FSPGR', '3D TFE', '3D T1 TFE', 'T1 TFE 3D', 'TFL', 'tfl3d', '3D MPRAGE', 'magnetization prepared rapid gradient echo']
+    terms: ['MPRAGE', 'MP-RAGE', 'MP RAGE', 'BRAVO', 'FSPGR BRAVO', 'IR-FSPGR', '3D IR-FSPGR', '3D TFE', '3D T1 TFE', 'T1 TFE 3D', 'IR-TFE', '3D IR-TFE', 'tfl3d', '3D MPRAGE', 'magnetization prepared rapid gradient echo', '3D Fast FE', '3DFFE-IR', '3D-GEIR']
+    description: '3D inversion-prepared rapid gradient echo (T1-weighted)'
     family: GRE
     keywords:
       - mprage
@@ -313,10 +357,14 @@ values:
     detection:
       exclusive: is_mprage
       combination: [has_ir, has_gre, is_3d]
+  # Bare Inhance Inflow (2D inflow) is a TOF [V1, V2]; GE's Inhance Inflow
+  # IR is a non-contrast bSSFP angiography [V4, V1], and the normalizer
+  # writes its `IR` as `inversion-recovery`, so it is kept out.
   TOF-MRA:
     terms: ['time-of-flight', 'TOF MRA', 'inflow angiography', 'Inhance Inflow']
     label: TOF
     family: GRE
+    requires: {not: {text: search_text, substring: 'inflow inversion-recovery'}}
     keywords:
       - tof
       - time of flight
@@ -336,7 +384,7 @@ values:
     detection:
       exclusive: is_pc
   comb-ME-GRE:
-    terms: ['MEDIC', 'MERGE', 'mFFE', 'combined multi-echo GRE']
+    terms: ['MEDIC', 'MERGE', 'mFFE', 'M-FFE', 'combined multi-echo GRE', 'mEcho', 'ADAGE']  # [MQ9, V2, V1]
     label: MEDIC
     family: GRE
     keywords:
@@ -357,18 +405,20 @@ values:
       - multi-echo gre
     detection:
       combination: [is_multi_echo, has_gre]
+  # DRIVE is Philips' driven equilibrium TSE and Philips has no
+  # dual-excitation bSSFP, so `3D DRIVE` is gone; PBSG is Hitachi's
+  # [P48, V1, V2, M1].
   CISS:
-    terms: ['CISS', 'FIESTA-C', '3D DRIVE']
+    terms: ['CISS', 'FIESTA-C', 'PBSG', 'Phase Balanced SARGE']
     family: GRE
     keywords:
       - ciss
       - fiesta-c
       - fiesta c
-      - '3d drive'
     detection:
       exclusive: is_ciss
   bSSFP:
-    terms: ['TrueFISP', 'FIESTA', 'balanced FFE', 'bFFE', 'True SSFP', 'balanced SSFP', 'trufi']
+    terms: ['TrueFISP', 'FIESTA', 'balanced FFE', 'bFFE', 'True SSFP', 'balanced SSFP', 'trufi', 'BASG']  # BASG: Hitachi [V1, V2]
     label: FIESTA
     family: GRE
     keywords:
@@ -389,7 +439,7 @@ values:
       - dess
       - mensa
   SSFP:
-    terms: ['PSIF', 'T2-FFE', 'CE-FAST', 'reversed FISP']
+    terms: ['PSIF', 'T2-FFE', 'CE-FAST', 'reversed FISP', 'TRSG']  # TRSG: Hitachi [V1, V2]
     label: PSIF
     family: GRE
     keywords:
@@ -418,7 +468,7 @@ values:
     detection:
       combination: [has_spoiled, is_3d, has_gre]
   FSP-GRE:
-    terms: ['TurboFLASH', 'FSPGR', 'TFE', 'turbo field echo', 'fast SPGR', 'TFL']
+    terms: ['TurboFLASH', 'FSPGR', 'TFE', 'turbo field echo', 'fast SPGR', 'TFL', 'Fast FE', 'FastFE', 'RGE']  # Fast FE: Canon, RGE: Hitachi [V1, M1, IM4]
     label: TurboFLASH
     family: GRE
     keywords:
@@ -440,7 +490,7 @@ values:
       exclusive: is_flash
       combination: [has_spoiled, has_gre]
   SS-GRE:
-    terms: ['FISP', 'GRASS', 'FFE', 'steady state GRE']
+    terms: ['FISP', 'GRASS', 'FFE', 'steady state GRE', 'SARGE', 'Rephased SARGE']  # Hitachi [V1, V2, M1]
     label: FISP
     family: GRE
     keywords:

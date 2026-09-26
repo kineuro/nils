@@ -43,6 +43,14 @@ sequence, a spelling, a radiologist's word), and its `description` says what it
 means. Both are display only: the reader finds a value by them, and no rule
 reads them, so they change no verdict and no version.
 
+Beside the rules, `excludes.yml` and `hints.yml` (pack contract 6, record 48)
+say what the axes allow together. An exclusion is hard: construct SWI rules
+out every spin-echo technique, and a campaign refuses an answer that holds
+both. A hint is what is usual and not always so, with its reason: a BOLD
+series is usually T2*-weighted, and a spin-echo BOLD is not. The reader shows
+it and nothing enforces it. Neither decides an axis of a stack. Every entry
+cites the sources it rests on, listed in `PROVENANCE.md`.
+
     nils pack validate packs/mri
     nils pack shape packs/mri
     nils pack show mri --pack-dir packs

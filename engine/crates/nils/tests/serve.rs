@@ -1112,7 +1112,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "a longhand rule's words"
     );
     assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
-    assert_eq!(packs_doc["packs"][0]["contract"], 4, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 6, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -1416,7 +1416,7 @@ fn knob_registry() -> TempDir {
     let home = TempDir::new("knob-home");
     let dir = TempDir::new("knob-src");
     for (study, sop, description) in [
-        ("1.2.3.A", "1.2.3.A.1.1", "t1 mprage zzgado"),
+        ("1.2.3.A", "1.2.3.A.1.1", "t1 mprage zzmedel"),
         ("1.2.3.B", "1.2.3.B.1.1", "t1 mprage"),
     ] {
         let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
@@ -1455,9 +1455,9 @@ fn knob_registry() -> TempDir {
 const SITE_OVERLAY: &str = r#"{
   "overlay": "site", "version": "1.0.0", "pack": "mri",
   "scope": {"manufacturer": "SYNTHETIC"},
-  "buckets": {"contrast_positive": {"add": ["zzgado", "zzznever"]}},
+  "buckets": {"contrast_positive": {"add": ["zzmedel", "zzznever"]}},
   "cases": [{"name": "the site's own agent",
-             "stack": {"text_series_description": "t1 mprage zzgado"},
+             "stack": {"text_series_description": "t1 mprage zzmedel"},
              "axes": {"post_contrast": "1"}}]
 }"#;
 
@@ -1697,7 +1697,7 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             .unwrap()
             .iter()
             .flat_map(|a| a["evidence"].as_array().into_iter().flatten())
-            .any(|e| e["matched"] == "zzgado")
+            .any(|e| e["matched"] == "zzmedel")
     };
     let moved = explained
         .iter()
@@ -4707,9 +4707,9 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
 const LIST_OVERLAY: &str = r#"{
   "overlay": "site-lists", "version": "1.0.0", "pack": "mri",
   "scope": {"manufacturer": "SYNTHETIC"},
-  "lists": {"technique.TSE": {"add": ["zzgado"]}},
+  "lists": {"technique.TSE": {"add": ["zzmedel"]}},
   "cases": [{"name": "the site's own turbo word",
-             "stack": {"text_series_description": "zzgado"},
+             "stack": {"text_series_description": "zzmedel"},
              "axes": {"technique": "TSE"}}]
 }"#;
 
@@ -4771,7 +4771,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
     let id = proposed["overlay"]["id"].as_i64().unwrap();
     assert_eq!(
         proposed["overlay"]["document"]["lists"]["technique.TSE"]["add"],
-        serde_json::json!(["zzgado"]),
+        serde_json::json!(["zzmedel"]),
         "{proposed}"
     );
     let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
@@ -4783,7 +4783,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
     assert_eq!(status, 200, "{pack}");
     assert_eq!(
         pack["site"]["technique.TSE"]["add"],
-        serde_json::json!(["zzgado"]),
+        serde_json::json!(["zzmedel"]),
         "{}",
         pack["site"]
     );
@@ -4802,7 +4802,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         .find(|v| v["name"] == "TSE")
         .cloned()
         .unwrap();
-    assert_eq!(tse["site"]["add"], serde_json::json!(["zzgado"]), "{tse}");
+    assert_eq!(tse["site"]["add"], serde_json::json!(["zzmedel"]), "{tse}");
     assert_eq!(
         tse["keywords"][0], "tse",
         "the pack's own words are the pack's, unamended on disk: {tse}"
@@ -4813,7 +4813,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
     let (status, row) = server.request("GET", &format!("/api/overlays/{id}"), None, reviewer);
     assert_eq!(status, 200, "{row}");
     assert_eq!(
-        row["document"]["lists"]["technique.TSE"]["add"][0], "zzgado",
+        row["document"]["lists"]["technique.TSE"]["add"][0], "zzmedel",
         "{row}"
     );
     let (status, signals) =
@@ -4861,7 +4861,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
             .iter()
             .filter(|a| a["axis"] == "technique")
             .flat_map(|a| a["evidence"].as_array().cloned().unwrap_or_default())
-            .any(|e| e["matched"] == "zzgado")
+            .any(|e| e["matched"] == "zzmedel")
     };
     let moved = explained
         .iter()
@@ -4879,7 +4879,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
     // `nils overlay show` prints the list, and the export loads on the
     // command line as `nils classify --overlay` loads it
     let shown = run(&home, &["overlay", "show", &id.to_string()], None);
-    assert!(shown.contains("list technique.TSE: +zzgado"), "{shown}");
+    assert!(shown.contains("list technique.TSE: +zzmedel"), "{shown}");
     let out = TempDir::new("overlay-export");
     let wrote = run(
         &home,
@@ -4928,7 +4928,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|k| k == "zzgado"),
+            .any(|k| k == "zzmedel"),
         "loaded under the overlay, the value carries the site's word: {tse}"
     );
     let classified = run(
@@ -4944,7 +4944,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@0.5.0", "{classified}");
+    assert_eq!(classified["pack"], "mri@0.6.0", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the

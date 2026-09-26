@@ -8,9 +8,21 @@ rule_set: post_contrast
 decides: [post_contrast]
 tiers: {exclusive: 0.95, keywords: 0.85}
 
-order: [structured, negative, positive]
+order: [perfusion, structured, negative, positive]
 
 rules:
+
+  # Record 48: DSC and DCE both need an intravenous gadolinium bolus, and a
+  # series that holds the pre-bolus dynamics too is still, as a series, a
+  # contrast study [RP4, MQ2, IM1]. A constraint a campaign freezes as well:
+  # it reads the technique and nothing else. ASL is the other way, and only
+  # usually: hints.yml.
+  perfusion:
+    clauses:
+      - {when: {any: [{axis: technique, is: 'Perfusion-EPI'}, {axis: technique, is: 'DCE'}]}, cite: 'a DSC or DCE perfusion', source: technique}
+    set: {post_contrast: given}
+    confidence: 0.95
+    why: 'DSC and DCE both need an intravenous gadolinium bolus'
 
   structured:
     clauses:

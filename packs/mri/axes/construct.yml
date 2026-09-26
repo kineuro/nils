@@ -85,8 +85,9 @@ values:
       - fa map
     detection:
       exclusive: has_fa
+  # the same image as isoDWI, under Siemens' and Philips' names [MQ3, D2]
   Trace:
-    terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b']
+    terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b', 'DIFFUSION_ISO']
     keywords:
       - trace
       - tracew
@@ -427,8 +428,10 @@ values:
       - uniform weighted
     detection:
       exclusive: is_uniform_denoised
+  # FSBB is Canon's, BSI Fujifilm's [MQ5, V1, V2, P4]. Whether GE's SWAN is
+  # a SWI construct or only a SWI base, the sources disagree [P4, P5, V1].
   SWI:
-    terms: ['susceptibility weighted imaging', 'SWI', 'SWAN', 'SWIp', 'VenoBOLD']
+    terms: ['susceptibility weighted imaging', 'SWI', 'SWAN', 'SWIp', 'VenoBOLD', 'FSBB', 'eFSBB', 'BSI']
     keywords:
       - swi processed
       - swi combined
@@ -444,8 +447,9 @@ values:
       - phase image
     detection:
       exclusive: has_phase
+  # R2* is 1/T2*, and a T2* map is a map of its own [P49, MQ15, V1]
   R2starmap:
-    terms: ['R2* map', 'R2star map', 'T2* map']
+    terms: ['R2* map', 'R2star map', 'R2* relaxation rate map']
     keywords:
       - r2star
       - r2star map
