@@ -3799,7 +3799,8 @@ pub fn accept_many(
             item,
             value,
             suggested,
-            suggested_by: None,
+            // a batch of like stacks is suggested by the engine's own rules
+            suggested_by: suggested.map(|_| "rules"),
             seconds: None,
         })
         .collect();
