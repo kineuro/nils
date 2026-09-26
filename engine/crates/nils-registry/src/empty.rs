@@ -49,6 +49,10 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("sealed_stack", Row::Keeps("it is of a sealed sample")),
     ("campaign_item", Row::Keeps("a campaign asks it")),
     (
+        "campaign_suggestion",
+        Row::Keeps("a campaign carries a suggestion for it"),
+    ),
+    (
         "review_member",
         Row::Keeps("a grouped review item holds it"),
     ),

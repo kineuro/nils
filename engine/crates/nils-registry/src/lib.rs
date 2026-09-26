@@ -48,6 +48,7 @@ pub mod review;
 pub mod schema;
 pub mod session;
 pub mod store;
+pub mod suggestion;
 pub mod time;
 
 pub use home::{Home, HomeError, InitOptions, Meta, Registry};

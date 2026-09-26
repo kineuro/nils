@@ -2138,11 +2138,49 @@ fn build_registry() -> Vec<Table> {
                 // {axis: value | [values] | null | "cant_tell"}; null where
                 // the question derives none.
                 col("derived", Type::Json),
+                // Record 50 R3: who suggested the answer the engine kept
+                // beside it: the author of the outside suggestion a
+                // campaign carries (`v0-model`, `v0-person`, a model id),
+                // or `rules` where the engine's own rules and System 1 did;
+                // null where nothing was suggested.
+                col("suggested_by", Type::Text),
             ],
         )
         // one answer per item, rater and round: a repeat is the same answer
         .unique(&["item_id", "principal", "round"])
         .index(&["item_id"])
+        .index(&["campaign_id"]),
+        // Record 50 R3: an answer suggested for a campaign's item from
+        // outside the engine (v0's committed labels, a model's proposals),
+        // with its author and, where the source gave them, a confidence per
+        // class. A suggestion is never an answer and never a decision: a
+        // person accepts or corrects it, and what a person accepted is the
+        // label. None is kept for a stack of a sample sealed when it came.
+        Table::new(
+            "campaign_suggestion",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                col("stack_id", Type::Int),
+                // as an answer to the question keeps its value
+                req("value", Type::Text),
+                // who suggested it: `v0-model`, `v0-person`, a model id
+                req("author", Type::Text),
+                // {value: p} per class, as the source gave them; null where
+                // it gave none
+                col("confidences", Type::Json),
+                // the confidence of the value suggested, from `confidences`
+                col("confidence", Type::Double),
+                // what the suggestions came from, as the importer named it
+                col("source", Type::Text),
+                req("imported_by", Type::Text),
+                req("imported_at", Type::Timestamp),
+            ],
+        )
+        // one suggestion per item and author: an author's later import
+        // replaces its earlier one
+        .unique(&["item_id", "author"])
         .index(&["campaign_id"]),
         // Record 42 S7 (C7): labels exported with their provenance. The
         // digest covers the canonical labels.tsv, so the same state gives
@@ -2530,6 +2568,7 @@ mod tests {
             "label_set",
             "sealed_stack",
             "certificate",
+            "campaign_suggestion",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

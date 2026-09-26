@@ -321,6 +321,22 @@ The job's result counts what it built, skipped and failed, with why for each fai
    nils campaign stats classify-review
    ```
 
+## Check a hundred suggestions at once
+
+For a campaign that asks one axis, such as body part, suggestions from outside the engine become gold labels once a person has checked them.
+
+1. Bring the suggestions in: v0's committed labels, or a model's proposals with a confidence per class. The file's first line names its columns: `stack_id`, `item` or `SeriesInstanceUID`; `value`; `author`; and one `p:<value>` column per class.
+
+   ```sh
+   nils campaign suggest body-parts --file v0-body-parts.tsv --author v0-person
+   ```
+
+   At the door it is `POST /api/campaigns/{id}/suggestions`, for the campaign's maker. A stack of a sealed sample takes no suggestion.
+
+2. Open the gallery: `GET /api/campaigns/{id}/gallery` lists up to 100 open items, each with its suggested value, who suggested it, its confidences and a small picture (`GET /api/instances/{stack}/thumb`), the least certain first.
+
+3. Correct the wrong ones and accept the page in one move with `POST /api/campaigns/{id}/gallery/accept`, `{"answers": [{"item": 12, "value": "brain"}, ...]}`. Each item becomes its own answer by the person, with the suggestion and its author kept beside it. The items the campaign holds back are never in a gallery; claim them to read them alone.
+
 ## Let a certified sample train
 
 A sealed sample trains nothing until the certificate it was drawn for is recorded. Both acts are a person's, at the engine's door with the person's own token, so the two people involved are told apart by the identity the engine verified. The keyboard refuses both.

@@ -52,6 +52,10 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/batches",
     "POST /api/campaigns/{id}/batches/{batch}/accept",
     "GET /api/campaigns/{id}/stats",
+    "GET /api/campaigns/{id}/suggestions",
+    "POST /api/campaigns/{id}/suggestions",
+    "GET /api/campaigns/{id}/gallery",
+    "POST /api/campaigns/{id}/gallery/accept",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -69,7 +73,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 "api",
                 "campaigns",
                 _,
-                "answers" | "batches" | "stats" | "combinations",
+                "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery",
             ],
         )
         | (
@@ -91,9 +95,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         // record 48: why one stack was judged so, one line per axis, is a
         // review reading, as the explanation is
         ("GET", ["api", "stacks", _, "why"]) => (Need::One("review:see"), Plain),
-        ("POST", ["api", "campaigns", _, "batches", _, "accept"]) => {
+        ("POST", ["api", "campaigns", _, "batches", _, "accept"])
+        | ("POST", ["api", "campaigns", _, "gallery", "accept"]) => {
             (Need::One("campaigns:work"), Plain)
         }
+        // record 50 R3: suggestions from outside are the campaign's maker's
+        // to bring, or a reviewer's
+        ("POST", ["api", "campaigns", _, "suggestions"]) => (Need::One("campaigns:work"), Plain),
         // record 48 R2: a certificate and the unseal are the model
         // registry's acts
         ("GET", ["api", "certificates"]) => (Need::One("models:see"), Plain),
@@ -348,6 +356,42 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "counts and times per rater",
         "Reading how fast a campaign is read",
         "Read how fast a campaign is read",
+    ),
+    (
+        "GET /api/campaigns/{id}/suggestions",
+        false,
+        false,
+        "bounded",
+        "every suggestion the campaign carries",
+        "Reading a campaign's suggestions",
+        "Read a campaign's suggestions",
+    ),
+    (
+        "POST /api/campaigns/{id}/suggestions",
+        true,
+        true,
+        "bounded",
+        "one suggestion per item and author",
+        "Bringing suggestions into a campaign",
+        "Brought suggestions into a campaign",
+    ),
+    (
+        "GET /api/campaigns/{id}/gallery",
+        false,
+        false,
+        "bounded",
+        "two hundred items",
+        "Reading a gallery of items",
+        "Read a gallery of items",
+    ),
+    (
+        "POST /api/campaigns/{id}/gallery/accept",
+        true,
+        false,
+        "bounded",
+        "one answer per item accepted",
+        "Accepting a gallery",
+        "Accepted a gallery",
     ),
     (
         "GET /api/certificates",
@@ -610,6 +654,10 @@ pub(crate) fn route(
                 // never the caller's
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let suggested = suggested_for(registry.store(), &c, a, pack.as_deref())?;
+                let (suggested, suggested_by) = match &suggested {
+                    Some((v, by)) => (Some(v.as_str()), Some(by.as_str())),
+                    None => (None, None),
+                };
                 // record 48: the axes derived from this answer through the
                 // pack, the engine's own computation, kept beside it
                 let derived = match value
@@ -642,7 +690,8 @@ pub(crate) fn route(
                         unsure,
                     },
                     &campaign::Timing {
-                        suggested: suggested.as_deref(),
+                        suggested,
+                        suggested_by,
                         batch: false,
                         derived: derived.as_ref(),
                     },
@@ -811,12 +860,39 @@ pub(crate) fn route(
                 let suggested = if blind {
                     None
                 } else {
-                    crate::reader::suggestion(registry.store(), stack, &q, pack.as_deref())?
+                    crate::reader::item_suggestion(
+                        registry.store(),
+                        &c,
+                        item,
+                        Some(stack),
+                        &q,
+                        pack.as_deref(),
+                    )?
                 };
-                let mut s = json!(suggested);
+                let mut s = json!(suggested.as_ref().map(|(v, _)| v));
                 axes_value(&c.question, &mut s);
                 doc["item"] = json!(item);
                 doc["suggested"] = s;
+                doc["suggested_by"] = json!(suggested.as_ref().map(|(_, by)| by));
+                // record 50 R3: every outside suggestion for the item, with
+                // its author and its confidences; none on a stack read blind
+                let told = if blind {
+                    Vec::new()
+                } else {
+                    nils_registry::suggestion::of_items(registry.store(), c.id, &[item])
+                        .map_err(campaign_err)?
+                        .remove(&item)
+                        .unwrap_or_default()
+                };
+                doc["suggestions"] = json!(
+                    told.iter()
+                        .map(|t| {
+                            let mut v = t.as_json();
+                            axes_value(&c.question, &mut v["value"]);
+                            v
+                        })
+                        .collect::<Vec<_>>()
+                );
                 // record 48, after the first real read: blind hides the
                 // systems' answers, never the file
                 with_file(registry.store(), stack, !plain(caller), &mut doc)?;
@@ -824,9 +900,13 @@ pub(crate) fn route(
                 doc["worth"] = if blind {
                     Value::Null
                 } else {
-                    campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
+                    let mine = campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
                         .map_err(campaign_err)?
-                        .get(&stack)
+                        .remove(&stack);
+                    let told =
+                        nils_registry::suggestion::worth_of_items(registry.store(), c.id, &[item])?;
+                    nils_registry::suggestion::merged(mine, told.get(&item))
+                        .as_ref()
                         .map(campaign::Worth::as_json)
                         .unwrap_or(Value::Null)
                 };
@@ -1015,6 +1095,287 @@ pub(crate) fn route(
                 Ok(Reply::ok(json!({
                     "campaign": c.id, "batch": key, "hold_back": c.hold_back,
                     "accepted": accepted, "held_back": held_list, "refused": refused,
+                })))
+            }
+            // record 50 R3: suggestions from outside the engine, each with
+            // its author and its confidences
+            ["api", "campaigns", which, "suggestions"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let mut doc = nils_registry::suggestion::summary(registry.store(), c.id)
+                    .map_err(campaign_err)?;
+                doc["campaign"] = json!(c.id);
+                // the rows themselves, to the campaign's maker and to those
+                // who read every campaign, never of a stack read blind
+                if c.owner == principal || oversees(caller) {
+                    let all = nils_registry::suggestion::of_campaign(registry.store(), c.id)
+                        .map_err(campaign_err)?;
+                    let stacks: Vec<i64> = all.iter().filter_map(|s| s.stack_id).collect();
+                    let (sealed, _) =
+                        labels::sealed_now(registry.store(), &stacks, &[]).map_err(labels_err)?;
+                    let limit = query
+                        .get("limit")
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(1000);
+                    doc["suggestions"] = json!(
+                        all.iter()
+                            .filter(|s| !s.stack_id.is_some_and(|k| sealed.contains(&k)))
+                            .take(limit)
+                            .map(nils_registry::suggestion::Suggestion::as_json)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Ok(Reply::ok(doc))
+            }
+            ["api", "campaigns", which, "suggestions"] if post => {
+                let doc = json_body(body)?;
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                if c.owner != principal && !oversees(caller) {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "suggestions are brought into campaign {} by its maker, or by a holder of review:work",
+                            c.name
+                        ),
+                    ));
+                }
+                let rows: Vec<nils_registry::suggestion::Given> = match (
+                    &doc["tsv"],
+                    &doc["suggestions"],
+                ) {
+                    (Value::String(text), Value::Null) => {
+                        let (rows, bad) =
+                            nils_registry::suggestion::parse_tsv(text).map_err(campaign_err)?;
+                        if bad > 0 && rows.is_empty() {
+                            return Err(Reply::error(
+                                400,
+                                format!("none of the {bad} lines is a suggestion"),
+                            ));
+                        }
+                        rows
+                    }
+                    (Value::Null, Value::Array(list)) => {
+                        list.iter().map(given_of_json).collect::<Result<_, _>>()?
+                    }
+                    _ => {
+                        return Err(Reply::error(
+                            400,
+                            "the body holds suggestions, a list of {stack | item | series, value, confidences, author}, or tsv, a file's text",
+                        ));
+                    }
+                };
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let done = import_suggestions(
+                    registry,
+                    &c,
+                    &rows,
+                    doc["author"].as_str(),
+                    doc["source"].as_str(),
+                    principal,
+                    pack.as_deref(),
+                    doc["dry_run"].as_bool().unwrap_or(false),
+                )?;
+                let mut out = done.as_json();
+                out["campaign"] = json!(c.id);
+                out["dry_run"] = json!(doc["dry_run"].as_bool().unwrap_or(false));
+                Ok(Reply::ok(out))
+            }
+            // record 50 R3: a page of a single-axis campaign's items, each
+            // small with its suggestion, for a person to check and accept
+            ["api", "campaigns", which, "gallery"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let listed = c.raters();
+                if !listed.is_empty() && !listed.iter().any(|p| p == principal) {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "campaign {} names its raters, and {principal} is not one",
+                            c.name
+                        ),
+                    ));
+                }
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let order = query
+                    .get("order")
+                    .map(|o| crate::reader::GalleryOrder::parse(o))
+                    .transpose()
+                    .map_err(|(st, m)| Reply::error(st, m))?
+                    .unwrap_or(crate::reader::GalleryOrder::Uncertain);
+                let limit = query
+                    .get("limit")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(crate::reader::GALLERY_PAGE);
+                let doc = crate::reader::gallery(
+                    registry.store(),
+                    &c,
+                    principal,
+                    pack.as_deref(),
+                    order,
+                    limit,
+                )
+                .map_err(|(st, m)| Reply::error(st, m))?;
+                Ok(Reply::ok(doc))
+            }
+            ["api", "campaigns", which, "gallery", "accept"] if post => {
+                let doc = json_body(body)?;
+                for held in ["hold_back", "seed", "suggested", "seconds"] {
+                    if doc.get(held).is_some() {
+                        return Err(Reply::error(
+                            400,
+                            format!(
+                                "{held} is not the caller's to say: the engine keeps its own suggestion beside each answer, measures the time, and holds back what the campaign's seed draws"
+                            ),
+                        ));
+                    }
+                }
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let q = c.question().map_err(campaign_err)?;
+                if campaign::single_axis(&q).is_none() {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "campaign {} asks more than one axis; a gallery is of a question with one",
+                            c.name
+                        ),
+                    ));
+                }
+                let list = doc["answers"]
+                    .as_array()
+                    .filter(|l| !l.is_empty())
+                    .ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            "answers: a list of {item, value}, the value each item is accepted as",
+                        )
+                    })?;
+                let mut named: Vec<(i64, String)> = Vec::with_capacity(list.len());
+                for a in list {
+                    let (Some(item), Some(value)) = (
+                        a["item"].as_i64(),
+                        a["value"].as_str().filter(|v| !v.trim().is_empty()),
+                    ) else {
+                        return Err(Reply::error(
+                            400,
+                            "answers: each {item, value}, the value a word of the axis",
+                        ));
+                    };
+                    named.push((item, value.trim().to_string()));
+                }
+                let ids: Vec<i64> = named.iter().map(|(i, _)| *i).collect();
+                // an item of a sealed sample is never accepted in one move
+                let stacks = item_stacks(registry.store(), c.id, &ids)?;
+                let (sealed, _) =
+                    labels::sealed_now(registry.store(), &stacks, &[]).map_err(labels_err)?;
+                if !sealed.is_empty() {
+                    return Err(Reply::error(
+                        409,
+                        format!(
+                            "{} of these items are of a sealed certification sample, and each is read alone and blind, never accepted in one move",
+                            sealed.len()
+                        ),
+                    ));
+                }
+                // record 48 R1: what the seed holds back is read alone
+                let seed =
+                    campaign::hold_back_seed(registry.store(), c.id).map_err(campaign_err)?;
+                let drawn: Vec<i64> = ids
+                    .iter()
+                    .copied()
+                    .filter(|i| campaign::drawn_back(&seed, *i, c.hold_back))
+                    .collect();
+                if !drawn.is_empty() {
+                    return Err(Reply::error(
+                        409,
+                        format!(
+                            "{} of these items are held back to be read alone (the campaign holds back {:.0} %), and never accepted in one move",
+                            drawn.len(),
+                            c.hold_back * 100.0
+                        ),
+                    ));
+                }
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                // the engine's own suggestion beside each answer, never the caller's
+                let mut suggested: Vec<Option<(String, String)>> = Vec::with_capacity(named.len());
+                for (item, _) in &named {
+                    let it = campaign::item(registry.store(), *item)
+                        .map_err(campaign_err)?
+                        .filter(|it| it.campaign_id == c.id)
+                        .ok_or_else(|| {
+                            Reply::error(404, format!("campaign {} has no item {item}", c.name))
+                        })?;
+                    suggested.push(crate::reader::item_suggestion(
+                        registry.store(),
+                        &c,
+                        it.id,
+                        it.stack_id,
+                        &q,
+                        pack.as_deref(),
+                    )?);
+                }
+                let answers: Vec<String> = named
+                    .iter()
+                    .map(|(_, v)| campaign::single_answer(&q, v).unwrap_or_else(|| v.clone()))
+                    .collect();
+                let seconds = crate::reader::page_seconds(c.id, principal, &ids);
+                let rows: Vec<campaign::Each<'_>> = named
+                    .iter()
+                    .zip(&answers)
+                    .zip(&suggested)
+                    .map(|(((item, _), value), s)| campaign::Each {
+                        item: *item,
+                        value,
+                        suggested: s.as_ref().map(|(v, _)| v.as_str()),
+                        suggested_by: s.as_ref().map(|(_, by)| by.as_str()),
+                        seconds,
+                    })
+                    .collect();
+                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
+                let given = Given {
+                    assignment: 0,
+                    principal,
+                    author_kind: kind_of(caller),
+                    model: acting,
+                    value: None,
+                    form: None,
+                    derivative_id: None,
+                    why: None,
+                    unsure: false,
+                };
+                let done = campaign::accept_each(registry, c.id, &rows, &given, &now)
+                    .map_err(campaign_err)?;
+                // what the seed draws among the items still open is held
+                // back now, so a claim offers it to be read alone
+                let open =
+                    campaign::open_for(registry.store(), &c, principal).map_err(campaign_err)?;
+                let held: Vec<i64> = open
+                    .iter()
+                    .map(|it| it.id)
+                    .filter(|i| campaign::drawn_back(&seed, *i, c.hold_back))
+                    .collect();
+                campaign::hold_back(registry.store(), c.id, &held).map_err(campaign_err)?;
+                // record 48: each accepted answer keeps what it derives
+                fill_derived(registry, pack.as_deref(), &c)?;
+                let answers_now =
+                    campaign::answers(registry.store(), c.id).map_err(campaign_err)?;
+                let changed: BTreeMap<i64, Option<bool>> =
+                    answers_now.iter().map(|a| (a.id, a.changed)).collect();
+                let accepted: Vec<Value> = done
+                    .accepted
+                    .iter()
+                    .map(|d| {
+                        json!({
+                            "item": d.item, "answer": d.answer, "state": d.state,
+                            "changed": changed.get(&d.answer).copied().flatten(),
+                        })
+                    })
+                    .collect();
+                let refused: Vec<Value> = done
+                    .refused
+                    .iter()
+                    .map(|(item, why)| json!({"item": item, "why": why}))
+                    .collect();
+                Ok(Reply::ok(json!({
+                    "campaign": c.id, "accepted": accepted, "refused": refused,
+                    "held_back": held.len(), "seconds": seconds,
                 })))
             }
             ["api", "campaigns", which, "stats"] if get => {
@@ -1677,14 +2038,89 @@ fn item_stacks(store: &mut Store, campaign: i64, items: &[i64]) -> Result<Vec<i6
     Ok(out)
 }
 
+/// Record 50 R3: one suggestion as a door's body gives it:
+/// `{stack | item | series, value, confidences, author}`.
+fn given_of_json(v: &Value) -> Result<nils_registry::suggestion::Given, Reply> {
+    let bad = || {
+        Reply::error(
+            400,
+            "suggestions: each {stack | item | series, value, confidences: {value: p}, author}",
+        )
+    };
+    let mut confidences = BTreeMap::new();
+    match &v["confidences"] {
+        Value::Null => {}
+        Value::Object(m) => {
+            for (k, p) in m {
+                confidences.insert(k.clone(), p.as_f64().ok_or_else(bad)?);
+            }
+        }
+        _ => return Err(bad()),
+    }
+    let g = nils_registry::suggestion::Given {
+        item: v["item"].as_i64(),
+        stack: v["stack"].as_i64().or_else(|| v["stack_id"].as_i64()),
+        series: v["series"].as_str().map(str::to_string),
+        value: v["value"].as_str().map(str::to_string),
+        confidences,
+        author: v["author"].as_str().map(str::to_string),
+    };
+    if (g.item.is_none() && g.stack.is_none() && g.series.is_none())
+        || (g.value.is_none() && g.confidences.is_empty())
+    {
+        return Err(bad());
+    }
+    Ok(g)
+}
+
+/// Record 50 R3: bring suggestions into a campaign, each value and class
+/// read in any name the served pack gives it, in any case.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn import_suggestions(
+    registry: &mut Registry,
+    c: &campaign::Campaign,
+    rows: &[nils_registry::suggestion::Given],
+    author: Option<&str>,
+    source: Option<&str>,
+    who: &str,
+    pack: Option<&nils_pack::Pack>,
+    dry_run: bool,
+) -> Result<nils_registry::suggestion::Imported, Reply> {
+    let q = c.question().map_err(campaign_err)?;
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(axis) = campaign::single_axis(&q) {
+        for (k, v) in value_names(pack, Some(&axis)) {
+            names.insert(k.to_lowercase(), v);
+        }
+        for v in crate::reader::single_vocabulary(&q, &axis, pack) {
+            names.insert(v.to_lowercase(), v);
+        }
+    }
+    nils_registry::suggestion::import(
+        registry,
+        &nils_registry::suggestion::Import {
+            campaign: c.id,
+            rows,
+            author,
+            source,
+            who,
+            names: &names,
+            dry_run,
+        },
+        &nils_registry::time::now_iso(),
+    )
+    .map_err(campaign_err)
+}
+
 /// Record 48 R1: what the engine suggests for the item an assignment
-/// leased, for the answer to keep beside it.
+/// leased, for the answer to keep beside it, with who suggested it (record
+/// 50 R3).
 fn suggested_for(
     store: &mut Store,
     c: &campaign::Campaign,
     assignment: i64,
     pack: Option<&nils_pack::Pack>,
-) -> Result<Option<String>, Reply> {
+) -> Result<Option<(String, String)>, Reply> {
     let Ok(q) = c.question() else {
         return Ok(None);
     };
@@ -1695,18 +2131,18 @@ fn suggested_for(
         return Ok(None);
     }
     let sql = format!(
-        "SELECT i.stack_id FROM {} a JOIN {} i ON i.id = a.item_id WHERE a.id = {}",
+        "SELECT i.id, i.stack_id FROM {} a JOIN {} i ON i.id = a.item_id WHERE a.id = {}",
         store.qualified("campaign_assignment"),
         store.qualified("campaign_item"),
         store.dialect().param(1, Type::Int)
     );
-    let stack = store
-        .query_opt(&sql, &[Param::Int(assignment)])?
-        .and_then(|r| r.opt_int(0).ok().flatten());
-    match stack {
-        Some(s) => Ok(crate::reader::suggestion(store, s, &q, pack)?),
-        None => Ok(None),
-    }
+    let Some(r) = store.query_opt(&sql, &[Param::Int(assignment)])? else {
+        return Ok(None);
+    };
+    let (item, stack) = (r.int(0)?, r.opt_int(1)?);
+    Ok(crate::reader::item_suggestion(
+        store, c, item, stack, &q, pack,
+    )?)
 }
 
 /// Record 45: an axes answer is kept as one text, and read as the object
@@ -2772,6 +3208,37 @@ pub(crate) enum CampaignCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Bring answers suggested from outside the engine into an open axis
+    /// or axes campaign (record 50): v0's committed labels, or a model's
+    /// proposals with a confidence per class. A person accepts or corrects
+    /// each; a suggestion is never an answer, and a stack of a sealed
+    /// sample takes none
+    Suggest {
+        /// The campaign, by name or id
+        campaign: String,
+        /// A tab-separated file whose first line names its columns:
+        /// stack_id, item or SeriesInstanceUID; value; author; and a
+        /// p:<value> column per class for the confidences
+        #[arg(long, value_name = "TSV")]
+        file: PathBuf,
+        /// Who suggested the rows that name no author: v0-model, v0-person,
+        /// a model id
+        #[arg(long, value_name = "WHO")]
+        author: Option<String>,
+        /// What the suggestions came from; the file's name when not given
+        #[arg(long, value_name = "TEXT")]
+        source: Option<String>,
+        /// Where the pack is, to read values by any name they go by
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        /// Count what would be brought in, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Answer a claimed item; an answer is never a decision
     Answer {
         /// The assignment a claim gave
@@ -3243,6 +3710,76 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             println!("  agreement  {}", doc["agreement"]);
             Ok(())
         }
+        CampaignCommand::Suggest {
+            campaign: which,
+            file,
+            author,
+            source,
+            pack_dir,
+            pack,
+            dry_run,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let (rows, bad) = nils_registry::suggestion::parse_tsv(&text).map_err(cerr)?;
+            let served = crate::pack_dir(home, pack_dir)
+                .ok()
+                .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            let source =
+                source.or_else(|| file.file_name().map(|n| n.to_string_lossy().into_owned()));
+            let done = import_suggestions(
+                &mut registry,
+                &c,
+                &rows,
+                author.as_deref(),
+                source.as_deref(),
+                &who(),
+                served.as_ref(),
+                dry_run,
+            )
+            .map_err(rerr)?;
+            let mut out = done.as_json();
+            out["campaign"] = json!(c.id);
+            out["bad_lines"] = json!(bad);
+            out["dry_run"] = json!(dry_run);
+            if json {
+                print(&out);
+                return Ok(());
+            }
+            println!(
+                "{} {} suggestion(s) for campaign {} from {} row(s){}",
+                if dry_run { "would bring" } else { "brought" },
+                done.suggestions,
+                c.name,
+                done.rows,
+                if done.replaced > 0 {
+                    format!(", {} replacing the same author's", done.replaced)
+                } else {
+                    String::new()
+                }
+            );
+            for (a, n) in &done.authors {
+                println!("  {a:<24} {n}");
+            }
+            for (what, n) in [
+                ("named nothing the campaign asks", done.unmatched),
+                ("of a sealed sample, left out (read blind)", done.sealed),
+                (
+                    "with a value or class the question does not take",
+                    done.refused_values,
+                ),
+                ("with no author (give --author)", done.no_author),
+                ("lines not a suggestion", bad),
+            ] {
+                if n > 0 {
+                    println!("  {n} {what}");
+                }
+            }
+            Ok(())
+        }
         CampaignCommand::Stats {
             campaign: which,
             json,
@@ -3392,7 +3929,8 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     unsure,
                 },
                 &campaign::Timing {
-                    suggested: suggested.as_deref(),
+                    suggested: suggested.as_ref().map(|(v, _)| v.as_str()),
+                    suggested_by: suggested.as_ref().map(|(_, by)| by.as_str()),
                     batch: false,
                     derived: derived.as_ref(),
                 },
