@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.47] - 2026-09-26
+
+A rater lists their own answers and corrects one while the campaign is open, the correction written as a new answer that supersedes the earlier, which is kept. `nils campaign raters` and its door add raters to an open campaign or take them off. A claim with `alone` offers only the items held back to be read one by one, and every claim names `next`, the item a reader fetches ahead; the manifest and header doors send cache headers. A sheared stack is placed where its planes are: the pyramid's manifest carries `step`, and the render and thumb doors cut such a stack's planes square in the patient. A pyramid built before gains `step` only when it is rebuilt. The registry is at schema 70. The HTTP API contract stays version 7, amended in place with additive fields and new doors; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.46.
+
 ### Added
 
 - A rater corrects their own answer while the campaign is open (record 48, after the first gold campaign). `GET /api/campaigns/{id}/mine` lists the caller's answers now, the latest first, filtered by value, and on a sealed stack shows only their own answer. `POST /api/campaigns/{id}/answers/{answer}/amend` writes the correction as a new answer, `via` amend, that supersedes the earlier; the earlier is kept, never deleted, and names it in `superseded_by`. Agreement, the item's outcome and the close read the correction, a correction that makes raters disagree offers the item to an adjudicator, and an export of answers holds both (labels.tsv gains `superseded_by`). Refused on a closed campaign, for another's answer, for one already corrected and on an item that went to an adjudicator. Audited as campaign.amend. Schema 70.
