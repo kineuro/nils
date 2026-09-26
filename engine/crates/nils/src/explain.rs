@@ -423,7 +423,7 @@ pub(crate) fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>
 fn campaign_answers(store: &mut Store, decision: i64, campaign: i64) -> Result<Value, StoreError> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT a.principal, a.author_kind, a.role, a.value, a.model_id \
+        "SELECT a.principal, a.author_kind, a.role, a.value, a.model_id, a.superseded_by \
          FROM {} a JOIN {} i ON i.id = a.item_id \
          WHERE i.decision_id = {} AND i.campaign_id = {} ORDER BY a.id",
         store.qualified("campaign_answer"),
@@ -441,6 +441,9 @@ fn campaign_answers(store: &mut Store, decision: i64, campaign: i64) -> Result<V
                 "role": r.text(2)?,
                 "value": r.opt_text(3)?,
                 "model_id": r.opt_int(4)?,
+                // record 48: an answer its rater corrected, beside the
+                // correction the decision was made from
+                "superseded_by": r.opt_int(5)?,
             }))
         })
         .collect::<Result<_, StoreError>>()?;

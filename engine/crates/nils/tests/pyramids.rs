@@ -660,6 +660,28 @@ fn a_selection_s_pyramids_are_one_job_at_the_door_and_a_campaign_counts_its_pict
     assert_eq!(m["orientation_known"], true, "{m}");
     assert_eq!(m["frame"]["parallel"], true, "{m}");
     assert!(m["origin"].is_array() && m["orientation"].is_array(), "{m}");
+    // record 48, after the first gold campaign: a reader fetches the next
+    // stack's manifest ahead, and the browser keeps it a while
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET /api/instances/{tilted}/manifest HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {OPERATOR}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let head = response
+        .split_once("\r\n\r\n")
+        .map(|(h, _)| h)
+        .unwrap_or("");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("cache-control: private, max-age=300"),
+        "{head}"
+    );
 }
 
 /// Multi-frame objects: every frame is a plane. The fixtures in

@@ -2144,10 +2144,24 @@ fn build_registry() -> Vec<Table> {
                 // or `rules` where the engine's own rules and System 1 did;
                 // null where nothing was suggested.
                 col("suggested_by", Type::Text),
+                // Record 48, after the first gold campaign: an answer its
+                // rater corrected while the campaign was open names the
+                // answer that corrected it. The earlier is kept, never
+                // deleted; the correction names it in `supersedes_id`.
+                // Agreement, the outcome and the close read the answer no
+                // later one supersedes.
+                col("superseded_by", Type::Int),
             ],
         )
-        // one answer per item, rater and round: a repeat is the same answer
-        .unique(&["item_id", "principal", "round"])
+        // one first answer per item, rater and round: a repeat is the same
+        // answer; a correction supersedes it and each answer is superseded
+        // once at most
+        .unique_where(
+            "first",
+            &["item_id", "principal", "round"],
+            "supersedes_id IS NULL",
+        )
+        .unique_where("amends", &["supersedes_id"], "supersedes_id IS NOT NULL")
         .index(&["item_id"])
         .index(&["campaign_id"]),
         // Record 50 R3: an answer suggested for a campaign's item from
@@ -2587,9 +2601,10 @@ mod tests {
         );
         assert!(
             table("campaign_answer")
-                .uniques
+                .partial_uniques
                 .iter()
-                .any(|k| k == &vec!["item_id", "principal", "round"])
+                .any(|k| k.columns == vec!["item_id", "principal", "round"]
+                    && k.predicate == "supersedes_id IS NULL")
         );
     }
 

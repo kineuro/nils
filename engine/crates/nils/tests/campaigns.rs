@@ -1710,14 +1710,17 @@ fn a_rater_answers_can_t_tell_and_unsure_at_the_door() {
     );
     let tsv = seen["files"]["labels.tsv"].as_str().unwrap();
     assert!(
-        tsv.lines().next().unwrap().ends_with("\tunsure\tderived"),
+        tsv.lines()
+            .next()
+            .unwrap()
+            .ends_with("\tunsure\tderived\tsuperseded_by"),
         "{tsv}"
     );
     let base: Vec<&str> = tsv.lines().filter(|l| l.contains("\tbase\t")).collect();
     assert_eq!(base.len(), 2, "{tsv}");
     assert!(base.iter().all(|l| l.contains("\tcant_tell\t")), "{tsv}");
     assert_eq!(
-        tsv.lines().filter(|l| l.ends_with("\ttrue\t")).count(),
+        tsv.lines().filter(|l| l.ends_with("\ttrue\t\t")).count(),
         2,
         "{tsv}: anna's answer, a row per axis"
     );

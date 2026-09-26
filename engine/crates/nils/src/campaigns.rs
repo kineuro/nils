@@ -56,6 +56,9 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/campaigns/{id}/suggestions",
     "GET /api/campaigns/{id}/gallery",
     "POST /api/campaigns/{id}/gallery/accept",
+    "GET /api/campaigns/{id}/mine",
+    "POST /api/campaigns/{id}/answers/{answer}/amend",
+    "POST /api/campaigns/{id}/raters",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -73,7 +76,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 "api",
                 "campaigns",
                 _,
-                "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery",
+                "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery"
+                | "mine",
             ],
         )
         | (
@@ -99,6 +103,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         | ("POST", ["api", "campaigns", _, "gallery", "accept"]) => {
             (Need::One("campaigns:work"), Plain)
         }
+        // record 48, after the first gold campaign: a rater corrects their
+        // own answer; the raters of an open campaign are its maker's to
+        // change, or a reviewer's, which the door checks beside the grant
+        ("POST", ["api", "campaigns", _, "answers", _, "amend"])
+        | ("POST", ["api", "campaigns", _, "raters"]) => (Need::One("campaigns:work"), Plain),
         // record 50 R3: suggestions from outside are the campaign's maker's
         // to bring, or a reviewer's
         ("POST", ["api", "campaigns", _, "suggestions"]) => (Need::One("campaigns:work"), Plain),
@@ -394,6 +403,33 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Accepted a gallery",
     ),
     (
+        "GET /api/campaigns/{id}/mine",
+        false,
+        false,
+        "bounded",
+        "a thousand answers",
+        "Reading one's own answers",
+        "Read one's own answers",
+    ),
+    (
+        "POST /api/campaigns/{id}/answers/{answer}/amend",
+        true,
+        false,
+        "bounded",
+        "one answer corrected",
+        "Correcting an answer",
+        "Corrected an answer",
+    ),
+    (
+        "POST /api/campaigns/{id}/raters",
+        true,
+        true,
+        "bounded",
+        "the raters of one campaign",
+        "Changing a campaign's raters",
+        "Changed a campaign's raters",
+    ),
+    (
         "GET /api/certificates",
         false,
         false,
@@ -614,8 +650,17 @@ pub(crate) fn route(
                     .transpose()
                     .map_err(campaign_err)?
                     .unwrap_or_default();
-                let claimed = campaign::claim_in(registry, c.id, principal, role, order, &now)
-                    .map_err(campaign_err)?;
+                // record 48, after the first gold campaign: only the items
+                // read one by one, held back from a batch or sealed
+                let alone = match (&doc["alone"], query.get("alone").map(String::as_str)) {
+                    (Value::Bool(b), _) => *b,
+                    (Value::Null, Some("1" | "true")) => true,
+                    (Value::Null, _) => false,
+                    _ => return Err(Reply::error(400, "alone: true or false")),
+                };
+                let claimed =
+                    campaign::claim_with(registry, c.id, principal, role, order, alone, &now)
+                        .map_err(campaign_err)?;
                 Ok(Reply::ok(match claimed {
                     Some(cl) => cl.as_json(),
                     None => json!({"assignment": null, "item": null, "why": format!(
@@ -703,6 +748,217 @@ pub(crate) fn route(
                     "state": answered.state, "adjudication": answered.adjudication,
                     "derived": derived,
                 })))
+            }
+            // record 48, after the first gold campaign: the caller's own
+            // answers now, the latest first, to find one to correct
+            ["api", "campaigns", which, "mine"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let q = c.question().map_err(campaign_err)?;
+                let single = campaign::single_axis(&q);
+                let all =
+                    campaign::mine(registry.store(), c.id, principal).map_err(campaign_err)?;
+                let items: BTreeMap<i64, campaign::Item> = campaign::items(registry.store(), c.id)
+                    .map_err(campaign_err)?
+                    .into_iter()
+                    .map(|it| (it.id, it))
+                    .collect();
+                let stacks: Vec<i64> = all
+                    .iter()
+                    .filter_map(|a| items.get(&a.item_id).and_then(|it| it.stack_id))
+                    .collect();
+                let hidden = blind_among(registry.store(), caller, &stacks)?;
+                // the value as the reader shows it: an axis's value for a
+                // question of one, the joint answer for one of several
+                let shown_value = |a: &campaign::Answer| -> Value {
+                    match (&single, a.value.as_deref()) {
+                        (_, None) => Value::Null,
+                        (Some(_), Some(v)) => {
+                            json!(campaign::single_value(&q, v).unwrap_or_else(|| v.to_string()))
+                        }
+                        (None, Some(_)) => {
+                            let mut v = json!(a.value);
+                            axes_value(&c.question, &mut v);
+                            v
+                        }
+                    }
+                };
+                let key = |v: &Value| -> String {
+                    match v {
+                        Value::String(s) => s.clone(),
+                        Value::Null => String::new(),
+                        other => other.to_string(),
+                    }
+                };
+                let mut values: BTreeMap<String, usize> = BTreeMap::new();
+                let wanted = query.get("value").filter(|v| !v.is_empty());
+                let limit = query
+                    .get("limit")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(200)
+                    .clamp(1, 1000);
+                let mut rows = Vec::new();
+                let mut matched = 0usize;
+                for a in &all {
+                    let v = shown_value(a);
+                    *values.entry(key(&v)).or_default() += 1;
+                    if wanted.is_some_and(|w| *w != key(&v)) {
+                        continue;
+                    }
+                    matched += 1;
+                    if rows.len() >= limit {
+                        continue;
+                    }
+                    let it = items.get(&a.item_id);
+                    let stack = it.and_then(|it| it.stack_id);
+                    // never what was suggested: on a stack read blind the
+                    // rater sees their own answer and nothing beside it
+                    rows.push(json!({
+                        "answer": a.id, "item": a.item_id, "stack": stack,
+                        "position": it.map(|it| it.position), "value": v,
+                        "answered_at": a.answered_at, "via": a.via, "unsure": a.unsure,
+                        "supersedes": a.supersedes_id, "role": a.role, "round": a.round,
+                        "item_state": it.map(|it| it.state.clone()),
+                        "thumb": stack.map(|s| format!("/api/instances/{s}/thumb")),
+                        "sealed": stack.is_some_and(|s| hidden.contains(&s)),
+                    }));
+                }
+                Ok(Reply::ok(json!({
+                    "campaign": c.id, "principal": principal, "open": c.status == "open",
+                    "count": rows.len(), "total": matched, "values": values, "answers": rows,
+                })))
+            }
+            // record 48, after the first gold campaign: a rater corrects
+            // their own answer while the campaign is open; the correction
+            // supersedes it and the earlier is kept
+            ["api", "campaigns", which, "answers", answer, "amend"] if post => {
+                let doc = json_body(body)?;
+                for held in ["suggested", "seconds", "derived", "supersedes", "via"] {
+                    if doc.get(held).is_some() {
+                        return Err(Reply::error(
+                            400,
+                            format!(
+                                "{held} is not the caller's to say: the engine keeps the suggestion the answer was given beside, marks the correction and derives what it derives"
+                            ),
+                        ));
+                    }
+                }
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let answer = id_of(answer)?;
+                belongs(registry.store(), c.id, "campaign_answer", answer)?;
+                let q = c.question().map_err(campaign_err)?;
+                let form = (!doc["form"].is_null()).then(|| doc["form"].clone());
+                let value = match &doc["value"] {
+                    Value::Null => None,
+                    Value::String(s) => Some(s.clone()),
+                    Value::Array(list) => Some(
+                        list.iter()
+                            .map(|v| v.to_string().trim_matches('"').to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                    other => Some(other.to_string()),
+                };
+                // a question of one axis takes the axis's value alone, as
+                // the gallery's accept does
+                let value = value.map(|v| {
+                    let whole = serde_json::from_str::<Value>(&v)
+                        .ok()
+                        .is_some_and(|x| x.is_object());
+                    if whole {
+                        v
+                    } else {
+                        campaign::single_answer(&q, v.trim()).unwrap_or(v)
+                    }
+                });
+                let unsure = match &doc["unsure"] {
+                    Value::Null => false,
+                    Value::Bool(b) => *b,
+                    _ => return Err(Reply::error(400, "unsure: true or false")),
+                };
+                let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let earlier = campaign::answer_by_id(registry.store(), answer)
+                    .map_err(campaign_err)?
+                    .ok_or_else(|| Reply::error(404, format!("no answer {answer}")))?;
+                // the axes derived from the correction through the pack, the
+                // engine's own computation, kept beside it
+                let derived = match value
+                    .as_deref()
+                    .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                    .filter(Value::is_object)
+                {
+                    Some(obj) => match campaign::item(registry.store(), earlier.item_id)
+                        .map_err(campaign_err)?
+                        .and_then(|it| it.stack_id)
+                    {
+                        Some(stack) => {
+                            derived_for(registry.store(), pack.as_deref(), &q, stack, &obj)?
+                        }
+                        None => None,
+                    },
+                    None => None,
+                };
+                let done = campaign::amend(
+                    registry,
+                    &campaign::Amend {
+                        answer,
+                        principal,
+                        author_kind: kind_of(caller),
+                        model: acting,
+                        value: value.as_deref(),
+                        form: form.as_ref(),
+                        derivative_id: doc["derivative_id"].as_i64(),
+                        why: doc["why"].as_str(),
+                        unsure,
+                        derived: derived.as_ref(),
+                    },
+                    &now,
+                )
+                .map_err(campaign_err)?;
+                let mut v = done.as_json();
+                v["derived"] = if done.unchanged {
+                    Value::Null
+                } else {
+                    json!(derived)
+                };
+                Ok(Reply::ok(v))
+            }
+            // record 48, after the first gold campaign: raters added to an
+            // open campaign, or taken off, by its maker or a reviewer
+            ["api", "campaigns", which, "raters"] if post => {
+                let doc = json_body(body)?;
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                if c.owner != principal && !caller.access.holds("review:work") {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "the raters of campaign {} are its maker's to change, or a holder of review:work's",
+                            c.name
+                        ),
+                    ));
+                }
+                let names = |key: &str| -> Result<Vec<String>, Reply> {
+                    match &doc[key] {
+                        Value::Null => Ok(Vec::new()),
+                        Value::String(s) => Ok(vec![s.clone()]),
+                        Value::Array(list) => list
+                            .iter()
+                            .map(|v| {
+                                v.as_str().map(str::to_string).ok_or_else(|| {
+                                    Reply::error(400, format!("{key}: principals, as text"))
+                                })
+                            })
+                            .collect(),
+                        _ => Err(Reply::error(
+                            400,
+                            format!("{key}: a principal or a list of them"),
+                        )),
+                    }
+                };
+                let (add, remove) = (names("add")?, names("remove")?);
+                let done = campaign::set_raters(registry, which, &add, &remove, principal, &now)
+                    .map_err(campaign_err)?;
+                Ok(Reply::ok(done.as_json()))
             }
             // record 45: the rating workspace's heartbeat
             ["api", "campaigns", which, "assignments", a, "renew"] if post => {
@@ -927,7 +1183,14 @@ pub(crate) fn route(
                     })?;
                 doc["item"] = json!(item);
                 doc["blind"] = json!(blind_to(registry.store(), caller, stack)?);
-                Ok(Reply::ok(doc))
+                // record 48, after the first gold campaign: a stored header
+                // does not change, so the reader keeps it while it reads
+                let mut r = Reply::ok(doc);
+                r.headers.push((
+                    "Cache-Control".to_string(),
+                    "private, max-age=300".to_string(),
+                ));
+                Ok(r)
             }
             // record 48: the axes the pack derives from an answer, partial or
             // whole, so the reader shows them as the rater answers
@@ -3387,6 +3650,23 @@ pub(crate) enum CampaignCommand {
         #[arg(long)]
         unsure: bool,
     },
+    /// Add raters to an open campaign that names its raters, or take them
+    /// off (record 48). A rater taken off keeps every answer given and gives
+    /// back a live claim. Blindness and the split that reads each stack
+    /// once are the operator's: a rater added who already answered one of
+    /// the campaign's stacks in another campaign is warned of
+    Raters {
+        /// The campaign, by name or id
+        campaign: String,
+        /// A principal to add; repeat for more
+        #[arg(long, value_name = "PRINCIPAL")]
+        add: Vec<String>,
+        /// A principal to take off; repeat for more
+        #[arg(long, value_name = "PRINCIPAL")]
+        remove: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Give a claimed item back unanswered: your own, or as the operator
     /// any rater's, which the audit records with its holder. A lease that
     /// ran out is ended as expired
@@ -4100,6 +4380,43 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     .map(|a| format!("; adjudication offered as assignment {a}"))
                     .unwrap_or_default()
             );
+            Ok(())
+        }
+        CampaignCommand::Raters {
+            campaign: which,
+            add,
+            remove,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let done = campaign::set_raters(&mut registry, &which, &add, &remove, &who(), &now)
+                .map_err(cerr)?;
+            if json {
+                print(&done.as_json());
+                return Ok(());
+            }
+            println!(
+                "campaign {} is rated by {}{}{}",
+                which,
+                done.raters.join(", "),
+                if done.added.is_empty() {
+                    String::new()
+                } else {
+                    format!("; added {}", done.added.join(", "))
+                },
+                if done.removed.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; took off {} ({} claim(s) given back)",
+                        done.removed.join(", "),
+                        done.released
+                    )
+                },
+            );
+            for w in &done.warnings {
+                eprintln!("warning: {}", w["why"].as_str().unwrap_or_default());
+            }
             Ok(())
         }
         CampaignCommand::Release { assignment } => {

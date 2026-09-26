@@ -335,7 +335,17 @@ For a campaign that asks one axis, such as body part, suggestions from outside t
 
 2. Open the gallery: `GET /api/campaigns/{id}/gallery` lists up to 100 open items, each with its suggested value, who suggested it, its confidences and a small picture (`GET /api/instances/{stack}/thumb`), the least certain first.
 
-3. Correct the wrong ones and accept the page in one move with `POST /api/campaigns/{id}/gallery/accept`, `{"answers": [{"item": 12, "value": "brain"}, ...]}`. Each item becomes its own answer by the person, with the suggestion and its author kept beside it. The items the campaign holds back are never in a gallery; claim them to read them alone.
+3. Correct the wrong ones and accept the page in one move with `POST /api/campaigns/{id}/gallery/accept`, `{"answers": [{"item": 12, "value": "brain"}, ...]}`. Each item becomes its own answer by the person, with the suggestion and its author kept beside it. The items the campaign holds back are never in a gallery; the gallery counts them (`held_back_open`, and `alone` with the sealed ones), and a claim with `{"alone": true}` offers only those, to be read one by one. They check how accurate the batches were.
+
+4. Correct a mistake while the campaign is open. `GET /api/campaigns/{id}/mine?value=brain` lists your answers, the latest first, and `POST /api/campaigns/{id}/answers/{answer}/amend` with `{"value": "spine"}` writes the correction. The earlier answer is kept and names the correction in `superseded_by`; agreement and the close read the correction.
+
+5. Add a rater to an open campaign, for example when one person reads another's share:
+
+   ```sh
+   nils campaign raters body-parts-b --add reader-a@lab
+   ```
+
+   A rater taken off with `--remove` keeps their answers. Keeping the reading blind, and each stack read once, is the operator's: the command warns when the rater added already answered the same stacks in another campaign.
 
 ## Let a certified sample train
 

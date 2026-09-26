@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69],
+            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2017,7 +2017,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66, 67, 68, 69],
+            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2079,7 +2079,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65, 66, 67, 68, 69],
+            [63, 64, 65, 66, 67, 68, 69, 70],
             "{name}"
         );
         for (t, col) in [
@@ -2153,7 +2153,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65, 66, 67, 68, 69],
+            [64, 65, 66, 67, 68, 69, 70],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2202,7 +2202,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65, 66, 67, 68, 69],
+            [65, 66, 67, 68, 69, 70],
             "{name}"
         );
         assert!(
@@ -2243,7 +2243,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66, 67, 68, 69],
+            [66, 67, 68, 69, 70],
             "{name}"
         );
         assert!(
@@ -2281,7 +2281,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [67, 68, 69],
+            [67, 68, 69, 70],
             "{name}"
         );
         assert!(
@@ -2319,7 +2319,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [68, 69],
+            [68, 69, 70],
             "{name}"
         );
         assert!(
@@ -2353,7 +2353,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [69],
+            [69, 70],
             "{name}"
         );
         assert!(
@@ -2364,6 +2364,97 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
             migrate::table_exists(&mut store, "campaign_suggestion").unwrap(),
             "{name}"
         );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// Record 48, after the first gold campaign: a registry whose answers were
+/// held to one per item, rater and round by a key its table declared gains
+/// the correction's column and the partial keys, every row kept with its
+/// id; a correction then sits beside the answer it supersedes, and a
+/// second first answer is still refused.
+#[test]
+fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        // the table as it stood before: the old key, no superseded_by
+        let mut old = table("campaign_answer").clone();
+        old.columns.retain(|c| c.name != "superseded_by");
+        old.partial_uniques.clear();
+        old.uniques = vec![vec!["item_id", "principal", "round"]];
+        let schema = store.schema().map(str::to_string);
+        let (a, meta) = (
+            store.qualified("campaign_answer"),
+            store.qualified("registry_meta"),
+        );
+        store.batch(&format!("DROP TABLE {a}")).unwrap();
+        store
+            .batch(&store.dialect().create_table(schema.as_deref(), &old))
+            .unwrap();
+        let put = |store: &mut Store, id: i64, round: i64, supersedes: Option<i64>| {
+            let sql = format!(
+                "INSERT INTO {a} ({}campaign_id, item_id, assignment_id, principal, role, round, author_kind, answered_at, value{}) \
+                 VALUES ({}1, 1, 1, 'anna', 'rater', {round}, 'person', '2026-09-26T10:00:00Z', 'brain'{})",
+                if id > 0 { "id, " } else { "" },
+                if supersedes.is_some() {
+                    ", supersedes_id"
+                } else {
+                    ""
+                },
+                if id > 0 {
+                    format!("{id}, ")
+                } else {
+                    String::new()
+                },
+                supersedes.map(|s| format!(", {s}")).unwrap_or_default(),
+            );
+            let sql = if matches!(store, Store::Postgres { .. }) && id > 0 {
+                sql.replace(") VALUES", ") OVERRIDING SYSTEM VALUE VALUES")
+            } else {
+                sql
+            };
+            store.batch(&sql)
+        };
+        put(&mut store, 5, 1, None).unwrap();
+        put(&mut store, 9, 2, None).unwrap();
+        store
+            .batch(&format!(
+                "UPDATE {meta} SET value = '69' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [70],
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "campaign_answer", "superseded_by").unwrap(),
+            "{name}"
+        );
+        let ids: Vec<i64> = store
+            .query(&format!("SELECT id FROM {a} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(ids, [5, 9], "{name}: every row kept with its id");
+        // a correction of answer 5 sits beside it; a second correction of
+        // 5, and a second first answer, are refused
+        if matches!(store, Store::Postgres { .. }) {
+            store
+                .batch(&format!(
+                    "SELECT setval(pg_get_serial_sequence('{a}', 'id'), 9)"
+                ))
+                .unwrap();
+        }
+        put(&mut store, 0, 1, Some(5)).unwrap();
+        assert!(put(&mut store, 0, 1, Some(5)).is_err(), "{name}");
+        assert!(put(&mut store, 0, 1, None).is_err(), "{name}");
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()

@@ -1057,3 +1057,265 @@ fn a_gallery_takes_suggestions_from_outside_and_accepts_a_page() {
     let (status, _) = server.call("GET", "/api/campaigns/two-axes/gallery", None, ANNA);
     assert_eq!(status, 400);
 }
+
+/// The headers of a GET, as text.
+fn headers_of(server: &Server, path: &str, token: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+        .split_once("\r\n\r\n")
+        .map(|(h, _)| h.to_string())
+        .unwrap_or(response)
+}
+
+/// Record 48, after the first gold campaign, through the door: the gallery
+/// says what is read one by one, a claim asks for those alone and names
+/// the next, a rater lists and corrects their own answers (the earlier
+/// kept and exported beside it, blind on a sealed stack, refused once the
+/// campaign closes), and the campaign's maker adds a rater.
+#[test]
+fn a_rater_corrects_their_answers_and_a_rater_joins_through_the_door() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "gold",
+            "question": {"kind": "axis", "axis": "body_part"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["anna@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+            "hold_back": 0.5,
+        })),
+        CURATOR,
+    );
+    let items: Vec<Value> = made["items"].as_array().unwrap().clone();
+    let stacks: Vec<i64> = items
+        .iter()
+        .map(|i| i["stack_id"].as_i64().unwrap())
+        .collect();
+    // the first stack is of a sealed sample
+    server.ok(
+        "PUT",
+        "/api/ask/selections/first",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "params": {"ids": {"type": "list", "value": [stacks[0]]}},
+            "sets": {"s": {"grain": "stack", "where": [["in", {}, ["field", {}, "id"], ["param", {}, "ids"]]]}},
+            "out": {"set": "s", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let (ok, _, err) = cli(
+        &home,
+        "cleo@lab",
+        &[
+            "labels",
+            "seal",
+            "--select",
+            "selection:first@1",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(ok, "{err}");
+
+    // ------------------------------------------------ what is read alone
+    let page = server.ok("GET", "/api/campaigns/gold/gallery", None, ANNA);
+    let held = page["held_back_open"].as_i64().unwrap();
+    assert_eq!(page["sealed"], 1, "{page}");
+    assert_eq!(page["alone"], held + 1, "{page}");
+    assert_eq!(
+        page["items"].as_array().unwrap().len() as i64 + held + 1,
+        4,
+        "{page}"
+    );
+    // a claim of those alone, naming the next
+    let (status, _) = server.call(
+        "POST",
+        "/api/campaigns/gold/claim",
+        Some(json!({"alone": "yes"})),
+        ANNA,
+    );
+    assert_eq!(status, 400);
+    let claimed = server.ok(
+        "POST",
+        "/api/campaigns/gold/claim",
+        Some(json!({"alone": true})),
+        ANNA,
+    );
+    let shown: Vec<i64> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["item"].as_i64().unwrap())
+        .collect();
+    let item = claimed["item"]["id"].as_i64().unwrap();
+    assert!(
+        !shown.contains(&item),
+        "{claimed}: never one the gallery shows"
+    );
+    assert!(claimed.get("next").is_some(), "{claimed}");
+    if held + 1 > 1 {
+        assert!(claimed["next"]["item"].is_i64(), "{claimed}");
+        assert!(claimed["next"]["stack"].is_i64(), "{claimed}");
+    }
+    let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+    let answered = server.ok(
+        "POST",
+        &format!("/api/campaigns/gold/assignments/{assignment}/answer"),
+        Some(json!({"value": "brain"})),
+        ANNA,
+    );
+    let first = answered["answer"].as_i64().unwrap();
+
+    // ------------------------------------------------ my answers
+    let mine = server.ok("GET", "/api/campaigns/gold/mine", None, ANNA);
+    assert_eq!(mine["count"], 1, "{mine}");
+    assert_eq!(mine["open"], true, "{mine}");
+    assert_eq!(mine["values"]["brain"], 1, "{mine}");
+    let row = &mine["answers"][0];
+    assert_eq!(row["answer"], first, "{mine}");
+    assert_eq!(row["value"], "brain", "{mine}");
+    assert_eq!(row["via"], "claim", "{mine}");
+    let stack = row["stack"].as_i64().unwrap();
+    assert_eq!(row["sealed"], stack == stacks[0], "{mine}");
+    assert!(
+        row.get("suggested").is_none(),
+        "{mine}: nothing suggested beside it"
+    );
+    let none = server.ok("GET", "/api/campaigns/gold/mine?value=spine", None, ANNA);
+    assert_eq!(none["count"], 0, "{none}");
+
+    // ------------------------------------------------ a correction
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/campaigns/gold/answers/{first}/amend"),
+        Some(json!({"value": "spine", "suggested": "brain"})),
+        ANNA,
+    );
+    assert_eq!(status, 400, "the suggestion is the engine's to keep");
+    // another rater does not reach the campaign, nor its answers
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/campaigns/gold/answers/{first}/amend"),
+        Some(json!({"value": "spine"})),
+        BO,
+    );
+    assert_eq!(status, 404);
+    let fixed = server.ok(
+        "POST",
+        &format!("/api/campaigns/gold/answers/{first}/amend"),
+        Some(json!({"value": "spine"})),
+        ANNA,
+    );
+    assert_eq!(fixed["supersedes"], first, "{fixed}");
+    assert_eq!(fixed["unchanged"], false, "{fixed}");
+    let later = fixed["answer"].as_i64().unwrap();
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/campaigns/gold/answers/{first}/amend"),
+        Some(json!({"value": "neck"})),
+        ANNA,
+    );
+    assert_eq!(status, 409, "the earlier is superseded");
+    let mine = server.ok("GET", "/api/campaigns/gold/mine", None, ANNA);
+    assert_eq!(mine["count"], 1, "{mine}");
+    assert_eq!(mine["answers"][0]["value"], "spine", "{mine}");
+    assert_eq!(mine["answers"][0]["supersedes"], first, "{mine}");
+    // the rater reads their own answers, both of them
+    let own = server.ok("GET", "/api/campaigns/gold/answers", None, ANNA);
+    assert_eq!(own["count"], 2, "{own}");
+    let earlier = own["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == first)
+        .unwrap();
+    assert_eq!(earlier["superseded_by"], later, "{own}");
+    let stats = server.ok("GET", "/api/campaigns/gold/stats", None, CURATOR);
+    assert_eq!(stats["all"]["amended"], 1, "{stats}");
+    // audited
+    let audit = server.ok("GET", "/api/audit?action=campaign.amend", None, CURATOR);
+    assert_eq!(audit["count"], 1, "{audit}");
+    assert_eq!(audit["rows"][0]["details"]["value"], "spine", "{audit}");
+    assert_eq!(audit["rows"][0]["details"]["earlier"], "brain", "{audit}");
+
+    // ------------------------------------------------ the header is kept
+    let h = headers_of(
+        &server,
+        &format!("/api/campaigns/gold/items/{item}/header"),
+        ANNA,
+    );
+    assert!(
+        h.to_ascii_lowercase()
+            .contains("cache-control: private, max-age=300"),
+        "{h}"
+    );
+
+    // ------------------------------------------------ a rater joins
+    let (status, _) = server.call(
+        "POST",
+        "/api/campaigns/gold/raters",
+        Some(json!({"add": ["bo@lab"]})),
+        ANNA,
+    );
+    assert_eq!(status, 403, "a rater does not change the raters");
+    let joined = server.ok(
+        "POST",
+        "/api/campaigns/gold/raters",
+        Some(json!({"add": ["bo@lab"]})),
+        CURATOR,
+    );
+    assert_eq!(joined["raters"], json!(["anna@lab", "bo@lab"]), "{joined}");
+    assert_eq!(joined["added"], json!(["bo@lab"]), "{joined}");
+    assert!(
+        server.ok("POST", "/api/campaigns/gold/claim", Some(json!({})), BO)["item"].is_object()
+    );
+    let (ok, out, err) = cli(
+        &home,
+        "cleo@lab",
+        &["campaign", "raters", "gold", "--add", "rita@lab", "--json"],
+    );
+    assert!(ok, "{err}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["added"], json!(["rita@lab"]), "{doc}");
+
+    // ------------------------------------------------ closed
+    server.ok("POST", "/api/campaigns/gold/close", None, CURATOR);
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/campaigns/gold/answers/{later}/amend"),
+        Some(json!({"value": "brain"})),
+        ANNA,
+    );
+    assert_eq!(status, 409);
+    let (status, _) = server.call(
+        "POST",
+        "/api/campaigns/gold/raters",
+        Some(json!({"remove": ["bo@lab"]})),
+        CURATOR,
+    );
+    assert_eq!(status, 409);
+    let mine = server.ok("GET", "/api/campaigns/gold/mine", None, ANNA);
+    assert_eq!(mine["open"], false, "{mine}");
+}

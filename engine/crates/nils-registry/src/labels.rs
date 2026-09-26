@@ -91,12 +91,17 @@ pub struct Label {
     /// from the answer through the pack (true) or answered (false). Empty
     /// for any other label.
     pub derived: Option<bool>,
+    /// Record 48, after the first gold campaign: for a campaign's answer
+    /// its rater corrected, the answer that superseded it. Empty for any
+    /// other label.
+    pub superseded_by: Option<i64>,
 }
 
 /// The columns of `labels.tsv`, in order. `unsure` joined (record 48),
-/// then `derived`; a set written before them has the first twelve,
-/// [`LEGACY_COLUMNS`], or the first thirteen, [`UNSURE_COLUMNS`].
-pub const COLUMNS: [&str; 14] = [
+/// then `derived`, then `superseded_by`; a set written before them has the
+/// first twelve, [`LEGACY_COLUMNS`], the first thirteen,
+/// [`UNSURE_COLUMNS`], or the first fourteen, [`DERIVED_COLUMNS`].
+pub const COLUMNS: [&str; 15] = [
     "stack_id",
     "subject_id",
     "session_day",
@@ -111,6 +116,7 @@ pub const COLUMNS: [&str; 14] = [
     "answer_id",
     "unsure",
     "derived",
+    "superseded_by",
 ];
 
 /// The columns of a `labels.tsv` written before `unsure` joined.
@@ -119,6 +125,10 @@ pub const LEGACY_COLUMNS: usize = 12;
 /// The columns of a `labels.tsv` written after `unsure` and before
 /// `derived` joined.
 pub const UNSURE_COLUMNS: usize = 13;
+
+/// The columns of a `labels.tsv` written after `derived` and before
+/// `superseded_by` joined.
+pub const DERIVED_COLUMNS: usize = 14;
 
 fn cell(v: Option<String>) -> String {
     v.map(|s| s.replace(['\t', '\n', '\r'], " "))
@@ -168,6 +178,7 @@ pub fn tsv(labels: &[Label]) -> String {
             cell(l.answer_id.map(|v| v.to_string())),
             cell(l.unsure.map(|v| v.to_string())),
             cell(l.derived.map(|v| v.to_string())),
+            cell(l.superseded_by.map(|v| v.to_string())),
         ];
         out.push_str(&line.join("\t"));
         out.push('\n');
@@ -365,6 +376,7 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
             answer_id: None,
             unsure: None,
             derived: None,
+            superseded_by: None,
         });
     }
     Ok(out)
@@ -416,7 +428,13 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
         .into_iter()
         .map(|i| (i.id, i))
         .collect();
-    let answers = campaign::answers(store, campaign)?;
+    // record 48, after the first gold campaign: a set of answers holds every
+    // answer, a corrected one beside the correction that superseded it; an
+    // outcome reads the answers now
+    let answers: Vec<campaign::Answer> = match of {
+        Of::Answers => campaign::answers(store, campaign)?,
+        Of::Outcomes => campaign::current_answers(store, campaign)?,
+    };
     // the answers of each item, grouped once
     let mut of_items: BTreeMap<i64, Vec<&campaign::Answer>> = BTreeMap::new();
     for a in &answers {
@@ -460,6 +478,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     campaign_id: Some(campaign),
                     model_id: a.model_id,
                     answer_id: Some(a.id),
+                    superseded_by: a.superseded_by,
                     unsure: Some(a.unsure),
                     derived: None,
                 });
@@ -632,6 +651,7 @@ fn axes_labels(
                         campaign_id: Some(campaign),
                         model_id: a.model_id,
                         answer_id: Some(a.id),
+                        superseded_by: a.superseded_by,
                         unsure: Some(a.unsure),
                         derived: marked,
                         ..Label::default()
@@ -649,6 +669,7 @@ fn axes_labels(
                         campaign_id: Some(campaign),
                         model_id: a.model_id,
                         answer_id: Some(a.id),
+                        superseded_by: a.superseded_by,
                         unsure: Some(a.unsure),
                         derived: Some(true),
                         ..Label::default()
@@ -1081,6 +1102,7 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
             let rows = keys_of_tsv(&text);
             let header = text.lines().next();
             let known = header == Some(COLUMNS.join("\t").as_str())
+                || header == Some(COLUMNS[..DERIVED_COLUMNS].join("\t").as_str())
                 || header == Some(COLUMNS[..UNSURE_COLUMNS].join("\t").as_str())
                 || header == Some(COLUMNS[..LEGACY_COLUMNS].join("\t").as_str());
             if !known
@@ -2286,6 +2308,7 @@ pub fn imported_labels(store: &mut Store, axis: &str) -> Result<Vec<Label>, Erro
                 answer_id: None,
                 unsure: None,
                 derived: None,
+                superseded_by: None,
             })
         })
         .collect::<Result<_, StoreError>>()

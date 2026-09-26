@@ -2110,7 +2110,15 @@ pub fn door(
             let mut doc = serde_json::to_value(&m).map_err(|e| Reply::error(500, e.to_string()))?;
             doc["place"] = serde_json::json!(working.name);
             doc["held"] = serde_json::json!(held);
-            Ok(Reply::ok(doc))
+            // record 48, after the first gold campaign: the reader fetches
+            // the next stack's manifest ahead; a rebuilt pyramid is seen
+            // within minutes
+            let mut r = Reply::ok(doc);
+            r.headers.push((
+                "Cache-Control".to_string(),
+                "private, max-age=300".to_string(),
+            ));
+            Ok(r)
         }
         ["tiles", level, z] => {
             let level = level_of(level)?;
