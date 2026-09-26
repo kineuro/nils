@@ -73,7 +73,7 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
     // has its see beside it, and the assistant's use; sorted by code point
     let g = json(&format!("{dir}/grants.schema.json"));
     let grants = strings(&g["$defs"]["grant"]["enum"]);
-    assert_eq!(grants.len(), 28, "{grants:?}");
+    assert_eq!(grants.len(), 29, "{grants:?}");
     let mut sorted = grants.clone();
     sorted.sort();
     assert_eq!(sorted, grants, "sorted by code point");
@@ -181,7 +181,14 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
     // the grants vectors name grants of the vocabulary only, sorted, and
     // hold a case in every group the engine runs
     let gv = json(&format!("{dir}/vectors/grants.json"));
-    assert_eq!(strings(&gv["everything"]["grants"]), grants);
+    // record 48, D1 of the move: everything is every grant but sealed:see,
+    // which only a name gives
+    let everything: Vec<String> = grants
+        .iter()
+        .filter(|g| *g != "sealed:see")
+        .cloned()
+        .collect();
+    assert_eq!(strings(&gv["everything"]["grants"]), everything);
     for (name, set) in gv["sets"].as_object().unwrap() {
         let held = strings(&set["grants"]);
         assert!(held.iter().all(|x| grants.contains(x)), "{name}: {held:?}");

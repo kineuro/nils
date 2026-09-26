@@ -354,12 +354,16 @@ fn bounds() -> Bounds {
 
 /// A verb of the command line holds every class: it runs as the operator
 /// at the keyboard, or as the worker under the principal that queued it.
+/// Record 48, D1 of the move: it reads the stacks of a sample sealed now
+/// only with `--unsealed-access`, or as a queued job of a caller who held
+/// the certificate's grant.
 fn scope() -> Scope {
     Scope {
         federated: false,
         classes: [Class::QuasiIdentifying, Class::Sensitive]
             .into_iter()
             .collect(),
+        unsealed: crate::sealed::keyboard_reads(),
     }
 }
 
@@ -1008,13 +1012,23 @@ fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
                     args.handle
                 )));
             }
+            // record 48, D1 of the move: as the rows door reads it
+            let scope = scope();
+            if !scope.unsealed && h.suppression["sealed"] != "withheld" {
+                return Err(usage(crate::sealed::refusal(&format!(
+                    "handle {}, answered with the stacks of a sealed sample in it or before they were withheld,",
+                    args.handle
+                ))));
+            }
             let n = handle::page_count(registry.store(), args.handle)
                 .map_err(|e| fail(e.to_string()))?;
             let mut pages = Vec::new();
             for page in 0..n {
-                if let Some(rows) = handle::page(registry.store(), args.handle, page)
+                if let Some(mut rows) = handle::page(registry.store(), args.handle, page)
                     .map_err(|e| fail(e.to_string()))?
                 {
+                    crate::ask_doors::withhold_rows(registry.store(), &h, &scope, &mut rows)
+                        .map_err(|r| fail(r.body.to_string()))?;
                     pages.push(rows);
                 }
             }
@@ -1303,7 +1317,11 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         });
     let (scope, may_project_raw) = match queued {
         Some(detail) => (
-            crate::ask_doors::scope_of_detail(detail),
+            {
+                let mut scope = crate::ask_doors::scope_of_detail(detail);
+                scope.unsealed = crate::sealed::keyboard_reads();
+                scope
+            },
             detail == crate::grants::Detail::Sensitive
                 && std::env::var("NILS_JOB_RAW").ok().as_deref() == Some("1"),
         ),
@@ -1659,12 +1677,20 @@ pub(crate) fn freeze_selection(
     let node = job::hostname();
     let who = principal();
     let scheme = Scheme::default();
+    // record 48, D1 of the move: a frozen selection is a list of keys, the
+    // files' identities, read by the campaign, the seal or the label set
+    // it is frozen for; the stacks of a sample sealed now are in it, which
+    // is how a sealed sample becomes a reading campaign
+    let keys = Scope {
+        unsealed: true,
+        ..scope()
+    };
     let out = run::run(
         &mut registry,
         Request {
             ask,
             names: &catalog,
-            scope: &scope(),
+            scope: &keys,
             principal: &who,
             node: &node,
             pack_version: Some(&pack_version),

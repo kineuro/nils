@@ -399,6 +399,7 @@ pub fn diagnose(
             scheme,
             bounds,
             reader,
+            unsealed: scope.unsealed,
         },
         names,
         scope,

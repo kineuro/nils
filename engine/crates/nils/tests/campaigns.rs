@@ -896,6 +896,29 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
     ))
     .unwrap();
     assert_eq!(sealed["stacks"].as_i64(), Some(n as i64), "{sealed}");
+    // record 48, D1 of the move: the decisions on a sealed stack are
+    // withheld at the keyboard too, unless --unsealed-access says why
+    let third = work.path().join("three");
+    let withheld: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &[
+            "labels",
+            "export",
+            "--axis",
+            "body_part",
+            "--to",
+            third.to_str().unwrap(),
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(withheld["rows"].as_i64(), Some(0), "{withheld}");
+    assert_eq!(
+        withheld["source"]["left_out_sealed"].as_i64(),
+        Some(n as i64),
+        "{withheld}"
+    );
     let again: Value = serde_json::from_str(&cli(
         &home,
         "cleo@lab",
@@ -907,6 +930,8 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
             "--to",
             second.to_str().unwrap(),
             "--json",
+            "--unsealed-access",
+            "the same state, for the test",
         ],
     ))
     .unwrap();

@@ -434,6 +434,7 @@ fn go_raw(l: &mut Lab, ask: Ask, may: bool) -> Result<nils_ask::run::Outcome, Ru
     let scope = Scope {
         federated: false,
         classes: BTreeSet::from([Class::QuasiIdentifying]),
+        unsealed: false,
     };
     let scheme = Scheme::default();
     run(

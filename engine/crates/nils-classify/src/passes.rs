@@ -331,6 +331,10 @@ fn run_one(
                     &evidence,
                 )?;
             }
+            // record 48, D1 of the move: a stack of a sample sealed now
+            // never becomes a review item
+            nils_registry::labels::drop_sealed_items(store, &mut reviews, 2)
+                .map_err(|e| nils_registry::store::Error::Message(e.to_string()))?;
             if !reviews.is_empty() {
                 store.insert(
                     &Insert::new(

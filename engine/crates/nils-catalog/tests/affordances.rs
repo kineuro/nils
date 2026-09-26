@@ -227,6 +227,7 @@ fn a_value_the_principal_may_not_see_is_never_enumerated_and_own_names_always_ar
         let cleared = kinds_of(&Scope {
             federated: false,
             classes: BTreeSet::from([Class::Sensitive]),
+            unsealed: false,
         });
         assert!(cleared.contains(&"HIV Status".to_string()), "{cleared:?}");
     }

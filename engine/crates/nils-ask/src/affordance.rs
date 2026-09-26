@@ -240,6 +240,7 @@ pub fn preview(
         scheme: s.scheme,
         bounds: s.bounds,
         reader,
+        unsealed: s.scope.unsealed,
     };
     let limit = match ask.out.level {
         Level::Boolean | Level::Count => None,
@@ -433,6 +434,7 @@ pub fn values(
         scheme: s.scheme,
         bounds: s.bounds,
         reader,
+        unsealed: s.scope.unsealed,
     };
     let (_, rows) = runner.answer(
         registry,

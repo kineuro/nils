@@ -4001,9 +4001,10 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             .all(|r| r["role"].is_null() && !r["grant"].is_null()),
         "{caps}"
     );
+    // any grant of the vocabulary, record 48's sealed:see among them
     assert_eq!(
         row("GET /api/status")["grant"].as_array().unwrap().len(),
-        28
+        29
     );
     // record 42 R7: a rater is not a reviewer of the whole queue; closing a
     // campaign writes decisions, which needs both

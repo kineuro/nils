@@ -114,6 +114,9 @@ const ANNA: &str = "anna-rater-token-of-length";
 const BO: &str = "bo-rater-token-of-length";
 const RITA: &str = "rita-reader-token-of-length";
 const OTTO: &str = "otto-certifier-token-of-length";
+/// Record 48, D1 of the move: the token a certificate's computation runs
+/// under, which alone reads what a system said of a sealed stack.
+const SEALED: &str = "sealed-reading-token-of-length";
 
 impl Server {
     fn start(home: &TempDir) -> Server {
@@ -129,6 +132,9 @@ impl Server {
             format!("{RITA}=rita@lab:review:see"),
             // a second person who works the model registry
             format!("{OTTO}=otto@lab:models:work"),
+            // the certificate's computation: a reviewer with the one grant
+            // that reads sealed stacks
+            format!("{SEALED}=certify@lab:reviewer,sealed:see"),
         ]
         .join(",");
         let mut child = nils()
@@ -555,7 +561,7 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         let why = server.ok("GET", &format!("/api/stacks/{stack}/why"), None, token);
         let explained = server.ok("GET", &format!("/api/explain/{stack}"), None, token);
         let review = items[0]["review_item_id"].as_i64().unwrap();
-        let item = server.ok("GET", &format!("/api/review/{review}"), None, token);
+        let item = server.call("GET", &format!("/api/review/{review}"), None, token);
         let list = server.ok("GET", "/api/review?status=open", None, token);
         let listed = list["items"]
             .as_array()
@@ -566,10 +572,11 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
             .unwrap_or(Value::Null);
         (why, explained, item, listed)
     };
-    // a rater of the campaign, and a reader who neither adjudicates nor
-    // holds review:work, read it blind at every door
-    for token in [BO, RITA] {
-        let (why, explained, item, listed) = seen(token);
+    // record 48, D1 of the move: sealed means sealed on every door, for a
+    // rater of the campaign, a reader, and a holder of review:work who rates
+    // in no campaign alike; the review item is not there
+    for token in [BO, RITA, CURATOR] {
+        let (why, explained, (status, item), listed) = seen(token);
         assert_eq!(why["blind"], true, "{why}");
         assert!(why.get("axes").is_none(), "{why}");
         assert_eq!(explained["blind"], true, "{explained}");
@@ -577,17 +584,15 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
             explained["axes"].as_array().unwrap().is_empty(),
             "{explained}"
         );
-        assert_eq!(item["blind"], true, "{item}");
-        assert!(item["evidence"].get("value").is_none(), "{item}");
-        if !listed.is_null() {
-            assert_eq!(listed["blind"], true, "{listed}");
-        }
+        assert_eq!(status, 404, "{item}");
+        assert!(listed.is_null(), "{listed}");
     }
-    // a holder of review:work who rates in no campaign asking it sees it
-    let (why, explained, item, _) = seen(CURATOR);
+    // the certificate's grant alone sees it
+    let (why, explained, (status, item), _) = seen(SEALED);
     assert_eq!(why["blind"], false, "{why}");
     assert!(!why["axes"].as_array().unwrap().is_empty(), "{why}");
     assert_eq!(explained["blind"], false, "{explained}");
+    assert_eq!(status, 200, "{item}");
     assert!(item.get("blind").is_none(), "{item}");
     let sealed = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert!(sealed["groups"].as_array().unwrap().is_empty(), "{sealed}");

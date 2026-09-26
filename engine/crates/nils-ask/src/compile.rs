@@ -60,6 +60,10 @@ pub struct Context<'a> {
     /// Keyset paging of the answer: rows after this key, at most this many.
     pub after: Option<i64>,
     pub limit: Option<u64>,
+    /// Record 48, D1 of the move: leave out every stack of a sample sealed
+    /// now, at the stack and the instance grains, so no set, count, group
+    /// or measure reaches one.
+    pub withhold_sealed: bool,
 }
 
 /// One statement, its parameters in order, and the answer's columns.
@@ -574,6 +578,17 @@ impl<'a> Builder<'a> {
         qualified(self.ctx.schema.as_deref(), table)
     }
 
+    /// Record 48, D1 of the move: the standing predicate that leaves out a
+    /// stack of a sample sealed now, when the context withholds them.
+    fn not_sealed(&self, stack: &str) -> Option<String> {
+        self.ctx.withhold_sealed.then(|| {
+            format!(
+                "NOT EXISTS (SELECT 1 FROM {} sst WHERE sst.stack_id = {stack} AND sst.unsealed_at IS NULL)",
+                self.q("sealed_stack")
+            )
+        })
+    }
+
     /// Bind one parameter and return its placeholder, numbered on both
     /// backends: the layers wrap each other, so an outer expression's
     /// placeholder sits before an inner one in the text while it is bound
@@ -701,7 +716,13 @@ impl<'a> Builder<'a> {
                     study_k: Some("sy.id".into()),
                     series_k: Some("se.id".into()),
                     stack_k: Some("st.id".into()),
-                    standing: vec![not_excluded],
+                    standing: {
+                        let mut standing = vec![not_excluded];
+                        if let Some(sealed) = self.not_sealed("st.id") {
+                            standing.push(sealed);
+                        }
+                        standing
+                    },
                 }
             }
             Grain::Instance => {
@@ -731,7 +752,7 @@ impl<'a> Builder<'a> {
                     study_k: Some("sy.id".into()),
                     series_k: Some("se.id".into()),
                     stack_k: Some("i.stack_id".into()),
-                    standing: Vec::new(),
+                    standing: self.not_sealed("i.stack_id").into_iter().collect(),
                 }
             }
             Grain::Event => Base {

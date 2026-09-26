@@ -109,6 +109,7 @@ fn scope() -> Scope {
         classes: [Class::QuasiIdentifying, Class::Sensitive]
             .into_iter()
             .collect(),
+        unsealed: false,
     }
 }
 

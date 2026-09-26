@@ -1393,6 +1393,34 @@ pub fn sealed_now(
     Ok(out)
 }
 
+/// Record 48, D1 of the move: review rows about a stack of a sample sealed
+/// now, left out before they are written, so a sealed stack never becomes a
+/// review item. `ref_at` is the index of the row's `ref`, JSON text naming
+/// the `stack_id`. Answers how many rows were left out.
+pub fn drop_sealed_items(
+    store: &mut Store,
+    rows: &mut Vec<Vec<Param>>,
+    ref_at: usize,
+) -> Result<usize, Error> {
+    let stack_of = |row: &Vec<Param>| -> Option<i64> {
+        match row.get(ref_at) {
+            Some(Param::Text(t)) => serde_json::from_str::<Value>(t).ok()?["stack_id"].as_i64(),
+            _ => None,
+        }
+    };
+    let stacks: Vec<i64> = rows.iter().filter_map(stack_of).collect();
+    if stacks.is_empty() {
+        return Ok(0);
+    }
+    let (sealed, _) = sealed_now(store, &stacks, &[])?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    let before = rows.len();
+    rows.retain(|r| !stack_of(r).is_some_and(|s| sealed.contains(&s)));
+    Ok(before - rows.len())
+}
+
 /// Record 48 R2: the labels a training tool may learn from, of these: every
 /// one whose item is not of a sample sealed now. Answers what is kept and
 /// how many were left out.

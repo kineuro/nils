@@ -393,9 +393,9 @@ fn the_metadata_is_public_and_a_refusal_names_it() {
             .contains("audience binding"),
         "{doc}"
     );
-    // the scopes it names are the grants
+    // the scopes it names are the grants, record 48's sealed:see among them
     let scopes = doc["scopes_supported"].as_array().unwrap();
-    assert_eq!(scopes.len(), 28, "{doc}");
+    assert_eq!(scopes.len(), 29, "{doc}");
     assert!(scopes.iter().any(|s| s == "query:see"), "{doc}");
 
     // no token: 401 that names the metadata

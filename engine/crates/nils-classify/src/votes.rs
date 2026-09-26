@@ -38,6 +38,9 @@ pub struct Written {
 pub struct Filter {
     /// Only this axis.
     pub axis: Option<String>,
+    /// Record 48, D1 of the move: leave out the stacks of a sample sealed
+    /// now, whose votes are what the rules said of them.
+    pub withhold_sealed: bool,
 }
 
 /// Write the vote matrix as tab-separated lines, a header first, in stack
@@ -72,8 +75,16 @@ pub fn write(store: &mut Store, filter: &Filter, out: &mut dyn Write) -> Result<
     let mut written = Written::default();
     let mut axes: BTreeSet<String> = BTreeSet::new();
     let window: i64 = 4_096;
+    let sealed = if filter.withhold_sealed {
+        format!(
+            " AND NOT EXISTS (SELECT 1 FROM {} ss WHERE ss.stack_id = v.stack_id AND ss.unsealed_at IS NULL)",
+            store.qualified("sealed_stack")
+        )
+    } else {
+        String::new()
+    };
     let sql = format!(
-        "SELECT stack_id, votes FROM {} WHERE stack_id > {} AND stack_id <= {} ORDER BY stack_id, phase",
+        "SELECT v.stack_id, v.votes FROM {} v WHERE v.stack_id > {} AND v.stack_id <= {}{sealed} ORDER BY v.stack_id, v.phase",
         store.qualified("classification_vote"),
         store.dialect().param(1, Type::Int),
         store.dialect().param(2, Type::Int),

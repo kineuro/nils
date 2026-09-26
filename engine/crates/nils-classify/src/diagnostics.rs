@@ -58,6 +58,14 @@ pub struct Tallies {
 }
 
 impl Tallies {
+    /// Name a batch the run read without noting what it found there: a
+    /// stack of a sample sealed now (record 48, D1 of the move), whose
+    /// words and values stay out of the batch's diagnostics, while the
+    /// batch's older rows are still replaced.
+    pub fn touch(&mut self, batch: i64) {
+        self.by_batch.entry(batch).or_default();
+    }
+
     /// Note one stack's verdict against its batch.
     pub fn note(&mut self, batch: i64, verdict: &Verdict) {
         let t = self.by_batch.entry(batch).or_default();

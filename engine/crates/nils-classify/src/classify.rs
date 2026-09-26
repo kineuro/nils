@@ -835,6 +835,12 @@ fn run(
             break;
         }
         let last = rows.last().expect("a non-empty window").int(0)?;
+        // record 48, D1 of the move: what the rules find on a stack of a
+        // sample sealed now stays out of the batch diagnostics and never
+        // becomes a review item
+        let window_stacks: Vec<i64> = rows.iter().filter_map(|r| r.int(0).ok()).collect();
+        let (sealed_window, _) = nils_registry::labels::sealed_now(store, &window_stacks, &[])
+            .map_err(|e| nils_registry::store::Error::Message(e.to_string()))?;
 
         let mut classes: Vec<Vec<Param>> = Vec::with_capacity(rows.len());
         let mut axes: Vec<Vec<Param>> = Vec::new();
@@ -867,7 +873,11 @@ fn run(
                 }
                 None => evaluated.classify(),
             };
-            tallies.note(batch_of(r, with_ids), &verdict);
+            if sealed_window.contains(&stack_id) {
+                tallies.touch(batch_of(r, with_ids));
+            } else {
+                tallies.note(batch_of(r, with_ids), &verdict);
+            }
             let mut raised = 0i64;
 
             // A split that makes one image per stack, over and over, is the
@@ -1315,6 +1325,10 @@ fn run(
                     &Insert::new(vote_t, &["stack_id", "phase", "votes"]),
                     &votes,
                 )?;
+                // record 48, D1 of the move: a stack of a sample sealed now
+                // never becomes a review item
+                nils_registry::labels::drop_sealed_items(store, &mut reviews, 2)
+                    .map_err(|e| nils_registry::store::Error::Message(e.to_string()))?;
                 if !reviews.is_empty() {
                     store.insert(
                         &Insert::new(

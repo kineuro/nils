@@ -262,6 +262,23 @@ pub(crate) struct Caller {
 }
 
 impl Caller {
+    /// Record 48, D1 of the move: this caller as the engine itself reads a
+    /// selection's keys for it, with the certificate's grant beside its
+    /// own. Never answers the caller; only a freeze uses it.
+    pub(crate) fn reading_sealed(&self) -> Caller {
+        let mut access = self.access.clone();
+        access.grants.insert(crate::grants::UNSEALED);
+        Caller {
+            principal: self.principal.clone(),
+            access,
+            display: self.display.clone(),
+            email: self.email.clone(),
+            actor: self.actor.clone(),
+            ceiling: self.ceiling,
+            idempotency_key: None,
+        }
+    }
+
     /// Whether the caller passes a door that needs `need` at `detail`, or
     /// the refusal, which names what was needed. A caller that holds no
     /// grant is refused at every door, whatever the door needs (Wave 4b
@@ -1735,10 +1752,11 @@ fn routed(
         // record 26 §11: why one stack was judged so, as `nils explain` says it
         ["api", "explain", _] if get => {
             let stack = id_at(2)?;
-            // record 48 R2: a stack read blind says nothing a system said
+            // record 48, D1 of the move: a stack of a sample sealed now says
+            // nothing a system said, to every caller but the certificate's
             if crate::campaigns::blind_to(registry.store(), caller, stack)? {
                 return Ok(Reply::ok(serde_json::json!({
-                    "stack": stack, "blind": true, "axes": [], "review": [],
+                    "stack": stack, "blind": true, "sealed": true, "axes": [], "review": [],
                 })));
             }
             match crate::explain::document(registry.store(), stack, doors.pack_dir.as_deref())? {
@@ -2985,7 +3003,13 @@ fn routed(
                 rows.retain(|r| r["id"].as_i64().is_some_and(|id| keep.contains(&id)));
                 rows.truncate(limit.max(1));
             }
-            blind_review(registry.store(), caller, &mut rows)?;
+            // record 48, D1 of the move: an item about a stack of a sample
+            // sealed now is not listed, as if it were not there
+            crate::sealed::withhold_review(
+                registry.store(),
+                &mut rows,
+                crate::sealed::reads(&caller.access),
+            )?;
             // record 49 R4 and R4b: below detail quasi a pipeline's items
             // are one entry a run and a check or reason, with a count held
             // to 5 scans, never one a unit
@@ -3015,6 +3039,7 @@ fn routed(
         }
         ["api", "review", _] if get => {
             let id = id_at(2)?;
+            unsealed_item(registry, caller, id)?;
             let Some(item) =
                 nils_registry::review::item(registry.store(), id).map_err(review_err)?
             else {
@@ -3029,12 +3054,20 @@ fn routed(
             } else {
                 Vec::new()
             };
-            let mut doc = serde_json::json!({
+            let doc = serde_json::json!({
                 "id": item.id, "kind": item.kind, "scope": item.scope, "status": item.status,
                 "ref": item.reference, "evidence": item.evidence, "members": item.members,
                 "member_stacks": members,
             });
-            blind_review(registry.store(), caller, std::slice::from_mut(&mut doc))?;
+            let mut one = vec![doc];
+            crate::sealed::withhold_review(
+                registry.store(),
+                &mut one,
+                crate::sealed::reads(&caller.access),
+            )?;
+            let doc = one
+                .pop()
+                .ok_or_else(|| Reply::error(404, format!("no review item {id}")))?;
             // record 49 R4b: below detail quasi a pipeline's item is not read
             // one by one, and answers as an item that is not there
             if !quasi && item.kind == nils_registry::review::PIPELINE_QC_KIND {
@@ -3049,6 +3082,7 @@ fn routed(
             // pack's legal combinations
             let id = id_at(2)?;
             let doc = json_body(body)?;
+            unsealed_item(registry, caller, id)?;
             let item = nils_registry::review::item(registry.store(), id)
                 .map_err(review_err)?
                 .ok_or_else(|| Reply::error(404, format!("no review item {id}")))?;
@@ -3124,6 +3158,7 @@ fn routed(
             if value.is_none() && !nothing {
                 return Err(Reply::error(400, "value, or nothing: true"));
             }
+            unsealed_item(registry, caller, id)?;
             not_held(registry, id)?;
             let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
@@ -3155,6 +3190,7 @@ fn routed(
         ["api", "review", _, "accept"] if post => {
             let id = id_at(2)?;
             let doc = json_body(body)?;
+            unsealed_item(registry, caller, id)?;
             crate::review_accept_as(
                 registry,
                 id,
@@ -3356,7 +3392,24 @@ fn routed(
         }
         ["api", "timeline", kind, _] if get => {
             let id = id_at(3)?;
+            // record 48, D1 of the move: a review item about a stack of a
+            // sample sealed now has no timeline to show, and a sealed stack's
+            // own keeps its arrival and loses what any system said of it
+            if *kind == "review" {
+                unsealed_item(registry, caller, id)?;
+            }
+            let sealed_stack =
+                *kind == "stack" && crate::campaigns::blind_to(registry.store(), caller, id)?;
             match crate::timeline::of(registry, kind, id).map_err(|e| Reply::error(500, e))? {
+                crate::timeline::Outcome::Events(mut events) if sealed_stack => {
+                    events.retain(|e| matches!(e.kind.as_str(), "landed" | "classified"));
+                    for e in events.iter_mut().filter(|e| e.kind == "classified") {
+                        e.summary = "classified; what the classifier said is withheld while the stack is sealed (record 48)".into();
+                    }
+                    Ok(Reply::ok(serde_json::json!({
+                        "kind": kind, "id": id, "count": events.len(), "events": events, "sealed": true,
+                    })))
+                }
                 crate::timeline::Outcome::Events(events) => Ok(Reply::ok(serde_json::json!({
                     "kind": kind, "id": id, "count": events.len(), "events": events,
                 }))),
@@ -4032,55 +4085,20 @@ fn capabilities(
     })
 }
 
-/// Record 48 R2: review items about a stack the caller reads blind say
-/// nothing a system said of it: a stack's item keeps its axis and loses its
-/// evidence, and a group's hidden members lose theirs, the group's own
-/// evidence going with them.
-fn blind_review(
-    store: &mut nils_registry::Store,
-    caller: &Caller,
-    rows: &mut [serde_json::Value],
-) -> Result<(), Reply> {
-    let mut about: Vec<(usize, Vec<i64>)> = Vec::new();
-    for (i, r) in rows.iter().enumerate() {
-        let mut stacks: Vec<i64> = r["ref"]["stack_id"].as_i64().into_iter().collect();
-        if r["scope"] == "group"
-            && let Some(id) = r["id"].as_i64()
-        {
-            let sql = format!(
-                "SELECT stack_id FROM {} WHERE item_id = {}",
-                store.qualified("review_member"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            );
-            for m in store.query(&sql, &[nils_registry::Param::Int(id)])? {
-                stacks.push(m.int(0)?);
-            }
-        }
-        if !stacks.is_empty() {
-            about.push((i, stacks));
-        }
-    }
-    let all: Vec<i64> = about.iter().flat_map(|(_, s)| s.iter().copied()).collect();
-    let hidden = crate::campaigns::blind_among(store, caller, &all)?;
-    if hidden.is_empty() {
+/// Record 48, D1 of the move: a review item about a stack of a sample
+/// sealed now is answered as one that is not there, to every caller but a
+/// holder of the certificate's grant.
+fn unsealed_item(registry: &mut Registry, caller: &Caller, id: i64) -> Result<(), Reply> {
+    if crate::sealed::reads(&caller.access) {
         return Ok(());
     }
-    for (i, stacks) in about {
-        if !stacks.iter().any(|s| hidden.contains(s)) {
-            continue;
-        }
-        let r = &mut rows[i];
-        let axis = r["evidence"]["axis"].clone();
-        r["evidence"] = serde_json::json!({"axis": axis, "blind": true});
-        if r.get("decision").is_some() {
-            r["decision"] = serde_json::Value::Null;
-        }
-        r["blind"] = serde_json::json!(true);
-        for m in r["member_stacks"].as_array_mut().into_iter().flatten() {
-            if m["stack_id"].as_i64().is_some_and(|s| hidden.contains(&s)) {
-                m["evidence"] = serde_json::json!({"blind": true});
-            }
-        }
+    let Some(item) = nils_registry::review::item(registry.store(), id).map_err(review_err)? else {
+        return Ok(());
+    };
+    let mut one =
+        vec![serde_json::json!({"id": item.id, "scope": item.scope, "ref": item.reference})];
+    if crate::sealed::withhold_review(registry.store(), &mut one, false)? > 0 {
+        return Err(Reply::error(404, format!("no review item {id}")));
     }
     Ok(())
 }
