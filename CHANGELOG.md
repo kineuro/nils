@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.46] - 2026-09-26
+
+A campaign carries answers suggested from outside the engine, v0's labels or a model's proposals, each with its author and its confidence per class, brought in with `nils campaign suggest` or its door. A campaign that asks one axis has a gallery of a hundred items, the least certain first, accepted in one move with each item's own value, the suggestion and its author (`suggested_by`) kept beside each answer; a stack is drawn small at its thumb door. `nils campaign repack` moves an open axes campaign to the served pack's version and keeps every answer as given. The MRI pack is version 0.7.0, where `body_part` gains `other`. The registry is at schema 69. The HTTP API contract stays version 7, amended in place with additive fields and new doors; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.45.
+
 ### Added
 
 - A campaign carries answers suggested from outside the engine (record 50): v0's committed labels or a model's proposals, each with its author (`v0-model`, `v0-person`, a model id) and, where the source gave them, a confidence per class. `POST /api/campaigns/{id}/suggestions` (the campaign's maker, or a holder of review:work) and `nils campaign suggest <campaign> --file <tsv> [--author]` bring them in, by stack, item or SeriesInstanceUID, so v0's export reads as it is; `GET` counts them. A suggestion is never an answer, a stack of a sealed sample takes none, and an author's later import replaces its earlier one. Schema 69.
