@@ -455,7 +455,9 @@ pub fn told(a: &Joint) -> Joint {
 
 /// The constraints an axes question carries are the shape
 /// `nils_pack::legal::constraints` writes: every asked axis's vocabulary,
-/// the multi-valued axes, the exclusion groups and the implications.
+/// the multi-valued axes, the exclusion groups and the implications, and
+/// since record 48 the exclusions between axes and the hints, which a
+/// campaign made before them does not carry.
 fn check_constraints(axes: &[String], c: &Value) -> Result<(), Error> {
     if !c.is_object() {
         return Err(invalid(
@@ -656,7 +658,8 @@ fn holds(e: &Value, a: &Joint) -> Option<bool> {
 }
 
 /// Whether the pack allows an assignment: at most one member of each
-/// exclusion group, and what an implication whose condition holds sets.
+/// exclusion group, what an implication whose condition holds sets, and
+/// none of the values an exclusion whose condition holds rules out.
 /// The words say which rule or group forbids it.
 pub fn legal(constraints: &Value, a: &Joint) -> Result<(), String> {
     // a can't-tell axis is read as one the answer does not name: no group
@@ -703,6 +706,27 @@ pub fn legal(constraints: &Value, a: &Joint) -> Result<(), String> {
                     }
                 ));
             }
+        }
+    }
+    // record 48: a value on one axis ruling values of another out; a
+    // campaign made before the pack said any carries none. The hints are
+    // what is usual, and nothing here reads them.
+    for x in constraints["excludes"].as_array().into_iter().flatten() {
+        if holds(&x["when"], a) != Some(true) {
+            continue;
+        }
+        let Some(axis) = x["axis"].as_str() else {
+            continue;
+        };
+        let Some(held) = a.get(axis) else { continue };
+        let ruled = words(&x["values"]);
+        if let Some(v) = held.iter().find(|v| ruled.contains(v)) {
+            return Err(format!(
+                "the pack rules {axis} {v} out when {} ({}): {}",
+                said(&x["when"]),
+                x["id"].as_str().unwrap_or("?"),
+                x["why"].as_str().unwrap_or("")
+            ));
         }
     }
     Ok(())

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/pack/v6/overlay.schema.json",
+  "title": "NILS overlay",
+  "description": "A site's amendment to a pack: its own words for the same thing, scoped to an origin and never to a selection, applied when the pack is loaded and never written into it. It amends words and nothing else: the pack's buckets by name, and every axis value's keywords list by axis.value. The flags, the physics windows, the review thresholds and the order values are tried in stay the pack's, and an overlay naming any of them is refused. Written as YAML in a pack directory or sent as JSON to the engine's overlay doors.",
+  "type": "object",
+  "required": [
+    "overlay",
+    "version",
+    "pack",
+    "scope",
+    "cases"
+  ],
+  "anyOf": [
+    {"required": ["buckets"]},
+    {"required": ["lists"]}
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "overlay": {
+      "type": "string",
+      "description": "The overlay's name. With the version it is what every row it judged records, as name@version."
+    },
+    "version": {
+      "type": "string",
+      "description": "The overlay's own version.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "pack": {
+      "type": "string",
+      "description": "The pack it amends, by name. An overlay for another pack is refused at load."
+    },
+    "scope": {
+      "type": "object",
+      "description": "What it is keyed on: an origin, never a selection. At least one key.",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "manufacturer": {"type": "string"},
+        "model": {"type": "string"},
+        "station": {"type": "string"},
+        "batch": {"type": "string"}
+      }
+    },
+    "buckets": {
+      "type": "object",
+      "description": "The pack's named lists it amends, each by what it adds and removes. A bucket the pack does not declare is refused.",
+      "additionalProperties": {"$ref": "#/$defs/edit"}
+    },
+    "lists": {
+      "type": "object",
+      "description": "The axis values' keywords lists it amends, keyed axis.value (the value's identity or its label), each by what it adds and removes. A value the pack does not have, or one no word of the pack's reaches (a route sets it, or it is the default), is refused: an overlay may not make an axis try a value it did not.",
+      "propertyNames": {"pattern": "^[^.]+\\..+$"},
+      "additionalProperties": {"$ref": "#/$defs/edit"}
+    },
+    "cases": {
+      "type": "array",
+      "description": "What the site says its amendment does, in the shape of a pack's corpus cases: a stack and the flags or axes expected of it. An overlay ships at least one, and one whose cases do not hold does not load.",
+      "minItems": 1,
+      "items": {"type": "object"}
+    }
+  },
+  "$defs": {
+    "edit": {
+      "type": "object",
+      "description": "What an edit does to one list: the words added, after the pack's own and deduplicated case-insensitively with the first spelling kept, and the words removed. One of the two at least; nothing else.",
+      "additionalProperties": false,
+      "anyOf": [
+        {"required": ["add"]},
+        {"required": ["remove"]}
+      ],
+      "properties": {
+        "add": {"type": "array", "items": {"type": "string"}},
+        "remove": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

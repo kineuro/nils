@@ -2091,6 +2091,10 @@ pub(crate) fn value_names(
             out.insert(v.label.clone(), v.id.clone());
             out.insert(a.stored(i).to_string(), v.id.clone());
             out.insert(v.id.clone(), v.id.clone());
+            // an identity the value had before a rename reads as it
+            for a in &v.aliases {
+                out.insert(a.clone(), v.id.clone());
+            }
         }
     }
     out

@@ -53,6 +53,8 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
         "fields",
         "levels",
         "mcp",
+        "excludes",
+        "hints",
     ];
     let version: u32 = std::fs::read_to_string(contracts().join("pack/VERSION"))
         .unwrap()
@@ -154,17 +156,67 @@ fn every_overlay_key_the_loader_reads_is_on_the_overlay_schema() {
     }
 }
 
+/// The MRI pack as a contract-5 pack: copied, with the keys contract 6
+/// added taken out of its manifest and the contract it declares set to 5.
+fn mri_at_contract_5() -> std::path::PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.is_dir() {
+                copy(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let to = std::env::temp_dir().join(format!("nils-contract-5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&to);
+    copy(&mri, &to);
+    let manifest = std::fs::read_to_string(to.join("pack.yml")).unwrap();
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in manifest.lines() {
+        if line.starts_with("excludes:") || line.starts_with("hints:") {
+            skipping = true;
+            continue;
+        }
+        if skipping && line.starts_with("  - ") {
+            continue;
+        }
+        skipping = false;
+        if line.starts_with("contract:") {
+            out.push_str("contract: 5\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    std::fs::write(to.join("pack.yml"), out).unwrap();
+    to
+}
+
 #[test]
 fn a_pack_of_an_earlier_contract_loads_under_this_one() {
-    // A contract-4 pack is what every pack written before 5 is, the shipped
-    // MRI pack among them, and version 5 changed no manifest key.
+    // Version 6 added two optional keys and changed none, so a contract-5
+    // pack, which is what every pack written before 6 is, loads unchanged:
+    // the MRI pack without its exclusions and hints is one.
+    let dir = mri_at_contract_5();
+    let pack = nils_pack::load(&dir, None).expect("the MRI pack at contract 5 loads");
+    assert_eq!(pack.contract, 5);
+    assert!(pack.contract < nils_pack::CONTRACT);
+    assert!(pack.excludes.is_empty() && pack.hints.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
     let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
     let pack = nils_pack::load(&mri, None).expect("the MRI pack loads");
-    assert!(
-        pack.contract < nils_pack::CONTRACT,
-        "the MRI pack stays at contract {} in this slice",
-        pack.contract
+    assert_eq!(
+        pack.contract,
+        nils_pack::CONTRACT,
+        "the shipped pack writes exclusions and hints"
     );
+    assert!(!pack.excludes.is_empty() && !pack.hints.is_empty());
     assert!(
         pack.lists.len() > 100,
         "every axis value's word list is a site's to amend: {}",

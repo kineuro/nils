@@ -315,6 +315,11 @@ pub struct AxisValue {
     pub terms: Vec<String>,
     /// What the value means, in a line, where the pack says.
     pub description: Option<String>,
+    /// Identities the value had in an earlier version of the pack, which
+    /// still name it: a campaign, an overlay or a decision written before a
+    /// rename reads as the value it became (record 48: `ASL-EPI` became
+    /// `ASL`). Never stored and never served as the identity.
+    pub aliases: Vec<String>,
 }
 
 /// How an axis value is reached other than by a word, kept in the words the
@@ -469,8 +474,13 @@ pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
 }
 
 impl Axis {
+    /// The value an identity names, or an identity it had before a rename.
     pub fn value_index(&self, id: &str) -> Option<usize> {
-        self.values.iter().position(|v| v.id == id)
+        self.values.iter().position(|v| v.id == id).or_else(|| {
+            self.values
+                .iter()
+                .position(|v| v.aliases.iter().any(|a| a == id))
+        })
     }
 
     /// The identity of the value a row stores.
@@ -527,4 +537,41 @@ pub struct RuleSet {
     pub rules: Vec<Rule>,
     /// The phase of the axes it decides, which the loader checks are all one.
     pub phase: AxisPhase,
+}
+
+/// Record 48: one value on one axis ruling values of another out, hard.
+/// Checked with the exclusion groups and the implications: an answer that
+/// holds both sides is refused, and a reader greys the excluded values out.
+/// Never a rule: it decides no axis of a stack, and a classification the
+/// rules reach is not changed by it.
+#[derive(Debug, Clone)]
+pub struct Exclude {
+    pub id: String,
+    /// The condition, over axis values only.
+    pub when: Expr,
+    /// The axis the excluded values are of.
+    pub axis: usize,
+    /// The values ruled out, as indices into the axis's vocabulary.
+    pub values: Vec<usize>,
+    /// Why, in a line, for the person the reader refuses.
+    pub why: String,
+    /// The pack's sources for it, by the ids its documentation cites.
+    pub sources: Vec<String>,
+}
+
+/// Record 48: what is usual, never enforced. A reader shows the hint with
+/// its reason where its condition holds; an answer against it is an answer.
+#[derive(Debug, Clone)]
+pub struct Hint {
+    pub id: String,
+    /// The condition, over axis values only.
+    pub when: Expr,
+    /// The axis and the value usually found there.
+    pub axis: usize,
+    pub value: usize,
+    /// Why it is usual, and where it is not.
+    pub why: String,
+    pub sources: Vec<String>,
+    /// The sources that show it is not always so.
+    pub counter: Vec<String>,
 }

@@ -24,6 +24,15 @@
 //! the answer and is left out; so is one whose rule set is a route entered
 //! on anything but axis values, since whether it fires depends on the stack.
 //!
+//! Record 48 adds two more, written beside the axes rather than read out
+//! of the rules (pack contract 6):
+//!
+//! - **the exclusions**: a value on one axis ruling values of another out,
+//!   hard, such as construct `SWI` ruling out every spin-echo technique;
+//! - **the hints**: what is usual and not always so, such as a BOLD series
+//!   being T2*-weighted, which a reader shows with its reason and nothing
+//!   enforces.
+//!
 //! The constraints are JSON, in identities throughout, so the registry,
 //! which knows no pack, checks an answer against them
 //! (`nils_registry::campaign`). The condition language is the axis subset of
@@ -65,6 +74,8 @@ fn identity(a: &Axis, value: &str) -> Option<String> {
         .find(|v| v.id == value || v.label == value)
         .map(|v| v.id.clone())
         .or_else(|| a.id_of_stored(value).map(str::to_string))
+        // an identity the value had before a rename (record 48)
+        .or_else(|| a.value_index(value).map(|i| a.values[i].id.clone()))
 }
 
 /// An axis-only expression as the constraint language writes it, or none
@@ -212,13 +223,56 @@ pub fn constraints(
             }
         }
     }
+    let (excludes, hints) = cross(pack, &asked);
     Ok(json!({
         "pack": pack.id(),
         "values": vocabulary,
         "multi": multi,
         "groups": groups,
         "implications": implications,
+        "excludes": excludes,
+        "hints": hints,
     }))
+}
+
+/// Record 48: the pack's cross-axis exclusions and hints among the `asked`
+/// axes (indices into the pack's axes), in the constraint language: an
+/// exclusion `{id, when, axis, values, why}` whose values are identities,
+/// and a hint `{id, when, axis, value, why}`. One whose condition reads an
+/// axis not asked, or whose other side is not asked, cannot be judged from
+/// the answer and is left out.
+pub fn cross(pack: &Pack, asked: &[usize]) -> (Vec<Value>, Vec<Value>) {
+    let excludes = pack
+        .excludes
+        .iter()
+        .filter(|x| asked.contains(&x.axis))
+        .filter_map(|x| {
+            let a = &pack.axes[x.axis];
+            Some(json!({
+                "id": x.id,
+                "when": condition(pack, &x.when, asked)?,
+                "axis": a.name,
+                "values": x.values.iter().map(|i| a.values[*i].id.clone()).collect::<Vec<_>>(),
+                "why": x.why,
+            }))
+        })
+        .collect();
+    let hints = pack
+        .hints
+        .iter()
+        .filter(|h| asked.contains(&h.axis))
+        .filter_map(|h| {
+            let a = &pack.axes[h.axis];
+            Some(json!({
+                "id": h.id,
+                "when": condition(pack, &h.when, asked)?,
+                "axis": a.name,
+                "value": a.values[h.value].id,
+                "why": h.why,
+            }))
+        })
+        .collect();
+    (excludes, hints)
 }
 
 /// Record 48, the reader's search: every name a person may know each value
@@ -344,13 +398,15 @@ mod tests {
                 .map(|x| x.as_str().unwrap().to_lowercase())
                 .collect()
         };
-        // the pack's rules read ir spgr for MPRAGE, and a person knows it as MP-RAGE or TFL;
+        // the pack's rules read ir spgr for MPRAGE, and a person knows it as MP-RAGE or tfl3d;
         // a word both lists hold is served once, as a term
         assert!(words("technique", "MPRAGE", "keywords").contains(&"ir spgr".to_string()));
         assert!(words("technique", "MPRAGE", "terms").contains(&"bravo".to_string()));
         assert!(!words("technique", "MPRAGE", "keywords").contains(&"bravo".to_string()));
         assert!(words("technique", "MPRAGE", "terms").contains(&"mp-rage".to_string()));
-        assert!(words("technique", "MPRAGE", "terms").contains(&"tfl".to_string()));
+        // record 48: bare TFL is TurboFLASH, 2D or 3D, and only tfl3d is an MPRAGE
+        assert!(words("technique", "MPRAGE", "terms").contains(&"tfl3d".to_string()));
+        assert!(!words("technique", "MPRAGE", "terms").contains(&"tfl".to_string()));
         // a word said twice is served once, and never the identity itself
         let all: Vec<String> = [
             words("technique", "MPRAGE", "terms"),
@@ -422,5 +478,112 @@ mod tests {
             .map(|x| x.as_str().unwrap().to_lowercase())
             .collect();
         assert!(kw.contains(&"myelin".to_string()), "{kw:?}");
+    }
+
+    #[test]
+    fn the_mri_pack_freezes_its_exclusions_and_hints_among_the_asked_axes() {
+        let pack = mri();
+        let axes: Vec<String> = ["technique", "base", "construct", "post_contrast"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let c = constraints(&pack, &axes, &BTreeMap::new()).unwrap();
+        // construct SWI rules out the whole spin-echo family, by identity
+        let swi = c["excludes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "swi-construct-not-spin-echo")
+            .expect("the SWI exclusion");
+        assert_eq!(swi["when"], json!({"axis": "construct", "is": "SWI"}));
+        assert_eq!(swi["axis"], "technique");
+        let ruled: Vec<&str> = swi["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for v in ["TSE", "3D-TSE", "SS-TSE", "IR-TSE", "SE", "MDME"] {
+            assert!(ruled.contains(&v), "{v} in {ruled:?}");
+        }
+        assert!(!ruled.contains(&"GRASE") && !ruled.contains(&"GRE"));
+        // a hint says what is usual and why
+        let bold = c["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == "bold-usually-t2star")
+            .expect("the BOLD hint");
+        assert_eq!(bold["axis"], "base");
+        assert_eq!(bold["value"], "T2starw");
+        assert!(bold["why"].as_str().unwrap().contains("spin-echo"));
+        // the hint over modifier is left out when modifier is not asked
+        assert!(
+            c["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|h| h["id"] != "megre-usually-t2star")
+        );
+        // the approved implications: a diffusion map is DWI, INV2 is PDw,
+        // an MP2RAGE output is an MP2RAGE, a DSC or DCE series had contrast
+        let imps = c["implications"].as_array().unwrap();
+        let find = |rule: &str| {
+            imps.iter()
+                .find(|i| i["rule"] == rule)
+                .unwrap_or_else(|| panic!("{rule} in {imps:?}"))
+        };
+        assert_eq!(
+            find("base/construct:diffusion")["then"],
+            json!([{"axis": "base", "value": "DWI"}])
+        );
+        assert_eq!(
+            find("base/construct:inv2")["then"],
+            json!([{"axis": "base", "value": "PDw"}])
+        );
+        assert_eq!(
+            find("implied_technique/construct:mp2rage")["then"],
+            json!([{"axis": "technique", "value": "MP2RAGE"}])
+        );
+        assert_eq!(
+            find("post_contrast/perfusion")["then"],
+            json!([{"axis": "post_contrast", "value": "given"}])
+        );
+        // a multi-echo GRE is T2*-weighted only usually, so no implication says so
+        assert!(
+            imps.iter()
+                .all(|i| !i["when"].to_string().contains("\"ME-GRE\""))
+        );
+        // only what the asked axes decide
+        let two = constraints(
+            &pack,
+            &["technique".to_string(), "base".to_string()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(
+            two["excludes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| !x["when"].to_string().contains("construct"))
+        );
+    }
+
+    #[test]
+    fn a_renamed_value_still_reads_by_its_old_identity() {
+        let pack = mri();
+        let mut values = BTreeMap::new();
+        values.insert("technique".to_string(), vec!["ASL-EPI".to_string()]);
+        let c = constraints(&pack, &["technique".to_string()], &values).unwrap();
+        assert_eq!(c["values"]["technique"], json!(["ASL"]));
+        let t = pack.axes.iter().find(|a| a.name == "technique").unwrap();
+        assert_eq!(t.value_index("ASL-EPI"), t.value_index("ASL"));
+        assert!(t.value_index("ASL").is_some());
+        // DCE is a technique of its own, and takes the word dce
+        let dce = &t.values[t.value_index("DCE").unwrap()];
+        assert!(dce.keywords.iter().any(|k| k == "dce"));
+        let dsc = &t.values[t.value_index("Perfusion-EPI").unwrap()];
+        assert!(!dsc.keywords.iter().any(|k| k == "dce"));
     }
 }

@@ -572,8 +572,15 @@ fn a_pack_of_an_earlier_contract_loads_and_a_later_one_is_refused() {
         kind_of(&nils_pack::load(d.path(), Some(&ov)).unwrap(), "zzqq").stored("kind"),
         "bee"
     );
-    d.file("pack.yml", &manifest.replace("contract: 5", "contract: 6"));
+    let later = nils_pack::CONTRACT + 1;
+    d.file(
+        "pack.yml",
+        &manifest.replace("contract: 5", &format!("contract: {later}")),
+    );
     let e = nils_pack::load(d.path(), None).err().unwrap().to_string();
-    assert!(e.contains("wants contract 6"), "{e}");
-    assert!(e.contains("this engine implements 5"), "{e}");
+    assert!(e.contains(&format!("wants contract {later}")), "{e}");
+    assert!(
+        e.contains(&format!("this engine implements {}", nils_pack::CONTRACT)),
+        "{e}"
+    );
 }

@@ -3358,3 +3358,81 @@ fn an_expired_lease_never_blocks_and_an_operator_releases_another_s_claim() {
         assert_eq!(state(reg, h.assignment.id), "released", "{name}");
     }
 }
+
+/// Record 48: an exclusion between axes refuses an answer that holds both
+/// sides, a hint refuses nothing, and constraints frozen before either
+/// existed read as they did.
+#[test]
+fn an_exclusion_refuses_both_sides_and_a_hint_refuses_nothing() {
+    let axes = vec![
+        "technique".to_string(),
+        "construct".to_string(),
+        "base".to_string(),
+    ];
+    let mut c = json!({
+        "pack": "test@1",
+        "values": {
+            "technique": ["TSE", "GRE"],
+            "construct": ["SWI", "ADC"],
+            "base": ["T2w", "T2starw", "SWI"]
+        },
+        "multi": ["construct"],
+        "groups": {},
+        "implications": [],
+        "excludes": [{
+            "id": "swi-construct-not-spin-echo",
+            "when": {"axis": "construct", "is": "SWI"},
+            "axis": "technique",
+            "values": ["TSE"],
+            "why": "SWI needs gradient-echo phase"
+        }],
+        "hints": [{
+            "id": "tse-usually-t2w",
+            "when": {"axis": "technique", "is": "TSE"},
+            "axis": "base",
+            "value": "T2w",
+            "why": "usually"
+        }]
+    });
+    let read = |c: &serde_json::Value, text: &str| {
+        let joint = campaign::answer_joint_of(&axes, c, text).unwrap();
+        campaign::legal(c, &joint)
+    };
+    let refused = read(
+        &c,
+        r#"{"technique": "TSE", "construct": ["SWI"], "base": "SWI"}"#,
+    )
+    .unwrap_err();
+    assert!(refused.contains("rules technique TSE out"), "{refused}");
+    assert!(refused.contains("gradient-echo"), "{refused}");
+    // the other side alone, or can't tell on one side, is no conflict
+    read(
+        &c,
+        r#"{"technique": "GRE", "construct": ["SWI"], "base": "SWI"}"#,
+    )
+    .unwrap();
+    read(
+        &c,
+        r#"{"technique": "TSE", "construct": ["ADC"], "base": "T2w"}"#,
+    )
+    .unwrap();
+    read(
+        &c,
+        r#"{"technique": "cant_tell", "construct": ["SWI"], "base": "SWI"}"#,
+    )
+    .unwrap();
+    // against the hint is still an answer
+    read(
+        &c,
+        r#"{"technique": "TSE", "construct": [], "base": "T2starw"}"#,
+    )
+    .unwrap();
+    // a campaign frozen before record 48 carries neither
+    c.as_object_mut().unwrap().remove("excludes");
+    c.as_object_mut().unwrap().remove("hints");
+    read(
+        &c,
+        r#"{"technique": "TSE", "construct": ["SWI"], "base": "SWI"}"#,
+    )
+    .unwrap();
+}

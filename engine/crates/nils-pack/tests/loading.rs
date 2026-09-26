@@ -632,3 +632,95 @@ fn a_dictionary_line_that_is_wrong_is_refused_with_its_number() {
     assert!(e.contains("dictionary.tsv"), "{e}");
     assert!(e.contains("line 1"), "{e}");
 }
+
+/// Record 48 (pack contract 6): a pack with two class axes and a file of
+/// exclusions or hints, written as `body`.
+fn crossed(key: &str, body: &str) -> Dir {
+    let d = phased();
+    d.file(
+        "pack.yml",
+        &format!(
+            "\
+pack: t
+version: 1.0.0
+contract: 6
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+axes: [axes/kind.yml, axes/family.yml, axes/disposition.yml]
+rules: [rules/kind.yml, rules/disposition.yml]
+order: [kind, disposition]
+{key}: [{key}.yml]
+"
+        ),
+    )
+    .file(
+        "axes/family.yml",
+        "axis: family\nkind: single\nvalues: {x: {family: SE}, y: {family: SE}, z: {family: GRE}, w: {aliases: [old-w]}}\n",
+    )
+    .file(&format!("{key}.yml"), body);
+    d
+}
+
+#[test]
+fn an_exclusion_between_axes_loads_with_its_family_named_value_by_value() {
+    let d = crossed(
+        "excludes",
+        "excludes:\n  - {id: a-not-se, when: {axis: kind, is: a}, excludes: {axis: family, family: SE}, why: because, sources: [S1]}\n",
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    assert_eq!(pack.excludes.len(), 1);
+    let every: Vec<usize> = (0..pack.axes.len()).collect();
+    let (x, _) = nils_pack::legal::cross(&pack, &every);
+    assert_eq!(x[0]["values"], serde_json::json!(["x", "y"]));
+    assert_eq!(x[0]["when"], serde_json::json!({"axis": "kind", "is": "a"}));
+    // an alias names the value it became
+    let f = &pack.axes[pack.axis_index("family").unwrap()];
+    assert_eq!(f.value_index("old-w"), f.value_index("w"));
+}
+
+#[test]
+fn an_exclusion_that_reads_the_file_or_names_nothing_is_refused() {
+    let e = refusal(&crossed(
+        "excludes",
+        "excludes:\n  - {id: bad, when: is_original, excludes: {axis: family, is: x}, why: w}\n",
+    ));
+    assert!(e.contains("axis values"), "{e}");
+    let e = refusal(&crossed(
+        "excludes",
+        "excludes:\n  - {id: bad, when: {axis: kind, is: a}, excludes: {axis: family, family: EPI}, why: w}\n",
+    ));
+    assert!(e.contains("no value of family is of the family EPI"), "{e}");
+    let e = refusal(&crossed(
+        "excludes",
+        "excludes:\n  - {id: bad, when: {axis: kind, is: a}, excludes: {axis: family, is: q}, why: w}\n",
+    ));
+    assert!(e.contains("q is not a value of the family axis"), "{e}");
+    let e = refusal(&crossed(
+        "excludes",
+        "excludes:\n  - {id: one, when: {axis: kind, is: a}, excludes: {axis: family, is: x}, why: w}\n  - {id: one, when: {axis: kind, is: b}, excludes: {axis: family, is: y}, why: w}\n",
+    ));
+    assert!(e.contains("declared twice"), "{e}");
+}
+
+#[test]
+fn a_hint_names_one_value_and_may_cite_what_contradicts_it() {
+    let d = crossed(
+        "hints",
+        "hints:\n  - {id: a-usually-z, when: {axis: kind, is: a}, suggest: {axis: family, value: z}, why: usually, sources: [S1], counter: [S2]}\n",
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    assert_eq!(pack.hints[0].counter, ["S2"]);
+    let every: Vec<usize> = (0..pack.axes.len()).collect();
+    let (_, h) = nils_pack::legal::cross(&pack, &every);
+    assert_eq!(h[0]["value"], "z");
+    assert_eq!(h[0]["why"], "usually");
+    let e = refusal(&crossed(
+        "hints",
+        "hints:\n  - {id: h, when: {axis: kind, is: a}, suggest: {axis: family, value: z}, why: w, excludes: {axis: family, is: x}}\n",
+    ));
+    assert!(
+        e.contains("excludes is not a key of an entry of hints"),
+        "{e}"
+    );
+}
