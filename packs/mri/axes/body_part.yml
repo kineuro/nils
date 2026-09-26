@@ -9,6 +9,13 @@
 # v0's keyword detector had no chest words and neither do the rules: no rule
 # writes it, and `nils pack shape` says so. A chest reaches a stack only as a
 # model's proposal that a person commits.
+#
+# `other` is the unknown (record 50 R2): whatever is none of the five, or
+# cannot be named from the stack. It is a person's answer, and a model's
+# proposal, never a rule's: no rule writes it, so a stack whose words say
+# nothing keeps no body part rather than a guess. A new category is added
+# later from a few examples of our own data, as v0 allowed, and takes its
+# stacks out of `other`.
 
 axis: body_part
 kind: single
@@ -16,6 +23,7 @@ kind: single
 values:
   'neck': {terms: ['neck', 'soft tissue neck']}
   'spine': {terms: ['spine', 'spinal cord', 'cervical spine', 'thoracic spine', 'lumbar spine', 'C-spine', 'T-spine', 'L-spine', 'whole spine']}
-  'brain': {terms: ['brain', 'head', 'neuro']}
-  'brain-neck': {terms: ['head and neck', 'head-neck', 'brain and neck', 'brain and cervical spine']}
+  'brain': {terms: ['brain', 'head', 'neuro'], description: 'the brain, the stack ending at or above C2'}
+  'brain-neck': {terms: ['head and neck', 'head-neck', 'brain and neck', 'brain and cervical spine'], description: 'the brain and the neck: the stack covers the brain and reaches below C2'}
   'chest': {terms: ['chest', 'thorax', 'lungs']}
+  'other': {terms: ['unknown', 'other body part', 'phantom', 'whole body'], description: 'none of the others, or not known: another part of the body, a phantom, a stack over several parts, or one whose coverage cannot be named'}
