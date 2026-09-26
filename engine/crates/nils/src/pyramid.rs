@@ -15,7 +15,11 @@
 //! Position Patient), and `frame`, whether the planes are parallel and
 //! evenly spaced, which is what a volume needs. The planes are ordered along
 //! the normal the orientation gives. A manifest written before is read as
-//! axial with `orientation_known` false. E1: `nils pyramid build --select`
+//! axial with `orientation_known` false. `step` is the real step from one
+//! plane to the next in the patient, which is not along the normal where
+//! the acquisition was sheared (a tilted gantry, a slab whose planes shift
+//! as they go); the render door cuts such a stack along the patient's
+//! planes, as dcm2niix and nibabel place it. E1: `nils pyramid build --select`
 //! builds a selection's pyramids as one job, skipping what is built.
 //!
 //! The planes are read from native pixel data (little endian, deflated or
@@ -209,6 +213,14 @@ pub struct Manifest {
     /// a plane; zero in a manifest from before.
     #[serde(default)]
     pub multiframe_files: u32,
+    /// The mean step from one plane to the next in the patient, mm, from
+    /// the planes' positions: along the normal by `spacing[0]` for most
+    /// stacks, and with a part in the plane where the acquisition was
+    /// sheared. Absent where the planes do not say where they are, for a
+    /// single plane, and in a manifest from before, which read as along
+    /// the normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<[f64; 3]>,
 }
 
 fn plane_axial() -> String {
@@ -267,6 +279,10 @@ pub struct Geometry {
     pub orientation: [f64; 6],
     pub origin: [f64; 3],
     pub frame: Frame,
+    /// The mean step from one plane to the next, in the patient, mm: the
+    /// last plane's position less the first's over the gaps. None for a
+    /// single plane.
+    pub step: Option<[f64; 3]>,
 }
 
 impl Volume {
@@ -1011,13 +1027,26 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
                 mean.abs() > 1e-6 && gaps.iter().all(|g| (g - mean).abs() <= tolerance)
             }
         };
+        let origin = slices[0].position.expect("every plane has a position");
+        let last = slices[nz as usize - 1]
+            .position
+            .expect("every plane has a position");
+        let step = (nz > 1).then(|| {
+            let gaps = nz as f64 - 1.0;
+            [
+                (last[0] - origin[0]) / gaps,
+                (last[1] - origin[1]) / gaps,
+                (last[2] - origin[2]) / gaps,
+            ]
+        });
         Some(Geometry {
             orientation: first,
-            origin: slices[0].position.expect("every plane has a position"),
+            origin,
             frame: Frame {
                 parallel,
                 evenly_spaced,
             },
+            step,
         })
     } else {
         None
@@ -1286,6 +1315,7 @@ pub fn build(
         source_syntaxes: vol.syntaxes.clone(),
         order: Some(vol.order.to_string()),
         multiframe_files: vol.multiframe_files,
+        step: vol.geometry.and_then(|g| g.step),
         stack,
         codec: CODEC.to_string(),
         tile: TILE,
@@ -1407,9 +1437,53 @@ pub fn decode_plane(
     Ok((nx, ny, plane))
 }
 
+/// How far a sheared stack's planes shift in their own plane from one to
+/// the next, in mm along the rows' and the columns' directions; None when
+/// the step is along the normal, or the whole stack drifts less than a
+/// tenth of a pixel, or the planes are not parallel (not one volume), or
+/// the manifest does not say.
+pub fn shear(m: &Manifest) -> Option<(f64, f64)> {
+    let step = m.step?;
+    if !m.orientation_known || m.frame.is_some_and(|f| !f.parallel) {
+        return None;
+    }
+    let o = &m.orientation;
+    let along = |v: [f64; 3]| step[0] * v[0] + step[1] * v[1] + step[2] * v[2];
+    let (a, b) = (along([o[0], o[1], o[2]]), along([o[3], o[4], o[5]]));
+    let gaps = m.shape[0].saturating_sub(1) as f64;
+    let [_, dy, dx] = m.spacing;
+    let drift = ((a * gaps / dx.max(1e-9)).powi(2) + (b * gaps / dy.max(1e-9)).powi(2)).sqrt();
+    (drift >= 0.1).then_some((a, b))
+}
+
+/// A plane's value at a fractional pixel, linear between its four
+/// neighbours, nothing outside it.
+fn sample(px: &[u16], w: u32, h: u32, x: f64, y: f64) -> u16 {
+    if !(x > -1.0 && y > -1.0 && x < w as f64 && y < h as f64) {
+        return 0;
+    }
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let at = |i: f64, j: f64| -> f64 {
+        if i < 0.0 || j < 0.0 || i >= w as f64 || j >= h as f64 {
+            0.0
+        } else {
+            px[(j as u32 * w + i as u32) as usize] as f64
+        }
+    };
+    let v = at(x0, y0) * (1.0 - fx) * (1.0 - fy)
+        + at(x0 + 1.0, y0) * fx * (1.0 - fy)
+        + at(x0, y0 + 1.0) * (1.0 - fx) * fy
+        + at(x0 + 1.0, y0 + 1.0) * fx * fy;
+    v.round().clamp(0.0, u16::MAX as f64) as u16
+}
+
 /// The plane along an axis: `z` is the index along that axis. `y` and `x`
 /// planes are assembled from every plane's row or column (the slab door's
-/// job in the browser; here for the server render).
+/// job in the browser; here for the server render). A sheared stack's `y`
+/// and `x` planes are cut square to its rows or columns in the patient:
+/// each plane gives the line where it meets that cut, shifted by its step
+/// in the plane, the middle plane at `index` unshifted.
 pub fn plane_along(
     root: &Path,
     m: &Manifest,
@@ -1422,6 +1496,36 @@ pub fn plane_along(
         .get(level as usize)
         .ok_or_else(|| format!("level {level} is not in the pyramid"))?;
     let [nz, ny, nx] = lv.shape;
+    if axis != 'z'
+        && let Some((a, b)) = shear(m)
+    {
+        // the step in the plane in this level's pixels; plane z meets the
+        // cut where its own pixel sits k steps back from the middle plane's
+        let f = 2f64.powi(level as i32);
+        let (sx, sy) = (a / (m.spacing[2] * f), b / (m.spacing[1] * f));
+        let mid = (nz.saturating_sub(1)) as f64 / 2.0;
+        let (w, h) = if axis == 'y' { (nx, nz) } else { (ny, nz) };
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for z in 0..nz {
+            let (pw, ph, px) = decode_plane(root, m, level, z)?;
+            let k = z as f64 - mid;
+            for t in 0..w {
+                let (x, y) = if axis == 'y' {
+                    (
+                        t as f64 - k * sx,
+                        index.min(ny.saturating_sub(1)) as f64 - k * sy,
+                    )
+                } else {
+                    (
+                        index.min(nx.saturating_sub(1)) as f64 - k * sx,
+                        t as f64 - k * sy,
+                    )
+                };
+                out.push(sample(&px, pw, ph, x, y));
+            }
+        }
+        return Ok((w, h, out));
+    }
     match axis {
         'z' => decode_plane(root, m, level, index.min(nz.saturating_sub(1))),
         'y' => {
@@ -1573,21 +1677,44 @@ pub fn thumb(
         let (row, col) = (ny / 2, nx / 2);
         let mut across_rows = Vec::with_capacity((n * nx) as usize);
         let mut across_cols = Vec::with_capacity((n * ny) as usize);
+        // a sheared stack is cut square to its rows and columns in the
+        // patient, as the render door cuts it: each plane's line shifted
+        // by its step in the plane, the middle plane's unshifted
+        let f = 2f64.powi(level as i32);
+        let shift = shear(m).map(|(a, b)| (a / (dx * f), b / (dy * f)));
+        let mid = (nz - 1) as f64 / 2.0;
         for z in &picks {
-            let (w, _, px) = decode_plane(root, m, level, *z)?;
+            let (w, h, px) = decode_plane(root, m, level, *z)?;
             let at_row = if in_band(row) { 0 } else { 1 };
-            across_rows.extend(
-                px[(row * w) as usize..((row + 1) * w) as usize]
-                    .iter()
-                    .map(|&p| grey(p) * at_row),
-            );
-            across_cols.extend((0..ny).map(|y| {
-                if in_band(y) {
-                    0
-                } else {
-                    grey(px[(y * w + col) as usize])
+            match shift {
+                Some((sx, sy)) => {
+                    let k = *z as f64 - mid;
+                    across_rows.extend((0..nx).map(|t| {
+                        grey(sample(&px, w, h, t as f64 - k * sx, row as f64 - k * sy)) * at_row
+                    }));
+                    across_cols.extend((0..ny).map(|y| {
+                        if in_band(y) {
+                            0
+                        } else {
+                            grey(sample(&px, w, h, col as f64 - k * sx, y as f64 - k * sy))
+                        }
+                    }));
                 }
-            }));
+                None => {
+                    across_rows.extend(
+                        px[(row * w) as usize..((row + 1) * w) as usize]
+                            .iter()
+                            .map(|&p| grey(p) * at_row),
+                    );
+                    across_cols.extend((0..ny).map(|y| {
+                        if in_band(y) {
+                            0
+                        } else {
+                            grey(px[(y * w + col) as usize])
+                        }
+                    }));
+                }
+            }
         }
         // the stack's planes run along its normal; across an axial stack
         // whose normal points to the head, the first plane is the lowest
@@ -2272,6 +2399,132 @@ mod tests {
         let bytes = encode_tile(&px, w, h).unwrap();
         let (_, _, back) = decode_tile(&bytes).unwrap();
         assert_eq!(back, px);
+    }
+
+    /// Axial planes 1 mm square and 4 mm apart whose positions shift 1 mm
+    /// forward per plane (a 14 degree shear), written in reverse instance
+    /// order, each holding a bright row where the patient's y is 20 mm: the
+    /// patient's coronal sheet at y = 20.
+    fn sheared_stack(dir: &nils_dicom::synth::TempDir, shift: f64) -> Vec<PathBuf> {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields};
+        let (nz, ny, nx) = (9u32, 32u32, 24u32);
+        let mut files = Vec::new();
+        for z in 0..nz {
+            let sop = format!("1.2.3.8.{}", z + 1);
+            let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+            let mut e = synth::minimal_mr("1.2.3", "1.2.3.8", &sop);
+            // instance numbers run against the planes' order
+            e.push(synth::text(
+                tags::INSTANCE_NUMBER,
+                VR::IS,
+                &(nz - z).to_string(),
+            ));
+            e.push(synth::text(
+                tags::IMAGE_POSITION_PATIENT,
+                VR::DS,
+                &format!("0\\{}\\{}", z as f64 * shift, z * 4),
+            ));
+            e.push(synth::text(
+                tags::IMAGE_ORIENTATION_PATIENT,
+                VR::DS,
+                "1\\0\\0\\0\\1\\0",
+            ));
+            e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"));
+            e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+            e.push(us(tags::ROWS, ny as u16));
+            e.push(us(tags::COLUMNS, nx as u16));
+            e.push(us(tags::BITS_ALLOCATED, 16));
+            e.push(us(tags::BITS_STORED, 16));
+            e.push(us(tags::HIGH_BIT, 15));
+            e.push(us(tags::PIXEL_REPRESENTATION, 0));
+            // pixel row j of plane z sits at y = j + z * shift
+            let bright = (20.0 - z as f64 * shift).round() as u32;
+            let px: Vec<u8> = (0..ny * nx)
+                .flat_map(|i| (if i / nx == bright { 1000u16 } else { 100 }).to_le_bytes())
+                .collect();
+            e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, px));
+            files.push(dir.file(&sop, &synth::part10(&MetaFields::mr(&sop), &e, true)));
+        }
+        files.reverse();
+        files
+    }
+
+    /// The row of each plane of a cut where it is brightest.
+    fn brightest(w: u32, h: u32, px: &[u16]) -> Vec<u32> {
+        (0..h)
+            .map(|z| (0..w).max_by_key(|&t| px[(z * w + t) as usize]).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_sheared_stack_says_its_step_and_is_cut_along_the_patient_s_planes() {
+        let dir = nils_dicom::synth::TempDir::new("pyramid-sheared");
+        let vol = read_files(&sheared_stack(&dir, 1.0)).unwrap();
+        // ordered along the normal whatever the instance numbers say, 4 mm apart along it
+        assert_eq!(vol.order, ORDER_POSITION);
+        assert!((vol.spacing[0] - 4.0).abs() < 1e-9, "{:?}", vol.spacing);
+        let g = vol.geometry.unwrap();
+        assert_eq!(g.origin, [0.0, 0.0, 0.0]);
+        assert_eq!(g.step, Some([0.0, 1.0, 4.0]));
+        let root = dir.path().join("pyramid");
+        let m = build(&vol, 21, &root, 2, None).unwrap();
+        assert_eq!(m.step, Some([0.0, 1.0, 4.0]));
+        assert_eq!(shear(&m), Some((0.0, 1.0)));
+        // the manifest carries it, and one from before reads as along the normal
+        let text = std::fs::read_to_string(root.join("manifest.json")).unwrap();
+        assert!(text.contains("\"step\""));
+        let mut old = serde_json::to_value(&m).unwrap();
+        old.as_object_mut().unwrap().remove("step");
+        let old: Manifest = serde_json::from_value(old).unwrap();
+        assert!(old.step.is_none() && shear(&old).is_none());
+        // a column of every plane: the coronal sheet at y = 20 stands straight,
+        // at the middle plane's row 16, not slanted one row per plane
+        let (w, h, px) = plane_along(&root, &m, 0, 'x', 12).unwrap();
+        assert_eq!((w, h), (32, 9));
+        assert_eq!(brightest(w, h, &px), vec![16; 9]);
+        // the stack as it was stored slants: the same cut with the step taken as the normal
+        let (w, h, px) = plane_along(&root, &old, 0, 'x', 12).unwrap();
+        assert_eq!(
+            brightest(w, h, &px),
+            (0..9).map(|z| 20 - z).collect::<Vec<_>>()
+        );
+        // a row cut at the middle plane's row 16 lies in the sheet on every plane
+        let (w, h, px) = plane_along(&root, &m, 0, 'y', 16).unwrap();
+        assert_eq!((w, h), (24, 9));
+        assert!(px.iter().all(|&v| v == 1000), "{:?}", &px[..24]);
+        // at a coarser level the shift is in that level's pixels: row 8 of 16
+        let (w, h, px) = plane_along(&root, &m, 1, 'x', 6).unwrap();
+        assert_eq!((w, h), (16, 9));
+        let rows = brightest(w, h, &px);
+        assert!(rows.iter().all(|&r| r == 7 || r == 8), "{rows:?}");
+        // the gallery's picture cuts it the same way and draws
+        assert!(!thumb(&root, &m, 64, 3, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stack_along_its_normal_has_a_step_and_no_shear() {
+        let dir = nils_dicom::synth::TempDir::new("pyramid-unsheared");
+        let vol = read_files(&sheared_stack(&dir, 0.0)).unwrap();
+        let root = dir.path().join("pyramid");
+        let m = build(&vol, 22, &root, 2, None).unwrap();
+        assert_eq!(m.step, Some([0.0, 0.0, 4.0]));
+        assert!(shear(&m).is_none());
+        // the cuts are the stored rows and columns, as before
+        let (w, h, px) = plane_along(&root, &m, 0, 'x', 12).unwrap();
+        assert_eq!(brightest(w, h, &px), vec![20; 9]);
+        // a drift under a tenth of a pixel over the whole stack is not a shear
+        let mut m2 = m.clone();
+        m2.step = Some([0.0, 0.01, 4.0]);
+        assert!(shear(&m2).is_none());
+        m2.step = Some([0.0, 0.02, 4.0]);
+        assert!(shear(&m2).is_some());
+        // planes that are not parallel are not one volume, and not a shear
+        m2.frame = Some(Frame {
+            parallel: false,
+            evenly_spaced: true,
+        });
+        assert!(shear(&m2).is_none());
     }
 
     /// Record 45: a signed stack with a rescale renders in the modality's
