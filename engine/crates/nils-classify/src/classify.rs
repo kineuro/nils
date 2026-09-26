@@ -263,6 +263,42 @@ pub(crate) fn scoped_select(
 /// value, or one with no value when the axis was decided to nothing, so that
 /// a reader matches a value by equality and never by a pattern over a joined
 /// string.
+/// Record 48: the confidence an axis is written at when the stack's answer
+/// breaks one of the pack's constraints that involves it. Below every review
+/// threshold a pack may set with sense, so no confidence gate takes the
+/// stack's answer as settled while the break stands.
+pub const BROKEN_CONFIDENCE: f64 = 0.3;
+
+/// Record 48: the constraints of the pack the verdict's class-phase axes
+/// break, read in identities.
+pub(crate) fn broken_constraints(
+    pack: &nils_pack::Pack,
+    constraints: &serde_json::Value,
+    verdict: &nils_pack::verdict::Verdict,
+) -> Vec<nils_pack::legal::Broken> {
+    let mut decided = std::collections::BTreeMap::new();
+    for a in &pack.axes {
+        if a.phase != nils_pack::rules::AxisPhase::Class {
+            continue;
+        }
+        let values: Vec<String> = verdict
+            .axis(&a.name)
+            .map(|v| v.values.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| !v.is_empty() && a.default.as_deref() != Some(v.as_str()))
+            .map(|v| a.id_of_stored(&v).map(str::to_string).unwrap_or(v))
+            .collect();
+        decided.insert(a.name.clone(), values);
+    }
+    let decided_by: std::collections::BTreeMap<String, String> = verdict
+        .evidence
+        .iter()
+        .map(|e| (e.axis.clone(), e.rule_set.clone()))
+        .collect();
+    nils_pack::legal::broken(pack, constraints, &decided, &decided_by)
+}
+
 pub(crate) fn axis_rows(
     stack: i64,
     axis: &str,
@@ -752,6 +788,9 @@ fn run(
     let with_ids = decisions.needs_ids();
     // Nothing was decided by a person, so nothing is looked up per axis.
     let any_decision = decisions.any();
+    // Record 48: the constraints the rules' own answer must keep, the same
+    // ones a rater's answer is held to, worked out once for the run.
+    let constraints = nils_pack::legal::class_constraints(pack);
     let sql = select(store, settings.modality.as_deref(), with_ids);
     let now = now_iso();
     let voters = if settings.votes {
@@ -864,9 +903,56 @@ fn run(
                 raised += 1;
             }
 
+            // Record 48: the rules' answer held to the pack's own exclusions
+            // and implications, as a rater's is. A break keeps the values as
+            // decided, raises one item per broken constraint, and writes the
+            // axes it involves at a confidence no threshold takes as an
+            // answer, so the stack is never certified by its confidence.
+            let doubted = if verdict.silent {
+                Vec::new()
+            } else {
+                broken_constraints(pack, &constraints, &verdict)
+            };
+            for b in &doubted {
+                reviews.push(vec![
+                    Param::from(format!("classify.{}", b.kind)),
+                    Param::from("stack"),
+                    Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
+                    Param::from(
+                        serde_json::json!({
+                            "value": b.id,
+                            "tier": "constraint",
+                            "constraint": b.id,
+                            "kind": b.kind,
+                            "why": b.why,
+                            "sources": b.sources,
+                            "axes": b.axes,
+                            "decided": b.axes.iter().map(|a| (a.clone(), verdict.stored(a))).collect::<std::collections::BTreeMap<_, _>>(),
+                            "rule": b.constraint,
+                            "pack": pack.id(),
+                        })
+                        .to_string(),
+                    ),
+                    Param::from("open"),
+                    Param::from(now.as_str()),
+                    Param::Int(job_id),
+                ]);
+                raised += 1;
+                *report
+                    .broken
+                    .entry(format!("{}:{}", b.kind, b.id))
+                    .or_insert(0) += 1;
+            }
+            report.broken_stacks += i64::from(!doubted.is_empty());
+
             for a in &verdict.axes {
                 let mut value = a.stored();
                 let mut tier = a.tier.clone();
+                let written = if doubted.iter().any(|b| b.axes.contains(&a.axis)) {
+                    a.confidence.min(BROKEN_CONFIDENCE)
+                } else {
+                    a.confidence
+                };
                 if let Some(d) = any_decision
                     .then(|| decisions.for_stack(ids, &stack, &a.axis))
                     .flatten()
@@ -913,7 +999,7 @@ fn run(
                     .by_tier
                     .entry(format!("{}:{}", a.axis, tier))
                     .or_insert(0) += 1;
-                axes.extend(axis_rows(stack_id, &a.axis, &value, a.confidence, &tier));
+                axes.extend(axis_rows(stack_id, &a.axis, &value, written, &tier));
                 // What a person is asked about, and where the number comes
                 // from: the pack declares it per axis, because what counts as
                 // a weak answer is knowledge about the domain and not about

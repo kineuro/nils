@@ -8,6 +8,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - Pack contract 6: a pack may say `excludes` and `hints`, constraints between axes over axis values alone. An exclusion rules values of one axis out where its condition holds, as `{axis, is}`, `{axis, any}` or `{axis, family}`; a hint names the value usually found on an axis, with its reason and the sources that show it is not always so. An axes campaign freezes both into its `constraints` beside the groups and the implications, an answer that holds both sides of an exclusion is refused with its reason, and a hint refuses nothing. `nils pack shape` names them. A campaign made before carries neither and reads as before, and an engine at 6 loads a contract-5 pack unchanged.
 - An axis value may say `aliases`, identities it had before a rename, which still name it in a campaign's values, an overlay's `lists` and a commit by filter.
+- A classification is held to the pack's own exclusions and implications, as a rater's answer is. Where the rules' answer for a stack breaks one (an exclusion whose condition holds and whose value the stack has, or an implication of another rule set whose value it contradicts), the values stay as decided, a `classify.excluded` or `classify.implied` review item names the constraint, its reason and its sources, and the axes it involves are written at confidence 0.3, below every threshold. The classify report counts them (`broken`, `broken_stacks`). An implication broken by its own rule set's order is not a break.
 
 ### Changed
 

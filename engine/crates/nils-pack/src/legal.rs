@@ -275,6 +275,207 @@ pub fn cross(pack: &Pack, asked: &[usize]) -> (Vec<Value>, Vec<Value>) {
     (excludes, hints)
 }
 
+/// A condition of the constraint language on decided values: true, false,
+/// or unknown where it reads an axis the map does not name.
+fn holds(e: &Value, a: &BTreeMap<String, Vec<String>>) -> Option<bool> {
+    match e {
+        Value::Bool(b) => Some(*b),
+        Value::Object(m) => {
+            if let Some(axis) = m.get("axis").and_then(Value::as_str) {
+                let held = a.get(axis)?;
+                if let Some(v) = m.get("is").and_then(Value::as_str) {
+                    return Some(held.iter().any(|x| x == v));
+                }
+                if let Some(v) = m.get("missing_or").and_then(Value::as_str) {
+                    return Some(held.is_empty() || held.iter().any(|x| x == v));
+                }
+                return None;
+            }
+            if let Some(list) = m.get("all").and_then(Value::as_array) {
+                let each: Vec<Option<bool>> = list.iter().map(|x| holds(x, a)).collect();
+                if each.contains(&Some(false)) {
+                    return Some(false);
+                }
+                return each.iter().all(|x| *x == Some(true)).then_some(true);
+            }
+            if let Some(list) = m.get("any").and_then(Value::as_array) {
+                let each: Vec<Option<bool>> = list.iter().map(|x| holds(x, a)).collect();
+                if each.contains(&Some(true)) {
+                    return Some(true);
+                }
+                return each.iter().all(|x| *x == Some(false)).then_some(false);
+            }
+            if let Some(x) = m.get("not") {
+                return holds(x, a).map(|b| !b);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The axes a condition of the constraint language reads.
+fn axes_of(e: &Value, into: &mut Vec<String>) {
+    match e {
+        Value::Object(m) => {
+            if let Some(a) = m.get("axis").and_then(Value::as_str)
+                && !into.iter().any(|x| x == a)
+            {
+                into.push(a.to_string());
+            }
+            for v in m.values() {
+                axes_of(v, into);
+            }
+        }
+        Value::Array(xs) => xs.iter().for_each(|x| axes_of(x, into)),
+        _ => {}
+    }
+}
+
+/// One constraint of the pack that a stack's decided values break.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Broken {
+    /// `excluded` (an exclusion between axes) or `implied` (an implication
+    /// whose value the stack lacks).
+    pub kind: &'static str,
+    /// The exclusion's id, or the implication's `set/rule`.
+    pub id: String,
+    pub why: String,
+    /// The pack's sources for it, where it names them.
+    pub sources: Vec<String>,
+    /// Every axis the constraint reads or writes, which is every axis the
+    /// break casts doubt on.
+    pub axes: Vec<String>,
+    /// The constraint as a campaign freezes it.
+    pub constraint: Value,
+}
+
+/// Record 48: the constraints the rules' own answer must keep, over every
+/// class-phase axis: what [`broken`] reads. Worked out once per run.
+pub fn class_constraints(pack: &Pack) -> Value {
+    let axes: Vec<String> = pack
+        .axes
+        .iter()
+        .filter(|a| a.phase == crate::rules::AxisPhase::Class)
+        .map(|a| a.name.clone())
+        .collect();
+    constraints(pack, &axes, &BTreeMap::new()).unwrap_or(Value::Null)
+}
+
+/// Record 48: which of the pack's exclusions and implications a stack's
+/// decided values break. `decided` holds every class-phase axis by name,
+/// its values as identities, an axis nothing decided as an empty list. An
+/// exclusion is broken where its condition holds and the stack holds a value
+/// it rules out; an implication where its condition holds and the axis it
+/// sets holds another value (a single-valued axis left empty says nothing,
+/// a multi-valued one that lacks the value breaks it).
+///
+/// `decided_by` names, per axis, the rule set whose rule wrote it. An
+/// implication of that same set is not broken by the set's own answer: a
+/// rule set is ordered and its first firing rule decides, so an earlier rule
+/// of it (a localizer in the intent cascade, INV2 before MPRAGE in base)
+/// winning over a later one is the set doing what it says. What is broken is
+/// one set's answer contradicting another's.
+pub fn broken(
+    pack: &Pack,
+    constraints: &Value,
+    decided: &BTreeMap<String, Vec<String>>,
+    decided_by: &BTreeMap<String, String>,
+) -> Vec<Broken> {
+    let multi = |axis: &str| pack.axes.iter().any(|a| a.name == axis && a.multi);
+    let mut out = Vec::new();
+    for x in constraints["excludes"].as_array().into_iter().flatten() {
+        if holds(&x["when"], decided) != Some(true) {
+            continue;
+        }
+        let Some(axis) = x["axis"].as_str() else {
+            continue;
+        };
+        let ruled: Vec<&str> = x["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if !decided
+            .get(axis)
+            .is_some_and(|held| held.iter().any(|v| ruled.contains(&v.as_str())))
+        {
+            continue;
+        }
+        let id = x["id"].as_str().unwrap_or_default().to_string();
+        let mut axes = Vec::new();
+        axes_of(&x["when"], &mut axes);
+        if !axes.iter().any(|a| a == axis) {
+            axes.push(axis.to_string());
+        }
+        out.push(Broken {
+            kind: "excluded",
+            sources: pack
+                .excludes
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.sources.clone())
+                .unwrap_or_default(),
+            why: x["why"].as_str().unwrap_or_default().to_string(),
+            id,
+            axes,
+            constraint: x.clone(),
+        });
+    }
+    for imp in constraints["implications"].as_array().into_iter().flatten() {
+        if holds(&imp["when"], decided) != Some(true) {
+            continue;
+        }
+        for t in imp["then"].as_array().into_iter().flatten() {
+            if !t["when"].is_null() && holds(&t["when"], decided) != Some(true) {
+                continue;
+            }
+            let (Some(axis), Some(value)) = (t["axis"].as_str(), t["value"].as_str()) else {
+                continue;
+            };
+            let Some(held) = decided.get(axis) else {
+                continue;
+            };
+            if held.iter().any(|v| v == value) || (held.is_empty() && !multi(axis)) {
+                continue;
+            }
+            let id = imp["rule"].as_str().unwrap_or_default().to_string();
+            let set = id.split_once('/').map_or("", |(s, _)| s);
+            if decided_by.get(axis).is_some_and(|by| by == set) {
+                continue;
+            }
+            let why = id
+                .split_once('/')
+                .and_then(|(set, rule)| {
+                    pack.rule_sets
+                        .iter()
+                        .find(|s| s.name == set)?
+                        .rules
+                        .iter()
+                        .find(|r| r.id == rule)?
+                        .why
+                        .clone()
+                })
+                .unwrap_or_else(|| format!("the pack sets {axis} to {value} here"));
+            let mut axes = Vec::new();
+            axes_of(&imp["when"], &mut axes);
+            if !axes.iter().any(|a| a == axis) {
+                axes.push(axis.to_string());
+            }
+            out.push(Broken {
+                kind: "implied",
+                id,
+                why,
+                sources: Vec::new(),
+                axes,
+                constraint: imp.clone(),
+            });
+        }
+    }
+    out
+}
+
 /// Record 48, the reader's search: every name a person may know each value
 /// of the asked axes by, so typing a vendor's name finds the value. Per axis,
 /// per value the question asks: its `label` where it differs from the
@@ -585,5 +786,81 @@ mod tests {
         assert!(dce.keywords.iter().any(|k| k == "dce"));
         let dsc = &t.values[t.value_index("Perfusion-EPI").unwrap()];
         assert!(!dsc.keywords.iter().any(|k| k == "dce"));
+    }
+
+    #[test]
+    fn a_stack_s_answer_breaks_an_exclusion_and_an_implication() {
+        let pack = mri();
+        let c = class_constraints(&pack);
+        let decided = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+            let mut m: BTreeMap<String, Vec<String>> = pack
+                .axes
+                .iter()
+                .filter(|a| a.phase == crate::rules::AxisPhase::Class)
+                .map(|a| (a.name.clone(), Vec::new()))
+                .collect();
+            for (a, vs) in pairs {
+                m.insert(a.to_string(), vs.iter().map(|v| v.to_string()).collect());
+            }
+            m
+        };
+        let b = broken(
+            &pack,
+            &c,
+            &decided(&[("technique", &["TSE"]), ("base", &["T2starw"])]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(
+            (b[0].kind, b[0].id.as_str()),
+            ("excluded", "t2star-not-spin-echo")
+        );
+        assert_eq!(b[0].sources, ["P8", "IM2"]);
+        assert!(
+            b[0].axes.contains(&"base".to_string()) && b[0].axes.contains(&"technique".to_string())
+        );
+        // an implication whose value the answer contradicts
+        let b = broken(
+            &pack,
+            &c,
+            &decided(&[("technique", &["MPRAGE"]), ("base", &["T2w"])]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            (b[0].kind, b[0].id.as_str()),
+            ("implied", "base/technique:MPRAGE")
+        );
+        assert!(b[0].why.contains("T1w"), "{b:?}");
+        // the same set's own order is no break: base decided by base itself
+        let mut by = BTreeMap::new();
+        by.insert("base".to_string(), "base".to_string());
+        assert!(
+            broken(
+                &pack,
+                &c,
+                &decided(&[("technique", &["MPRAGE"]), ("base", &["T2w"])]),
+                &by
+            )
+            .is_empty()
+        );
+        // a single-valued axis left empty says nothing; a legal answer breaks nothing
+        assert!(
+            broken(
+                &pack,
+                &c,
+                &decided(&[("technique", &["MPRAGE"])]),
+                &BTreeMap::new()
+            )
+            .is_empty()
+        );
+        assert!(
+            broken(
+                &pack,
+                &c,
+                &decided(&[("technique", &["GRE"]), ("base", &["T2starw"])]),
+                &BTreeMap::new()
+            )
+            .is_empty()
+        );
     }
 }

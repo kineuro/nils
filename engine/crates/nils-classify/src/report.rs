@@ -129,6 +129,15 @@ pub struct Classified {
     /// the batch's `diagnostic` table with samples.
     #[serde(default)]
     pub diagnostics: std::collections::BTreeMap<String, i64>,
+    /// Record 48: the pack's own constraints the rules' answers broke, as
+    /// `excluded:<id>` or `implied:<set/rule>`, a stack counted once per
+    /// constraint. Each raised a `classify.excluded` or `classify.implied`
+    /// item, and the axes it involves were written below every threshold.
+    #[serde(default)]
+    pub broken: std::collections::BTreeMap<String, i64>,
+    /// The stacks whose answer broke at least one of them.
+    #[serde(default)]
+    pub broken_stacks: i64,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -154,6 +163,8 @@ impl Classified {
             review_groups: 0,
             at_threshold: std::collections::BTreeMap::new(),
             diagnostics: std::collections::BTreeMap::new(),
+            broken: std::collections::BTreeMap::new(),
+            broken_stacks: 0,
             seconds: 0.0,
             peak_rss: None,
             cancelled: false,
@@ -270,6 +281,19 @@ impl fmt::Display for Classified {
             for (method, n) in how.iter().take(5) {
                 writeln!(f, "    {method:<24} {n:>8}")?;
             }
+        }
+        if self.broken_stacks > 0 {
+            let line: Vec<String> = self
+                .broken
+                .iter()
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect();
+            writeln!(
+                f,
+                "  against the pack {:>12}   stacks whose answer breaks its own constraints: {}",
+                self.broken_stacks,
+                line.join(", ")
+            )?;
         }
         if !self.diagnostics.is_empty() {
             let line: Vec<String> = self
