@@ -1886,6 +1886,14 @@ fn main() -> ExitCode {
         eprintln!("nils: --unsealed-access names the reason it is read, which the audit keeps");
         return ExitCode::from(USAGE);
     }
+    if cli.unsealed_access.is_some()
+        && matches!(cli.command, Command::Serve(_) | Command::Supervise { .. })
+    {
+        eprintln!(
+            "nils: --unsealed-access is the keyboard's, for one command; a server reads sealed stacks only for a token that holds sealed:see"
+        );
+        return ExitCode::from(USAGE);
+    }
     sealed::set_keyboard(cli.unsealed_access.clone());
     let home = Home::resolve(cli.registry.as_deref());
     // record 48, D1 of the move: every use of --unsealed-access is audited
@@ -1894,6 +1902,18 @@ fn main() -> ExitCode {
         && let Ok(mut registry) = open(&home)
     {
         sealed::audit_keyboard(&mut registry);
+    }
+    // the keyboard alone may write a decision on a sealed stack, with its
+    // reason audited above; a server, whatever it was started with, and a
+    // queued job never
+    if cli.unsealed_access.is_some()
+        && std::env::var("NILS_JOB_DETAIL").is_err()
+        && !matches!(
+            cli.command,
+            Command::Serve(_) | Command::Supervise { .. } | Command::Setup(_)
+        )
+    {
+        nils_registry::labels::allow_sealed_writes();
     }
     let outcome = match cli.command {
         Command::Init(args) => init(&home, args),
@@ -5106,6 +5126,12 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     actor_kind(),
                 )
                 .map_err(|e| fail(e.to_string()))?;
+                if done.left_out_sealed > 0 {
+                    eprintln!(
+                        "nils review commit: {} stack(s) of a sealed certification sample left out (record 48)",
+                        done.left_out_sealed
+                    );
+                }
                 println!(
                     "committed {} decision(s), {} item(s) accepted; {} left staged{}",
                     done.decisions.len(),
@@ -5134,6 +5160,12 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             let done =
                 nils_registry::review::commit_as(&mut registry, id, anyway, &actor(), actor_kind())
                     .map_err(|e| fail(e.to_string()))?;
+            if done.left_out_sealed > 0 {
+                eprintln!(
+                    "nils review commit: {} decision(s) reaching a sealed certification sample left staged (record 48)",
+                    done.left_out_sealed
+                );
+            }
             println!(
                 "committed {} decision(s), {} item(s) accepted",
                 done.decisions.len(),

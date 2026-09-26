@@ -3212,9 +3212,10 @@ fn routed(
                 author_of(caller).0,
             )
             .map_err(review_err)?;
-            Ok(Reply::ok(
-                serde_json::json!({ "committed": done.decisions, "items": done.items }),
-            ))
+            Ok(Reply::ok(serde_json::json!({
+                "committed": done.decisions, "items": done.items,
+                "left_out_sealed": done.left_out_sealed,
+            })))
         }
         ["api", "decisions", _, "withdraw"] if post => {
             let id = id_at(2)?;

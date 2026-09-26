@@ -444,6 +444,25 @@ fn sweep(dsn: Option<&str>) {
             ADMIN,
         );
     }
+    // decisions staged, not yet in force, on an open stack and a sealed one
+    let mut staged = BTreeMap::new();
+    for s in [ids[2], ids[3]] {
+        let done = server.ok(
+            "POST",
+            &format!("/api/review/{}/apply", asked[&s]),
+            Some(json!({"values": answer["values"], "stage": true})),
+            ADMIN,
+        );
+        let base = done["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["axis"] == "base")
+            .unwrap()["decision"]
+            .as_i64()
+            .unwrap();
+        staged.insert(s, base);
+    }
     let review_item = Some(asked[&ids[3]]);
     let decided = server.ok(
         "POST",
@@ -828,7 +847,107 @@ fn sweep(dsn: Option<&str>) {
     assert!(why["suggested"].is_null(), "{why}");
     assert!(why["header"].is_object(), "{why}");
 
+    // ------------------------------------------------ no decision is written
+    // an explicit sealed stack or decision is refused, even to the
+    // certificate's grant, which reads and never writes
+    for token in [ADMIN, CERT] {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/decisions/commit",
+            Some(json!({"stacks": [ids[3]]})),
+            token,
+        );
+        assert_eq!(status, 409, "{doc}");
+        let (status, doc) = server.call(
+            "POST",
+            &format!("/api/decisions/{}/commit", staged[&ids[3]]),
+            Some(json!({})),
+            token,
+        );
+        assert_eq!(status, 409, "{doc}");
+        let (status, doc) = server.call(
+            "POST",
+            "/api/picks",
+            Some(json!({"role": "t1w", "stacks": [ids[3]], "why": "the sharpest"})),
+            token,
+        );
+        assert_eq!(status, 409, "{doc}");
+        assert!(doc.to_string().contains("sealed"), "{doc}");
+    }
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/review/{}/apply", asked[&ids[3]]),
+        Some(answer.clone()),
+        CERT,
+    );
+    assert_eq!(status, 409, "{doc}");
+    // a filter that reaches a sealed stack leaves it out and says so
+    let part = server.ok(
+        "POST",
+        "/api/decisions/commit",
+        Some(json!({"axis": "base", "anyway": true})),
+        ADMIN,
+    );
+    assert_eq!(part["left_out_sealed"].as_i64(), Some(1), "{part}");
+    assert_eq!(
+        part["committed"].as_array().unwrap(),
+        &vec![json!(staged[&ids[2]])],
+        "{part}"
+    );
+    // a campaign closing into decisions writes none on a sealed stack
+    server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "gold",
+            "question": {"kind": "axis", "axis": "base"},
+            "source": {"selection": "sealed@1"},
+            "raters_per_item": 1,
+            "raters": ["rita@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "decision",
+        })),
+        ADMIN,
+    );
+    let claimed = server.ok("POST", "/api/campaigns/gold/claim", Some(json!({})), RATER);
+    let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/gold/assignments/{assignment}/answer"),
+        Some(json!({"value": "T1w"})),
+        RATER,
+    );
+    let closed = server.ok("POST", "/api/campaigns/gold/close", None, ADMIN);
+    assert_eq!(closed["left_out_sealed"].as_i64(), Some(1), "{closed}");
+    assert!(
+        closed["decisions"].as_array().unwrap().is_empty(),
+        "{closed}"
+    );
+
     // ------------------------------------------------ the keyboard
+    // the commit by filter refuses a sealed stack, unless --unsealed-access
+    // says why, which the audit keeps
+    let stack3 = ids[3].to_string();
+    let (done, _, stderr) = cli(
+        &home,
+        &["review", "commit", "--stacks", &stack3, "--anyway"],
+    );
+    assert!(!done, "the keyboard committed on a sealed stack");
+    assert!(stderr.contains("sealed"), "{stderr}");
+    let (done, stdout, stderr) = cli(
+        &home,
+        &[
+            "review",
+            "commit",
+            "--stacks",
+            &stack3,
+            "--anyway",
+            "--unsealed-access",
+            "committing the reference after the certificate's reading",
+        ],
+    );
+    assert!(done, "{stderr}");
+    assert!(stdout.contains("committed 3 decision"), "{stdout}");
     let (done, _, stderr) = cli(&home, &["explain", &stack.to_string()]);
     assert!(!done, "the keyboard explained a sealed stack");
     assert!(stderr.contains("--unsealed-access"), "{stderr}");
@@ -905,4 +1024,11 @@ fn sweep(dsn: Option<&str>) {
         text.contains("computing the certificate of the test sample"),
         "{text}"
     );
+    assert!(
+        text.contains("committing the reference after the certificate's reading"),
+        "{text}"
+    );
+    // a server takes no --unsealed-access
+    let (done, _, stderr) = cli(&home, &["serve", "--unsealed-access", "a server"]);
+    assert!(!done && stderr.contains("keyboard"), "{stderr}");
 }

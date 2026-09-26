@@ -1026,10 +1026,10 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
         "SeriesInstanceUID\tbody_part\tdate\n1.2.3.A.1\tBrain\t2024-05-06\n9.9.9\tSpine\t2024-05-07\n",
     )
     .unwrap();
-    let imported: Value = serde_json::from_str(&cli(
-        &home,
-        "cleo@lab",
-        &[
+    // record 48, D1 of the move: every stack is sealed by now, and no
+    // decision is written on one without --unsealed-access
+    let import = |extra: &[&str]| -> Value {
+        let mut args = vec![
             "labels",
             "import-v0",
             "--tsv",
@@ -1037,9 +1037,14 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
             "--pack-dir",
             pack_dir,
             "--json",
-        ],
-    ))
-    .unwrap();
+        ];
+        args.extend_from_slice(extra);
+        serde_json::from_str(&cli(&home, "cleo@lab", &args)).unwrap()
+    };
+    let withheld = import(&[]);
+    assert_eq!(withheld["left_out_sealed"], 1, "{withheld}");
+    assert_eq!(withheld["decisions"], 0, "{withheld}");
+    let imported = import(&["--unsealed-access", "v0's labels for the test"]);
     assert_eq!(imported["series_matched"], 1, "{imported}");
     assert_eq!(imported["series_unmatched"], 1, "{imported}");
     assert_eq!(imported["held"], 1, "{imported}");

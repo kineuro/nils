@@ -5616,6 +5616,10 @@ pub struct Closed {
     /// model closed (record 42 R6).
     pub staged: bool,
     pub agreement: Value,
+    /// Record 48, D1 of the move: items of a stack of a sample sealed now,
+    /// which close into no decision and no pick until a certificate
+    /// unseals it.
+    pub left_out_sealed: i64,
 }
 
 impl Closed {
@@ -5629,6 +5633,7 @@ impl Closed {
             "skipped": self.skipped.iter().map(|(i, why)| json!({"item": i, "why": why})).collect::<Vec<_>>(),
             "staged": self.staged,
             "agreement": self.agreement,
+            "left_out_sealed": self.left_out_sealed,
         })
     }
 }
@@ -5831,6 +5836,24 @@ fn close_items(
                 ),
             ));
             continue;
+        }
+        // record 48, D1 of the move: an item whose stack, or a pick of
+        // whose stacks, is of a sample sealed now closes into no decision
+        // and no pick; it is left as it was and counted
+        if matches!(c.closes_into.as_str(), "decision" | "stage" | "pick") {
+            let mut touches: Vec<i64> = it.stack_id.into_iter().collect();
+            if matches!(question, Question::Pick { .. })
+                && let Some(Ok(picked)) = it.outcome["value"].as_str().map(pick_stacks)
+            {
+                touches.extend(picked);
+            }
+            let sealed = crate::labels::sealed_for_writes(registry.store(), &touches)
+                .map_err(|e| invalid(e.to_string()))?;
+            if !sealed.is_empty() {
+                out.left_out_sealed += 1;
+                out.unresolved += 1;
+                continue;
+            }
         }
         match c.closes_into.as_str() {
             "decision" | "stage" if matches!(question, Question::Axes { .. }) => {

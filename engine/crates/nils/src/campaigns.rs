@@ -1994,7 +1994,7 @@ pub(crate) fn route(
                 })?;
                 Ok(Reply::ok(json!({
                     "committed": done.decisions, "items": done.items, "left": done.left,
-                    "split": done.split,
+                    "split": done.split, "left_out_sealed": done.left_out_sealed,
                 })))
             }
             _ => Err(Reply::error(
