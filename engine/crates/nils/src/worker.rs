@@ -191,6 +191,19 @@ pub(crate) fn run(
             )
             .env("NILS_JOB_DETAIL", detail.name())
             .env("NILS_JOB_RAW", raw)
+            // record 48, D1 of the move: the verb reads sealed stacks only
+            // when the caller that queued it held the certificate's grant
+            .env(
+                crate::sealed::JOB_VAR,
+                if next.args["grants"]
+                    .as_array()
+                    .is_some_and(|g| g.iter().any(|g| g == crate::grants::UNSEALED))
+                {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             .env("NILS_INGEST_ROOTS", &roots_env)
             .env(
                 nils_registry::actor::VAR,

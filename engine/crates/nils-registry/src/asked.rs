@@ -178,6 +178,15 @@ pub fn raise(
     job_id: Option<i64>,
 ) -> Result<i64, crate::review::Error> {
     check(evidence, constraints).map_err(crate::review::Error::Refused)?;
+    // record 48, D1 of the move: a stack of a sample sealed now never
+    // becomes a review item, System 1's question least of all
+    let (sealed, _) = crate::labels::sealed_now(store, &[stack], &[])
+        .map_err(|e| crate::review::Error::Refused(e.to_string()))?;
+    if !sealed.is_empty() {
+        return Err(crate::review::Error::Refused(format!(
+            "stack {stack} is of a sample sealed for certification, and a sealed stack never becomes a review item (record 48)"
+        )));
+    }
     let d = store.dialect();
     let now = now_iso();
     let supersede = format!(

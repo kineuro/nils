@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::Value;
 
 /// The vocabulary, sorted by code point, as `grants.schema.json` lists it.
-pub(crate) const GRANTS: [&str; 28] = [
+pub(crate) const GRANTS: [&str; 29] = [
     "assistant-settings:see",
     "assistant-settings:work",
     "assistant:use",
@@ -48,10 +48,21 @@ pub(crate) const GRANTS: [&str; 28] = [
     "release:work",
     "review:see",
     "review:work",
+    // record 48, D1 of the move: reading what a system said of a stack of
+    // a sample sealed now, for computing a certificate; in no ladder set
+    // and not in everything, so only a named token or a binding that names
+    // it gives it
+    "sealed:see",
 ];
 
 /// The grant a ceiling always keeps: the assistant checks it before any call.
 const ASSISTANT: &str = "assistant:use";
+
+/// Record 48, D1 of the move: the one grant that reads what a system said of
+/// a stack of a sample sealed now. No ladder set holds it, admin's neither,
+/// and `everything` leaves it out, so no person holds it by a role while
+/// they read; the certificate's computation runs under a token that names it.
+pub(crate) const UNSEALED: &str = "sealed:see";
 
 /// What a reader holds; a reviewer holds more, an operator more again.
 const READER: &[&str] = &["data:see", "query:see", "query:work"];
@@ -168,7 +179,11 @@ impl Step {
             Step::Reader => READER.to_vec(),
             Step::Reviewer => [READER, REVIEWER].concat(),
             Step::Operator => [READER, REVIEWER, OPERATOR].concat(),
-            Step::Admin => GRANTS.iter().copied().filter(|g| *g != ASSISTANT).collect(),
+            Step::Admin => GRANTS
+                .iter()
+                .copied()
+                .filter(|g| *g != ASSISTANT && *g != UNSEALED)
+                .collect(),
         };
         let mut access = Access {
             detail: self.detail(),
@@ -189,14 +204,14 @@ pub(crate) struct Access {
 }
 
 impl Access {
-    /// Every grant and detail sensitive: what `--auth off` and a named token
-    /// with no list hold.
+    /// Every grant but [`UNSEALED`] and detail sensitive: what `--auth off`
+    /// and a named token with no list hold.
     pub(crate) fn everything() -> Access {
         let mut access = Access {
             detail: Detail::Sensitive,
             ..Access::default()
         };
-        for g in GRANTS {
+        for g in GRANTS.iter().filter(|g| **g != UNSEALED) {
             access.give(g);
         }
         access

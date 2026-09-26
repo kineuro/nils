@@ -177,6 +177,9 @@ pub struct Group {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ingested {
     pub groups: Vec<Group>,
+    /// Record 48, D1 of the move: proposals left out because their stack
+    /// is of a sample sealed now, which never becomes a review item.
+    pub sealed: i64,
     /// Members under the groups.
     pub members: i64,
     /// Members of staged groups.
@@ -208,6 +211,7 @@ impl Ingested {
             "staged_members": self.staged_members,
             "staged_decisions": self.groups.iter().filter(|g| g.staged.is_some()).count(),
             "decided": self.decided,
+            "sealed": self.sealed,
             "not_staged": self.not_staged,
             "superseded": self.superseded,
             "withdrawn": self.withdrawn,
@@ -523,11 +527,26 @@ pub fn ingest(
             other => Error::Refused(other.to_string()),
         })?;
     }
+    // record 48, D1 of the move: a model's answer on a stack of a sample
+    // sealed now is neither a review item nor a decision
+    let proposed: Vec<i64> = resolved
+        .iter()
+        .map(|(i, _)| proposals[*i].stack_id)
+        .collect();
+    let (sealed, _) =
+        labels::sealed_now(registry.store(), &proposed, &[]).map_err(|e| match e {
+            labels::Error::Store(s) => Error::Store(s),
+            other => Error::Refused(other.to_string()),
+        })?;
     // (axis, model, value, band) -> members
     let mut groups: BTreeMap<(String, i64, String, String), Gathered> = BTreeMap::new();
     let mut models: BTreeMap<i64, Model> = BTreeMap::new();
     for (i, m) in resolved {
         let p = &proposals[i];
+        if sealed.contains(&p.stack_id) {
+            out.sealed += 1;
+            continue;
+        }
         if decided
             .get(&p.axis)
             .is_some_and(|s| s.contains(&p.stack_id))

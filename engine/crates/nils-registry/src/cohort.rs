@@ -849,6 +849,22 @@ pub fn items_about(store: &mut Store, status: Option<&str>) -> Result<Vec<OpenIt
     let series: Vec<i64> = series.into_iter().collect();
     let by_stack = subjects_of_stacks(store, &stacks)?;
     let by_series = subjects_of_series(store, &series)?;
+    // record 48, D1 of the move: an item about a stack of a sample sealed
+    // now, or a group of nothing else, is not counted as there
+    let (sealed, _) = crate::labels::sealed_now(store, &stacks, &[])
+        .map_err(|e| StoreError::Message(e.to_string()))?;
+    let raw: Vec<Raw> = raw
+        .into_iter()
+        .filter(|r| {
+            let own = r.reference["stack_id"].as_i64();
+            let group = members.get(&r.id);
+            let about: Vec<i64> = own
+                .into_iter()
+                .chain(group.into_iter().flatten().copied())
+                .collect();
+            about.is_empty() || !about.iter().all(|k| sealed.contains(k))
+        })
+        .collect();
     Ok(raw
         .into_iter()
         .map(|r| {

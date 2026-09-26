@@ -617,6 +617,18 @@ fn apply_as(
             (s, r, None)
         }
     };
+    // record 48, D1 of the move: no decision is written on a stack of a
+    // sample sealed now, wherever it would reach
+    let reach = reached_keys(store, &[(0, scope.as_str(), reference.as_str())])?
+        .remove(&0)
+        .unwrap_or_default();
+    let sealed = sealed_writes(store, &reach)?;
+    if !sealed.is_empty() {
+        return Err(sealed_refusal(
+            &format!("a decision on review item {}", it.id),
+            &sealed,
+        ));
+    }
     let now = now_iso();
     let d = store.dialect();
     // C15: a person over an agent over a model. A decision in force on this
@@ -904,6 +916,9 @@ fn close_item(
 pub struct Committed {
     pub decisions: Vec<i64>,
     pub items: i64,
+    /// Record 48, D1 of the move: staged decisions left staged because they
+    /// reach a stack of a sample sealed now.
+    pub left_out_sealed: i64,
 }
 
 /// Commit staged decisions: the one named, or every one. A staged
@@ -953,6 +968,38 @@ pub fn commit_as(
             ))
         })
         .collect::<Result<_, StoreError>>()?;
+    // record 48, D1 of the move: a staged decision that reaches a stack of
+    // a sample sealed now is not put in force: one named is refused, and
+    // commit --all leaves it staged and says how many
+    let keys = decision_keys(
+        store,
+        &rows.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+    )?;
+    let keyed: Vec<(i64, &str, &str)> = keys
+        .iter()
+        .map(|(id, s, r)| (*id, s.as_str(), r.as_str()))
+        .collect();
+    let reach = reached_keys(store, &keyed)?;
+    let every: Vec<i64> = reach.values().flatten().copied().collect();
+    let sealed = sealed_writes(store, &every)?;
+    let mut left_out_sealed = 0i64;
+    let rows: Vec<(i64, Option<i64>, String)> = rows
+        .into_iter()
+        .filter(|(id, _, _)| {
+            let hits = reach
+                .get(id)
+                .is_some_and(|k| k.iter().any(|s| sealed.contains(s)));
+            if hits {
+                left_out_sealed += 1;
+            }
+            !hits
+        })
+        .collect();
+    if left_out_sealed > 0
+        && let Some(id) = decision
+    {
+        return Err(sealed_refusal(&format!("decision {id}"), &sealed));
+    }
     let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
     only_a_person_commits(store, &ids, kind)?;
     let staged: Vec<(i64, Option<i64>)> = rows.into_iter().map(|(id, e, _)| (id, e)).collect();
@@ -979,7 +1026,10 @@ pub fn commit_as(
         )));
     }
     let now = now_iso();
-    let mut out = Committed::default();
+    let mut out = Committed {
+        left_out_sealed,
+        ..Committed::default()
+    };
     let ids: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
     store.begin()?;
     match put_in_force(store, &ids, who, &now) {
@@ -1029,6 +1079,22 @@ fn put_in_force(store: &mut Store, ids: &[i64], who: &str, now: &str) -> Result<
         items += store.execute(&sql, &[])? as i64;
     }
     Ok(items)
+}
+
+/// The scope and ref of each of these decisions.
+fn decision_keys(store: &mut Store, ids: &[i64]) -> Result<Vec<(i64, String, String)>, StoreError> {
+    let mut out = Vec::new();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT id, scope, ref FROM {} WHERE id IN ({})",
+            store.qualified("decision"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            out.push((r.int(0)?, r.text(1)?.to_string(), r.text(2)?.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// Ids as a list inside `IN (...)`: integers only, so nothing a caller said
@@ -1205,6 +1271,9 @@ pub struct CommittedPart {
     /// was written as decisions of those stacks by the same author and put
     /// in force, and the group's decision stays staged for the rest.
     pub split: Vec<i64>,
+    /// Record 48, D1 of the move: the stacks of a sample sealed now the
+    /// filter reached and left out; nothing is put in force on them.
+    pub left_out_sealed: i64,
 }
 
 /// A value as a set of values: a multi-valued axis is stored joined by
@@ -1242,11 +1311,23 @@ struct Staged {
 /// The stacks each decision reaches: its own, its group's members, its
 /// series' or its subject's; none for a decision about a machine.
 fn reached(store: &mut Store, staged: &[&Staged]) -> Result<BTreeMap<i64, Vec<i64>>, StoreError> {
+    let keys: Vec<(i64, &str, &str)> = staged
+        .iter()
+        .map(|s| (s.id, s.scope.as_str(), s.reference.as_str()))
+        .collect();
+    reached_keys(store, &keys)
+}
+
+/// [`reached`], by (decision id, scope, ref).
+fn reached_keys(
+    store: &mut Store,
+    staged: &[(i64, &str, &str)],
+) -> Result<BTreeMap<i64, Vec<i64>>, StoreError> {
     let mut out: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     let groups: Vec<i64> = staged
         .iter()
-        .filter(|s| s.scope == "group")
-        .filter_map(|s| s.reference.parse().ok())
+        .filter(|s| s.1 == "group")
+        .filter_map(|s| s.2.parse().ok())
         .collect();
     let mut members: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     for chunk in groups.chunks(500) {
@@ -1259,9 +1340,7 @@ fn reached(store: &mut Store, staged: &[&Staged]) -> Result<BTreeMap<i64, Vec<i6
             members.entry(r.int(0)?).or_default().push(r.int(1)?);
         }
     }
-    let wide = staged
-        .iter()
-        .any(|s| s.scope == "series" || s.scope == "subject");
+    let wide = staged.iter().any(|s| s.1 == "series" || s.1 == "subject");
     let mut by_series: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     let mut by_subject: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     if wide {
@@ -1275,9 +1354,9 @@ fn reached(store: &mut Store, staged: &[&Staged]) -> Result<BTreeMap<i64, Vec<i6
             by_subject.entry(r.int(2)?).or_default().push(r.int(0)?);
         }
     }
-    for s in staged {
-        let id: Option<i64> = s.reference.parse().ok();
-        let stacks = match s.scope.as_str() {
+    for &(decision, scope, reference) in staged {
+        let id: Option<i64> = reference.parse().ok();
+        let stacks = match scope {
             "stack" => id.into_iter().collect(),
             "group" => id
                 .and_then(|i| members.get(&i).cloned())
@@ -1290,9 +1369,31 @@ fn reached(store: &mut Store, staged: &[&Staged]) -> Result<BTreeMap<i64, Vec<i6
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        out.insert(s.id, stacks);
+        out.insert(decision, stacks);
     }
     Ok(out)
+}
+
+/// Record 48, D1 of the move: of these stacks, the ones no decision may be
+/// written on now, being of a sample sealed now.
+fn sealed_writes(store: &mut Store, stacks: &[i64]) -> Result<BTreeSet<i64>, Error> {
+    crate::labels::sealed_for_writes(store, stacks).map_err(|e| match e {
+        crate::labels::Error::Store(s) => Error::Store(s),
+        other => refused(other.to_string()),
+    })
+}
+
+/// The refusal of a decision that would reach a sealed stack.
+fn sealed_refusal(what: &str, sealed: &BTreeSet<i64>) -> Error {
+    refused(format!(
+        "{what} reaches {} stack(s) of a sample sealed for certification ({}); no decision is written on a sealed stack until a certificate unseals it (record 48)",
+        sealed.len(),
+        sealed
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 /// What an axis holds now on each of `stacks`: the decision in force,
@@ -1591,9 +1692,26 @@ pub fn commit_where(
                     .is_none_or(|t| filter.set_of(s.value.as_deref()) == *t)
         })
         .collect();
-    let per_stack = from.is_some() || wanted.is_some();
+    // record 48, D1 of the move: a stack of a sample sealed now takes no
+    // decision; one the filter names is refused, one it reaches is left out
+    if let Some(w) = &wanted {
+        let named_sealed = sealed_writes(store, &w.iter().copied().collect::<Vec<_>>())?;
+        if !named_sealed.is_empty() {
+            return Err(sealed_refusal("the filter's stacks", &named_sealed));
+        }
+    }
+    let all_reach = reached(store, &named)?;
+    let reached_stacks: Vec<i64> = all_reach
+        .values()
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let sealed = sealed_writes(store, &reached_stacks)?;
+    let per_stack = from.is_some() || wanted.is_some() || !sealed.is_empty();
     let reach = if per_stack {
-        reached(store, &named)?
+        all_reach
     } else {
         BTreeMap::new()
     };
@@ -1611,7 +1729,8 @@ pub fn commit_where(
         _ => BTreeMap::new(),
     };
     let passes = |stack: &i64| -> bool {
-        wanted.as_ref().is_none_or(|w| w.contains(stack))
+        !sealed.contains(stack)
+            && wanted.as_ref().is_none_or(|w| w.contains(stack))
             && from.as_ref().is_none_or(|f| {
                 now_holds
                     .get(stack)
@@ -1633,7 +1752,10 @@ pub fn commit_where(
             parts.push((s, taking));
         }
     }
-    let mut out = CommittedPart::default();
+    let mut out = CommittedPart {
+        left_out_sealed: sealed.len() as i64,
+        ..CommittedPart::default()
+    };
     let touched: Vec<i64> = whole
         .iter()
         .map(|s| s.id)
@@ -1710,6 +1832,7 @@ pub fn commit_where(
             action: Action::Decision,
             scope: serde_json::json!({
                 "committed": out.decisions, "items": out.items, "left": out.left, "split": out.split,
+                "left_out_sealed": out.left_out_sealed,
             }),
             policy: None,
             job_id: None,

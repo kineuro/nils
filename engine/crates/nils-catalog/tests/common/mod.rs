@@ -180,6 +180,7 @@ pub fn run_ask(l: &mut Lab, ask: Ask) -> (Compiled, Answer) {
         scheme_digest: Scheme::default().digest(),
         after: None,
         limit: None,
+        withhold_sealed: false,
     };
     let compiled = compile(&prepared.ask, &prepared.validated, &ctx)
         .unwrap_or_else(|e| panic!("{}: {e}", l.name));

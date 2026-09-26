@@ -1803,7 +1803,14 @@ pub(crate) fn route(
                         },
                     )
                     .map_err(labels_err)?;
-                    (rows, 0)
+                    // record 48, D1 of the move: a decision on a stack of a
+                    // sample sealed now is withheld from every caller but
+                    // the certificate's
+                    if crate::sealed::reads(&caller.access) {
+                        (rows, 0)
+                    } else {
+                        labels::drop_sealed(registry.store(), rows).map_err(labels_err)?
+                    }
                 };
                 let what = if axis.is_empty() {
                     "training".to_string()
@@ -1834,7 +1841,7 @@ pub(crate) fn route(
                 let set = write_set(registry, &dir, true, &rows, &meta)
                     .map_err(|(status, e)| Reply::error(status, e))?;
                 let mut v = set_json(&set, None);
-                if for_training {
+                if for_training || left_out > 0 {
                     v["left_out_sealed"] = json!(left_out);
                 }
                 Ok(Reply::created(v))
@@ -1866,10 +1873,30 @@ pub(crate) fn route(
                         return Ok(Reply::ok(set_json(&set, None)));
                     }
                 }
+                // record 48, D1 of the move: a set's labels of a stack of a
+                // sample sealed now are withheld, a campaign's answers aside
+                // (a person's, as blind as the answers door above)
+                let answers = set.kind == Of::Answers.name() || set.kind == Of::Outcomes.name();
+                let reads = answers || crate::sealed::reads(&caller.access);
+                let mut withheld = 0usize;
+                let mut tsv = |text: String| -> Result<String, Reply> {
+                    if reads {
+                        return Ok(text);
+                    }
+                    let (kept, n) = withhold_tsv(registry.store(), &text)?;
+                    withheld = n;
+                    Ok(kept)
+                };
+                let text = set
+                    .path
+                    .as_deref()
+                    .and_then(|p| std::fs::read_to_string(Path::new(p).join("labels.tsv")).ok())
+                    .map(&mut tsv)
+                    .transpose()?;
                 let files = set.path.as_deref().map(|p| {
                     let dir = Path::new(p);
                     json!({
-                        "labels.tsv": std::fs::read_to_string(dir.join("labels.tsv")).ok(),
+                        "labels.tsv": text,
                         "provenance.json": std::fs::read_to_string(dir.join("provenance.json"))
                             .ok()
                             .and_then(|t| serde_json::from_str::<Value>(&t).ok()),
@@ -1877,6 +1904,9 @@ pub(crate) fn route(
                 });
                 let mut v = set_json(&set, files);
                 training_now(registry.store(), &set, &mut v);
+                if withheld > 0 {
+                    v["withheld_sealed"] = json!(withheld);
+                }
                 Ok(Reply::ok(v))
             }
             ["api", "decisions", "commit"] if post => {
@@ -1964,7 +1994,7 @@ pub(crate) fn route(
                 })?;
                 Ok(Reply::ok(json!({
                     "committed": done.decisions, "items": done.items, "left": done.left,
-                    "split": done.split,
+                    "split": done.split, "left_out_sealed": done.left_out_sealed,
                 })))
             }
             _ => Err(Reply::error(
@@ -1975,30 +2005,21 @@ pub(crate) fn route(
     })())
 }
 
-/// Record 48 R2: whether the caller reads a stack blind: it is of a sample
-/// sealed now, an open campaign asks it, and the caller rates in that
-/// campaign or is neither its adjudicator nor a holder of review:work.
+/// Record 48, D1 of the move: whether the caller reads a stack blind: it is
+/// of a sample sealed now, and the caller does not hold the certificate's
+/// grant. Sealed means sealed on every door, for a rater, an adjudicator,
+/// a reviewer and an admin alike.
 pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result<bool, Reply> {
-    Ok(crate::reader::hidden(
-        store,
-        stack,
-        &caller.principal,
-        caller.access.holds("review:work"),
-    )?)
+    Ok(!blind_among(store, caller, &[stack])?.is_empty())
 }
 
-/// Record 48 R2: the stacks of these a caller reads blind.
+/// Record 48, D1 of the move: the stacks of these a caller reads blind.
 pub(crate) fn blind_among(
     store: &mut Store,
     caller: &Caller,
     stacks: &[i64],
 ) -> Result<std::collections::BTreeSet<i64>, Reply> {
-    Ok(crate::reader::hidden_stacks(
-        store,
-        stacks,
-        &caller.principal,
-        caller.access.holds("review:work"),
-    )?)
+    Ok(crate::sealed::withheld(store, &caller.access, stacks)?)
 }
 
 /// Record 48 R2: a certificate and the unseal are a person's acts; an
@@ -2029,6 +2050,28 @@ fn training_now(store: &mut Store, set: &LabelSet, v: &mut Value) {
     if set.sealed && labels::usable_for_training(store, set.id).is_ok() {
         v["training"] = json!("allowed: its sample was unsealed by a certificate (record 48 R2)");
     }
+}
+
+/// Record 48, D1 of the move: a `labels.tsv` less its lines of a stack of a
+/// sample sealed now, and how many went.
+fn withhold_tsv(store: &mut Store, text: &str) -> Result<(String, usize), Reply> {
+    let stack_of = |line: &str| line.split('\t').next().and_then(|c| c.parse::<i64>().ok());
+    let stacks: Vec<i64> = text.lines().skip(1).filter_map(stack_of).collect();
+    let sealed = crate::sealed::now(store, &stacks)?;
+    if sealed.is_empty() {
+        return Ok((text.to_string(), 0));
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut n = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 && stack_of(line).is_some_and(|k| sealed.contains(&k)) {
+            n += 1;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok((out, n))
 }
 
 /// Record 40 R3: whether a set is sealed is the registry's finding, from
@@ -2552,11 +2595,17 @@ fn freeze_at_door(
         .unwrap_or(Grain::Subject);
     let doc =
         freeze_document(name, saved.version, grain, want).map_err(|m| Reply::error(400, m))?;
+    // record 48, D1 of the move: a frozen selection is a list of keys, the
+    // files' identities, read by the campaign, the seal or the label set it
+    // is frozen for, never shown; the stacks of a sample sealed now are in
+    // it, which is how a sealed sample becomes a reading campaign. Its
+    // handle records that it read them, so no other scope opens it.
+    let keys = caller.reading_sealed();
     let reply = crate::serve::ask_call(
         doors,
         registry,
         ask,
-        caller,
+        &keys,
         "POST",
         "/api/ask/run",
         &HashMap::new(),
@@ -4911,7 +4960,13 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                     },
                 )
                 .map_err(lerr)?;
-                (rows, 0)
+                // record 48, D1 of the move: a decision on a stack of a
+                // sample sealed now is left out without --unsealed-access
+                if crate::sealed::keyboard_reads() {
+                    (rows, 0)
+                } else {
+                    labels::drop_sealed(registry.store(), rows).map_err(lerr)?
+                }
             };
             let what = match (&a.axis, a.for_training) {
                 (Some(axis), _) => axis.clone(),
@@ -4946,7 +5001,7 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
             )
             .map_err(|(_, e)| fail(e))?;
             report_set(&set, a.json);
-            if a.for_training && !a.json {
+            if (a.for_training || left_out > 0) && !a.json {
                 println!("   left out {left_out} label(s) of a sample sealed now");
             }
             Ok(())

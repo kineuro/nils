@@ -2064,6 +2064,7 @@ fn the_ask_and_select_agree_on_how_many_subjects_a_selection_holds() {
             scheme_digest: SessionScheme::default().digest(),
             after: None,
             limit: None,
+            withhold_sealed: false,
         };
         let compiled =
             nils_ask::compile::compile(&prepared.ask, &prepared.validated, &ctx).unwrap();

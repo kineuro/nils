@@ -2447,6 +2447,13 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
     if let Some(m) = &selection.modality {
         wheres.push(format!("se.modality = '{}'", m.replace('\'', "''")));
     }
+    // Record 48, D1 of the move: a stack of a sample sealed now never leaves
+    // in a release, whose names and routes say what the classifier said of
+    // it, until a certificate unseals it.
+    wheres.push(format!(
+        "NOT EXISTS (SELECT 1 FROM {} ss WHERE ss.stack_id = k.id AND ss.unsealed_at IS NULL)",
+        store.qualified("sealed_stack")
+    ));
     let axis = store.qualified("classification_axis");
     // Wave 4a §8: stacks by what the pack says they are. One value per row
     // (§6.1), so equality is equality; the values of one axis are

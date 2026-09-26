@@ -7,7 +7,7 @@
 //! registry. A capped run is flagged truncated and has no hash; a token
 //! with no grant never reaches a door.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nils_ask::affordance::{self, AffordanceError, Setting};
 use nils_ask::ast::{Ask, Grain, SchemeRef};
@@ -83,7 +83,11 @@ impl AskState {
 /// its detail: plain asks; quasi projects quasi identifying fields;
 /// sensitive sees sensitive kinds and may project identifiers.
 fn scope_of(caller: &Caller) -> Scope {
-    scope_of_detail(caller.access.detail)
+    let mut scope = scope_of_detail(caller.access.detail);
+    // record 48, D1 of the move: the certificate's grant alone reads the
+    // stacks of a sample sealed now
+    scope.unsealed = crate::sealed::reads(&caller.access);
+    scope
 }
 
 fn may_project_raw(caller: &Caller) -> bool {
@@ -103,6 +107,7 @@ pub(crate) fn scope_of_detail(detail: Detail) -> Scope {
     Scope {
         federated: false,
         classes,
+        unsealed: false,
     }
 }
 
@@ -155,6 +160,17 @@ pub(crate) fn not_reproducible(
 }
 
 fn handle_within_scope(h: &handle::Handle, scope: &Scope, id: i64) -> Result<(), Reply> {
+    // record 48, D1 of the move: a handle that read the stacks of a sample
+    // sealed now, or was answered before they were withheld, is opened only
+    // by a scope that reads them
+    if !scope.unsealed && h.suppression["sealed"] != "withheld" {
+        return Err(Reply::error(
+            403,
+            format!(
+                "handle {id} was answered with the stacks of a sealed certification sample in it (record 48); run its question again"
+            ),
+        ));
+    }
     let classes: BTreeSet<Class> =
         serde_json::from_value(h.suppression["classes"].clone()).unwrap_or_default();
     let beyond: Vec<String> = classes
@@ -178,6 +194,60 @@ fn handle_within_scope(h: &handle::Handle, scope: &Scope, id: i64) -> Result<(),
             ),
         ))
     }
+}
+
+/// Record 48, D1 of the move: a handle's page as a scope that does not read
+/// sealed stacks reads it: a row of a stack (or an instance of one) sealed
+/// since the handle was answered is left out. Answers how many were.
+pub(crate) fn withhold_rows(
+    store: &mut Store,
+    h: &handle::Handle,
+    scope: &Scope,
+    rows: &mut Vec<Vec<Value>>,
+) -> Result<usize, Reply> {
+    // a page of keyed rows alone: a count or a group's row is no stack's
+    if scope.unsealed
+        || rows.is_empty()
+        || h.columns.first().map(|c| c.name.as_str()) != Some("_key")
+    {
+        return Ok(0);
+    }
+    let keys: Vec<i64> = rows.iter().filter_map(|r| r.first()?.as_i64()).collect();
+    let stack_of: BTreeMap<i64, i64> = match h.grain {
+        Grain::Stack => keys.iter().map(|k| (*k, *k)).collect(),
+        Grain::Instance => {
+            let mut m = BTreeMap::new();
+            for chunk in keys.chunks(500) {
+                let list = chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT id, stack_id FROM {} WHERE id IN ({list})",
+                    store.qualified("instance")
+                );
+                for r in store.query(&sql, &[])? {
+                    m.insert(r.int(0)?, r.int(1)?);
+                }
+            }
+            m
+        }
+        _ => return Ok(0),
+    };
+    let stacks: Vec<i64> = stack_of.values().copied().collect();
+    let sealed = crate::sealed::now(store, &stacks)?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    let before = rows.len();
+    rows.retain(|r| {
+        !r.first()
+            .and_then(Value::as_i64)
+            .and_then(|k| stack_of.get(&k))
+            .is_some_and(|s| sealed.contains(s))
+    });
+    Ok(before - rows.len())
 }
 
 fn scheme_of(registry: &mut Registry, ask: &Ask) -> Result<Scheme, Reply> {
@@ -532,9 +602,10 @@ fn answer(
                 });
                 let pages = handle::page_count(registry.store(), h.id)
                     .map_err(|e| Reply::error(500, e.to_string()))?;
-                let rows = handle::page(registry.store(), h.id, 0)
+                let mut rows = handle::page(registry.store(), h.id, 0)
                     .map_err(|e| Reply::error(500, e.to_string()))?
                     .unwrap_or_default();
+                withhold_rows(registry.store(), &h, &scope, &mut rows)?;
                 handle::touch(registry.store(), h.id)
                     .map_err(|e| Reply::error(500, e.to_string()))?;
                 let page_rows = caps.page_rows.max(1) as usize;
@@ -1392,9 +1463,10 @@ fn answer(
             }
             let pages = handle::page_count(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?;
-            let rows = handle::page(registry.store(), id, page)
+            let mut rows = handle::page(registry.store(), id, page)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("handle {id} has {pages} pages")))?;
+            let withheld = withhold_rows(registry.store(), &h, &scope, &mut rows)?;
             // Wave 4c §6.1: every page read is audited, not only a reveal.
             let epoch = registry.meta().epoch;
             let columns: Vec<String> = h.columns.iter().map(|c| c.name.clone()).collect();
@@ -1408,9 +1480,11 @@ fn answer(
                 epoch,
             )
             .map_err(|e| Reply::error(500, e.to_string()))?;
-            Ok(Reply::ok(
-                json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "rows": rows}),
-            ))
+            let mut v = json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "rows": rows});
+            if withheld > 0 {
+                v["withheld_sealed"] = json!(withheld);
+            }
+            Ok(Reply::ok(v))
         }
         ["api", "ask", "handles", _, "promote"] if post => {
             let id = id_at(3)?;

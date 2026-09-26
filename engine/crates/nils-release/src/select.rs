@@ -496,11 +496,15 @@ fn cohort_members(registry: &mut Registry, name: &str) -> Result<Option<Vec<Stri
 fn axis_count(registry: &mut Registry, axis: &str, value: &str) -> Result<i64, Error> {
     let store = registry.store();
     let d = store.dialect();
+    // record 48, D1 of the move: a stack of a sample sealed now is not
+    // counted, as no release carries one
     let sql = format!(
-        "SELECT COUNT(DISTINCT stack_id) FROM {} WHERE axis = {} AND value = {}",
+        "SELECT COUNT(DISTINCT a.stack_id) FROM {} a WHERE a.axis = {} AND a.value = {} \
+         AND NOT EXISTS (SELECT 1 FROM {} ss WHERE ss.stack_id = a.stack_id AND ss.unsealed_at IS NULL)",
         store.qualified("classification_axis"),
         d.param(1, Type::Text),
-        d.param(2, Type::Text)
+        d.param(2, Type::Text),
+        store.qualified("sealed_stack")
     );
     Ok(store
         .query_opt(&sql, &[Param::from(axis), Param::from(value)])?

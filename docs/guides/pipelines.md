@@ -347,6 +347,22 @@ For a campaign that asks one axis, such as body part, suggestions from outside t
 
    A rater taken off with `--remove` keeps their answers. Keeping the reading blind, and each stack read once, is the operator's: the command warns when the rater added already answered the same stacks in another campaign.
 
+## Compute a certificate on a sealed sample
+
+While a sample is sealed, nothing a system said of its stacks opens to anyone: the ask leaves them out, explain and the evidence line answer blind, their review items are not there, their timeline keeps only their arrival, a label set leaves their lines out, and no release carries them. That holds for an admin as for a rater. The file itself, its header and its pictures, still opens.
+
+1. Compute the certificate under a token that names `sealed:see`, the one grant that reads a sealed stack. No role holds it, admin's neither, so give it by name to the token the computation runs under and to no person who reads the sample:
+
+   ```sh
+   NILS_TOKENS="<token>=certify@lab:reviewer,sealed:see" nils serve ...
+   ```
+
+2. At the keyboard, a command that would show what a system said of a sealed stack refuses unless you say why. The reason is written to the audit as `sealed.read`:
+
+   ```sh
+   nils ask run --file sample.json --unsealed-access "certificate for cert-p0-clean"
+   ```
+
 ## Let a certified sample train
 
 A sealed sample trains nothing until the certificate it was drawn for is recorded. Both acts are a person's, at the engine's door with the person's own token, so the two people involved are told apart by the identity the engine verified. The keyboard refuses both.

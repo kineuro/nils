@@ -137,6 +137,12 @@ pub struct Scope {
     pub federated: bool,
     /// Classes the principal may project raw (§9).
     pub classes: BTreeSet<Class>,
+    /// Record 48, D1 of the move: whether the principal reads the stacks of
+    /// a sample sealed now. Every one is left out of every answer (and so
+    /// of every count, group and measure over stacks) unless it does; only
+    /// the certificate's grant, or the keyboard's `--unsealed-access`, and a
+    /// selection frozen into a campaign, a seal or a label set, set it.
+    pub unsealed: bool,
 }
 
 /// The taxonomy (§4.4, rule 14).

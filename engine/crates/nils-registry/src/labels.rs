@@ -1393,6 +1393,54 @@ pub fn sealed_now(
     Ok(out)
 }
 
+/// Record 48, D1 of the move: whether this process may write a decision on
+/// a stack of a sample sealed now. Only the keyboard, given
+/// `--unsealed-access REASON` (which it audits), sets it; no door does.
+static SEALED_WRITES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let this process write decisions on sealed stacks: the keyboard's
+/// `--unsealed-access` alone calls it.
+pub fn allow_sealed_writes() {
+    SEALED_WRITES.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Of these stacks, the ones a decision may not be written on now: every
+/// one of a sample sealed now, unless the keyboard said why it may.
+pub fn sealed_for_writes(store: &mut Store, stacks: &[i64]) -> Result<BTreeSet<i64>, Error> {
+    if SEALED_WRITES.load(std::sync::atomic::Ordering::SeqCst) || stacks.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(sealed_now(store, stacks, &[])?.0)
+}
+
+/// Record 48, D1 of the move: review rows about a stack of a sample sealed
+/// now, left out before they are written, so a sealed stack never becomes a
+/// review item. `ref_at` is the index of the row's `ref`, JSON text naming
+/// the `stack_id`. Answers how many rows were left out.
+pub fn drop_sealed_items(
+    store: &mut Store,
+    rows: &mut Vec<Vec<Param>>,
+    ref_at: usize,
+) -> Result<usize, Error> {
+    let stack_of = |row: &Vec<Param>| -> Option<i64> {
+        match row.get(ref_at) {
+            Some(Param::Text(t)) => serde_json::from_str::<Value>(t).ok()?["stack_id"].as_i64(),
+            _ => None,
+        }
+    };
+    let stacks: Vec<i64> = rows.iter().filter_map(stack_of).collect();
+    if stacks.is_empty() {
+        return Ok(0);
+    }
+    let (sealed, _) = sealed_now(store, &stacks, &[])?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    let before = rows.len();
+    rows.retain(|r| !stack_of(r).is_some_and(|s| sealed.contains(&s)));
+    Ok(before - rows.len())
+}
+
 /// Record 48 R2: the labels a training tool may learn from, of these: every
 /// one whose item is not of a sample sealed now. Answers what is kept and
 /// how many were left out.
@@ -1925,6 +1973,9 @@ pub struct Imported {
     pub already: i64,
     pub refused_values: i64,
     pub bad_dates: i64,
+    /// Record 48, D1 of the move: stacks of a sample sealed now, on which
+    /// no decision is written.
+    pub left_out_sealed: i64,
 }
 
 impl Imported {
@@ -1934,6 +1985,7 @@ impl Imported {
             "series_unmatched": self.series_unmatched, "stacks": self.stacks,
             "decisions": self.decisions.len(), "held": self.held, "already": self.already,
             "refused_values": self.refused_values, "bad_dates": self.bad_dates,
+            "left_out_sealed": self.left_out_sealed,
         })
     }
 }
@@ -2010,6 +2062,8 @@ fn import_within(
         ))?;
     }
     let tree = stacks_of_series(store, labels)?;
+    let every: Vec<i64> = tree.values().flatten().map(|(k, _, _)| *k).collect();
+    let sealed = sealed_for_writes(store, &every)?;
     let mut standing = Standings::read(store, axis)?;
     let now = now_iso();
     // what to write: the stacks, in order, with the value and the date
@@ -2031,6 +2085,10 @@ fn import_within(
         out.series_matched += 1;
         for &(stack, series, subject) in stacks {
             out.stacks += 1;
+            if sealed.contains(&stack) {
+                out.left_out_sealed += 1;
+                continue;
+            }
             match standing.of(stack, series, subject, &value) {
                 Held::Already => out.already += 1,
                 Held::ByAPerson => out.held += 1,

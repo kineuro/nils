@@ -53,6 +53,7 @@ mod profile;
 mod pyramid;
 mod reader;
 mod schedule;
+mod sealed;
 mod serve;
 mod setup;
 mod sources;
@@ -87,6 +88,13 @@ struct Cli {
     /// databases. NILS_REGISTRY, else the working directory.
     #[arg(long, global = true, value_name = "DIR")]
     registry: Option<PathBuf>,
+    /// Record 48: read what a system said of a stack of a sample sealed
+    /// now (the rules' values, System 1's, a decision, a review item), which
+    /// every command withholds without it. The reason is written to the
+    /// audit as `sealed.read`; it is for computing a certificate, never for
+    /// a person who reads the sample
+    #[arg(long, global = true, value_name = "REASON")]
+    unsealed_access: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -1870,7 +1878,43 @@ struct StatusArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli
+        .unsealed_access
+        .as_deref()
+        .is_some_and(|r| r.trim().is_empty())
+    {
+        eprintln!("nils: --unsealed-access names the reason it is read, which the audit keeps");
+        return ExitCode::from(USAGE);
+    }
+    if cli.unsealed_access.is_some()
+        && matches!(cli.command, Command::Serve(_) | Command::Supervise { .. })
+    {
+        eprintln!(
+            "nils: --unsealed-access is the keyboard's, for one command; a server reads sealed stacks only for a token that holds sealed:see"
+        );
+        return ExitCode::from(USAGE);
+    }
+    sealed::set_keyboard(cli.unsealed_access.clone());
     let home = Home::resolve(cli.registry.as_deref());
+    // record 48, D1 of the move: every use of --unsealed-access is audited
+    // with its reason, in the registry it reads, before the command runs
+    if cli.unsealed_access.is_some()
+        && let Ok(mut registry) = open(&home)
+    {
+        sealed::audit_keyboard(&mut registry);
+    }
+    // the keyboard alone may write a decision on a sealed stack, with its
+    // reason audited above; a server, whatever it was started with, and a
+    // queued job never
+    if cli.unsealed_access.is_some()
+        && std::env::var("NILS_JOB_DETAIL").is_err()
+        && !matches!(
+            cli.command,
+            Command::Serve(_) | Command::Supervise { .. } | Command::Setup(_)
+        )
+    {
+        nils_registry::labels::allow_sealed_writes();
+    }
     let outcome = match cli.command {
         Command::Init(args) => init(&home, args),
         Command::Key { command } => key(&home, command),
@@ -2159,7 +2203,12 @@ fn classify_votes(
     json: bool,
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let filter = nils_classify::votes::Filter { axis };
+    // record 48, D1 of the move: the votes on a stack of a sample sealed now
+    // are left out without --unsealed-access
+    let filter = nils_classify::votes::Filter {
+        axis,
+        withhold_sealed: !sealed::keyboard_reads(),
+    };
     let written = match &out {
         Some(path) => {
             let file = fs::File::create(path)
@@ -2267,6 +2316,14 @@ fn explain(
     json: bool,
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
+    // record 48, D1 of the move: a stack of a sample sealed now is not
+    // explained at the keyboard either, without --unsealed-access
+    if !sealed::keyboard_withheld(registry.store(), &[stack])
+        .map_err(|e| fail(e.to_string()))?
+        .is_empty()
+    {
+        return Err(usage(sealed::refusal(&format!("stack {stack}"))));
+    }
     // the pack, for the labels of the values; best effort, since the
     // explanation stands without it
     let dir = match pack_dir_given {
@@ -4965,11 +5022,20 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 ));
             }
             sql.push_str(" ORDER BY id");
-            let items: Vec<serde_json::Value> = store
+            let mut items: Vec<serde_json::Value> = store
                 .query(&sql, &params)?
                 .iter()
                 .map(item_of)
                 .collect::<Result<_, nils_registry::Error>>()?;
+            // record 48, D1 of the move: an item about a stack of a sample
+            // sealed now is not listed without --unsealed-access
+            let withheld = sealed::withhold_review(store, &mut items, sealed::keyboard_reads())
+                .map_err(|e| fail(e.to_string()))?;
+            if withheld > 0 {
+                eprintln!(
+                    "nils review: {withheld} item(s) about stacks of a sealed certification sample left out (record 48)"
+                );
+            }
             if json {
                 let doc = serde_json::json!({ "count": items.len(), "items": items });
                 println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
@@ -5005,6 +5071,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         }
         ReviewCommand::Apply(args) | ReviewCommand::Decide(args) => {
             drop(columns);
+            keyboard_item(&mut registry, args.id)?;
             review_decide(&mut registry, args)
         }
         ReviewCommand::Commit {
@@ -5059,6 +5126,12 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     actor_kind(),
                 )
                 .map_err(|e| fail(e.to_string()))?;
+                if done.left_out_sealed > 0 {
+                    eprintln!(
+                        "nils review commit: {} stack(s) of a sealed certification sample left out (record 48)",
+                        done.left_out_sealed
+                    );
+                }
                 println!(
                     "committed {} decision(s), {} item(s) accepted; {} left staged{}",
                     done.decisions.len(),
@@ -5087,6 +5160,12 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             let done =
                 nils_registry::review::commit_as(&mut registry, id, anyway, &actor(), actor_kind())
                     .map_err(|e| fail(e.to_string()))?;
+            if done.left_out_sealed > 0 {
+                eprintln!(
+                    "nils review commit: {} decision(s) reaching a sealed certification sample left staged (record 48)",
+                    done.left_out_sealed
+                );
+            }
             println!(
                 "committed {} decision(s), {} item(s) accepted",
                 done.decisions.len(),
@@ -5104,6 +5183,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         }
         ReviewCommand::Accept { id, why } => {
             drop(columns);
+            keyboard_item(&mut registry, id)?;
             review_accept(&mut registry, id, why)
         }
         ReviewCommand::Asked { .. } => unreachable!("answered before the registry opened"),
@@ -5116,7 +5196,24 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             let row = store
                 .query_opt(&sql, &[Param::Int(id)])?
                 .ok_or_else(|| fail(format!("no review item {id}")))?;
-            let item = item_of(&row)?;
+            let mut one = vec![item_of(&row)?];
+            // record 48, D1 of the move: an item about a stack of a sample
+            // sealed now is not shown without --unsealed-access
+            sealed::withhold_review(store, &mut one, sealed::keyboard_reads())
+                .map_err(|e| fail(e.to_string()))?;
+            let item = one
+                .pop()
+                .ok_or_else(|| usage(sealed::refusal(&format!("review item {id}"))))?;
+            let hidden: std::collections::BTreeSet<i64> = if sealed::keyboard_reads() {
+                Default::default()
+            } else {
+                let stacks: Vec<i64> = nils_registry::review::members(store, id)
+                    .map_err(|e| fail(e.to_string()))?
+                    .iter()
+                    .map(|m| m.stack_id)
+                    .collect();
+                sealed::now(store, &stacks).map_err(|e| fail(e.to_string()))?
+            };
             if json {
                 println!(
                     "{}",
@@ -5135,8 +5232,9 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             println!("  ref        {}", item["ref"]);
             println!("  evidence   {}", item["evidence"]);
             if s(&item["scope"]) == "group" {
-                let members =
+                let mut members =
                     nils_registry::review::members(store, id).map_err(|e| fail(e.to_string()))?;
+                members.retain(|m| !hidden.contains(&m.stack_id));
                 let decided = members.iter().filter(|m| m.decided_at.is_some()).count();
                 println!(
                     "  members    {} stack(s), {} decided: {}{}",
@@ -5162,6 +5260,28 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             Ok(())
         }
     }
+}
+
+/// Record 48, D1 of the move: a review item about a stack of a sample sealed
+/// now is not answered at the keyboard without `--unsealed-access`.
+fn keyboard_item(registry: &mut Registry, id: i64) -> Result<(), Exit> {
+    if sealed::keyboard_reads() {
+        return Ok(());
+    }
+    let Some(item) =
+        nils_registry::review::item(registry.store(), id).map_err(|e| fail(e.to_string()))?
+    else {
+        return Ok(());
+    };
+    let mut one =
+        vec![serde_json::json!({"id": item.id, "scope": item.scope, "ref": item.reference})];
+    if sealed::withhold_review(registry.store(), &mut one, false)
+        .map_err(|e| fail(e.to_string()))?
+        > 0
+    {
+        return Err(usage(sealed::refusal(&format!("review item {id}"))));
+    }
+    Ok(())
 }
 
 /// `nils review decide`: a person's answer to one item.
@@ -7021,7 +7141,31 @@ fn pick_list(
         text_of(store, "pick", "session_day"),
         text_of(store, "pick", "session_day"),
     );
-    let rows = store.query(&sql, &[]).map_err(|e| fail(e.to_string()))?;
+    let mut rows = store.query(&sql, &[]).map_err(|e| fail(e.to_string()))?;
+    // record 48, D1 of the move: a pick of a stack of a sample sealed now is
+    // not listed without --unsealed-access
+    if !sealed::keyboard_reads() {
+        let sql = format!(
+            "SELECT DISTINCT ps.pick_id FROM {} ps WHERE EXISTS (SELECT 1 FROM {} ss \
+             WHERE ss.stack_id = ps.stack_id AND ss.unsealed_at IS NULL)",
+            store.qualified("pick_stack"),
+            store.qualified("sealed_stack")
+        );
+        let held: std::collections::BTreeSet<i64> = store
+            .query(&sql, &[])
+            .map_err(|e| fail(e.to_string()))?
+            .iter()
+            .filter_map(|r| r.int(0).ok())
+            .collect();
+        let before = rows.len();
+        rows.retain(|r| !r.int(0).is_ok_and(|id| held.contains(&id)));
+        if rows.len() < before {
+            eprintln!(
+                "nils pick: {} pick(s) of stacks of a sealed certification sample left out (record 48)",
+                before - rows.len()
+            );
+        }
+    }
 
     if json {
         let out: Vec<serde_json::Value> = rows
@@ -7090,6 +7234,25 @@ fn pick_list(
     Ok(())
 }
 
+/// Every stack id a document names, under a `stack` or `stack_id` key at
+/// any depth.
+fn stacks_named(v: &serde_json::Value, out: &mut Vec<i64>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, x) in m {
+                if (k == "stack" || k == "stack_id")
+                    && let Some(id) = x.as_i64()
+                {
+                    out.push(id);
+                }
+                stacks_named(x, out);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| stacks_named(x, out)),
+        _ => {}
+    }
+}
+
 fn counted_line(n: u64, noun: &str) -> String {
     format!("{n} {}", counted(noun, n))
 }
@@ -7140,6 +7303,16 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
         )
         .map_err(|e| fail(e.to_string()))?;
     let chosen: Vec<i64> = stacks.iter().filter_map(|r| r.int(0).ok()).collect();
+    // record 48, D1 of the move: a pick that chose or weighed a stack of a
+    // sample sealed now is not explained without --unsealed-access
+    let mut weighed = chosen.clone();
+    stacks_named(&considered, &mut weighed);
+    if !sealed::keyboard_withheld(store, &weighed)
+        .map_err(|e| fail(e.to_string()))?
+        .is_empty()
+    {
+        return Err(usage(sealed::refusal(&format!("pick {id}"))));
+    }
 
     if json {
         let v = serde_json::json!({

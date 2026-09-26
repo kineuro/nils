@@ -15,7 +15,7 @@ directory beside the old one, which stays.
 |---|---|---|
 | 1 | [`v1/`](v1/) | Wave 4c slice A7, 2026-09-09 |
 | 2 | [`v2/`](v2/) | 2026-09-15: grants and detail in place of the role ladder |
-| 3 | [`v3/`](v3/) | 2026-09-24: version 2 with the grants of record 42 R7: the model registry's `models:see` and `models:work`, and the campaigns' `campaigns:see` and `campaigns:work` |
+| 3 | [`v3/`](v3/) | 2026-09-24: version 2 with the grants of record 42 R7: the model registry's `models:see` and `models:work`, and the campaigns' `campaigns:see` and `campaigns:work`; 2026-09-26, in place: `sealed:see` (record 48) |
 
 ## What version 1 fixes
 
@@ -73,6 +73,16 @@ is why the grants are their own: no ladder set holds them but admin.
 
 A derivative is not a grant of its own: its doors are the Pipelines page's
 (`pipelines:see`, `pipelines:work`), as in version 2.
+
+`sealed:see` joined version 3 in place (record 48, D1 of the move to the
+group's install). While a stack is in a sample sealed now, every door that
+could show what a system said of it (the ask, explain, the evidence line,
+the review, the timeline, System 1's questions and suggestions, a label set
+of decisions, a release) answers as if the stack held none, for every caller
+but one holding `sealed:see`. No ladder set holds it, admin's neither, and
+the everything set of `--auth off` and an unlisted token leaves it out, so
+it is given only by name: to the token the certificate's computation runs
+under, which no person holds while they read.
 
 The actor a token proves binds `X-Nils-Actor` (record 42 S1 and R6). A
 token whose `act` claim (RFC 8693) names an actor may say agent or model in

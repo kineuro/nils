@@ -835,6 +835,20 @@ pub fn set_person(
             "a person's pick says why; it is what a reader of the pick has in place of the run's scores",
         ));
     }
+    // record 48, D1 of the move: no pick is written on a stack of a sample
+    // sealed now
+    let sealed = nils_registry::labels::sealed_for_writes(registry.store(), p.stacks)
+        .map_err(|e| refused(e.to_string()))?;
+    if !sealed.is_empty() {
+        return Err(refused(format!(
+            "stack(s) {} are of a sample sealed for certification; no pick is written on a sealed stack until a certificate unseals it (record 48)",
+            sealed
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
     let declaring: Vec<&Model> = pack
         .picks
         .iter()

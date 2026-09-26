@@ -427,6 +427,7 @@ fn every_validate_time_code_has_a_document_that_produces_it_with_a_path_and_a_ne
         let scope = Scope {
             federated: true,
             classes: BTreeSet::new(),
+            unsealed: false,
         };
         match prepare(ask, &Fixture, &scope) {
             Err(nils_ask::Error::Invalid(issues)) => {

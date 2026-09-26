@@ -177,6 +177,7 @@ fn a_sensitive_kind_is_absent_without_the_class_and_refused_at_validate() {
     let holder = Scope {
         federated: false,
         classes: BTreeSet::from([Class::Sensitive]),
+        unsealed: false,
     };
     assert!(
         catalog
@@ -224,6 +225,7 @@ fn birth_date_is_usable_by_a_reader_and_projected_raw_only_with_the_class() {
     let holder = Scope {
         federated: false,
         classes: BTreeSet::from([Class::QuasiIdentifying]),
+        unsealed: false,
     };
     assert!(catalog.may_project_raw(&f, &holder));
     let ask = parse(
@@ -235,6 +237,7 @@ fn birth_date_is_usable_by_a_reader_and_projected_raw_only_with_the_class() {
     let federated = Scope {
         federated: true,
         classes: BTreeSet::new(),
+        unsealed: false,
     };
     match prepare(ask, &catalog, &federated) {
         Err(nils_ask::Error::Invalid(issues)) => {

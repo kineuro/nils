@@ -129,6 +129,10 @@ pub enum Action {
     /// sample unsealed by it, so its labels may train the next model.
     LabelsCertificate,
     LabelsUnseal,
+    /// Record 48, D1 of the move: what a system said of a stack of a sample
+    /// sealed now was read at the keyboard with `--unsealed-access`, and the
+    /// reason given. It changes nothing.
+    SealedRead,
     /// Record 43: a descriptor added to the pipeline catalog, a pipeline
     /// run over a frozen selection (its derivatives and review items with
     /// it), and the runtime an operator chose. None changes a judgement: a
@@ -205,6 +209,7 @@ impl Action {
             Action::LabelsSeal => "labels.seal",
             Action::LabelsCertificate => "labels.certificate",
             Action::LabelsUnseal => "labels.unseal",
+            Action::SealedRead => "sealed.read",
             Action::PipelineAdd => "pipeline.add",
             Action::PipelineRun => "pipeline.run",
             Action::PipelineRuntime => "pipeline.runtime",
@@ -248,6 +253,7 @@ impl Action {
                 | Action::LabelsSeal
                 | Action::LabelsCertificate
                 | Action::LabelsUnseal
+                | Action::SealedRead
                 | Action::PipelineAdd
                 | Action::PipelineRun
                 | Action::PipelineRuntime

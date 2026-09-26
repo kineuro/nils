@@ -310,6 +310,7 @@ fn a_cap_marks_the_answer_truncated_and_a_timeout_stops_it() {
             scheme_digest: Scheme::default().digest(),
             after: None,
             limit: None,
+            withhold_sealed: false,
         };
         let compiled = compile(&prepared.ask, &prepared.validated, &ctx).unwrap();
         let capped = run(
@@ -330,6 +331,7 @@ fn a_cap_marks_the_answer_truncated_and_a_timeout_stops_it() {
         let ctx2 = Context {
             after: Some(after),
             limit: Some(10),
+            withhold_sealed: false,
             ..ctx
         };
         let next = compile(&prepared.ask, &prepared.validated, &ctx2).unwrap();

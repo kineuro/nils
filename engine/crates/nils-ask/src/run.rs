@@ -157,6 +157,18 @@ pub struct Explained {
 
 const MAX_DEPTH: usize = 4;
 
+/// What a handle records of the scope it was answered under: the classes
+/// it may project, and (record 48, D1 of the move) whether it read the
+/// stacks of a sample sealed now, `withheld` or `read`, so a cached answer
+/// is never one another scope made, and a handle that read sealed stacks
+/// is opened only by a scope that reads them.
+pub fn suppression_of(scope: &Scope) -> Value {
+    json!({
+        "classes": scope.classes,
+        "sealed": if scope.unsealed { "read" } else { "withheld" },
+    })
+}
+
 pub(crate) fn inline_selections(
     registry: &mut Registry,
     ask: &mut Ask,
@@ -205,6 +217,8 @@ pub(crate) struct Runner<'a> {
     /// The door's reader, when the statement runs elsewhere than the
     /// registry's own connection.
     pub(crate) reader: Option<&'a mut Store>,
+    /// Record 48, D1 of the move: the scope reads sealed stacks.
+    pub(crate) unsealed: bool,
 }
 
 impl Runner<'_> {
@@ -229,6 +243,7 @@ impl Runner<'_> {
             scheme_digest: self.scheme.digest(),
             after,
             limit,
+            withhold_sealed: !self.unsealed,
         };
         let compiled =
             compile(ask, validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?;
@@ -284,7 +299,7 @@ pub fn cached(
     let digest = scheme.digest();
     // the same scope: a handle written under another suppression is not
     // this caller's answer
-    let suppression = json!({"classes": scope.classes});
+    let suppression = suppression_of(scope);
     Ok(handle::find_cached(
         registry.store(),
         &core,
@@ -405,6 +420,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         scheme: req.scheme,
         bounds: req.bounds,
         reader: lend(&mut reader),
+        unsealed: req.scope.unsealed,
     };
     let (compiled, mut answer) = runner.answer(registry, &ask, &validated, req.after, req.limit)?;
     // the post pass
@@ -488,7 +504,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
     } else {
         "local"
     };
-    let suppression = json!({"classes": req.scope.classes});
+    let suppression = suppression_of(req.scope);
     let scheme_digest = req.scheme.digest();
     let provenance = Provenance {
         principal: req.principal,
@@ -802,6 +818,7 @@ pub fn explain(
             scheme_digest: scheme.digest(),
             after: None,
             limit: None,
+            withhold_sealed: !scope.unsealed,
         };
         texts.push(compile(&ask, &validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?);
     }

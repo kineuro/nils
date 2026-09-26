@@ -47,7 +47,22 @@ impl Scope {
 
     /// A subquery of the stack ids in scope, with its parameters, numbered
     /// from `first`. Written as `IN (...)` on a stack id column.
+    ///
+    /// Record 48, D1 of the move: a stack of a sample sealed now is never in
+    /// a scope, so the signals and a rehearsal say nothing of it.
     pub fn stacks_sql(&self, store: &Store, first: usize) -> (String, Vec<Param>) {
+        let (sql, params) = self.scoped(store, first);
+        (
+            format!(
+                "(SELECT sx.id FROM {} sx WHERE sx.id IN {sql} AND NOT EXISTS (SELECT 1 FROM {} ss WHERE ss.stack_id = sx.id AND ss.unsealed_at IS NULL))",
+                store.qualified("stack"),
+                store.qualified("sealed_stack")
+            ),
+            params,
+        )
+    }
+
+    fn scoped(&self, store: &Store, first: usize) -> (String, Vec<Param>) {
         let d = store.dialect();
         match self {
             Scope::Batch(b) => (

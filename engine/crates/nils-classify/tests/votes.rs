@@ -269,6 +269,7 @@ fn hearing_every_rule_changes_no_verdict_and_the_matrix_covers_every_decided_axi
             reg,
             &Filter {
                 axis: Some("base".into()),
+                withhold_sealed: false,
             },
         );
         assert!(
