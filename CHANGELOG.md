@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.48] - 2026-09-27
+
+Sealed means sealed on every door. While a stack is of a sample sealed now, what any system said of it is withheld from every caller, an admin included, but a token holding `sealed:see`: the ask, explain and why, the review, the timeline, label sets, the classifier's votes and signals, selections and releases leave it out or answer blind, while the file, its header and its pictures still open. No decision or pick is written on a sealed stack. At the keyboard `--unsealed-access REASON` lifts this for one command and is audited; a server refuses the flag. The registry stays at schema 70. The HTTP API contract stays version 7, amended in place; the suite contract stays version 3, amended in place with `sealed:see`; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.47.
+
 ### Changed
 
 - Sealed means sealed on every door (record 48, D1 of the move). While a stack is of a sample sealed now, what any system said of it is withheld from every caller, an admin included, but one holding `sealed:see`, a grant of suite contract version 3 (added in place) that no ladder set holds and `--auth off` does not give. The ask and every door that runs a question leave the stack out; `GET /api/explain/{stack}` and `GET /api/stacks/{stack}/why` answer blind; its review items are not listed, not shown and not answered, and a classification or System 1 raises none; its timeline keeps its arrival alone; a label set leaves its lines out; the classifier's signals and batch diagnostics leave it out; no selection or release reaches it. A handle answered with sealed stacks in it opens only to `sealed:see`. The file itself, its header and its pictures, still opens, and the rater's doors are as blind as before. A selection frozen into a campaign, a seal or a label set still names its sealed stacks, so a sealed sample becomes a reading campaign.
