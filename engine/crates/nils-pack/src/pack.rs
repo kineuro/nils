@@ -761,6 +761,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             &axes,
             &derived,
             &ingest,
+            &flag_ix,
             &parsers,
             &parser_ix,
             &buckets,
@@ -776,6 +777,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             &axes,
             &derived,
             &ingest,
+            &flag_ix,
             &parsers,
             &parser_ix,
             &buckets,
@@ -1197,6 +1199,7 @@ fn load_cross(
     axes: &[Axis],
     derived: &[Normalizer],
     ingest: &[crate::private::Ingest],
+    flag_ix: &HashMap<String, usize>,
     parsers: &[ParserDef],
     parser_ix: &HashMap<String, usize>,
     buckets: &BTreeMap<String, Vec<String>>,
@@ -1267,7 +1270,8 @@ fn load_cross(
             parser_ix,
             buckets,
             within: None,
-            flags: None,
+            // a flag compiles, so the refusal below can say what is wrong
+            flags: Some(flag_ix),
             regexes: &mut *regexes,
             deps: HashSet::new(),
         };
