@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.45] - 2026-09-26
+
+The MRI pack's rules hold between axes: pack contract 6 lets a pack say exclusions and hints, and the MRI pack 0.6.0 carries constraints checked against public sources, technique DCE, ASL under its own name and some 40 vendors' names. A classification is held to the pack's own exclusions and implications: where the rules' answer for a stack breaks one, a `classify.excluded` or `classify.implied` review item names it and the axes it involves drop to confidence 0.3. The reader's search leaves out the words a route reads as its cue. The registry stays at schema 68, as at 1.0.0-alpha.44. The HTTP API contract stays version 7, amended in place with additive fields; the pack contract is version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.44.
+
 ### Added
 
 - Pack contract 6: a pack may say `excludes` and `hints`, constraints between axes over axis values alone. An exclusion rules values of one axis out where its condition holds, as `{axis, is}`, `{axis, any}` or `{axis, family}`; a hint names the value usually found on an axis, with its reason and the sources that show it is not always so. An axes campaign freezes both into its `constraints` beside the groups and the implications, an answer that holds both sides of an exclusion is refused with its reason, and a hint refuses nothing. `nils pack shape` names them. A campaign made before carries neither and reads as before, and an engine at 6 loads a contract-5 pack unchanged.
@@ -13,6 +17,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - The MRI pack is version 0.6.0, pack contract 6, after record 48 checked its constraints against public sources. Technique `DCE` is a value of its own and takes the word `dce` from `Perfusion-EPI`, which is now the DSC series; technique `ASL-EPI` is `ASL`, with `ASL-EPI` as its alias and its stored label unchanged. Base is decided after construct: a diffusion map is base DWI, a perfusion map PWI, a SWI construct SWI, an MP2RAGE's second inversion PDw where it was T1w; an MP2RAGE output is technique MP2RAGE where nothing else decided it; a water or fat image holds modifier Dixon; a DSC or DCE series had contrast. A multi-echo GRE is T2*-weighted only where the file says it is no Dixon or in and opposed phase, and is no longer a constraint. SWI, T2*w, QSM and R2* rule out the spin-echo techniques, a TOF rules out base T2w, and an intensity projection rules out a raw reconstruction. Eight hints say what is usual, BOLD being T2*-weighted and ASL being acquired before contrast among them. Terms are corrected and some 40 vendors' names added, and the contrast words gain the round 4 phrases in the spelling the normalizer leaves. `PROVENANCE.md` lists every change and its sources.
+
+### Fixed
+
+- The reader's search leaves out a route's cue words. A keyword a route's rule reads (EPIMix, SWI, SyMRI) is the cue for the whole combination that rule sets, and the served vocabulary no longer offers it as a name of every value the rule sets: typing "sw" on technique no longer offers EPI. The packs door still shows every word, and a word the axis file itself lists for a value stays its name. MyC and qmaps become terms of MyelinMap and MultiQmap.
 
 ## [1.0.0-alpha.44] - 2026-09-25
 
