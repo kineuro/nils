@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.52] - 2026-09-27
+
+Each part is checked and updated against its own newest release. `nils update --check` lists every part, the engine, the desk, the assistant and Kvasir, beside its own newest release; `nils update --part <part>` updates one part alone; the install door adds `release.parts` and `release.behind`, and `POST /api/supervise/update-all` takes `{part}`. A desk release whose `contracts.json` needs an engine contract the engine does not speak waits and is not installed. Released with desk 1.0.0-alpha.52, which offers each part's update on its Parts page and publishes its `contracts.json`. The registry stays at schema 70. The HTTP API contract stays version 7, amended in place; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.49.
+
 ### Fixed
 
 - An update is offered when any part is behind its own newest release, not only when the engine is. The engine, the desk, the assistant and Kvasir each release on their own, so a desk released alone was never offered: `nils update --check` compared the engine alone, and the supervisor's install door, which the desk's Parts page reads, offered nothing while the engine was at its newest. `nils update --check` now says each part's installed version beside its own newest release and what `--all` would take; `nils update --part <part>` updates one part alone; `nils update --all` moves a desk image to the desk's own newest tag and the assistant and Kvasir to their own newest tags, never below the tags this engine pins. `GET /api/supervise/install` adds `release.parts` and `release.behind`, and `release.newer` names the first part behind where the engine is not; `POST /api/supervise/update-all` takes `{part}`; the helper takes `update <part>` (HTTP API contract 7, amended in place). A desk release that names, in a `contracts.json`, an engine contract the engine does not speak is held and said to wait, and is not installed.
