@@ -4076,9 +4076,11 @@ pub(crate) struct Plan {
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
-    /// The desk's own version where it is not the engine's: the desk
-    /// releases on its own, and an install that took a desk released alone
-    /// runs that desk's image beside the engine's.
+    /// The desk's own version. The desk releases on its own, under numbers
+    /// of its own, and a container install runs the image of the newest desk
+    /// release whose contract floor the engine meets, tagged with that
+    /// desk's version. `None` until setup has chosen it; an install made
+    /// before the two were apart has both at the engine's version on record.
     pub(crate) desk_version: Option<String>,
     /// Whether the pod is given this machine's loopback, so Kvasir or an
     /// engine inside it reaches a model server or a Postgres listening on
@@ -4248,8 +4250,10 @@ impl Plan {
         image_tag(&self.version)
     }
 
-    /// The tag of the desk's image: the desk's own version where the record
-    /// holds one, else the engine's, which a new install takes both at.
+    /// The tag of the desk's image: the desk's own version, once chosen or
+    /// read from the record. Only a plan made before the desk was chosen,
+    /// such as the one `--print` shows where the desk's releases cannot be
+    /// read, falls back to the engine's.
     fn desk_tag(&self) -> String {
         image_tag(self.desk_version.as_deref().unwrap_or(&self.version))
     }
@@ -6856,6 +6860,7 @@ fn questions(
         console.row("missing", need);
     }
     if args.print {
+        let plan = with_desk_to_print(plan, console);
         print!("{}", commands_text(&plan, console));
         print!("{}", stops_text(&plan, Run::Place, console));
         println!();
@@ -6869,6 +6874,23 @@ fn questions(
         return Ok(Flow::Declined);
     }
     Ok(Flow::Install(Box::new((plan, answers))))
+}
+
+/// The plan `--print` shows, with the desk's image at the desk release an
+/// install would take, where its releases can be read: the desk's version is
+/// its own and need not be the engine's.
+fn with_desk_to_print(mut plan: Plan, console: &Console) -> Plan {
+    if plan.has(Part::Desk) && plan.runtime.container() {
+        match crate::releases::desk_to_take(plan.channel.as_deref(), false) {
+            Ok(version) => plan.desk_version = Some(version),
+            Err(why) => console.note(&format!(
+                "the desk's image is shown at {}; an install takes the newest desk release \
+                 this engine speaks, which could not be read: {why}",
+                plan.desk_tag()
+            )),
+        }
+    }
+    plan
 }
 
 /// What is installed, where, in what mode and how it runs, on one line.
@@ -6940,6 +6962,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
     println!("{}", console.bold("Updating"));
     print!("{}", plan_text(&plan, console));
     if args.print {
+        let plan = with_desk_to_print(plan, console);
         print!("{}", commands_text(&plan, console));
         print!("{}", stops_text(&plan, Run::Place, console));
         println!();
@@ -7956,11 +7979,38 @@ fn place(
     // service will be.
     let acting = AsAccount::of(plan.system.as_ref(), am_root(), plan.registry());
 
+    // The desk this engine runs beside: its own newest release whose
+    // contract floor this engine meets, whatever its number, chosen once so
+    // that its binary, its image and every unit name the same version. An
+    // update that cannot read the desk's releases keeps the desk on record.
+    let chosen_desk;
+    let mut unchosen = None;
+    let plan = if plan.has(Part::Desk) {
+        match crate::releases::desk_to_take(plan.channel.as_deref(), true) {
+            Ok(version) => {
+                chosen_desk = Plan {
+                    desk_version: Some(version),
+                    ..plan.clone()
+                };
+                &chosen_desk
+            }
+            Err(why) => {
+                if let Some(kept) = &plan.desk_version {
+                    console.note(&format!("the desk stays at {kept}: {why}"));
+                }
+                unchosen = Some(why);
+                plan
+            }
+        }
+    } else {
+        plan
+    };
+
     console.begin(Stage::Engine);
     if plan.runtime.container() {
         state.keep_program(&me);
         checkpoint(state);
-        pull_or_build(plan, console, "nils", ENGINE_IMAGE, &me)?;
+        pull_or_build(plan, console, "nils", ENGINE_IMAGE, &plan.version, &me)?;
         // Taken now rather than by the first start, which a slow pull would
         // run past the time systemd gives a service to come up.
         if plan.has(Part::Assistant) {
@@ -7979,15 +8029,24 @@ fn place(
         }
         if plan.has(Part::Desk) {
             console.begin(Stage::DeskImage);
-            let desk_binary = match install_desk(&into, plan.channel.as_deref()) {
-                Ok((_, path)) => {
+            if plan.desk_version.is_none()
+                && let Some(why) = &unchosen
+            {
+                console.broken(&format!("the desk was not installed: {why}"))?;
+            }
+            let desk = plan
+                .desk_version
+                .clone()
+                .unwrap_or_else(|| plan.version.clone());
+            let desk_binary = match install_desk(&into, plan.channel.as_deref(), &desk) {
+                Ok(path) => {
                     state.keep_program(&path);
                     checkpoint(state);
                     path
                 }
                 Err(_) => into.join("nils-desk"),
             };
-            pull_or_build(plan, console, "nils-desk", DESK_IMAGE, &desk_binary)?;
+            pull_or_build(plan, console, "nils-desk", DESK_IMAGE, &desk, &desk_binary)?;
         }
     } else {
         install_packs(plan, &me, console)?;
@@ -8063,7 +8122,16 @@ fn place(
     if plan.has(Part::Desk) {
         console.begin(Stage::Desk);
         if !plan.runtime.container() {
-            match install_desk(&into, plan.channel.as_deref()) {
+            let installed = match &plan.desk_version {
+                Some(version) => install_desk(&into, plan.channel.as_deref(), version)
+                    .map(|path| (version.clone(), path)),
+                None => {
+                    Err(fail(unchosen.clone().unwrap_or_else(|| {
+                        "no desk release could be chosen".to_string()
+                    })))
+                }
+            };
+            match installed {
                 Ok((version, path)) => {
                     console.progress(&format!("desk {version} at {}", path.display()));
                     state.parts.insert(
@@ -8082,8 +8150,11 @@ fn place(
             state.parts.insert(
                 "desk".to_string(),
                 PartState {
-                    version: plan.version.clone(),
-                    path: format!("{DESK_IMAGE}:{}", plan.tag()),
+                    version: plan
+                        .desk_version
+                        .clone()
+                        .unwrap_or_else(|| plan.version.clone()),
+                    path: format!("{DESK_IMAGE}:{}", plan.desk_tag()),
                     kind: plan.runtime.name().to_string(),
                 },
             );
@@ -8345,17 +8416,18 @@ fn binary_dir(me: &Path, plan: &Plan) -> PathBuf {
     }
 }
 
-/// The image, pulled if the registry has it and built from the binary
-/// beside us if it does not.
+/// The image of a part at its own version, pulled if the registry has it
+/// and built from the binary beside us if it does not.
 fn pull_or_build(
     plan: &Plan,
     console: &mut Console,
     part: &str,
     image: &str,
+    version: &str,
     binary: &Path,
 ) -> Result<(), Exit> {
     let engine = plan.runtime.name();
-    let tag = format!("{image}:{}", plan.tag());
+    let tag = format!("{image}:{}", image_tag(version));
     // one line with a timer, as every slow step; a pull that fails is not
     // an error yet, since the image is then built here
     let pulled = quietly(engine, &["image", "exists", &tag])
@@ -9286,13 +9358,13 @@ fn write_secret_bytes(path: &Path, bytes: &[u8]) -> Result<(), Exit> {
         .map_err(|e| fail(format!("{}: {e}", path.display())))
 }
 
-/// The desk's binary from its own releases, checked against their sums.
-fn install_desk(into: &Path, channel: Option<&str>) -> Result<(String, PathBuf), Exit> {
+/// The desk's binary at `version` from its own releases, checked against
+/// their sums.
+fn install_desk(into: &Path, channel: Option<&str>, version: &str) -> Result<PathBuf, Exit> {
     let base = update::desk_base(channel);
-    let version = update::newest_version(&base)?;
     let target = update::host_target();
     let file = update::part_file("nils-desk", &target);
-    let bytes = update::fetch_checked(&base, &version, &file)?;
+    let bytes = update::fetch_checked(&base, version, &file)?;
     let name = if cfg!(windows) {
         "nils-desk.exe"
     } else {
@@ -9300,7 +9372,7 @@ fn install_desk(into: &Path, channel: Option<&str>) -> Result<(String, PathBuf),
     };
     let path = into.join(name);
     update::install_binary(&path, &bytes)?;
-    Ok((version, path))
+    Ok(path)
 }
 
 /// The rule packs, which a machine install has no other way of getting: the
@@ -10472,11 +10544,13 @@ pub(crate) fn node_repo(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The ref a lab named for a Node part in place of its releases, if one is.
+/// The ref a lab named for a Node part in place of its releases, or the
+/// version it pinned the desk at, if one is.
 pub(crate) fn named_source_ref(name: &str) -> Option<String> {
     let variable = match name {
         "kvasir" => "NILS_SETUP_KVASIR_REF",
         "assistant" => "NILS_SETUP_ASSISTANT_REF",
+        "desk" => crate::releases::DESK_PIN,
         _ => return None,
     };
     std::env::var(variable)
@@ -16039,17 +16113,28 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
         let part = state.parts[&name].clone();
         match part.kind.as_str() {
             "podman" | "docker" => {
-                let Some(version) = newest_of(&name) else {
+                // the desk by its contracts: the newest desk release this
+                // engine speaks, under whatever number it carries
+                let found = if name == "desk" {
+                    match desk_to_move_to(channel, &part.version) {
+                        Ok(Some(version)) => Some(version),
+                        Ok(None) => {
+                            println!("{name}: {} is the newest this engine speaks", part.version);
+                            continue;
+                        }
+                        Err(why) => {
+                            println!("{name}: {why}");
+                            continue;
+                        }
+                    }
+                } else {
+                    newest_of(&name)
+                };
+                let Some(version) = found else {
                     println!("{name}: no release to move to");
                     continue;
                 };
                 let version = version.as_str();
-                if name == "desk"
-                    && let Err(why) = desk_may_move(channel, version)
-                {
-                    println!("{name}: {why}");
-                    continue;
-                }
                 let image = part
                     .path
                     .rsplit_once(':')
@@ -17051,24 +17136,22 @@ fn start_supervisor(plan: &Plan, state: &State, console: &Console) {
     }
 }
 
-/// Whether the desk may move to `version`: a desk release names the
-/// contracts it needs of the engine, and one that needs more than this engine
-/// speaks would refuse to start, so it is not taken. This binary is the
+/// The desk version an update moves to from `installed`: the newest desk
+/// release whose contract floor this engine meets, where that is newer, or
+/// the version a lab pinned, where that is another. A desk release names the
+/// contracts it needs of the engine, and one that needs more than this
+/// engine speaks would refuse to start, so it is passed over for the newest
+/// that does; the numbers of the two need not match. This binary is the
 /// newest engine by now, since an update installs it first and hands over.
-fn desk_may_move(channel: Option<&str>, version: &str) -> Result<(), String> {
-    let base = update::desk_base(channel);
-    match crate::releases::desk_floor(&base, version, true) {
-        Ok(Some(floor)) => {
-            match crate::releases::held_by(version, floor, crate::releases::engine_contracts()) {
-                Some(why) => Err(format!("kept where it is: {why}")),
-                None => Ok(()),
-            }
-        }
-        Ok(None) => Ok(()),
-        Err(why) => Err(format!(
-            "kept where it is: what desk {version} needs of the engine could not be read: {why}"
-        )),
-    }
+fn desk_to_move_to(channel: Option<&str>, installed: &str) -> Result<Option<String>, String> {
+    let version = crate::releases::desk_to_take(channel, true)
+        .map_err(|why| format!("kept where it is: {why}"))?;
+    let moves = if crate::releases::desk_pin().is_some() {
+        version != installed.trim_start_matches('v')
+    } else {
+        update::newer(&version, installed)
+    };
+    Ok(moves.then_some(version))
 }
 
 /// One binary part from its own releases, when a newer one is published.
@@ -17081,15 +17164,18 @@ fn update_binary_part(
         return Err(fail(format!("{name} is not a part this can update")));
     }
     let base = &update::desk_base(channel);
-    let version = update::newest_version(base)?;
     let path = &part.path;
-    if !update::newer(&version, &part.version) && Path::new(path).exists() {
-        return Ok((
-            part.version.clone(),
-            format!("{} is the newest", part.version),
-        ));
-    }
-    desk_may_move(channel, &version).map_err(fail)?;
+    let version = match desk_to_move_to(channel, &part.version).map_err(fail)? {
+        Some(version) => version,
+        None if Path::new(path).exists() => {
+            return Ok((
+                part.version.clone(),
+                format!("{} is the newest this engine speaks", part.version),
+            ));
+        }
+        // a desk whose binary is gone is taken again at the version to take
+        None => crate::releases::desk_to_take(channel, true).map_err(fail)?,
+    };
     let file = update::part_file("nils-desk", &update::host_target());
     let bytes = update::fetch_checked(base, &version, &file)?;
     update::install_binary(Path::new(path), &bytes)?;
@@ -26719,6 +26805,23 @@ mod tests {
         );
         assert!(engine.contains("--bind 0.0.0.0:8437"), "{engine}");
         assert!(commands[2].contains("ghcr.io/kineuro/nils-desk:v1.0.0-alpha.2"));
+
+        // the desk's image carries the desk's own version, never the engine's
+        let mut apart = p.clone();
+        apart.desk_version = Some("0.9.0".to_string());
+        let commands = podman_commands(&apart);
+        assert!(commands[1].contains("ghcr.io/kineuro/nils:v1.0.0-alpha.2"));
+        assert!(
+            commands[2].contains("ghcr.io/kineuro/nils-desk:v0.9.0"),
+            "{}",
+            commands[2]
+        );
+        assert!(
+            quadlets(&apart)
+                .iter()
+                .any(|(_, q)| q.contains("Image=ghcr.io/kineuro/nils-desk:v0.9.0")),
+            "the desk's quadlet names the desk's version"
+        );
     }
 
     #[test]

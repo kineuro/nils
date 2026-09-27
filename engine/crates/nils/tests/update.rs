@@ -324,8 +324,14 @@ impl Install {
     }
 
     fn run(&self, args: &[&str], engine: &Releases, desk: &Path) -> Out {
+        self.run_with(args, engine, desk, &[])
+    }
+
+    fn run_with(&self, args: &[&str], engine: &Releases, desk: &Path, env: &[(&str, &str)]) -> Out {
         let out = nils()
             .args(args)
+            .env_remove("NILS_SETUP_DESK_VERSION")
+            .envs(env.iter().copied())
             .env("HOME", self.base.path())
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_DATA_HOME", self.base.path().join("data"))
@@ -527,6 +533,37 @@ fn a_desk_that_needs_a_newer_engine_contract_is_not_installed() {
         "#!/bin/sh\necho nils-desk 99.0.1\n",
         "{}",
         o.stdout
+    );
+}
+
+#[test]
+fn a_lab_pins_the_desk_at_a_version_of_its_own() {
+    // the desk's number is its own: a pin below the engine's is taken as named
+    let engine = Releases::new();
+    engine.publish(ENGINE, false);
+    let desk = TempDir::new("nils-desk-releases-pin");
+    publish_desk(desk.path(), "0.4.2", None);
+    let install = Install::new(ENGINE, ENGINE);
+    let pin = [("NILS_SETUP_DESK_VERSION", "v0.4.2")];
+    let o = install.run_with(&["update", "--check"], &engine, desk.path(), &pin);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("desk") && o.stdout.contains("follows v0.4.2"),
+        "{}",
+        o.stdout
+    );
+    let o = install.run_with(&["update", "--part", "desk"], &engine, desk.path(), &pin);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(
+        install.desk(),
+        "#!/bin/sh\necho nils-desk 0.4.2\n",
+        "{}",
+        o.stdout
+    );
+    assert!(
+        install.record().contains("version = \"0.4.2\""),
+        "{}",
+        install.record()
     );
 }
 

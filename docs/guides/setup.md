@@ -336,9 +336,18 @@ checked against the release's checksums and installed beside the running
 `nils` or in `<dir>/bin` where that directory is not writable. `--channel`
 (or `NILS_RELEASES`) points the whole thing at a deployment's own release
 directory. In a container run the images are
-`ghcr.io/kineuro/nils` and `ghcr.io/kineuro/nils-desk`, tagged as the
-release is tagged, so version 1.0.0-alpha.2 is the image `v1.0.0-alpha.2`.
-Both are public and pull without an account. Where an image cannot be
+`ghcr.io/kineuro/nils` and `ghcr.io/kineuro/nils-desk`, each tagged as its
+own release is tagged, so engine 1.0.0-alpha.2 is the image
+`ghcr.io/kineuro/nils:v1.0.0-alpha.2`. Both are public and pull without an
+account.
+
+The engine and the desk release on their own and their version numbers need
+not match. Setup takes the newest desk release whose `contracts.json` floor
+the engine meets, whatever its number, and a container install pulls that
+desk's image by the desk's own version. A lab pins the desk at one version
+with `NILS_SETUP_DESK_VERSION`, as `NILS_SETUP_KVASIR_REF` pins Kvasir. An
+install made before the two were apart has both at the engine's version on
+record, and keeps running the images it names until its next update. Where an image cannot be
 pulled, a Containerfile is written beside the base directory and the image
 is built there from the release binary already downloaded.
 
@@ -538,8 +547,10 @@ its newest. `--part` takes one part, or several, without the others.
 
 A desk release says in a `contracts.json` beside its binaries which engine
 contracts it needs at least. A desk that needs more than the engine speaks
-is not installed, and `--check` says it waits; where the engine is behind
-too, `--all` takes the engine first and the desk after it.
+is not installed, and `--check` says it waits; the newest desk release
+between it and the installed one that the engine does speak is taken
+instead, and where the engine is behind too, `--all` takes the engine first
+and the desk after it. The desk's number never has to match the engine's.
 
 Every part the state names, each in the way it runs: a binary is replaced
 from its release, a container is a pull of its own newest tag and a restart
