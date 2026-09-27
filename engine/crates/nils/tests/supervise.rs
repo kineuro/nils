@@ -618,6 +618,89 @@ fn the_install_door_offers_a_desk_released_alone() {
     assert_eq!(status, 400, "{refused}");
 }
 
+/// The install door says the rule packs beside the ones the engine's release
+/// carries, read where the engine reads them, and offers the update that
+/// takes them when only they are behind.
+#[test]
+fn the_install_door_says_packs_behind_the_engines_release() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let home = TempDir::new("supervise-packs");
+    let packs = home.path().join("engine").join("packs");
+    std::fs::create_dir_all(packs.join("mri")).unwrap();
+    std::fs::write(packs.join("mri/pack.yml"), "pack: mri\nversion: 0.7.0\n").unwrap();
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(settings.join("nils")).unwrap();
+    std::fs::write(
+        settings.join("nils").join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\n[parts.engine]\nversion = \"1.0.0-alpha.14\"\npath = \"{}\"\n\n[site]\npack_dir = \"{}\"\n",
+            home.path().join("nils").display(),
+            home.path().join("engine").join("nils").display(),
+            packs.display()
+        ),
+    )
+    .unwrap();
+    // the engine's channel, with the packs its release carries
+    let releases = home.path().join("engine-releases");
+    std::fs::create_dir_all(releases.join("latest").join("download")).unwrap();
+    std::fs::write(
+        releases.join("latest").join("download").join("VERSION"),
+        "1.0.0-alpha.14\n",
+    )
+    .unwrap();
+    let src = home.path().join("src");
+    std::fs::create_dir_all(src.join("packs").join("mri")).unwrap();
+    std::fs::write(
+        src.join("packs/mri/pack.yml"),
+        "pack: mri\nversion: 0.8.0\n",
+    )
+    .unwrap();
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    tar.append_dir_all("packs", src.join("packs")).unwrap();
+    let tar = tar.into_inner().unwrap().finish().unwrap();
+    let at = releases.join("download").join("v1.0.0-alpha.14");
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(at.join("packs.tar.gz"), &tar).unwrap();
+    let sum = hex::encode(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+    std::fs::write(at.join("SHA256SUMS"), format!("{sum}  packs.tar.gz\n")).unwrap();
+    let engine = format!("file://{}", releases.display());
+    let s = Service::start_with(
+        &config,
+        &[
+            ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+            ("NILS_RELEASES", engine.as_str()),
+        ],
+    );
+    let token = Some("a-supervisor-token-of-length");
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    let release = &doc["release"];
+    let packs_doc = &release["packs"];
+    assert_eq!(packs_doc["dir"], packs.display().to_string(), "{doc}");
+    assert_eq!(packs_doc["release"], "1.0.0-alpha.14", "{doc}");
+    assert_eq!(packs_doc["installed"][0]["version"], "0.7.0", "{doc}");
+    assert_eq!(packs_doc["bundled"][0]["version"], "0.8.0", "{doc}");
+    assert_eq!(packs_doc["stale"], serde_json::json!(["mri"]), "{doc}");
+    assert_eq!(packs_doc["behind"], true, "{doc}");
+    assert_eq!(release["behind"], serde_json::json!(["packs"]), "{doc}");
+    assert_eq!(release["newer"], "packs of 1.0.0-alpha.14", "{doc}");
+
+    // what is on disk is read on every call: packs brought up to date are
+    // no longer offered
+    std::fs::write(packs.join("mri/pack.yml"), "pack: mri\nversion: 0.8.0\n").unwrap();
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["packs"]["behind"], false, "{doc}");
+    assert_eq!(doc["release"]["behind"], serde_json::json!([]), "{doc}");
+    assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+}
+
 /// The install door (the desk's Settings read it): an install nils setup
 /// recorded is reported as recorded; a restart runs apart from the door and
 /// ends with its reason; and a folder is looked inside before it is added,

@@ -453,6 +453,86 @@ fn every_part_at_its_newest_offers_nothing() {
 }
 
 #[test]
+fn an_engine_update_puts_its_packs_where_the_engine_reads_them() {
+    // an install whose site named its pack directory, holding what an older
+    // release put there, while the engine is already at the newest release:
+    // the packs are behind, and the update takes them there and nowhere else
+    let engine = Releases::new();
+    engine.publish(ENGINE, true);
+    let desk = TempDir::new("nils-desk-releases-packs");
+    publish_desk(desk.path(), "1.0.0-alpha.51", None);
+    let install = Install::new(ENGINE, "1.0.0-alpha.51");
+    let packs = install.base.path().join("engine").join("packs");
+    std::fs::create_dir_all(packs.join("demo")).unwrap();
+    std::fs::write(packs.join("demo/pack.yml"), "pack: demo 1.0.0\n").unwrap();
+    std::fs::create_dir_all(packs.join("lab")).unwrap();
+    std::fs::write(packs.join("lab/pack.yml"), "pack: lab\n").unwrap();
+    let record = install.config.path().join("nils").join("setup.toml");
+    let mut text = std::fs::read_to_string(&record).unwrap();
+    text.push_str(&format!("\n[site]\npack_dir = \"{}\"\n", packs.display()));
+    std::fs::write(&record, text).unwrap();
+
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains(&format!("packs in {}", packs.display())),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("lab ("), "{}", o.stdout);
+    assert!(o.stdout.contains("the site's own, kept"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains(&format!(
+            "nils update --all would take packs of {ENGINE} (demo)"
+        )),
+        "{}",
+        o.stdout
+    );
+    let demo = || std::fs::read_to_string(packs.join("demo/pack.yml")).unwrap();
+    assert_eq!(demo(), "pack: demo 1.0.0\n", "--check changed the packs");
+
+    let o = install.run(&["update", "--all"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(demo(), format!("pack: demo {ENGINE}\n"), "{}", o.stdout);
+    assert!(o.stdout.contains("packs: the packs in"), "{}", o.stdout);
+    assert_eq!(
+        std::fs::read_to_string(packs.join("lab/pack.yml")).unwrap(),
+        "pack: lab\n",
+        "the site's own pack was touched"
+    );
+    let previous = install.base.path().join("engine").join("packs.previous");
+    assert_eq!(
+        std::fs::read_to_string(previous.join("demo/pack.yml")).unwrap(),
+        "pack: demo 1.0.0\n",
+        "the packs replaced were not kept"
+    );
+    for elsewhere in ["share", "registry", "data"] {
+        assert!(
+            !install.base.path().join(elsewhere).join("nils").exists()
+                && !install.base.path().join(elsewhere).join("packs").exists(),
+            "packs were put in {elsewhere}: {}",
+            o.stdout
+        );
+    }
+
+    // and nothing is behind after it, and a second update leaves them be
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+    let o = install.run(&["update", "--all"], &engine, desk.path());
+    assert!(
+        o.stdout.contains(&format!(
+            "packs: the ones engine {ENGINE} was released with"
+        )),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
 fn a_development_channel_is_measured_by_its_builds() {
     // a wave's build is ahead of the release it came from, and behind the
     // channel's next build of the same wave
