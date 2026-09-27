@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.53] - 2026-09-27
+
+The engine and the desk release independently, under version numbers of their own. `nils setup` and `nils update` take the newest desk release whose `contracts.json` floor the engine meets and pull the desk's image by the desk's own version, so an engine release needs no desk release of the same number; `nils update --check` and `release.parts` say which desk release an install takes and which waits. `NILS_SETUP_DESK_VERSION` pins the desk for a lab. The registry stays at schema 70. The HTTP API contract stays version 7, amended in place; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.52.
+
 ### Changed
 
 - The engine and the desk release independently, and their version numbers need not match. `nils setup` takes the newest desk release whose `contracts.json` floor the engine meets, and a container install pulls the desk's image by the desk's own version instead of the engine's, so an engine release no longer needs a desk release of the same number. `nils update` moves the desk to the newest release the engine speaks, passing over a newer one that waits for an engine release; `nils update --check` and `release.parts` say which (`takes`, `waits`; HTTP API contract 7, amended in place). `NILS_SETUP_DESK_VERSION` pins the desk at one version for a lab. An install made before keeps the images its record names until its next update.
