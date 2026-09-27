@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.54] - 2026-09-27
+
+An engine update brings the rule packs of the engine's release to the directory the engine reads, keeps the packs it replaces in `<dir>.previous`, and never touches a site's own packs or a first-party pack changed on the machine; `nils update --check` and the install door's `release.packs` show each pack's version beside the release's. A classification over stacks of a sealed sample raises no review item, and `nils repair sealed-review` closes the ones an older engine raised. Released alone, with no desk release of the same number. The registry stays at schema 70. The HTTP API contract stays version 7, amended in place; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.53.
+
 ### Fixed
 
 - An engine update brings the rule packs of the engine's release. Where a site named its pack directory, `nils update` put the new packs where the account running it would look (beside the binary) instead of where the engine reads them, so the engine went on classifying with the packs of the release it was installed from. `nils update --all` now puts the packs of the installed engine's release in the directory the engine reads, whichever binary replaced the engine, and does so where the engine is already at its newest release, so an install left behind catches up on its next update. Only packs that differ from the release's are replaced, in one swap; the ones they replace are kept in `<dir>.previous`, a site's own packs are never touched, and a first-party pack changed on the machine after an update put it there is kept and said. `nils update --check` lists each pack beside the release's, and `GET /api/supervise/install` adds `release.packs`, with `packs` in `release.behind` where they are behind (HTTP API contract 7, amended in place).
