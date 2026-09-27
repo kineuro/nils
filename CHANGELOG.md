@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.49] - 2026-09-27
+
+The MRI pack is version 0.8.0. Philips's `VERTEBRALCRANIUM`, written as the body part examined for the spine and the brain alike, names no body part, so the series' own words, the coil or the geometry decide, or the axis stays empty for review. The German `WS` and a range of vertebral levels such as `C2-Th1` or `C3-6` read as a spine. The registry stays at schema 70. The HTTP API contract stays version 7; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.48.
+
+### Changed
+
+- The MRI pack is version 0.8.0. The stated-anatomy normalizer drops `vertebralcranium`, the value Philips writes as Body Part Examined on its neuro exam cards for the spine and the brain alike and no DICOM defined term, so it decides nothing: its `vertebral` no longer makes every stack whose own words say nothing a spine, 3D FLAIR, DIR and head surveys among them. The series' words, the coil or the geometry decide, or the axis stays empty for review. The anatomy normalizer spells the German `WS` (Wirbelsäule) as a word, so the `wirbel` keyword reads it, and a new rule, `spine_levels`, right after `spine`, reads a range of vertebral levels such as `C2-Th1`, `Th4-9`, `C4-L1` or `C3-6` as a spine; `T1` and `T2` are never read as levels. `HWS`, `BWS` and `LWS` cite their sources, and `PROVENANCE.md` lists them. Stacks classified before keep their verdicts until they are classified again under this pack.
+
 ## [1.0.0-alpha.48] - 2026-09-27
 
 Sealed means sealed on every door. While a stack is of a sample sealed now, what any system said of it is withheld from every caller, an admin included, but a token holding `sealed:see`: the ask, explain and why, the review, the timeline, label sets, the classifier's votes and signals, selections and releases leave it out or answer blind, while the file, its header and its pictures still open. No decision or pick is written on a sealed stack. At the keyboard `--unsealed-access REASON` lifts this for one command and is audited; a server refuses the flag. The registry stays at schema 70. The HTTP API contract stays version 7, amended in place; the suite contract stays version 3, amended in place with `sealed:see`; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.47.
