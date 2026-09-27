@@ -980,7 +980,7 @@ paths:
   /api/supervise/install:
     get:
       summary: The install nils setup made, as the supervisor on its host sees it
-      description: "{record, dir, runtime, service, reach, backend, mode, at, ports, parts: {name: {version, kind, path}}, places, oidc: {issuer, client_id} | null, addresses: [{part, address, reach}], services: [{part, unit, watcher, running}], unfinished, release: {installed, newest, newer, error, command}, machine: {card: {name, memory_gb} | null, cards: [{name, memory_gb}], advice}}. `cards` is every graphics card the machine has, and `card` the one with the most memory, which the advice reads. The record is the setup's own file on the host and holds no secret. The newest release and the cards are looked at once in a while, not on every call."
+      description: "{record, dir, runtime, service, reach, backend, mode, at, ports, parts: {name: {version, kind, path}}, places, oidc: {issuer, client_id} | null, addresses: [{part, address, reach}], services: [{part, unit, watcher, running}], unfinished, release: {installed, newest, newer, error, command, behind, parts: [{part, installed, newest, newer, held, follows, error, command}]}, machine: {card: {name, memory_gb} | null, cards: [{name, memory_gb}], advice}}. Added in place: `release.parts` is each part with releases of its own (engine, desk, assistant, kvasir) beside its own newest release, since each releases on its own; `newer` is the version it may move to or null, `held` why a newer desk waits (its release needs an engine contract the engine does not speak), `follows` a ref a lab named in place of its releases. `release.behind` names the parts an update would move. `release.installed`, `newest` and `error` stay the engine's; `newer` is the engine's newer version, else the first part behind as `<part> <version>`. `cards` is every graphics card the machine has, and `card` the one with the most memory, which the advice reads. The record is the setup's own file on the host and holds no secret. The newest release and the cards are looked at once in a while, not on every call."
       responses:
         "200": {description: The install}
         "401": {description: No token the supervisor knows}
@@ -1004,8 +1004,11 @@ paths:
   /api/supervise/update-all:
     post:
       summary: Bring every part up to date as `nils update --all` does, apart from the call
+      description: "With `{part}` (engine, desk, assistant or kvasir; added in place) that part alone, as `nils update --part <part>` does, against its own releases."
+      requestBody: {required: false, content: {application/json: {schema: {type: object, properties: {part: {type: string}}}}}}
       responses:
         "202": {description: A run}
+        "400": {description: A part with no releases of its own}
         "409": {description: A run is still going}
   /api/supervise/runs/{id}:
     get:

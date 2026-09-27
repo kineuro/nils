@@ -1686,6 +1686,9 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
     out.push(vec!["reapply".to_string()]);
     out.push(vec!["reapply".to_string(), "all".to_string()]);
     out.push(vec!["update".to_string()]);
+    for part in updatable_parts(state) {
+        out.push(vec!["update".to_string(), part.to_string()]);
+    }
     out
 }
 
@@ -1715,6 +1718,15 @@ fn helper_text(dir: &Path, helper: &Helper, state: &State) -> String {
     } else {
         format!("{} or all", parts.join(", "))
     };
+    let own = updatable_parts(state);
+    let mut update_arms = String::new();
+    for part in &own {
+        let _ = writeln!(
+            update_arms,
+            "      {part}) exec {nils} update --part {part} ;;"
+        );
+    }
+    let updatable = own.join(", ");
     format!(
         "#!/bin/sh\n\
          # The privileged work of the NILS install in {dir}, and nothing else.\n\
@@ -1752,11 +1764,17 @@ fn helper_text(dir: &Path, helper: &Helper, state: &State) -> String {
          \x20   exit 2\n\
          \x20   ;;\n\
          \x20 update)\n\
-         \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage update takes no other word\" >&2; exit 2; }}\n\
-         \x20   exec {nils} update --all\n\
+         \x20   if [ \"$#\" -eq 1 ]; then\n\
+         \x20     exec {nils} update --all\n\
+         \x20   fi\n\
+         \x20   [ \"$#\" -eq 2 ] || {{ echo \"nils-manage update takes one part or none: {updatable}\" >&2; exit 2; }}\n\
+         \x20   case \"$2\" in\n\
+         {update_arms}\
+         \x20     *) echo \"nils-manage update takes one part or none: {updatable}\" >&2; exit 2 ;;\n\
+         \x20   esac\n\
          \x20   ;;\n\
          \x20 *)\n\
-         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all or update\" >&2\n\
+         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all, update or update <part>\" >&2\n\
          \x20   exit 2\n\
          \x20   ;;\n\
          esac\n",
@@ -1973,10 +1991,33 @@ fn run_helper(argv: &[String]) -> Result<(), Exit> {
 /// run by the account the supervisor runs as: replacing the parts' files is
 /// root's, so it is asked of the helper, which runs this same command as
 /// root. `None` where this process does the work itself.
-pub(crate) fn update_by_helper() -> Option<Result<(), Exit>> {
+///
+/// With parts named, each is asked for by its own word (`update desk`), so
+/// one part is updated without the others; a helper written before those
+/// words refuses them, and says so, until nils setup or an update writes it
+/// again.
+pub(crate) fn update_by_helper(only: &[String]) -> Option<Result<(), Exit>> {
     let state = read_state()?;
-    let argv = helper_call(&state, &["update"])?;
-    Some(run_helper(&argv))
+    helper_call(&state, &["update"])?;
+    if only.is_empty() {
+        return Some(run_helper(&helper_call(&state, &["update"])?));
+    }
+    for part in only {
+        let argv = helper_call(&state, &["update", part.as_str()])?;
+        if let Err(e) = run_helper(&argv) {
+            return Some(Err(e));
+        }
+    }
+    Some(Ok(()))
+}
+
+/// The parts of a record an update may take one at a time: those with
+/// releases of their own.
+fn updatable_parts(state: &State) -> Vec<&'static str> {
+    crate::releases::OWN_RELEASES
+        .into_iter()
+        .filter(|p| state.parts.contains_key(*p))
+        .collect()
 }
 
 /// Where the supervisor reads the record from. The supervisor of an install
@@ -4035,6 +4076,10 @@ pub(crate) struct Plan {
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
+    /// The desk's own version where it is not the engine's: the desk
+    /// releases on its own, and an install that took a desk released alone
+    /// runs that desk's image beside the engine's.
+    pub(crate) desk_version: Option<String>,
     /// Whether the pod is given this machine's loopback, so Kvasir or an
     /// engine inside it reaches a model server or a Postgres listening on
     /// 127.0.0.1 here. Rootless podman with pasta, and only when something
@@ -4203,6 +4248,12 @@ impl Plan {
         image_tag(&self.version)
     }
 
+    /// The tag of the desk's image: the desk's own version where the record
+    /// holds one, else the engine's, which a new install takes both at.
+    fn desk_tag(&self) -> String {
+        image_tag(self.desk_version.as_deref().unwrap_or(&self.version))
+    }
+
     fn has(&self, part: Part) -> bool {
         self.parts.contains(&part)
     }
@@ -4323,6 +4374,11 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         service: !state.service.is_empty() && state.service != "none",
         channel: channel.map(str::to_string),
         version: update::VERSION.to_string(),
+        desk_version: state
+            .parts
+            .get("desk")
+            .filter(|d| d.kind != "binary")
+            .map(|d| d.version.clone()),
         host_loopback: state.runtime == "podman"
             && (state.parts.contains_key("assistant")
                 || state.parts.contains_key("desk")
@@ -5431,7 +5487,7 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
             "podman run -d --pod nils --name nils-desk {}-v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
             container_user(Runtime::Podman),
             plan.desk_dir().display(),
-            plan.tag()
+            plan.desk_tag()
         ));
     }
     if plan.has(Part::Assistant) {
@@ -5488,7 +5544,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
             "docker run -d --network nils --name nils-desk {}-p {publish} --add-host host.docker.internal:host-gateway -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
             container_user(Runtime::Docker),
             plan.desk_dir().display(),
-            plan.tag()
+            plan.desk_tag()
         ));
     }
     if plan.has(Part::Assistant) {
@@ -5542,7 +5598,7 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
     if plan.has(Part::Desk) {
         let publish = desk_publish(plan);
         let _ = writeln!(out, "  desk:");
-        let _ = writeln!(out, "    image: {DESK_IMAGE}:{}", plan.tag());
+        let _ = writeln!(out, "    image: {DESK_IMAGE}:{}", plan.desk_tag());
         let _ = writeln!(out, "    container_name: nils-desk");
         if !as_this_account().is_empty() {
             let _ = writeln!(out, "    user: \"{}\"", as_this_account());
@@ -5637,7 +5693,7 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     out.push(("nils-engine.container".to_string(), engine));
     if plan.has(Part::Desk) {
         let mut desk = String::from("[Unit]\nDescription=NILS desk\n\n[Container]\n");
-        let _ = writeln!(desk, "Image={DESK_IMAGE}:{}", plan.tag());
+        let _ = writeln!(desk, "Image={DESK_IMAGE}:{}", plan.desk_tag());
         let _ = writeln!(desk, "Pod=nils.pod");
         desk.push_str(&quadlet_user());
         let _ = writeln!(desk, "Volume={}:{IN_DESK}", plan.desk_dir().display());
@@ -6735,6 +6791,7 @@ fn questions(
         service,
         channel: args.channel.clone(),
         version: update::VERSION.to_string(),
+        desk_version: None,
         oidc,
         llama,
         system,
@@ -10086,7 +10143,7 @@ fn register_desk(
                 .args(container_user_words(runtime))
                 .arg("-v")
                 .arg(format!("{}:{IN_DESK}", dir.display()))
-                .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
+                .arg(format!("{DESK_IMAGE}:{}", plan.desk_tag()));
             c
         }
     };
@@ -10404,6 +10461,53 @@ fn node_source(name: &str) -> Option<(&'static str, String, &'static str)> {
     };
     let named = std::env::var(variable).ok();
     Some((repo, source_ref(pinned, named.as_deref()), said))
+}
+
+/// A Node part's repository, whose tags are its releases.
+pub(crate) fn node_repo(name: &str) -> Option<&'static str> {
+    match name {
+        "kvasir" => Some(KVASIR_REPO),
+        "assistant" => Some(ASSISTANT_REPO),
+        _ => None,
+    }
+}
+
+/// The ref a lab named for a Node part in place of its releases, if one is.
+pub(crate) fn named_source_ref(name: &str) -> Option<String> {
+    let variable = match name {
+        "kvasir" => "NILS_SETUP_KVASIR_REF",
+        "assistant" => "NILS_SETUP_ASSISTANT_REF",
+        _ => return None,
+    };
+    std::env::var(variable)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// A Node part's source as an update takes it: a ref a lab names, else its
+/// own newest tag where that is past the one this engine pins, so the part
+/// follows its own releases and needs no engine release to move. Where its
+/// tags cannot be read, the pin, said on the update's line.
+fn node_update_source(name: &str) -> Option<(&'static str, String, &'static str)> {
+    let (repo, pinned, said) = node_source(name)?;
+    if named_source_ref(name).is_some() {
+        return Some((repo, pinned, said));
+    }
+    let newest = match crate::releases::newest_tag(repo) {
+        Ok(v) => Some(v),
+        Err(why) => {
+            println!(
+                "{name}: its newest tag could not be read ({why}); {pinned}, which this engine pins"
+            );
+            None
+        }
+    };
+    Some((
+        repo,
+        crate::releases::source_update_ref(&pinned, newest.as_deref()),
+        said,
+    ))
 }
 
 /// The git commands that bring a Node part's source to a ref, each as its
@@ -15883,14 +15987,30 @@ pub(crate) fn setup_recorded() -> Result<(), Exit> {
 /// binary, so they move to the versions the newest release pins, and then
 /// [`restart_after_update`] starts everything again from what is there.
 /// The answer is whether any part changed.
-pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
+pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool, Exit> {
     let mut state = read_state().ok_or_else(|| {
         fail(format!(
             "no setup is recorded at {}; nils update takes the engine alone",
             state_path().display()
         ))
     })?;
-    let newest = update::newest_version(&update::engine_base(channel)).ok();
+    // Each part against its own newest release: the engine's image moves
+    // with the engine's releases and the desk's with the desk's, so a desk
+    // released alone is taken with no engine release beside it.
+    let mut newest_by_part: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut newest_of = |name: &str| -> Option<String> {
+        newest_by_part
+            .entry(name.to_string())
+            .or_insert_with(|| match crate::releases::newest_of(name, channel) {
+                Ok(v) => Some(v),
+                Err(why) => {
+                    println!("{name}: its newest release could not be read: {why}");
+                    None
+                }
+            })
+            .clone()
+    };
+    let chosen = |name: &str| only.is_empty() || only.iter().any(|p| p == name);
     let console = Console::new(true);
     let mut changed = false;
     // The units the parts run under, so that each is stopped just before its
@@ -15902,6 +16022,8 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
         .iter()
         // the engine's binary is replaced by nils update itself; its image is not
         .filter(|(name, part)| name.as_str() != "engine" || part.kind != "binary")
+        // the parts asked for, where some were
+        .filter(|(name, _)| chosen(name))
         // a new Postgres major version needs its data upgraded, not a pull
         .filter(|(name, part)| {
             if name.as_str() == "postgres" {
@@ -15917,10 +16039,17 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
         let part = state.parts[&name].clone();
         match part.kind.as_str() {
             "podman" | "docker" => {
-                let Some(version) = newest.as_deref() else {
+                let Some(version) = newest_of(&name) else {
                     println!("{name}: no release to move to");
                     continue;
                 };
+                let version = version.as_str();
+                if name == "desk"
+                    && let Err(why) = desk_may_move(channel, version)
+                {
+                    println!("{name}: {why}");
+                    continue;
+                }
                 let image = part
                     .path
                     .rsplit_once(':')
@@ -15952,7 +16081,7 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
             "node" => {
                 let dir = PathBuf::from(&part.path);
                 let (Some((repo, reference, said)), Some(switch)) =
-                    (node_source(&name), switch_of_part(&name))
+                    (node_update_source(&name), switch_of_part(&name))
                 else {
                     println!("{name}: not a part this can update");
                     continue;
@@ -16055,7 +16184,7 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                 }
             }
             // llama.cpp is taken again where this version pins another build
-            LLAMA_PART => {
+            LLAMA_PART if only.is_empty() => {
                 let plan = plan_from_state(&state, channel);
                 let mut stopped = false;
                 let taken = fetch_llama(&plan, &mut || {
@@ -16083,7 +16212,8 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     Err(e) => println!("{name}: {e}"),
                 }
             }
-            _ => match update_binary_part(&name, &part, &update::desk_base(channel)) {
+            LLAMA_PART => {}
+            _ => match update_binary_part(&name, &part, channel) {
                 Ok((version, said)) => {
                     println!("{name}: {said}");
                     changed |= version != part.version;
@@ -16097,7 +16227,10 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     }
 
     // an install from before llama.cpp takes it, where it has the assistant
-    if state.parts.contains_key("assistant") && !state.parts.contains_key(LLAMA_PART) {
+    if only.is_empty()
+        && state.parts.contains_key("assistant")
+        && !state.parts.contains_key(LLAMA_PART)
+    {
         let plan = plan_from_state(&state, channel);
         if plan.llama.is_some() {
             let mut stopped = false;
@@ -16918,11 +17051,36 @@ fn start_supervisor(plan: &Plan, state: &State, console: &Console) {
     }
 }
 
+/// Whether the desk may move to `version`: a desk release names the
+/// contracts it needs of the engine, and one that needs more than this engine
+/// speaks would refuse to start, so it is not taken. This binary is the
+/// newest engine by now, since an update installs it first and hands over.
+fn desk_may_move(channel: Option<&str>, version: &str) -> Result<(), String> {
+    let base = update::desk_base(channel);
+    match crate::releases::desk_floor(&base, version, true) {
+        Ok(Some(floor)) => {
+            match crate::releases::held_by(version, floor, crate::releases::engine_contracts()) {
+                Some(why) => Err(format!("kept where it is: {why}")),
+                None => Ok(()),
+            }
+        }
+        Ok(None) => Ok(()),
+        Err(why) => Err(format!(
+            "kept where it is: what desk {version} needs of the engine could not be read: {why}"
+        )),
+    }
+}
+
 /// One binary part from its own releases, when a newer one is published.
-fn update_binary_part(name: &str, part: &PartState, base: &str) -> Result<(String, String), Exit> {
+fn update_binary_part(
+    name: &str,
+    part: &PartState,
+    channel: Option<&str>,
+) -> Result<(String, String), Exit> {
     if name != "desk" {
         return Err(fail(format!("{name} is not a part this can update")));
     }
+    let base = &update::desk_base(channel);
     let version = update::newest_version(base)?;
     let path = &part.path;
     if !update::newer(&version, &part.version) && Path::new(path).exists() {
@@ -16931,6 +17089,7 @@ fn update_binary_part(name: &str, part: &PartState, base: &str) -> Result<(Strin
             format!("{} is the newest", part.version),
         ));
     }
+    desk_may_move(channel, &version).map_err(fail)?;
     let file = update::part_file("nils-desk", &update::host_target());
     let bytes = update::fetch_checked(base, &version, &file)?;
     update::install_binary(Path::new(path), &bytes)?;
@@ -18394,6 +18553,7 @@ mod tests {
             service: true,
             channel: None,
             version: "1.0.0-alpha.2".to_string(),
+            desk_version: None,
             host_loopback: false,
             postgres: None,
             oidc: None,
@@ -24698,6 +24858,9 @@ mod tests {
             vec!["reapply", "all", "desk"],
             vec!["reapply", ""],
             vec!["update", "--all"],
+            vec!["update", "postgres"],
+            vec!["update", "desk; id"],
+            vec!["update", "desk", "engine"],
             vec!["systemctl", "restart", "sshd"],
             vec!["/bin/sh"],
             vec![],
@@ -24812,6 +24975,61 @@ mod tests {
             assert!(
                 said.contains("nils-manage reapply takes all, or no other word"),
                 "{args:?}: {said}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The helper updates every part with no other word, as it always did,
+    /// and one part by its own word, each part of the record with releases of
+    /// its own, so a desk released alone is taken without the engine. The
+    /// rule names each line. The recorded engine is `echo` here.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_updates_every_part_or_one_part_by_name() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let Some(echo) = ["/bin/echo", "/usr/bin/echo"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+        else {
+            return;
+        };
+        let plan = deployment();
+        let mut state = deployed_state(&plan);
+        state.parts.get_mut("engine").expect("an engine").path = echo.to_string();
+        let helper = plan.helper.clone().expect("a deployment keeps one");
+        let text = helper_text(&plan.dir, &helper, &state);
+        let dir = scratch("helper-update-part");
+        let script = dir.join("nils-manage");
+        std::fs::write(&script, &text).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("sh")
+                .arg(&script)
+                .args(args)
+                .output()
+                .expect("sh runs the helper")
+        };
+        let out = run(&["update"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "update --all");
+        let own = updatable_parts(&state);
+        assert!(own.contains(&"desk"), "{own:?}");
+        let rule = sudoers_text(&helper, &state);
+        for part in &own {
+            let out = run(&["update", part]);
+            assert!(
+                out.status.success(),
+                "{part}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                format!("update --part {part}")
+            );
+            assert!(
+                rule.contains(&format!("{} update {part}", helper.path)),
+                "{rule}"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

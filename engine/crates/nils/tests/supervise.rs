@@ -556,6 +556,68 @@ fn the_door_reports_what_is_installed_and_updates_a_part_under_a_token() {
     assert_eq!(log["rows"][0]["digest"], caps["parts"][0]["digest"]);
 }
 
+/// The install door says each part beside its own newest release: a desk
+/// released alone is offered while the engine is at its newest, by name, and
+/// the update of one part is asked for by its name.
+#[test]
+fn the_install_door_offers_a_desk_released_alone() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let home = TempDir::new("supervise-parts");
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(settings.join("nils")).unwrap();
+    std::fs::write(
+        settings.join("nils").join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\n[parts.engine]\nversion = \"1.0.0-alpha.14\"\npath = \"/usr/local/bin/nils\"\n\n[parts.desk]\nversion = \"1.0.0-alpha.14\"\npath = \"/usr/local/bin/nils-desk\"\n",
+            home.path().join("nils").display()
+        ),
+    )
+    .unwrap();
+    let channel = |name: &str, version: &str| {
+        let dir = home.path().join(name);
+        std::fs::create_dir_all(dir.join("latest").join("download")).unwrap();
+        std::fs::write(dir.join("latest").join("download").join("VERSION"), version).unwrap();
+        format!("file://{}", dir.display())
+    };
+    let engine = channel("engine-releases", "1.0.0-alpha.14\n");
+    let desk = channel("desk-releases", "1.0.0-alpha.15\n");
+    let s = Service::start_with(
+        &config,
+        &[
+            ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+            ("NILS_RELEASES", engine.as_str()),
+            ("NILS_DESK_RELEASES", desk.as_str()),
+        ],
+    );
+    let token = Some("a-supervisor-token-of-length");
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    let release = &doc["release"];
+    assert_eq!(release["installed"], "1.0.0-alpha.14", "{doc}");
+    assert_eq!(release["newest"], "1.0.0-alpha.14", "{doc}");
+    assert_eq!(release["behind"], serde_json::json!(["desk"]), "{doc}");
+    assert_eq!(release["newer"], "desk 1.0.0-alpha.15", "{doc}");
+    let parts = release["parts"].as_array().expect("each part");
+    let of = |name: &str| parts.iter().find(|p| p["part"] == name).cloned().unwrap();
+    assert_eq!(of("engine")["newer"], serde_json::Value::Null, "{doc}");
+    assert_eq!(of("desk")["installed"], "1.0.0-alpha.14", "{doc}");
+    assert_eq!(of("desk")["newest"], "1.0.0-alpha.15", "{doc}");
+    assert_eq!(of("desk")["newer"], "1.0.0-alpha.15", "{doc}");
+    assert_eq!(of("desk")["command"], "nils update --part desk", "{doc}");
+
+    let (status, refused) = s.call(
+        "POST",
+        "/api/supervise/update-all",
+        Some(r#"{"part":"postgres"}"#),
+        token,
+    );
+    assert_eq!(status, 400, "{refused}");
+}
+
 /// The install door (the desk's Settings read it): an install nils setup
 /// recorded is reported as recorded; a restart runs apart from the door and
 /// ends with its reason; and a folder is looked inside before it is added,
