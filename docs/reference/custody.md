@@ -26,7 +26,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the registry's operator, for the research group that owns the archive |
 | kept | until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed |
 | read | `nils status [--batch <id>]`<br>`nils quarantine list`<br>`nils review list` |
-| change | `nils digest <root>`<br>`nils repair empty-stacks` |
+| change | `nils digest <root>`<br>`nils repair empty-stacks`<br>`nils repair sealed-review` |
 | export | none in Wave 1: the file (or the schema) is the export |
 | delete | remove `<home>/registry.db` (nils has no command for it) |
 

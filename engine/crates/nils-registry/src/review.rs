@@ -2543,6 +2543,129 @@ pub fn close_pick_border(
     )
 }
 
+/// What `nils repair sealed-review` found: the open review items that stand
+/// on stacks of a sample sealed now, which record 48 says a sealed stack
+/// never becomes, and the ones kept because a reading campaign holds them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SealedSwept {
+    /// The items closed as superseded, or that would be on a dry run.
+    pub closed: Vec<i64>,
+    /// Items on sealed stacks a campaign holds: the campaign is how a
+    /// sealed sample is read, so they stay open.
+    pub kept_for_campaigns: Vec<i64>,
+}
+
+impl SealedSwept {
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "closed": self.closed.len(),
+            "closed_ids": self.closed,
+            "kept_for_campaigns": self.kept_for_campaigns.len(),
+        })
+    }
+}
+
+/// Record 48, D1 of the move, mended after the fact: every open review item
+/// about a stack of a sample sealed now (a stack's own item, or a grouped
+/// item whose members are all sealed now) is closed as superseded, which is
+/// what a re-classification does with a question it no longer asks. An item
+/// a campaign holds is the reading of the sealed sample itself and is kept.
+/// The rows stay, as history; nothing is deleted. Running it again finds
+/// nothing. Written in the caller's transaction; `dry_run` writes nothing.
+pub fn close_sealed_items(store: &mut Store, dry_run: bool) -> Result<SealedSwept, StoreError> {
+    let d = store.dialect();
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT id, scope, {} FROM {} WHERE status = 'open' AND scope IN ('stack', 'group') ORDER BY id",
+        d.text_of(t.column("ref").expect("ref")),
+        store.qualified("review_item"),
+    );
+    let mut about: Vec<(i64, Vec<i64>)> = Vec::new();
+    let mut groups: Vec<i64> = Vec::new();
+    for r in store.query(&sql, &[])? {
+        let id = r.int(0)?;
+        if r.text(1)? == "group" {
+            groups.push(id);
+            continue;
+        }
+        let stack = r
+            .opt_text(2)?
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .and_then(|v| v["stack_id"].as_i64());
+        if let Some(stack) = stack {
+            about.push((id, vec![stack]));
+        }
+    }
+    for chunk in groups.chunks(500) {
+        let sql = format!(
+            "SELECT item_id, stack_id FROM {} WHERE item_id IN ({}) ORDER BY item_id",
+            store.qualified("review_member"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut members: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+        for r in store.query(&sql, &[])? {
+            members.entry(r.int(0)?).or_default().push(r.int(1)?);
+        }
+        about.extend(members);
+    }
+    let every: Vec<i64> = about.iter().flat_map(|(_, s)| s.iter().copied()).collect();
+    let (sealed, _) = crate::labels::sealed_now(store, &every, &[])
+        .map_err(|e| StoreError::Message(e.to_string()))?;
+    let mut out = SealedSwept::default();
+    if sealed.is_empty() {
+        return Ok(out);
+    }
+    let mut hit: Vec<i64> = about
+        .into_iter()
+        .filter(|(_, stacks)| !stacks.is_empty() && stacks.iter().all(|s| sealed.contains(s)))
+        .map(|(id, _)| id)
+        .collect();
+    hit.sort_unstable();
+    let mut held: BTreeSet<i64> = BTreeSet::new();
+    for chunk in hit.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT review_item_id FROM {} WHERE review_item_id IN ({})",
+            store.qualified("campaign_item"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            held.insert(r.int(0)?);
+        }
+    }
+    for id in hit {
+        if held.contains(&id) {
+            out.kept_for_campaigns.push(id);
+        } else {
+            out.closed.push(id);
+        }
+    }
+    if !dry_run {
+        for chunk in out.closed.chunks(500) {
+            store.execute(
+                &format!(
+                    "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND id IN ({})",
+                    store.qualified("review_item"),
+                    chunk
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                &[],
+            )?;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod identity_items {
     use super::*;

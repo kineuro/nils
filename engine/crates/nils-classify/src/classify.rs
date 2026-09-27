@@ -879,6 +879,9 @@ fn run(
                 tallies.note(batch_of(r, with_ids), &verdict);
             }
             let mut raised = 0i64;
+            // where this stack's questions begin, so a sealed stack's can be
+            // taken back whole before the window is written
+            let raised_from = reviews.len();
 
             // A split that makes one image per stack, over and over, is the
             // split key failing and not an acquisition (record 35, S4). It
@@ -1186,6 +1189,12 @@ fn run(
             }
             report.evidence += (verdict.evidence.len() + authored.len()) as i64;
             report.silent += i64::from(verdict.silent);
+            // record 48, D1 of the move: a stack of a sample sealed now raises
+            // no review item, and its classification says it raised none
+            if sealed_window.contains(&stack_id) {
+                reviews.truncate(raised_from);
+                raised = 0;
+            }
             report.review_items += raised;
             report.written += 1;
             classes.push(vec![

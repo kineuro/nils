@@ -5671,3 +5671,111 @@ fn repair_removes_the_empty_stacks_and_keeps_what_a_person_named() {
     let again = run(&[]);
     assert_eq!(again["stacks_removed"], 0, "{again}");
 }
+
+/// `nils repair sealed-review`: the open review items an older engine raised
+/// on stacks of a sample sealed now are closed as superseded, never
+/// deleted; a dry run writes nothing; the repair writes one audit row naming
+/// the items; and a second run finds nothing.
+#[test]
+fn repair_closes_the_review_items_on_sealed_stacks_and_audits_them() {
+    let home = home();
+    let dir = tree();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "2", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let db = home.path().join("registry.db");
+    let count = |store: &mut nils_registry::Store, sql: &str| -> i64 {
+        store.query(sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        let stack = count(&mut store, "SELECT MIN(id) FROM stack");
+        let other = count(&mut store, "SELECT MAX(id) FROM stack");
+        assert_ne!(stack, other, "the tree holds two stacks");
+        // what an older engine left: two questions on the sealed stack and
+        // one on a stack no seal names
+        for s in [stack, stack, other] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO review_item (kind, scope, ref, evidence, status, created_at) \
+                         VALUES ('base:conflict', 'stack', '{{\"stack_id\": {s}}}', '{{}}', 'open', '2026-09-25T10:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO sealed_stack (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {stack}, 0, 'anna', '2026-09-25T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let run = |extra: &[&str]| -> serde_json::Value {
+        let out = nils()
+            .args(registry)
+            .args(["repair", "sealed-review", "--json"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let dry = run(&["--dry-run"]);
+    assert_eq!(dry["closed"], 2, "{dry}");
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM review_item WHERE kind = 'base:conflict' AND status = 'open'"
+        ),
+        3
+    );
+    drop(store);
+
+    let done = run(&[]);
+    assert_eq!(done["closed"], 2, "{done}");
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM review_item WHERE kind = 'base:conflict'"
+        ),
+        3
+    );
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM review_item WHERE kind = 'base:conflict' AND status = 'superseded'"
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM audit WHERE action = 'registry.repair' AND scope LIKE '%sealed-review%'"
+        ),
+        1
+    );
+    drop(store);
+    let again = run(&[]);
+    assert_eq!(again["closed"], 0, "{again}");
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM audit WHERE action = 'registry.repair'"
+        ),
+        1,
+        "a run that closes nothing writes no audit row"
+    );
+}

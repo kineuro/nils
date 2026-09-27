@@ -7,6 +7,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Fixed
 
 - An engine update brings the rule packs of the engine's release. Where a site named its pack directory, `nils update` put the new packs where the account running it would look (beside the binary) instead of where the engine reads them, so the engine went on classifying with the packs of the release it was installed from. `nils update --all` now puts the packs of the installed engine's release in the directory the engine reads, whichever binary replaced the engine, and does so where the engine is already at its newest release, so an install left behind catches up on its next update. Only packs that differ from the release's are replaced, in one swap; the ones they replace are kept in `<dir>.previous`, a site's own packs are never touched, and a first-party pack changed on the machine after an update put it there is kept and said. `nils update --check` lists each pack beside the release's, and `GET /api/supervise/install` adds `release.packs`, with `packs` in `release.behind` where they are behind (HTTP API contract 7, amended in place).
+- A classification over stacks of a sample sealed now raises no review item and says it raised none. The items were already left out before they were written, but the run's report and each stack's classification row still counted them, so a run over a sealed sample read as having raised questions it never asked. A pass that votes counts the same way.
+
+### Added
+
+- `nils repair sealed-review [--dry-run] [--json]` closes the open review items about stacks of a sample sealed now that an older engine raised: a stack's own item, or a grouped item whose members are all sealed. The items are marked superseded, never deleted, in one transaction with one `registry.repair` audit row naming them. An item a reading campaign holds is kept, since the campaign is how a sealed sample is read, and is counted. A second run finds nothing.
 
 ## [1.0.0-alpha.53] - 2026-09-27
 
