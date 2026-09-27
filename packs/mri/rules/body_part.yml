@@ -38,18 +38,40 @@ rule_set: body_part
 decides: [body_part]
 tiers: {keywords: 0.65}
 
-order: [spine, brain_neck, neck, brain, spine_coil, stated_spine, stated_brain_neck, stated_neck, stated_brain, portrait_sagittal]
+order: [spine, spine_levels, brain_neck, neck, brain, spine_coil, stated_spine, stated_brain_neck, stated_neck, stated_brain, portrait_sagittal]
 
 rules:
 
   # --- 1. the series' own words
 
+  # The German words are the ones a German protocol is named with:
+  # `HWS`, `BWS` and `LWS` are the cervical, thoracic and lumbar spine
+  # (Halswirbelsäule, Brustwirbelsäule, Lendenwirbelsäule; sources G1 to
+  # G3), and `WS` the spine as a whole (G5), which `normalize-anatomy.yml`
+  # spells as a word so that two letters are never matched inside another.
   spine:
     clauses:
       - {field: anatomy_text, keywords: &spine ['spine', 'spinal', 'spinal cord', 'cervical', 'cerv', 'thoracic', 'thor ', 'lumbar', 'lumb', 'c-spine', 't-spine', 'l-spine', 'vertebral', 'vertebra', 'cord', 'medulla', 'rygg', 'ryggm rg', 'halsrygg', 'br strygg', 'brostrygg', 'l ndrygg', 'lumbalrygg', 'totalcolumna', 'columna', 'sag cc', 'th col', 'wirbel', 'hws', 'bws', 'lws', 'wirbels ule', 'rachis', 'cervicale', 'dorsale', 'lombaire', 'moelle', 'wervelkolom', 'ruggengraat', 'myelit', 'myelopathy', 'syringomyelia'], tier: keywords}
     set: {body_part: spine}
     confidence: 0.65
     why: 'a spine mentioned at all decides it, even beside a brain'
+
+  # A range of vertebral levels is a spine: `C2-Th1`, `Th4-9`, `C4-L1`,
+  # `C3-6`. German writes the thoracic vertebrae Th1 to Th12 (source G4), so
+  # a Philips protocol names its coverage `T1 4mm C2-Th1 KM`. The folded text
+  # has the hyphen as a token of its own, and de-duplication keeps only the
+  # first hyphen of a text, so the hyphen is optional. `T1` and `T2` are
+  # weightings and never a level here: the thoracic letter is `th`, and a
+  # level alone is not read, because `Th1` beside an MPRAGE was a brain on
+  # the archive. Every one of the 85 stacks of the archive a range matched
+  # was a spinal series; 6 of them had been registered as a brain or a head
+  # (2026-09-27).
+  spine_levels:
+    clauses:
+      - {when: {all: [{text: anatomy_text, matches: '\b(?:c[1-7]|th(?:1[0-2]|[1-9])|l[1-5])\s+(?:-\s+)?(?:c[1-7]|th(?:1[0-2]|[1-9])|l[1-5]|s[1-5]|1[0-2]|[1-9])\b'}]}, cite: 'a range of vertebral levels', source: text, tier: keywords}
+    set: {body_part: spine}
+    confidence: 0.65
+    why: 'a range of vertebral levels names a spine'
 
   brain_neck:
     clauses:

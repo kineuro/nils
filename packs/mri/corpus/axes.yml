@@ -191,6 +191,82 @@ cases:
     axes:
       body_part: neck
 
+  # Pack 0.8.0: Philips states `VERTEBRALCRANIUM` for its neuro exams, spine
+  # and brain alike, so it says nothing, and the series' own words decide.
+  # The first is the header combination of a thoracic spine that a campaign
+  # showed as a brain: German protocol words, a neuro body part.
+  - name: a German thoracic spine protocol under VERTEBRALCRANIUM is a spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'VERTEBRALCRANIUM'
+      text_series_description: 'T2 tra 4mm BWS RFadapt'
+      text_protocol_name: 'WIP T2 tra 4mm BWS RFadapt'
+      orientation: Axial
+      scanning_sequence: 'SE'
+      echo_time: 100
+      repetition_time: 4000
+    axes:
+      body_part: spine
+
+  - name: a German head protocol under VERTEBRALCRANIUM stays a brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'VERTEBRALCRANIUM'
+      text_series_description: 'T2 tra Kopf'
+      text_protocol_name: 'WIP T2 tra Kopf'
+      orientation: Axial
+    axes:
+      body_part: brain
+
+  - name: VERTEBRALCRANIUM alone names no body part
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'VERTEBRALCRANIUM'
+      text_series_description: 'cs10_3D_FLAIR'
+      text_protocol_name: 'WIP cs10_3D_FLAIR'
+    axes:
+      body_part: ''
+
+  - name: WS is the German for the spine, spelled as a word
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'VERTEBRALCRANIUM'
+      text_series_description: 'MobiView T1s WS 2mm nativ'
+    axes:
+      body_part: spine
+
+  - name: two letters inside a word are not WS
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'HEAD'
+      text_series_description: 'ax t2 news'
+    axes:
+      body_part: brain
+
+  - name: a range of vertebral levels is a spine, even in an exam registered as a brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN'
+      text_series_description: 'T1_4mm C2-Th1 KM RFadapt'
+    axes:
+      body_part: spine
+
+  - name: a thoracic range written short is a spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'VERTEBRALCRANIUM'
+      text_series_description: 'T1 tra 4mm Th4-9 KM RFadapt'
+    axes:
+      body_part: spine
+
+  - name: a T1 beside a T2 is no range of levels
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'HEAD'
+      text_series_description: 'T1-T2 ratio'
+    axes:
+      body_part: brain
+
   - name: a body part whose accented letter came through damaged still decides
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'

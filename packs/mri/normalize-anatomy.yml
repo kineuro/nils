@@ -50,5 +50,12 @@ token_removals: []
 # decide those 35, because it is the neck half of the brain-and-neck rule as
 # well, and that rule runs ahead of the one that can name a neck. So the
 # word is spelled as a word here and is not a keyword anywhere.
+#
+# `WS` is the German abbreviation for the spine, Wirbelsäule (source G5), as
+# in Philips' `MobiView T1s WS 2mm`. Two letters are too short to be a
+# keyword, so the token is spelled out here and `wirbel` in the spine list
+# reads it. On the archive the token stood only in spinal series
+# (2026-09-27).
 token_replacements:
   'cou': 'neck'
+  'ws': 'wirbelsaeule'
