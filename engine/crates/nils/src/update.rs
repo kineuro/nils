@@ -221,6 +221,26 @@ pub(crate) fn newest_version(base: &str) -> Result<String, Exit> {
     version_file(base)
 }
 
+/// Every release a base publishes, newest first. A GitHub repository's
+/// listing names them all (the thirty newest, which is more than a desk that
+/// waits for its engine ever passes over); a channel of a deployment's own
+/// keeps only the `VERSION` file of its newest, so that one is all it has.
+pub(crate) fn versions(base: &str) -> Result<Vec<String>, Exit> {
+    if let Some(repo) = github_repo(base) {
+        let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+        if let Ok(answer) = ask(&url) {
+            if answer.refused() {
+                return Err(fail(answer.refusal(&url)));
+            }
+            let listed = listed(&answer.body);
+            if !listed.is_empty() {
+                return Ok(listed);
+            }
+        }
+    }
+    version_file(base).map(|v| vec![v])
+}
+
 /// The version the one line `VERSION` file of the newest release names.
 fn version_file(base: &str) -> Result<String, Exit> {
     let url = format!("{base}/latest/download/VERSION");
@@ -397,15 +417,36 @@ fn ask(url: &str) -> Result<Answer, String> {
 /// 1.0.0-alpha.11 it put alpha.9 first, and taking the first release kept
 /// every install at alpha.9.
 fn newest_of(listing: &str) -> Option<String> {
-    let releases: serde_json::Value = serde_json::from_str(listing).ok()?;
-    releases
-        .as_array()?
+    listed(listing).into_iter().next()
+}
+
+/// The releases a listing names, drafts left out, newest first by version
+/// rather than in the order GitHub gave them.
+fn listed(listing: &str) -> Vec<String> {
+    let Ok(releases) = serde_json::from_str::<serde_json::Value>(listing) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = releases
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
         .iter()
         .filter(|r| !r["draft"].as_bool().unwrap_or(false))
         .filter_map(|r| r["tag_name"].as_str())
         .map(|tag| tag.trim_start_matches('v').to_string())
         .filter(|tag| !tag.is_empty())
-        .reduce(|best, tag| if newer(&tag, &best) { tag } else { best })
+        .collect();
+    out.sort_by(|a, b| {
+        if newer(a, b) {
+            std::cmp::Ordering::Less
+        } else if newer(b, a) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    out.dedup();
+    out
 }
 
 /// Fetch one file of a release and check it against that release's sums.
@@ -637,6 +678,7 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
             other => crate::releases::newest_of(other, channel),
         },
         &mut |v| crate::releases::desk_floor(&desk_base(channel), v, false),
+        &mut || versions(&desk_base(channel)).map_err(|e| e.message),
         crate::releases::engine_contracts(),
     );
     let asked: Vec<&PartRelease> = rows
@@ -649,7 +691,7 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
     let behind: Vec<String> = asked
         .iter()
         .filter(|r| r.behind())
-        .filter_map(|r| r.newer().map(|n| format!("{} {n}", r.part)))
+        .filter_map(|r| r.to_take().map(|n| format!("{} {n}", r.part)))
         .collect();
     if behind.is_empty() {
         println!("every part is at its newest release");
@@ -824,6 +866,17 @@ mod tests {
         assert_eq!(newest_of(released).as_deref(), Some("1.0.0"));
         assert_eq!(newest_of("[]"), None);
         assert_eq!(newest_of("not json"), None);
+        // every release, newest first, for a desk that has to pass one over
+        assert_eq!(
+            listed(listing),
+            [
+                "1.0.0-alpha.11",
+                "1.0.0-alpha.10",
+                "1.0.0-alpha.9",
+                "1.0.0-alpha.8"
+            ]
+        );
+        assert_eq!(listed(with_draft), ["1.0.0-alpha.11"]);
     }
 
     #[test]

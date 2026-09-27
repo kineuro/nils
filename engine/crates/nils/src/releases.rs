@@ -13,7 +13,10 @@
 //! engine's contracts, and a desk whose floor is above what the engine speaks
 //! would refuse to start. A desk release names its contracts in a
 //! `contracts.json` beside its binaries, and a desk that needs more than the
-//! engine speaks is said to be held, and is not installed.
+//! engine speaks is said to be held, and is not installed. The two carry
+//! version numbers of their own that need not match: what a desk may run
+//! beside is decided by those contracts, never by its number, so an install
+//! takes the newest desk release whose floor its engine meets.
 use std::path::Path;
 use std::process::Command;
 
@@ -113,6 +116,89 @@ pub(crate) fn desk_floor(
         .ok_or_else(|| format!("desk {version}'s contracts.json names no floor"))
 }
 
+/// The variable a lab pins the desk's version with, in place of the newest
+/// desk release that speaks the engine, as `NILS_SETUP_KVASIR_REF` pins
+/// Kvasir's tag.
+pub(crate) const DESK_PIN: &str = "NILS_SETUP_DESK_VERSION";
+
+/// The desk version a lab pinned, if one is.
+pub(crate) fn desk_pin() -> Option<String> {
+    std::env::var(DESK_PIN)
+        .ok()
+        .map(|v| v.trim().trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The newest of `versions` whose floor `engine` meets, read newest first;
+/// `Ok(None)` where none does. A floor that cannot be read stops the walk
+/// rather than being passed over, so a failed download never quietly picks
+/// an older desk.
+pub(crate) fn newest_that_speaks(
+    versions: &[String],
+    floor: &mut dyn FnMut(&str) -> Result<Option<Contracts>, String>,
+    engine: Contracts,
+) -> Result<Option<String>, String> {
+    let mut sorted: Vec<&String> = versions.iter().collect();
+    sorted.sort_by(|a, b| {
+        if update::newer(a, b) {
+            std::cmp::Ordering::Less
+        } else if update::newer(b, a) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    for version in sorted {
+        match floor(version) {
+            Ok(None) => return Ok(Some(version.clone())),
+            Ok(Some(needs)) if held_by(version, needs, engine).is_none() => {
+                return Ok(Some(version.clone()));
+            }
+            Ok(Some(_)) => {}
+            Err(why) => {
+                return Err(format!(
+                    "what desk {version} needs of the engine could not be read: {why}"
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The desk an install or an update takes beside this engine: the version a
+/// lab pinned, else the newest desk release whose contract floor this engine
+/// meets, whatever its number. With `checked`, each `contracts.json` is read
+/// against its release's sums.
+pub(crate) fn desk_to_take(channel: Option<&str>, checked: bool) -> Result<String, String> {
+    if let Some(pinned) = desk_pin() {
+        return Ok(pinned);
+    }
+    let base = update::desk_base(channel);
+    let versions = update::versions(&base).map_err(|e| e.message)?;
+    let engine = engine_contracts();
+    // why the newest waits, said where no release is taken
+    let mut first_held = None;
+    let mut floor = |v: &str| {
+        let found = desk_floor(&base, v, checked);
+        if first_held.is_none()
+            && let Ok(Some(needs)) = &found
+        {
+            first_held = held_by(v, *needs, engine);
+        }
+        found
+    };
+    match newest_that_speaks(&versions, &mut floor, engine)? {
+        Some(version) => Ok(version),
+        None => Err(first_held.unwrap_or_else(|| {
+            format!(
+                "no desk release speaks this engine's contracts (HTTP contract {}, suite \
+                 contract {})",
+                engine.openapi, engine.suite
+            )
+        })),
+    }
+}
+
 /// One part beside its own newest release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartRelease {
@@ -128,6 +214,9 @@ pub(crate) struct PartRelease {
     pub(crate) follows: Option<String>,
     /// Why the newer version is not taken yet, where another part holds it.
     pub(crate) held: Option<String>,
+    /// Where the newest is held, the newest release between it and the one
+    /// installed that the engine does speak, which is taken instead.
+    pub(crate) takes: Option<String>,
 }
 
 impl PartRelease {
@@ -142,9 +231,19 @@ impl PartRelease {
         }
     }
 
+    /// The version an update would move it to now: the newest, or where
+    /// that is held, the newest release the engine speaks.
+    pub(crate) fn to_take(&self) -> Option<&str> {
+        let newer = self.newer()?;
+        match &self.held {
+            None => Some(newer),
+            Some(_) => self.takes.as_deref(),
+        }
+    }
+
     /// Whether an update would move it now.
     pub(crate) fn behind(&self) -> bool {
-        self.newer().is_some() && self.held.is_none()
+        self.to_take().is_some()
     }
 
     /// The line `nils update --check` says for it.
@@ -158,7 +257,10 @@ impl PartRelease {
             return format!("{name} {at}: its newest release could not be read: {e}");
         }
         match (self.newer(), &self.held) {
-            (Some(n), Some(why)) => format!("{name} {at}: {n} is out and waits: {why}"),
+            (Some(n), Some(why)) => match &self.takes {
+                Some(t) => format!("{name} {at}: {t} is out ({n} is newer and waits: {why})"),
+                None => format!("{name} {at}: {n} is out and waits: {why}"),
+            },
             (Some(n), None) => format!("{name} {at}: {n} is out"),
             (None, _) => match &self.newest {
                 Some(n) if self.installed.as_deref() == Some(n.as_str()) => {
@@ -175,8 +277,11 @@ impl PartRelease {
             "part": self.part,
             "installed": self.installed,
             "newest": self.newest,
-            "newer": self.newer(),
-            "held": self.held,
+            // what an update takes, so a desk's Parts page offers it
+            "newer": self.to_take().or(self.newer()),
+            "held": if self.takes.is_some() { None } else { self.held.clone() },
+            "takes": self.takes,
+            "waits": self.held,
             "follows": self.follows,
             "error": self.error,
             "command": format!("nils update --part {}", self.part),
@@ -206,11 +311,14 @@ pub(crate) type Newest = Result<String, String>;
 /// Every part of the install that has releases of its own, beside its newest,
 /// with `look` asking a part's releases for their newest version. A desk
 /// newer than it is installed is read for the contracts it needs of the
-/// engine, with `floor`, against `engine`.
+/// engine, with `floor`, against `engine`; where the newest is held, the
+/// desk's releases from `desk_list` are read for the newest one the engine
+/// speaks, which an update takes instead.
 pub(crate) fn part_releases(
     state: &State,
     look: &mut dyn FnMut(&str) -> Newest,
     floor: &mut dyn FnMut(&str) -> Result<Option<Contracts>, String>,
+    desk_list: &mut dyn FnMut() -> Result<Vec<String>, String>,
     engine: Contracts,
 ) -> Vec<PartRelease> {
     let mut out = Vec::new();
@@ -234,12 +342,27 @@ pub(crate) fn part_releases(
             error,
             follows,
             held: None,
+            takes: None,
         };
         if name == "desk"
             && let Some(n) = row.newer().map(str::to_string)
         {
             match floor(&n) {
-                Ok(Some(needs)) => row.held = held_by(&n, needs, engine),
+                Ok(Some(needs)) => {
+                    row.held = held_by(&n, needs, engine);
+                    if row.held.is_some()
+                        && let Some(have) = row.installed.clone()
+                        && let Ok(list) = desk_list()
+                    {
+                        let between: Vec<String> = list
+                            .into_iter()
+                            .filter(|v| update::newer(v, &have) && update::newer(&n, v))
+                            .collect();
+                        row.takes = newest_that_speaks(&between, &mut *floor, engine)
+                            .ok()
+                            .flatten();
+                    }
+                }
                 Ok(None) => {}
                 Err(e) => {
                     row.held = Some(format!(
@@ -259,6 +382,7 @@ pub(crate) fn part_releases(
                 .is_some_and(|h| h.contains("waits for an engine release"))
             {
                 r.held = None;
+                r.takes = None;
             }
         }
     }
@@ -330,7 +454,7 @@ pub(crate) fn release_doc(rows: &[PartRelease], engine_error: Option<&str>) -> V
         .or_else(|| {
             rows.iter()
                 .find(|r| r.behind())
-                .and_then(|r| r.newer().map(|n| format!("{} {n}", r.part)))
+                .and_then(|r| r.to_take().map(|n| format!("{} {n}", r.part)))
         });
     let behind: Vec<&str> = rows
         .iter()
@@ -393,6 +517,7 @@ mod tests {
                     .ok_or_else(|| format!("{p}: not published"))
             },
             &mut |_| Ok(floor),
+            &mut || Ok(Vec::new()),
             SPEAKS,
         )
     }
@@ -536,6 +661,68 @@ mod tests {
             }),
         );
         assert!(r.iter().find(|r| r.part == "desk").unwrap().behind());
+    }
+
+    #[test]
+    fn a_desk_is_taken_by_the_contracts_it_needs_and_never_by_its_number() {
+        let v = |list: &[&str]| list.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let needs = |openapi| Contracts { openapi, suite: 3 };
+        // desk 60 needs HTTP contract 8, desk 58 and every desk before speak 7
+        let mut floor = |d: &str| {
+            Ok(match d {
+                "1.0.0-alpha.60" => Some(needs(8)),
+                "1.0.0-alpha.58" => Some(needs(5)),
+                _ => None,
+            })
+        };
+        let listed = v(&["1.0.0-alpha.49", "1.0.0-alpha.60", "1.0.0-alpha.58"]);
+        assert_eq!(
+            newest_that_speaks(&listed, &mut floor, SPEAKS).unwrap(),
+            Some("1.0.0-alpha.58".to_string()),
+            "the newest the engine speaks, whatever the engine's own number"
+        );
+        assert_eq!(
+            newest_that_speaks(&v(&["1.0.0-alpha.60"]), &mut floor, SPEAKS).unwrap(),
+            None
+        );
+        // a floor that cannot be read stops the walk rather than picking older
+        let mut unread = |d: &str| {
+            if d == "1.0.0-alpha.60" {
+                Err("404".to_string())
+            } else {
+                Ok(None)
+            }
+        };
+        assert!(newest_that_speaks(&listed, &mut unread, SPEAKS).is_err());
+
+        // an update passes the held newest over for the newest it speaks
+        let s = state("1.0.0-alpha.53", "1.0.0-alpha.52");
+        let r = part_releases(
+            &s,
+            &mut |p| {
+                Ok(match p {
+                    "engine" => "1.0.0-alpha.53",
+                    _ => "1.0.0-alpha.60",
+                }
+                .to_string())
+            },
+            &mut floor,
+            &mut || Ok(v(&["1.0.0-alpha.60", "1.0.0-alpha.58", "1.0.0-alpha.52"])),
+            SPEAKS,
+        );
+        let desk = r.iter().find(|r| r.part == "desk").unwrap();
+        assert!(desk.behind(), "{desk:?}");
+        assert_eq!(desk.to_take(), Some("1.0.0-alpha.58"));
+        assert!(
+            desk.line()
+                .starts_with("desk 1.0.0-alpha.52: 1.0.0-alpha.58 is out")
+        );
+        let doc = release_doc(&r, None);
+        assert_eq!(doc["newer"], "desk 1.0.0-alpha.58");
+        let d = &doc["parts"][1];
+        assert_eq!(d["newer"], "1.0.0-alpha.58");
+        assert_eq!(d["held"], Value::Null);
+        assert!(d["waits"].as_str().unwrap().contains("HTTP contract 8"));
     }
 
     #[test]
