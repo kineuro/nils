@@ -1112,9 +1112,18 @@ fn install(config: &Config) -> (u16, Value) {
             if !state.parts.contains_key(part) {
                 continue;
             }
-            let found = match crate::releases::newest_of(part, None) {
-                Ok(v) => json!({ "version": v }),
-                Err(e) => json!({ "error": e }),
+            // the desk's whole listing, from the one request, so a desk
+            // whose newest waits for the engine can offer an older one
+            let found = if part == "desk" {
+                match crate::update::versions(&crate::update::desk_base(None)) {
+                    Ok(list) => json!({ "version": list.first(), "versions": list }),
+                    Err(e) => json!({ "error": e.message }),
+                }
+            } else {
+                match crate::releases::newest_of(part, None) {
+                    Ok(v) => json!({ "version": v }),
+                    Err(e) => json!({ "error": e }),
+                }
             };
             looked.insert(part.to_string(), found);
         }
@@ -1131,6 +1140,16 @@ fn install(config: &Config) -> (u16, Value) {
             (None, None) => Err("not looked at yet".to_string()),
         },
         &mut |version| cached_floor(every, version),
+        &mut || {
+            newest["desk"]["versions"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .ok_or_else(|| "not looked at yet".to_string())
+        },
         crate::releases::engine_contracts(),
     );
     doc["release"] = crate::releases::release_doc(&rows, None);
