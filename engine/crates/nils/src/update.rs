@@ -510,86 +510,6 @@ pub(crate) fn install_binary(path: &Path, bytes: &[u8]) -> Result<(), Exit> {
     Ok(())
 }
 
-/// The packs the release carries, over the directory in use. The tarball
-/// holds one `packs/` directory, so it is unpacked beside the old one and
-/// the two are swapped.
-pub(crate) fn refresh_packs(base: &str, version: &str, dir: &Path) -> Result<String, String> {
-    let parent = dir.parent().ok_or("the pack directory has no parent")?;
-    if !writable(parent) {
-        return Err(format!("{} is not writable by this user", parent.display()));
-    }
-    let bytes = fetch_checked(base, version, "packs.tar.gz").map_err(|e| e.message)?;
-    let staging = parent.join(format!(".nils-packs-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
-    archive
-        .unpack(&staging)
-        .map_err(|e| format!("unpacking the packs: {e}"))?;
-    let fresh = staging.join("packs");
-    if !fresh.is_dir() {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err("the release's packs.tar.gz holds no packs directory".to_string());
-    }
-    let aside = parent.join(format!(".nils-packs-old-{}", std::process::id()));
-    let swapped = swap_packs(&fresh, dir, &aside);
-    let _ = std::fs::remove_dir_all(&staging);
-    swapped
-}
-
-/// Put the release's packs in `dir`. A pack the release does not carry, one
-/// a deployment wrote for scans of its own, is kept: an update replaces only
-/// the packs it brings. Everything is a rename inside one parent, so nothing
-/// is copied, and what could not be put back is left where it was set aside
-/// and never removed.
-fn swap_packs(fresh: &Path, dir: &Path, aside: &Path) -> Result<String, String> {
-    let _ = std::fs::remove_dir_all(aside);
-    let mut own: Vec<std::ffi::OsString> = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|e| e.file_name())
-                .filter(|name| std::fs::symlink_metadata(fresh.join(name)).is_err())
-                .collect()
-        })
-        .unwrap_or_default();
-    own.sort();
-    if dir.exists() {
-        std::fs::rename(dir, aside).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    if let Err(e) = std::fs::rename(fresh, dir) {
-        if aside.exists() {
-            let _ = std::fs::rename(aside, dir);
-        }
-        return Err(format!("{}: {e}", dir.display()));
-    }
-    let names = |list: &[std::ffi::OsString]| {
-        list.iter()
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let stranded: Vec<_> = own
-        .iter()
-        .filter(|name| std::fs::rename(aside.join(name), dir.join(name)).is_err())
-        .cloned()
-        .collect();
-    let said = format!("the packs in {} are the release's", dir.display());
-    if !stranded.is_empty() {
-        return Ok(format!(
-            "{said}; the deployment's own {} could not be put back and are in {}",
-            names(&stranded),
-            aside.display()
-        ));
-    }
-    let _ = std::fs::remove_dir_all(aside);
-    if own.is_empty() {
-        Ok(said)
-    } else {
-        Ok(format!("{said}, and its own are kept: {}", names(&own)))
-    }
-}
-
 /// The share directory of the prefix a binary sits in, made if it can be:
 /// `~/.local/share/nils/packs` for `~/.local/bin/nils`, and
 /// `/usr/local/share/nils/packs` for `/usr/local/bin/nils`. Both are places
@@ -688,11 +608,35 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
     for row in &asked {
         println!("  {}", row.line());
     }
-    let behind: Vec<String> = asked
+    let mut behind: Vec<String> = asked
         .iter()
         .filter(|r| r.behind())
         .filter_map(|r| r.to_take().map(|n| format!("{} {n}", r.part)))
         .collect();
+    // The packs beside the engine's release: the one an update takes, or the
+    // one installed where the engine is at its newest.
+    if args.parts.is_empty() || args.parts.iter().any(|p| p == "engine") {
+        let engine_row = rows.iter().find(|r| r.part == "engine");
+        let release = engine_row
+            .and_then(|r| r.to_take().map(str::to_string))
+            .or_else(|| crate::setup::engine_version(&state));
+        if let (Some(dir), Some(release)) = (crate::setup::engine_pack_dir(&state), release) {
+            match crate::packs::status(base, &release, &dir) {
+                Ok(status) => {
+                    for line in status.lines() {
+                        println!("  {line}");
+                    }
+                    if status.behind() {
+                        behind.push(format!("packs of {release} ({})", status.stale.join(", ")));
+                    }
+                }
+                Err(why) => println!(
+                    "  packs in {}: the ones engine {release} was released with could not be read: {why}",
+                    dir.display()
+                ),
+            }
+        }
+    }
     if behind.is_empty() {
         println!("every part is at its newest release");
     } else if args.parts.is_empty() {
@@ -798,25 +742,48 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
 
     // The packs go with the binary when the ones in use may be replaced; a
     // deployment that keeps its packs elsewhere is left alone and told so.
+    // Where a setup is recorded and this is its engine, they go where that
+    // engine reads them, which a site may have named: the directory this
+    // process would look in is the one of whoever runs it, and an update the
+    // supervisor asks for runs as root, who finds none there.
     //
     // Where there are none at all, they are taken now. An engine installed
     // before the wizard fetched packs has none, and an update that moves
     // the binary and leaves it unable to say what a scan is has not
     // updated much.
-    match crate::pack_dir(home, None) {
-        Ok(packs) => match refresh_packs(&base, &wanted, &packs) {
-            Ok(said) => println!("{said}"),
-            Err(why) => println!("the packs were left alone: {why}"),
-        },
-        Err(_) => match beside_the_binary(&path) {
-            Some(packs) => match refresh_packs(&base, &wanted, &packs) {
-                Ok(_) => println!(
-                    "the packs are at {}, where there were none",
-                    packs.display()
-                ),
-                Err(why) => println!("there are no packs, and none could be taken: {why}"),
+    let recorded = crate::setup::read_state()
+        .filter(|state| {
+            state.parts.get("engine").is_some_and(|p| {
+                Path::new(&p.path) == path
+                    || std::fs::canonicalize(&p.path).is_ok_and(|c| c == path)
+            })
+        })
+        .and_then(|state| crate::setup::engine_pack_dir(&state));
+    match recorded {
+        Some(packs) => {
+            if let Some(parent) = packs.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match crate::packs::refresh(&base, &wanted, &packs) {
+                Ok(said) => println!("{said}"),
+                Err(why) => println!("the packs were left alone: {why}"),
+            }
+        }
+        None => match crate::pack_dir(home, None) {
+            Ok(packs) => match crate::packs::refresh(&base, &wanted, &packs) {
+                Ok(said) => println!("{said}"),
+                Err(why) => println!("the packs were left alone: {why}"),
             },
-            None => println!("there are no packs, and nowhere beside the binary to put them"),
+            Err(_) => match beside_the_binary(&path) {
+                Some(packs) => match crate::packs::refresh(&base, &wanted, &packs) {
+                    Ok(_) => println!(
+                        "the packs are at {}, where there were none",
+                        packs.display()
+                    ),
+                    Err(why) => println!("there are no packs, and none could be taken: {why}"),
+                },
+                None => println!("there are no packs, and nowhere beside the binary to put them"),
+            },
         },
     }
 
@@ -999,44 +966,6 @@ mod tests {
         assert_eq!(file_of("windows-x86_64"), "nils-windows-x86_64.exe");
         let target = host_target();
         assert!(!target.contains("aarch64"), "{target} spells arm64");
-    }
-
-    #[test]
-    fn an_update_replaces_the_releases_packs_and_keeps_a_deployments_own() {
-        let root = std::env::temp_dir().join(format!("nils-packs-swap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let (fresh, dir, aside) = (root.join("fresh"), root.join("packs"), root.join("aside"));
-        for (path, text) in [
-            (fresh.join("mri/pack.toml"), "the release's"),
-            (fresh.join("clinical/pack.toml"), "the release's"),
-            (dir.join("mri/pack.toml"), "the one before"),
-            (dir.join("mri/gone.toml"), "no longer in the release"),
-            (dir.join("clinical/pack.toml"), "the one before"),
-            (dir.join("lab/pack.toml"), "the deployment's own"),
-        ] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, text).unwrap();
-        }
-        let said = swap_packs(&fresh, &dir, &aside).unwrap();
-        assert!(said.ends_with("its own are kept: lab"), "{said}");
-        let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap();
-        assert_eq!(read("mri/pack.toml"), "the release's");
-        assert_eq!(read("clinical/pack.toml"), "the release's");
-        assert!(
-            !dir.join("mri/gone.toml").exists(),
-            "a pack the release brings is the release's, whole"
-        );
-        assert_eq!(read("lab/pack.toml"), "the deployment's own");
-        assert!(!aside.exists() && !fresh.exists());
-
-        // where there were no packs, the release's are put in place
-        let fresh = root.join("fresh-again");
-        std::fs::create_dir_all(fresh.join("mri")).unwrap();
-        let none = root.join("none");
-        let said = swap_packs(&fresh, &none, &aside).unwrap();
-        assert!(!said.contains("kept"), "{said}");
-        assert!(none.join("mri").is_dir());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -9389,7 +9389,7 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| fail(format!("{}: {e}", parent.display())))?;
     }
-    match update::refresh_packs(&base, &version, &dir) {
+    match crate::packs::refresh(&base, &version, &dir) {
         Ok(_) => {
             console.note(&format!("packs at {}", dir.display()));
             Ok(())
@@ -16351,6 +16351,13 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
     if let Some(node) = plan_from_state(&state, channel).node {
         state.node = node.display().to_string();
     }
+    // The packs go with the engine: the ones its release carries, whichever
+    // binary replaced the engine, since one older than this put them where
+    // the engine does not read them (1.0.0-alpha.53 and before, where a site
+    // named its pack directory).
+    if chosen("engine") {
+        changed |= mend_packs(&state, channel);
+    }
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
     // The record is the one the parts are at now, and the helper is written
@@ -16359,6 +16366,93 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
     // again.
     refresh_helper(&state);
     Ok(changed)
+}
+
+/// Where the engine of a recorded install reads its rule packs, where that
+/// engine is a binary this install put in place: a container's image carries
+/// its own. The directory a site named, which the engine's unit is started
+/// with; else the first of the two the engine looks in that holds a pack,
+/// its registry's and the one beside its binary; else where setup would put
+/// them.
+pub(crate) fn engine_pack_dir(state: &State) -> Option<PathBuf> {
+    let engine = state.parts.get("engine").filter(|p| p.kind == "binary")?;
+    if let Some(dir) = state.site.as_ref().and_then(|s| s.pack_dir.as_ref()) {
+        return Some(PathBuf::from(dir));
+    }
+    let registry = PathBuf::from(&state.dir).join("registry").join("packs");
+    let beside = Path::new(&engine.path)
+        .parent()
+        .and_then(Path::parent)
+        .map(|prefix| prefix.join("share").join("nils").join("packs"));
+    if let Some(found) = [Some(registry.clone()), beside.clone()]
+        .into_iter()
+        .flatten()
+        .find(|d| crate::holds_a_pack(d))
+    {
+        return Some(found);
+    }
+    Some(
+        beside
+            .filter(|d| d.parent().is_some_and(Path::is_dir))
+            .unwrap_or(registry),
+    )
+}
+
+/// The engine version a recorded install is at, which its packs are
+/// measured against.
+pub(crate) fn engine_version(state: &State) -> Option<String> {
+    state
+        .parts
+        .get("engine")
+        .map(|p| p.version.trim().trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty() && v != "from source")
+}
+
+/// The packs of the engine's release put where the engine reads them, where
+/// they are not there already, with what was done said on one line. The
+/// answer is whether the directory changed, so the engine is started again
+/// and reads them.
+fn mend_packs(state: &State, channel: Option<&str>) -> bool {
+    let Some(dir) = engine_pack_dir(state) else {
+        return false;
+    };
+    let Some(version) = engine_version(state) else {
+        println!("packs: the engine's version is not recorded, so its packs were left alone");
+        return false;
+    };
+    let base = update::engine_base(channel);
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match crate::packs::status(&base, &version, &dir) {
+        Ok(status) if !status.behind() => {
+            println!(
+                "packs: the ones engine {version} was released with, in {}",
+                dir.display()
+            );
+            if !status.edited.is_empty() {
+                println!(
+                    "packs: {} changed on this machine and kept as it is",
+                    status.edited.join(", ")
+                );
+            }
+            false
+        }
+        Ok(_) => match crate::packs::refresh(&base, &version, &dir) {
+            Ok(said) => {
+                println!("packs: {said}");
+                true
+            }
+            Err(why) => {
+                println!("packs: left as they were: {why}");
+                false
+            }
+        },
+        Err(why) => {
+            println!("packs: the ones engine {version} was released with could not be read: {why}");
+            false
+        }
+    }
 }
 
 /// A part's unit stopped before an update switches its files, said on the
@@ -17615,10 +17709,18 @@ pub(crate) fn leftovers(me: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> 
             }
             if let Some(prefix) = bin.parent() {
                 let packs = prefix.join("share").join("nils").join("packs");
+                // the packs an update replaced, kept beside them
+                let previous = crate::packs::previous_of(&packs);
+                if previous.is_dir() {
+                    out.push(previous);
+                }
                 for pack in FIRST_PARTY_PACKS {
                     if packs.join(pack).is_dir() {
                         out.push(packs.join(pack));
                     }
+                }
+                if packs.join(crate::packs::MANIFEST).is_file() {
+                    out.push(packs.join(crate::packs::MANIFEST));
                 }
             }
         }
@@ -18021,11 +18123,17 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         .and_then(Path::parent)
     {
         let packs = prefix.join("share").join("nils").join("packs");
+        // the packs an update replaced, kept beside them, which are first
+        // party whatever they hold, as the update kept only what it replaced
+        let previous = crate::packs::previous_of(&packs);
+        if previous.is_dir() {
+            removal.packs.push(previous);
+        }
         if let Ok(entries) = std::fs::read_dir(&packs) {
             let mut others = false;
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if FIRST_PARTY_PACKS.contains(&name.as_str()) {
+                if FIRST_PARTY_PACKS.contains(&name.as_str()) || name == crate::packs::MANIFEST {
                     removal.packs.push(entry.path());
                 } else {
                     others = true;

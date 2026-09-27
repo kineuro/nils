@@ -46,6 +46,7 @@ mod mcp;
 mod measures;
 mod model_cli;
 mod originals;
+mod packs;
 mod pipelines;
 mod places;
 mod preflight;
@@ -2395,7 +2396,7 @@ enum PackCommand {
 /// Whether a directory is a pack directory: one that holds at least one
 /// pack, which is a subdirectory with a `pack.yml` in it. An empty
 /// directory is not one, so the search below walks past it.
-fn holds_a_pack(dir: &Path) -> bool {
+pub(crate) fn holds_a_pack(dir: &Path) -> bool {
     fs::read_dir(dir).is_ok_and(|entries| {
         entries
             .filter_map(Result::ok)

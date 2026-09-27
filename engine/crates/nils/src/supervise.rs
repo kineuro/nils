@@ -1073,6 +1073,31 @@ fn cached_floor(every: Duration, version: &str) -> Result<Option<Contracts>, Str
 }
 static MACHINE: Slot = OnceLock::new();
 
+/// The packs a release carries, as read, and when.
+type Bundled = (Instant, Result<Vec<crate::packs::Pack>, String>);
+static BUNDLED: OnceLock<Mutex<HashMap<String, Bundled>>> = OnceLock::new();
+
+/// The packs an engine release carries, kept by version: for good once read,
+/// since a release's packs never change, and for a while where they could not
+/// be.
+fn cached_bundled(every: Duration, version: &str) -> Result<Vec<crate::packs::Pack>, String> {
+    let held = BUNDLED.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = held.lock()
+        && let Some((at, found)) = guard.get(version)
+        && (found.is_ok() || at.elapsed() < every)
+    {
+        return found.clone();
+    }
+    let found =
+        crate::update::fetch_checked(&crate::update::engine_base(None), version, "packs.tar.gz")
+            .map_err(|e| e.message)
+            .and_then(|bytes| crate::packs::in_tarball(&bytes));
+    if let Ok(mut guard) = held.lock() {
+        guard.insert(version.to_string(), (Instant::now(), found.clone()));
+    }
+    found
+}
+
 /// A slow look kept for a while: the newest release, the card.
 fn cached(slot: &'static Slot, every: Duration, make: impl FnOnce() -> Value) -> Value {
     let held = slot.get_or_init(|| Mutex::new(None));
@@ -1153,6 +1178,46 @@ fn install(config: &Config) -> (u16, Value) {
         crate::releases::engine_contracts(),
     );
     doc["release"] = crate::releases::release_doc(&rows, None);
+    // The rule packs beside the ones the engine's release carries: the
+    // release an update takes, or the one installed. What is on disk is read
+    // on every call; a release's packs never change, so they are kept.
+    if let Some(dir) = crate::setup::engine_pack_dir(&state) {
+        let engine = rows.iter().find(|r| r.part == "engine");
+        let release = engine
+            .and_then(|r| r.to_take().map(str::to_string))
+            .or_else(|| crate::setup::engine_version(&state));
+        if let Some(release) = release {
+            let packs = match cached_bundled(every, &release) {
+                Ok(bundled) => {
+                    let status = crate::packs::compare(
+                        &dir,
+                        &release,
+                        crate::packs::on_disk(&dir),
+                        bundled,
+                        crate::packs::Manifest::read(&dir).as_ref(),
+                    );
+                    if status.behind() {
+                        if let Some(list) = doc["release"]["behind"].as_array_mut() {
+                            list.push(json!("packs"));
+                        }
+                        // a desk that knows nothing of packs still offers
+                        // the update that takes them
+                        if doc["release"]["newer"].is_null() {
+                            doc["release"]["newer"] = json!(format!("packs of {release}"));
+                        }
+                    }
+                    status.doc()
+                }
+                Err(e) => json!({
+                    "dir": dir.display().to_string(),
+                    "release": release,
+                    "error": e,
+                    "command": "nils update --all",
+                }),
+            };
+            doc["release"]["packs"] = packs;
+        }
+    }
     doc["machine"] = cached(&MACHINE, Duration::from_secs(3600), || {
         // every card, and beside them the one with the most memory as the
         // card, which the advice reads and an older desk shows

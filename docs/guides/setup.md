@@ -561,6 +561,21 @@ for an install from before that has the assistant, and restarted with the
 rest. One line each, and the engine last, since it replaces the binary doing
 the replacing. `nils setup --update` is the same work from the wizard's side.
 
+The rule packs go with the engine. An engine that is a binary reads its
+packs from a directory of their own, and each engine release carries its
+packs in one `packs.tar.gz`, so `--all` puts the packs of the engine's
+release in the directory the engine reads: the one a site named with
+`--pack-dir`, else the registry's or the one beside the binary. It measures
+before it writes: each pack is read for the version its `pack.yml` states and
+a digest of its files, and only packs that differ from the release's are
+replaced, in one swap, with the ones they replace kept in `<dir>.previous`.
+A pack the release does not carry is the site's own and is never touched.
+Each swap writes `.nils-packs.json`, naming what it put there, so a
+first-party pack changed on the machine afterwards is kept and said to be
+changed; remove it and update again to take the release's. `--check` lists
+each pack beside the release's, and the install door's `release.packs` gives
+the desk's Parts page the same.
+
 ### A model server for the stations
 
 ```
