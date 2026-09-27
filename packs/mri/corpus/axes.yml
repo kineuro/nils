@@ -730,6 +730,51 @@ cases:
       technique: MP2RAGE
       base: T1w
 
+  # A reader, 2026-09-27: an MP2RAGE whose name also says T1, and whose image
+  # comments say which inversion it is. Invented, in the shape such a
+  # protocol takes.
+  - name: an MP2RAGE second inversion named T1 is still INV2 and proton-density weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS3D\NORM'
+      scanning_sequence: GR
+      sequence_variant: SK
+      scan_options: PER
+      mr_acquisition_type: 3D
+      text_sequence_name: '*tfl3d1_176ns'
+      text_series_description: 'sag T1 mp2rage 0.7iso_INV2'
+      text_protocol_name: 'sag T1 mp2rage 0.7iso'
+      text_image_comments: 'Inv2 Image'
+      echo_time: 2.3
+      repetition_time: 5000
+      inversion_time: 2900
+      flip_angle: 5
+    axes:
+      provenance: RawRecon
+      construct: INV2
+      technique: MP2RAGE
+      base: PDw
+
+  - name: the same protocol's first inversion is INV1 and T1-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS3D\NORM'
+      scanning_sequence: GR
+      sequence_variant: SK
+      scan_options: PER
+      mr_acquisition_type: 3D
+      text_sequence_name: '*tfl3d1_176ns'
+      text_series_description: 'sag T1 mp2rage 0.7iso_INV1'
+      text_protocol_name: 'sag T1 mp2rage 0.7iso'
+      text_image_comments: 'Inv1 Image'
+      echo_time: 2.3
+      repetition_time: 5000
+      inversion_time: 900
+      flip_angle: 5
+    axes:
+      provenance: RawRecon
+      construct: INV1
+      technique: MP2RAGE
+      base: T1w
+
   - name: an MP2RAGE output that says nothing else of its sequence is an MP2RAGE
     stack:
       image_type: 'ORIGINAL\PRIMARY\M'

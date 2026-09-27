@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The MRI pack's corpus holds an MP2RAGE whose name also says T1, with its inversion in the image comments: the second inversion is INV2, MP2RAGE and PDw, the first INV1 and T1w. A test shows that the whole INV2 answer breaks none of the pack's constraints, that a reading campaign's question rules nothing out on INV2, and that only a T1w base beside it breaks one. A reader greyed INV2 out on such a stack; the cause was the desk (kineuro/nils-desk#164), not the pack.
+
 ## [1.0.0-alpha.54] - 2026-09-27
 
 An engine update brings the rule packs of the engine's release to the directory the engine reads, keeps the packs it replaces in `<dir>.previous`, and never touches a site's own packs or a first-party pack changed on the machine; `nils update --check` and the install door's `release.packs` show each pack's version beside the release's. A classification over stacks of a sealed sample raises no review item, and `nils repair sealed-review` closes the ones an older engine raised. Released alone, with no desk release of the same number. The registry stays at schema 70. The HTTP API contract stays version 7, amended in place; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.53.
