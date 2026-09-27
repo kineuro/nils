@@ -333,8 +333,9 @@ fn run_one(
             }
             // record 48, D1 of the move: a stack of a sample sealed now
             // never becomes a review item
-            nils_registry::labels::drop_sealed_items(store, &mut reviews, 2)
+            let withheld = nils_registry::labels::drop_sealed_items(store, &mut reviews, 2)
                 .map_err(|e| nils_registry::store::Error::Message(e.to_string()))?;
+            ran.review_items -= withheld as i64;
             if !reviews.is_empty() {
                 store.insert(
                     &Insert::new(

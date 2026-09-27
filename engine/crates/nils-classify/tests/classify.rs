@@ -1928,3 +1928,189 @@ fn an_answer_that_breaks_the_pack_s_own_constraint_is_kept_doubted_and_asked() {
         assert_eq!(asked(&mut reg, "classify.excluded"), 0, "{name}");
     }
 }
+
+/// Seal every stack of the registry as one sample, as `nils labels seal`
+/// would, or lift the seal when `sealed` is false.
+fn seal_all(reg: &mut Registry, sealed: bool) {
+    if !sealed {
+        let sql = format!(
+            "UPDATE {} SET unsealed_at = sealed_at, unsealed_by = 'test'",
+            reg.store().qualified("sealed_stack")
+        );
+        reg.store().execute(&sql, &[]).unwrap();
+        return;
+    }
+    let table = reg.store().qualified("sealed_stack");
+    if one(reg, &format!("SELECT COUNT(*) FROM {table}")) > 0 {
+        let sql = format!("UPDATE {table} SET unsealed_at = NULL, unsealed_by = NULL");
+        reg.store().execute(&sql, &[]).unwrap();
+        return;
+    }
+    let ids: Vec<i64> = rows(reg, "SELECT id FROM {stack} ORDER BY id")
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    let now = nils_registry::time::now_iso();
+    let seal: Vec<Vec<Param>> = ids
+        .iter()
+        .map(|id| {
+            vec![
+                Param::from("selection:sealed@1"),
+                Param::Int(*id),
+                Param::Int(0),
+                Param::from("test"),
+                Param::from(now.as_str()),
+            ]
+        })
+        .collect();
+    reg.store()
+        .insert(
+            &Insert::new(
+                nils_registry::schema::table("sealed_stack"),
+                &["sample", "stack_id", "subject_id", "sealed_by", "sealed_at"],
+            ),
+            &seal,
+        )
+        .unwrap();
+}
+
+/// Record 48, D1 of the move: sealed means sealed at the source. A
+/// classification over stacks of a sample sealed now writes what the rules
+/// found and raises no review item, not one that the doors then withhold,
+/// and its rows say they raised none. Lifted, the same run asks again; and
+/// `nils repair sealed-review` closes what an older engine raised, keeps
+/// what a reading campaign holds, audits nothing it did not do, and finds
+/// nothing the second time.
+#[test]
+fn a_classification_over_a_sealed_stack_raises_no_review_item() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_tree();
+        let mut reg = prepare(&lab, &dir);
+        seal_all(&mut reg, true);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(report.review_items, 0, "{name}: the report raised none");
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {review_item}"),
+            0,
+            "{name}: a sealed stack never becomes a review item"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification} WHERE review_items <> 0"
+            ),
+            0,
+            "{name}: the classification rows say they raised none"
+        );
+        assert!(
+            one(&mut reg, "SELECT COUNT(*) FROM {classification}") > 0,
+            "{name}: what the rules found is still written"
+        );
+
+        // lifted, the same stacks ask the question the seal kept back
+        seal_all(&mut reg, false);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let open = one(
+            &mut reg,
+            "SELECT COUNT(*) FROM {review_item} WHERE status = 'open'",
+        );
+        assert!(open > 0, "{name}: unsealed, the split is a question again");
+
+        // sealed again over what an older engine would have left open, with
+        // one stack item a reading campaign holds
+        seal_all(&mut reg, true);
+        let stack = one(&mut reg, "SELECT MIN(id) FROM {stack}");
+        let now = nils_registry::time::now_iso();
+        let held = reg
+            .store()
+            .insert(
+                &Insert::new(
+                    nils_registry::schema::table("review_item"),
+                    &["kind", "scope", "ref", "evidence", "status", "created_at"],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("campaign.axes"),
+                    Param::from("stack"),
+                    Param::from(serde_json::json!({"stack_id": stack}).to_string()),
+                    Param::from("{}"),
+                    Param::from("open"),
+                    Param::from(now.as_str()),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        reg.store()
+            .insert(
+                &Insert::new(
+                    nils_registry::schema::table("campaign_item"),
+                    &[
+                        "campaign_id",
+                        "position",
+                        "review_item_id",
+                        "stack_id",
+                        "key",
+                        "state",
+                        "round",
+                    ],
+                ),
+                &[vec![
+                    Param::Int(1),
+                    Param::Int(1),
+                    Param::Int(held),
+                    Param::Int(stack),
+                    Param::from("k1"),
+                    Param::from("open"),
+                    Param::Int(1),
+                ]],
+            )
+            .unwrap();
+
+        let dry = nils_registry::review::close_sealed_items(reg.store(), true).unwrap();
+        assert_eq!(
+            dry.closed.len() as i64,
+            open,
+            "{name}: every open item is sealed"
+        );
+        assert_eq!(dry.kept_for_campaigns, vec![held], "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE status = 'open'"
+            ),
+            open + 1,
+            "{name}: a dry run writes nothing"
+        );
+        let swept = nils_registry::review::close_sealed_items(reg.store(), false).unwrap();
+        assert_eq!(swept, dry, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE status = 'open'"
+            ),
+            1,
+            "{name}: only the campaign's item is still open"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!(
+                    "SELECT COUNT(*) FROM {{review_item}} WHERE id = {held} AND status = 'open'"
+                )
+            ),
+            1,
+            "{name}"
+        );
+        let again = nils_registry::review::close_sealed_items(reg.store(), false).unwrap();
+        assert!(
+            again.closed.is_empty(),
+            "{name}: a second run finds nothing"
+        );
+    }
+}

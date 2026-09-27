@@ -1439,6 +1439,20 @@ enum RepairCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Close the open review items about stacks of a sample sealed now,
+    /// which a sealed stack never becomes (record 48): a stack's own item,
+    /// or a grouped item whose members are all sealed. An item a reading
+    /// campaign holds is kept, since the campaign is how the sample is read.
+    /// The items are marked superseded, not deleted, and the repair is
+    /// audited
+    SealedReview {
+        /// Say how many would be closed and kept, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -4798,7 +4812,12 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
 /// `nils quarantine list`: the paths a digest refused, with the class and
 /// the detail, joined to the root of their source.
 fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
-    let RepairCommand::EmptyStacks { dry_run, json } = command;
+    let (dry_run, json) = match command {
+        RepairCommand::EmptyStacks { dry_run, json } => (dry_run, json),
+        RepairCommand::SealedReview { dry_run, json } => {
+            return repair_sealed_review(home, dry_run, json);
+        }
+    };
     let mut registry = open(home)?;
     let principal = actor();
     let store = registry.store();
@@ -4855,6 +4874,70 @@ fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
     }
     for (id, why) in &swept.kept_series {
         println!("  kept series {id}: {why}");
+    }
+    Ok(())
+}
+
+/// `nils repair sealed-review`: the open review items on stacks of a sample
+/// sealed now closed as superseded, in one transaction with one
+/// `registry.repair` audit row naming every item it closed.
+fn repair_sealed_review(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let principal = actor();
+    let store = registry.store();
+    store.begin().map_err(|e| fail(e.to_string()))?;
+    let done = (|| -> Result<nils_registry::review::SealedSwept, nils_registry::store::Error> {
+        let swept = nils_registry::review::close_sealed_items(store, dry_run)?;
+        if !dry_run && !swept.closed.is_empty() {
+            nils_registry::audit::record_in(
+                store,
+                &nils_registry::audit::Entry {
+                    principal: &principal,
+                    action: nils_registry::audit::Action::RegistryRepair,
+                    scope: serde_json::json!({"repair": "sealed-review"}),
+                    policy: None,
+                    job_id: None,
+                    details: Some(serde_json::json!({
+                        "items_closed": swept.closed.len(),
+                        "item_ids": swept.closed,
+                        "status": "superseded",
+                        "kept_for_campaigns": swept.kept_for_campaigns.len(),
+                    })),
+                },
+            )?;
+        }
+        Ok(swept)
+    })();
+    let swept = match done {
+        Ok(s) if !dry_run => {
+            store.commit().map_err(|e| fail(e.to_string()))?;
+            s
+        }
+        Ok(s) => {
+            store.rollback().ok();
+            s
+        }
+        Err(e) => {
+            store.rollback().ok();
+            return Err(fail(e.to_string()));
+        }
+    };
+    if json {
+        let mut doc = swept.as_json();
+        doc["dry_run"] = dry_run.into();
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return Ok(());
+    }
+    let verb = if dry_run { "would close" } else { "closed" };
+    println!(
+        "nils repair sealed-review   {verb} {} open review item(s) about stacks of a sample sealed now",
+        swept.closed.len()
+    );
+    if !swept.kept_for_campaigns.is_empty() {
+        println!(
+            "  kept {} item(s) a reading campaign holds",
+            swept.kept_for_campaigns.len()
+        );
     }
     Ok(())
 }
@@ -5733,7 +5816,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",
             "commands": {
                 "read": ["nils status [--batch <id>]", "nils quarantine list", "nils review list"],
-                "change": ["nils digest <root>", "nils repair empty-stacks"],
+                "change": ["nils digest <root>", "nils repair empty-stacks", "nils repair sealed-review"],
                 "export": ["none in Wave 1: the file (or the schema) is the export"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },
