@@ -1052,8 +1052,8 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // where an installer leaves them; without any, the engine still serves
     // and the doors that need a pack say so.
     let pack_dir = crate::pack_dir(home, args.pack_dir.clone()).ok();
-    let server = tiny_http::Server::http(&args.bind)
-        .map_err(|e| fail(format!("cannot listen on {}: {e}", args.bind)))?;
+    let server =
+        listen(&args.bind).map_err(|e| fail(format!("cannot listen on {}: {e}", args.bind)))?;
     let bound = server
         .server_addr()
         .to_ip()
@@ -1211,6 +1211,41 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     }
     Ok(())
 }
+
+/// The doors' listener, its connections sending without delay (TCP_NODELAY,
+/// which the accepted connections take from the listener). A response is
+/// written as its head and then its body; on a connection the desk keeps
+/// open, the body otherwise waits for the acknowledgement of the head,
+/// which the other side delays by some 40 ms, so every picture and every
+/// manifest a reader's page asked for arrived 40 ms late.
+fn listen(bind: &str) -> Result<tiny_http::Server, String> {
+    let listener = std::net::TcpListener::bind(bind).map_err(|e| e.to_string())?;
+    no_delay(&listener);
+    tiny_http::Server::from_listener(listener, None).map_err(|e| e.to_string())
+}
+
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "setsockopt reads one int through the pointer it is given"
+)]
+fn no_delay(listener: &std::net::TcpListener) {
+    use std::os::fd::AsRawFd;
+    let on: libc::c_int = 1;
+    // SAFETY: a valid socket, an int option of the size given
+    let _ = unsafe {
+        libc::setsockopt(
+            listener.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            (&on as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+}
+
+#[cfg(not(unix))]
+fn no_delay(_: &std::net::TcpListener) {}
 
 /// The queue's worker beside the doors: it takes the queue when no other
 /// worker holds it and runs what is queued; when another worker has it, or

@@ -2153,6 +2153,128 @@ fn manifest_cached(root: &Path) -> Result<Option<Manifest>, String> {
     Ok(m)
 }
 
+/// What a rendered plane depends on: the pyramid (its directory and its
+/// manifest's modification time and length, so a rebuild is a new key), the
+/// level, the axis, the plane, the window as asked, and whether the band is
+/// held (a caller below the class gets another picture).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct RenderKey {
+    pub root: PathBuf,
+    pub built: (std::time::SystemTime, u64),
+    pub level: u32,
+    pub axis: char,
+    pub index: u32,
+    pub center: u64,
+    pub width: u64,
+    pub held: bool,
+}
+
+/// The planes the render door drew, kept by what they depend on up to a
+/// number of bytes, the oldest dropped first. A reader moves through a
+/// campaign's stacks and the desk warms the next ones ahead, so the same
+/// three planes of a stack are asked again by the reader, by the next rater
+/// and by the page loaded afresh; a coronal or sagittal plane decodes every
+/// plane of the level to draw, which is tens of milliseconds and a worker
+/// taken each time. The access checks and the audit row come before the
+/// cache, so a kept plane is never served to a caller the door would refuse.
+pub struct RenderCache {
+    cap: usize,
+    bytes: usize,
+    kept: std::collections::HashMap<RenderKey, std::sync::Arc<Vec<u8>>>,
+    order: std::collections::VecDeque<RenderKey>,
+}
+
+impl RenderCache {
+    pub fn new(cap: usize) -> Self {
+        RenderCache {
+            cap,
+            bytes: 0,
+            kept: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub fn get(&self, key: &RenderKey) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.kept.get(key).cloned()
+    }
+
+    /// Keep a plane; one larger than the whole cap is not kept.
+    pub fn put(&mut self, key: RenderKey, image: std::sync::Arc<Vec<u8>>) {
+        if image.len() > self.cap || self.kept.contains_key(&key) {
+            return;
+        }
+        self.bytes += image.len();
+        self.kept.insert(key.clone(), image);
+        self.order.push_back(key);
+        while self.bytes > self.cap {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.kept.remove(&old) {
+                self.bytes -= gone.len();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.kept.len()
+    }
+
+    #[cfg(test)]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+/// The render door's cache: 64 MB, some thousands of planes at the server's level.
+pub const RENDER_CACHE_BYTES: usize = 64 << 20;
+
+static RENDERED: std::sync::LazyLock<std::sync::Mutex<RenderCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(RenderCache::new(RENDER_CACHE_BYTES)));
+
+/// A plane rendered as a JPEG, from the cache when it holds it.
+#[allow(clippy::too_many_arguments)]
+fn render_cached(
+    root: &Path,
+    m: &Manifest,
+    level: u32,
+    axis: char,
+    index: u32,
+    center: f64,
+    width: f64,
+    held: bool,
+) -> Result<std::sync::Arc<Vec<u8>>, Reply> {
+    let meta = std::fs::metadata(root.join("manifest.json"))
+        .map_err(|e| Reply::error(404, e.to_string()))?;
+    let key = RenderKey {
+        root: root.to_path_buf(),
+        built: (
+            meta.modified()
+                .map_err(|e| Reply::error(500, e.to_string()))?,
+            meta.len(),
+        ),
+        level,
+        axis,
+        index,
+        center: center.to_bits(),
+        width: width.to_bits(),
+        held,
+    };
+    if let Some(image) = RENDERED.lock().ok().and_then(|c| c.get(&key)) {
+        return Ok(image);
+    }
+    let (w, h, px) = plane_along(root, m, level, axis, index).map_err(|e| Reply::error(404, e))?;
+    // the band is held on every axis when the annotation is burned in and the caller is below the class
+    let jpeg = render_jpeg(w, h, &px, m.slope, m.intercept, center, width, held)
+        .map_err(|e| Reply::error(500, e))?;
+    let image = std::sync::Arc::new(jpeg);
+    if let Ok(mut c) = RENDERED.lock() {
+        c.put(key, std::sync::Arc::clone(&image));
+    }
+    Ok(image)
+}
+
 /// The working place the doors read under, looked up at most once a second:
 /// a grid's tiles do not each ask the registry which place it is.
 static WORKING: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Place)>>> =
@@ -2329,14 +2451,10 @@ pub fn door(
                 .unwrap_or(m.window.width);
             note_open(registry, caller, stack, through, level, "render")
                 .map_err(|e| Reply::error(500, e))?;
-            let (w, h, px) =
-                plane_along(&root, &m, level, axis, z).map_err(|e| Reply::error(404, e))?;
-            // the band is held on every axis when the annotation is burned in and the caller is below the class
-            let jpeg = render_jpeg(w, h, &px, m.slope, m.intercept, center, width, held)
-                .map_err(|e| Reply::error(500, e))?;
+            let jpeg = render_cached(&root, &m, level, axis, z, center, width, held)?;
             Ok(Reply::raw(
                 "image/jpeg",
-                jpeg,
+                jpeg.as_ref().clone(),
                 headers(vec![("X-Nils-Held".to_string(), held.to_string())]),
             ))
         }
@@ -2380,6 +2498,62 @@ pub fn door(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(index: u32, held: bool) -> RenderKey {
+        RenderKey {
+            root: PathBuf::from("/pyramids/7"),
+            built: (std::time::UNIX_EPOCH, 100),
+            level: 2,
+            axis: 'y',
+            index,
+            center: 500f64.to_bits(),
+            width: 1000f64.to_bits(),
+            held,
+        }
+    }
+
+    #[test]
+    fn the_render_cache_keeps_a_plane_by_what_it_depends_on() {
+        let mut c = RenderCache::new(1000);
+        c.put(key(1, false), std::sync::Arc::new(vec![1; 100]));
+        assert_eq!(c.get(&key(1, false)).unwrap().len(), 100);
+        // the held picture is another picture, and so is another plane or a rebuilt pyramid
+        assert!(c.get(&key(1, true)).is_none());
+        assert!(c.get(&key(2, false)).is_none());
+        let rebuilt = RenderKey {
+            built: (
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+                100,
+            ),
+            ..key(1, false)
+        };
+        assert!(c.get(&rebuilt).is_none());
+        let windowed = RenderKey {
+            center: 400f64.to_bits(),
+            ..key(1, false)
+        };
+        assert!(c.get(&windowed).is_none());
+    }
+
+    #[test]
+    fn the_render_cache_stays_within_its_bytes_dropping_the_oldest() {
+        let mut c = RenderCache::new(1000);
+        for i in 0..25 {
+            c.put(key(i, false), std::sync::Arc::new(vec![0; 100]));
+            assert!(c.bytes() <= 1000);
+        }
+        assert_eq!(c.len(), 10);
+        assert!(c.get(&key(14, false)).is_none());
+        assert!(c.get(&key(15, false)).is_some());
+        assert!(c.get(&key(24, false)).is_some());
+        // a plane larger than the whole cache is not kept, and nothing is dropped for it
+        c.put(key(99, false), std::sync::Arc::new(vec![0; 1001]));
+        assert!(c.get(&key(99, false)).is_none());
+        assert_eq!(c.len(), 10);
+        // the same key twice is kept once
+        c.put(key(24, false), std::sync::Arc::new(vec![0; 100]));
+        assert_eq!(c.bytes(), 1000);
+    }
 
     #[test]
     fn a_tile_round_trips_reversibly() {
