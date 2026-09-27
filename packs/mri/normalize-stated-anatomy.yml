@@ -14,7 +14,16 @@ normalize: stated_anatomy_text
 from:
   - text_body_part
 
-token_removals: []
+# `VERTEBRALCRANIUM` is Philips' body part for its neuro exam cards, spine
+# and brain alike, and not one of DICOM's defined terms for Body Part
+# Examined (source D7). It names no part: on the archive it stood on 1,090
+# stacks, whose own words said a spine on 669 and a brain on 8, and the rest
+# held brain protocols (a 3D FLAIR, a DIR, surveys centred on the root of
+# the nose) beside spinal ones. Read as a stated body part, its `vertebral`
+# made every one of them a spine. So it is dropped here and says nothing:
+# the series' own words, the coil or the geometry decide, or nothing does
+# (2026-09-27).
+token_removals: ['vertebralcranium']
 
 # As in `normalize-anatomy.yml`: the French for neck, spelled as a word so
 # that no keyword has to be three letters long.
