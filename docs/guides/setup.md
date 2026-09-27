@@ -524,12 +524,27 @@ once it runs, under the same id and with the key its key file holds.
 ## Updating
 
 ```
+nils update --check
 nils update --all
+nils update --part desk
 ```
 
+The engine, the desk, the assistant and Kvasir each release on their own, so
+each is measured against its own newest release: the desk against the desk's
+releases, the assistant and Kvasir against their own tags. `--check` says,
+part by part, the version installed and whether a newer one is out, and what
+`--all` would take; a desk released alone is offered while the engine is at
+its newest. `--part` takes one part, or several, without the others.
+
+A desk release says in a `contracts.json` beside its binaries which engine
+contracts it needs at least. A desk that needs more than the engine speaks
+is not installed, and `--check` says it waits; where the engine is behind
+too, `--all` takes the engine first and the desk after it.
+
 Every part the state names, each in the way it runs: a binary is replaced
-from its release, a container is a pull of the new tag and a restart of its
-unit, a Node part is its release tag fetched, checked out and built again,
+from its release, a container is a pull of its own newest tag and a restart
+of its unit, a Node part is its newest release tag (never one below the tag
+the engine pins) fetched, checked out and built again,
 and llama.cpp's build is taken again when a version pins another, or taken
 for an install from before that has the assistant, and restarted with the
 rest. One line each, and the engine last, since it replaces the binary doing

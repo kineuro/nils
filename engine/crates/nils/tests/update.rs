@@ -19,7 +19,15 @@ struct Out {
 }
 
 fn run(args: &[&str]) -> Out {
-    let out = nils().args(args).output().expect("nils runs");
+    // no setup is recorded where these look, whatever the machine has
+    let config = TempDir::new("nils-update-no-record");
+    let out = nils()
+        .args(args)
+        .env("XDG_CONFIG_HOME", config.path())
+        .env_remove("NILS_DESK_RELEASES")
+        .env_remove("NILS_RELEASES")
+        .output()
+        .expect("nils runs");
     Out {
         ok: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).to_string(),
@@ -260,4 +268,275 @@ fn an_empty_directory_is_not_a_pack_directory() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "an empty directory was taken as one");
     assert!(stderr.contains("no pack directory"), "{stderr}");
+}
+
+/// This engine's own version, which an engine part at the newest release has.
+const ENGINE: &str = env!("CARGO_PKG_VERSION");
+
+/// The desk's name for this platform's binary in a release.
+fn desk_file() -> String {
+    file().replacen("nils-", "nils-desk-", 1)
+}
+
+/// A desk channel beside the engine's: its own `VERSION` and binaries, as the
+/// desk's own repository publishes them, and a `contracts.json` where given.
+fn publish_desk(dir: &Path, version: &str, contracts: Option<&str>) {
+    let into = dir.join("download").join(format!("v{version}"));
+    std::fs::create_dir_all(&into).unwrap();
+    let binary = format!("#!/bin/sh\necho nils-desk {version}\n");
+    std::fs::write(into.join(desk_file()), &binary).unwrap();
+    let mut sums = format!("{}  {}\n", sha256_hex(binary.as_bytes()), desk_file());
+    if let Some(doc) = contracts {
+        std::fs::write(into.join("contracts.json"), doc).unwrap();
+        sums.push_str(&format!("{}  contracts.json\n", sha256_hex(doc.as_bytes())));
+    }
+    std::fs::write(into.join("SHA256SUMS"), sums).unwrap();
+    let latest = dir.join("latest").join("download");
+    std::fs::create_dir_all(&latest).unwrap();
+    std::fs::write(latest.join("VERSION"), format!("{version}\n")).unwrap();
+}
+
+/// A recorded setup with an engine and a desk binary, in a config directory
+/// of its own, and nothing that runs.
+struct Install {
+    config: TempDir,
+    base: TempDir,
+}
+
+impl Install {
+    fn new(engine: &str, desk: &str) -> Install {
+        let config = TempDir::new("nils-update-parts-config");
+        let base = TempDir::new("nils-update-parts-base");
+        let desk_path = base.path().join("bin").join("nils-desk");
+        std::fs::create_dir_all(desk_path.parent().unwrap()).unwrap();
+        std::fs::write(&desk_path, format!("#!/bin/sh\necho nils-desk {desk}\n")).unwrap();
+        let record = format!(
+            "dir = \"{dir}\"\nmode = \"local\"\nservice = \"none\"\n\n\
+             [parts.engine]\nversion = \"{engine}\"\npath = \"{dir}/bin/nils\"\nkind = \"binary\"\n\n\
+             [parts.desk]\nversion = \"{desk}\"\npath = \"{desk_path}\"\nkind = \"binary\"\n",
+            dir = base.path().display(),
+            desk_path = desk_path.display(),
+        );
+        let at = config.path().join("nils");
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join("setup.toml"), record).unwrap();
+        Install { config, base }
+    }
+
+    fn run(&self, args: &[&str], engine: &Releases, desk: &Path) -> Out {
+        let out = nils()
+            .args(args)
+            .env("HOME", self.base.path())
+            .env("XDG_CONFIG_HOME", self.config.path())
+            .env("XDG_DATA_HOME", self.base.path().join("data"))
+            .env("NILS_RELEASES", engine.url())
+            .env("NILS_DESK_RELEASES", format!("file://{}", desk.display()))
+            .env_remove("NILS_UPDATE_HANDED_OVER")
+            .output()
+            .expect("nils runs");
+        Out {
+            ok: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        }
+    }
+
+    fn desk(&self) -> String {
+        std::fs::read_to_string(self.base.path().join("bin").join("nils-desk")).unwrap()
+    }
+
+    fn record(&self) -> String {
+        std::fs::read_to_string(self.config.path().join("nils").join("setup.toml")).unwrap()
+    }
+}
+
+#[test]
+fn a_desk_released_alone_is_offered_while_the_engine_is_the_newest() {
+    let engine = Releases::new();
+    engine.publish(ENGINE, false);
+    let desk = TempDir::new("nils-desk-releases");
+    publish_desk(desk.path(), "99.0.0", None);
+    let install = Install::new(ENGINE, ENGINE);
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains(&format!("nils {ENGINE} is the newest release")),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains(&format!("engine {ENGINE}: the newest release")),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains(&format!("desk {ENGINE}: 99.0.0 is out")),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("nils update --all would take desk 99.0.0"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        install.desk(),
+        format!("#!/bin/sh\necho nils-desk {ENGINE}\n"),
+        "--check changed the desk"
+    );
+
+    // and the desk alone is taken, the engine left where it is
+    let o = install.run(&["update", "--part", "desk"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(
+        install.desk(),
+        "#!/bin/sh\necho nils-desk 99.0.0\n",
+        "{}",
+        o.stdout
+    );
+    assert!(
+        install.record().contains("version = \"99.0.0\""),
+        "{}",
+        install.record()
+    );
+    assert!(
+        install
+            .record()
+            .contains(&format!("version = \"{ENGINE}\"")),
+        "{}",
+        install.record()
+    );
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn every_part_at_its_newest_offers_nothing() {
+    let engine = Releases::new();
+    engine.publish(ENGINE, false);
+    let desk = TempDir::new("nils-desk-releases-current");
+    publish_desk(desk.path(), "1.0.0-alpha.51", None);
+    let install = Install::new(ENGINE, "1.0.0-alpha.51");
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("desk 1.0.0-alpha.51: the newest release"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+    // --all with nothing behind changes nothing
+    let o = install.run(&["update", "--all"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("desk: 1.0.0-alpha.51 is the newest"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_development_channel_is_measured_by_its_builds() {
+    // a wave's build is ahead of the release it came from, and behind the
+    // channel's next build of the same wave
+    let dev = format!("{ENGINE}.dev.2");
+    let engine = Releases::new();
+    engine.publish(&dev, false);
+    let desk = TempDir::new("nils-desk-releases-dev");
+    publish_desk(desk.path(), &format!("{ENGINE}.dev.3"), None);
+    let install = Install::new(&dev, &dev);
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains(&format!("engine {dev}: the newest release")),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains(&format!("nils update --all would take desk {ENGINE}.dev.3")),
+        "{}",
+        o.stdout
+    );
+
+    publish_desk(desk.path(), ENGINE, None);
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_desk_that_needs_a_newer_engine_contract_is_not_installed() {
+    let engine = Releases::new();
+    engine.publish(ENGINE, false);
+    let desk = TempDir::new("nils-desk-releases-floor");
+    publish_desk(
+        desk.path(),
+        "99.0.0",
+        Some(r#"{"openapi": "999", "openapi_floor": "999", "suite": "3", "suite_floor": "2"}"#),
+    );
+    let install = Install::new(ENGINE, ENGINE);
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("99.0.0 is out and waits"), "{}", o.stdout);
+    assert!(o.stdout.contains("HTTP contract 999"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+
+    let o = install.run(&["update", "--part", "desk"], &engine, desk.path());
+    assert!(
+        o.stdout.contains("HTTP contract 999"),
+        "{}\n{}",
+        o.stdout,
+        o.stderr
+    );
+    assert_eq!(
+        install.desk(),
+        format!("#!/bin/sh\necho nils-desk {ENGINE}\n"),
+        "the desk was replaced"
+    );
+
+    // a floor this engine speaks is taken
+    publish_desk(
+        desk.path(),
+        "99.0.1",
+        Some(r#"{"openapi": "7", "openapi_floor": "1", "suite": "3", "suite_floor": "1"}"#),
+    );
+    let o = install.run(&["update", "--part", "desk"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(
+        install.desk(),
+        "#!/bin/sh\necho nils-desk 99.0.1\n",
+        "{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn a_part_without_releases_of_its_own_is_refused_by_name() {
+    let o = run(&["update", "--part", "postgres", "--check"]);
+    assert!(!o.ok, "{}", o.stdout);
+    assert!(
+        o.stderr.contains("engine, desk, assistant, kvasir"),
+        "{}",
+        o.stderr
+    );
 }

@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- An update is offered when any part is behind its own newest release, not only when the engine is. The engine, the desk, the assistant and Kvasir each release on their own, so a desk released alone was never offered: `nils update --check` compared the engine alone, and the supervisor's install door, which the desk's Parts page reads, offered nothing while the engine was at its newest. `nils update --check` now says each part's installed version beside its own newest release and what `--all` would take; `nils update --part <part>` updates one part alone; `nils update --all` moves a desk image to the desk's own newest tag and the assistant and Kvasir to their own newest tags, never below the tags this engine pins. `GET /api/supervise/install` adds `release.parts` and `release.behind`, and `release.newer` names the first part behind where the engine is not; `POST /api/supervise/update-all` takes `{part}`; the helper takes `update <part>` (HTTP API contract 7, amended in place). A desk release that names, in a `contracts.json`, an engine contract the engine does not speak is held and said to wait, and is not installed.
+
 ## [1.0.0-alpha.49] - 2026-09-27
 
 The MRI pack is version 0.8.0. Philips's `VERTEBRALCRANIUM`, written as the body part examined for the spine and the brain alike, names no body part, so the series' own words, the coil or the geometry decide, or the axis stays empty for review. The German `WS` and a range of vertebral levels such as `C2-Th1` or `C3-6` read as a spine. The registry stays at schema 70. The HTTP API contract stays version 7; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.48.

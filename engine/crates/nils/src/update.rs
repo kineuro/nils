@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 
+use crate::releases::PartRelease;
 use crate::supervise::{fetch, sha256_hex};
 use crate::{Exit, fail, usage};
 
@@ -42,6 +43,27 @@ pub(crate) struct UpdateArgs {
     /// rest by the newest binary, with the versions its release pins
     #[arg(long)]
     all: bool,
+    /// Update only this part, against its own newest release; repeatable
+    /// (engine, desk, assistant, kvasir)
+    #[arg(long = "part", value_name = "PART")]
+    parts: Vec<String>,
+}
+
+impl UpdateArgs {
+    /// Whether the parts beside the engine are in this update.
+    fn takes_parts(&self) -> bool {
+        self.all || !self.parts.is_empty()
+    }
+
+    /// Whether the engine's own binary is in this update.
+    fn takes_engine(&self) -> bool {
+        self.parts.is_empty() || self.parts.iter().any(|p| p == "engine")
+    }
+
+    /// The parts beside the engine named, or none for every one.
+    fn only(&self) -> Vec<String> {
+        self.parts.clone()
+    }
 }
 
 /// The release's name for one part and one target. The engine publishes
@@ -582,20 +604,109 @@ fn hand_over(path: &Path) -> std::io::Error {
     }
 }
 
+/// `nils update --check`: what an update would do, and nothing done. The
+/// engine as always, and where a setup is recorded, every part beside its own
+/// newest release, since the desk, the assistant and Kvasir release on their
+/// own and any one of them may be behind while the engine is not.
+fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
+    let state = crate::setup::read_state();
+    let engine = match &args.version {
+        Some(v) => Ok(v.trim().trim_start_matches('v').to_string()),
+        None => newest_version(base),
+    };
+    // With no setup recorded the engine is all there is, and a release that
+    // cannot be read is the answer, as it always was.
+    let Some(state) = state else {
+        return engine_check(args, &engine?);
+    };
+    match &engine {
+        Ok(wanted) => engine_check(args, wanted)?,
+        Err(e) => println!(
+            "nils {VERSION}: the newest release could not be read: {}",
+            e.message
+        ),
+    }
+    let channel = args.channel.as_deref();
+    let rows = crate::releases::part_releases(
+        &state,
+        &mut |part| match part {
+            "engine" => engine
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|e| e.message.clone()),
+            other => crate::releases::newest_of(other, channel),
+        },
+        &mut |v| crate::releases::desk_floor(&desk_base(channel), v, false),
+        crate::releases::engine_contracts(),
+    );
+    let asked: Vec<&PartRelease> = rows
+        .iter()
+        .filter(|r| args.parts.is_empty() || args.parts.contains(&r.part))
+        .collect();
+    for row in &asked {
+        println!("  {}", row.line());
+    }
+    let behind: Vec<String> = asked
+        .iter()
+        .filter(|r| r.behind())
+        .filter_map(|r| r.newer().map(|n| format!("{} {n}", r.part)))
+        .collect();
+    if behind.is_empty() {
+        println!("every part is at its newest release");
+    } else if args.parts.is_empty() {
+        println!("nils update --all would take {}", behind.join(", "));
+    } else {
+        let named: Vec<String> = args.parts.iter().map(|p| format!("--part {p}")).collect();
+        println!(
+            "nils update {} would take {}",
+            named.join(" "),
+            behind.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The engine's own lines of a check.
+fn engine_check(args: &UpdateArgs, wanted: &str) -> Result<(), Exit> {
+    let asked = args.version.is_some() || args.to.is_some();
+    if !asked && !newer(wanted, VERSION) {
+        println!("nils {VERSION} is the newest release");
+        return Ok(());
+    }
+    let file = file_of(&host_target());
+    let path = destination(args)?;
+    println!("nils {wanted} is the release; this binary is {VERSION}");
+    println!("  it would install {file} at {}", path.display());
+    Ok(())
+}
+
 pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Result<(), Exit> {
     let base = base_of(&args);
+    for part in &args.parts {
+        if !crate::releases::OWN_RELEASES.contains(&part.as_str()) {
+            return Err(usage(format!(
+                "--part {part}: a part with releases of its own is one of {}",
+                crate::releases::OWN_RELEASES.join(", ")
+            )));
+        }
+    }
+    if args.check {
+        return check(&args, &base);
+    }
+    let only = args.only();
     // The engine first, then every other part: the parts are the newest
     // binary's to update, since this one's pins are the release it came with
     // and a part a later release adds is unknown to it. A binary this update
     // installed carries on from here, and its services start again, since the
-    // engine's binary is new.
-    if args.all && !args.check {
+    // engine's binary is new. Each part moves to its own newest release, so a
+    // part is updated whether or not the engine has a newer one.
+    if args.takes_parts() {
         if let Some(from) = std::env::var_os(HANDED_OVER) {
             println!(
                 "nils {VERSION} carries on the update from {}",
                 from.to_string_lossy()
             );
-            crate::setup::update_all(args.channel.as_deref())?;
+            crate::setup::update_all(args.channel.as_deref(), &only)?;
             crate::setup::restart_after_update(args.channel.as_deref());
             return Ok(());
         }
@@ -603,8 +714,15 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
         // On an install whose services are the machine's own, replacing the
         // parts' files is root's work, and the account the supervisor runs
         // as asks the helper to run this same command as root.
-        if let Some(done) = crate::setup::update_by_helper() {
+        if let Some(done) = crate::setup::update_by_helper(&only) {
             return done;
+        }
+        // Parts named without the engine leave its binary where it is.
+        if !args.takes_engine() {
+            if crate::setup::update_all(args.channel.as_deref(), &only)? {
+                crate::setup::restart_after_update(args.channel.as_deref());
+            }
+            return Ok(());
         }
     }
     let wanted = match &args.version {
@@ -614,7 +732,7 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let asked = args.version.is_some() || args.to.is_some();
     if !asked && !newer(&wanted, VERSION) {
         println!("nils {VERSION} is the newest release");
-        if args.all && !args.check && crate::setup::update_all(args.channel.as_deref())? {
+        if args.takes_parts() && crate::setup::update_all(args.channel.as_deref(), &only)? {
             crate::setup::restart_after_update(args.channel.as_deref());
         }
         return Ok(());
@@ -622,12 +740,6 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let target = host_target();
     let file = file_of(&target);
     let path = destination(&args)?;
-
-    if args.check {
-        println!("nils {wanted} is the release; this binary is {VERSION}");
-        println!("  it would install {file} at {}", path.display());
-        return Ok(());
-    }
 
     let dir = path.parent().unwrap_or(Path::new("."));
     if !writable(dir) {
@@ -668,10 +780,10 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
 
     // Every other part is the new binary's to update, with the versions its
     // release pins; where it cannot be started, this one does what it can.
-    if args.all {
+    if args.takes_parts() {
         let why = hand_over(&path);
         println!("nils {wanted} could not be started ({why}), so nils {VERSION} updates the parts");
-        crate::setup::update_all(args.channel.as_deref())?;
+        crate::setup::update_all(args.channel.as_deref(), &only)?;
         crate::setup::restart_after_update(args.channel.as_deref());
         return Ok(());
     }

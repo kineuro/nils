@@ -144,7 +144,10 @@ install and acts on it, from the setup record of the account it runs as
   from the record, with every source place the registry holds, and starts
   only the engine again. A container sees only what was mounted when it
   started, so a folder added as a source needs this.
-- `POST /api/supervise/update-all` runs `nils update --all`.
+- `POST /api/supervise/update-all` runs `nils update --all`, or with
+  `{"part": "desk"}` `nils update --part desk`, one part against its own
+  releases. `GET /api/supervise/install` says each part beside its own newest
+  release in `release.parts`, and which are behind in `release.behind`.
 - `POST /api/supervise/look` says what a folder holds before it is added:
   each folder inside with its files, how many of a sample are DICOM, and
   their modalities and scanners.
@@ -184,7 +187,9 @@ word matches no rule and is turned away before the program is reached, and
 the program itself answers only to those words: `restart` with the name of a
 part of this install or `all`, `reapply`, which writes the engine's unit again
 from the record and starts it, `reapply all`, which writes every part's unit
-again and starts them in order, and `update`, which runs `nils update --all`.
+again and starts them in order, `update`, which runs `nils update --all`, and
+`update` with the name of a part that has releases of its own, which runs
+`nils update --part` for that part alone.
 It takes no path, no unit name and no command of its caller's.
 
 The account is named with `--account supervisor=nils-deploy`, which `--system`

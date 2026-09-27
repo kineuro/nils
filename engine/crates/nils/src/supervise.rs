@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
+use crate::releases::Contracts;
 use crate::{Exit, fail, usage};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1051,6 +1052,25 @@ fn write_run(dir: &Path, id: &str, doc: &Value) {
 
 type Slot = OnceLock<Mutex<Option<(Instant, Value)>>>;
 static NEWEST: Slot = OnceLock::new();
+/// A desk release's floor as read, and when.
+type Floor = (Instant, Result<Option<Contracts>, String>);
+static FLOORS: OnceLock<Mutex<HashMap<String, Floor>>> = OnceLock::new();
+
+/// What a desk release needs of the engine, kept for a while by version.
+fn cached_floor(every: Duration, version: &str) -> Result<Option<Contracts>, String> {
+    let held = FLOORS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = held.lock()
+        && let Some((at, found)) = guard.get(version)
+        && at.elapsed() < every
+    {
+        return found.clone();
+    }
+    let found = crate::releases::desk_floor(&crate::update::desk_base(None), version, false);
+    if let Ok(mut guard) = held.lock() {
+        guard.insert(version.to_string(), (Instant::now(), found.clone()));
+    }
+    found
+}
 static MACHINE: Slot = OnceLock::new();
 
 /// A slow look kept for a while: the newest release, the card.
@@ -1083,24 +1103,37 @@ fn install(config: &Config) -> (u16, Value) {
     };
     let mut doc = crate::setup::install_doc(&state);
     let every = Duration::from_secs(config.poll_seconds.max(60));
+    // Each part against its own newest release, looked at once in a while;
+    // what is installed is read from the record on every call, so a part
+    // just updated stops being offered at once.
     let newest = cached(&NEWEST, every, || {
-        match crate::update::newest_version(&crate::update::engine_base(None)) {
-            Ok(v) => json!({ "version": v }),
-            Err(e) => json!({ "error": e.message }),
+        let mut looked = serde_json::Map::new();
+        for part in crate::releases::OWN_RELEASES {
+            if !state.parts.contains_key(part) {
+                continue;
+            }
+            let found = match crate::releases::newest_of(part, None) {
+                Ok(v) => json!({ "version": v }),
+                Err(e) => json!({ "error": e }),
+            };
+            looked.insert(part.to_string(), found);
         }
+        Value::Object(looked)
     });
-    let installed = state.parts.get("engine").map(|p| p.version.clone());
-    let newer = match (newest["version"].as_str(), installed.as_deref()) {
-        (Some(n), Some(have)) if crate::update::newer(n, have) => json!(n),
-        _ => Value::Null,
-    };
-    doc["release"] = json!({
-        "installed": installed,
-        "newest": newest["version"],
-        "newer": newer,
-        "error": newest["error"],
-        "command": "nils update --all",
-    });
+    let rows = crate::releases::part_releases(
+        &state,
+        &mut |part| match (
+            newest[part]["version"].as_str(),
+            newest[part]["error"].as_str(),
+        ) {
+            (Some(v), _) => Ok(v.to_string()),
+            (None, Some(e)) => Err(e.to_string()),
+            (None, None) => Err("not looked at yet".to_string()),
+        },
+        &mut |version| cached_floor(every, version),
+        crate::releases::engine_contracts(),
+    );
+    doc["release"] = crate::releases::release_doc(&rows, None);
     doc["machine"] = cached(&MACHINE, Duration::from_secs(3600), || {
         // every card, and beside them the one with the most memory as the
         // card, which the advice reads and an older desk shows
@@ -1328,7 +1361,24 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
             started(runs.start("reapply", &args))
         }
         (Method::Post, "/api/supervise/update-all") => {
-            started(runs.start("update", &["update".to_string(), "--all".to_string()]))
+            // every part, or the one named, each against its own releases
+            let doc = body_json(&mut request);
+            match doc["part"].as_str() {
+                None | Some("all") => {
+                    started(runs.start("update", &["update".to_string(), "--all".to_string()]))
+                }
+                Some(part) if crate::releases::OWN_RELEASES.contains(&part) => started(runs.start(
+                    "update",
+                    &["update".to_string(), "--part".to_string(), part.to_string()],
+                )),
+                Some(_) => error(
+                    400,
+                    format!(
+                        "part: one of {}, or none for every part",
+                        crate::releases::OWN_RELEASES.join(", ")
+                    ),
+                ),
+            }
         }
         (Method::Get, p) if p.starts_with("/api/supervise/runs/") => {
             match runs.show(&p["/api/supervise/runs/".len()..]) {

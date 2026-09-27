@@ -28,10 +28,10 @@ use crate::{Exit, ServeArgs, fail, usage};
 
 /// The contract versions this binary speaks, read from the checked-in
 /// contracts at build time so that the door and the document cannot drift.
-const OPENAPI_VERSION: &str = include_str!("../../../../contracts/openapi/VERSION");
+pub(crate) const OPENAPI_VERSION: &str = include_str!("../../../../contracts/openapi/VERSION");
 const REVIEW_ITEM_VERSION: &str = include_str!("../../../../contracts/review-item/VERSION");
 // Wave 4c §6.7: the suite vocabulary and the MCP door, each versioned.
-const SUITE_VERSION: &str = include_str!("../../../../contracts/suite/VERSION");
+pub(crate) const SUITE_VERSION: &str = include_str!("../../../../contracts/suite/VERSION");
 const MCP_VERSION: &str = include_str!("../../../../contracts/mcp/VERSION");
 const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VERSION");
 const MODEL_CONTRACT_VERSION: &str = include_str!("../../../../contracts/model/VERSION");

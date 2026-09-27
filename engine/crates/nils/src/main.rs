@@ -52,6 +52,7 @@ mod preflight;
 mod profile;
 mod pyramid;
 mod reader;
+mod releases;
 mod schedule;
 mod sealed;
 mod serve;
