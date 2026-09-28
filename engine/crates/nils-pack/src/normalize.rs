@@ -21,6 +21,12 @@ pub struct Normalizer {
     pub into: String,
     /// The fields joined, in order, before anything else happens.
     pub from: Vec<usize>,
+    /// For each field of `from`, the manufacturers whose value of it is left
+    /// out, as upper-case prefixes of the stack's `Manufacturer`. Empty for a
+    /// field every vendor writes per series. MRI pack 0.10.0: GE writes the
+    /// exam's protocol into `ProtocolName`, so a word in it lands on every
+    /// series of the exam and says nothing about the one in hand.
+    pub unless_manufacturer: Vec<Vec<String>>,
     /// Literal substrings removed before normalization, case-sensitively.
     pub raw_removals: Vec<String>,
     /// A character that becomes a word: `*` becomes `star`, so `T2*` is one
@@ -46,6 +52,18 @@ pub struct Conditional {
 }
 
 impl Normalizer {
+    /// Whether field `k` of `from` is read for a stack of this manufacturer.
+    pub fn reads(&self, k: usize, manufacturer: &str) -> bool {
+        let Some(prefixes) = self.unless_manufacturer.get(k) else {
+            return true;
+        };
+        if prefixes.is_empty() {
+            return true;
+        }
+        let m = manufacturer.trim().to_uppercase();
+        !prefixes.iter().any(|p| m.starts_with(p.as_str()))
+    }
+
     /// The normalized blob, or `None` when nothing survives.
     pub fn apply(&self, parts: &[&str]) -> Option<String> {
         // The join v0 makes before it normalizes.

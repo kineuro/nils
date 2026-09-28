@@ -38,6 +38,12 @@ pub const FIELDS: &[&str] = &[
     // images sit on rather than from how many images there are.
     "n_slices",
     "slice_span_mm",
+    // MRI pack 0.10.0: how many time points the series holds, where the
+    // file says (NumberOfTemporalPositions), and the series number, which
+    // Siemens moves by 1000 for a single-band reference. Both were in the
+    // fingerprint and no rule could read them.
+    "temporal_positions",
+    "series_number",
     // text
     "modality",
     "manufacturer",
@@ -81,7 +87,7 @@ pub const FIELDS: &[&str] = &[
 ];
 
 /// Where the text half begins.
-pub const FIRST_TEXT: usize = 21;
+pub const FIRST_TEXT: usize = 23;
 
 pub fn field_index(name: &str) -> Option<usize> {
     FIELDS.iter().position(|f| *f == name)

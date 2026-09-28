@@ -1219,3 +1219,468 @@ cases:
       flip_angle: 12
     axes:
       modifier: ''
+
+  # --- pack 0.10.0: fMRI, perfusion and the gradient-echo family
+  # (`studies/2026-09-28-sequence-research/reconciled.md` in the design
+  # repository). Every stack is invented; the shapes are the archive's.
+
+  # The EPI time series: diffusion, ASL, DSC, BOLD, then the references.
+  - name: a gradient-echo EPI time series with nothing else to say is BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: '*epfid2d1_94'
+      text_series_description: 'run 1'
+      n_instances: 500
+      n_slices: 1
+    axes:
+      technique: BOLD
+      provenance: RawRecon
+
+  - name: a GE multiphase EPI of 200 time points with no words is BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\GR'
+      sequence_variant: SS
+      scan_options: 'SAT_GEMS\MP_GEMS\EPI_GEMS\HYPERBAND_GEMS\FS'
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax rest'
+      temporal_positions: 200
+      n_instances: 12000
+      n_slices: 60
+    axes:
+      technique: BOLD
+
+  - name: the same EPI time series given contrast is DSC, tried before BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_128'
+      text_series_description: 'ax dynamic'
+      text_contrast: 'gadobutrol'
+      n_instances: 60
+      n_slices: 1
+    axes:
+      technique: Perfusion
+      post_contrast: '1'
+
+  - name: a Philips FE-EPI of 40 dynamics named for gadolinium is DSC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SK
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: FEEPI
+      text_series_description: 'Gd FE EPI Dyn'
+      temporal_positions: 40
+      n_instances: 1000
+      n_slices: 25
+    axes:
+      technique: Perfusion
+
+  - name: a Siemens DSC run is DSC by its image type
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE\DIS2D'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_128'
+      text_series_description: 'ep2d_perf'
+    axes:
+      technique: Perfusion
+      provenance: RawRecon
+
+  - name: a GE rCBV map with no perfusion token is DSC by its map token
+    stack:
+      image_type: 'DERIVED\PRIMARY\RCBVCORR\RCBVCORR\UNSPECIFIED'
+      scanning_sequence: 'EP\GR'
+      sequence_variant: SS
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'nrCBVcorrLCSV'
+    axes:
+      technique: Perfusion
+      provenance: PerfusionRecon
+
+  - name: a map named rCBV whose image type says nothing is still DSC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY'
+      scanning_sequence: GR
+      sequence_variant: SK
+      text_series_description: 'rCBV rSVD calculated'
+    axes:
+      technique: Perfusion
+
+  - name: a time-to-peak image of a dynamic VIBE is not DSC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\WATER\TTP'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fldyn3d2'
+      text_series_description: 't1_vibe_dixon_tra_dyn_TTP'
+    axes:
+      technique: VIBE
+
+  - name: a GE reverse-phase field map in an fMRI exam is not BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'rsfMRI_FieldMap'
+      temporal_positions: 4
+      n_instances: 240
+      n_slices: 60
+    axes:
+      technique: EPI
+
+  - name: a GE exam protocol that says fMRI does not make a BRAVO BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SS\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sag 3D T1 BRAVO'
+      text_protocol_name: 'fmri nnl'
+      inversion_time: 450
+    axes:
+      technique: MPRAGE
+
+  - name: nor does one that says perfusion make a localizer DSC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: '3-pl T2* FGRE S'
+      text_protocol_name: 'skalle m perfusion'
+    axes:
+      technique: GRE
+
+  - name: a Siemens protocol name is the series' own and still counts
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_64'
+      text_protocol_name: 'ep2d_bold_task'
+      n_instances: 1
+      n_slices: 1
+    axes:
+      technique: BOLD
+      provenance: BOLDRecon
+
+  - name: an EPI of 4 time points named for BOLD is a reference and not a run
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_64'
+      text_protocol_name: 'ep2d_bold_task'
+      temporal_positions: 4
+      n_instances: 120
+      n_slices: 30
+    axes:
+      technique: GRE-EPI
+
+  - name: a series named for BOLD whose header states nothing is still BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\MOSAIC'
+      text_series_description: 'ep2d_bold_moco'
+      text_protocol_name: 'BOLD'
+      n_instances: 3
+    axes:
+      technique: BOLD
+
+  - name: a single-band reference numbered 1000 above its run is BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: 'epfid2d1_90'
+      manufacturer: SIEMENS
+      series_number: 1011
+      n_instances: 1
+      n_slices: 1
+    axes:
+      technique: BOLD
+
+  - name: a one-volume gradient-echo EPI with no such mark is a GRE-EPI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: 'epfid2d1_90'
+      manufacturer: SIEMENS
+      series_number: 11
+      n_instances: 1
+      n_slices: 1
+    axes:
+      technique: GRE-EPI
+
+  - name: a gradient-echo EPI written SE\EP is a GRE-EPI by its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\EP'
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_64'
+      n_instances: 30
+      n_slices: 30
+    axes:
+      technique: GRE-EPI
+
+  - name: a spin-echo EPI written GR\EP is a SE-EPI by its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'GR\EP'
+      sequence_variant: SK
+      text_sequence_name: '*epse2d1_86'
+      n_instances: 60
+      n_slices: 60
+    axes:
+      technique: SE-EPI
+
+  # Whole words.
+  - name: a baseline misspelt in the comments is not ASL
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      text_sequence_name: 'se1'
+      text_series_description: 'T1_SE_TRA'
+      text_image_comments: 'basline'
+    axes:
+      technique: SE
+
+  - name: a pCASL named in a Siemens file name is ASL
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: 'epfid2d1_64'
+      text_series_description: 'ep2d_pcasl'
+      n_instances: 61
+      n_slices: 1
+    axes:
+      technique: ASL
+
+  - name: Philips' VenBOLD is SWI, not BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      text_series_description: 'VEN_BOLD'
+      echo_time: 50
+    axes:
+      technique: GRE
+      provenance: RawRecon
+      base: T2*w
+
+  # DCE from the header, and what it is not.
+  - name: a 3D FLASH of 40 time points through a bolus is DCE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fldyn3d1'
+      text_series_description: 't1_3d_dyn_tra'
+      temporal_positions: 40
+    axes:
+      technique: DCE
+      base: PWI
+      post_contrast: '1'
+
+  - name: a TWIST angiography run of 50 time points is not DCE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fldyn3d1_ns'
+      text_series_description: 'mra-ce sag twist 5s'
+      temporal_positions: 50
+    axes:
+      technique: FLASH
+
+  - name: a liver VIBE of four phases is a VIBE and not DCE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fl3d1'
+      text_series_description: 't1_vibe_fs_tra_dyn'
+      temporal_positions: 4
+    axes:
+      technique: VIBE
+
+  - name: Philips' PRESTO of 40 dynamics is not DCE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      text_series_description: 'presto_hr'
+      temporal_positions: 40
+    axes:
+      technique: FLASH
+
+  # The gradient-echo family.
+  - name: a 3D FLASH nobody named VIBE is a spoiled GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fl3d1'
+      text_series_description: 't1_3d_tra'
+    axes:
+      technique: FLASH
+
+  - name: a GE 3D SPGR nobody named LAVA is a spoiled GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax 3D T1'
+    axes:
+      technique: FLASH
+
+  - name: a GE FSPGR is the fast spoiled GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sag 3D T1 FSPGR'
+    axes:
+      technique: TurboFLASH
+
+  - name: a Siemens CISS written with ScanningSequence SE is a CISS
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      text_sequence_name: '*ci3d1'
+      text_series_description: 't2_ci3d_tra'
+    axes:
+      technique: CISS
+
+  - name: a Siemens TrueFISP written with ScanningSequence SE is a bSSFP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      text_sequence_name: '*tfi2d1_110'
+      text_series_description: 'trufi_cor'
+    axes:
+      technique: FIESTA
+
+  - name: a Siemens FISP is the steady-state GRE by its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SS
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fi3d1'
+    axes:
+      technique: FISP
+
+  - name: a Siemens DESS is a DESS by its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SS
+      mr_acquisition_type: 3D
+      text_sequence_name: '*de3d1'
+    axes:
+      technique: DESS
+
+  - name: a time reversed steady state is PSIF
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: TRSS
+      text_sequence_name: '*ps2d1'
+    axes:
+      technique: PSIF
+
+  - name: a Siemens TOF is a TOF before anything its FLASH readout says
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      text_sequence_name: '*fl3d1r_t70'
+      text_series_description: 'tof_3d_multi-slab'
+    axes:
+      technique: TOF
+
+  - name: a Philips T1-FFE is a spoiled GRE by its scanning technique
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: OSP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      text_series_description: 'T1W_3D'
+    axes:
+      technique: FLASH
+
+  - name: a Philips 2D TFE is the turbo field echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'T1W_TFE'
+    axes:
+      technique: TurboFLASH
+
+  - name: a Philips balanced FFE is a bSSFP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SS
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: B-FFE
+      text_series_description: 'bffe_cor'
+    axes:
+      technique: FIESTA
+
+  # Provenance: value 1 decides a motion-corrected copy and no map.
+  - name: a motion-corrected DSC run written DERIVED is the scanner's
+    stack:
+      image_type: 'DERIVED\PRIMARY\PERFUSION\DIS2D\MOCO'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_128'
+      text_series_description: 'ep2d_perf_MoCo'
+    axes:
+      technique: Perfusion
+      modifier: MoCo
+      provenance: PerfusionRecon
+
+  - name: a Siemens relCBF map written ORIGINAL is still the scanner's map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE\DIS2D\RELCBF'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*epfid2d1_128'
+      text_series_description: 'ep2d_perf_relCBF'
+    axes:
+      technique: Perfusion
+      provenance: PerfusionRecon

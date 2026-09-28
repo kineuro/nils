@@ -2292,16 +2292,48 @@ fn load_normalizer(f: &File) -> R<Normalizer> {
         )
         .in_file(&f.path, Some(&f.source)));
     }
+    // A field is named, or written `{field: <name>, unless_manufacturer:
+    // [<prefix>, ...]}` where one vendor fills it with something other than
+    // the series' own (MRI pack 0.10.0: GE's exam-level ProtocolName).
     let mut from = Vec::new();
-    for (i, n) in f
-        .blame(yaml::texts(yaml::get(m, "from", "normalize")?, "from"))?
-        .iter()
-        .enumerate()
-    {
-        from.push(field_index(n).ok_or_else(|| {
-            Error::at(format!("from[{i}]"), format!("no field named {n}"))
-                .in_file(&f.path, Some(&f.source))
+    let mut unless_manufacturer = Vec::new();
+    let from_v = f.blame(yaml::get(m, "from", "normalize"))?;
+    let entries: Vec<Value> = match from_v {
+        Value::Array(a) => a.clone(),
+        other => vec![other.clone()],
+    };
+    for (i, entry) in entries.iter().enumerate() {
+        let at = format!("from[{i}]");
+        let (n, unless) = match entry {
+            Value::Object(e) => {
+                for k in e.keys() {
+                    if k != "field" && k != "unless_manufacturer" {
+                        return Err(Error::at(
+                            &at,
+                            format!(
+                                "{k} is not a key here; they are field and unless_manufacturer"
+                            ),
+                        )
+                        .in_file(&f.path, Some(&f.source)));
+                    }
+                }
+                let n = f.blame(yaml::text(yaml::get(e, "field", &at)?, &at))?;
+                let unless = match e.get("unless_manufacturer") {
+                    Some(u) => f
+                        .blame(yaml::texts(u, &format!("{at}.unless_manufacturer")))?
+                        .iter()
+                        .map(|p| p.trim().to_uppercase())
+                        .collect(),
+                    None => Vec::new(),
+                };
+                (n, unless)
+            }
+            _ => (f.blame(yaml::text(entry, &at))?, Vec::new()),
+        };
+        from.push(field_index(&n).ok_or_else(|| {
+            Error::at(&at, format!("no field named {n}")).in_file(&f.path, Some(&f.source))
         })?);
+        unless_manufacturer.push(unless);
     }
 
     let one_char = |s: &str, at: &str| -> R<char> {
@@ -2404,6 +2436,7 @@ fn load_normalizer(f: &File) -> R<Normalizer> {
     Ok(Normalizer {
         into,
         from,
+        unless_manufacturer,
         raw_removals: match m.get("raw_removals") {
             Some(v) => f.blame(yaml::texts(v, "raw_removals"))?,
             None => Vec::new(),

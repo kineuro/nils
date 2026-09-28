@@ -1607,7 +1607,7 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(out.status.success(), "{}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("mri@"), "{said}");
-    assert!(said.contains("222 predicates"), "{said}");
+    assert!(said.contains("227 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
     // and what its rules can reach (record 41)
     assert!(said.contains("values reached by a rule"), "{said}");
@@ -1699,7 +1699,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.9.0"),
+            .any(|p| p["pack"] == "mri@0.10.0"),
         "{listed}"
     );
 
@@ -1711,7 +1711,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 146);
+    assert_eq!(shown["flags"], 182);
     assert_eq!(
         shown["contract"], 6,
         "record 48: the excludes and hints keys (contract 6), after the mcp key of contract 4"
