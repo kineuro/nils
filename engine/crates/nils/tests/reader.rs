@@ -314,6 +314,21 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     );
     assert!(base["set_by"]["kind"] == "rule", "{base}");
     assert!(base["decided"]["rule_set"].is_string(), "{base}");
+    // header or name, from the tier the verdict recorded
+    let basis = nils_pack::basis_of(base["tier"].as_str().unwrap());
+    assert_eq!(base["basis"], basis, "{base}");
+    assert_eq!(
+        base["decided"]["basis"],
+        nils_pack::basis_of(base["decided"]["tier"].as_str().unwrap()),
+        "{base}"
+    );
+    assert!(
+        base["line"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("({})", base["decided"]["basis"].as_str().unwrap())),
+        "{base}"
+    );
     assert!(base["voted"].is_array(), "{base}");
     assert!(quasi["header"].is_object(), "{quasi}");
     // at detail plain, nothing a stack carried as words

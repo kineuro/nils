@@ -70,6 +70,9 @@ pub(crate) fn document(
                 "axis": r.text(0)?,
                 "value": r.text(1)?,
                 "tier": r.text(2)?,
+                // item 8 of the 2026-09-28 sequence research: header or name,
+                // from the tier, so rows stored before read the same way
+                "basis": nils_pack::basis_of(r.text(2)?),
                 "confidence": r.double(3)?,
                 "rule_set": r.text(4)?,
                 "rule": r.text(5)?,
@@ -128,6 +131,7 @@ pub(crate) fn document(
                         "matched": e["matched"],
                         "value": e["value"],
                         "tier": e["tier"],
+                        "basis": e["basis"],
                         "confidence": e["confidence"],
                         "pass": e["pass"],
                         "reference": e["reference"],
@@ -181,6 +185,7 @@ pub(crate) fn document(
                 "label": label,
                 "confidence": confidence,
                 "tier": tier,
+                "basis": nils_pack::basis_of(tier),
                 "evidence": mine,
                 "decision": decision,
             })
@@ -496,11 +501,12 @@ pub(crate) fn text(doc: &Value) -> String {
     for a in doc["axes"].as_array().into_iter().flatten() {
         let value = a["value"].as_str().unwrap_or("");
         out.push_str(&format!(
-            "  {:16} {:20} {:.2}  {}\n",
+            "  {:16} {:20} {:.2}  {:12} {}\n",
             a["axis"].as_str().unwrap_or_default(),
             if value.is_empty() { "(nothing)" } else { value },
             a["confidence"].as_f64().unwrap_or(0.0),
-            a["tier"].as_str().unwrap_or_default()
+            a["tier"].as_str().unwrap_or_default(),
+            a["basis"].as_str().unwrap_or_default()
         ));
         // §10.1. A value somebody decided says who, and with what standing,
         // in the same place a rule's answer says which rule.

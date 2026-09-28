@@ -53,6 +53,39 @@ impl Tier {
             Tier::Default => "default",
         }
     }
+
+    /// What the tier read, in the words a reader is shown: see [`basis_of`].
+    pub fn basis(self) -> &'static str {
+        basis_of(self.name())
+    }
+}
+
+/// What a verdict was read from, derived from the tier it records (the
+/// sequence research of 2026-09-28, item 8: "the header-vs-name flag is shown
+/// from the tier each verdict records"). Computed when a verdict is shown, so
+/// rows stored before it existed read the same way.
+///
+/// | tier | basis | why |
+/// |---|---|---|
+/// | exclusive, combination, alternative, physics | `header` | flags and numbers the scanner wrote into the header |
+/// | keywords | `name` | a word in a text field someone typed: the protocol or series name |
+/// | stated | `inferred` | a longhand rule, which in the MRI pack reads what other axes decided |
+/// | default | `default` | nothing matched and the axis has a default |
+/// | answer | `answer` | a person's pinned answer |
+/// | vote | `neighbours` | a pass's vote among similar stacks already classified |
+/// | decision | `decision` | a decision document (a person's or a model's) overrode the rules |
+/// | anything else | `other` | a tier this engine does not know |
+pub fn basis_of(tier: &str) -> &'static str {
+    match tier {
+        "exclusive" | "combination" | "alternative" | "physics" => "header",
+        "keywords" => "name",
+        "stated" => "inferred",
+        "default" => "default",
+        "answer" => "answer",
+        "vote" => "neighbours",
+        "decision" => "decision",
+        _ => "other",
+    }
 }
 
 /// One condition of a rule, with what it cites when it fires.
@@ -586,4 +619,30 @@ pub struct Hint {
     pub sources: Vec<String>,
     /// The sources that show it is not always so.
     pub counter: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_tier_names_what_it_read() {
+        for (tier, basis) in [
+            (Tier::Exclusive, "header"),
+            (Tier::Combination, "header"),
+            (Tier::Alternative, "header"),
+            (Tier::Physics, "header"),
+            (Tier::Keywords, "name"),
+            (Tier::Stated, "inferred"),
+            (Tier::Default, "default"),
+        ] {
+            assert_eq!(tier.basis(), basis, "{}", tier.name());
+            assert_eq!(basis_of(tier.name()), basis);
+        }
+        assert_eq!(basis_of("answer"), "answer");
+        assert_eq!(basis_of("vote"), "neighbours");
+        assert_eq!(basis_of("decision"), "decision");
+        assert_eq!(basis_of("something new"), "other");
+        assert_eq!(basis_of(""), "other");
+    }
 }
