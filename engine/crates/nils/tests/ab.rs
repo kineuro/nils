@@ -412,6 +412,8 @@ fn a_person_settles_what_the_voters_split_on_blind() {
     assert_eq!(made["items"].as_array().unwrap().len(), 6, "{made}");
     assert!(made["source"]["ab"]["seed_sha256"].is_string(), "{made}");
     assert!(made["source"]["ab"].get("seed").is_none(), "{made}");
+    // the candidates are the only answers shown: nothing is suggested
+    assert_eq!(made["suggest"], "none", "{made}");
 
     // ------------------------------------------------ blind while open
     let seen = server.ok("GET", &format!("/api/campaigns/{id}"), None, &anna);
@@ -596,6 +598,18 @@ fn a_person_settles_what_the_voters_split_on_blind() {
     assert_eq!(rows["sources"], false);
     assert_eq!(rows["count"], 6 * 7);
     blind(&rows["decisions"]);
+    // another reader of the campaign reads no one's decisions but their
+    // own while it is open
+    let (st, other) = server.call(
+        "GET",
+        &format!("/api/campaigns/{id}/ab/decisions"),
+        None,
+        &bo,
+    );
+    assert!(
+        st == 404 || (st == 200 && other["count"] == 0 && other["blind"] == true),
+        "{st} {other}"
+    );
 
     // ------------------------------------------------ told once closed
     server.ok(
