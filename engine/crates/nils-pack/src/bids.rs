@@ -40,7 +40,16 @@ pub struct Named {
     /// Entities the suffix fixes: the first inversion of an MP2RAGE is
     /// `inv-1` and saying so is part of saying it is an `INV1`.
     pub entities: BTreeMap<String, String>,
+    /// The volume type of every volume of an `asl` image, which the release
+    /// writes as the `aslcontext.tsv` beside it: a scanner's own perfusion
+    /// weighted image is `deltam` throughout. Only on suffix `asl`, and only
+    /// one of [`ASL_VOLUME_TYPES`] (pack contract 6, an addition).
+    pub aslcontext: Option<String>,
 }
+
+/// The volume types BIDS allows in an `aslcontext.tsv`, spelled as the
+/// standard spells them (`volume_type`, BIDS 1.11).
+pub const ASL_VOLUME_TYPES: &[&str] = &["control", "label", "m0scan", "deltam", "cbf", "noRF"];
 
 /// One group of `acq-` tokens, from one field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +217,7 @@ mod tests {
             suffix: suffix.into(),
             when_technique: when.map(str::to_string),
             entities: BTreeMap::new(),
+            aslcontext: None,
         }
     }
 

@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Added
 
 - Each axis a stack was judged on says whether the header or the name decided it (`basis`), derived from the tier the verdict records: `header` for a flag, a combination, an alternative or a physics window, `name` for a keyword, `inferred` for a longhand rule, and `default`, `answer`, `neighbours` (a pass's vote), `decision` or `other`. It is in `nils classify`'s verdicts, `nils explain` (a column beside the tier) and `GET /api/explain/{stack}`, on each evidence row as well, and in the reader's evidence line (`GET /api/stacks/{stack}/why`). It is computed when a stack is read, so stacks classified before carry it too. The HTTP API contract stays version 7, amended in place.
+- A pack's BIDS suffix `asl` may say what every volume of the image is (`aslcontext`, one of `control`, `label`, `m0scan`, `deltam`, `cbf`, `noRF`; refused on any other suffix or word), and a BIDS release writes the `aslcontext.tsv` BIDS requires beside the converted image, one row per volume read from its NIfTI header. The release check reads the table's name as it reads an image's. The pack contract stays version 6: the key is an addition.
 
 ## [1.0.0-alpha.56] - 2026-09-28
 
