@@ -1019,6 +1019,77 @@ fn a_stopped_digest_writes_what_it_read_and_resumes_to_the_same_rows() {
     }
 }
 
+/// `nils digest --reread-exact` stopped after its first commit, then run
+/// again: the second run reads only the files the first did not write, and
+/// counts the others as unchanged; a third, after one that finished, reads
+/// them all.
+#[test]
+fn a_stopped_reread_is_continued_by_the_next() {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_registry::Store;
+    let dir = TempDir::new("cli-reread");
+    // eight XA series of six files, spelled `Siemens`, and one older series
+    // spelled `SIEMENS`, which the exact match leaves alone
+    for (s, maker) in (1..=9).map(|s| (s, if s <= 8 { "Siemens" } else { "SIEMENS" })) {
+        let study = format!("1.2.826.0.1.3680043.8.498.{s}");
+        let series = format!("{study}.1");
+        for i in 1..=6 {
+            let sop = format!("{series}.{i}");
+            let mut e = synth::minimal_mr(&study, &series, &sop);
+            e.extend(patient(&format!("S{s:02}"), None));
+            e.push(synth::text(tags::MANUFACTURER, VR::LO, maker));
+            dir.file(
+                &format!("s{s:02}/IM_{i:04}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let home = home();
+    let out = run(&home, &dir, None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reread = |stop: Option<&str>| {
+        let mut cmd = nils();
+        cmd.args(["--registry"])
+            .arg(home.path())
+            .args(["digest", "--workers", "1", "--batch-rows", "1", "--json"])
+            .args(["--reread-exact", "Siemens"])
+            .arg(dir.path());
+        match stop {
+            Some(s) => cmd.env("NILS_DEBUG_STOP", s),
+            None => cmd.env_remove("NILS_DEBUG_STOP"),
+        };
+        let out = cmd.output().unwrap();
+        let report: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", stderr(&out)));
+        (out, report)
+    };
+    let (out, first) = reread(Some("stop:1"));
+    assert_eq!(out.status.code(), Some(130), "{}", stderr(&out));
+    assert_eq!(first["cancelled"], "stopped", "{first}");
+    let batch = first["written"]["batch_id"].as_i64().unwrap();
+    let mut reg = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let done = reg
+        .query(
+            &format!("SELECT COUNT(*) FROM source_file WHERE batch_id = {batch}"),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert!((1..48).contains(&done), "{done} of 48 read: {first}");
+
+    let (out, next) = reread(None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(next["unchanged"], done, "{next}");
+    assert_eq!(next["parsed"], 48 - done, "{next}");
+
+    let (out, again) = reread(None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(again["unchanged"], 0, "{again}");
+    assert_eq!(again["parsed"], 48, "{again}");
+}
+
 #[cfg(unix)]
 #[test]
 fn an_interrupted_digest_stops_and_resumes_to_the_same_rows() {

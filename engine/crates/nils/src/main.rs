@@ -1716,9 +1716,15 @@ struct DigestArgs {
     restart: bool,
     /// Read again, without a walk, only the files the registry holds for the
     /// MR series of this manufacturer, as the study names it (case and outer
-    /// spaces aside); repeat for more than one
-    #[arg(long, value_name = "MANUFACTURER", conflicts_with_all = ["dry_run", "restart", "retry_quarantine"])]
+    /// spaces aside); repeat for more than one. A re-read that did not finish
+    /// is continued; with --restart it starts over
+    #[arg(long, value_name = "MANUFACTURER", conflicts_with_all = ["dry_run", "retry_quarantine"])]
     reread: Vec<String>,
+    /// As --reread, the manufacturer compared with its case (outer spaces
+    /// aside): `Siemens` takes the Siemens XA11 and XA20 series and not the
+    /// older `SIEMENS` ones; repeat for more than one
+    #[arg(long, value_name = "MANUFACTURER", conflicts_with_all = ["dry_run", "retry_quarantine"])]
+    reread_exact: Vec<String>,
     /// Walk and read everything, print the report, write nothing
     #[arg(long)]
     dry_run: bool,
@@ -3587,8 +3593,12 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
     settings.retry_quarantine = args.retry_quarantine;
     settings.restart = args.restart;
     settings.reread = args.reread.clone();
+    settings.reread_exact = args.reread_exact.clone();
     if settings.reread.iter().any(|m| m.trim().is_empty()) {
         return Err(usage("--reread names a manufacturer".to_string()));
+    }
+    if settings.reread_exact.iter().any(|m| m.trim().is_empty()) {
+        return Err(usage("--reread-exact names a manufacturer".to_string()));
     }
     if let Some(name) = args.name {
         settings.name = name;

@@ -141,7 +141,7 @@ fn run(
     let start = Instant::now();
     // A re-read finds its files in the registry, so it has none to do
     // without.
-    if !settings.reread.is_empty() && registry.is_none() {
+    if settings.rereads() && registry.is_none() {
         return Err(DigestError::Message(
             "--reread reads again the files the registry holds, so it has no dry run".into(),
         ));
@@ -341,7 +341,7 @@ fn execute(
     let progress = Progress::new(start, settings.json, dry);
     let script = Scripted::from_env();
 
-    let reread = !settings.reread.is_empty();
+    let reread = settings.rereads();
     let records = match (registry.as_deref(), run) {
         (Some(reg), Some(r)) if !reread => Some(Records::new(reg.open_reader()?, r.source_id)?),
         _ => None,
@@ -349,7 +349,7 @@ fn execute(
     // The 2026-09-28 sequence research: a re-read's files come from the
     // registry, through a connection of their own, in place of the walk.
     let feeder = match (registry.as_deref(), run) {
-        (Some(reg), Some(r)) if reread => Some((reg.open_reader()?, r.source_id)),
+        (Some(reg), Some(r)) if reread => Some((reg.open_reader()?, r.source_id, r.batch_id)),
         _ => None,
     };
     // Record 26 §4: the dataset whose pseudonymised tree this run reads,
@@ -397,12 +397,13 @@ fn execute(
                 result
             })
         };
-        let resumer = if let Some((store, source_id)) = feeder {
+        let resumer = if let Some((store, source_id, batch_id)) = feeder {
             let root = &root;
-            let manufacturers = &settings.reread;
+            let progress = &progress;
             s.spawn(move || {
-                let result =
-                    crate::reread::feed(store, source_id, root, manufacturers, &task_tx, cancel);
+                let result = crate::reread::feed(
+                    store, source_id, batch_id, root, settings, &task_tx, progress, cancel,
+                );
                 drop(task_tx);
                 result
             })
@@ -586,7 +587,7 @@ fn finish(
         if cancelled.is_none()
             && counts.walk_errors == 0
             && matches!(settings.filter, Filter::All)
-            && settings.reread.is_empty()
+            && !settings.rereads()
         {
             let d = store.dialect();
             let sql = format!(
@@ -609,8 +610,8 @@ fn finish(
         }
         // A re-read changed series rows under stacks whose instance counts
         // did not move, which is what the fingerprint takes for fresh.
-        if !settings.reread.is_empty() {
-            crate::reread::stale_fingerprints(store, &settings.reread)?;
+        if settings.rereads() {
+            crate::reread::stale_fingerprints(store, &crate::reread::Selection::of(settings))?;
         }
         let mut report = Report::new(setup, counts, elapsed, peak_rss());
         report.written = Some(written.clone());
