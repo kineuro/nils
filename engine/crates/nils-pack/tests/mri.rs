@@ -160,3 +160,40 @@ fn every_image_type_identity_record_37_named_reaches_an_axis() {
         wrong.join("\n")
     );
 }
+
+/// A BIDS suffix that waits for a technique names the technique by its
+/// identity. One spelled as a label (`TIRM` for `IR-TSE`) or misspelled
+/// would load and never match, and the stack would fall through to its base
+/// contrast without a word, so the pack is refused and says where.
+#[test]
+fn a_bids_suffix_waits_for_a_technique_the_pack_has() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.is_dir() {
+                copy(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let to = std::env::temp_dir().join(format!("nils-bids-technique-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&to);
+    copy(&packs().join("mri"), &to);
+    let bids = std::fs::read_to_string(to.join("bids.yml")).unwrap();
+    assert!(bids.contains("when_technique: MP2RAGE"));
+    std::fs::write(
+        to.join("bids.yml"),
+        bids.replacen("when_technique: MP2RAGE", "when_technique: MP2RAG", 1),
+    )
+    .unwrap();
+    let e = match nils_pack::load(&to, None) {
+        Ok(_) => panic!("a technique the pack does not have loaded"),
+        Err(e) => e.to_string(),
+    };
+    let _ = std::fs::remove_dir_all(&to);
+    assert!(e.contains("when_technique"), "{e}");
+    assert!(e.contains("MP2RAG is not a value of the technique axis"), "{e}");
+}

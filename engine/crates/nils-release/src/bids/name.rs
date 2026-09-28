@@ -669,6 +669,49 @@ mod tests {
         );
     }
 
+    /// Pack 0.9.0, against the MRI pack itself rather than a mock: an
+    /// MP2RAGE's two inversions are `inv-1` and `inv-2` of the suffix
+    /// `MP2RAGE` and carry no base, the uniform image is `UNIT1`, and the
+    /// denoised one `UNIT1` reconstructed `Denoised`. The rows store labels
+    /// (`Denoised`), and the name is built from identities, as the run does.
+    #[test]
+    fn the_mri_pack_names_an_mp2rage_by_the_standard() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
+        let construct = pack.axes.iter().find(|a| a.name == "construct").unwrap();
+        for (stored, base, want) in [
+            ("INV1", None, "sub-x_ses-1_inv-1_MP2RAGE"),
+            ("INV2", None, "sub-x_ses-1_inv-2_MP2RAGE"),
+            ("Uniform", Some("T1w"), "sub-x_ses-1_UNIT1"),
+            ("Denoised", Some("T1w"), "sub-x_ses-1_rec-Denoised_UNIT1"),
+        ] {
+            let id = construct.id_of_stored(stored).expect("a stored construct");
+            let facts = Facts {
+                intent: Some("anat"),
+                constructs: vec![id],
+                technique: Some("MP2RAGE"),
+                base,
+                provenance: Some("RawRecon"),
+                ..Facts::default()
+            };
+            let n = build(&facts, &pack.bids, Naming::Bids).unwrap();
+            assert_eq!(n.stem("x", "1"), want, "{stored}");
+            assert_eq!(n.datatype, "anat", "{stored}");
+        }
+        // an inversion named on another technique is no MP2RAGE inversion
+        let facts = Facts {
+            intent: Some("anat"),
+            constructs: vec!["INV1"],
+            technique: Some("MPRAGE"),
+            base: Some("T1w"),
+            ..Facts::default()
+        };
+        assert_eq!(
+            build(&facts, &pack.bids, Naming::Bids).unwrap().stem("x", "1"),
+            "sub-x_ses-1_T1w"
+        );
+    }
+
     #[test]
     fn a_stack_with_no_bids_word_is_refused_with_the_reason() {
         // BIDS has no suffix for an SWI image, and no datatype for a scout.

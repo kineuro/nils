@@ -1036,8 +1036,16 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                     crate::bids::Named {
                         datatype: f.blame(yaml::text(yaml::get(bm, "datatype", &at)?, &at))?,
                         suffix: f.blame(yaml::text(yaml::get(bm, "suffix", &at)?, &at))?,
+                        // A technique by its identity, as every other key
+                        // here: a label or a misspelling would load and
+                        // never match, and the stack would fall through to
+                        // its base contrast without a word.
                         when_technique: match bm.get("when_technique") {
-                            Some(w) => Some(f.blame(yaml::text(w, &at))?),
+                            Some(w) => {
+                                let w = f.blame(yaml::text(w, &at))?;
+                                check("technique", &w, &format!("{at}.when_technique"))?;
+                                Some(w)
+                            }
                             None => None,
                         },
                         entities,
