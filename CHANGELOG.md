@@ -4,9 +4,18 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The MRI pack is 0.9.0, with the reading conventions of 2026-09-27 and 28. An MP2RAGE's two inversions, INV1 and INV2, take base none and the construct says what they are, as BIDS files them `inv-1` and `inv-2` of the suffix `MP2RAGE`; the uniform image stays T1w, and a base beside an inversion breaks an exclusion. This replaces 0.6.0's INV2 as PDw. A dual-echo PD/T2 FSE or TSE, one stack per echo, is technique TSE and not ME-SE, with base PDw on an echo under 40 ms and T2w from 40 ms; ME-SE keeps a conventional multi-echo spin echo, and GE's `memp` with one echo is a plain spin echo. An acquisition's own images are RawRecon and what the scanner computed from them takes the product: an SWI's magnitude and phase, a BOLD or ASL series as acquired and MAGiC's MDME images are RawRecon, the SWI image, an ASL's CBF map (no longer PerfusionRecon), an fMRI map and the synthetic contrasts keep SWIRecon, ASLRecon, BOLDRecon and SyMRI, and an SWI's minIP is ProjectionDerived. An SWI's magnitude is T2*w and its phase has no base. GE's `FSA_GEMS`, `FSP_GEMS`, `FSS_GEMS`, `FSI_GEMS`, `FSR_GEMS` and `FSL_GEMS` are the readout direction and never FatSat, which the pack now says where FatSat's evidence is defined. The corpus holds a case for each. Reclassify with the new pack to apply it; a reading campaign frozen on an earlier pack keeps its constraints until it is repacked.
+
 ### Added
 
-- The MRI pack's corpus holds an MP2RAGE whose name also says T1, with its inversion in the image comments: the second inversion is INV2, MP2RAGE and PDw, the first INV1 and T1w. A test shows that the whole INV2 answer breaks none of the pack's constraints, that a reading campaign's question rules nothing out on INV2, and that only a T1w base beside it breaks one. A reader greyed INV2 out on such a stack; the cause was the desk (kineuro/nils-desk#164), not the pack.
+- A rule set may decide again an axis an earlier set decided (`redecides`), where one of its rules fires and has a value to put there; a person's answer is never moved. The MRI pack's SWI and SyMRI routes use it to give an acquisition's own images the provenance RawRecon.
+- The MRI pack's corpus holds an MP2RAGE whose name also says T1, with its inversion in the image comments. A reader greyed INV2 out on such a stack; the cause was the desk (kineuro/nils-desk#164), not the pack.
+
+### Fixed
+
+- A BIDS suffix that waits for a technique (`when_technique`) names it by its identity, checked when the pack loads. A label or a misspelling loaded before and never matched, so the stack fell through to its base contrast without a word. A test builds the MRI pack's own MP2RAGE names: `inv-1_MP2RAGE`, `inv-2_MP2RAGE`, `UNIT1` and `rec-Denoised_UNIT1`.
 
 ## [1.0.0-alpha.54] - 2026-09-27
 
