@@ -231,9 +231,15 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
         pack.lists.iter().any(|l| l == "base.T1w"),
         "a longhand rule's words too"
     );
+    // Pack 0.9.0: the default is reached by no word of its own axis. The SWI
+    // and SyMRI routes decide it again for an acquisition's own images, so
+    // their words for a phase or a magnitude reach it, and only as a route's.
+    let provenance = pack.axes.iter().find(|a| a.name == "provenance").unwrap();
+    let raw = &provenance.values[provenance.value_index("RawRecon").unwrap()];
+    assert!(!raw.keywords.is_empty(), "{raw:?}");
     assert!(
-        !pack.lists.iter().any(|l| l == "provenance.RawRecon"),
-        "the default is reached by no word"
+        raw.keywords.iter().all(|k| raw.route_words.contains(k)),
+        "the default is reached by no word of its own: {raw:?}"
     );
 }
 
