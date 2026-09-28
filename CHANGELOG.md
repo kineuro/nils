@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.58] - 2026-09-28
+
+`nils digest --reread` reads a series at a time through an index instead of joining its target series into every page, so a re-read runs at the rate the parsers and the storage allow; a stopped, failed or killed re-read is continued by the next one (`--restart` starts over); and `--reread-exact <manufacturer>` compares the manufacturer with its case, so Siemens XA can be re-read without the older Siemens fleet. Released alone, with no desk release of the same number. The registry stays at schema 71. The HTTP API contract stays version 7; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. The MRI pack stays 0.11.0. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.57.
+
 ### Added
 
 - `nils digest <root> --reread-exact <manufacturer>` re-reads the MR series of a manufacturer compared with its case, beside `--reread`, which compares without it. Siemens spells its XA11 and XA20 scanners `Siemens` and its older ones `SIEMENS`, so GE, Siemens Healthineers and Siemens XA are `--reread "GE MEDICAL SYSTEMS" --reread "Siemens Healthineers" --reread-exact Siemens`, without reading the older Siemens fleet.
