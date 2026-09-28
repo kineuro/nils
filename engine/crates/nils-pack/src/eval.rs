@@ -67,7 +67,15 @@ impl<'a> Evaluated<'a> {
             .derived
             .iter()
             .map(|n| {
-                let parts: Vec<&str> = n.from.iter().map(|i| stack.text(*i)).collect();
+                let manufacturer = crate::stack::field_index("manufacturer")
+                    .map(|i| stack.text(i))
+                    .unwrap_or("");
+                let parts: Vec<&str> = n
+                    .from
+                    .iter()
+                    .enumerate()
+                    .map(|(k, i)| if n.reads(k, manufacturer) { stack.text(*i) } else { "" })
+                    .collect();
                 n.apply(&parts).unwrap_or_default()
             })
             .collect();

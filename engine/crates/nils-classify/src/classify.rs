@@ -84,6 +84,8 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("dwi_directions", "dwi_directions"),
     ("n_slices", "n_slices"),
     ("slice_span_mm", "slice_span_mm"),
+    ("temporal_positions", "temporal_positions"),
+    ("series_number", "series_number"),
     ("modality", "modality"),
     ("manufacturer", "manufacturer"),
     ("manufacturer_model_name", "manufacturer_model_name"),
