@@ -157,6 +157,9 @@ parsers:
       # vendors' names.
       is_projection: {any: [{substring: 'PROJECTION IMAG'}, {any_token: [COLLAPSE, PJN]}]}
       is_vascular:   {token: VASCULAR}
+      # MRI pack 0.12.0: the value itself, without GE's `COLLAPSE` and `PJN`,
+      # which are projections through a volume and never a plane.
+      is_projection_image: {substring: 'PROJECTION IMAG'}
       is_scroll:     {token: SCROLL}
       is_mip_thin:   {substring: 'CSA MIP THIN'}
 
@@ -203,7 +206,10 @@ parsers:
       has_ttest:     {token: TTEST}
       # Pixels nobody downstream can read.
       is_encrypted:  {token: ENCRYPTED}
-      is_screenshot: {any_token: [SCREENSHOT, PASTED]}
+      # MRI pack 0.12.0: and Siemens' `SCREEN SAVE`, which the rule for a
+      # secondary without a primary used to catch, and which no longer rules
+      # anything out (rules/excluded.yml).
+      is_screenshot: {any: [{any_token: [SCREENSHOT, PASTED, SCREEN_SAVE, SCREENSAVE]}, {substring: 'SCREEN SAVE'}]}
       is_posdisp:    {token: POSDISP}
       is_gsp:        {token: GSP}
       is_other:      {any_token: [OTHER, UNKNOWN]}

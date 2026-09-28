@@ -565,6 +565,13 @@ out before any detector runs, so it never reaches the disposition as a
 is right, and the session rescue of §6 is what lets one back in for a visit whose
 every stack is like that. Both cases are in the corpus.
 
+> **Amended by MRI pack 0.12.0 (2026-09-28).** A workstation reformat is no
+> longer ruled out by the class phase. It is classified on every axis as any
+> stack is, and its disposition is `reformat`: the disposition, not an empty
+> verdict, is what a pipeline, a pick or a release reads to leave it out of the
+> raw tree. The development reference found the exclusion left every axis of
+> about a fifth of its stacks empty.
+
 ## 8. The release
 
 One verb over one selection. A selection is a predicate over the registry:

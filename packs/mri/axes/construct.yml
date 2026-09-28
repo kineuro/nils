@@ -318,8 +318,11 @@ values:
       - chi map
     detection:
       exclusive: has_qsm
+  # MRI pack 0.12.0: not a minimum projection, whose `minip` holds the
+  # keyword `mip` (dev-1: three SWI minIPs were MIP and MinIP).
   MIP:
     terms: ['maximum intensity projection', 'MIP']
+    requires: {not: is_minip}
     keywords:
       - mip
       - maximum intensity projection
@@ -334,8 +337,14 @@ values:
       - min ip
     detection:
       exclusive: is_minip
+  # MRI pack 0.12.0: a projection is a MIP or a MinIP and not a plane as
+  # well, though a workstation writes `MPR` on both (Siemens
+  # `DERIVED\SECONDARY\MPR` on a MIP; dev-1 settled MIP alone on six stacks
+  # the rules would have made MIP and MPR). And the plane of a Philips
+  # reformat (flags.yml, `is_projection_plane`).
   MPR:
     terms: ['multiplanar reformat', 'MPR', 'reformat']
+    requires: {not: {any: [is_mip, is_minip, projection_named]}}
     keywords:
       - multiplanar reformat
       - reformatted
@@ -469,8 +478,12 @@ values:
       - inversion 2
     detection:
       exclusive: is_mp2rage_inv2
+  # MRI pack 0.12.0: the denoised uniform image is UniformDenoised alone.
+  # Siemens writes `UNIFORM` on both, and dev-1 settled UniformDenoised
+  # without Uniform on all three stacks that held both.
   Uniform:
     terms: ['UNI', 'uniform image', 'MP2RAGE UNI']
+    requires: {not: is_uniform_denoised}
     keywords:
       - uni image
       - uni images
@@ -500,8 +513,16 @@ values:
       - swi filtered
     detection:
       combination: [has_swi, is_derived]
+  # MRI pack 0.12.0: `phase` is also a word for a Dixon's in and opposed
+  # phase, a dynamic's arterial or venous phase, a phase contrast flow study
+  # and the phase-encoding direction, none of which is a phase image. The
+  # image type says phase (`P`, `PHASE`, `PHASE MAP`), and the reading
+  # guide takes it from there; the word counts only where none of those is
+  # meant (dev-1: a GE multi-echo gradient echo and a Siemens subtraction
+  # were Phase by the word).
   Phase:
     terms: ['phase', 'phase image']
+    requires: {not: phase_not_an_image}
     keywords:
       - phase
       - phase map

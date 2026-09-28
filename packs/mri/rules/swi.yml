@@ -20,10 +20,17 @@ decides: [base, construct, technique, directory_type, provenance]
 # Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images, its
 # magnitude and its phase, are RawRecon, and its minimum intensity projection
 # is ProjectionDerived; what the scanner computed from them (the SWI image,
-# QSM, an R2* map, a MIP, a reformat) keeps SWIRecon. The route was entered
-# on SWIRecon, so it decides the provenance again for those outputs.
+# QSM, an R2* map, a MIP) keeps SWIRecon. The route was entered on
+# SWIRecon, so it decides the provenance again for those outputs. Pack
+# 0.12.0: a reformat is ProjectionDerived too, and the real part RawRecon.
 redecides: [provenance]
 tiers: {exclusive: 0.95, keywords: 0.9, stated: 0.9}
+
+# MRI pack 0.12.0: every output keeps the construct ND where its image type
+# says it (`ND`, not distortion corrected), as the SyMRI route's do since
+# 0.11.0: the reading guide takes ND off the image type whatever else the
+# image is, and dev-1 settled ND beside SWI on two stacks the route had
+# written SWI alone.
 
 # Every output of one acquisition shares its readout.
 derive:
@@ -34,11 +41,17 @@ derive:
       # FEEPI SWIp) is GRE-EPI, as its readout is anywhere else.
       - {when: is_gre_epi, value: GRE-EPI}
       - {when: has_epi, value: EPI}
+      # MRI pack 0.12.0: a series split by echo is a multi-echo gradient
+      # echo, as the technique axis reads it anywhere else (dev-1 settled
+      # ME-GRE on the two SWI stacks where the axis said so and the route
+      # GRE). A spoiled GRE is not told apart here: dev-1's panel said GRE on
+      # seven SWI stacks and SP-GRE on four where the axis said SP-GRE.
+      - {when: {all: [is_multi_echo, has_gre]}, value: ME-GRE}
       - {when: has_gre, value: GRE}
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, swi, projection, r2star, magnitude, qsm_source_echo, qsm, mpr, fallback]
+order: [minip, mip, phase, real, swi, projection, r2star, magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -58,6 +71,7 @@ rules:
         # 1,154 stacks that carry `MEAN` are SWI, MinIP, MIP or magnitude
         # images of one, so this is where the identity has to be said.
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -72,6 +86,7 @@ rules:
       construct:
         - MIP
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -91,9 +106,29 @@ rules:
         - Phase
         - {value: QSM, when: {text: search_text, substring: qsm}}
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
+
+  # MRI pack 0.12.0: the real part of the complex signal, which Philips
+  # writes beside the magnitude and the phase of its SWIp (`R_FFE`): an
+  # image of the acquisition as the magnitude is, RawRecon and T2*w, with
+  # construct Real, where the route called it the SWI image (dev-1, one
+  # stack, three cells).
+  real:
+    clauses:
+      - {when: {all: [has_real, {not: has_swi}, {not: has_phase}]}, cite: 'has_real without a SWI token', source: flags, tier: exclusive}
+    set:
+      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      base: T2starw
+      construct:
+        - Real
+        - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.85
 
   swi:
     clauses:
@@ -103,6 +138,7 @@ rules:
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -115,6 +151,7 @@ rules:
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -129,6 +166,7 @@ rules:
         - {value: QSM, when: {any: [has_qsm, {text: search_text, substring: qsm}]}}
         - R2starmap
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -143,10 +181,14 @@ rules:
       # echo-combined magnitude is computed, and keeps SWIRecon.
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
+      # MRI pack 0.12.0: a magnitude is not a QSM map because the protocol
+      # is named for one (dev-1: a multi-echo magnitude named QSM was
+      # Magnitude and QSM); a source echo of a QSM acquisition is the rule
+      # below, `qsm_source_echo`, and the map itself `qsm`.
       construct:
         - Magnitude
-        - {value: QSM, when: {text: search_text, substring: qsm}}
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.85
@@ -172,6 +214,7 @@ rules:
         - Magnitude
         - QSM
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -185,6 +228,7 @@ rules:
       construct:
         - QSM
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -193,12 +237,18 @@ rules:
   # MPR and names none of the outputs above. It is a reformat as every other
   # MPR is, and the route's last resort called 375 of them the processed
   # SWI image (record 41).
+  # MRI pack 0.12.0: a plane resliced from a susceptibility acquisition is
+  # ProjectionDerived, as any reformat made from another series is (the
+  # reading guide), and not SWIRecon (dev-1: two EPI SWI reformats).
   mpr:
     clauses:
       - {flag: is_mpr, tier: exclusive}
     set:
+      provenance: ProjectionDerived
       base: SWI
-      construct: MPR
+      construct:
+        - MPR
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -211,6 +261,7 @@ rules:
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.7

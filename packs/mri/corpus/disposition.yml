@@ -106,20 +106,67 @@ cases:
       disposition: reformat
       convertible: 'yes'
 
-  # And the interaction worth writing down: a workstation reformat is tagged
-  # SECONDARY and never PRIMARY, which the class phase rules out before any
-  # detector runs, so it never reaches the disposition as a reformat. The
-  # session rescue (section 6) is what lets one back in, for a visit whose
-  # every stack is like this.
-  - name: a workstation reformat is ruled out before it can be one
+  # MRI pack 0.12.0: a Siemens screen save is still not an image, now that
+  # a secondary without a primary is classified.
+  - name: a screen save is ruled out as a screenshot
+    stack:
+      image_type: 'DERIVED\SECONDARY\SCREEN SAVE'
+      scanning_sequence: SE
+      text_series_description: 'sag t1 screenshot'
+    axes:
+      directory_type: excluded
+      disposition: excluded
+      convertible: 'no'
+
+  # MRI pack 0.12.0, Nima's ruling (2026-09-28): a workstation reformat,
+  # tagged SECONDARY and never PRIMARY, is no longer ruled out by the class
+  # phase. It is classified on every axis as any stack is, and its
+  # disposition is `reformat`, which is what a pipeline reads to skip it.
+  - name: a workstation reformat is classified and marked a reformat
     stack:
       image_type: 'DERIVED\SECONDARY\MPR'
       text_series_description: 'cor MPR'
       image_role: derived
     axes:
-      directory_type: excluded
-      disposition: excluded
-      convertible: 'no'
+      provenance: ProjectionDerived
+      construct: MPR
+      directory_type: anat
+      disposition: reformat
+      convertible: 'yes'
+      role: ''
+
+  # Whatever its construct turned out to be: a map a workstation copied
+  # is still a workstation's, and a pipeline skips it.
+  - name: a workstation copy of an ADC map is a reformat, not scanner derived
+    stack:
+      image_type: 'DERIVED\SECONDARY\DIFFUSION\ADC'
+      scanning_sequence: EP
+      text_sequence_name: '*ep_b0_1000'
+      text_series_description: 'ADC tra'
+      image_role: derived
+    axes:
+      construct: ADC
+      disposition: reformat
+
+  # And a workstation reformat of an MPRAGE is not the session's main T1w,
+  # though its base, technique and intent are the source's.
+  - name: a workstation reformat of an MPRAGE keeps its axes and takes no role
+    stack:
+      image_type: 'DERIVED\SECONDARY\MPR\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 'T1 mprage cor MPR'
+      image_role: derived
+    axes:
+      provenance: ProjectionDerived
+      technique: MPRAGE
+      base: T1w
+      construct: 'MPR,ND'
+      directory_type: anat
+      disposition: reformat
+      role: ''
 
   # --- section 10: which stacks are candidates for a role
 

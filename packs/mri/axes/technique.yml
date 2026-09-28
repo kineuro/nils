@@ -369,6 +369,8 @@ values:
       - de-fse
       - de-fir
       - t2 plus
+    detection:
+      exclusive: is_restore_tse
   TSE:
     terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE', 'double echo TSE', 'DE TSE', 'DTSE', 'PD/T2 FSE', 'dual echo FSE']
     family: SE

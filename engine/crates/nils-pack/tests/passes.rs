@@ -241,3 +241,62 @@ fn a_phase_image_is_no_gap_to_fill() {
     let at: Vec<usize> = answers.iter().map(|a| a.at).collect();
     assert_eq!(at, vec![12], "only the magnitude is a gap: {at:?}");
 }
+
+/// MRI pack 0.12.0: the SyMRI route decides the base of every MDME or
+/// QALAS stack, to nothing on the acquisition's own images and the maps,
+/// so none of them is a gap. And a reformat or a projection repeats its
+/// source's physics, so it is no voter: now that a workstation reformat is
+/// classified rather than ruled out, the pool would count its source twice.
+#[test]
+fn an_mdme_image_is_no_gap_and_a_reformat_no_voter() {
+    let pack = mri();
+    let pass = &pack.passes[0];
+    let vote = pass.vote().expect("the physics vote");
+
+    let mut c = Corpus::new(&pack);
+    let push = |c: &mut Corpus, id: i64, base: &str, technique: &str, provenance: &str| {
+        let s = stack(4000.0, 100.0, "SE");
+        c.push(
+            id,
+            |f| s.as_text(f).into_owned(),
+            |a| match pack.axes[a].name.as_str() {
+                "base" => base.to_string(),
+                "technique" => technique.to_string(),
+                "directory_type" => "anat".to_string(),
+                "provenance" => provenance.to_string(),
+                _ => String::new(),
+            },
+        );
+    };
+    // Ten reformats, all saying T2w TSE, and nothing else in the pool.
+    for i in 0..10 {
+        push(&mut c, i + 1, "T2w", "TSE", "ProjectionDerived");
+    }
+    push(&mut c, 11, "", "MDME", "RawRecon");
+    push(&mut c, 12, "", "QALAS", "RawRecon");
+    push(&mut c, 13, "", "TSE", "RawRecon");
+    let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
+    let at: Vec<usize> = answers.iter().map(|a| a.at).collect();
+    assert_eq!(at, vec![12], "only the plain TSE is a gap: {at:?}");
+    assert!(
+        answers
+            .iter()
+            .all(|a| a.writes.iter().all(|(_, w)| w.is_empty())),
+        "and the reformats cast no vote for it: {:?}",
+        answers.iter().map(|a| &a.writes).collect::<Vec<_>>()
+    );
+
+    // With the same ten as acquisitions, it is answered.
+    let mut c = Corpus::new(&pack);
+    for i in 0..10 {
+        push(&mut c, i + 1, "T2w", "TSE", "RawRecon");
+    }
+    push(&mut c, 11, "", "TSE", "RawRecon");
+    let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
+    assert_eq!(answers.len(), 1);
+    assert!(
+        answers[0].writes.iter().any(|(_, w)| w == "T2w"),
+        "{:?}",
+        answers[0].writes
+    );
+}

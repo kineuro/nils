@@ -694,14 +694,15 @@ cases:
   # A plane the console resliced from a susceptibility acquisition is a
   # reformat, as every other MPR is. Its image type says MPR and holds no
   # SWI token, and the route's last resort called 375 such planes the
-  # processed SWI image.
+  # processed SWI image. Pack 0.12.0: and it is ProjectionDerived, as any
+  # reformat made from another series is.
   - name: a reformat of a susceptibility EPI is an MPR and not the SWI image
     stack:
       image_type: 'DERIVED\PRIMARY\MPR\NORM\DIS2D'
       scanning_sequence: EP
       text_series_description: 'Sag SWI EPI 0,65 mm iso_MPR_Tra'
     axes:
-      provenance: SWIRecon
+      provenance: ProjectionDerived
       technique: EPI
       construct: MPR
       disposition: reformat
@@ -1088,7 +1089,7 @@ cases:
       echo_time: 20
     axes:
       provenance: RawRecon
-      construct: Magnitude
+      construct: 'Magnitude,ND'
       base: T2*w
 
   - name: the phase of a Siemens SWI is acquired and has no base contrast
@@ -1100,7 +1101,7 @@ cases:
       echo_time: 20
     axes:
       provenance: RawRecon
-      construct: Phase
+      construct: 'ND,Phase'
       base: ''
 
   - name: the SWI image the scanner computed keeps its product and is base SWI
@@ -1112,7 +1113,7 @@ cases:
       echo_time: 20
     axes:
       provenance: SWIRecon
-      construct: SWI
+      construct: 'ND,SWI'
       base: SWI
 
   - name: the minIP of an SWI is a projection, and base SWI
@@ -1124,7 +1125,7 @@ cases:
       echo_time: 20
     axes:
       provenance: ProjectionDerived
-      construct: MinIP
+      construct: 'MinIP,ND'
       base: SWI
 
   - name: a GE SWAN phase is acquired and has no base contrast
@@ -2032,7 +2033,12 @@ cases:
       echo_train_length: 140
     axes:
       technique: SPACE
-      directory_type: excluded
+      # Pack 0.12.0: classified on every axis, marked a reformat.
+      provenance: ProjectionDerived
+      construct: MPR
+      modifier: 'FLAIR,FatSat'
+      directory_type: anat
+      disposition: reformat
 
   # Gradient echo.
   - name: a Philips 2D T1W_FFE is a spoiled gradient echo
@@ -2130,7 +2136,11 @@ cases:
       stacks_in_series: 2
     axes:
       provenance: RawRecon
-      construct: 'Magnitude,ND'
+      # Pack 0.12.0: an acquired image, so no Magnitude; and its saturation
+      # delay, written as a TI beside SE\IR, is no IR modifier.
+      construct: ND
+      technique: MDME
+      modifier: ''
 
   - name: a GE exam protocol named MS+GD says nothing of a STIR before contrast
     stack:
@@ -2155,3 +2165,164 @@ cases:
       text_protocol_name: 't1_se_tra +gd'
     axes:
       post_contrast: '1'
+
+  # --- MRI pack 0.12.0: the dev-1 development reference's rule errors
+  # (`studies/2026-09-28-dev-reference/` in the design repository). Every
+  # stack here is invented, in the shape the errors had.
+
+  # Philips writes a reformat as a projection image, planes and maximum
+  # projections alike; with no MIP token and no MIP word it is a plane.
+  - name: a Philips reformat written as a projection image is an MPR
+    stack:
+      image_type: 'DERIVED\PRIMARY\PROJECTION IMAGE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'VCor 3D T1 TFE'
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: a Philips projection image named MIP is a MIP and not a plane
+    stack:
+      image_type: 'DERIVED\PRIMARY\PROJECTION IMAGE\M\FFE'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'MIP TOF cor'
+    axes:
+      provenance: ProjectionDerived
+      construct: MIP
+
+  # A workstation writes MPR on a projection too.
+  - name: a workstation MIP written MPR is a MIP alone
+    stack:
+      image_type: 'DERIVED\SECONDARY\MPR\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl3d1r_t70'
+      text_series_description: 'tof_3d_multi-slab_MIP_COR'
+    axes:
+      provenance: ProjectionDerived
+      construct: 'MIP,ND'
+      disposition: reformat
+
+  - name: a minimum intensity projection is not also a maximum one
+    stack:
+      image_type: 'DERIVED\PRIMARY\MNIP\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 'mIP_Images(SW)'
+    axes:
+      provenance: ProjectionDerived
+      construct: 'MinIP,ND'
+
+  - name: a denoised MP2RAGE uniform image is UniformDenoised alone
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND\UNIFORM'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 'mp2rage_sag_UNI-DEN'
+    axes:
+      construct: 'Denoised,ND'
+
+  - name: an in-phase Dixon image is not a phase image
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIXON\IN_PHASE'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl3d2'
+      text_series_description: 't1_vibe_dixon_tra_in-phase'
+    axes:
+      construct: InPhase
+
+  - name: a phase image is still a phase image by its image type and its word
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl3d1r'
+      text_series_description: 'gre_phase'
+    axes:
+      construct: 'ND,Phase'
+
+  # RESTORE, by the letter Siemens writes after `tse`.
+  - name: a Siemens TSE with RESTORE is the driven equilibrium TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*tseR2d1rs16'
+      text_series_description: 't2_tse_tra'
+      echo_train_length: 16
+    axes:
+      technique: RESTORE
+
+  - name: the letters after a Siemens TSE's echo train are not RESTORE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*tse2d1rs15'
+      text_series_description: 't2_tse_tra'
+      echo_train_length: 15
+    axes:
+      technique: TSE
+
+  # The SWI route: the real part, a magnitude named for QSM, a reformat,
+  # and a multi-echo readout.
+  - name: the real part of a Philips SWIp is an acquired T2*-weighted image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\R_FFE\R\FFE'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SWIp'
+    axes:
+      provenance: RawRecon
+      construct: Real
+      base: 'T2*w'
+
+  - name: a magnitude of a multi-echo series named QSM is no QSM map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*swi3d4r'
+      text_series_description: 'swi_qsm_tra_Mag'
+      split_reason: multi_echo
+      stacks_in_series: 4
+    axes:
+      provenance: RawRecon
+      construct: 'Magnitude,ND'
+      base: 'T2*w'
+      technique: MEGRE
+
+  # A multi-parameter mapping protocol's MT-weighted multi-echo gradient
+  # echo takes its base from the MT pulse, not the echo train.
+  - name: an MT-weighted multi-echo gradient echo is MTw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'MPM_MTw_3D'
+      split_reason: multi_echo
+      stacks_in_series: 6
+    axes:
+      technique: MEGRE
+      base: MTw
