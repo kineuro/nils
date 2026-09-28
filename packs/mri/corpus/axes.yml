@@ -1372,17 +1372,27 @@ cases:
       technique: BOLD
       provenance: BOLDRecon
 
-  - name: a short EPI named for BOLD is a reference and not a run
+  - name: an EPI of 4 time points named for BOLD is a reference and not a run
     stack:
-      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
       scanning_sequence: EP
       sequence_variant: SK
       text_sequence_name: '*epfid2d1_64'
       text_protocol_name: 'ep2d_bold_task'
-      n_instances: 8
-      n_slices: 1
+      temporal_positions: 4
+      n_instances: 120
+      n_slices: 30
     axes:
       technique: GRE-EPI
+
+  - name: a series named for BOLD whose header states nothing is still BOLD
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\MOSAIC'
+      text_series_description: 'ep2d_bold_moco'
+      text_protocol_name: 'BOLD'
+      n_instances: 3
+    axes:
+      technique: BOLD
 
   - name: a single-band reference numbered 1000 above its run is BOLD
     stack:

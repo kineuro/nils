@@ -2310,7 +2310,9 @@ fn load_normalizer(f: &File) -> R<Normalizer> {
                     if k != "field" && k != "unless_manufacturer" {
                         return Err(Error::at(
                             &at,
-                            format!("{k} is not a key here; they are field and unless_manufacturer"),
+                            format!(
+                                "{k} is not a key here; they are field and unless_manufacturer"
+                            ),
                         )
                         .in_file(&f.path, Some(&f.source)));
                     }

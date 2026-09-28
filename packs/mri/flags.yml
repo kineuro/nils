@@ -457,6 +457,12 @@ flags:
       - all: [{field: temporal_positions, present: false}, {not: is_mosaic},
               {field: n_instances, le: {field: n_slices}}]
 
+  # A readout the header states and that is not EPI: a gradient or spin echo
+  # with no EPI anywhere. A word for an EPI technique is not believed on it.
+  says_not_epi: {all: [{not: has_epi}, {any: [has_gre, has_se]}]}
+  # Fewer than 10 time points, where the file says how many.
+  has_few_time_points: {all: [{field: temporal_positions, present: true}, {field: temporal_positions, lt: 10}]}
+
   # --- words, as whole words. A keyword is a substring of the text, and the
   # short ones matched inside other words on the archive: `asl` inside
   # `basline` (13 stacks called ASL), `bold` inside Philips' `VenBOLD`, its

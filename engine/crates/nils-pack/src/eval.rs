@@ -74,7 +74,13 @@ impl<'a> Evaluated<'a> {
                     .from
                     .iter()
                     .enumerate()
-                    .map(|(k, i)| if n.reads(k, manufacturer) { stack.text(*i) } else { "" })
+                    .map(|(k, i)| {
+                        if n.reads(k, manufacturer) {
+                            stack.text(*i)
+                        } else {
+                            ""
+                        }
+                    })
                     .collect();
                 n.apply(&parts).unwrap_or_default()
             })

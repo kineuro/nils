@@ -131,9 +131,11 @@ values:
   # MRI pack 0.10.0: an EPI time series with no sign of diffusion, perfusion
   # or contrast is BOLD from the header alone, and so is a single-band
   # reference (flags.yml, section 11). A word counts only as a whole word
-  # (`bold` is inside VenBOLD, Philips' SWI) and only on an EPI series that
-  # holds more than a few volumes, or a map computed from one: GE's exam
-  # protocol put `fmri` on a scout, a BRAVO and a reverse-phase field map.
+  # (`bold` is inside VenBOLD, Philips' SWI), not on a series whose header
+  # states a readout that is not EPI, and not on one the file says holds
+  # fewer than 10 time points unless it is a map computed from a run: GE's
+  # exam protocol put `fmri` on a scout and a BRAVO, and GE's reverse-phase
+  # field maps of 4 time points are named `rsfMRI_FieldMap`.
   BOLD-EPI:
     terms: ['ep2d_bold', 'fMRI EPI', 'BOLD']
     label: BOLD
@@ -142,7 +144,7 @@ values:
       any:
         - is_bold
         - is_bold_structural
-        - all: [bold_words, has_epi, {any: [{not: is_few_volumes}, is_derived, is_ttest]}]
+        - all: [bold_words, {not: says_not_epi}, {any: [{not: has_few_time_points}, is_derived, is_ttest]}]
     keywords:
       - bold
       - fmri
@@ -204,13 +206,14 @@ values:
     # MRI pack 0.10.0: tried before BOLD, from a perfusion image type (not
     # ASL's), a map only DSC makes, or an EPI time series given contrast or
     # named for perfusion (flags.yml, section 11). A word counts as a whole
-    # word, and only on an EPI series or a perfusion map: GE's exam protocol
-    # put `perfusion` on a localizer, a T2 FSE, a FLAIR and a spin echo.
+    # word, and not on a series whose header states a readout that is not
+    # EPI, unless it is a perfusion map: GE's exam protocol put `perfusion` on
+    # a localizer, a T2 FSE, a FLAIR and a spin echo.
     requires:
       any:
         - is_dsc_stated
         - is_dsc_series
-        - all: [dsc_words, {any: [has_epi, is_perfusion_derived, perfusion_map_words]}, {not: is_asl}]
+        - all: [dsc_words, {any: [{not: says_not_epi}, is_perfusion_derived, perfusion_map_words]}, {not: is_asl}]
         # a DSC map named for what it is, where its image type says nothing
         - all: [perfusion_map_words, {not: is_asl}, {not: asl_words}, {not: is_spiral}]
     keywords:
