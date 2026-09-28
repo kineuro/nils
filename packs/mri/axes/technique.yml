@@ -17,18 +17,34 @@ stores: label
 default: Unknown
 # The text a keyword is matched against is the pack's own, normalized by
 # its twelve steps from the fingerprint's folded fields (spec section 6.4).
-search: search_text
+# MRI pack 0.10.0: `technique_text` is `search_text` without GE's
+# ProtocolName, which names the exam and not the series
+# (normalize-technique.yml).
+search: technique_text
 
 # Only these are tried by this axis's own rules; any other value
 # below is vocabulary a route sets (spec section 6.5).
+#
+# MRI pack 0.10.0 (`studies/2026-09-28-sequence-research/reconciled.md` in
+# the design repository). The EPI time series in the order both research
+# reports give: diffusion, then ASL (a `PERFUSION` image type is ASL, DSC or
+# DCE alike, so the ASL-only signs go first), then DSC (it shares BOLD's
+# gradient-echo EPI, so the contrast and the perfusion words go before BOLD
+# takes every EPI time series), then BOLD, then the one-volume references.
+# DCE is a 3D gradient echo and stays before DSC, so a series that says DCE
+# is DCE whatever its image type says. The gradient-echo family: angiography
+# first (flow contrast outranks the rest, and TOF and PC are FLASH inside),
+# then the magnetisation-prepared, then the coherent steady states, then
+# combined multi-echo before multi-echo, the variable flip angle, and the
+# named interpolated 3D before the turbo, spoiled and steady-state families.
 order:
   - MS-EPI
   - DWI-EPI
   - DWI-STEAM
-  - BOLD-EPI
   - ASL
   - DCE
   - Perfusion-EPI
+  - BOLD-EPI
   - GRASE
   - SE-EPI
   - GRE-EPI
@@ -42,18 +58,18 @@ order:
   - VFA-TSE
   - TSE
   - SE
+  - TOF-MRA
+  - PC-MRA
   - QALAS
   - MP2RAGE
   - MEMPRAGE
   - MPRAGE
-  - TOF-MRA
-  - PC-MRA
-  - comb-ME-GRE
-  - ME-GRE
   - CISS
   - bSSFP
   - DESS
   - SSFP
+  - comb-ME-GRE
+  - ME-GRE
   - VFA-GRE
   - VI-GRE
   - FSP-GRE
@@ -112,10 +128,21 @@ values:
       - steam
       - dwi-steam
       - diffusion steam
+  # MRI pack 0.10.0: an EPI time series with no sign of diffusion, perfusion
+  # or contrast is BOLD from the header alone, and so is a single-band
+  # reference (flags.yml, section 11). A word counts only as a whole word
+  # (`bold` is inside VenBOLD, Philips' SWI) and only on an EPI series that
+  # holds more than a few volumes, or a map computed from one: GE's exam
+  # protocol put `fmri` on a scout, a BRAVO and a reverse-phase field map.
   BOLD-EPI:
     terms: ['ep2d_bold', 'fMRI EPI', 'BOLD']
     label: BOLD
     family: MIXED
+    requires:
+      any:
+        - is_bold
+        - is_bold_structural
+        - all: [bold_words, has_epi, {any: [{not: is_few_volumes}, is_derived, is_ttest]}]
     keywords:
       - bold
       - fmri
@@ -124,6 +151,7 @@ values:
       - task
     detection:
       exclusive: is_bold
+      combination: [is_bold_structural]
   # Record 48: named for the labelling and not a readout. The consensus
   # readouts are 3D GRASE and a 3D spiral fast spin echo, with 2D EPI an
   # alternative [P20, RP5]. The identity was ASL-EPI before pack 0.6.0, and
@@ -135,6 +163,13 @@ values:
     description: 'arterial spin labelling perfusion, any readout (3D GRASE, 3D spiral FSE, EPI)'
     aliases: [ASL-EPI]
     family: MIXED
+    # MRI pack 0.10.0: a word counts only as a whole word (`asl` is inside
+    # `basline`), and only on a readout ASL is made with: EPI, 3D (GRASE,
+    # spiral) or GE's spiral, or on an image the scanner computed.
+    requires:
+      any:
+        - is_asl
+        - all: [asl_words, {any: [has_epi, is_3d, is_spiral, is_derived]}]
     keywords:
       - asl
       - pcasl
@@ -148,24 +183,46 @@ values:
   # Perfusion-EPI, which is now the dynamic susceptibility contrast series.
   # Tried before it, so a series that says DCE is DCE whatever its image
   # type says.
+  # MRI pack 0.10.0: also from the header, a 3D spoiled gradient echo of 10
+  # or more time points that is no angiography run (flags.yml, section 11),
+  # and the word only as a whole word.
   DCE:
     terms: ['dynamic contrast enhanced', 'DCE-MRI', 'DCE perfusion', 'permeability']
     description: 'dynamic contrast enhanced perfusion: a T1-weighted 3D spoiled gradient echo repeated through a bolus'
     family: GRE
+    requires: {any: [is_dce_series, dce_words]}
     keywords:
       - dce
       - dynamic contrast enhanced
+    detection:
+      combination: [is_dce_series]
   Perfusion-EPI:
     terms: ['ep2d_perf', 'DSC perfusion', 'dynamic susceptibility contrast', 'bolus tracking']
     label: Perfusion
     description: 'dynamic susceptibility contrast (DSC) perfusion, a gradient- or spin-echo EPI through a bolus'
     family: EPI
+    # MRI pack 0.10.0: tried before BOLD, from a perfusion image type (not
+    # ASL's), a map only DSC makes, or an EPI time series given contrast or
+    # named for perfusion (flags.yml, section 11). A word counts as a whole
+    # word, and only on an EPI series or a perfusion map: GE's exam protocol
+    # put `perfusion` on a localizer, a T2 FSE, a FLAIR and a spin echo.
+    requires:
+      any:
+        - is_dsc_stated
+        - is_dsc_series
+        - all: [dsc_words, {any: [has_epi, is_perfusion_derived, perfusion_map_words]}, {not: is_asl}]
+        # a DSC map named for what it is, where its image type says nothing
+        - all: [perfusion_map_words, {not: is_asl}, {not: asl_words}, {not: is_spiral}]
     keywords:
       - perfusion
       - dsc
       - pwi
+      - rcbv
+      - rcbf
+      - rmtt
     detection:
-      exclusive: is_perfusion
+      exclusive: is_dsc_stated
+      combination: [is_dsc_series]
   GRASE:
     # Canon's name [V1, M1]
     terms: ['gradient and spin echo', 'TGSE', 'Hybrid EPI']
@@ -179,15 +236,18 @@ values:
     keywords:
       - se-epi
       - spin echo epi
+    # MRI pack 0.10.0: the readout from the Siemens name (`epse`) or Philips'
+    # SEEPI before ScanningSequence.
     detection:
-      combination: [has_se, has_epi]
+      combination: [is_se_epi]
   GRE-EPI:
     family: MIXED
     keywords:
       - gre-epi
       - epi-gre
+    # MRI pack 0.10.0: `epfid` or Philips' FEEPI before ScanningSequence.
     detection:
-      combination: [has_gre, has_epi]
+      combination: [is_gre_epi]
   MRF:
     terms: ['MR fingerprinting', 'magnetic resonance fingerprinting']
     family: MIXED
@@ -446,6 +506,9 @@ values:
     keywords:
       - dess
       - mensa
+    # MRI pack 0.10.0: Siemens `de` [the brochure's legend].
+    detection:
+      exclusive: is_dess
   SSFP:
     terms: ['PSIF', 'T2-FFE', 'CE-FAST', 'reversed FISP', 'TRSG']  # TRSG: Hitachi [V1, V2]
     label: PSIF
@@ -455,6 +518,10 @@ values:
       - psif
       - t2-ffe
       - ce-fast
+    # MRI pack 0.10.0: Siemens `ps`, the time reversed steady state of
+    # DICOM, or Philips' T2FFE.
+    detection:
+      exclusive: is_psif
   VFA-GRE:
     terms: ['DESPOT', 'variable flip angle GRE']
     family: GRE
@@ -473,8 +540,10 @@ values:
       - lava
       - thrive
       - fame
-    detection:
-      combination: [has_spoiled, is_3d, has_gre]
+    # MRI pack 0.10.0: by name only. Both reports: VIBE, LAVA and THRIVE are
+    # a 3D spoiled gradient echo that no header field marks as interpolated,
+    # so a spoiled 3D gradient echo is SP-GRE unless it is named; the
+    # combination this value had took every 3D FLASH, T1-FFE and SPGR first.
   FSP-GRE:
     terms: ['TurboFLASH', 'FSPGR', 'TFE', 'turbo field echo', 'fast SPGR', 'TFL', 'Fast FE', 'FastFE', 'RGE']  # Fast FE: Canon, RGE: Hitachi [V1, M1, IM4]
     label: TurboFLASH
@@ -505,7 +574,11 @@ values:
       - fisp
       - grass
       - ss-gre
-      - single shot gre
+    # MRI pack 0.10.0: SS in SequenceVariant is the steady state, not a
+    # single shot, so that word is gone; Siemens `fi` is FISP, "gradient echo
+    # sequence without RF spoiling".
+    detection:
+      exclusive: is_fisp
   GRE:
     terms: ['gradient echo', 'gradient recalled echo', 'field echo', 'FE']
     family: GRE

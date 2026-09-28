@@ -61,7 +61,19 @@ flags:
 
   # === 1. pulse sequence physics ============================================
 
+  # MRI pack 0.10.0: never on a Siemens gradient-echo stem (`*ci3d1` and
+  # `*tfi2d1` are written with ScanningSequence SE: 84 and 105 stacks on the
+  # archive, 2026-09-28) nor on a gradient-echo EPI (`epfid`, which VB12T
+  # once wrote `SE\EP`); the name decides against ScanningSequence. Philips'
+  # scanning technique SEEPI is a spin-echo EPI.
   has_se:
+    all:
+      - {not: sequence_name.is_gre_stem}
+      - {not: sequence_name.is_epi_gre}
+      - {not: philips_gre_technique}
+      - any: [has_se_evidence, philips_seepi]
+
+  has_se_evidence:
     any:
       - scanning_sequence.has_se
       - scanning_sequence.has_fse
@@ -86,13 +98,16 @@ flags:
     any: [scanning_sequence.has_gre, image_type.hint_gre, sequence_name.is_gre,
           sequence_name.is_fgre, sequence_name.is_flash, sequence_name.is_tfl,
           sequence_name.is_mprage, sequence_name.is_swi, sequence_name.is_ciss,
-          sequence_name.is_tof, sequence_name.is_pc, sequence_name.is_epi_gre]
+          sequence_name.is_tof, sequence_name.is_pc, sequence_name.is_epi_gre,
+          # MRI pack 0.10.0: every Siemens gradient-echo stem, and Philips'
+          # gradient-echo scanning techniques
+          sequence_name.is_gre_stem, philips_gre_technique]
 
   has_epi:
     any: [scanning_sequence.has_epi, sequence_name.is_epi_diff,
           sequence_name.is_epi_gre, sequence_name.is_epi_se,
           sequence_name.is_epi_ir, sequence_name.is_epi_diff_resolve,
-          sequence_name.is_epi_diff_b0]
+          sequence_name.is_epi_diff_b0, philips_feepi, philips_seepi]
 
   has_ir:
     any:
@@ -154,11 +169,19 @@ flags:
   is_medic:   sequence_name.is_medic
   is_mdme:    sequence_name.is_mdme
   is_qalas:   sequence_name.is_qalas
-  is_flash:   {any: [sequence_name.is_flash, sequence_name.is_fgre]}
-  is_tfl:     sequence_name.is_tfl
+  # MRI pack 0.10.0: Philips' scanning technique (2001,1020) decides the
+  # family where Siemens' name would: T1FFE is spoiled, TFE and T1TFE the
+  # turbo field echo, B-FFE and B-TFE balanced, T2FFE the echo of the
+  # steady state (Philips, "Siemens to Philips sequence terminology";
+  # observed on the archive, section 5.1 of the research).
+  is_flash:   {any: [sequence_name.is_flash, sequence_name.is_fgre, philips_t1ffe]}
+  is_tfl:     {any: [sequence_name.is_tfl, philips_tfe]}
   is_mprage:  sequence_name.is_mprage
-  is_ssfp:    sequence_name.is_trufisp
+  is_ssfp:    {any: [sequence_name.is_trufisp, philips_balanced]}
   is_ciss:    sequence_name.is_ciss
+  is_dess:    sequence_name.is_dess
+  is_psif:    {any: [sequence_name.is_psif, sequence_variant.has_trss, philips_t2ffe]}
+  is_fisp:    sequence_name.is_fisp
   is_swi:     {any: [sequence_name.is_swi, image_type.has_swi]}
   has_swi:    image_type.has_swi
   is_tof:     {any: [sequence_name.is_tof, sequence_variant.is_tof,
@@ -188,7 +211,11 @@ flags:
   has_spoiled:          sequence_variant.has_spoiled
   has_steady_state:     sequence_variant.has_steady_state
   has_segmented_kspace: sequence_variant.has_segmented_kspace
-  has_mag_prepared:     {any: [sequence_variant.has_mag_prepared, scan_options.has_mp_gems]}
+  # SequenceVariant MP alone. GE's `MP_GEMS` is no magnetisation
+  # preparation: 117 of the 255 stacks that carry it are EPI (fMRI and DSC),
+  # which fits GE's multi-phase, and GE documents no meaning for it (MRI
+  # pack 0.10.0).
+  has_mag_prepared:     sequence_variant.has_mag_prepared
   has_mtc:              {any: [sequence_variant.has_mtc, scan_options.has_mt]}
   has_oversampling:     sequence_variant.has_oversampling
   # FS or SFS only; never GE's readout-direction tokens (parsers.yml)
@@ -376,3 +403,166 @@ flags:
   is_navail:     image_type.has_navail
   # Pixels NILS cannot read, so not an image it can convert.
   is_encrypted:  image_type.is_encrypted
+
+  # === 11. fMRI, perfusion and the gradient-echo family (MRI pack 0.10.0) ====
+  # `studies/2026-09-28-sequence-research/reconciled.md` in the design
+  # repository: two independent research reports reconciled and checked
+  # against the archive. Each flag names what it rests on.
+
+  # --- Philips' scanning technique, private (2001,1020), the counterpart of
+  # Siemens' sequence name. The strings are the ones the archive holds.
+  philips_feepi:    {text: philips_scanning_technique, matches: '^feepi$'}
+  philips_seepi:    {text: philips_scanning_technique, matches: '^seepi$'}
+  philips_t1ffe:    {text: philips_scanning_technique, matches: '^t1ffe$'}
+  philips_t2ffe:    {text: philips_scanning_technique, matches: '^t2ffe$'}
+  philips_tfe:      {text: philips_scanning_technique, matches: '^(t1tfe|tfe)$'}
+  philips_balanced: {text: philips_scanning_technique, matches: '^(b-ffe|b-tfe|bffe|btfe)$'}
+  philips_gre_technique:
+    any: [philips_feepi, philips_t1ffe, philips_t2ffe, philips_tfe, philips_balanced,
+          {text: philips_scanning_technique, matches: '^ffe$'}]
+
+  # --- the EPI readout: gradient or spin echo, from the name before
+  # ScanningSequence. Both reports: `epfid` is the FID (gradient-echo) EPI and
+  # `epse` the spin-echo one, and ScanningSequence cannot tell them apart on
+  # old Siemens (`SE\EP` on a gradient-echo BOLD, dcm2niix issue 309); the
+  # archive holds 8 `epse` stacks written `GR\EP`.
+  is_se_epi:
+    any:
+      - sequence_name.is_epi_se
+      - philips_seepi
+      - all: [has_epi, has_se, {not: sequence_name.is_epi_gre}, {not: philips_feepi}]
+  is_gre_epi:
+    any:
+      - sequence_name.is_epi_gre
+      - philips_feepi
+      - all: [has_epi, has_gre, {not: sequence_name.is_epi_se}, {not: philips_seepi}]
+
+  # --- how many time points a series holds. NumberOfTemporalPositions where
+  # the file says it (the enhanced split, GE, Philips); a Siemens mosaic holds
+  # one volume per image; otherwise the images per slice position, which the
+  # language can only bound. On the archive every BOLD run held 100 or more
+  # time points, every DSC run 40 to 90, a GE reverse-phase field map 4, and
+  # no multiphase liver series more than 5.
+  is_mosaic: image_type.layout_mosaic
+  is_time_series:
+    any:
+      - {field: temporal_positions, ge: 10}
+      - all: [{field: temporal_positions, present: false}, is_mosaic, {field: n_instances, ge: 10}]
+      - all: [{field: temporal_positions, present: false}, {not: is_mosaic},
+              {field: n_instances, gt: {field: n_slices}}, {field: n_instances, ge: 300}]
+  is_few_volumes:
+    any:
+      - all: [{field: temporal_positions, present: true}, {field: temporal_positions, lt: 10}]
+      - all: [{field: temporal_positions, present: false}, is_mosaic, {field: n_instances, lt: 10}]
+      - all: [{field: temporal_positions, present: false}, {not: is_mosaic},
+              {field: n_instances, le: {field: n_slices}}]
+
+  # --- words, as whole words. A keyword is a substring of the text, and the
+  # short ones matched inside other words on the archive: `asl` inside
+  # `basline` (13 stacks called ASL), `bold` inside Philips' `VenBOLD`, its
+  # SWI (all 18 stacks called BOLD). A word here is bounded by anything that
+  # is not a letter, so `ep2d_pasl`, `asl3d` and `ep2d_bold` still say it.
+  bold_words:
+    all:
+      - {text: technique_text, matches: '(^|[^a-z])(bold|task)([^a-z]|$)|fmri|functional|resting state'}
+      - {not: is_venbold}
+  asl_words:  {text: technique_text, matches: '(^|[^a-z])(asl|pasl|casl|pcasl)([^a-z]|$)|arterial spin'}
+  dsc_words:  {text: technique_text, matches: '(^|[^a-z])(dsc|pwi|perf)([^a-z]|$)|perfusion'}
+  dce_words:  {text: technique_text, matches: '(^|[^a-z])dce([^a-z]|$)|dynamic contrast enhanced'}
+  # Philips' SWI is VenBOLD: a 3D spoiled gradient echo with a long echo
+  # time, not an fMRI series.
+  is_venbold: {text: search_text, matches: 'venbold|venobold|(^|[^a-z])v?ven bold'}
+  # A contrast-enhanced angiography run (TWIST, TRICKS) repeats a 3D spoiled
+  # gradient echo through a bolus as DCE does; on the archive every such
+  # series with 10 or more time points was one, and none was DCE.
+  angio_words: {text: technique_text, matches: '(^|[^a-z])(mra|angio|twist|tricks|tof)([^a-z]|$)'}
+  # Philips' PRESTO is a 3D gradient-echo DSC sequence, not DCE.
+  presto_words: {text: technique_text, matches: '(^|[^a-z])presto([^a-z]|$)'}
+
+  # --- contrast given, as the file or its words say it
+  has_contrast_tag: {field: text_contrast, present: true}
+  contrast_said:
+    any:
+      - has_contrast_tag
+      - {text: technique_text, matches: '(^|[^a-z])(gd|gad|gado)([^a-z]|$)'}
+      - all: [{text: search_text, any_substring: {bucket: contrast_positive}},
+              {not: {text: search_text, any_substring: {bucket: contrast_negative}}}]
+
+  # --- DSC. A perfusion image type, a map only DSC makes (not CBF, which
+  # ASL makes too), or an EPI time series given contrast or named for it.
+  # Both reports: the contrast tag decides BOLD against DSC where it is
+  # present, and nothing in the header does where it is not; a missing tag
+  # does not rule DSC out (pitfall 4), so the words count too.
+  # Not on a 3D gradient echo that is no EPI: Siemens writes `TTP` on the
+  # time-to-peak image of a dynamic VIBE too.
+  is_dsc_map:
+    all:
+      - any: [has_cbv, has_mtt, has_ttp, has_tmax, image_type.has_leakage,
+              image_type.has_peak_bolus, image_type.has_k2]
+      - {not: is_asl}
+      - {not: is_spiral}
+      - {not: {all: [is_3d, {not: has_epi}]}}
+  # A perfusion map named for what it is, where its image type says nothing
+  # (Philips' `rCBV rSVD calculated ...`, written ORIGINAL\PRIMARY).
+  perfusion_map_words: {text: technique_text, matches: '(^|[^a-z])(r?cbv|rcbf|r?mtt|ttp|tmax)([^a-z]|$)'}
+  is_dsc_stated: {any: [{all: [is_perfusion, {not: is_asl}]}, is_dsc_map]}
+  is_dsc_series:
+    all:
+      - has_epi
+      - is_time_series
+      - {not: is_dwi}
+      - {not: is_asl}
+      - {not: bold_words}
+      - any: [dsc_words, contrast_said]
+
+  # --- BOLD. An EPI time series with nothing that says diffusion, perfusion
+  # or contrast (both reports: many volumes, no contrast, no DIFFUSION,
+  # PERFUSION or ASL token). A single-band reference is the BOLD run's own
+  # reference image, and both reports put it under BOLD-EPI: a one-volume
+  # gradient-echo EPI named `sbref`, or on Siemens numbered 1000 above its
+  # run (dcm2niix issue 816), which is evidence and not a construct.
+  is_bold_series:
+    all:
+      - has_epi
+      - is_time_series
+      - {not: is_dwi}
+      - {not: is_perfusion}
+      - {not: is_asl}
+      - {not: is_perfusion_derived}
+      - {not: dsc_words}
+      - {not: contrast_said}
+      - {not: is_venbold}
+  is_sbref:
+    all:
+      - is_gre_epi
+      - {not: is_se_epi}
+      - {not: is_dwi}
+      - is_few_volumes
+      - any:
+          - {text: technique_text, matches: '(^|[^a-z])sbref([^a-z]|$)'}
+          - all: [{text: manufacturer, prefix: siemens}, {field: series_number, ge: 1000}]
+  is_bold_structural: {any: [is_bold_series, is_sbref]}
+
+  # --- DCE: a 3D spoiled gradient echo repeated through a bolus. QIBA: at
+  # least 5 baseline phases, 40 to 80 phases, under 10 s each; the archive:
+  # no multiphase liver series held more than 5 time points. So 10 or more
+  # time points in one series, not an angiography run, not PRESTO.
+  is_dce_series:
+    all:
+      - is_3d
+      - has_gre
+      - {not: has_epi}
+      - any: [has_spoiled, is_flash]
+      - {field: temporal_positions, ge: 10}
+      - {not: angio_words}
+      - {not: presto_words}
+      - {not: is_tof}
+      - {not: is_pc}
+
+  # --- MoCo. Nima's ruling (2026-09-28): a motion-corrected series written
+  # ORIGINAL\PRIMARY is not derived, so its provenance follows value 1 of
+  # its image type, and only a DERIVED one takes the reconstruction's. A
+  # computed map is not decided this way: Siemens writes some as ORIGINAL
+  # (dcm2niix issue 243; on the archive `ORIGINAL\PRIMARY\PERFUSION\NONE\
+  # DIS2D\RELCBF`), and its own token decides it.
+  is_derived_moco: {all: [has_moco, is_derived]}

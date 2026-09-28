@@ -207,7 +207,11 @@ cases:
   # perfusion-weighted image an ASL series computes from its label and
   # control images.
 
-  - name: the motion-corrected copy of a BOLD run is scanner derived
+  # MRI pack 0.10.0, Nima's ruling (2026-09-28): "if Motion Correction is
+  # ORIGINAL\PRIMARY then it is not derived". The copy Siemens writes
+  # ORIGINAL is the acquisition with its MoCo modifier, and one written
+  # DERIVED is the scanner's.
+  - name: a motion-corrected copy of a BOLD run written ORIGINAL is not derived
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOCO\MOSAIC'
       scanning_sequence: EP
@@ -216,8 +220,30 @@ cases:
       text_series_description: 'MoCoSeries'
       text_protocol_name: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
       image_role: original_primary
+      n_instances: 500
+      n_slices: 1
     axes:
       technique: BOLD
+      modifier: MoCo
+      provenance: RawRecon
+      disposition: acquisition
+      convertible: 'yes'
+
+  - name: a motion-corrected copy written DERIVED is the scanner's
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND\NORM\MOCO\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: '*epfid2d1_104'
+      text_series_description: 'MoCoSeries'
+      text_protocol_name: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
+      image_role: derived
+      n_instances: 500
+      n_slices: 1
+    axes:
+      technique: BOLD
+      modifier: MoCo
+      provenance: BOLDRecon
       disposition: scanner_derived
       convertible: 'yes'
 

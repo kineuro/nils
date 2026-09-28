@@ -69,6 +69,12 @@ values:
       - susceptibility
       - qsm
       - r2star
+      # MRI pack 0.10.0: Philips' SWI, VenBOLD, which the normalizer spells
+      # `venbold`, `venobold` or, from `VEN_BOLD`, `ven bold`. On the archive
+      # all 18 of its stacks were called BOLD.
+      - venbold
+      - venobold
+      - ven bold
     detection:
       exclusive: is_swi
       combination: [has_swi, is_derived]
@@ -95,8 +101,12 @@ values:
       - time to peak
       - perfusion map
     alternative_flags: [has_cbf, has_cbv, has_mtt, has_ttp, has_tmax]
+    # Nima's ruling (2026-09-28): a motion-corrected DSC run written DERIVED
+    # is the scanner's (`DERIVED\PRIMARY\PERFUSION\DIS2D\MOCO` on 22 stacks
+    # of the archive that came out RawRecon); written ORIGINAL it is not.
     detection:
       exclusive: is_perfusion_derived
+      combination: [is_perfusion, is_derived_moco]
   # Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images are
   # RawRecon and what the scanner computed from them takes the product. An
   # ASL series as acquired is RawRecon; its CBF map, and the perfusion-weighted
@@ -112,11 +122,15 @@ values:
     detection:
       exclusive: is_asl
   # The same ruling: a BOLD time series as acquired is RawRecon; an fMRI map
-  # the scanner computed (a t-test map, a derived image, a motion-corrected
-  # copy of the run) is BOLDRecon.
+  # the scanner computed (a t-test map, a derived image) is BOLDRecon. MRI
+  # pack 0.10.0, Nima's ruling (2026-09-28): "if Motion Correction is
+  # ORIGINAL\PRIMARY then it is not derived". A motion-corrected copy takes
+  # the MoCo modifier either way, and BOLDRecon only where its image type
+  # says DERIVED; Siemens writes it ORIGINAL (1,759 stacks on the archive,
+  # every one of them), so those are RawRecon.
   BOLDRecon:
     terms: ['BOLD reconstruction', 'fMRI maps']
-    requires: {any: [is_derived, is_ttest, has_moco]}
+    requires: {any: [is_derived, is_ttest]}
     keywords:
       - bold
       - fmri

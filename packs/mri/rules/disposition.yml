@@ -164,8 +164,10 @@ rules:
   # what the perfusion-weighted image of an ASL series is, the label minus
   # the control. Both are switched on in the console's printouts and neither
   # is the acquisition.
+  # MRI pack 0.10.0, Nima's ruling (2026-09-28): a motion-corrected copy
+  # written ORIGINAL\PRIMARY is not derived, so only a DERIVED one is.
   scanner_computed:
     clauses:
-      - {flag: has_moco, tier: stated}
+      - {flag: is_derived_moco, tier: stated}
       - {flag: is_subtraction, tier: stated}
     set: {disposition: scanner_derived, convertible: 'yes'}

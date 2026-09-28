@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The technique text: `search_text` (normalize.yml) step for step, except
+# that a GE stack's ProtocolName is left out. MRI pack 0.10.0.
+#
+# GE writes the exam's protocol into ProtocolName, so a word in it lands on
+# every series of the exam: on the archive (2026-09-28) `fmri` and
+# `perfusion` in a GE exam protocol made a scout, a BRAVO, T2 FSE, CUBE,
+# FLAIR and spin echo series BOLD or a DSC perfusion, and `cube` made 13
+# stacks SPACE whose own words said something else. The series' own words,
+# its description and sequence name, say which sequence it is. The other
+# vendors write ProtocolName per series, and it is kept for them: on
+# anonymised data it is often the only name a series has. Every step below
+# is normalize.yml's; a change there is made here too.
+
+normalize: technique_text
+from:
+  - text_series_description
+  - {field: text_protocol_name, unless_manufacturer: [GE]}
+  - text_sequence_name
+  - text_body_part
+  - text_series_comments
+  - text_image_comments
+
+# Removed literally, before anything is folded, and case-sensitively:
+# which is why the fingerprint keeps case (spec section 4.2).
+raw_removals:
+  - 'RÖR PÅ DXSIN SE PÄRM'
+
+characters:
+  meaningful:
+    '*': 'star'
+  to_space: ['/', '\', '(', ')', '[', ']', ',', ';', ':', '^', '=']
+  remove: ['''', '"']
+
+# Boilerplate that means nothing to the axes this text is searched by,
+# dropped after de-duplication. `brain` and `head` are here because a
+# description that says brain says nothing about which sequence it is, and
+# because dropping a word puts its neighbours next to each other, where a
+# two-word keyword can match. They mean everything to the body-part axis,
+# which is why that axis reads `anatomy_text` instead (normalize-anatomy.yml)
+# rather than this list being shortened for it.
+token_removals: ['RÖR PÅ DXSIN SE PÄRM', 'EPILEPSI', 'eplipsi', 'hjärtsekvens', 'Startsekvens', 'ENCEPHALIT', 'swift', 'brain', 'BRAIN', 'HEAD', 'head', 'Direkt', 'direct', 'direkt', 'MESEMS', 'SistaTestet', 'faser']
+
+# Ambiguous short tokens expanded so a keyword can be matched as a plain
+# substring without hitting the inside of another word.
+token_replacements:
+  'ir': 'inversion-recovery'
+  'pd': 'proton-density'
+  'pdw': 'proton-density'
+  'se': 'spin-echo'
+  'gre': 'gradient-echo'
+  'fc': 'flow-compensation'
+  'mt': 'magnetization-transfer'
+  't1': 't1w'
+  't2': 't2w'
+  '+t2': 't2w'
+  '-t2': 't2w'
+  't2cube': 't2w-cube'
+  'pdt2': 'proton-density-t2w'
+  'pd-t2': 'proton-density-t2w'
+  'pd+t2': 'proton-density-t2w'
+  'pd +t2': 'proton-density-t2w'
+  'pd+ t2': 'proton-density-t2w'
+  'loc': 'localizer'
+  'surv': 'localizer'
+  'sur': 'localizer'
+  '3-pl': 'localizer'
+  '3pl': 'localizer'
+  '-sikt': 'localizer'
+  'scout': 'localizer'
+  'versikt': 'localizer'
+  'prop': 'propeller'
+  'pha': 'phase'
+  'phs': 'phase'
+  'mag': 'magnitude'
+  'sense': 'grappa'
+  # v0 rewrote `fase` to `resolve`. Canon's FASE is its single-shot fast spin
+  # echo (a HASTE), and no series in the archive is named with the word, so
+  # the rewrite only ever mislabelled (record 41). HASTE does not take the
+  # word either: it is phase in Danish, Norwegian and Dutch.
+
+# v0 has one conditional replacement and it can never fire: it waits for
+# `t1`, which the unconditional replacement above has already turned into
+# `t1w`. Writing it against what is actually there was tried and measured on
+# the whole corpus, and it loses more than it gains: it would turn `mpr` into
+# `mprage` on 15,858 series, and on this corpus `mprage` is usually already
+# present while the separate `mpr` means the reformat. The cost is 7,693
+# stacks losing the MPR construct and 7,725 losing the ProjectionDerived
+# provenance, against 1,207 gaining MPRAGE as their technique. Whether
+# `MPR 3D T1` with no `mprage` is an MPRAGE is a radiological question, not
+# a programming one, so it goes to the verified corpus and not into a pack
+# on my say-so. The mechanism is in the format and tested; the rule is out.
+conditional_replacements: []

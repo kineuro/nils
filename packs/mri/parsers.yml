@@ -253,6 +253,8 @@ parsers:
       is_other:            {token: OTHER}
       is_synthetic:        {token: SYNTHETIC}
       is_tof:              {token: TOF}
+      # DICOM's time reversed steady state, which is PSIF (MRI pack 0.10.0).
+      has_trss:            {token: TRSS}
 
   # ==========================================================================
   scan_options:
@@ -343,8 +345,25 @@ parsers:
       is_tse_body:         {substring: tser}
       is_ir_tse:           {all: [{substring: tir}, {not: {substring: stir}}]}
       is_haste:            {any_substring: [h2d, h3d, hr2d, haste]}
-      is_flash:            {all: [{any_substring: [fl1, fl2d, fl3d]}, {not: {substring: flair}}]}
-      is_tfl:              {substring: tfl}
+      # MRI pack 0.10.0: anchored at the start of the name (after `*`, the
+      # mark of a product sequence, or `wip`), because `fl2d` and `fl3d` are
+      # inside `tfl2d` and `tfl3d`, TurboFLASH. `fldyn` is FLASH run
+      # dynamically. The Siemens brochure's legend: `fl` FLASH, "gradient
+      # echo sequence with active RF spoiling"; `tfl` TurboFLASH.
+      is_flash:            {all: [{matches: '^\*?(wip)?fl(1|[23]d|dyn[23]d)'}, {not: {substring: flair}}]}
+      is_tfl:              {matches: '^\*?(wip)?tfl'}
+      # A Siemens gradient-echo family by its stem, which Siemens writes on
+      # some of them beside ScanningSequence SE (`*ci3d1`, `*tfi2d1`): FLASH,
+      # TurboFLASH, FISP, TrueFISP, CISS, DESS, MEDIC, PSIF, SWI, the dual
+      # echo field map and phase contrast. The stem decides against
+      # ScanningSequence (MRI pack 0.10.0).
+      is_gre_stem:         {matches: '^\*?(wip)?(fl(1|[23]d|dyn)|tfl|t?fi[23]d|ci[23]d|de[23]d|me[23]d|ps[23]d|swi[23]d|fm[23]d|pc[23]d)'}
+      # `fi` FISP, "gradient echo sequence without RF spoiling"; not the
+      # tune-up `fi3d1tun`.
+      is_fisp:             {all: [{matches: '^\*?fi[23]d'}, {not: {substring: tun}}]}
+      # `de` DESS and `ps` PSIF, in the same legend.
+      is_dess:             {matches: '^\*?de[23]d'}
+      is_psif:             {matches: '^\*?ps[23]d'}
       is_gre:              {all: [{any_substring: ['*gre', ffe]}, {not: {substring: mprage}}]}
       is_fgre:             {substring: fgre}
       is_space:            {all: [{substring: spc}, {not: {substring: spcir}}]}
@@ -363,7 +382,7 @@ parsers:
       is_mprage:           {any_substring: [mprage, bravo, tfl3d1, irfspgr, 'ir-spgr', mpr]}
       is_flair_seq:        {all: [{any_substring: [flair, mrcflair]},
                                   {not: {substring: t1flair}}, {not: {substring: t2flair}}]}
-      is_ciss:             {any_substring: [ciss, ci3d]}
+      is_ciss:             {any: [{substring: ciss}, {matches: '^\*?ci[23]d'}]}
       is_localizer:        {any_substring: {bucket: localizer_words}}
       is_wip:              {substring: wip}
       is_tune:             {any_substring: [tun_, 'tun-', tune, fi3d1tun]}
