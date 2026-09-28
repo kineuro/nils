@@ -391,23 +391,48 @@ Settled while building the writer (slice 3):
 - Added with the sequence research of 2026-09-28: `--reread <manufacturer>`
   (repeatable) reads again only the files the registry already holds for the
   MR series whose study names one of those manufacturers, compared trimmed
-  and without case. There is no walk: the files are each instance's own
-  `ingested` row of `source_file` for this root, in row order, and each goes
-  to the parsers with its instance beside it, as under `--restart`, so the
-  writer fills what the registry lacks and keeps the smaller of two values
-  that disagree. It reads every file of such a series and not a sample,
-  because a series field and `series_private`'s `varied` hold only when every
-  file is seen (GE writes both passes of its ASL, with different contrast
-  techniques, into one series). A re-read marks nothing gone, has no dry run,
-  and marks the fingerprints of the series it names stale, so the next
-  `nils fingerprint` derives them again. It is how a registry digested before
-  PulseSequenceName (0018,9005) and the GE and Philips sequence elements of
-  the MRI pack's ingest list were collected is brought up to them:
-  `nils digest <root> --reread "GE MEDICAL SYSTEMS" --reread "Siemens Healthineers"`,
+  and without case. `--reread-exact <manufacturer>` (repeatable, and it may
+  stand beside `--reread`) compares trimmed and with case. The two exist
+  because Siemens spells its XA11 and XA20 scanners `Siemens` and every
+  older one `SIEMENS`: on the archive below, `Siemens` held 0.72 M MR files
+  and `SIEMENS` 20.6 M, so a match without case would read the whole older
+  fleet to reach the XA files. The registry does not carry SoftwareVersions,
+  so the spelling is the handle it has. There is no walk: the target series
+  are resolved once, from `series` and `study` alone, and then read one at
+  a time, each series' own `ingested` rows of `source_file` for this root in
+  id order, a page of at most 10,000 after the last id the page before
+  handed on. A page is an index lookup of one series' instances joined to
+  their files by primary key, so it costs what that series holds and never a
+  pass over the archive. Each file goes to the parsers with its instance
+  beside it, as under `--restart`, so the writer fills what the registry
+  lacks and keeps the smaller of two values that disagree. It reads every
+  file of such a series and not a sample, because a series field and
+  `series_private`'s `varied` hold only when every file is seen (GE writes
+  both passes of its ASL, with different contrast techniques, into one
+  series). A re-read marks nothing gone, has no dry run, and marks the
+  fingerprints of the series it names stale, so the next `nils fingerprint`
+  derives them again.
+- A re-read that did not finish (stopped, failed, or killed and failed by
+  the next run's takeover) is continued by the next re-read. The writer sets
+  `source_file.batch_id` on every file it files, so the files whose rows
+  carry the batch of such a re-read, or of a later one, were read already:
+  they are counted `unchanged` and not read again. The chain it continues is
+  the unbroken run of the source's latest batches that are re-reads on the
+  same private elements (the `private` knob) and did not end `done`, so any
+  manufacturer selection may continue it; an ordinary digest, a finished
+  re-read or another pack's ingest list ends the chain. `--restart` beside
+  `--reread` reads everything again.
+- It is how a registry digested before PulseSequenceName (0018,9005) and the
+  GE and Philips sequence elements of the MRI pack's ingest list were
+  collected is brought up to them, for GE, Siemens Healthineers (XA30 and
+  later) and Siemens XA11 and XA20:
+  `nils digest <root> --reread "GE MEDICAL SYSTEMS" --reread "Siemens Healthineers" --reread-exact Siemens`,
   then `nils fingerprint` and a reclassify. On an archive of 43.7 M MR
-  instances those two manufacturers held 16.8 M; at the 670 files a second
-  the digest ran at on that storage, that is about 7 hours, against about
-  18 for a `--restart` of everything.
+  instances those held 16.8 M; at the 670 files a second the digest ran at
+  on that storage, that is about 7 hours, against about 18 for a
+  `--restart` of everything. The first version of the re-read joined the
+  target series into every page's query, which cost about 65 seconds a
+  page there and held the run near 120 files a second.
 - Special files (sockets, devices, pipes) are recorded as `skipped` with reason
   `special`, beside `symlink`.
 
@@ -1294,7 +1319,8 @@ their defaults and types, and they are recorded, resolved, in `ingest_batch.conf
 | `retry_quarantine` | false | |
 | `name` | the root's basename and the date | the batch's label |
 | `private` | none | a pack's ingest list, Wave 4a §5.2 |
-| `reread` | none | the manufacturers whose MR files a re-read reads, §5.2 |
+| `reread` | none | the manufacturers whose MR files a re-read reads, compared without case, §5.2 |
+| `reread_exact` | none | the same, compared with case, §5.2 |
 
 This is the seed of the affordance API (`describe` and `diagnose`, C20): in Wave
 4 the same declaration is served over HTTP and an agent proposes changes to it as
@@ -1621,7 +1647,7 @@ nils key list | remove <name>
 nils digest <root> [--name <label>] [--workers N] [--walk-threads N] [--batch-rows N]
             [--files all|dcm|no-ext|<glob>[,...]] [--identity-rule <file>]
             [--retry-quarantine] [--restart] [--dry-run] [--describe] [--json]
-            [--reread <manufacturer>]...
+            [--reread <manufacturer>]... [--reread-exact <manufacturer>]...
 nils status [--batch <id>] [--json]
 nils quarantine list [--batch <id>] [--class <c>] [--json]
 nils review list [--kind <k>] [--status <s>] [--json] | show <id> [--json]

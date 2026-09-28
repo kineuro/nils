@@ -114,7 +114,14 @@ pub static KNOBS: &[Knob] = &[
         name: "reread",
         kind: "list of manufacturers",
         default: "none",
-        note: "read again only the files of these manufacturers' MR series, found in the registry",
+        note: "read again only the files of these manufacturers' MR series, found in the registry; compared without case",
+        settable_since: 4,
+    },
+    Knob {
+        name: "reread_exact",
+        kind: "list of manufacturers",
+        default: "none",
+        note: "as reread, compared with case: `Siemens` (XA11, XA20) and not `SIEMENS`",
         settable_since: 4,
     },
 ];
@@ -185,6 +192,10 @@ pub struct Settings {
     /// without a walk, only the files of the MR series whose study names one
     /// of these manufacturers (`reread`). Empty for an ordinary run.
     pub reread: Vec<String>,
+    /// The same, the manufacturer compared with its case (`reread_exact`):
+    /// Siemens spells its XA11 and XA20 scanners `Siemens` and the older
+    /// ones `SIEMENS`.
+    pub reread_exact: Vec<String>,
 }
 
 impl Settings {
@@ -209,7 +220,13 @@ impl Settings {
             ingest: Vec::new(),
             ingest_from: None,
             reread: Vec::new(),
+            reread_exact: Vec::new(),
         }
+    }
+
+    /// Whether this run is a re-read (`reread` or `reread_exact`).
+    pub fn rereads(&self) -> bool {
+        !self.reread.is_empty() || !self.reread_exact.is_empty()
     }
 
     /// The effective value of a knob, as `--describe` prints it.
@@ -233,6 +250,10 @@ impl Settings {
                 true => "none".to_string(),
                 false => self.reread.join(", "),
             },
+            "reread_exact" => match self.reread_exact.is_empty() {
+                true => "none".to_string(),
+                false => self.reread_exact.join(", "),
+            },
             _ => String::new(),
         }
     }
@@ -255,6 +276,7 @@ impl Settings {
             "name": self.name,
             "restart": self.restart,
             "reread": self.reread,
+            "reread_exact": self.reread_exact,
             "private": {
                 "pack": self.ingest_from,
                 "elements": self.ingest.iter().map(|i| i.address()).collect::<Vec<_>>(),
@@ -345,6 +367,8 @@ mod tests {
         assert_eq!(config["restart"], false);
         assert_eq!(s.value_of("reread"), "none");
         assert_eq!(config["reread"], serde_json::json!([]));
+        assert_eq!(s.value_of("reread_exact"), "none");
+        assert_eq!(config["reread_exact"], serde_json::json!([]));
         assert_eq!(config["identity"]["id_type"], "patient-id");
         assert_eq!(config["identity"]["from"][0]["field"], "PatientID");
         assert_eq!(config["identity"]["fallback"], "StudyInstanceUID");

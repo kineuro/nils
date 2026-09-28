@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `nils digest <root> --reread-exact <manufacturer>` re-reads the MR series of a manufacturer compared with its case, beside `--reread`, which compares without it. Siemens spells its XA11 and XA20 scanners `Siemens` and its older ones `SIEMENS`, so GE, Siemens Healthineers and Siemens XA are `--reread "GE MEDICAL SYSTEMS" --reread "Siemens Healthineers" --reread-exact Siemens`, without reading the older Siemens fleet.
+- A re-read that was stopped, failed or killed is continued by the next one: the files it already wrote are counted as unchanged and not read again. `--restart` beside `--reread` starts over.
+
+### Fixed
+
+- `nils digest --reread` no longer joins its target series into every page's query. It resolves them once and reads them a series at a time, each page an index lookup that costs what its series holds, so a re-read runs at the rate the parsers and the storage allow instead of waiting about a minute on each page of 10,000 files of a large archive.
+
 ## [1.0.0-alpha.57] - 2026-09-28
 
 The MRI pack is 0.11.0: four new constructs (`DeltaM` and `M0` for ASL, `SBRef` for a multiband run's single-band reference, `FieldmapRef` for a reversed phase-encoding EPI), the rule fixes two header re-measures found, and a BIDS `aslcontext.tsv` beside an ASL image. Each axis now says whether the header or the name decided it (`basis`), in `nils classify`, `nils explain` and the two explain doors. The digest collects PulseSequenceName and the GE and Philips sequence elements, and `nils digest <root> --reread <manufacturer>` reads one manufacturer's MR files again without a walk. Reclassify with the new pack to apply it. Released alone, with no desk release of the same number. The registry is at schema 71. The HTTP API contract stays version 7, amended in place with the additive `basis`; the suite contract stays version 3; the pack contract stays version 6, with additions; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.56.
