@@ -31,11 +31,11 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        180,
+        182,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
-         dual-echo TSE, and pack 0.10.0 the 34 of fMRI, perfusion and the \
+         dual-echo TSE, and pack 0.10.0 the 36 of fMRI, perfusion and the \
          gradient-echo family"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
