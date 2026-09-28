@@ -129,6 +129,14 @@ fn named(names: &BTreeMap<String, String>, raw: &Value) -> Value {
     };
     match raw {
         Value::String(s) if s == campaign::CANT_TELL => raw.clone(),
+        // the header judge's schema says none for an axis with no value,
+        // which an axes answer says as null, where the pack has no value
+        // of that name
+        Value::String(s)
+            if s.trim().eq_ignore_ascii_case("none") && !names.contains_key(s.trim()) =>
+        {
+            Value::Null
+        }
         Value::String(s) => json!(one(s)),
         Value::Array(list) => json!(
             list.iter()

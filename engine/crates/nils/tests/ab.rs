@@ -399,6 +399,10 @@ fn a_person_settles_what_the_voters_split_on_blind() {
     assert_eq!(d["counts"]["agree"], 4, "{d}");
     assert_eq!(d["counts"]["audit"], 2, "half of four: {d}");
     assert_eq!(d["counts"]["localizers"], 1, "{d}");
+    // the judge's none is an axes answer's null: every value read
+    for v in ["judge-a", "judge-b"] {
+        assert_eq!(d["voters"][v]["refused"], json!({}), "{d}");
+    }
     // the same seed, the same draw
     let d2: Value = serde_json::from_str(&ok(&home, &dry)).unwrap();
     assert_eq!(d["counts"], d2["counts"]);
