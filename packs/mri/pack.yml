@@ -70,7 +70,8 @@ rules:
   - rules/role.yml
 
 # The order the rule sets run in. Record 48: base runs after construct, so
-# a base rule that reads the construct (an ADC map is DWI, INV2 is PDw) reads
+# a base rule that reads the construct (an ADC map is DWI, an MP2RAGE inversion
+# has no base) reads
 # what was decided rather than an empty axis; no modifier or construct rule
 # reads the base. The two `implied_` sets fill the technique and add to the
 # modifiers from the construct, for the same reason after it.
