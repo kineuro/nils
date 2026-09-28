@@ -1031,11 +1031,43 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                         entities.insert(k.clone(), f.blame(yaml::text(ev, &at))?);
                     }
                 }
+                let datatype = f.blame(yaml::text(yaml::get(bm, "datatype", &at)?, &at))?;
+                let suffix = f.blame(yaml::text(yaml::get(bm, "suffix", &at)?, &at))?;
+                // What every volume of an ASL image is, which the release
+                // writes as its aslcontext.tsv. One of the standard's volume
+                // types, and only where the suffix is `asl`: any other file
+                // has no aslcontext, and a typo would write a table no
+                // validator passes.
+                let aslcontext = match bm.get("aslcontext") {
+                    Some(v) => {
+                        let at = format!("{at}.aslcontext");
+                        let v = f.blame(yaml::text(v, &at))?;
+                        if suffix != "asl" {
+                            return Err(Error::at(
+                                &at,
+                                format!("aslcontext is for suffix asl, and this is {suffix}"),
+                            )
+                            .in_file(&f.path, Some(&f.source)));
+                        }
+                        if !crate::bids::ASL_VOLUME_TYPES.contains(&v.as_str()) {
+                            return Err(Error::at(
+                                &at,
+                                format!(
+                                    "{v} is not a BIDS volume type (one of {})",
+                                    crate::bids::ASL_VOLUME_TYPES.join(", ")
+                                ),
+                            )
+                            .in_file(&f.path, Some(&f.source)));
+                        }
+                        Some(v)
+                    }
+                    None => None,
+                };
                 into_map.insert(
                     value.clone(),
                     crate::bids::Named {
-                        datatype: f.blame(yaml::text(yaml::get(bm, "datatype", &at)?, &at))?,
-                        suffix: f.blame(yaml::text(yaml::get(bm, "suffix", &at)?, &at))?,
+                        datatype,
+                        suffix,
                         // A technique by its identity, as every other key
                         // here: a label or a misspelling would load and
                         // never match, and the stack would fall through to
@@ -1049,6 +1081,7 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                             None => None,
                         },
                         entities,
+                        aslcontext,
                     },
                 );
             }

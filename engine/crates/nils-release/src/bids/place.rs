@@ -211,6 +211,7 @@ mod tests {
             suffix: "T1w",
             entities: Vec::new(),
             refused: Vec::new(),
+            aslcontext: None,
         })
     }
 

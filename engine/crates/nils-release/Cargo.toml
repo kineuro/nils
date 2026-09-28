@@ -24,6 +24,9 @@ dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
 dicom-transfer-syntax-registry.workspace = true
+# The volume count of a converted ASL image, read from its NIfTI header, which
+# is gzipped when the release compresses.
+flate2.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

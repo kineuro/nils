@@ -73,13 +73,17 @@ names = [
 # `derivatives/` for the raw tree as `part-mag` of `T2starw`, which the schema
 # admits, and its descriptive name says T2starw where it said SWI. Checked
 # name by name; nothing else moved.
+#
+# Amended 2026-09-28, MRI pack 0.11.0. The ADC map, made by the scanner from
+# a plain DWI, is RawRecon and no longer DTIRecon (ruling 7), so its name
+# loses `rec-DTIRecon`. Nothing else moved.
 files = [
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx2DIRTSEFLAIR_FLAIR.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-1_T1w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-2_T1w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DGRE_part-mag_T2starw.nii.gz",
-  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_rec-DTIRecon_ADC.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_ADC.nii.gz",
   "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_trace.nii.gz",
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-1_T1w.nii.gz",
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-2_T1w.nii.gz",

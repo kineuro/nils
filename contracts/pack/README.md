@@ -28,6 +28,16 @@ and gets a version; nothing is amended in place.
 | 5 | [`v5/pack.schema.json`](v5/pack.schema.json), [`v5/overlay.schema.json`](v5/overlay.schema.json) | 2026-09-16: no manifest key changes; every axis value's `keywords` list is a site's to amend through an overlay, named `lists.<axis>.<value>` beside the `buckets`, and the overlay document has a schema of its own. The flags, the physics, the thresholds and the order values are tried in stay the pack's. An engine at 5 loads a contract-4 pack unchanged |
 | 6 | [`v6/pack.schema.json`](v6/pack.schema.json), [`v6/overlay.schema.json`](v6/overlay.schema.json) | 2026-09-26, record 48: the optional `excludes` and `hints` keys, files of constraints between axes over axis values alone. An exclusion rules values of one axis out where its condition holds, and an answer holding one is refused; a hint names the value usually found on an axis, with its reason, and is shown and never enforced. Neither decides an axis of a stack. The overlay schema is unchanged. An engine at 6 loads a contract-5 pack unchanged |
 
+Added in place to version 6, additively, as the files it names grew keys a
+contract-6 engine reads and an older pack never writes: the BIDS mapping's
+`when_technique` on a suffix, a rule set's `redecides`
+(1.0.0-alpha.55), a normalized text's `unless_manufacturer` and the fields
+`temporal_positions` and `series_number` (1.0.0-alpha.56), and `aslcontext` on
+a suffix mapping, allowed only with `suffix: asl` and one of the BIDS volume
+types `control`, `label`, `m0scan`, `deltam`, `cbf` and `noRF`, which a BIDS
+release writes as the `aslcontext.tsv` beside the image, one row per volume
+(MRI pack 0.11.0). The manifest is unchanged by all of them.
+
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.
 

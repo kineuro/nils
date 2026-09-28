@@ -168,9 +168,11 @@ values:
     # MRI pack 0.10.0: a word counts only as a whole word (`asl` is inside
     # `basline`), and only on a readout ASL is made with: EPI, 3D (GRASE,
     # spiral) or GE's spiral, or on an image the scanner computed.
+    # MRI pack 0.11.0: or an ASL's M0 scan (flags.yml, 12).
     requires:
       any:
         - is_asl
+        - is_asl_m0
         - all: [asl_words, {any: [has_epi, is_3d, is_spiral, is_derived]}]
     keywords:
       - asl
@@ -180,6 +182,7 @@ values:
       - arterial spin
     detection:
       exclusive: is_asl
+      combination: [is_asl_m0]
   # Record 48: DCE is a T1-weighted 3D spoiled gradient echo, not EPI, and
   # takes a value of its own [MQ2, RP3, D4]; `dce` moved here from
   # Perfusion-EPI, which is now the dynamic susceptibility contrast series.
@@ -295,9 +298,11 @@ values:
       - fase3d
       - mvox
       - isofse
+    # MRI pack 0.11.0: or a 3D spin echo with a train of 100 or more, which
+    # is what a GE CUBE FLAIR's reformat states (flags.yml, 12).
     detection:
       exclusive: is_space
-      combination: [is_tse, is_3d]
+      combination: [is_3d_tse]
   SS-TSE:
     terms: ['HASTE', 'SSFSE', 'SSh TSE', 'single shot TSE', 'FASE', 'single-shot FSE']
     label: HASTE
@@ -566,6 +571,10 @@ values:
       - flash
       - spgr
       - t1-ffe
+      # MRI pack 0.11.0: Philips' `T1W_FFE` and `T1_FFE`, as the normalizer
+      # spells them (a 2D T1-FFE was plain GRE on the 2026-09-28 re-measure).
+      - t1w ffe
+      - t1ffe
     detection:
       exclusive: is_flash
       combination: [has_spoiled, has_gre]

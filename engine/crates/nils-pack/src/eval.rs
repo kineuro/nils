@@ -598,6 +598,7 @@ impl Evaluated<'_> {
                     values,
                     confidence: 1.0,
                     tier: "answer".to_string(),
+                    basis: crate::rules::basis_of("answer").to_string(),
                 });
                 continue;
             }
@@ -642,11 +643,13 @@ impl Evaluated<'_> {
                         values: vec![d.clone()],
                         confidence: axis.default_confidence,
                         tier: Tier::Default.name().to_string(),
+                        basis: Tier::Default.basis().to_string(),
                     });
                     verdict.evidence.push(Evidence {
                         axis: axis.name.clone(),
                         value: d.clone(),
                         tier: Tier::Default.name().to_string(),
+                        basis: Tier::Default.basis().to_string(),
                         confidence: axis.default_confidence,
                         rule_set: axis.name.clone(),
                         rule: "default".into(),
@@ -662,6 +665,7 @@ impl Evaluated<'_> {
                     axis: axis.name.clone(),
                     value: axis.stored(*v).to_string(),
                     tier: fired.tier.name().to_string(),
+                    basis: fired.tier.basis().to_string(),
                     confidence: fired.confidence,
                     rule_set: set_name.clone(),
                     rule: rule_id.clone(),
@@ -688,6 +692,7 @@ impl Evaluated<'_> {
                 values,
                 confidence: if confidence.is_nan() { 0.0 } else { confidence },
                 tier: hits[0].1.tier.name().to_string(),
+                basis: hits[0].1.tier.basis().to_string(),
             });
         }
         // Last, because it reads what was decided.

@@ -76,6 +76,10 @@ pub struct Name {
     /// the run counts them by entity, so a tree says how often the standard
     /// had no slot for something the archive states.
     pub refused: Vec<&'static str>,
+    /// What every volume of an `asl` image is, from the pack's mapping,
+    /// which the release writes as the `aslcontext.tsv` beside the image.
+    /// Only ever on suffix `asl`.
+    pub aslcontext: Option<String>,
 }
 
 /// Why a stack has no BIDS name.
@@ -306,6 +310,7 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
             .ok_or(Why::NoSuffix)?,
         entities,
         refused,
+        aslcontext: named.aslcontext.clone().filter(|_| named.suffix == "asl"),
     })
 }
 
@@ -429,6 +434,7 @@ mod tests {
             suffix: suffix.into(),
             when_technique: None,
             entities: BTreeMap::new(),
+            aslcontext: None,
         }
     }
 
@@ -602,6 +608,57 @@ mod tests {
                 .stem("x", "1"),
             "sub-x_ses-1_task-rest_bold"
         );
+    }
+
+    #[test]
+    fn the_asl_constructs_name_their_files_as_bids_does() {
+        // MRI pack 0.11.0: a scanner's own perfusion weighted image, its M0,
+        // a single-band reference and a reversed phase-encoding reference.
+        let mut m = mapping();
+        let mut deltam = named("perf", "asl");
+        deltam.aslcontext = Some("deltam".into());
+        m.from_construct.insert("DeltaM".into(), deltam);
+        m.from_construct
+            .insert("M0".into(), named("perf", "m0scan"));
+        m.from_construct
+            .insert("SBRef".into(), named("func", "sbref"));
+        m.from_construct
+            .insert("FieldmapRef".into(), named("fmap", "epi"));
+        let of = |construct: &'static str| Facts {
+            intent: Some("perf"),
+            constructs: vec![construct],
+            ..Facts::default()
+        };
+        let n = build(&of("DeltaM"), &m, Naming::Bids).unwrap();
+        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_asl");
+        assert_eq!(n.dir("x", "1"), "sub-x/ses-1/perf");
+        assert_eq!(n.aslcontext.as_deref(), Some("deltam"));
+        assert_eq!(
+            n.with_run(2).unwrap().aslcontext.as_deref(),
+            Some("deltam"),
+            "a repeat keeps its volume type"
+        );
+        let n = build(&of("M0"), &m, Naming::Bids).unwrap();
+        assert_eq!((n.datatype, n.suffix), ("perf", "m0scan"));
+        assert_eq!(n.aslcontext, None);
+        // an sbref in `func` needs a task, as a bold does
+        assert_eq!(build(&of("SBRef"), &m, Naming::Bids), Err(Why::NoTask));
+        let answered = Facts {
+            task: Some("rest"),
+            ..of("SBRef")
+        };
+        assert_eq!(
+            build(&answered, &m, Naming::Bids).unwrap().stem("x", "1"),
+            "sub-x_ses-1_task-rest_sbref"
+        );
+        // an epi reference takes its phase-encoding direction as `dir-`
+        let reversed = Facts {
+            pe_direction: Some("PA"),
+            ..of("FieldmapRef")
+        };
+        let n = build(&reversed, &m, Naming::Bids).unwrap();
+        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_dir-PA_epi");
+        assert_eq!(n.dir("x", "1"), "sub-x/ses-1/fmap");
     }
 
     #[test]

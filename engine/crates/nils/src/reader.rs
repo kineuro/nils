@@ -460,6 +460,7 @@ pub(crate) fn why(
             }
             let mut v = json!({
                 "rule_set": set, "rule": rule, "clause": clause, "tier": e["tier"],
+                "basis": nils_pack::basis_of(e["tier"].as_str().unwrap_or_default()),
                 "source": e["source"],
                 "reads": reads.as_ref().map(|r| json!({
                     "fields": r.fields, "texts": r.texts, "axes": r.axes, "flags": r.flags,
@@ -521,9 +522,10 @@ pub(crate) fn why(
             }
             (_, Some(dv)) => {
                 line.push_str(&format!(
-                    " by {}/{}",
+                    " by {}/{} ({})",
                     dv["rule_set"].as_str().unwrap_or_default(),
-                    dv["rule"].as_str().unwrap_or_default()
+                    dv["rule"].as_str().unwrap_or_default(),
+                    nils_pack::basis_of(dv["tier"].as_str().unwrap_or_default())
                 ));
                 if quasi && let Some(m) = dv["matched"].as_str().filter(|m| !m.is_empty()) {
                     line.push_str(&format!(" [{m}]"));
@@ -568,6 +570,9 @@ pub(crate) fn why(
             "value": value,
             "confidence": confidence,
             "tier": tier,
+            // header or name (item 8 of the 2026-09-28 sequence research),
+            // derived from the stored tier, so older rows read the same way
+            "basis": nils_pack::basis_of(tier),
             "set_by": set_by,
             "decided": decided,
             "voted": voted,

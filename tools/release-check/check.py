@@ -121,6 +121,10 @@ def bar_validator(work: Path) -> list[str]:
         name = parts[-1]
         datatype = parts[-2]
         stem = re.sub(r"\.(nii\.gz|nii|json|bval|bvec)$", "", name)
+        # an ASL image's aslcontext is the one table that is named like an
+        # image and checked like one
+        if name.endswith("_aslcontext.tsv"):
+            stem = name[: -len(".tsv")]
         if stem == name:
             continue
         fields = stem.split("_")

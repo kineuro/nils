@@ -18,6 +18,9 @@ pub struct Evidence {
     /// Which clause kind fired: exclusive, keywords, combination, physics,
     /// stated, default.
     pub tier: String,
+    /// What the tier read: header, name, inferred, default and so on
+    /// ([`crate::rules::basis_of`]).
+    pub basis: String,
     pub confidence: f64,
     /// The rule set and the rule inside it, so `nils explain` can name them.
     pub rule_set: String,
@@ -37,6 +40,9 @@ pub struct AxisVerdict {
     pub values: Vec<String>,
     pub confidence: f64,
     pub tier: String,
+    /// What the tier read, so a reader sees whether the header or the name
+    /// decided the axis ([`crate::rules::basis_of`]).
+    pub basis: String,
 }
 
 impl AxisVerdict {

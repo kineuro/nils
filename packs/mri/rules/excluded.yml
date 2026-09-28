@@ -10,7 +10,7 @@
 rule_set: excluded
 decides: [directory_type, base, technique, modifier, construct, quality, provenance, body_part, post_contrast]
 
-order: [screenshot, error_map, secondary_reformat]
+order: [screenshot, error_map, secondary_reformat_3d_tse, secondary_reformat]
 
 rules:
 
@@ -32,6 +32,26 @@ rules:
     clauses:
       - {flag: is_error, tier: exclusive}
     set: *blank
+
+  # MRI pack 0.11.0: a reformat of a 3D turbo spin echo says so in its own
+  # header (3D, SE, a train of 100 or more), and the physics vote, which
+  # fills the technique of every excluded stack, read GE's CUBE FLAIR
+  # reformats as 2D IR-TSE among the FLAIRs of the same TR and TI (six on
+  # the 2026-09-28 re-measure). The technique is taken from the header;
+  # everything else stays blank, as below.
+  secondary_reformat_3d_tse:
+    clauses:
+      - {when: {all: [is_secondary, {not: is_primary}, is_3d_tse]}, cite: 'secondary without primary, of a 3D TSE', source: flags, tier: exclusive}
+    set:
+      directory_type: excluded
+      base: null
+      technique: '3D-TSE'
+      modifier: null
+      construct: null
+      quality: null
+      provenance: null
+      body_part: null
+      post_contrast: null
 
   # A workstation reformat: tagged SECONDARY and never PRIMARY. The session
   # rescue of the pass layer is what lets one back in (spec section 7.2).

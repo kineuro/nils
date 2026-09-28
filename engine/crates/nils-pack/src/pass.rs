@@ -797,7 +797,10 @@ impl Ctx for Row<'_> {
         unreachable!("a pass's expressions carry no patterns of their own")
     }
     fn axis_is(&self, axis: usize, value: &str) -> bool {
-        self.corpus.axis_of(self.at, axis) == value
+        // A multi-valued axis is stored comma-joined, and holding one of its
+        // values is what `is` asks, as it does of a stack being judged.
+        let stored = self.corpus.axis_of(self.at, axis);
+        stored == value || stored.split(',').any(|v| v == value)
     }
     fn axis_empty(&self, axis: usize) -> bool {
         self.corpus.axis_of(self.at, axis).is_empty()
