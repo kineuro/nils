@@ -782,6 +782,16 @@ fn fixed_fields() -> Vec<Field> {
         ),
         f(
             "stack",
+            "pulse_sequence_name",
+            "text",
+            Technical,
+            false,
+            true,
+            "fingerprint",
+            "PulseSequenceName (0018,9005) as read; Siemens XA writes it where it leaves the sequence name empty",
+        ),
+        f(
+            "stack",
             "mr_acquisition_type",
             "text",
             Technical,

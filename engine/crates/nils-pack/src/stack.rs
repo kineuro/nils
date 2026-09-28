@@ -84,6 +84,9 @@ pub const FIELDS: &[&str] = &[
     "acquisition_matrix",
     // Record 37 S3: the coil a series was already split on.
     "receive_coil_name",
+    // The 2026-09-28 sequence research: PulseSequenceName (0018,9005), which
+    // Siemens XA writes where it leaves SequenceName empty.
+    "pulse_sequence_name",
 ];
 
 /// Where the text half begins.

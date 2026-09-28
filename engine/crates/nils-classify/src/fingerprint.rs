@@ -22,7 +22,8 @@ use crate::{coverage, derived, dwi, fold};
 /// 2: record 37, S3. The receive coil.
 /// 3: record 38, S2. The centre of the slices, the earliest acquisition, the
 ///    series number, the gradient directions and the temporal position.
-pub const REVISION: i64 = 3;
+/// 4: the 2026-09-28 sequence research. PulseSequenceName (0018,9005).
+pub const REVISION: i64 = 4;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -106,6 +107,9 @@ const MR: &[&str] = &[
     // Record 38 S2: where in a dynamic the series is, and of how many.
     "temporal_position_identifier",
     "number_of_temporal_positions",
+    // The 2026-09-28 sequence research: what Siemens XA names the sequence
+    // where it leaves SequenceName empty.
+    "pulse_sequence_name",
 ];
 
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
@@ -206,6 +210,7 @@ pub const WRITTEN: &[&str] = &[
     "dwi_pe_direction_source",
     "dwi_directions",
     "dwi_directions_source",
+    "pulse_sequence_name",
     "job_id",
     "epoch",
 ];
@@ -687,6 +692,7 @@ pub fn derive(
         opt(diffusion.pe_direction_source),
         int(diffusion.directions),
         opt(diffusion.directions_source),
+        opt(text(r, E + 16)?), // pulse_sequence_name
         Param::Int(job_id),
         Param::Int(epoch),
     ])

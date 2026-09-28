@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70],
+            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2017,7 +2017,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70],
+            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2079,7 +2079,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65, 66, 67, 68, 69, 70],
+            [63, 64, 65, 66, 67, 68, 69, 70, 71],
             "{name}"
         );
         for (t, col) in [
@@ -2153,7 +2153,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65, 66, 67, 68, 69, 70],
+            [64, 65, 66, 67, 68, 69, 70, 71],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2202,7 +2202,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65, 66, 67, 68, 69, 70],
+            [65, 66, 67, 68, 69, 70, 71],
             "{name}"
         );
         assert!(
@@ -2243,7 +2243,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66, 67, 68, 69, 70],
+            [66, 67, 68, 69, 70, 71],
             "{name}"
         );
         assert!(
@@ -2281,7 +2281,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [67, 68, 69, 70],
+            [67, 68, 69, 70, 71],
             "{name}"
         );
         assert!(
@@ -2319,7 +2319,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [68, 69, 70],
+            [68, 69, 70, 71],
             "{name}"
         );
         assert!(
@@ -2353,7 +2353,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [69, 70],
+            [69, 70, 71],
             "{name}"
         );
         assert!(
@@ -2429,7 +2429,7 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [70],
+            [70, 71],
             "{name}"
         );
         assert!(
@@ -2455,6 +2455,45 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
         put(&mut store, 0, 1, Some(5)).unwrap();
         assert!(put(&mut store, 0, 1, Some(5)).is_err(), "{name}");
         assert!(put(&mut store, 0, 1, None).is_err(), "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// The 2026-09-28 sequence research: a registry of schema 70 gains the
+/// pulse sequence name on the MR series and on the fingerprint.
+#[test]
+fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (m, f, meta) = (
+            store.qualified("series_mr"),
+            store.qualified("stack_fingerprint"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {m} DROP COLUMN pulse_sequence_name;
+                 ALTER TABLE {f} DROP COLUMN pulse_sequence_name;
+                 UPDATE {meta} SET value = '70' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [71],
+            "{name}"
+        );
+        for table in ["series_mr", "stack_fingerprint"] {
+            assert!(
+                migrate::column_exists(&mut store, table, "pulse_sequence_name").unwrap(),
+                "{name}: {table}"
+            );
+        }
+        // twice is once
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()

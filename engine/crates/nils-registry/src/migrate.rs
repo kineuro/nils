@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 70;
+pub const SCHEMA_VERSION: i64 = 71;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,7 +334,25 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 70,
         apply: an_answer_may_be_corrected,
     },
+    Migration {
+        version: 71,
+        apply: a_series_says_its_pulse_sequence,
+    },
 ];
+
+/// The 2026-09-28 sequence research: an MR series gains PulseSequenceName
+/// (0018,9005), and the fingerprint carries it for a pack to read. A
+/// registry from before gains both empty. The fingerprint's revision moved
+/// with them, so the next `nils fingerprint` derives every stack again; the
+/// series column fills when the files are read again, which `nils digest
+/// --reread` does for the manufacturers that need it.
+fn a_series_says_its_pulse_sequence(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "series_mr", &["pulse_sequence_name"])?;
+    add_columns(store, "stack_fingerprint", &["pulse_sequence_name"])
+}
 
 /// Record 49 A1: pipeline runs have a lane of their own, their units run
 /// side by side within a budget, and a run that stopped is taken up again

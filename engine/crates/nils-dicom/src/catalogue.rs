@@ -242,6 +242,15 @@ const RECEIVE_COIL_CHAIN: &[Step] = &[
     Top(tags::RECEIVE_COIL_NAME),
     Fg(tags::MR_RECEIVE_COIL_SEQUENCE, tags::RECEIVE_COIL_NAME),
 ];
+/// The 2026-09-28 sequence research: PulseSequenceName sits at the top
+/// level of an enhanced MR object (the MR Pulse Sequence module) and of a
+/// Siemens XA classic one, which leaves SequenceName empty on about a
+/// quarter of its stacks. No standard functional group holds it; the
+/// private per-frame sequences are tried after, as for the timing.
+const PULSE_SEQUENCE_CHAIN: &[Step] = &[
+    Top(tags::PULSE_SEQUENCE_NAME),
+    Private(tags::PULSE_SEQUENCE_NAME),
+];
 const ORIENTATION_CHAIN: &[Step] = &[
     Top(tags::IMAGE_ORIENTATION_PATIENT),
     Fg(
@@ -1064,6 +1073,14 @@ pub static CATALOGUE: &[Field] = &[
         "as on the stack",
     ),
     f(
+        "pulse_sequence_name",
+        SeriesMr,
+        Chain(PULSE_SEQUENCE_CHAIN),
+        Text,
+        Tech,
+        "addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28)",
+    ),
+    f(
         "transmit_coil_name",
         SeriesMr,
         Chain(&[
@@ -1789,10 +1806,10 @@ mod tests {
         // records a multi-shell acquisition as its smallest shell.
         assert_eq!(count(Instance), 34);
         assert_eq!(count(Stack), 14);
-        assert_eq!(count(SeriesMr), 32);
+        assert_eq!(count(SeriesMr), 33);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 179);
+        assert_eq!(CATALOGUE.len(), 180);
     }
 
     #[test]
@@ -1880,7 +1897,7 @@ mod tests {
             "EchoTime, then fg MREchoSequence.EffectiveEchoTime, then private per-frame .EchoTime"
         ));
         let md = render_markdown();
-        assert!(md.contains("## series_mr (32, MR only)"));
-        assert!(md.contains("179 columns."));
+        assert!(md.contains("## series_mr (33, MR only)"));
+        assert!(md.contains("180 columns."));
     }
 }

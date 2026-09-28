@@ -855,6 +855,10 @@ fn build_registry() -> Vec<Table> {
                 col("dwi_pe_direction_source", Type::Text),
                 col("dwi_directions", Type::Int),
                 col("dwi_directions_source", Type::Text),
+                // The 2026-09-28 sequence research: PulseSequenceName
+                // (0018,9005) from the series, which Siemens XA writes where
+                // it leaves SequenceName empty.
+                col("pulse_sequence_name", Type::Text),
                 // what made it
                 req("job_id", Type::Int),
                 req("epoch", Type::Int),

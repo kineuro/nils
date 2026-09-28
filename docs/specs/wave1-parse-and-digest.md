@@ -388,6 +388,26 @@ Settled while building the writer (slice 3):
 - `--restart` reads every file again; a file whose instance is its own is
   refiled as that instance (`same_sop` when the file changed), and nothing is
   deleted.
+- Added with the sequence research of 2026-09-28: `--reread <manufacturer>`
+  (repeatable) reads again only the files the registry already holds for the
+  MR series whose study names one of those manufacturers, compared trimmed
+  and without case. There is no walk: the files are each instance's own
+  `ingested` row of `source_file` for this root, in row order, and each goes
+  to the parsers with its instance beside it, as under `--restart`, so the
+  writer fills what the registry lacks and keeps the smaller of two values
+  that disagree. It reads every file of such a series and not a sample,
+  because a series field and `series_private`'s `varied` hold only when every
+  file is seen (GE writes both passes of its ASL, with different contrast
+  techniques, into one series). A re-read marks nothing gone, has no dry run,
+  and marks the fingerprints of the series it names stale, so the next
+  `nils fingerprint` derives them again. It is how a registry digested before
+  PulseSequenceName (0018,9005) and the GE and Philips sequence elements of
+  the MRI pack's ingest list were collected is brought up to them:
+  `nils digest <root> --reread "GE MEDICAL SYSTEMS" --reread "Siemens Healthineers"`,
+  then `nils fingerprint` and a reclassify. On an archive of 43.7 M MR
+  instances those two manufacturers held 16.8 M; at the 670 files a second
+  the digest ran at on that storage, that is about 7 hours, against about
+  18 for a `--restart` of everything.
 - Special files (sockets, devices, pipes) are recorded as `skipped` with reason
   `special`, beside `symlink`.
 
@@ -1273,6 +1293,8 @@ their defaults and types, and they are recorded, resolved, in `ingest_batch.conf
 | `charset_fallback` | `iso-8859-1` | §6.1 |
 | `retry_quarantine` | false | |
 | `name` | the root's basename and the date | the batch's label |
+| `private` | none | a pack's ingest list, Wave 4a §5.2 |
+| `reread` | none | the manufacturers whose MR files a re-read reads, §5.2 |
 
 This is the seed of the affordance API (`describe` and `diagnose`, C20): in Wave
 4 the same declaration is served over HTTP and an agent proposes changes to it as
@@ -1599,6 +1621,7 @@ nils key list | remove <name>
 nils digest <root> [--name <label>] [--workers N] [--walk-threads N] [--batch-rows N]
             [--files all|dcm|no-ext|<glob>[,...]] [--identity-rule <file>]
             [--retry-quarantine] [--restart] [--dry-run] [--describe] [--json]
+            [--reread <manufacturer>]...
 nils status [--batch <id>] [--json]
 nils quarantine list [--batch <id>] [--class <c>] [--json]
 nils review list [--kind <k>] [--status <s>] [--json] | show <id> [--json]
