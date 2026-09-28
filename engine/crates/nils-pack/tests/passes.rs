@@ -217,7 +217,7 @@ fn a_phase_image_is_no_gap_to_fill() {
     let vote = pass.vote().expect("the physics vote");
 
     let mut c = Corpus::new(&pack);
-    let mut push = |c: &mut Corpus, id: i64, base: &str, technique: &str, construct: &str| {
+    let push = |c: &mut Corpus, id: i64, base: &str, technique: &str, construct: &str| {
         let s = stack(28.0, 20.0, "GR");
         c.push(
             id,
