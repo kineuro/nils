@@ -528,6 +528,14 @@ pub struct RuleSet {
     /// replace the construct list and add to the modifiers, and the
     /// difference is 35 stacks on the live corpus.
     pub adds: Vec<usize>,
+    /// Axes this set may decide again although an earlier set decided them:
+    /// a route entered on a provenance says of the outputs that are the
+    /// acquisition's own images that their provenance is the acquisition's
+    /// (MRI pack 0.9.0: an SWI's magnitude and phase are `RawRecon`, its
+    /// minimum intensity projection `ProjectionDerived`). Only where one of
+    /// its rules fires and writes a value there; a person's answer is never
+    /// moved. Each is in `decides`, and single-valued.
+    pub redecides: Vec<usize>,
     /// The axes a rule of this set may write. Checked at load: a rule that
     /// sets an axis its set does not declare fails the pack.
     pub decides: Vec<usize>,

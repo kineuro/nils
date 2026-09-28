@@ -2243,6 +2243,7 @@ fn load_axis(
             name,
             derives: Vec::new(),
             adds: Vec::new(),
+            redecides: Vec::new(),
             collect: multi,
             decides: vec![axis_index],
             enter_when: None,
@@ -2481,6 +2482,29 @@ fn load_rule_set(
                 .in_file(&f.path, Some(&f.source)));
             }
             adds.push(i);
+        }
+    }
+    // Axes this set may decide again (MRI pack 0.9.0): a route entered on a
+    // provenance that gives the acquisition's own images the acquisition's.
+    let mut redecides = Vec::new();
+    if let Some(v) = m.get("redecides") {
+        for a in f.blame(yaml::texts(v, "redecides"))? {
+            let i = axes.iter().position(|x| x.name == a).ok_or_else(|| {
+                Error::at("redecides", format!("no axis named {a}"))
+                    .in_file(&f.path, Some(&f.source))
+            })?;
+            if !decides.contains(&i) {
+                return Err(Error::at("redecides", format!("{a} is not in `decides`"))
+                    .in_file(&f.path, Some(&f.source)));
+            }
+            if axes[i].multi {
+                return Err(Error::at(
+                    "redecides",
+                    format!("{a} holds several values; a set adds to it or replaces it already"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            redecides.push(i);
         }
     }
 
@@ -2812,6 +2836,7 @@ fn load_rule_set(
         name,
         derives,
         adds,
+        redecides,
         collect: m.get("collect").and_then(|c| c.as_bool()).unwrap_or(false),
         decides,
         enter_when,
