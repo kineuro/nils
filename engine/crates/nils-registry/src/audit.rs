@@ -119,6 +119,10 @@ pub enum Action {
     /// an open campaign changed.
     CampaignAmend,
     CampaignRaters,
+    /// Record 48, the reference read by judges: an A/B campaign made from
+    /// the voters' readings, and a cause given for an axis of an answer.
+    CampaignAb,
+    CampaignCause,
     /// Record 42 S7: a label set written out with its digest, and labels
     /// from v0 imported as person decisions.
     LabelsExport,
@@ -204,6 +208,8 @@ impl Action {
             Action::CampaignSuggest => "campaign.suggest",
             Action::CampaignAmend => "campaign.amend",
             Action::CampaignRaters => "campaign.raters",
+            Action::CampaignAb => "campaign.ab",
+            Action::CampaignCause => "campaign.cause",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
@@ -249,6 +255,8 @@ impl Action {
                 | Action::CampaignSuggest
                 | Action::CampaignAmend
                 | Action::CampaignRaters
+                | Action::CampaignAb
+                | Action::CampaignCause
                 | Action::LabelsExport
                 | Action::LabelsSeal
                 | Action::LabelsCertificate

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 72;
+pub const SCHEMA_VERSION: i64 = 73;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,7 +342,32 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 72,
         apply: a_campaign_says_what_it_suggests,
     },
+    Migration {
+        version: 73,
+        apply: a_campaign_settles_candidates_blind,
+    },
 ];
+
+/// Record 48, the reference read by judges: an A/B campaign's items carry
+/// the voters' candidates, an answer on one says what it chose on each
+/// axis, and the person who settled it gives a cause per axis. A registry
+/// from before gains the three tables empty and the column empty, since no
+/// campaign before settled candidates.
+fn a_campaign_settles_candidates_blind(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "campaign_answer", &["choices"])?;
+    add_tables(
+        store,
+        kind,
+        &[
+            "campaign_ab_item",
+            "campaign_ab_candidate",
+            "campaign_ab_cause",
+        ],
+    )
+}
 
 /// A campaign says what its reader shows beside each item as the answer
 /// suggested: none, the rules, or suggestions brought in. A campaign from
@@ -503,6 +528,14 @@ fn an_answer_may_be_corrected(store: &mut Store, kind: Kind) -> Result<(), Error
             let old = store.qualified("campaign_answer");
             let mut rebuilt = schema::table("campaign_answer").clone();
             rebuilt.name = "campaign_answer_rebuilt";
+            // the columns a later migration adds are its own to add
+            let mut had = Vec::new();
+            for c in &rebuilt.columns {
+                if column_exists(store, "campaign_answer", c.name)? {
+                    had.push(c.name);
+                }
+            }
+            rebuilt.columns.retain(|c| had.contains(&c.name));
             store.batch(&dialect.create_table(schema_name.as_deref(), &rebuilt))?;
             let new = store.qualified("campaign_answer_rebuilt");
             let cols: Vec<&str> = rebuilt.columns.iter().map(|c| c.name).collect();
