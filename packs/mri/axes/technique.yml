@@ -264,17 +264,23 @@ values:
     detection:
       combination: [has_ir, is_tse]
   ME-SE:
-    # not bare `dual echo`, which is also a dual-echo GRE and DESS [V3]
-    terms: ['multi-echo spin echo', 'MESE', 'dual echo SE', 'double echo TSE']
+    # not bare `dual echo`, which is also a dual-echo GRE and DESS [V3].
+    # Pack 0.9.0, Nima's ruling (2026-09-27): a conventional multi-echo spin
+    # echo, 3 or more echoes for T2 mapping or a pre-turbo dual echo with no
+    # echo train. A dual-echo PD/T2 FSE or TSE is a TSE [M1, MQ20, RP14, B1],
+    # each echo its own stack; before this the combination below called every
+    # split one ME-SE, which v0 never did. `memp` is GE's name for its spin
+    # echo with any number of echoes, so it is no word for this value.
+    terms: ['multi-echo spin echo', 'MESE', 'dual echo SE', 'CPMG', 'T2 mapping spin echo']
     label: MESE
     family: SE
+    requires: {not: is_dual_echo_tse}
     keywords:
       - mese
       - me-se
       - multi echo se
       - multi-echo se
       - dual echo se
-      - memp
     detection:
       exclusive: is_me_se
       combination: [is_multi_echo, has_se]
@@ -296,7 +302,7 @@ values:
       - de-fir
       - t2 plus
   TSE:
-    terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE']
+    terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE', 'double echo TSE', 'DE TSE', 'DTSE', 'PD/T2 FSE', 'dual echo FSE']
     family: SE
     keywords:
       - tse
@@ -308,6 +314,8 @@ values:
       - rare
     detection:
       exclusive: is_tse
+      # a dual-echo FSE whose only sign of its train is the train's length
+      combination: [is_dual_echo_tse]
   SE:
     terms: ['spin echo', 'SE', 'conventional spin echo']
     family: SE

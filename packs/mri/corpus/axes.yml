@@ -915,3 +915,234 @@ cases:
       text_series_description: 'T1 tra kontrast'
     axes:
       post_contrast: '1'
+
+  # --- pack 0.9.0: Nima's rulings of 2026-09-27 and 28
+  # (`studies/2026-09-27-read-r1-notes/` and `studies/2026-09-27-header-judge/`
+  # in the design repository). Every stack is invented.
+
+  # A dual-echo PD/T2 turbo spin echo is a TSE, each echo its own stack, and
+  # its base is the echo's: under 40 ms PDw, from 40 ms T2w.
+  - name: the short echo of a Siemens dual-echo TSE is a TSE and PDw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: '*tse2d2_5'
+      text_series_description: 'ax PD/T2 tse'
+      echo_time: 14
+      repetition_time: 3500
+      echo_train_length: 5
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      base: PDw
+
+  - name: the long echo of the same series is a TSE and T2w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: '*tse2d2_5'
+      text_series_description: 'ax PD/T2 tse'
+      echo_time: 96
+      repetition_time: 3500
+      echo_train_length: 5
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      base: T2w
+
+  - name: a dual-echo TSE whose words say only T2 is still PDw on its short echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: '*tse2d2_7'
+      text_series_description: 't2_tse_tra'
+      echo_time: 12
+      repetition_time: 4000
+      echo_train_length: 7
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      base: PDw
+
+  - name: a GE dual-echo FSE whose only sign of a train is its length is a TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      text_series_description: 'Ax PD/T2 FSE'
+      echo_time: 9
+      repetition_time: 3000
+      echo_train_length: 8
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      base: PDw
+
+  - name: its long echo is a TSE and T2w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      text_series_description: 'Ax PD/T2 FSE'
+      echo_time: 82
+      repetition_time: 3000
+      echo_train_length: 8
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      base: T2w
+
+  - name: a Philips PD and T2 TSE pair is a TSE, base by the echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      text_series_description: 'PD_T2 TSE tra'
+      echo_time: 100
+      repetition_time: 3200
+      echo_train_length: 12
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      base: T2w
+
+  - name: twelve echoes for T2 mapping are a multi-echo spin echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      text_series_description: 'T2 map multi echo'
+      echo_time: 40
+      repetition_time: 2000
+      echo_train_length: 12
+      split_reason: multi_echo
+      stacks_in_series: 12
+    axes:
+      technique: MESE
+
+  - name: a pre-turbo dual-echo spin echo with no train is a multi-echo spin echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      text_series_description: 'ax pd t2 dual echo se'
+      echo_time: 20
+      repetition_time: 2500
+      echo_train_length: 1
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: MESE
+      base: PDw
+
+  - name: a GE memp with one echo is a spin echo, not a multi-echo one
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      text_sequence_name: memp
+      text_series_description: 'Ax T1 SE'
+      echo_time: 10
+      repetition_time: 500
+    axes:
+      technique: SE
+      base: T1w
+
+  - name: a dual-echo single-shot TSE stays a HASTE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SS'
+      text_sequence_name: '*h2d1_256'
+      text_series_description: 'cor haste dual echo'
+      echo_time: 60
+      repetition_time: 2500
+      echo_train_length: 128
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: HASTE
+
+  # The acquisition's own images are RawRecon, and what the scanner computes
+  # from them takes the product (Nima's ruling, 2026-09-28). An SWI: its
+  # magnitude and phase are acquired, the SWI image is computed, and its minIP
+  # is a projection. The magnitude is T2*w, the phase has no base, the SWI
+  # image and its minIP are SWI.
+  - name: the magnitude of a Siemens SWI is acquired and T2 star weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 't2_swi_tra_p2_Mag'
+      echo_time: 20
+    axes:
+      provenance: RawRecon
+      construct: Magnitude
+      base: T2*w
+
+  - name: the phase of a Siemens SWI is acquired and has no base contrast
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 't2_swi_tra_p2_Pha'
+      echo_time: 20
+    axes:
+      provenance: RawRecon
+      construct: Phase
+      base: ''
+
+  - name: the SWI image the scanner computed keeps its product and is base SWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\SWI\ND\NORM'
+      scanning_sequence: GR
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 't2_swi_tra_p2_SWI'
+      echo_time: 20
+    axes:
+      provenance: SWIRecon
+      construct: SWI
+      base: SWI
+
+  - name: the minIP of an SWI is a projection, and base SWI
+    stack:
+      image_type: 'DERIVED\PRIMARY\MNIP\ND\NORM'
+      scanning_sequence: GR
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 't2_swi_tra_p2_mIP_Images(SW)'
+      echo_time: 20
+    axes:
+      provenance: ProjectionDerived
+      construct: MinIP
+      base: SWI
+
+  - name: a GE SWAN phase is acquired and has no base contrast
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PHASE MAP'
+      scanning_sequence: GR
+      text_series_description: 'Ax SWAN PHS'
+      echo_time: 25
+    axes:
+      provenance: RawRecon
+      construct: Phase
+      base: ''
+
+  - name: an echo-combined SWI magnitude is computed, so it keeps its product
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\MEAN'
+      scanning_sequence: GR
+      text_series_description: 'swi mag combined'
+      echo_time: 20
+    axes:
+      provenance: SWIRecon
+      construct: EchoCombined,Magnitude
+      base: T2*w

@@ -145,7 +145,9 @@ flags:
               {not: scanning_sequence.has_gre}]
   is_space:   {any: [sequence_name.is_space, sequence_name.is_space_ir]}
   is_haste:   sequence_name.is_haste
-  is_me_se:   sequence_name.is_me_se
+  # GE's `memp` names its spin echo whatever the number of echoes, so it is a
+  # multi-echo spin echo only where the series holds several (pack 0.9.0).
+  is_me_se:   {all: [sequence_name.is_me_se, is_multi_echo]}
   is_medic:   sequence_name.is_medic
   is_mdme:    sequence_name.is_mdme
   is_qalas:   sequence_name.is_qalas
@@ -206,6 +208,19 @@ flags:
   is_multi_echo: {field: split_reason, eq: multi_echo}
   is_multi_ti:   {field: split_reason, eq: multi_ti}
   is_multi_fa:   {field: split_reason, eq: multi_flip_angle}
+  # Pack 0.9.0, Nima's ruling (2026-09-27): a dual-echo PD/T2 fast or turbo
+  # spin echo is a TSE, not a multi-echo spin echo. The digest splits it by
+  # echo time into one stack per echo, two in the series, and its echo train
+  # says TSE (the sequence name, segmented k-space, or a train longer than
+  # one echo, which GE writes where it writes no variant). A conventional
+  # multi-echo spin echo is 3 or more echoes for T2 mapping, or a pre-turbo
+  # dual echo with no train, and stays ME-SE.
+  is_dual_echo_tse:
+    all:
+      - is_multi_echo
+      - has_se
+      - {field: stacks_in_series, le: 2}
+      - any: [is_tse, is_haste, {field: echo_train_length, gt: 1}]
 
   # === 5. derived / synthetic / quantitative ================================
 

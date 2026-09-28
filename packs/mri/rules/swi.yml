@@ -2,8 +2,8 @@
 #
 # The SWI route, transcribed from v0 0.5.3 `classification/branches/swi.py`.
 #
-# One acquisition, seven outputs, and none of them is answering "which
-# contrast weighting is this". A route is a rule set with an entry condition;
+# One acquisition, seven outputs. The processed image and its projections
+# are base SWI, the magnitude T2*w and the phase none (pack 0.9.0). A route is a rule set with an entry condition;
 # nothing else distinguishes it (spec section 6.5).
 #
 # The order is the knowledge, not the plumbing: QSM is tried LAST, because one
@@ -16,7 +16,13 @@
 
 rule_set: swi
 enter_when: {axis: provenance, is: SWIRecon}
-decides: [base, construct, technique, directory_type]
+decides: [base, construct, technique, directory_type, provenance]
+# Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images, its
+# magnitude and its phase, are RawRecon, and its minimum intensity projection
+# is ProjectionDerived; what the scanner computed from them (the SWI image,
+# QSM, an R2* map, a MIP, a reformat) keeps SWIRecon. The route was entered
+# on SWIRecon, so it decides the provenance again for those outputs.
+redecides: [provenance]
 tiers: {exclusive: 0.95, keywords: 0.9, stated: 0.9}
 
 # Every output of one acquisition shares its readout.
@@ -38,6 +44,9 @@ rules:
       - {flag: is_minip, tier: exclusive}
       - {keywords: [minip, 'min ip'], tier: keywords}
     set:
+      # A projection through the volume, as any other minIP is (pack 0.9.0);
+      # its base is still SWI.
+      provenance: ProjectionDerived
       base: SWI
       construct:
         - MinIP
@@ -49,7 +58,7 @@ rules:
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
-    why: 'a minimum intensity projection: the venogram'
+    why: 'a minimum intensity projection of the SWI: the venogram'
 
   mip:
     clauses:
@@ -71,7 +80,10 @@ rules:
       - {when: {all: [has_phase, {not: has_magnitude}, {not: has_qsm}]}, cite: has_phase, source: flags, tier: exclusive}
       - {when: {all: [{text: search_text, substring: phase}, {not: {text: search_text, substring: magnitude}}, {not: has_qsm}]}, cite: phase, source: text, tier: keywords}
     set:
-      base: SWI
+      # The acquisition's own phase image: RawRecon, and no base contrast
+      # (pack 0.9.0). An echo-combined phase is computed, and keeps SWIRecon.
+      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      base: null
       construct:
         - Phase
         - {value: QSM, when: {text: search_text, substring: qsm}}
@@ -123,7 +135,11 @@ rules:
       - {when: {all: [has_magnitude, {not: has_swi}]}, cite: 'has_magnitude without a SWI token', source: flags, tier: exclusive}
       - {keywords: [magnitude], tier: keywords}
     set:
-      base: SWI
+      # The acquisition's own magnitude image: RawRecon and T2*-weighted, a
+      # gradient echo with a long echo time [P8, MQ5] (pack 0.9.0). An
+      # echo-combined magnitude is computed, and keeps SWIRecon.
+      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      base: T2starw
       construct:
         - Magnitude
         - {value: QSM, when: {text: search_text, substring: qsm}}
@@ -146,7 +162,9 @@ rules:
         source: text
         tier: keywords
     set:
-      base: SWI
+      # The echoes as acquired, as the magnitude above (pack 0.9.0).
+      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      base: T2starw
       construct:
         - Magnitude
         - QSM
