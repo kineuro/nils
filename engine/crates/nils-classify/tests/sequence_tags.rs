@@ -668,3 +668,47 @@ fn a_reread_reads_only_the_named_manufacturers_mr_files() {
         );
     }
 }
+
+/// The MRI pack itself (0.11.0) declares the nine entries this test reads,
+/// at the same addresses and under the same names, so what the digest
+/// collects is what its rules read, and it reads PulseSequenceName as a
+/// field of the stack.
+#[test]
+fn the_mri_pack_declares_what_this_test_collects() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
+    let want: Vec<(String, u16, u8, String)> = INGEST
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- {creator: "))
+        .map(|l| {
+            let part = |key: &str| {
+                l.split(", ")
+                    .find_map(|p| p.strip_prefix(key))
+                    .unwrap_or_default()
+                    .trim_end_matches('}')
+                    .to_string()
+            };
+            let hex = |s: String| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+            (
+                l.split(", ").next().unwrap().to_string(),
+                hex(part("group: ")) as u16,
+                hex(part("element: ")) as u8,
+                part("name: "),
+            )
+        })
+        .collect();
+    assert_eq!(want.len(), 9);
+    for (creator, group, element, name) in &want {
+        let found = pack
+            .ingest
+            .iter()
+            .find(|i| &i.name == name)
+            .unwrap_or_else(|| panic!("the MRI pack declares no {name}"));
+        assert_eq!(
+            (&found.creator, found.group, found.element),
+            (creator, *group, *element),
+            "{name}"
+        );
+    }
+    assert!(nils_pack::stack::field_index("pulse_sequence_name").is_some());
+}

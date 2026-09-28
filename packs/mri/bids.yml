@@ -64,6 +64,16 @@ suffix:
     UniformDenoised: {datatype: anat, suffix: UNIT1, when_technique: MP2RAGE}
     # A B0 map is what BIDS calls a fieldmap.
     B0map: {datatype: fmap, suffix: fieldmap}
+    # MRI pack 0.11.0, ruled 2026-09-28. The ASL difference image is an `asl`
+    # file whose `aslcontext.tsv` says every volume is `deltam` ("if control
+    # and label are not available, their derivative deltam should be
+    # stored"); its M0 scan is `m0scan` beside it; a multiband run's
+    # single-band reference is `sbref` beside the bold; and a reversed-phase
+    # EPI reference is the `epi` of the PEpolar field maps.
+    DeltaM: {datatype: perf, suffix: asl, aslcontext: deltam}
+    M0: {datatype: perf, suffix: m0scan}
+    SBRef: {datatype: func, suffix: sbref}
+    FieldmapRef: {datatype: fmap, suffix: epi}
     B1map: {datatype: fmap, suffix: TB1map}
   technique:
     ME-GRE: {datatype: anat, suffix: MEGRE}
@@ -90,7 +100,9 @@ suffix:
   # to its base and keeps its technique in `acq-`. `MP2RAGE` as a technique
   # with no construct: the suffix requires an inversion index and nothing says
   # which inversion it is. A DSC perfusion: the BIDS `perf` datatype is ASL.
-  # Most of `fmap` likewise: telling `phasediff` from `phase1` needs echo
+  # The perfusion parameters the MRI pack has not added (ATT, Ktrans, Ve,
+  # Vp, Kep, iAUC) and an fMRI mean: ruled deferred on 2026-09-28 until a
+  # dataset holds one. Most of `fmap` likewise: telling `phasediff` from `phase1` needs echo
   # knowledge we do not have, and guessing writes a claim into a filename.
 
 # What an axis value contributes as an entity rather than as a description.

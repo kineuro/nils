@@ -205,3 +205,39 @@ fn a_zero_echo_time_is_not_a_short_one_to_the_vote_either() {
          being dropped where the pass writes it back"
     );
 }
+
+/// MRI pack 0.11.0: a phase image and an MP2RAGE inversion have no base by
+/// ruling, and the rules decide it to nothing. The vote leaves them alone,
+/// though the magnitudes beside them share their physics; the construct is
+/// multi-valued, so holding Phase beside ND is what counts.
+#[test]
+fn a_phase_image_is_no_gap_to_fill() {
+    let pack = mri();
+    let pass = &pack.passes[0];
+    let vote = pass.vote().expect("the physics vote");
+
+    let mut c = Corpus::new(&pack);
+    let push = |c: &mut Corpus, id: i64, base: &str, technique: &str, construct: &str| {
+        let s = stack(28.0, 20.0, "GR");
+        c.push(
+            id,
+            |f| s.as_text(f).into_owned(),
+            |a| match pack.axes[a].name.as_str() {
+                "base" => base.to_string(),
+                "technique" => technique.to_string(),
+                "directory_type" => "anat".to_string(),
+                "construct" => construct.to_string(),
+                _ => String::new(),
+            },
+        );
+    };
+    for i in 0..10 {
+        push(&mut c, i + 1, "SWI", "GRE", "SWI");
+    }
+    push(&mut c, 11, "", "GRE", "ND,Phase");
+    push(&mut c, 12, "", "", "INV2");
+    push(&mut c, 13, "", "", "Magnitude");
+    let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
+    let at: Vec<usize> = answers.iter().map(|a| a.at).collect();
+    assert_eq!(at, vec![12], "only the magnitude is a gap: {at:?}");
+}

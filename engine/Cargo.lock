@@ -1895,6 +1895,7 @@ dependencies = [
  "dicom-dictionary-std",
  "dicom-object",
  "dicom-transfer-syntax-registry",
+ "flate2",
  "hex",
  "libc",
  "nils-ask",

@@ -39,6 +39,7 @@ pub use error::Error;
 pub use eval::Evaluated;
 pub use overlay::Overlay;
 pub use pack::{CONTRACT, Pack, THRESHOLD_TOLERANCE, at_threshold, load, load_judged, weaker_than};
+pub use rules::basis_of;
 pub use stack::Stack;
 pub use verdict::{AxisVerdict, Diagnostic, Evidence, Verdict, Vote, Voter, voters};
 pub use version::Version;

@@ -49,7 +49,7 @@ private:
   coverage:
     - Siemens MR, syngo VB to XA (three cohorts; the XA-era SDS and SDI blocks measured on two)
     - Siemens MR, Numaris VA (one legacy cohort; its blocks are per-image or administrative and none is ingested)
-    - GE MR (one cohort, GEMS_ACQU_01 and GEMS_PARM_01)
+    - GE MR (one cohort, GEMS_ACQU_01 and GEMS_PARM_01; the sequence and ASL elements of pack 0.11.0 from the dictionary and two research reports, not yet measured)
     - Philips MR (one cohort, Imaging DD 001 and MR Imaging DD 001 and DD 005)
 
   ingest:
@@ -176,6 +176,62 @@ private:
       kind: parameter
       why: "the auto-prescan centre frequency, which the dictionary names; a parameter (0 of 482 varied within on mix; 446 distinct)"
 
+    # MRI pack 0.11.0: GE's sequence and ASL elements, which both research
+    # reports of 2026-09-28 name (`studies/2026-09-28-sequence-research/` in
+    # the design repository) and the archive did not hold: GE's standard
+    # SequenceName is empty on 99.8 % of its stacks, so its pulse sequence
+    # is known only here. Named by the dictionary; not yet measured for
+    # variation within a series, which the next digest's `nils private
+    # --measured` reports.
+    - creator: GEMS_ACQU_01
+      group: 0x0019
+      element: 0x9C
+      name: ge_pulse_sequence_name
+      kind: parameter
+      why: "the pulse sequence (PSD) name, `epi`, `epiRT`, `epi_pepolar`, `efgre3d`, `3dasl`: GE's counterpart of Siemens' sequence name (dcm2niix; both research reports)"
+
+    - creator: GEMS_ACQU_01
+      group: 0x0019
+      element: 0x9E
+      name: ge_internal_pulse_sequence_name
+      kind: parameter
+      why: "the internal pulse sequence name, `EPI` for a gradient-echo and `EPI2` for a spin-echo EPI (dcm2niix)"
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0xA3
+      name: ge_asl_contrast_technique
+      kind: parameter
+      why: "ASL contrast technique: PSEUDOCONTINUOUS on the perfusion-weighted pass of GE's 3D ASL, CONTINUOUS on the proton-density pass (dcm2niix; both research reports)"
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0xA4
+      name: ge_asl_labeling_technique
+      kind: parameter
+      why: "the ASL labelling technique as text (`3D pulsed continuous ASL technique`)"
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0xA5
+      name: ge_asl_label_duration
+      kind: timing
+      why: "the duration of the label or control pulse"
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0x2F
+      name: ge_private_image_type
+      kind: parameter
+      why: "GE's image type: 0 magnitude, 1 phase, 2 real, 3 imaginary (dcm2niix GE README)"
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0xB6
+      name: ge_multiband
+      kind: parameter
+      why: "the multiband (HyperBand) parameters, the first value the factor (dcm2niix GE README)"
+
     # --- Philips
     - creator: Philips Imaging DD 001
       group: 0x2001
@@ -218,6 +274,23 @@ private:
       name: philips_spir
       kind: parameter
       why: "whether spectral fat suppression was on, which the text says inconsistently and the flag says exactly; a parameter (0 of 409 varied within; 3 distinct)"
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x81
+      name: philips_dynamic_scans
+      kind: parameter
+      why: "the number of dynamic scans, how many time points the series holds (MRI pack 0.11.0; our research, table 1A)"
+
+    # (2005,1429): the block at 14 is reserved by DD 005, whose entry the
+    # dictionary lacks, so the VR is given here.
+    - creator: Philips MR Imaging DD 005
+      group: 0x2005
+      element: 0x29
+      name: philips_label_type
+      vr: CS
+      kind: parameter
+      why: "MRImageLabelType, whose first letter tells an ASL label image (L) from a control (C) (MRI pack 0.11.0; dcm2niix)"
 
     - creator: Philips Imaging DD 001
       group: 0x2001

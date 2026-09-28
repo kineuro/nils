@@ -8,6 +8,7 @@
 //! layout beside the descriptive one of §9.1 and not a replacement for it, and
 //! the parts of the archive it cannot name are routed rather than dropped.
 
+pub mod aslcontext;
 pub mod convert;
 pub mod dataset;
 pub mod name;

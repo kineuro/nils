@@ -30,9 +30,20 @@ phase: after
 # Which stacks it runs on: the ones with a gap it could fill.
 target:
   when:
-    any:
-      - {axis: base, missing_or: Unknown}
-      - {axis: technique, missing_or: Unknown}
+    all:
+      - any:
+          - {axis: base, missing_or: Unknown}
+          - {axis: technique, missing_or: Unknown}
+      # MRI pack 0.11.0: a phase image and an MP2RAGE inversion have no base
+      # by ruling (SWI 2026-09-28, MP2RAGE 2026-09-27), and the rules say so
+      # by deciding it to nothing. A vote among the magnitudes beside them
+      # wrote SWI on two SWI phases of the 2026-09-28 re-measure. Their
+      # technique is the route's.
+      - not:
+          any:
+            - {axis: construct, is: Phase}
+            - {axis: construct, is: INV1}
+            - {axis: construct, is: INV2}
 
 reference:
   # Named, and recorded on every row the pass writes. It holds what a rule or a

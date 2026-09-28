@@ -309,6 +309,8 @@ parsers:
       # direction (above), and not SAT_GEMS, spatial saturation bands.
       has_fat_sat:       {all: [{any_token: [FS, SFS]}, {not: {token: FSE}}]}
       has_mt:            {token: MT}
+      # GE's magnetisation transfer (MRI pack 0.11.0).
+      has_mt_gems:       {token: MT_GEMS}
       # Flow compensation: `FC` is the standard's term, which Siemens writes;
       # GE writes it per axis, `FC_SLICE_AX_GEMS` along the slice axis and
       # `FC_FREQ_AX_GEMS` along the frequency axis.
@@ -350,14 +352,18 @@ parsers:
       # inside `tfl2d` and `tfl3d`, TurboFLASH. `fldyn` is FLASH run
       # dynamically. The Siemens brochure's legend: `fl` FLASH, "gradient
       # echo sequence with active RF spoiling"; `tfl` TurboFLASH.
-      is_flash:            {all: [{matches: '^\*?(wip)?fl(1|[23]d|dyn[23]d)'}, {not: {substring: flair}}]}
-      is_tfl:              {matches: '^\*?(wip)?tfl'}
+      # MRI pack 0.11.0: `wip` may be joined by an underscore (`WIP_fldyn3d1`).
+      is_flash:            {all: [{matches: '^\*?(wip_?)?fl(1|[23]d|dyn[23]d)'}, {not: {substring: flair}}]}
+      is_tfl:              {matches: '^\*?(wip_?)?tfl'}
+      # Siemens' dynamic FLASH, one series per time point on classic
+      # software (MRI pack 0.11.0).
+      is_fldyn:            {matches: '^\*?(wip_?)?fldyn[23]d'}
       # A Siemens gradient-echo family by its stem, which Siemens writes on
       # some of them beside ScanningSequence SE (`*ci3d1`, `*tfi2d1`): FLASH,
       # TurboFLASH, FISP, TrueFISP, CISS, DESS, MEDIC, PSIF, SWI, the dual
       # echo field map and phase contrast. The stem decides against
       # ScanningSequence (MRI pack 0.10.0).
-      is_gre_stem:         {matches: '^\*?(wip)?(fl(1|[23]d|dyn)|tfl|t?fi[23]d|ci[23]d|de[23]d|me[23]d|ps[23]d|swi[23]d|fm[23]d|pc[23]d)'}
+      is_gre_stem:         {matches: '^\*?(wip_?)?(fl(1|[23]d|dyn)|tfl|t?fi[23]d|ci[23]d|de[23]d|me[23]d|ps[23]d|swi[23]d|fm[23]d|pc[23]d)'}
       # `fi` FISP, "gradient echo sequence without RF spoiling"; not the
       # tune-up `fi3d1tun`.
       is_fisp:             {all: [{matches: '^\*?fi[23]d'}, {not: {substring: tun}}]}

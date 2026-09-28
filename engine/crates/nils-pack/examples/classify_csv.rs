@@ -87,11 +87,22 @@ fn main() {
             cols.push((i, field.to_string()));
         }
     }
+    // A column named for one of the pack's ingested private elements feeds
+    // it, so a corpus that carries a vendor's value is judged with it.
+    let private_cols: Vec<Option<usize>> = pack
+        .ingest
+        .iter()
+        .map(|i| head.iter().position(|h| h == i.name))
+        .collect();
     let id_col = id_col.unwrap_or_else(|| {
         eprintln!("{csv_path}: no id column (series_stack_id, stack_id or id)");
         std::process::exit(2)
     });
-    eprintln!("{} columns feed a field", cols.len());
+    eprintln!(
+        "{} columns feed a field, {} a private element",
+        cols.len(),
+        private_cols.iter().filter(|c| c.is_some()).count()
+    );
 
     // With --passes, the phases that read more than one stack run too, over
     // the corpus in the file: the reference is the CSV, which is what makes
@@ -149,7 +160,11 @@ fn main() {
                 .set(field, nils_pack::stack::Value::Text(Some(v)))
                 .expect("a field the header named");
         }
-        let ev = nils_pack::Evaluated::new(&pack, &stack);
+        let private: Vec<String> = private_cols
+            .iter()
+            .map(|c| c.and_then(|i| r.get(i)).unwrap_or("").to_string())
+            .collect();
+        let ev = nils_pack::Evaluated::with_private(&pack, &stack, private);
         let id = r.get(id_col).unwrap_or("");
         // `--axis <name>` also names a text the pack derives, so the
         // normalizer can be checked the same way an axis is.

@@ -30,6 +30,8 @@ order:
   - MTT
   - Tmax
   - TTP
+  - DeltaM
+  - M0
   - Water
   - Fat
   - InPhase
@@ -52,6 +54,8 @@ order:
   - Composed
   - EchoCombined
   - TTestMap
+  - SBRef
+  - FieldmapRef
   - B0map
   - B1map
   - Magnitude
@@ -62,8 +66,11 @@ order:
   - ND
 
 values:
+  # MRI pack 0.11.0: not an exponential ADC, whose name holds `adc` too
+  # (Philips `eADC` was ADC and eADC on the 2026-09-28 re-measure).
   ADC:
     terms: ['apparent diffusion coefficient', 'ADC map']
+    requires: {all: [{not: has_eadc}, {not: eadc_words}]}
     keywords:
       - adc
       - apparent diffusion coefficient
@@ -86,8 +93,11 @@ values:
     detection:
       exclusive: has_fa
   # the same image as isoDWI, under Siemens' and Philips' names [MQ3, D2]
+  # MRI pack 0.11.0: not on a map, whose protocol name may still say
+  # `3scan_trace` (Siemens `ep2d_diff_3scan_trace_ADC` was ADC and Trace).
   Trace:
     terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b', 'DIFFUSION_ISO']
+    requires: {not: {any: [has_adc, has_eadc, has_fa]}}
     keywords:
       - trace
       - tracew
@@ -142,6 +152,26 @@ values:
       - time to peak
     detection:
       exclusive: has_ttp
+  # MRI pack 0.11.0, ruled 2026-09-28 (`studies/2026-09-28-sequence-research/
+  # decisions.md` in the design repository): the ASL label-control difference
+  # and the M0 scan, which BIDS names (`aslcontext` volume type `deltam`, the
+  # suffix `m0scan`) and which had no construct of their own.
+  DeltaM:
+    terms: ['perfusion-weighted image', 'PWI (ASL)', 'deltaM', 'label-control difference', 'ASL subtraction', 'PERFUSION_ASL']
+    description: 'the ASL perfusion-weighted image: control minus label, subtracted by the scanner (BIDS aslcontext deltam)'
+    keywords:
+      - deltam
+      - delta m
+    detection:
+      exclusive: is_asl_difference
+  M0:
+    terms: ['M0 scan', 'm0scan', 'proton density reference', 'ASL PD pass', 'equilibrium magnetisation image']
+    description: 'the ASL M0 (equilibrium magnetisation) scan a CBF quantification divides by (BIDS m0scan)'
+    requires: is_asl_m0
+    keywords:
+      - m0
+    detection:
+      exclusive: is_asl_m0_stated
   Water:
     terms: ['Dixon water', 'water only']
     keywords:
@@ -311,8 +341,40 @@ values:
       - reformatted
     detection:
       exclusive: is_mpr
+  # MRI pack 0.11.0, ruled 2026-09-28: the single-band reference of a
+  # multiband run (Siemens numbers it 1000 above its run, dcm2niix issue
+  # 816; or its name), and the EPI of reversed phase encoding a distortion
+  # correction pairs with a run (BIDS `func/_sbref`, `fmap/_epi`).
+  SBRef:
+    terms: ['single-band reference', 'SBRef', 'single band reference']
+    description: 'the single-band reference image of a multiband EPI run (BIDS sbref)'
+    requires: is_sbref
+    keywords:
+      - sbref
+    detection:
+      exclusive: is_sbref_numbered
+  FieldmapRef:
+    terms: ['reverse phase-encoding EPI', 'blip-up blip-down', 'pepolar', 'TOPUP reference', 'EPI field map']
+    description: 'an EPI of a few volumes with the phase encoding reversed, for distortion correction (BIDS fmap epi)'
+    requires: is_epi_fieldmap_ref
+    keywords:
+      - pepolar
+      - topup
+      - blip
+      - fieldmap
+      - field map
+      - fmap
+      - reverse
+      - rev
+      - ap
+      - pa
+    detection:
+      exclusive: ge_pepolar
+  # A reversed-phase EPI reference is FieldmapRef, not a B0 map, whatever it
+  # is named (MRI pack 0.11.0).
   B0map:
     terms: ['B0 map', 'field map', 'fieldmap']
+    requires: {not: is_epi_fieldmap_ref}
     keywords:
       - b0 map
       - b0map
