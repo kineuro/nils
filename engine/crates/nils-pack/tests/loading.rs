@@ -420,6 +420,133 @@ rules:
     assert!(e.contains("a rule set decides one phase"), "{e}");
 }
 
+// ---------------------------------------------------------------------------
+// `redecides` (MRI pack 0.9.0): a route entered on an axis may decide it again
+// for the stacks whose output is the acquisition itself.
+
+/// The phased pack, plus an axis `part` and a route entered on `kind: a` that
+/// says a primary image is of kind `b`.
+fn rerouted(redecides: &str) -> Dir {
+    let d = phased();
+    d.file(
+        "pack.yml",
+        "\
+pack: t
+version: 1.0.0
+contract: 1
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+axes: [axes/kind.yml, axes/part.yml, axes/disposition.yml]
+rules: [rules/kind.yml, rules/route.yml, rules/disposition.yml]
+order: [kind, route, disposition]
+",
+    )
+    .file(
+        "parsers.yml",
+        "\
+parsers:
+  image_type:
+    field: image_type
+    case: upper
+    tokenize: {split: '[\\\\/\\s]+'}
+    predicates:
+      is_original: {token: ORIGINAL}
+      is_primary: {token: PRIMARY}
+",
+    )
+    .file(
+        "flags.yml",
+        "flags:\n  is_original: image_type.is_original\n  is_primary: image_type.is_primary\n",
+    )
+    .file(
+        "axes/part.yml",
+        "axis: part\nkind: single\nvalues: {one: {}, two: {}}\n",
+    )
+    .file(
+        "rules/route.yml",
+        &format!(
+            "\
+rule_set: route
+enter_when: {{axis: kind, is: a}}
+decides: [kind, part]
+{redecides}
+tiers: {{stated: 0.9}}
+order: [primary, otherwise]
+rules:
+  primary:
+    clauses: [{{flag: is_primary, tier: stated}}]
+    set: {{kind: b, part: one}}
+  otherwise:
+    clauses: [{{when: true, cite: a, source: kind}}]
+    set: {{part: two}}
+"
+        ),
+    );
+    d
+}
+
+fn stack(image_type: &str) -> nils_pack::stack::Stack {
+    let mut stack = nils_pack::stack::Stack::new();
+    stack
+        .set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some(image_type)),
+        )
+        .unwrap();
+    stack
+}
+
+#[test]
+fn a_route_may_decide_again_the_axis_it_was_entered_on() {
+    let d = rerouted("redecides: [kind]");
+    let pack = nils_pack::load(d.path(), None).unwrap();
+
+    // The route's rule for the acquisition's own image replaces the kind the
+    // earlier set decided, and the rest of its answer stands beside it.
+    let primary = stack("ORIGINAL\\PRIMARY");
+    let v = nils_pack::eval::Evaluated::new(&pack, &primary).classify();
+    assert_eq!(v.stored("kind"), "b");
+    assert_eq!(v.stored("part"), "one");
+
+    // A rule that writes nothing there leaves the earlier answer alone.
+    let secondary = stack("ORIGINAL\\SECONDARY");
+    let v = nils_pack::eval::Evaluated::new(&pack, &secondary).classify();
+    assert_eq!(v.stored("kind"), "a");
+    assert_eq!(v.stored("part"), "two");
+
+    // A person's answer is never moved.
+    let e = nils_pack::eval::Evaluated::new(&pack, &primary);
+    let kind = pack.axis_index("kind").unwrap();
+    let mut pins = vec![None; pack.axes.len()];
+    pins[kind] = Some(vec!["a".to_string()]);
+    let v = e.with_pins(&pins, &|_, _| false);
+    assert_eq!(v.stored("kind"), "a");
+    assert_eq!(v.stored("part"), "one");
+}
+
+#[test]
+fn without_redecides_a_route_leaves_an_earlier_answer_alone() {
+    let d = rerouted("");
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let primary = stack("ORIGINAL\\PRIMARY");
+    let v = nils_pack::eval::Evaluated::new(&pack, &primary).classify();
+    assert_eq!(
+        v.stored("kind"),
+        "a",
+        "an axis a set decided is not decided again"
+    );
+    assert_eq!(v.stored("part"), "one");
+}
+
+#[test]
+fn a_set_redecides_only_a_single_valued_axis_it_decides() {
+    let d = rerouted("redecides: [disposition]");
+    let e = refusal(&d);
+    assert!(e.contains("redecides"), "{e}");
+    assert!(e.contains("not in `decides`"), "{e}");
+}
+
 /// Record 41: a longhand rule's `requires` was read by nothing, so the rule
 /// fired where its author said it must not. It gates the rule now, as it
 /// gates a value of an axis file.

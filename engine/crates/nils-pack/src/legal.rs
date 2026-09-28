@@ -726,8 +726,8 @@ mod tests {
                 .iter()
                 .all(|h| h["id"] != "megre-usually-t2star")
         );
-        // the approved implications: a diffusion map is DWI, INV2 is PDw,
-        // an MP2RAGE output is an MP2RAGE, a DSC or DCE series had contrast
+        // the approved implications: a diffusion map is DWI, an MP2RAGE
+        // output is an MP2RAGE, a DSC or DCE series had contrast
         let imps = c["implications"].as_array().unwrap();
         let find = |rule: &str| {
             imps.iter()
@@ -738,10 +738,10 @@ mod tests {
             find("base/construct:diffusion")["then"],
             json!([{"axis": "base", "value": "DWI"}])
         );
-        assert_eq!(
-            find("base/construct:inv2")["then"],
-            json!([{"axis": "base", "value": "PDw"}])
-        );
+        // pack 0.9.0: an MP2RAGE inversion has no base, which no
+        // implication writes (an exclusion of every base value says it)
+        assert!(imps.iter().all(|i| i["rule"] != "base/construct:inversion"));
+        assert!(imps.iter().all(|i| i["rule"] != "base/construct:inv2"));
         assert_eq!(
             find("implied_technique/construct:mp2rage")["then"],
             json!([{"axis": "technique", "value": "MP2RAGE"}])
@@ -865,10 +865,12 @@ mod tests {
     }
 
     /// Nima's read, 2026-09-27: on an MP2RAGE second inversion the reader
-    /// greyed INV2 out. The pack is not the cause: the whole INV2 answer is
-    /// legal, and only a base of T1w beside it breaks anything.
+    /// greyed INV2 out; the desk was the cause. Pack 0.9.0 then ruled that
+    /// both inversions take base none: the whole answer with no base is
+    /// legal, UNI stays T1w, and any base beside an inversion breaks the one
+    /// exclusion that says so.
     #[test]
-    fn an_mp2rage_second_inversion_is_a_legal_answer() {
+    fn an_mp2rage_inversion_is_a_legal_answer_with_no_base() {
         let pack = mri();
         let c = class_constraints(&pack);
         let decided = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
@@ -884,7 +886,8 @@ mod tests {
             m
         };
         let none = BTreeMap::new();
-        for (construct, base) in [("INV2", "PDw"), ("INV1", "T1w"), ("Uniform", "T1w")] {
+        for (construct, base) in [("INV2", None), ("INV1", None), ("Uniform", Some("T1w"))] {
+            let bases: Vec<&str> = base.into_iter().collect();
             let b = broken(
                 &pack,
                 &c,
@@ -892,31 +895,34 @@ mod tests {
                     ("provenance", &["RawRecon"]),
                     ("technique", &["MP2RAGE"]),
                     ("construct", &[construct]),
-                    ("base", &[base]),
+                    ("base", &bases),
                     ("post_contrast", &["not_given"]),
                     ("body_part", &["brain"]),
                 ]),
                 &none,
             );
-            assert!(b.is_empty(), "{construct} with {base}: {b:?}");
+            assert!(b.is_empty(), "{construct} with {base:?}: {b:?}");
         }
-        // INV2 beside a T1w base is the one break, and it names the rule
-        let b = broken(
-            &pack,
-            &c,
-            &decided(&[
-                ("technique", &["MP2RAGE"]),
-                ("construct", &["INV2"]),
-                ("base", &["T1w"]),
-            ]),
-            &none,
-        );
-        assert_eq!(b.len(), 1, "{b:?}");
-        assert_eq!(
-            (b[0].kind, b[0].id.as_str()),
-            ("implied", "base/construct:inv2")
-        );
-        // and a reading campaign's question rules nothing out on INV2
+        // any base beside an inversion is the one break, and it names the rule
+        for (construct, base) in [("INV2", "PDw"), ("INV2", "T1w"), ("INV1", "T1w")] {
+            let b = broken(
+                &pack,
+                &c,
+                &decided(&[
+                    ("technique", &["MP2RAGE"]),
+                    ("construct", &[construct]),
+                    ("base", &[base]),
+                ]),
+                &none,
+            );
+            assert_eq!(b.len(), 1, "{construct} with {base}: {b:?}");
+            assert_eq!(
+                (b[0].kind, b[0].id.as_str()),
+                ("excluded", "mp2rage-inversion-no-base")
+            );
+        }
+        // a reading campaign's question freezes it, and INV2 is ruled out on
+        // no axis but the base
         let axes: Vec<String> = [
             "provenance",
             "technique",
@@ -930,8 +936,13 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let q = constraints(&pack, &axes, &BTreeMap::new()).unwrap();
-        let text = q["excludes"].to_string();
-        assert!(!text.contains("INV2"), "{text}");
+        for x in q["excludes"].as_array().unwrap() {
+            if x["when"].to_string().contains("INV2") {
+                assert_eq!(x["id"], "mp2rage-inversion-no-base");
+                assert_eq!(x["axis"], "base");
+                assert_eq!(x["values"].as_array().unwrap().len(), 11, "{x}");
+            }
+        }
         let rules: Vec<&str> = q["implications"]
             .as_array()
             .unwrap()
@@ -940,7 +951,6 @@ mod tests {
             .collect();
         for r in [
             "implied_technique/construct:mp2rage",
-            "base/construct:inv2",
             "base/technique:MP2RAGE",
         ] {
             assert!(rules.contains(&r), "{r} in {rules:?}");

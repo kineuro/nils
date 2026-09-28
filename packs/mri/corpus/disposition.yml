@@ -21,7 +21,10 @@ cases:
       scanning_sequence: SE
       image_role: original_primary
     axes:
-      provenance: SyMRI
+      # Pack 0.9.0, Nima's ruling (2026-09-28): the images as acquired are
+      # RawRecon; they are still the working scan the maps come from.
+      provenance: RawRecon
+      technique: MDME
       disposition: working_scan
       convertible: 'no'
 
@@ -250,5 +253,8 @@ cases:
       text_series_description: 'Ax ASL 3D'
       image_role: original_primary
     axes:
-      provenance: ASLRecon
+      # Pack 0.9.0: the acquisition's own images are RawRecon (Nima's
+      # ruling, 2026-09-28); the subtraction above keeps ASLRecon.
+      provenance: RawRecon
       disposition: acquisition
+      directory_type: perf

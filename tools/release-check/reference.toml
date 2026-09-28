@@ -16,9 +16,9 @@
 # `sub-<code>/ses-<label>/` is stripped: the code is a pseudonym and changes
 # with the key.
 names = [
-  "ses-20220115/anat/Ax_SWI_3D_GRE_Magnitude",
   "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_1",
   "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_2",
+  "ses-20220115/anat/Ax_T2starw_3D_GRE_Magnitude",
   "ses-20220115/anat/Ax_T2w_2D_FLAIR_TIRM_ND",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_ADC_b1000",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_Trace_b1000",
@@ -50,8 +50,9 @@ names = [
 #     to `yes`;
 #   * the ADC keeps its own suffix and takes no `part`, because the standard
 #     gives its scanner derivatives none;
-#   * the SWI has no BIDS word, so it is a derivative under section 9.1's name
-#     carried in `acq-`;
+#   * the SWI's magnitude is the acquisition's own T2*-weighted image, so it
+#     is `part-mag` of the suffix `T2starw` (MRI pack 0.9.0; the processed SWI
+#     image, which BIDS has no word for, would be a derivative);
 #   * the localizer is DICOM under `sourcedata/`, which is the default of the
 #     four answers a release may take.
 #
@@ -66,12 +67,18 @@ names = [
 # move loses no distinction and gains one: the `ADC` and the `trace` now share
 # `acq-BrainAx2DDWIEPI`, which is true of them, where the old pair of labels
 # claimed two different acquisitions. Checked name by name; nothing else moved.
+#
+# Amended 2026-09-28, MRI pack 0.9.0. The SWI series' magnitude is RawRecon and
+# base T2*w, as acquired, where it was SWIRecon and base SWI. So it left
+# `derivatives/` for the raw tree as `part-mag` of `T2starw`, which the schema
+# admits, and its descriptive name says T2starw where it said SWI. Checked
+# name by name; nothing else moved.
 files = [
-  "derivatives/nils/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-AxSWI3DGREMagnitude.nii.gz",
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx2DIRTSEFLAIR_FLAIR.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-1_T1w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-2_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DGRE_part-mag_T2starw.nii.gz",
   "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_rec-DTIRecon_ADC.nii.gz",
   "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_trace.nii.gz",
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-1_T1w.nii.gz",

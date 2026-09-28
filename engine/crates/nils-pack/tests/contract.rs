@@ -231,6 +231,9 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
         pack.lists.iter().any(|l| l == "base.T1w"),
         "a longhand rule's words too"
     );
+    // Pack 0.9.0: the SWI and SyMRI routes decide the provenance again for
+    // an acquisition's own images, and their words for a phase or a
+    // magnitude are the output's, so they make no list of the default's.
     assert!(
         !pack.lists.iter().any(|l| l == "provenance.RawRecon"),
         "the default is reached by no word"

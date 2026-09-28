@@ -179,3 +179,18 @@ cases:
       text_sequence_name: '*fl2d1_scout'
     flags:
       is_localizer: true
+
+  # Pack 0.9.0: GE's FS-letter tokens are the readout direction, never fat
+  # saturation (`studies/2026-09-27-header-judge/ge-scan-options.md` in the
+  # design repository). Only the defined term FS is.
+  - name: GE's six readout-direction tokens are no fat saturation
+    stack:
+      scan_options: 'FSA_GEMS\FSP_GEMS\FSS_GEMS\FSI_GEMS\FSR_GEMS\FSL_GEMS\SAT_GEMS'
+    flags:
+      has_fat_sat: false
+
+  - name: the defined term FS beside a readout direction is fat saturation
+    stack:
+      scan_options: 'SAT_GEMS\FS\FSS_GEMS'
+    flags:
+      has_fat_sat: true

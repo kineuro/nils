@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.8.0");
+    assert_eq!(pack.id(), "mri@0.9.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -29,10 +29,11 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        145,
+        146,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
-         four that say what is wrong with an image"
+         four that say what is wrong with an image, and pack 0.9.0 added the \
+         dual-echo TSE"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());
@@ -157,5 +158,45 @@ fn every_image_type_identity_record_37_named_reaches_an_axis() {
         wrong.len(),
         want.len(),
         wrong.join("\n")
+    );
+}
+
+/// A BIDS suffix that waits for a technique names the technique by its
+/// identity. One spelled as a label (`TIRM` for `IR-TSE`) or misspelled
+/// would load and never match, and the stack would fall through to its base
+/// contrast without a word, so the pack is refused and says where.
+#[test]
+fn a_bids_suffix_waits_for_a_technique_the_pack_has() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.is_dir() {
+                copy(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let to = std::env::temp_dir().join(format!("nils-bids-technique-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&to);
+    copy(&packs().join("mri"), &to);
+    let bids = std::fs::read_to_string(to.join("bids.yml")).unwrap();
+    assert!(bids.contains("when_technique: MP2RAGE"));
+    std::fs::write(
+        to.join("bids.yml"),
+        bids.replacen("when_technique: MP2RAGE", "when_technique: MP2RAG", 1),
+    )
+    .unwrap();
+    let e = match nils_pack::load(&to, None) {
+        Ok(_) => panic!("a technique the pack does not have loaded"),
+        Err(e) => e.to_string(),
+    };
+    let _ = std::fs::remove_dir_all(&to);
+    assert!(e.contains("when_technique"), "{e}");
+    assert!(
+        e.contains("MP2RAG is not a value of the technique axis"),
+        "{e}"
     );
 }

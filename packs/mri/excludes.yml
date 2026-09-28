@@ -53,9 +53,21 @@ excludes:
 
   # A projection is not a raw reconstruction [RP10, W1]. Written as an
   # exclusion and not as "MIP is ProjectionDerived", because the SWI route
-  # answers a MinIP of an SWI with provenance SWIRecon.
+  # answers a MIP of an SWI with provenance SWIRecon (its MinIP is
+  # ProjectionDerived from pack 0.9.0).
   - id: projection-not-raw
     when: {any: [{axis: construct, is: MIP}, {axis: construct, is: MinIP}]}
     excludes: {axis: provenance, any: [RawRecon, Localizer]}
     why: 'an intensity projection is computed from a volume, so it is neither a raw reconstruction nor a localizer'
     sources: [RP10, W1]
+
+  # Pack 0.9.0, Nima's ruling (2026-09-27): an MP2RAGE inversion has no base
+  # contrast. The construct carries the meaning, as BIDS files INV1 and INV2
+  # as `inv-1` and `inv-2` of the suffix `MP2RAGE` and not as a weighting
+  # [B1], and they are the images the T1-weighted uniform image is computed
+  # from [P9, MQ6]. Every base value is ruled out, so the answer is none.
+  - id: mp2rage-inversion-no-base
+    when: {any: [{axis: construct, is: INV1}, {axis: construct, is: INV2}]}
+    excludes: {axis: base, any: [DWI, PWI, SWI, T1rho, T2rho, T2starw, T2w, PDw, T1w, MTw, Unknown]}
+    why: 'an MP2RAGE inversion is named by its construct and takes base none; the uniform image is the T1-weighted one'
+    sources: [B1, P9, MQ6]

@@ -14,7 +14,7 @@ decides: [base]
 tiers: {exclusive: 0.9, keywords: 0.85, physics: 0.7}
 
 order:
-  - 'construct:inv2'
+  - 'construct:inversion'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -41,7 +41,6 @@ order:
   - 'flag:t1_map'
   - 'flag:t2_map'
   - 'flag:mp2rage_inversion'
-  - 'flag:mp2rage_inv2'
   - 'flag:mp2rage_uniform'
   - 'flair:t1_text'
   - 'flair:t2_text'
@@ -50,6 +49,8 @@ order:
   - 'flair:default'
   - 'dual_echo:pd'
   - 'dual_echo:t2'
+  - 'dual_echo:short_echo'
+  - 'dual_echo:long_echo'
   - 'keywords:DWI'
   - 'keywords:PWI'
   - 'keywords:SWI'
@@ -87,16 +88,18 @@ rules:
   # after construct (pack.yml `order`), so a rule that reads construct reads
   # what was decided.
 
-  # The second inversion of an MP2RAGE is proton-density weighted: its brain
-  # mask is made from "the raw proton density weighted image acquired at the
-  # second inversion time" [P10, MQ6, P9]. First, so the MP2RAGE rule below
-  # never reaches it.
-  'construct:inv2':
+  # The two inversions of an MP2RAGE carry no base contrast of their own:
+  # the construct says what they are, and BIDS files them as `inv-1` and
+  # `inv-2` of the suffix `MP2RAGE` and not as a weighting [B1], the images
+  # the uniform T1-weighted image is computed from [P9, MQ6]. Nima's ruling,
+  # 2026-09-27 (pack 0.9.0), which replaces 0.6.0's "INV2 is PDw". First, so
+  # the MP2RAGE rule below never reaches them.
+  'construct:inversion':
     clauses:
-      - {when: {axis: construct, is: INV2}, cite: 'INV2', source: construct}
-    set: {base: 'PDw'}
+      - {when: {any: [{axis: construct, is: INV1}, {axis: construct, is: INV2}]}, cite: 'an MP2RAGE inversion', source: construct}
+    set: {base: null}
     confidence: 0.9
-    why: 'the second inversion of an MP2RAGE is proton-density weighted'
+    why: 'an MP2RAGE inversion is named by its construct and has no base contrast'
 
   # 3D inversion-prepared rapid gradient echo [MQ6, B1, P11, S8]
   'technique:MPRAGE':
@@ -114,13 +117,14 @@ rules:
     confidence: 0.95
     why: 'the MEMPRAGE technique implies a T1w base contrast'
 
-  # UNI, INV1 and a T1 map are T1-weighted; INV2 is not [P9, MQ6, P10]
+  # UNI, UNI-DEN and a T1 map are T1-weighted; the two inversions have no
+  # base (above) [P9, MQ6, B1]
   'technique:MP2RAGE':
     clauses:
-      - {when: {all: [{axis: technique, is: 'MP2RAGE'}, {not: {axis: construct, is: INV2}}]}, cite: 'MP2RAGE', source: technique}
+      - {when: {all: [{axis: technique, is: 'MP2RAGE'}, {not: {axis: construct, is: INV1}}, {not: {axis: construct, is: INV2}}]}, cite: 'MP2RAGE', source: technique}
     set: {base: 'T1w'}
     confidence: 0.95
-    why: 'MP2RAGE UNI, INV1 and T1 map are T1-weighted; INV2 is proton-density weighted'
+    why: 'the MP2RAGE uniform image and T1 map are T1-weighted; its inversions have no base'
 
   # The physics sources agree the stationary tissue of a TOF is T1-weighted
   # [RP7, MQ7]; DICOM and BIDS give angiography a class of its own [D3, D4,
@@ -285,18 +289,14 @@ rules:
       - {flag: has_r2, tier: exclusive}
     set: {base: 'T2w'}
 
+  # Pack 0.9.0: an inversion the construct did not name still has no base
+  # [B1, P9]
   'flag:mp2rage_inversion':
     clauses:
       - {flag: is_mp2rage_inv1, tier: exclusive}
-    set: {base: 'T1w'}
-    why: 'the first inversion of an MP2RAGE is T1-weighted'
-
-  # Record 48: the second inversion is proton-density weighted [P10, MQ6, P9]
-  'flag:mp2rage_inv2':
-    clauses:
       - {flag: is_mp2rage_inv2, tier: exclusive}
-    set: {base: 'PDw'}
-    why: 'the second inversion of an MP2RAGE is proton-density weighted'
+    set: {base: null}
+    why: 'an MP2RAGE inversion has no base contrast'
 
   'flag:mp2rage_uniform':
     clauses:
@@ -346,6 +346,24 @@ rules:
       - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, ge: 40}]}, cite: 'T2 echo', source: physics, tier: physics}
     set: {base: 'T2w'}
     confidence: 0.85
+
+  # Pack 0.9.0, Nima's ruling (2026-09-27): a dual-echo spin echo is base by
+  # the echo on screen, whatever its words say. The digest splits it into one
+  # stack per echo, and a long repetition time with a short echo is
+  # proton-density weighted, with a long one T2-weighted [MQ20, M1, RP14, B1].
+  # 40 ms is v0's cut, ours: the published PD echo is at most about 30 ms and
+  # the T2 echo at least about 80 ms, so it sits in the gap.
+  'dual_echo:short_echo':
+    clauses:
+      - {when: {all: [is_multi_echo, has_se, {not: has_epi}, {field: stacks_in_series, eq: 2}, {field: repetition_time, ge: 2000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'the short echo of a dual-echo spin echo', source: physics, tier: physics}
+    set: {base: 'PDw'}
+    confidence: 0.8
+
+  'dual_echo:long_echo':
+    clauses:
+      - {when: {all: [is_multi_echo, has_se, {not: has_epi}, {field: stacks_in_series, eq: 2}, {field: repetition_time, ge: 2000}, {field: echo_time, ge: 40}]}, cite: 'the long echo of a dual-echo spin echo', source: physics, tier: physics}
+    set: {base: 'T2w'}
+    confidence: 0.8
 
   # Tier 5. Keywords, in the axis's own priority order.
   'keywords:DWI':

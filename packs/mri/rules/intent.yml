@@ -21,6 +21,7 @@ order:
   - provenance_dwi
   - provenance_perf
   - provenance_func
+  - technique_func
   - construct_dwi
   - construct_perf
   - construct_fmap
@@ -56,6 +57,13 @@ rules:
   provenance_func:
     clauses:
       - {when: {axis: provenance, is: BOLDRecon}, cite: BOLDRecon, source: provenance}
+    set: {directory_type: func}
+
+  # Pack 0.9.0: a BOLD time series is RawRecon, so its technique says func
+  # where the provenance no longer does.
+  technique_func:
+    clauses:
+      - {when: {axis: technique, is: BOLD-EPI}, cite: BOLD-EPI, source: technique}
     set: {directory_type: func}
 
   construct_dwi:

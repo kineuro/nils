@@ -337,6 +337,8 @@ impl Evaluated<'_> {
         // An axis a rule decided to be nothing is closed too: the default is
         // for an axis nobody spoke about, not for one told to stay empty.
         let mut said_nothing: Vec<bool> = vec![false; pack.axes.len()];
+        // An axis a set decided again under its `redecides`: once is enough.
+        let mut redecided: Vec<bool> = vec![false; pack.axes.len()];
         // Wave 4c §6.6: who closed each axis, so that a later rule reaching
         // it can be recorded against the one that won. Set, rule, the stored
         // value and the citation.
@@ -383,7 +385,19 @@ impl Evaluated<'_> {
                 // because a rule that would have said something different
                 // is the diagnostic of Wave 4c §6.6, and the evidence rows
                 // cannot tell: they record only what was cited.
-                let all_closed = rule.sets.iter().all(|s| closed[s.axis]);
+                //
+                // An axis the set may decide again (`redecides`) is open to
+                // it once, whoever closed it, unless a person's answer holds
+                // it.
+                let reopens = |axis: usize, redecided: &[bool]| {
+                    set.redecides.contains(&axis)
+                        && !redecided[axis]
+                        && pins.get(axis).is_none_or(|p| p.is_none())
+                };
+                let all_closed = rule
+                    .sets
+                    .iter()
+                    .all(|s| closed[s.axis] && !reopens(s.axis, &redecided));
                 let Some(fired) = self.fire(rule) else {
                     continue;
                 };
@@ -405,6 +419,23 @@ impl Evaluated<'_> {
                 for sets in &rule.sets {
                     let axis = &pack.axes[sets.axis];
                     self.vote(&mut verdict.votes, set, rule, &held, sets, &derived);
+                    // The set decides this axis again: what an earlier set
+                    // said is replaced, not joined, and only where the rule
+                    // has a value to put in its place.
+                    if closed[sets.axis]
+                        && reopens(sets.axis, &redecided)
+                        && sets
+                            .values
+                            .iter()
+                            .any(|v| v.when.as_ref().is_none_or(|w| w.eval(None, self)))
+                    {
+                        closed[sets.axis] = false;
+                        said_nothing[sets.axis] = false;
+                        collected[sets.axis].clear();
+                        decided_by[sets.axis] = None;
+                        redecided[sets.axis] = true;
+                        self.decided.borrow_mut()[sets.axis].clear();
+                    }
                     if closed[sets.axis] {
                         self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
                         continue;
