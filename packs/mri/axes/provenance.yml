@@ -83,8 +83,11 @@ values:
     alternative_flags: [has_adc, has_eadc, has_fa, has_trace]
     detection:
       exclusive: is_diffusion_derived
+  # An ASL series' CBF map is ASLRecon (Nima's ruling, 2026-09-28), so the
+  # DSC and DCE maps are this value's and an ASL's are not.
   PerfusionRecon:
     terms: ['perfusion reconstruction', 'perfusion maps']
+    requires: {not: is_asl}
     keywords:
       - cerebral blood flow
       - cerebral blood volume
@@ -94,8 +97,13 @@ values:
     alternative_flags: [has_cbf, has_cbv, has_mtt, has_ttp, has_tmax]
     detection:
       exclusive: is_perfusion_derived
+  # Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images are
+  # RawRecon and what the scanner computed from them takes the product. An
+  # ASL series as acquired is RawRecon; its CBF map, and the perfusion-weighted
+  # image the scanner subtracts label from control, are ASLRecon.
   ASLRecon:
     terms: ['ASL reconstruction', 'CBF from ASL']
+    requires: {any: [is_derived, has_cbf, is_subtraction, is_ttest]}
     keywords:
       - asl
       - pcasl
@@ -103,8 +111,12 @@ values:
       - arterial spin
     detection:
       exclusive: is_asl
+  # The same ruling: a BOLD time series as acquired is RawRecon; an fMRI map
+  # the scanner computed (a t-test map, a derived image, a motion-corrected
+  # copy of the run) is BOLDRecon.
   BOLDRecon:
     terms: ['BOLD reconstruction', 'fMRI maps']
+    requires: {any: [is_derived, is_ttest, has_moco]}
     keywords:
       - bold
       - fmri

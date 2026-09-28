@@ -129,6 +129,9 @@ flags:
       - all: [scanning_sequence.has_ir, sequence_variant.has_segmented_kspace,
               {not: scanning_sequence.has_gre}, {not: scanning_sequence.has_epi}]
 
+  # Spatial saturation bands (GE's SAT_GEMS among them), not fat saturation:
+  # every GE FS stack carries SAT_GEMS, most SAT_GEMS stacks have no fat
+  # saturation. Read by no rule; keep it away from FatSat.
   has_saturation:
     any: [scanning_sequence.has_saturation, scan_options.has_sat_gems,
           scan_options.has_spatial_sat]
@@ -188,6 +191,7 @@ flags:
   has_mag_prepared:     {any: [sequence_variant.has_mag_prepared, scan_options.has_mp_gems]}
   has_mtc:              {any: [sequence_variant.has_mtc, scan_options.has_mt]}
   has_oversampling:     sequence_variant.has_oversampling
+  # FS or SFS only; never GE's readout-direction tokens (parsers.yml)
   has_fat_sat:          scan_options.has_fat_sat
   has_water_excitation: scan_options.has_water_exc
   has_flow_comp:        scan_options.has_flow_comp

@@ -124,7 +124,10 @@ values:
   # `fat supp` are record 48's round 4 phrases. `spir` (36 stacks of the
   # training sites, 34 Philips) stays a term: a keyword is a substring, and
   # `spir` is inside `spiral` and `respiratory`. `fs` is read from the
-  # ScanOptions flag instead of the text.
+  # ScanOptions flag instead of the text: the defined term FS (or SFS) as a
+  # whole token. GE's FSA_GEMS, FSP_GEMS, FSS_GEMS, FSI_GEMS, FSR_GEMS and
+  # FSL_GEMS are the readout direction and never FatSat, and SAT_GEMS is
+  # spatial saturation (parsers.yml, pack 0.9.0).
   FatSat:
     terms: ['fat saturation', 'fat suppression', 'fat suppressed', 'fat sat', 'SPIR', 'SPAIR', 'ChemSat', 'FS', 'ASPIR', 'MSOFT', 'SINC', 'fettsat', 'fettsattigad']
     keywords:

@@ -9,7 +9,12 @@
 
 rule_set: symri
 enter_when: {axis: provenance, is: SyMRI}
-decides: [base, construct, modifier, technique, directory_type]
+decides: [base, construct, modifier, technique, directory_type, provenance]
+# Pack 0.9.0, Nima's ruling (2026-09-28): the MDME or QALAS images as the
+# scanner acquired them are RawRecon; the maps and the synthetic contrasts it
+# computed from them keep SyMRI. The route was entered on SyMRI, so it decides
+# the provenance again for the acquired images.
+redecides: [provenance]
 # v0's branch adds its modifiers to what the modifier rules found; only the
 # construct list is replaced.
 adds: [modifier]
@@ -193,19 +198,19 @@ rules:
     clauses:
       - {flag: has_phase, tier: exclusive}
       - {keywords: [phase], tier: keywords}
-    set: {base: null, construct: [Phase], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Phase], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   magnitude:
     clauses:
       - {flag: has_magnitude, tier: exclusive}
       - {keywords: [magnitude], tier: keywords}
-    set: {base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   fallback:
     clauses:
       - {when: true, cite: SyMRI, source: provenance}
-    set: {base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.7
     why: 'a SyMRI acquisition whose output is unclear is the raw source data'

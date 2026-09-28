@@ -1146,3 +1146,76 @@ cases:
       provenance: SWIRecon
       construct: EchoCombined,Magnitude
       base: T2*w
+
+  # A BOLD run as acquired is RawRecon and still a functional series; the map
+  # the scanner computes from it is BOLDRecon.
+  - name: a BOLD time series is acquired, and func
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\FMRI\NONE\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\SS'
+      text_sequence_name: '*epfid2d1_64'
+      text_series_description: 'ep2d_bold_resting'
+    axes:
+      provenance: RawRecon
+      technique: BOLD
+      directory_type: func
+
+  - name: a t-test map of a BOLD run is the scanner's, BOLDRecon
+    stack:
+      image_type: 'DERIVED\PRIMARY\FMRI\TTEST\MOSAIC'
+      scanning_sequence: EP
+      text_sequence_name: '*epfid2d1_64'
+      text_series_description: 'ep2d_bold_moco_t-map'
+    axes:
+      provenance: BOLDRecon
+      directory_type: func
+
+  - name: a CBF map of an ASL series is the scanner's, ASLRecon
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\CBF'
+      text_series_description: 'Cerebral Blood Flow'
+    axes:
+      provenance: ASLRecon
+      construct: CBF
+      base: PWI
+
+  # MAGiC: the MDME images as acquired are RawRecon, the synthetic contrasts
+  # SyMRI.
+  - name: a MAGiC phase image as acquired is RawRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PHASE MAP'
+      scanning_sequence: SE
+      text_series_description: 'MAGiC Ax'
+    axes:
+      provenance: RawRecon
+      construct: Phase
+      technique: MDME
+      base: ''
+
+  - name: a MAGiC synthetic T2 is SyMRI
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2W_SYNTHETIC'
+      text_series_description: 'MAGiC Ax T2 synthetic'
+    axes:
+      provenance: SyMRI
+      construct: SyntheticT2w
+      base: T2w
+
+  # A GE BRAVO read along the anterior-posterior axis carries FSP_GEMS, the
+  # readout direction, and no word of fat: it has no FatSat.
+  - name: a GE BRAVO with FSP_GEMS and no fat words has no FatSat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS\FILTERED_GEMS\ACC_GEMS\FSP_GEMS'
+      mr_acquisition_type: 3D
+      text_sequence_name: 'efgre3d'
+      text_series_description: 'Sag T1 BRAVO'
+      echo_time: 2.8
+      repetition_time: 7.2
+      inversion_time: 450
+      flip_angle: 12
+    axes:
+      modifier: ''

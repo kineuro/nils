@@ -285,6 +285,16 @@ parsers:
       has_fast_gems:     {token: FAST_GEMS}
       has_edr_gems:      {token: EDR_GEMS}
       has_filtered_gems: {token: FILTERED_GEMS}
+      # GE's FSA_GEMS, FSP_GEMS, FSS_GEMS, FSI_GEMS, FSR_GEMS and FSL_GEMS are
+      # one six-valued setting: the direction of the readout (frequency)
+      # axis, named by the patient direction it points to (anterior,
+      # posterior, superior, inferior, right, left). Measured on 142,584 GE
+      # stacks (`studies/2026-09-27-header-judge/ge-scan-options.md` in the
+      # design repository): at most one per stack, and the letter matches the
+      # readout axis on 15,369 of 15,373 original stacks. Geometry only. They
+      # are never fat saturation: no rule and no flag may read them as
+      # FatSat, and `has_fat_sat` below reads the whole token FS or SFS, which
+      # none of them is.
       has_fsa_gems:      {token: FSA_GEMS}
       has_fsl_gems:      {token: FSL_GEMS}
       has_fss_gems:      {token: FSS_GEMS}
@@ -292,6 +302,9 @@ parsers:
       has_fsp_gems:      {token: FSP_GEMS}
       has_fsr_gems:      {token: FSR_GEMS}
       has_ir:            {token: IR}
+      # FatSat's GE evidence: the DICOM defined term FS (and SFS), as a whole
+      # token. Not FSA_GEMS and its five siblings, which are the readout
+      # direction (above), and not SAT_GEMS, spatial saturation bands.
       has_fat_sat:       {all: [{any_token: [FS, SFS]}, {not: {token: FSE}}]}
       has_mt:            {token: MT}
       # Flow compensation: `FC` is the standard's term, which Siemens writes;

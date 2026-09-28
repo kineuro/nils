@@ -85,6 +85,14 @@ rules:
                   - {axis: construct, is: MyelinMap}
         cite: 'SyMRI naming no product'
         source: provenance
+      # Pack 0.9.0: the MDME or QALAS images as acquired are RawRecon, and
+      # they are still the working scan the maps were fitted from.
+      - when:
+          all:
+            - {axis: provenance, is: RawRecon}
+            - any: [{axis: technique, is: MDME}, {axis: technique, is: QALAS}]
+        cite: 'an MDME or QALAS acquisition as acquired'
+        source: technique
     set: {disposition: working_scan, convertible: 'no'}
 
   # And the rest of SyMRI: the synthetic contrasts and the quantitative maps,
