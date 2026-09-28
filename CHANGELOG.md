@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- Each axis a stack was judged on says whether the header or the name decided it (`basis`), derived from the tier the verdict records: `header` for a flag, a combination, an alternative or a physics window, `name` for a keyword, `inferred` for a longhand rule, and `default`, `answer`, `neighbours` (a pass's vote), `decision` or `other`. It is in `nils classify`'s verdicts, `nils explain` (a column beside the tier) and `GET /api/explain/{stack}`, on each evidence row as well, and in the reader's evidence line (`GET /api/stacks/{stack}/why`). It is computed when a stack is read, so stacks classified before carry it too. The HTTP API contract stays version 7, amended in place.
+- A pack's BIDS suffix `asl` may say what every volume of the image is (`aslcontext`, one of `control`, `label`, `m0scan`, `deltam`, `cbf`, `noRF`; refused on any other suffix or word), and a BIDS release writes the `aslcontext.tsv` BIDS requires beside the converted image, one row per volume read from its NIfTI header. The release check reads the table's name as it reads an image's. The pack contract stays version 6: the key is an addition.
+
 ## [1.0.0-alpha.56] - 2026-09-28
 
 The MRI pack is 0.10.0: fMRI, perfusion and the gradient-echo family are read from the header. The EPI time series are tried in the order diffusion, ASL, DSC, BOLD; Siemens sequence stems and Philips' scanning technique decide the gradient-echo family, VIBE is recognised by name only, and FSP-GRE is tried before SP-GRE; the short technique words count only as whole words, so VenBOLD is no BOLD; GE's exam ProtocolName no longer decides a technique; DCE is a 3D spoiled gradient echo of 10 or more time points; and a motion-corrected copy follows its image type. A pack may read temporal positions and the series number, and a normalized text may leave one vendor's field out. Reclassify with the new pack to apply it. Released alone, with no desk release of the same number. The registry stays at schema 70. The HTTP API contract stays version 7; the suite contract stays version 3; the pack contract stays version 6, with two additions; the job contract stays version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.55.

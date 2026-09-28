@@ -1857,6 +1857,28 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
             .any(|e| e["rule"].is_string()),
         "{shown}"
     );
+    // item 8 of the 2026-09-28 sequence research: each axis and each of its
+    // evidence rows says whether the header or the name decided it, derived
+    // from the tier it records
+    for a in shown["axes"].as_array().unwrap() {
+        let tier = a["tier"].as_str().unwrap();
+        assert_eq!(a["basis"], nils_pack::basis_of(tier), "{a}");
+        for e in a["evidence"].as_array().unwrap() {
+            assert_eq!(
+                e["basis"],
+                nils_pack::basis_of(e["tier"].as_str().unwrap()),
+                "{e}"
+            );
+        }
+    }
+    assert!(
+        shown["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["basis"] == "header" || a["basis"] == "name"),
+        "{shown}"
+    );
 
     // record 41: the vote matrix, on standard output and to a file
     let out = nils()
@@ -1926,6 +1948,16 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // the axis line ends with the basis beside the tier
+    let technique = axis(&shown, "technique");
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("technique "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.split_whitespace().last() == technique["basis"].as_str(),
+        "{line}"
+    );
     for item in &open {
         let id = item["id"].as_i64().unwrap();
         let kind = item["kind"].as_str().unwrap();
@@ -2004,6 +2036,7 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(axis(&shown, "base")["value"], "T2w", "{shown}");
     assert_eq!(axis(&shown, "base")["tier"], "decision", "{shown}");
+    assert_eq!(axis(&shown, "base")["basis"], "decision", "{shown}");
     assert!(
         items("open").iter().any(|i| i["kind"] == "base:decision"),
         "a rule that still disagrees is said out loud"

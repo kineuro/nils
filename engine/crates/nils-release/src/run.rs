@@ -556,6 +556,15 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         .iter()
         .filter_map(|(stack, p)| p.body_part.clone().map(|b| (*stack, b)))
         .collect();
+    // What every volume of an ASL image is, by stack, for the aslcontext.tsv
+    // BIDS requires beside it (MRI pack 0.11.0).
+    let asl_contexts: HashMap<i64, String> = named
+        .iter()
+        .filter_map(|(stack, p)| {
+            let n = p.bids.as_ref().ok()?;
+            n.aslcontext.clone().map(|t| (*stack, t))
+        })
+        .collect();
     // The dataset this is a version of, and the version before it, read before
     // anything is written.
     let dataset = dataset_of(registry.store(), settings.name, settings.root)?;
@@ -971,6 +980,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                         settings,
                         &mut report,
                         body_parts.get(&job.stack).map(String::as_str),
+                        asl_contexts.get(&job.stack).map(String::as_str),
                     ),
                 };
                 let mut wrote: Vec<Wrote> = Vec::new();
@@ -2968,6 +2978,7 @@ fn write_bids(
     settings: &Settings,
     report: &mut Report,
     body_part: Option<&str>,
+    aslcontext: Option<&str>,
 ) -> Vec<Result<Written, String>> {
     let root = settings.root;
     let staging = root.join(".nils-convert").join(job.stack.to_string());
@@ -3022,8 +3033,21 @@ fn write_bids(
                 add_to_sidecar(&into.join(format!("{stem}.json")), "BodyPart", part);
             }
             let mut out = refused;
+            let mut files = made.files;
+            // BIDS requires an `aslcontext.tsv` beside an ASL image, one row
+            // per volume the converter wrote. It shares the image's stem
+            // with `context.tsv` after it, so the version's state names it
+            // among the stack's files and a move carries it along.
+            if let Some(volume_type) = aslcontext
+                && stem.ends_with("_asl")
+            {
+                match crate::bids::aslcontext::write(&into, &stem, volume_type) {
+                    Ok(name) => files.push(name),
+                    Err(why) => out.push(Err(why)),
+                }
+            }
             let mut first = true;
-            for file in made.files {
+            for file in files {
                 let path = format!("{}/{file}", job.place.dir);
                 match std::fs::read(root.join(&path)) {
                     Ok(bytes) => out.push(Ok(Written {

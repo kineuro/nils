@@ -205,3 +205,58 @@ fn a_bids_suffix_waits_for_a_technique_the_pack_has() {
         "{e}"
     );
 }
+
+/// Pack 0.11.0: an `asl` suffix may say what every volume of the image is,
+/// which the release writes as the aslcontext.tsv beside it. One of the
+/// standard's volume types, and only on suffix `asl`.
+#[test]
+fn an_asl_suffix_says_its_volume_type_and_nothing_else_may() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.is_dir() {
+                copy(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let to = std::env::temp_dir().join(format!("nils-bids-aslcontext-{}", std::process::id()));
+    let adc = "    ADC: {datatype: dwi, suffix: ADC}";
+    let load = |line: &str| {
+        let _ = std::fs::remove_dir_all(&to);
+        copy(&packs().join("mri"), &to);
+        let bids = std::fs::read_to_string(to.join("bids.yml")).unwrap();
+        assert!(bids.contains(adc), "the test edits the ADC line");
+        std::fs::write(to.join("bids.yml"), bids.replacen(adc, line, 1)).unwrap();
+        let loaded = nils_pack::load(&to, None).map_err(|e| e.to_string());
+        let _ = std::fs::remove_dir_all(&to);
+        loaded
+    };
+    let pack = load("    ADC: {datatype: perf, suffix: asl, aslcontext: deltam}").unwrap();
+    assert_eq!(
+        pack.bids.from_construct["ADC"].aslcontext.as_deref(),
+        Some("deltam")
+    );
+    let e = match load("    ADC: {datatype: perf, suffix: asl, aslcontext: deltaM}") {
+        Ok(_) => panic!("loaded"),
+        Err(e) => e,
+    };
+    assert!(e.contains("deltaM is not a BIDS volume type"), "{e}");
+    assert!(e.contains("aslcontext"), "{e}");
+    let e = match load("    ADC: {datatype: perf, suffix: m0scan, aslcontext: m0scan}") {
+        Ok(_) => panic!("loaded"),
+        Err(e) => e,
+    };
+    assert!(e.contains("aslcontext is for suffix asl"), "{e}");
+    // and the shipped pack's suffixes load with or without one
+    let pack = nils_pack::load(&packs().join("mri"), None).unwrap();
+    for (value, named) in &pack.bids.from_construct {
+        if let Some(t) = &named.aslcontext {
+            assert_eq!(named.suffix, "asl", "{value}");
+            assert!(nils_pack::bids::ASL_VOLUME_TYPES.contains(&t.as_str()));
+        }
+    }
+}
