@@ -194,6 +194,7 @@ fn new<'a>(
         lease_seconds: 600,
         inputs: Default::default(),
         hold_back: None,
+        suggest: Some(nils_registry::campaign::Suggest::Rules),
     }
 }
 

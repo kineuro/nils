@@ -1860,7 +1860,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71],
+            [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72],
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2017,7 +2017,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71],
+            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2079,7 +2079,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65, 66, 67, 68, 69, 70, 71],
+            [63, 64, 65, 66, 67, 68, 69, 70, 71, 72],
             "{name}"
         );
         for (t, col) in [
@@ -2153,7 +2153,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65, 66, 67, 68, 69, 70, 71],
+            [64, 65, 66, 67, 68, 69, 70, 71, 72],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2202,7 +2202,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65, 66, 67, 68, 69, 70, 71],
+            [65, 66, 67, 68, 69, 70, 71, 72],
             "{name}"
         );
         assert!(
@@ -2243,7 +2243,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66, 67, 68, 69, 70, 71],
+            [66, 67, 68, 69, 70, 71, 72],
             "{name}"
         );
         assert!(
@@ -2281,7 +2281,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [67, 68, 69, 70, 71],
+            [67, 68, 69, 70, 71, 72],
             "{name}"
         );
         assert!(
@@ -2319,7 +2319,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [68, 69, 70, 71],
+            [68, 69, 70, 71, 72],
             "{name}"
         );
         assert!(
@@ -2353,7 +2353,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [69, 70, 71],
+            [69, 70, 71, 72],
             "{name}"
         );
         assert!(
@@ -2429,7 +2429,7 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [70, 71],
+            [70, 71, 72],
             "{name}"
         );
         assert!(
@@ -2484,7 +2484,7 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [71],
+            [71, 72],
             "{name}"
         );
         for table in ["series_mr", "stack_fingerprint"] {
@@ -2493,6 +2493,75 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
                 "{name}: {table}"
             );
         }
+        // twice is once
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// A campaign says what its reader shows beside each item as the answer
+/// suggested. A registry of schema 71 gains the column, and each campaign
+/// from before is written as what it showed: `imported` where suggestions
+/// were brought into it, `rules` otherwise.
+#[test]
+fn migration_72_writes_what_each_campaign_suggested_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (c, s, meta) = (
+            store.qualified("campaign"),
+            store.qualified("campaign_suggestion"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {c} DROP COLUMN suggest;
+                 UPDATE {meta} SET value = '71' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        for n in ["plain", "told"] {
+            store
+                .batch(&format!(
+                    "INSERT INTO {c} (name, owner, status, question, grain, source, epoch, \
+                     raters_per_item, adjudication, closes_into, lease_seconds, created_at) \
+                     VALUES ('{n}', 'cleo', 'open', '{{}}', 'stack', '{{}}', 1, 1, '{{}}', 'none', 60, \
+                     '2026-09-28T00:00:00Z')"
+                ))
+                .unwrap();
+        }
+        store
+            .batch(&format!(
+                "INSERT INTO {s} (campaign_id, item_id, value, author, imported_by, imported_at) \
+                 SELECT id, 1, 'brain', 'v0-model', 'cleo', '2026-09-28T00:00:00Z' FROM {c} WHERE name = 'told'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [72],
+            "{name}"
+        );
+        let said: Vec<(String, String)> = store
+            .query(&format!("SELECT name, suggest FROM {c} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    r.text(1).unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("plain".to_string(), "rules".to_string()),
+                ("told".to_string(), "imported".to_string())
+            ],
+            "{name}"
+        );
         // twice is once
         assert!(
             migrate::migrate(&mut store, Kind::Registry)

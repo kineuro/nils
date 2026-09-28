@@ -786,6 +786,8 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
     .unwrap();
     let n = made["items"].as_array().unwrap().len();
     assert!(n >= 4, "{made}");
+    // made without saying what it suggests, it suggests nothing
+    assert_eq!(made["suggest"], "none", "{made}");
     assert!(
         made["question"]["values"]
             .as_array()

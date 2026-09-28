@@ -207,6 +207,7 @@ fn new<'a>(
         lease_seconds: 600,
         inputs: Default::default(),
         hold_back: None,
+        suggest: Some(nils_registry::campaign::Suggest::Imported),
     }
 }
 
@@ -610,4 +611,56 @@ fn the_seed_holds_back_about_its_share_item_by_item() {
     );
     assert!((0..100).all(|i| !campaign::drawn_back("s", i, 0.0)));
     assert!((0..100).all(|i| campaign::drawn_back("s", i, 1.0)));
+}
+
+/// A campaign says when it is made what its raters are shown. One made
+/// without saying shows nothing, and neither it nor one made to show the
+/// rules takes suggestions later: bringing them in is refused, and nothing
+/// is written.
+#[test]
+fn a_campaign_made_without_suggestions_takes_none_later() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let (q, adj) = (body_part(), json!({"when": "never"}));
+        for (n, suggest) in [
+            ("unsaid", None),
+            ("none", Some(campaign::Suggest::None)),
+            ("rules", Some(campaign::Suggest::Rules)),
+        ] {
+            let mut made = new(n, &q, &adj, Items::Stacks(ids.clone()), 1);
+            made.suggest = suggest;
+            let c = campaign::create(reg, &made).unwrap();
+            let said = suggest.unwrap_or_default();
+            assert_eq!(c.suggest, said, "{name}: {n}");
+            assert_eq!(c.as_json()["suggest"], said.name(), "{name}: {n}");
+            let names = names();
+            let refused = suggestion::import(
+                reg,
+                &Import {
+                    campaign: c.id,
+                    rows: &[by_stack(ids[0], Some("brain"), &[], Some("v0-model"))],
+                    author: None,
+                    source: Some("test.tsv"),
+                    who: "cleo@lab",
+                    names: &names,
+                    dry_run: false,
+                },
+                &at(0, 0),
+            )
+            .unwrap_err();
+            assert!(
+                refused.to_string().contains("suggest imported"),
+                "{name}: {n}: {refused}"
+            );
+            assert!(
+                suggestion::of_campaign(reg.store(), c.id)
+                    .unwrap()
+                    .is_empty(),
+                "{name}: {n}"
+            );
+        }
+        assert_eq!(campaign::Suggest::default(), campaign::Suggest::None);
+    }
 }
