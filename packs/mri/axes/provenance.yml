@@ -78,8 +78,17 @@ values:
     detection:
       exclusive: is_swi
       combination: [has_swi, is_derived]
+  # MRI pack 0.11.0, Nima's ruling 7 (2026-09-27): an ADC, eADC or trace the
+  # scanner made from a plain DWI is RawRecon with its construct; only a
+  # tensor's outputs (FA, MD, colour FA, a trace of a DTI) are DTIRecon, and
+  # never the acquisition itself. On the 2026-09-28 re-measures Philips
+  # `dADC` maps and a GE DTI acquisition were DTIRecon.
   DTIRecon:
     terms: ['diffusion reconstruction', 'tensor', 'DTI']
+    requires:
+      all:
+        - {not: is_plain_dwi_map}
+        - {any: [is_derived, is_diffusion_derived, has_fa]}
     keywords:
       - adc map
       - apparent diffusion
@@ -111,9 +120,11 @@ values:
   # RawRecon and what the scanner computed from them takes the product. An
   # ASL series as acquired is RawRecon; its CBF map, and the perfusion-weighted
   # image the scanner subtracts label from control, are ASLRecon.
+  # MRI pack 0.11.0: Philips writes its difference image ORIGINAL though
+  # the scanner computed it, so the DeltaM flag stands for derived.
   ASLRecon:
     terms: ['ASL reconstruction', 'CBF from ASL']
-    requires: {any: [is_derived, has_cbf, is_subtraction, is_ttest]}
+    requires: {any: [is_derived, has_cbf, is_subtraction, is_ttest, is_asl_difference]}
     keywords:
       - asl
       - pcasl
@@ -121,6 +132,7 @@ values:
       - arterial spin
     detection:
       exclusive: is_asl
+      combination: [is_asl_difference]
   # The same ruling: a BOLD time series as acquired is RawRecon; an fMRI map
   # the scanner computed (a t-test map, a derived image) is BOLDRecon. MRI
   # pack 0.10.0, Nima's ruling (2026-09-28): "if Motion Correction is
@@ -152,8 +164,15 @@ values:
       - locator
       - versikt
       - kalibrering
+      # MRI pack 0.11.0: `3-pl`, `Ö-SIKT` and `SUR**` as the normalizer
+      # spells them, all missed on the 2026-09-28 re-measure.
+      - '3 - pl'
+      - '- sikt'
+      - surstar
     detection:
       exclusive: is_localizer
+      # MRI pack 0.11.0: a tri-plane scout by its shape (flags.yml, 12).
+      combination: [is_tri_plane_scout]
   ProjectionDerived:
     terms: ['projection', 'MIP', 'MinIP', 'MPR', 'reformat']
     keywords:

@@ -36,8 +36,12 @@ flags:
 
   has_mpr_in_text:
     # 'mpr' as a word, and only on DERIVED: on an ORIGINAL it is the tail of
-    # MPRAGE, on a DERIVED it is a reformat.
-    all: [image_type.is_derived, {text: search_text, matches: '\bmpr\b'}]
+    # MPRAGE, on a DERIVED it is a reformat. MRI pack 0.11.0: or on a
+    # projection image, which is how Philips writes its reformats, ORIGINAL
+    # (`MPR Ax`, `ORIGINAL\PRIMARY\PROJECTION IMAGE\M\FFE`).
+    all:
+      - any: [image_type.is_derived, image_type.is_projection]
+      - {text: search_text, matches: '\bmpr\b'}
 
   has_inv1_in_text: {text: search_text, matches: '\binv1\b'}
   has_inv2_in_text: {text: search_text, matches: '\binv2\b'}
@@ -158,6 +162,10 @@ flags:
       - sequence_name.is_tse
       - sequence_name.is_tse_body
       - sequence_name.is_fse
+      # MRI pack 0.11.0: Siemens `tir` is the turbo inversion recovery
+      # (TIRM), whose train an old `tir1i7m` with ScanningSequence IR alone
+      # and 27 echoes did not otherwise show; it was written SE.
+      - sequence_name.is_ir_tse
       - all: [sequence_variant.has_segmented_kspace, scanning_sequence.has_se]
       - all: [sequence_variant.has_segmented_kspace, scanning_sequence.has_ir,
               {not: scanning_sequence.has_gre}]
@@ -191,10 +199,20 @@ flags:
                      scan_options.has_t2flair_gems, image_type.has_flair_synthetic]}
   is_dir:     {any: [image_type.has_dir, image_type.has_dir_synthetic]}
   is_epi_diff_resolve: sequence_name.is_epi_diff_resolve
+  # MRI pack 0.11.0: GE leaves a b value of 1000 in its private diffusion
+  # element on series that are no diffusion at all (a T1 spin echo and a
+  # three-plane SSFSE localizer in the 2026-09-28 re-measure), so on GE the
+  # b value alone counts only where the header does not state a readout
+  # that is not EPI.
   is_dwi:
-    any: [sequence_name.is_epi_diff, sequence_name.is_epi_diff_resolve,
-          sequence_name.is_epi_diff_b0, image_type.has_diffusion,
-          has_positive_b_value]
+    any:
+      - sequence_name.is_epi_diff
+      - sequence_name.is_epi_diff_resolve
+      - sequence_name.is_epi_diff_b0
+      - image_type.has_diffusion
+      - all:
+          - has_positive_b_value
+          - {not: {all: [says_not_epi, {text: manufacturer, prefix: ge}]}}
   is_bold:    {all: [image_type.has_fmri, {not: image_type.has_phase}]}
   is_asl:     image_type.has_asl
   is_perfusion: image_type.has_perfusion
@@ -216,7 +234,10 @@ flags:
   # which fits GE's multi-phase, and GE documents no meaning for it (MRI
   # pack 0.10.0).
   has_mag_prepared:     sequence_variant.has_mag_prepared
-  has_mtc:              {any: [sequence_variant.has_mtc, scan_options.has_mt]}
+  # MRI pack 0.11.0: GE writes magnetisation transfer as `MT_GEMS` in
+  # ScanOptions (a GE TOF in the 2026-09-28 re-measure).
+  has_mtc:              {any: [sequence_variant.has_mtc, scan_options.has_mt,
+                               scan_options.has_mt_gems]}
   has_oversampling:     sequence_variant.has_oversampling
   # FS or SFS only; never GE's readout-direction tokens (parsers.yml)
   has_fat_sat:          scan_options.has_fat_sat
@@ -230,8 +251,19 @@ flags:
 
   # === 4. acquisition properties ============================================
 
-  is_3d: {any: [{field: mr_acquisition_type, eq: '3D'}, image_type.is_3d_view]}
-  is_2d: {any: [{field: mr_acquisition_type, eq: '2D'}, image_type.is_2d_view]}
+  # MRI pack 0.11.0: `DIS3D` and `DIS2D` in Siemens' image type say which
+  # distortion correction ran, not how the volume was acquired: a 2D
+  # `*tir2d1_21` FLAIR written `DIS3D` was a 3D-TSE (the 2026-09-28
+  # re-measure). They stand in only where the file does not state the
+  # acquisition type.
+  is_3d:
+    any:
+      - {field: mr_acquisition_type, eq: '3D'}
+      - all: [{field: mr_acquisition_type, present: false}, image_type.is_3d_view]
+  is_2d:
+    any:
+      - {field: mr_acquisition_type, eq: '2D'}
+      - all: [{field: mr_acquisition_type, present: false}, image_type.is_2d_view]
   # v0 reads these three off a stack key its fingerprint query never selects,
   # so all three are permanently false there. The rule below is the one v0
   # meant, against the fingerprint column Wave 2 slice 1 added; the difference
@@ -316,7 +348,10 @@ flags:
 
   # === 7. post-processing ===================================================
 
-  is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin, image_type.has_maximum]}
+  # MRI pack 0.11.0: GE writes a TOF's MIP as `PROJECTION IMAGE\VASCULAR`
+  # (`PJN:` in its name) and nothing else.
+  is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin, image_type.has_maximum,
+                        {all: [image_type.is_projection, image_type.is_vascular]}]}
   is_minip:      image_type.is_minip
   is_projection: image_type.is_projection
   # A curved planar reformat is a reformat: v0 parses `CPR` and reads it
@@ -491,8 +526,10 @@ flags:
     any:
       - has_contrast_tag
       - {text: technique_text, matches: '(^|[^a-z])(gd|gad|gado)([^a-z]|$)'}
-      - all: [{text: search_text, any_substring: {bucket: contrast_positive}},
-              {not: {text: search_text, any_substring: {bucket: contrast_negative}}}]
+      # MRI pack 0.11.0: `technique_text`, so GE's exam-level ProtocolName
+      # (`MS+GD`) says nothing about a series.
+      - all: [{text: technique_text, any_substring: {bucket: contrast_positive}},
+              {not: {text: technique_text, any_substring: {bucket: contrast_negative}}}]
 
   # --- DSC. A perfusion image type, a map only DSC makes (not CBF, which
   # ASL makes too), or an EPI time series given contrast or named for it.
@@ -559,11 +596,21 @@ flags:
       - has_gre
       - {not: has_epi}
       - any: [has_spoiled, is_flash]
-      - {field: temporal_positions, ge: 10}
+      - any:
+          - {field: temporal_positions, ge: 10}
+          # MRI pack 0.11.0: a classic Siemens dynamic FLASH (`fldyn3d`)
+          # writes each time point as a series of its own, so no series holds
+          # 10 of them. Its name with a time-to-contrast in its words
+          # (`TTC=9.6s`, one per phase) stands for the run: a dynamic VIBE
+          # with Clariscan was VI-GRE on the re-measure of 2026-09-28. Not a
+          # map computed from one, and not a multiphase body study, which
+          # names its phases `dyn` and holds at most 5.
+          - all: [sequence_name.is_fldyn, dynamic_words, {not: is_perfusion_derived}]
       - {not: angio_words}
       - {not: presto_words}
       - {not: is_tof}
       - {not: is_pc}
+  dynamic_words: {text: technique_text, matches: '(^|[^a-z])ttc([^a-z]|$)'}
 
   # --- MoCo. Nima's ruling (2026-09-28): a motion-corrected series written
   # ORIGINAL\PRIMARY is not derived, so its provenance follows value 1 of
@@ -572,3 +619,131 @@ flags:
   # (dcm2niix issue 243; on the archive `ORIGINAL\PRIMARY\PERFUSION\NONE\
   # DIS2D\RELCBF`), and its own token decides it.
   is_derived_moco: {all: [has_moco, is_derived]}
+
+  # === 12. MRI pack 0.11.0: the new constructs and the re-measure's fixes =====
+  # `studies/2026-09-28-sequence-research/decisions.md` (ruled 2026-09-28)
+  # and the rule bugs of `studies/2026-09-28-judge-remeasure/` and
+  # `-remeasure-2/`, in the design repository.
+
+  # --- localizers the words and the tri-plane shape say. The normalizer
+  # spells `3-pl` as `3 - pl`, `Ö-SIKT` as `- sikt` and `SUR**` as
+  # `surstarstar`, so the provenance keywords take those spellings; and a
+  # series split by orientation into stacks of at most 5 slices each, with
+  # no projection, angiography or cholangiography in it, is a tri-plane
+  # scout whatever its words (Philips `sSSh_TSE` of 3 slices a plane,
+  # `T2W_TSE/SUR**` of 5).
+  is_tri_plane_scout:
+    all:
+      - {field: split_reason, eq: multi_orientation}
+      - {field: n_slices, le: 5}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: is_projection}
+      - {not: is_mpr}
+      - {not: is_derived}
+      - {not: {text: search_text, matches: '(^|[^a-z])(mip|tof|mrcp|mra|angio)([^a-z]|$)'}}
+
+  # --- a 3D turbo spin echo from the train where the name says nothing. A
+  # GE CUBE FLAIR and its reformats state SE\IR, segmented k-space, 3D and
+  # an echo train of 140 to 180; a 2D FLAIR's train is 1 to about 30 and a
+  # single shot's is not IR-prepared.
+  is_3d_tse:
+    any:
+      - all: [is_tse, is_3d]
+      - all:
+          - is_3d
+          - has_se
+          - {not: has_epi}
+          - {not: is_haste}
+          - {field: echo_train_length, ge: 100}
+
+  # --- a gradient echo named T2 is T2*-weighted: `t2_fl2d_tra_hemo`, a FLASH
+  # of TE 26 ms, was T2w by its word [P8, MQ8].
+  is_t2_named_gre:
+    all:
+      - has_gre
+      - {not: has_se}
+      - {not: has_epi}
+      - {field: echo_time, gt: 15}
+      - {text: search_text, matches: '(^|[^a-z0-9])t2w?([^a-z0-9*]|$)'}
+      - {not: {text: search_text, matches: 't2\*|t2star|t2 star'}}
+
+  # --- diffusion: the tensor's outputs against a plain DWI's. Nima's ruling 7
+  # (2026-09-27): an ADC or trace the scanner made from a plain DWI is
+  # RawRecon; an FA or other tensor map, or a trace of a DTI, is DTIRecon.
+  dti_words: {text: search_text, matches: '(^|[^a-z])(dti|tensor|hardi|fractional anisotropy|colfa|color fa|colour fa|md map|mean diffusivity)'}
+  is_plain_dwi_map:
+    all:
+      - any: [has_adc, has_eadc, has_trace, image_type.has_exp_diffusion, image_type.has_calc_bval]
+      - {not: has_fa}
+      - {not: dti_words}
+  eadc_words: {text: search_text, matches: 'eadc|exp adc|exponential adc'}
+
+  # --- ASL: the difference image (DeltaM), the M0 scan, and GE's two passes
+  # from its private ASL element (0043,xxA3): PSEUDOCONTINUOUS on the
+  # perfusion-weighted pass, CONTINUOUS on the proton-density one (dcm2niix;
+  # both research reports).
+  ge_asl_pw: {text: ge_asl_contrast_technique, matches: '^\s*pseudocontinuous\s*$'}
+  ge_asl_pd: {text: ge_asl_contrast_technique, matches: '^\s*continuous\s*$'}
+  # The label-control difference: Siemens `ASL\SUB`, `ASL\SUBTRACTION` and
+  # the `TTEST` it writes on the same image, GE `PERFUSION_ASL` or its PW
+  # pass, Philips' `PERFUSION` image of an ASL (written ORIGINAL though
+  # computed). Never a CBF map, which is its own construct.
+  is_asl_difference:
+    all:
+      - {not: has_cbf}
+      - {not: is_qmap}
+      - any:
+          - all: [is_asl, {any: [is_subtraction, is_ttest]}]
+          - {parser: image_type, token: PERFUSION_ASL}
+          - ge_asl_pw
+          - all: [{text: manufacturer, prefix: philips}, is_perfusion, {any: [is_asl, asl_words]}]
+  # GE's PD pass, from the header alone.
+  is_asl_m0_stated:
+    all:
+      - is_asl_m0
+      - any:
+          - ge_asl_pd
+          - all: [{text: manufacturer, prefix: ge}, is_asl, is_original]
+  ge_pepolar: {all: [is_epi_fieldmap_ref, {text: ge_pulse_sequence_name, matches: 'pepolar'}]}
+  is_sbref_numbered: {all: [is_sbref, {text: manufacturer, prefix: siemens}, {field: series_number, ge: 1000}]}
+  m0_words: {text: technique_text, matches: '(^|[^a-z0-9])(m0|m0scan|m0 scan|m0 image)([^a-z0-9]|$)'}
+  # The M0 (proton-density) scan of an ASL: GE's PD pass (`ORIGINAL\PRIMARY\
+  # ASL`, or (0043,xxA3) CONTINUOUS), or a series named M0 beside an ASL
+  # readout, never a map, a synthetic image or a SyMRI acquisition.
+  is_asl_m0:
+    all:
+      - {not: is_asl_difference}
+      - {not: has_cbf}
+      - {not: is_qmap}
+      - {not: is_synthetic}
+      - {not: is_mdme}
+      - {not: has_pd_map}
+      - any:
+          - all: [ge_asl_pd, {not: is_derived}]
+          - all: [{text: manufacturer, prefix: ge}, is_asl, is_original,
+                  {not: {parser: image_type, token: PERFUSION_ASL}}, {not: ge_asl_pw}]
+          - all: [m0_words, {any: [is_asl, asl_words, has_epi, is_3d, is_spiral]}]
+
+  # --- an EPI reference with the phase encoding reversed, for distortion
+  # correction (BIDS `fmap/_epi`): a few volumes of EPI with no diffusion,
+  # perfusion or ASL, named for it or GE's `epi_pepolar` sequence
+  # (0019,xx9C). GE's `rsfMRI_FieldMap` of 4 time points was BOLD before
+  # 0.10.0 and EPI after it; this names what it is.
+  fieldmap_ref_words:
+    text: search_text
+    matches: 'pepolar|topup|blip|(^|[^a-z])(fmap|field ?map|reverse|rev ?pe|revpe|opposite ?pe|ap|pa)([^a-z]|$)'
+  is_epi_fieldmap_ref:
+    all:
+      - has_epi
+      - is_few_volumes
+      - {not: is_dwi}
+      - {not: is_asl}
+      - {not: is_perfusion}
+      - {not: is_perfusion_derived}
+      - {not: is_sbref}
+      - {not: is_derived}
+      - {not: is_swi}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: 'pepolar'}
+          - fieldmap_ref_words

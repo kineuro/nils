@@ -22,6 +22,7 @@ order:
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
+  - 'construct:m0'
   - 'technique:ASL'
   - 'technique:Perfusion-EPI'
   - 'technique:DCE'
@@ -57,6 +58,7 @@ order:
   - 'keywords:T1rho'
   - 'keywords:T2rho'
   - 'keywords:T2starw'
+  - 'gre:t2_named'
   - 'keywords:T2w'
   - 'keywords:PDw'
   - 'keywords:T1w'
@@ -164,6 +166,17 @@ rules:
     confidence: 0.95
     why: 'the DWI-EPI technique implies a DWI base contrast'
 
+  # MRI pack 0.11.0: an ASL's M0 scan is the proton-density reference a CBF
+  # quantification divides by, so it is PDw and not the perfusion weighting
+  # of its technique [P20; both research reports of 2026-09-28]. Before the
+  # ASL rule, which would take it.
+  'construct:m0':
+    clauses:
+      - {when: {axis: construct, is: M0}, cite: 'an ASL M0 scan', source: construct}
+    set: {base: 'PDw'}
+    confidence: 0.95
+    why: 'the M0 scan of an ASL is its proton-density reference'
+
   # [RP5, MQ2, D1, D2]
   'technique:ASL':
     clauses:
@@ -202,10 +215,10 @@ rules:
   # technique [D6, RP2, RP5, MQ2]
   'construct:perfusion':
     clauses:
-      - {when: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}]}, cite: 'a perfusion map', source: construct}
+      - {when: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}, {axis: construct, is: DeltaM}]}, cite: 'a perfusion map', source: construct}
     set: {base: 'PWI'}
     confidence: 0.95
-    why: 'CBF, CBV, MTT, Tmax and TTP are perfusion parameters, from DSC, DCE or ASL'
+    why: 'CBF, CBV, MTT, Tmax and TTP are perfusion parameters, from DSC, DCE or ASL, and an ASL difference image is perfusion-weighted'
 
   # SWI, SWIp, SWAN, FSBB and BSI are the vendors' susceptibility-weighted
   # images [MQ5, RP6, P4]
@@ -395,6 +408,15 @@ rules:
     clauses:
       - {keywords: ['t2*', 't2star', 't2 star', 't2*w', 't2*-w'], tier: keywords}
     set: {base: 'T2starw'}
+
+  # MRI pack 0.11.0: a gradient echo named T2 is T2*-weighted [P8, MQ8]:
+  # `t2_fl2d_tra_hemo`, a FLASH of TE 26 ms, was T2w by its word on the
+  # 2026-09-28 re-measure. Before the T2w words, which would take it.
+  'gre:t2_named':
+    clauses:
+      - {flag: is_t2_named_gre, tier: keywords}
+    set: {base: 'T2starw'}
+    why: 'a gradient echo with a long echo time named T2 is T2*-weighted'
 
   'keywords:T2w':
     clauses:

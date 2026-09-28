@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.10.0");
+    assert_eq!(pack.id(), "mri@0.11.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -24,19 +24,21 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        227,
-        "v0's 220 predicates, all of them, the two record 37 added, and the \
+        229,
+        "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
-         Siemens stems"
+         Siemens stems, and the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
+         dynamic FLASH"
     );
     assert_eq!(
         pack.flags.len(),
-        182,
+        199,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
-         dual-echo TSE, and pack 0.10.0 the 36 of fMRI, perfusion and the \
-         gradient-echo family"
+         dual-echo TSE, pack 0.10.0 the 36 of fMRI, perfusion and the \
+         gradient-echo family, and pack 0.11.0 the 17 of its new constructs \
+         and the re-measures' fixes"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

@@ -30,13 +30,17 @@ rules:
     set: {post_contrast: given}
     why: 'the administration was recorded in the file, so it happened'
 
+  # MRI pack 0.11.0: the words are read from `technique_text`, which leaves
+  # GE's ProtocolName out: it names the exam (`MS+GD`, `MS -/+ gd`), and on
+  # the 2026-09-28 re-measures it made pre-contrast STIR and FLAIR series
+  # given (normalize-technique.yml).
   negative:
     clauses:
-      - {keywords: {bucket: contrast_negative}, tier: keywords}
+      - {keywords: {bucket: contrast_negative}, field: technique_text, tier: keywords}
     set: {post_contrast: not_given}
     why: 'a word saying no beats a word saying yes'
 
   positive:
     clauses:
-      - {keywords: {bucket: contrast_positive}, tier: keywords}
+      - {keywords: {bucket: contrast_positive}, field: technique_text, tier: keywords}
     set: {post_contrast: given}

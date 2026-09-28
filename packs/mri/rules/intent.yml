@@ -87,6 +87,9 @@ rules:
             - {axis: construct, is: MTT}
             - {axis: construct, is: Tmax}
             - {axis: construct, is: TTP}
+            # MRI pack 0.11.0: the ASL difference image and its M0 scan
+            - {axis: construct, is: DeltaM}
+            - {axis: construct, is: M0}
         cite: 'a perfusion-derived construct'
         source: construct
     set: {directory_type: perf}
@@ -94,6 +97,8 @@ rules:
   construct_fmap:
     clauses:
       - {when: {axis: construct, is: B0map}, cite: B0map, source: construct}
+      # MRI pack 0.11.0: a reversed-phase EPI reference (BIDS fmap/_epi)
+      - {when: {axis: construct, is: FieldmapRef}, cite: FieldmapRef, source: construct}
     set: {directory_type: fmap}
 
   # v0 also has a PhaseMap rule here. It is unreachable: no construct of that

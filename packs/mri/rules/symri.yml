@@ -198,19 +198,19 @@ rules:
     clauses:
       - {flag: has_phase, tier: exclusive}
       - {keywords: [phase], tier: keywords}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Phase], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Phase, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   magnitude:
     clauses:
       - {flag: has_magnitude, tier: exclusive}
       - {keywords: [magnitude], tier: keywords}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   fallback:
     clauses:
       - {when: true, cite: SyMRI, source: provenance}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.7
     why: 'a SyMRI acquisition whose output is unclear is the raw source data'

@@ -30,6 +30,9 @@ derive:
   swi_technique:
     axis: technique
     cases:
+      # MRI pack 0.11.0: a gradient-echo EPI SWI (Siemens `epfid3d`, Philips
+      # FEEPI SWIp) is GRE-EPI, as its readout is anywhere else.
+      - {when: is_gre_epi, value: GRE-EPI}
       - {when: has_epi, value: EPI}
       - {when: has_gre, value: GRE}
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
