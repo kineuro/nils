@@ -194,3 +194,36 @@ cases:
       scan_options: 'SAT_GEMS\FS\FSS_GEMS'
     flags:
       has_fat_sat: true
+
+  # --- pack 0.10.0
+  - name: GE's MP_GEMS on an EPI is no magnetisation preparation
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\GR'
+      sequence_variant: SS
+      scan_options: 'SAT_GEMS\MP_GEMS\EPI_GEMS\FS'
+    flags:
+      has_mag_prepared: false
+      has_epi: true
+
+  - name: TurboFLASH is not FLASH, whatever its name holds inside it
+    stack:
+      text_sequence_name: '*tfl3d1_16ns'
+    flags:
+      is_flash: false
+      is_tfl: true
+
+  - name: a WIP FLASH is FLASH
+    stack:
+      text_sequence_name: 'wipfl3d2'
+    flags:
+      is_flash: true
+
+  - name: a CISS written SE is no spin echo
+    stack:
+      scanning_sequence: SE
+      text_sequence_name: '*ci3d1'
+    flags:
+      has_se: false
+      has_gre: true
+      is_ciss: true

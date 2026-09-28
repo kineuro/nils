@@ -851,3 +851,37 @@ fn a_hint_names_one_value_and_may_cite_what_contradicts_it() {
         "{e}"
     );
 }
+
+/// MRI pack 0.10.0: a normalized text may leave one vendor's value of a field
+/// out, because GE writes the exam's protocol into `ProtocolName`. The
+/// corpus of the pack below is what says it works, for both vendors, and a
+/// key the entry does not know is refused.
+#[test]
+fn a_normalized_text_leaves_out_the_field_a_vendor_fills_with_something_else() {
+    let d = good();
+    d.file(
+        "pack.yml",
+        "pack: t\nversion: 1.0.0\ncontract: 1\nmodality: MR\nparsers: [parsers.yml]\nflags: [flags.yml]\nnormalize: [normalize.yml]\n",
+    )
+    .file(
+        "normalize.yml",
+        "normalize: series_text\nfrom:\n  - text_series_description\n  - {field: text_protocol_name, unless_manufacturer: [GE]}\n",
+    )
+    .file(
+        "flags.yml",
+        "flags:\n  is_original: image_type.is_original\n  says_fmri: {text: series_text, substring: fmri}\n",
+    )
+    .file(
+        "corpus/cases.yml",
+        "cases:\n  - name: a GE exam protocol says nothing about the series\n    stack: {manufacturer: GE MEDICAL SYSTEMS, text_series_description: 'Sag T1', text_protocol_name: 'fmri exam'}\n    flags: {says_fmri: false}\n  - name: another vendor's protocol name is the series' own\n    stack: {manufacturer: SIEMENS, text_series_description: 'Sag T1', text_protocol_name: 'fmri exam'}\n    flags: {says_fmri: true}\n  - name: and the series' own words count for GE\n    stack: {manufacturer: GE MEDICAL SYSTEMS, text_series_description: 'rs fmri'}\n    flags: {says_fmri: true}\n",
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(pack.cases, 3);
+
+    d.file(
+        "normalize.yml",
+        "normalize: series_text\nfrom:\n  - {field: text_protocol_name, unless_vendor: [GE]}\n",
+    );
+    let why = refusal(&d);
+    assert!(why.contains("unless_vendor is not a key here"), "{why}");
+}
