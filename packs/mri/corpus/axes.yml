@@ -708,7 +708,10 @@ cases:
   # (`studies/2026-09-25-pack-constraints/` in the design repository) and the
   # round 4 phrases. Every stack is invented.
 
-  - name: the second inversion of an MP2RAGE is proton-density weighted
+  # Pack 0.9.0, Nima's ruling: both inversions take base none; the
+  # construct says what they are, and BIDS files them as inv-1 and inv-2 of
+  # the suffix MP2RAGE [B1]. The uniform image is the T1-weighted one.
+  - name: the second inversion of an MP2RAGE has no base contrast
     stack:
       image_type: 'ORIGINAL\PRIMARY\M'
       scanning_sequence: 'GR\IR'
@@ -717,9 +720,9 @@ cases:
     axes:
       construct: INV2
       technique: MP2RAGE
-      base: PDw
+      base: ''
 
-  - name: the first inversion of an MP2RAGE is T1-weighted
+  - name: the first inversion of an MP2RAGE has no base contrast either
     stack:
       image_type: 'ORIGINAL\PRIMARY\M'
       scanning_sequence: 'GR\IR'
@@ -728,12 +731,23 @@ cases:
     axes:
       construct: INV1
       technique: MP2RAGE
+      base: ''
+
+  - name: the uniform image of an MP2RAGE is T1-weighted
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\UNI'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: 3D
+      text_series_description: 'mp2rage_sag_UNI_Images'
+    axes:
+      construct: Uniform
+      technique: MP2RAGE
       base: T1w
 
   # A reader, 2026-09-27: an MP2RAGE whose name also says T1, and whose image
   # comments say which inversion it is. Invented, in the shape such a
   # protocol takes.
-  - name: an MP2RAGE second inversion named T1 is still INV2 and proton-density weighted
+  - name: an MP2RAGE second inversion named T1 is still INV2, with no base
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\DIS3D\NORM'
       scanning_sequence: GR
@@ -752,9 +766,9 @@ cases:
       provenance: RawRecon
       construct: INV2
       technique: MP2RAGE
-      base: PDw
+      base: ''
 
-  - name: the same protocol's first inversion is INV1 and T1-weighted
+  - name: the same protocol's first inversion is INV1, with no base
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\DIS3D\NORM'
       scanning_sequence: GR
@@ -773,7 +787,7 @@ cases:
       provenance: RawRecon
       construct: INV1
       technique: MP2RAGE
-      base: T1w
+      base: ''
 
   - name: an MP2RAGE output that says nothing else of its sequence is an MP2RAGE
     stack:
@@ -782,7 +796,7 @@ cases:
     axes:
       construct: INV2
       technique: MP2RAGE
-      base: PDw
+      base: ''
 
   - name: a DCE series is a technique of its own, perfusion-weighted, and had contrast
     stack:
