@@ -26,6 +26,7 @@ pub mod knobs;
 pub mod probe;
 pub mod progress;
 pub mod report;
+pub mod reread;
 pub mod resolve;
 pub mod resume;
 pub mod rss;

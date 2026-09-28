@@ -139,6 +139,13 @@ fn run(
     cancel: &Cancel,
 ) -> Result<Report, DigestError> {
     let start = Instant::now();
+    // A re-read finds its files in the registry, so it has none to do
+    // without.
+    if !settings.reread.is_empty() && registry.is_none() {
+        return Err(DigestError::Message(
+            "--reread reads again the files the registry holds, so it has no dry run".into(),
+        ));
+    }
     // The root's failure is the job's, before anything is recorded.
     if let Err(error) = std::fs::read_dir(&settings.root) {
         return Err(DigestError::Root {
@@ -334,8 +341,15 @@ fn execute(
     let progress = Progress::new(start, settings.json, dry);
     let script = Scripted::from_env();
 
+    let reread = !settings.reread.is_empty();
     let records = match (registry.as_deref(), run) {
-        (Some(reg), Some(r)) => Some(Records::new(reg.open_reader()?, r.source_id)?),
+        (Some(reg), Some(r)) if !reread => Some(Records::new(reg.open_reader()?, r.source_id)?),
+        _ => None,
+    };
+    // The 2026-09-28 sequence research: a re-read's files come from the
+    // registry, through a connection of their own, in place of the walk.
+    let feeder = match (registry.as_deref(), run) {
+        (Some(reg), Some(r)) if reread => Some((reg.open_reader()?, r.source_id)),
         _ => None,
     };
     // Record 26 §4: the dataset whose pseudonymised tree this run reads,
@@ -374,12 +388,25 @@ fn execute(
             let root = root.clone();
             let threads = settings.walk_threads.max(1);
             s.spawn(move || {
-                let result = walk(&root, threads, &filter, &walk_tx, cancel);
+                // a re-read walks nothing: its files come from the registry
+                let result = match reread {
+                    true => Ok(()),
+                    false => walk(&root, threads, &filter, &walk_tx, cancel),
+                };
                 drop(walk_tx);
                 result
             })
         };
-        let resumer = {
+        let resumer = if let Some((store, source_id)) = feeder {
+            let root = &root;
+            let manufacturers = &settings.reread;
+            s.spawn(move || {
+                let result =
+                    crate::reread::feed(store, source_id, root, manufacturers, &task_tx, cancel);
+                drop(task_tx);
+                result
+            })
+        } else {
             let stage = resume::Stage {
                 root: &root,
                 records,
@@ -554,8 +581,12 @@ fn finish(
     store.begin()?;
     let result = (|| -> Result<Report, DigestError> {
         // Only a complete walk of everything says what is gone: no directory
-        // unlisted, no file left out by the filter, no stop before the end.
-        if cancelled.is_none() && counts.walk_errors == 0 && matches!(settings.filter, Filter::All)
+        // unlisted, no file left out by the filter, no stop before the end,
+        // and a walk at all, which a re-read is not.
+        if cancelled.is_none()
+            && counts.walk_errors == 0
+            && matches!(settings.filter, Filter::All)
+            && settings.reread.is_empty()
         {
             let d = store.dialect();
             let sql = format!(
@@ -575,6 +606,11 @@ fn finish(
                     Param::Int(run.batch_id),
                 ],
             )?;
+        }
+        // A re-read changed series rows under stacks whose instance counts
+        // did not move, which is what the fingerprint takes for fresh.
+        if !settings.reread.is_empty() {
+            crate::reread::stale_fingerprints(store, &settings.reread)?;
         }
         let mut report = Report::new(setup, counts, elapsed, peak_rss());
         report.written = Some(written.clone());

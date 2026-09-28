@@ -110,6 +110,13 @@ pub static KNOBS: &[Knob] = &[
         note: "the private elements read into series_private, by creator and offset",
         settable_since: 4,
     },
+    Knob {
+        name: "reread",
+        kind: "list of manufacturers",
+        default: "none",
+        note: "read again only the files of these manufacturers' MR series, found in the registry",
+        settable_since: 4,
+    },
 ];
 
 /// The slice this build implements; knobs with a later `settable_since` hold
@@ -174,6 +181,10 @@ pub struct Settings {
     /// pack is given: the digest reads no private element on its own.
     pub ingest: Vec<nils_dicom::private::Ingest>,
     pub ingest_from: Option<String>,
+    /// The 2026-09-28 sequence research: read again, from the registry and
+    /// without a walk, only the files of the MR series whose study names one
+    /// of these manufacturers (`reread`). Empty for an ordinary run.
+    pub reread: Vec<String>,
 }
 
 impl Settings {
@@ -197,6 +208,7 @@ impl Settings {
             json: false,
             ingest: Vec::new(),
             ingest_from: None,
+            reread: Vec::new(),
         }
     }
 
@@ -216,6 +228,10 @@ impl Settings {
             "private" => match &self.ingest_from {
                 Some(pack) => format!("{} element(s) from {pack}", self.ingest.len()),
                 None => "none".to_string(),
+            },
+            "reread" => match self.reread.is_empty() {
+                true => "none".to_string(),
+                false => self.reread.join(", "),
             },
             _ => String::new(),
         }
@@ -238,6 +254,7 @@ impl Settings {
             "retry_quarantine": self.retry_quarantine,
             "name": self.name,
             "restart": self.restart,
+            "reread": self.reread,
             "private": {
                 "pack": self.ingest_from,
                 "elements": self.ingest.iter().map(|i| i.address()).collect::<Vec<_>>(),
@@ -326,6 +343,8 @@ mod tests {
         assert_eq!(config["workers"], 3);
         assert_eq!(config["files"], "all");
         assert_eq!(config["restart"], false);
+        assert_eq!(s.value_of("reread"), "none");
+        assert_eq!(config["reread"], serde_json::json!([]));
         assert_eq!(config["identity"]["id_type"], "patient-id");
         assert_eq!(config["identity"]["from"][0]["field"], "PatientID");
         assert_eq!(config["identity"]["fallback"], "StudyInstanceUID");

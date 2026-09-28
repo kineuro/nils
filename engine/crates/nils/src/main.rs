@@ -1714,6 +1714,11 @@ struct DigestArgs {
     /// Read every file again, changed or not
     #[arg(long)]
     restart: bool,
+    /// Read again, without a walk, only the files the registry holds for the
+    /// MR series of this manufacturer, as the study names it (case and outer
+    /// spaces aside); repeat for more than one
+    #[arg(long, value_name = "MANUFACTURER", conflicts_with_all = ["dry_run", "restart", "retry_quarantine"])]
+    reread: Vec<String>,
     /// Walk and read everything, print the report, write nothing
     #[arg(long)]
     dry_run: bool,
@@ -3581,6 +3586,10 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
     settings.json = args.json;
     settings.retry_quarantine = args.retry_quarantine;
     settings.restart = args.restart;
+    settings.reread = args.reread.clone();
+    if settings.reread.iter().any(|m| m.trim().is_empty()) {
+        return Err(usage("--reread names a manufacturer".to_string()));
+    }
     if let Some(name) = args.name {
         settings.name = name;
     }

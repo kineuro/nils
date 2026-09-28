@@ -46,7 +46,11 @@ LEVELS: dict[str, Level] = {
         # record 38 S2: v0 never kept the series number
         "series", "series", absent=frozenset({"burned_in_annotation", "series_number"})
     ),
-    "series_mr": Level("series_mr", "mri_series_details"),
+    # PulseSequenceName (0018,9005) is v1's addition (the 2026-09-28
+    # sequence research): v0 never read it, so there is nothing to compare.
+    "series_mr": Level(
+        "series_mr", "mri_series_details", absent=frozenset({"pulse_sequence_name"})
+    ),
     "series_ct": Level("series_ct", "ct_series_details"),
     "series_pet": Level("series_pet", "pet_series_details"),
     # v0's series_stack prefixes every value with `stack_`; its

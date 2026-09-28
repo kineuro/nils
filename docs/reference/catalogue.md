@@ -63,7 +63,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `contrast_flow_rate` | ContrastFlowRate (0018,1046) | double | technical |  |
 | `contrast_flow_duration` | ContrastFlowDuration (0018,1047) | double | technical |  |
 
-## series_mr (32, MR only)
+## series_mr (33, MR only)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -86,6 +86,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `percent_phase_field_of_view` | PercentPhaseFieldOfView, then fg MRFOVGeometrySequence.PercentPhaseFieldOfView | double | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `pixel_bandwidth` | PixelBandwidth, then fg MRImagingModifierSequence.PixelBandwidth | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `receive_coil_name` | ReceiveCoilName, then fg MRReceiveCoilSequence.ReceiveCoilName | text | technical | as on the stack |
+| `pulse_sequence_name` | PulseSequenceName, then private per-frame .PulseSequenceName | text | technical | addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28) |
 | `transmit_coil_name` | TransmitCoilName, then fg MRTransmitCoilSequence.TransmitCoilName | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `acquisition_matrix` | AcquisitionMatrix (0018,1310) | text | technical |  |
 | `phase_encoding_direction` | InPlanePhaseEncodingDirection (0018,1312) | text | technical | addition: InPlanePhaseEncodingDirection; v0's keyword PhaseEncodingDirection is no element and the column was always null |
@@ -221,4 +222,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
-179 columns.
+180 columns.
