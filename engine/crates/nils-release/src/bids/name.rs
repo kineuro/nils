@@ -707,7 +707,9 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            build(&facts, &pack.bids, Naming::Bids).unwrap().stem("x", "1"),
+            build(&facts, &pack.bids, Naming::Bids)
+                .unwrap()
+                .stem("x", "1"),
             "sub-x_ses-1_T1w"
         );
     }

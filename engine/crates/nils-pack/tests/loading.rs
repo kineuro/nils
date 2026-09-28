@@ -489,7 +489,10 @@ rules:
 fn stack(image_type: &str) -> nils_pack::stack::Stack {
     let mut stack = nils_pack::stack::Stack::new();
     stack
-        .set("image_type", nils_pack::stack::Value::Text(Some(image_type)))
+        .set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some(image_type)),
+        )
         .unwrap();
     stack
 }
@@ -528,7 +531,11 @@ fn without_redecides_a_route_leaves_an_earlier_answer_alone() {
     let pack = nils_pack::load(d.path(), None).unwrap();
     let primary = stack("ORIGINAL\\PRIMARY");
     let v = nils_pack::eval::Evaluated::new(&pack, &primary).classify();
-    assert_eq!(v.stored("kind"), "a", "an axis a set decided is not decided again");
+    assert_eq!(
+        v.stored("kind"),
+        "a",
+        "an axis a set decided is not decided again"
+    );
     assert_eq!(v.stored("part"), "one");
 }
 

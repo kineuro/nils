@@ -949,7 +949,10 @@ mod tests {
             .iter()
             .map(|i| i["rule"].as_str().unwrap())
             .collect();
-        for r in ["implied_technique/construct:mp2rage", "base/technique:MP2RAGE"] {
+        for r in [
+            "implied_technique/construct:mp2rage",
+            "base/technique:MP2RAGE",
+        ] {
             assert!(rules.contains(&r), "{r} in {rules:?}");
         }
     }

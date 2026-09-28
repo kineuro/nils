@@ -195,5 +195,8 @@ fn a_bids_suffix_waits_for_a_technique_the_pack_has() {
     };
     let _ = std::fs::remove_dir_all(&to);
     assert!(e.contains("when_technique"), "{e}");
-    assert!(e.contains("MP2RAG is not a value of the technique axis"), "{e}");
+    assert!(
+        e.contains("MP2RAG is not a value of the technique axis"),
+        "{e}"
+    );
 }

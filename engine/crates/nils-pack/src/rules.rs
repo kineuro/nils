@@ -356,13 +356,17 @@ pub fn amendable(axes: &[Axis], rule_sets: &[RuleSet]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for a in axes {
         for v in &a.values {
-            let by_rule = rule_sets.iter().any(|s| {
-                s.rules.iter().any(|r| {
+            let by_rule = rule_sets.iter().any(|set| {
+                set.rules.iter().any(|r| {
                     r.clauses
                         .iter()
                         .any(|c| matches!(c, Clause::Keywords { .. }))
                         && r.sets.iter().any(|s| {
+                            // a route deciding an axis again says what an
+                            // output is, and its words are the output's
+                            // (a phase, a magnitude), not this value's
                             axes[s.axis].name == a.name
+                                && !set.redecides.contains(&s.axis)
                                 && s.values.iter().any(|sv| {
                                     matches!(sv.value, Which::Fixed(i) if a.values[i].id == v.id)
                                 })
