@@ -23,6 +23,7 @@ order:
   - not_an_image
   - ruled_out
   - scout
+  - secondary_reformat
   - symri_working_scan
   - symri_product
   - projection
@@ -59,6 +60,22 @@ rules:
     clauses:
       - {when: {axis: directory_type, is: localizer}, cite: localizer, source: directory_type}
     set: {disposition: scout, convertible: 'yes'}
+
+  # MRI pack 0.12.0, Nima's ruling (2026-09-28): "we can call them reformat
+  # to know we should skip them". A stack tagged SECONDARY and never PRIMARY
+  # was made on a workstation from images already acquired. The class phase
+  # now classifies it on every axis (rules/excluded.yml), and this is the
+  # mark a pipeline or a pick reads to leave it out: `reformat`, whatever its
+  # construct turned out to be (an MPR, a MIP, a map a workstation copied).
+  # It is before the SyMRI and the scanner-derived rules, so no other
+  # disposition takes it. Convertible, as every reformat is: a release writes
+  # it under `derivatives/`, never in the raw tree a pipeline reads, and no
+  # role takes a stack whose disposition is not `acquisition`
+  # (rules/role.yml).
+  secondary_reformat:
+    clauses:
+      - {when: {all: [is_secondary, {not: is_primary}]}, cite: 'secondary without primary', source: image_type}
+    set: {disposition: reformat, convertible: 'yes'}
 
   # §7.1, the case that proves the concept is needed. A SyMRI series that
   # names no product is the MDME container: a TI by TE by complex grid the

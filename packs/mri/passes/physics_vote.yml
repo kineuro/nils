@@ -44,6 +44,12 @@ target:
             - {axis: construct, is: Phase}
             - {axis: construct, is: INV1}
             - {axis: construct, is: INV2}
+            # MRI pack 0.12.0: the SyMRI route decides the base of every
+            # MDME or QALAS stack, and to nothing on the acquisition's own
+            # images and the maps, which have none (dev-1 settled `none` on
+            # 33 of them). The vote wrote T2w, PDw or T1w on six of dev-1's.
+            - {axis: technique, is: MDME}
+            - {axis: technique, is: QALAS}
 
 reference:
   # Named, and recorded on every row the pass writes. It holds what a rule or a
@@ -58,6 +64,11 @@ reference:
     base: {present: true, not: Unknown}
     technique: {present: true, not: Unknown}
     directory_type: {not: excluded}
+    # MRI pack 0.12.0: a workstation reformat is no longer ruled out
+    # (rules/excluded.yml), so it would join the pool, and a reformat or a
+    # projection repeats the physics of the acquisition it was made from:
+    # counted again, it is the same vote twice. The pool is acquisitions.
+    provenance: {not: ProjectionDerived}
   # One pool per intent, so an anatomical stack votes among anatomical ones,
   partition_by: directory_type
   # and the whole pool when its own says nothing.

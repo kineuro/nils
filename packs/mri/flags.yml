@@ -357,7 +357,44 @@ flags:
   # A curved planar reformat is a reformat: v0 parses `CPR` and reads it
   # nowhere.
   is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
-                        has_mpr_in_text]}
+                        has_mpr_in_text, is_projection_plane]}
+  # MRI pack 0.12.0: Philips writes a reformat as `PROJECTION IMAGE`
+  # (`ORIGINAL\PRIMARY\PROJECTION IMAGE\M\FFE`, or DERIVED or SECONDARY),
+  # a plane and a maximum projection alike, and only the words or a MIP
+  # token tell the projection. With neither it is a plane, an MPR: dev-1
+  # settled MPR on 28 Philips reformats of which no construct rule voted on
+  # one, and the header-judge prompt reads them so ("MIP needs MIP in the
+  # words or ImageType").
+  is_projection_plane:
+    all:
+      - image_type.is_projection_image
+      - {not: image_type.is_vascular}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: projection_named}
+  # MRI pack 0.12.0: a 90-degree flip-back (driven equilibrium) TSE by its
+  # sequence name. Siemens writes an `R` right after `tse` on one with the
+  # RESTORE pulse (`*tseR2d1rs16`; v0 parsed the stem as `is_tse_body` and
+  # read it nowhere, and the header-judge prompt reads it so; the letters
+  # after the echo train number, `*tse2d1rs15`, are not it); GE names the
+  # pulse sequence FRFSE (0019,xx9C) [V1, P48, MQ14]. dev-1 settled VFA-TSE
+  # on 14 Siemens, one GE and one Philips 2D TSE that the rules called TSE.
+  is_restore_tse:
+    any:
+      - sequence_name.is_tse_body
+      - {text: ge_pulse_sequence_name, matches: 'frfse'}
+  # The words of base MTw (rules/base.yml, `keywords:MTw`), for the rule
+  # that must not take such a series first (MRI pack 0.12.0).
+  mtw_named: {text: search_text, any_substring: [mtw, 'mt w', 'magnetization transfer', 'magnetization-transfer', 'mt weighted']}
+  # The word `phase` meaning something other than a phase image, and no
+  # phase in the image type (MRI pack 0.12.0).
+  phase_not_an_image:
+    all:
+      - {not: has_phase}
+      - {text: search_text, matches: '\b(in|out|opp|opposed|arterial|venous|portal|delayed|late|early|dynamic|dyn)\s*-?\s*phase|\bphase\s*-?\s*(contrast|encod|enc|\d)|\b(pc|phase) ?(mra|angio|flow)'}
+  # A maximum or minimum projection said in words, as the construct axis's
+  # MIP and MinIP keywords read it.
+  projection_named: {text: search_text, matches: '\b(mip|minip|min ip|max ip|mnip)\b|maximum intensity|minimum intensity'}
   is_subtraction: image_type.is_subtraction
   is_mean:       image_type.is_mean
   is_composite:  image_type.is_composite

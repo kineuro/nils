@@ -5,12 +5,21 @@
 #
 # v0 returns an excluded result before any detector runs, so an excluded stack
 # carries no axis at all rather than an answer nobody should read. This rule
-# set runs first and decides every axis, most of them to nothing.
+# set runs first and decides every axis, most of them to nothing. What it rules
+# out is what is not an image of a person: a screen capture and an error map.
 
 rule_set: excluded
 decides: [directory_type, base, technique, modifier, construct, quality, provenance, body_part, post_contrast]
 
-order: [screenshot, error_map, secondary_reformat_3d_tse, secondary_reformat]
+# MRI pack 0.12.0, Nima's ruling (2026-09-28): a workstation reformat, tagged
+# SECONDARY and never PRIMARY, is no longer ruled out here. It is classified
+# on every axis as any stack is (provenance ProjectionDerived, construct MPR,
+# MIP or MinIP as its header says, and the technique, base, modifier and
+# post-contrast of its source), and the disposition marks it `reformat`
+# (rules/disposition.yml), which is what a pipeline reads to skip it. Ruling
+# it out left every axis of 193 of dev-1's 900 stacks empty, the largest
+# error group of that reference (890 cells).
+order: [screenshot, error_map]
 
 rules:
 
@@ -31,31 +40,4 @@ rules:
   error_map:
     clauses:
       - {flag: is_error, tier: exclusive}
-    set: *blank
-
-  # MRI pack 0.11.0: a reformat of a 3D turbo spin echo says so in its own
-  # header (3D, SE, a train of 100 or more), and the physics vote, which
-  # fills the technique of every excluded stack, read GE's CUBE FLAIR
-  # reformats as 2D IR-TSE among the FLAIRs of the same TR and TI (six on
-  # the 2026-09-28 re-measure). The technique is taken from the header;
-  # everything else stays blank, as below.
-  secondary_reformat_3d_tse:
-    clauses:
-      - {when: {all: [is_secondary, {not: is_primary}, is_3d_tse]}, cite: 'secondary without primary, of a 3D TSE', source: flags, tier: exclusive}
-    set:
-      directory_type: excluded
-      base: null
-      technique: '3D-TSE'
-      modifier: null
-      construct: null
-      quality: null
-      provenance: null
-      body_part: null
-      post_contrast: null
-
-  # A workstation reformat: tagged SECONDARY and never PRIMARY. The session
-  # rescue of the pass layer is what lets one back in (spec section 7.2).
-  secondary_reformat:
-    clauses:
-      - {when: {all: [is_secondary, {not: is_primary}]}, cite: 'secondary without primary', source: flags, tier: exclusive}
     set: *blank

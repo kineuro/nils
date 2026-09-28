@@ -201,16 +201,21 @@ rules:
     set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Phase, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
+  # MRI pack 0.12.0: an MDME or QALAS image as acquired is an ordinary
+  # acquired image, and its construct is none (or ND where its ImageType
+  # says so), as the reading guide has it for any acquisition: dev-1 settled
+  # none on 28 of the 30 where the route wrote Magnitude, and ND on the
+  # other two. Magnitude stays for what the software wrote as one.
   magnitude:
     clauses:
       - {flag: has_magnitude, tier: exclusive}
       - {keywords: [magnitude], tier: keywords}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   fallback:
     clauses:
       - {when: true, cite: SyMRI, source: provenance}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Magnitude, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.7
     why: 'a SyMRI acquisition whose output is unclear is the raw source data'

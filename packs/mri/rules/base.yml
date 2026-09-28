@@ -145,10 +145,16 @@ rules:
   # which keeps it a reading of the stack rather than a law of the schema.
   'technique:ME-GRE':
     clauses:
-      - {when: {all: [{axis: technique, is: 'ME-GRE'}, {not: {any: [has_dixon, has_water, has_fat, has_in_phase, has_out_phase]}}]}, cite: 'ME-GRE', source: technique}
+      - {when: {all: [{axis: technique, is: 'ME-GRE'}, {not: {any: [has_dixon, has_water, has_fat, has_in_phase, has_out_phase, mtw_named]}}]}, cite: 'ME-GRE', source: technique}
     set: {base: 'T2starw'}
     confidence: 0.85
-    why: 'a multi-echo GRE that is not a Dixon or an in and opposed phase is taken as T2*-weighted'
+    why: 'a multi-echo GRE that is not a Dixon, an in and opposed phase or a magnetisation transfer weighting is taken as T2*-weighted'
+
+  # MRI pack 0.12.0: nor an MT-weighted one. A multi-parameter mapping
+  # protocol acquires an MT-weighted multi-echo 3D gradient echo beside its
+  # PD- and T1-weighted ones [P51], and names it so; the MT pulse, not the echo
+  # train, is its contrast (dev-1: two Philips multi-echo FFEs named for MT
+  # were T2*w, settled MTw). The words go to `keywords:MTw`.
 
   # MEDIC, MERGE and M-FFE are T2*-weighted [MQ9, P17, P18]
   'technique:comb-ME-GRE':
