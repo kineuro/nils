@@ -2416,6 +2416,30 @@ enum PackCommand {
         #[arg(long)]
         json: bool,
     },
+    /// The axes a pack derives from given answers, offline (record 48): the
+    /// reader's live line for answers kept anywhere, such as a settled
+    /// reference or the rules' own stored answers. JSON lines in, one per
+    /// stack: `{"stack", "answer": {axis: value | [values] | null |
+    /// "cant_tell"}, "fields": {field: text | number}}`, where the fields
+    /// are the stack as the pack sees it (the derived axes of the MRI pack
+    /// read ImageType alone). JSON lines out: `{"stack", "values"}`
+    Derive {
+        /// The pack directory
+        dir: PathBuf,
+        /// The axes the answers give, comma separated
+        #[arg(long, value_delimiter = ',', required = true)]
+        asked: Vec<String>,
+        /// The axes to derive; every axis the pack may derive beside the
+        /// asked ones when not given
+        #[arg(long, value_delimiter = ',')]
+        derive: Vec<String>,
+        /// Read the answers from this file rather than stdin
+        #[arg(long, value_name = "FILE")]
+        input: Option<PathBuf>,
+        /// Load it under this overlay
+        #[arg(long, value_name = "FILE")]
+        overlay: Option<PathBuf>,
+    },
 }
 
 /// Whether a directory is a pack directory: one that holds at least one
@@ -3459,6 +3483,40 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 Err(e) => Err(fail(e.to_string())),
             }
         }
+        PackCommand::Derive {
+            dir,
+            asked,
+            derive,
+            input,
+            overlay,
+        } => {
+            let ov = load_overlay(overlay.as_ref())?;
+            let pack = nils_pack::load(&dir, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
+            let text = match &input {
+                Some(p) => {
+                    fs::read_to_string(p).map_err(|e| fail(format!("{}: {e}", p.display())))?
+                }
+                None => {
+                    let mut t = String::new();
+                    io::stdin()
+                        .read_to_string(&mut t)
+                        .map_err(|e| fail(format!("stdin: {e}")))?;
+                    t
+                }
+            };
+            let (derive, lines) = pack_derive(&pack, &asked, &derive, &text).map_err(usage)?;
+            for l in &lines {
+                println!("{l}");
+            }
+            eprintln!(
+                "{} stacks through {}: {} derived from {}",
+                lines.len(),
+                pack.id(),
+                derive.join(", "),
+                asked.join(", ")
+            );
+            Ok(())
+        }
         PackCommand::Shape { dir, overlay, json } => {
             let ov = load_overlay(overlay.as_ref())?;
             let pack = nils_pack::load(&dir, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
@@ -3475,6 +3533,85 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
             Ok(())
         }
     }
+}
+
+/// `nils pack derive`: the derived axes of every answer in `text` (JSON
+/// lines), through the pack, as JSON lines; with the axes derived. The
+/// derived axes are the ones named, else every axis the pack may derive
+/// beside the asked ones, and none of them may be one the pack reads off
+/// the file's own numbers or words ([`nils_pack::derive::check`]).
+fn pack_derive(
+    pack: &nils_pack::Pack,
+    asked: &[String],
+    derive: &[String],
+    text: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let derive = if derive.is_empty() {
+        nils_pack::derive::infer(pack, asked)?
+    } else {
+        derive.to_vec()
+    };
+    if derive.is_empty() {
+        return Err(format!(
+            "the {} pack derives nothing beside {}: some axis it would need is read off the file, so name the axes with --derive to see why",
+            pack.name,
+            asked.join(", ")
+        ));
+    }
+    nils_pack::derive::check(pack, asked, &derive)?;
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let at = n + 1;
+        let rec: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("line {at}: not JSON ({e})"))?;
+        let answer = rec
+            .get("answer")
+            .filter(|a| a.is_object())
+            .ok_or_else(|| format!("line {at}: no answer object"))?;
+        let mut stack = nils_pack::Stack::new();
+        // the pack's own modality, unless the line says otherwise
+        stack.set(
+            "modality",
+            nils_pack::stack::Value::Text(Some(&pack.modality)),
+        )?;
+        if let Some(fields) = rec.get("fields") {
+            let fields = fields
+                .as_object()
+                .ok_or_else(|| format!("line {at}: fields is not an object"))?;
+            for (name, v) in fields {
+                let value = match v {
+                    serde_json::Value::Null => nils_pack::stack::Value::Text(None),
+                    serde_json::Value::Number(x) => nils_pack::stack::Value::Num(x.as_f64()),
+                    serde_json::Value::String(t) => nils_pack::stack::Value::Text(Some(t)),
+                    _ => {
+                        return Err(format!(
+                            "line {at}: field {name} is neither text nor a number"
+                        ));
+                    }
+                };
+                stack
+                    .set(name, value)
+                    .map_err(|e| format!("line {at}: {e}"))?;
+            }
+        }
+        let private: Vec<String> = rec
+            .get("private")
+            .and_then(|p| p.as_array())
+            .map(|p| {
+                p.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let values = campaigns::derive_answer(pack, &stack, private, asked, &derive, answer);
+        let stack_id = rec.get("stack").cloned().unwrap_or(serde_json::Value::Null);
+        out.push(serde_json::json!({"stack": stack_id, "values": values}).to_string());
+    }
+    Ok((derive, out))
 }
 
 /// `nils fingerprint` (Wave 2 §4.3).
@@ -9864,6 +10001,99 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mri_pack() -> nils_pack::Pack {
+        nils_pack::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri"),
+            None,
+        )
+        .expect("the MRI pack loads")
+    }
+
+    /// `nils pack derive` carries answers kept anywhere through the pack
+    /// as the reader does live: the five the seven asked axes leave, a
+    /// value named by its label as well as its identity, can't tell
+    /// carried to what reads it, and quality from ImageType alone.
+    #[test]
+    fn pack_derive_carries_given_answers_through_the_pack() {
+        let pack = mri_pack();
+        let asked: Vec<String> = [
+            "provenance",
+            "technique",
+            "modifier",
+            "construct",
+            "base",
+            "body_part",
+            "post_contrast",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let text = [
+            r#"{"stack": "1", "answer": {"provenance": "RawRecon", "technique": "MPRAGE", "modifier": [], "construct": [], "base": "T1w", "body_part": "brain", "post_contrast": "not_given"}, "fields": {"image_type": "ORIGINAL\\PRIMARY\\M\\ND"}}"#,
+            r#"{"stack": 2, "answer": {"provenance": "RawRecon", "technique": "TSE", "modifier": ["FLAIR"], "construct": [], "base": "T2w", "body_part": "brain", "post_contrast": "cant_tell"}}"#,
+            "",
+            r#"{"stack": "3", "answer": {"provenance": "RawRecon", "technique": "TSE", "modifier": [], "construct": [], "base": "cant_tell", "body_part": "brain", "post_contrast": "not_given"}, "fields": {"image_type": "DERIVED\\SECONDARY\\SCREEN SAVE"}}"#,
+            r#"{"stack": "4", "answer": {"provenance": "RawRecon", "technique": "ME-GRE", "modifier": [], "construct": [], "base": "T2*w", "body_part": "brain", "post_contrast": "not_given"}}"#,
+        ]
+        .join("\n");
+        let (derive, lines) = pack_derive(&pack, &asked, &[], &text).unwrap();
+        let mut d = derive.clone();
+        d.sort();
+        assert_eq!(
+            d,
+            [
+                "convertible",
+                "directory_type",
+                "disposition",
+                "quality",
+                "role"
+            ]
+        );
+        let got: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[0]["stack"], "1");
+        assert_eq!(got[0]["values"]["directory_type"], "anat");
+        assert_eq!(got[0]["values"]["role"], serde_json::json!(["t1w"]));
+        assert_eq!(got[0]["values"]["quality"], serde_json::json!([]));
+        assert_eq!(got[1]["stack"], 2);
+        assert_eq!(got[1]["values"]["role"], serde_json::json!(["flair"]));
+        assert_eq!(got[2]["values"]["directory_type"], "cant_tell");
+        assert_eq!(got[2]["values"]["role"], "cant_tell");
+        assert_ne!(got[2]["values"]["quality"], serde_json::json!("cant_tell"));
+        // T2*w is the label of T2starw, and reads as it
+        assert_eq!(got[3]["values"]["directory_type"], "anat");
+
+        // what the reader shows live for the same answer
+        let mut s = nils_pack::Stack::new();
+        s.set("modality", nils_pack::stack::Value::Text(Some("MR")))
+            .unwrap();
+        s.set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some("ORIGINAL\\PRIMARY\\M\\ND")),
+        )
+        .unwrap();
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        let live =
+            campaigns::derive_answer(&pack, &s, Vec::new(), &asked, &derive, &first["answer"]);
+        assert_eq!(live, got[0]["values"]);
+
+        // a field the pack has no name for, and an axis the pack reads off
+        // the file, are refused
+        let e = pack_derive(
+            &pack,
+            &asked,
+            &[],
+            r#"{"stack": "5", "answer": {}, "fields": {"no_such_field": "x"}}"#,
+        )
+        .unwrap_err();
+        assert!(e.contains("line 1") && e.contains("no_such_field"), "{e}");
+        let e = pack_derive(&pack, &asked, &["base".to_string()], "").unwrap_err();
+        assert!(e.contains("asked"), "{e}");
+    }
 
     #[test]
     fn a_released_stack_says_which_session_it_is_in() {
