@@ -2033,6 +2033,9 @@ fn build_registry() -> Vec<Table> {
                 // which no door returns.
                 col("hold_back", Type::Double),
                 col("hold_back_seed", Type::Text),
+                // What the reader shows beside each item as the answer
+                // suggested: none | rules | imported, said when it is made.
+                col("suggest", Type::Text),
             ],
         )
         .unique(&["name"]),

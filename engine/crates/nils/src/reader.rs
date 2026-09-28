@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nils_registry::campaign::{self, Campaign, Question};
+use nils_registry::campaign::{self, Campaign, Question, Suggest};
 use nils_registry::schema::{Type, table};
 use nils_registry::store::{Cell, Error as StoreError, Param, Store};
 use serde_json::{Value, json};
@@ -889,6 +889,18 @@ pub(crate) fn batches(
             ),
         ));
     }
+    // a batch is of like stacks the rules gave one answer, which is shown
+    // and accepted: only a campaign made to show the rules has any
+    if !c.suggest.shows_rules() {
+        return Err((
+            409,
+            format!(
+                "campaign {} suggests {}, so it shows no rules' answer and forms no batch; each item is read on its own",
+                c.name,
+                c.suggest.name()
+            ),
+        ));
+    }
     let axes = campaign::axes_of(&question);
     let open: Vec<(i64, i64)> = campaign::open_for(store, c, principal)
         .map_err(|e| (500, e.to_string()))?
@@ -1295,7 +1307,8 @@ pub(crate) const BY_RULES: &str = "rules";
 /// to its question is kept, and who suggested it: the latest suggestion
 /// from outside the campaign carries for the item, else the engine's own
 /// ([`suggestion`], by [`BY_RULES`]); none for a stack of a sample sealed
-/// now, which is read blind.
+/// now, which is read blind. The campaign says which it shows: nothing,
+/// the rules alone, or the suggestions brought in alone.
 pub(crate) fn item_suggestion(
     store: &mut Store,
     c: &Campaign,
@@ -1304,18 +1317,21 @@ pub(crate) fn item_suggestion(
     question: &Question,
     pack: Option<&nils_pack::Pack>,
 ) -> Result<Option<(String, String)>, StoreError> {
+    if c.suggest == Suggest::None {
+        return Ok(None);
+    }
     if let Some(s) = stack
         && blind(store, s)?
     {
         return Ok(None);
     }
-    let told = nils_registry::suggestion::of_items(store, c.id, &[item])
-        .map_err(|e| StoreError::Message(e.to_string()))?;
-    if let Some(p) = told
-        .get(&item)
-        .and_then(|l| nils_registry::suggestion::primary(l))
-    {
-        return Ok(Some((p.value.clone(), p.author.clone())));
+    if c.suggest.shows_imported() {
+        let told = nils_registry::suggestion::of_items(store, c.id, &[item])
+            .map_err(|e| StoreError::Message(e.to_string()))?;
+        return Ok(told
+            .get(&item)
+            .and_then(|l| nils_registry::suggestion::primary(l))
+            .map(|p| (p.value.clone(), p.author.clone())));
     }
     match stack {
         Some(s) => Ok(suggestion(store, s, question, pack)?.map(|v| (v, BY_RULES.to_string()))),
@@ -1456,14 +1472,27 @@ pub(crate) fn gallery(
         }
     }
     let ids: Vec<i64> = left.iter().map(|it| it.id).collect();
-    let told =
-        nils_registry::suggestion::of_items(store, c.id, &ids).map_err(|e| (500, e.to_string()))?;
-    // the engine's own suggestion where nothing came from outside
-    let bare: Vec<i64> = left
-        .iter()
-        .filter(|it| !told.contains_key(&it.id))
-        .filter_map(|it| it.stack_id)
-        .collect();
+    // what the campaign was made to show, and nothing else: suggestions
+    // brought in, or the engine's own rules, or neither
+    let told = if c.suggest.shows_imported() {
+        nils_registry::suggestion::of_items(store, c.id, &ids).map_err(|e| (500, e.to_string()))?
+    } else {
+        BTreeMap::new()
+    };
+    let bare: Vec<i64> = if c.suggest.shows_rules() {
+        left.iter()
+            .filter(|it| !told.contains_key(&it.id))
+            .filter_map(|it| it.stack_id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // with nothing shown, nothing may rank the page either
+    let order = if c.suggest == Suggest::None {
+        GalleryOrder::Position
+    } else {
+        order
+    };
     let rules = rules_values(store, &bare, pack).map_err(e500)?;
     let asked = asked_many(store, &bare).map_err(e500)?;
     let worth = campaign::worth(store, &bare, std::slice::from_ref(&axis))
@@ -1502,6 +1531,17 @@ pub(crate) fn gallery(
                     disagree: nils_registry::suggestion::disagree(list),
                 }
             }
+            None if !c.suggest.shows_rules() => Shown {
+                item: it.id,
+                stack,
+                position: it.position,
+                suggested: None,
+                by: None,
+                confidence: None,
+                confidences: Value::Null,
+                others: Vec::new(),
+                disagree: false,
+            },
             None => {
                 let ev = asked.get(&stack).map(|(_, ev)| ev);
                 let s = suggest_from(rules.get(&stack).unwrap_or(&BTreeMap::new()), ev, &question);
@@ -1585,6 +1625,7 @@ pub(crate) fn gallery(
         "held_back_open": n_held + flagged,
         "alone": n_held + flagged + n_sealed,
         "hold_back": c.hold_back,
+        "suggest": c.suggest.name(),
         "left": total,
         "count": rows.len(),
         "items": rows.iter().map(|r| json!({

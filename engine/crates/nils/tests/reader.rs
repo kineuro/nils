@@ -290,6 +290,7 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
             "adjudication": {"when": "never"},
             "closes_into": "stage",
             "hold_back": 0.5,
+            "suggest": "rules",
         })),
         CURATOR,
     );
@@ -803,6 +804,7 @@ fn a_gallery_takes_suggestions_from_outside_and_accepts_a_page() {
             "raters": ["anna@lab", "bo@lab"],
             "adjudication": {"when": "never"},
             "closes_into": "stage",
+            "suggest": "imported",
         })),
         CURATOR,
     );
@@ -1338,4 +1340,229 @@ fn a_rater_corrects_their_answers_and_a_rater_joins_through_the_door() {
     assert_eq!(status, 409);
     let mine = server.ok("GET", "/api/campaigns/gold/mine", None, ANNA);
     assert_eq!(mine["open"], false, "{mine}");
+}
+
+/// A campaign says when it is made what its raters are shown beside each
+/// item. One made without saying shows nothing on any of its doors: no
+/// suggestion and no rules' line at the evidence door, which reads it blind
+/// as a sealed stack is read, no batch, a gallery with nothing suggested in
+/// the order the items were listed, and every answer kept with nothing
+/// suggested beside it. One made to show what is brought in hides the
+/// rules' lines the same way and shows only what was brought.
+#[test]
+fn a_campaign_made_without_suggestions_shows_none_on_any_door() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let make = |name: &str, suggest: Option<&str>| {
+        let mut body = json!({
+            "name": name,
+            "question": {"kind": "axis", "axis": "base"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["anna@lab", "bo@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+        });
+        if let Some(s) = suggest {
+            body["suggest"] = json!(s);
+        }
+        server.ok("POST", "/api/campaigns", Some(body), CURATOR)
+    };
+    // the same stacks shown the rules, so what the other hides is there
+    let led = make("led", Some("rules"));
+    assert_eq!(led["suggest"], "rules", "{led}");
+    let led_item = led["items"][0]["id"].as_i64().unwrap();
+    let why = server.ok(
+        "GET",
+        &format!("/api/campaigns/led/items/{led_item}/why"),
+        None,
+        ANNA,
+    );
+    assert!(why["suggested"].is_string(), "{why}");
+    assert!(
+        why["axes"].as_array().is_some_and(|a| !a.is_empty()),
+        "{why}"
+    );
+
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(
+            json!({"name": "odd", "question": {"kind": "axis", "axis": "base"},
+            "source": {"selection": "every-stack@1"}, "suggest": "always"}),
+        ),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+
+    let made = make("unled", None);
+    assert_eq!(made["suggest"], "none", "{made}");
+    let shown = server.ok("GET", "/api/campaigns/unled", None, ANNA);
+    assert_eq!(shown["suggest"], "none", "{shown}");
+    let items: Vec<i64> = made["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_i64().unwrap())
+        .collect();
+    assert!(items.len() >= 4, "{made}");
+    // every item is read blind: the file, and nothing a system said of it
+    for item in &items {
+        for who in [ANNA, CURATOR] {
+            let why = server.ok(
+                "GET",
+                &format!("/api/campaigns/unled/items/{item}/why"),
+                None,
+                who,
+            );
+            assert_eq!(why["blind"], true, "{why}");
+            assert_eq!(why["suggest"], "none", "{why}");
+            assert!(why["suggested"].is_null(), "{why}");
+            assert!(why["suggested_by"].is_null(), "{why}");
+            assert_eq!(why["suggestions"], json!([]), "{why}");
+            assert!(why["worth"].is_null(), "{why}");
+            for k in ["axes", "asked", "candidates", "voted", "line"] {
+                assert!(!why.to_string().contains(&format!("\"{k}\"")), "{k}: {why}");
+            }
+            assert!(why["header"].is_object(), "{why}");
+        }
+        let head = server.ok(
+            "GET",
+            &format!("/api/campaigns/unled/items/{item}/header"),
+            None,
+            ANNA,
+        );
+        assert_eq!(head["blind"], true, "{head}");
+    }
+    // no batch is formed or accepted
+    let (status, doc) = server.call("GET", "/api/campaigns/unled/batches", None, ANNA);
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc.to_string().contains("suggests none"), "{doc}");
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/unled/batches/any/accept",
+        Some(json!({})),
+        ANNA,
+    );
+    assert_eq!(status, 409, "{doc}");
+    // the gallery suggests nothing, in the order the items were listed,
+    // whatever order is asked
+    for order in ["uncertain", "suggested", "position"] {
+        let g = server.ok(
+            "GET",
+            &format!("/api/campaigns/unled/gallery?order={order}"),
+            None,
+            BO,
+        );
+        assert_eq!(g["order"], "position", "{g}");
+        assert_eq!(g["suggest"], "none", "{g}");
+        let shown = g["items"].as_array().unwrap();
+        assert!(!shown.is_empty(), "{g}");
+        let positions: Vec<i64> = shown
+            .iter()
+            .map(|i| i["position"].as_i64().unwrap())
+            .collect();
+        let mut sorted = positions.clone();
+        sorted.sort();
+        assert_eq!(positions, sorted, "{g}");
+        for i in shown {
+            for k in ["suggested", "by", "confidence", "confidences"] {
+                assert!(i[k].is_null(), "{k}: {i}");
+            }
+            assert_eq!(i["others"], json!([]), "{i}");
+            assert_eq!(i["disagree"], false, "{i}");
+        }
+    }
+    // an answer by claim, in the order of value, keeps nothing suggested
+    let claimed = server.ok(
+        "POST",
+        "/api/campaigns/unled/claim",
+        Some(json!({"order": "value"})),
+        ANNA,
+    );
+    let a = claimed["assignment"]["id"].as_i64().unwrap();
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/unled/assignments/{a}/answer"),
+        Some(json!({"value": "T1w"})),
+        ANNA,
+    );
+    // and a page of the gallery accepted keeps nothing suggested either
+    let g = server.ok("GET", "/api/campaigns/unled/gallery", None, BO);
+    let page: Vec<Value> = g["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| json!({"item": i["item"], "value": "T2w"}))
+        .collect();
+    let accepted = server.ok(
+        "POST",
+        "/api/campaigns/unled/gallery/accept",
+        Some(json!({"answers": page})),
+        BO,
+    );
+    for a in accepted["accepted"].as_array().unwrap() {
+        assert!(a["changed"].is_null(), "{a}");
+    }
+    let answers = server.ok("GET", "/api/campaigns/unled/answers", None, CURATOR);
+    let list = answers["answers"].as_array().unwrap();
+    assert!(list.len() >= 2, "{answers}");
+    for a in list {
+        assert!(a["suggested"].is_null(), "{a}");
+        assert!(a["suggested_by"].is_null(), "{a}");
+    }
+    // suggestions are never brought into it later
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/unled/suggestions",
+        Some(json!({"suggestions": [{"item": items[1], "value": "T1w", "author": "v0-model"}]})),
+        CURATOR,
+    );
+    assert_eq!(status, 409, "{doc}");
+
+    // a campaign that shows what is brought in never shows the rules
+    let told = make("told", Some("imported"));
+    let first = told["items"][0]["id"].as_i64().unwrap();
+    let before = server.ok(
+        "GET",
+        &format!("/api/campaigns/told/items/{first}/why"),
+        None,
+        ANNA,
+    );
+    assert_eq!(before["blind"], false, "{before}");
+    assert!(before["suggested"].is_null(), "{before}");
+    assert!(!before.to_string().contains("\"axes\""), "{before}");
+    let (status, doc) = server.call("GET", "/api/campaigns/told/batches", None, ANNA);
+    assert_eq!(status, 409, "{doc}");
+    server.ok(
+        "POST",
+        "/api/campaigns/told/suggestions",
+        Some(json!({"suggestions": [{"item": first, "value": "T2w", "author": "v0-model"}]})),
+        CURATOR,
+    );
+    let after = server.ok(
+        "GET",
+        &format!("/api/campaigns/told/items/{first}/why"),
+        None,
+        ANNA,
+    );
+    assert_eq!(after["suggested"], "T2w", "{after}");
+    assert_eq!(after["suggested_by"], "v0-model", "{after}");
+    assert!(!after.to_string().contains("\"axes\""), "{after}");
+    let g = server.ok("GET", "/api/campaigns/told/gallery", None, BO);
+    for i in g["items"].as_array().unwrap() {
+        if i["item"] != first {
+            assert!(i["suggested"].is_null(), "{i}");
+        }
+    }
 }

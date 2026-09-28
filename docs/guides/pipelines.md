@@ -301,7 +301,23 @@ The job's result counts what it built, skipped and failed, with why for each fai
 
 3. Close it. Each item becomes one decision per axis, and agreement is reported whole and per axis.
 
+## Choose what the raters are shown
+
+A campaign says when it is made what its raters see beside each item as the answer suggested, and it never changes:
+
+- `--suggest none`, the default: nothing. Every item is read blind, as an item of a sealed sample is: the evidence door shows the file and nothing a system said of the stack, no batch is formed, the gallery suggests nothing, and each answer keeps nothing suggested beside it. Use it for a reference read, where a shown answer would lead the rater.
+- `--suggest rules`: the rules' answer and System 1's, filled in, with batches of like stacks. Use it to check the engine's own reading fast.
+- `--suggest imported`: only the suggestions `nils campaign suggest` brings in, never the rules, and no batches.
+
+```sh
+nils campaign create body-parts --axis body_part --select selection:gold@1 --suggest imported
+```
+
+At the door it is `suggest` on `POST /api/campaigns`, and every campaign says its `suggest`.
+
 ## Read a campaign fast
+
+These steps show the rules' answer, so they are for a campaign made with `--suggest rules`.
 
 1. Claim the items worth a look first: those where the two systems or the rules disagree, then the least confident.
 
@@ -331,7 +347,7 @@ For a campaign that asks one axis, such as body part, suggestions from outside t
    nils campaign suggest body-parts --file v0-body-parts.tsv --author v0-person
    ```
 
-   At the door it is `POST /api/campaigns/{id}/suggestions`, for the campaign's maker. A stack of a sealed sample takes no suggestion.
+   At the door it is `POST /api/campaigns/{id}/suggestions`, for the campaign's maker. Only a campaign made with `--suggest imported` takes suggestions. A stack of a sealed sample takes none.
 
 2. Open the gallery: `GET /api/campaigns/{id}/gallery` lists up to 100 open items, each with its suggested value, who suggested it, its confidences and a small picture (`GET /api/instances/{stack}/thumb`), the least certain first.
 

@@ -271,6 +271,15 @@ pub fn import(registry: &mut Registry, im: &Import<'_>, now: &str) -> Result<Imp
             c.name, c.status
         )));
     }
+    // a campaign says when it is made what its raters are shown; one made
+    // to show nothing, or the rules, never takes suggestions later
+    if !c.suggest.shows_imported() {
+        return Err(Error::Refused(format!(
+            "campaign {} was made to suggest {}, and its raters are shown no suggestion brought in; make the campaign with suggest imported to bring suggestions",
+            c.name,
+            c.suggest.name()
+        )));
+    }
     let question = c.question()?;
     if !matches!(question, Question::Axis { .. } | Question::Axes { .. }) {
         return Err(invalid(format!(

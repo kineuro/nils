@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 71;
+pub const SCHEMA_VERSION: i64 = 72;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,7 +338,39 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 71,
         apply: a_series_says_its_pulse_sequence,
     },
+    Migration {
+        version: 72,
+        apply: a_campaign_says_what_it_suggests,
+    },
 ];
+
+/// A campaign says what its reader shows beside each item as the answer
+/// suggested: none, the rules, or suggestions brought in. A campaign from
+/// before is written as what it showed: `imported` where suggestions were
+/// brought into it, `rules` otherwise, since the engine then showed its
+/// rules' answer on every item of a stack not sealed.
+fn a_campaign_says_what_it_suggests(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "campaign")? {
+        return Ok(());
+    }
+    add_columns(store, "campaign", &["suggest"])?;
+    let c = store.qualified("campaign");
+    if table_exists(store, "campaign_suggestion")? {
+        let s = store.qualified("campaign_suggestion");
+        store.execute(
+            &format!(
+                "UPDATE {c} SET suggest = 'imported' WHERE suggest IS NULL \
+                 AND EXISTS (SELECT 1 FROM {s} s WHERE s.campaign_id = {c}.id)"
+            ),
+            &[],
+        )?;
+    }
+    store.execute(
+        &format!("UPDATE {c} SET suggest = 'rules' WHERE suggest IS NULL"),
+        &[],
+    )?;
+    Ok(())
+}
 
 /// The 2026-09-28 sequence research: an MR series gains PulseSequenceName
 /// (0018,9005), and the fingerprint carries it for a pack to read. A

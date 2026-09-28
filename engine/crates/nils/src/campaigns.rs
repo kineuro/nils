@@ -621,10 +621,12 @@ pub(crate) fn route(
                     .filter_map(|c| c["stack_id"].as_i64())
                     .collect();
                 let hidden = blind_among(registry.store(), caller, &stacks)?;
+                let none = hides_rules(&c);
                 for cand in doc["candidates"].as_array_mut().into_iter().flatten() {
-                    if cand["stack_id"]
-                        .as_i64()
-                        .is_some_and(|s| hidden.contains(&s))
+                    if none
+                        || cand["stack_id"]
+                            .as_i64()
+                            .is_some_and(|s| hidden.contains(&s))
                     {
                         cand["axes"] = json!({});
                         cand["blind"] = json!(true);
@@ -1104,15 +1106,22 @@ pub(crate) fn route(
                 let q = c.question().map_err(campaign_err)?;
                 // record 48 R2: a stack of a sealed sample that an open
                 // campaign asks is read blind by its raters
-                let blind = blind_to(registry.store(), caller, stack)?;
+                let sealed = blind_to(registry.store(), caller, stack)?;
+                // a campaign made to show nothing is read blind whole; one
+                // that shows what was brought in hides the rules the same
+                // way and keeps its suggestions
+                let blind = sealed || c.suggest == campaign::Suggest::None;
+                let rules_hidden = sealed || hides_rules(&c);
                 let mut doc = crate::reader::why(
                     registry.store(),
                     stack,
                     pack.as_deref(),
                     !plain(caller),
-                    blind,
+                    rules_hidden,
                 )?
                 .unwrap_or_else(|| json!({"stack": stack, "axes": [], "blind": false}));
+                doc["blind"] = json!(blind);
+                doc["suggest"] = json!(c.suggest.name());
                 let suggested = if blind {
                     None
                 } else {
@@ -1132,7 +1141,7 @@ pub(crate) fn route(
                 doc["suggested_by"] = json!(suggested.as_ref().map(|(_, by)| by));
                 // record 50 R3: every outside suggestion for the item, with
                 // its author and its confidences; none on a stack read blind
-                let told = if blind {
+                let told = if blind || !c.suggest.shows_imported() {
                     Vec::new()
                 } else {
                     nils_registry::suggestion::of_items(registry.store(), c.id, &[item])
@@ -1156,9 +1165,13 @@ pub(crate) fn route(
                 doc["worth"] = if blind {
                     Value::Null
                 } else {
-                    let mine = campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
-                        .map_err(campaign_err)?
-                        .remove(&stack);
+                    let mine = if rules_hidden {
+                        None
+                    } else {
+                        campaign::worth(registry.store(), &[stack], &campaign::axes_of(&q))
+                            .map_err(campaign_err)?
+                            .remove(&stack)
+                    };
                     let told =
                         nils_registry::suggestion::worth_of_items(registry.store(), c.id, &[item])?;
                     nils_registry::suggestion::merged(mine, told.get(&item))
@@ -1182,7 +1195,10 @@ pub(crate) fn route(
                         Reply::error(404, format!("stack {stack} is not in the registry"))
                     })?;
                 doc["item"] = json!(item);
-                doc["blind"] = json!(blind_to(registry.store(), caller, stack)?);
+                doc["blind"] = json!(
+                    c.suggest == campaign::Suggest::None
+                        || blind_to(registry.store(), caller, stack)?
+                );
                 // record 48, after the first gold campaign: a stored header
                 // does not change, so the reader keeps it while it reads
                 let mut r = Reply::ok(doc);
@@ -2013,6 +2029,15 @@ pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result
     Ok(!blind_among(store, caller, &[stack])?.is_empty())
 }
 
+/// Whether a campaign's doors keep what the rules and System 1 said of its
+/// stacks from everyone who reads them there: a campaign made to suggest
+/// none or imported shows no rules' answer, no evidence line that would
+/// reveal it and nothing filled in from it (its doors alone: a registry-wide
+/// seal is a sealed sample's).
+pub(crate) fn hides_rules(c: &campaign::Campaign) -> bool {
+    !c.suggest.shows_rules()
+}
+
 /// Record 48, D1 of the move: the stacks of these a caller reads blind.
 pub(crate) fn blind_among(
     store: &mut Store,
@@ -2696,6 +2721,16 @@ fn hold_back_of(v: &Value) -> Result<Option<f64>, Reply> {
     }
 }
 
+/// What a campaign shows beside each item as the answer suggested, as its
+/// maker says it; nothing when not said.
+fn suggest_of(v: &Value) -> Result<Option<campaign::Suggest>, Reply> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(t) => campaign::Suggest::parse(t).map(Some).map_err(campaign_err),
+        _ => Err(Reply::error(400, "suggest: none, rules or imported")),
+    }
+}
+
 fn inputs_of(v: &Value) -> BTreeMap<String, Vec<i64>> {
     v.as_object()
         .map(|m| {
@@ -2815,6 +2850,7 @@ fn create_at_door(
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
             inputs: inputs_of(&doc["inputs"]),
             hold_back: hold_back_of(&doc["hold_back"])?,
+            suggest: suggest_of(&doc["suggest"])?,
         },
     )
     .map_err(campaign_err)?;
@@ -3865,6 +3901,12 @@ pub(crate) struct CreateArgs {
     /// be read alone, from 0.1 to 1 (record 48)
     #[arg(long, value_name = "SHARE")]
     hold_back: Option<f64>,
+    /// What the reader shows beside each item as the answer suggested:
+    /// none (the default: nothing is suggested, filled in or batched),
+    /// rules (the pack's rules and System 1, with batches of like stacks)
+    /// or imported (only what `campaign suggest` brings in)
+    #[arg(long, default_value = "none", value_name = "none|rules|imported")]
+    suggest: String,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
     #[arg(long, default_value = "mri")]
@@ -4872,6 +4914,7 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
             lease_seconds: a.lease_seconds,
             inputs: BTreeMap::new(),
             hold_back: a.hold_back,
+            suggest: Some(campaign::Suggest::parse(&a.suggest).map_err(cerr)?),
         },
     )
     .map_err(cerr)?;
@@ -4885,12 +4928,13 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
             .map_err(cerr)?
             .len();
         println!(
-            "campaign {} {}   {} item(s)   {} question   closes into {}   pictures {} of {}",
+            "campaign {} {}   {} item(s)   {} question   closes into {}   suggests {}   pictures {} of {}",
             made.id,
             made.name,
             n,
             q.kind(),
             made.closes_into,
+            made.suggest.name(),
             pictures["have"],
             pictures["stacks"]
         );

@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A reading campaign says when it is made what its raters are shown beside each item as the answer suggested: `nils campaign create --suggest none|rules|imported`, or `suggest` on `POST /api/campaigns`. The default is `none`: a campaign made without saying shows nothing, so a read registered as made without suggestions is one. With `none` every door of the campaign reads its items blind, as a sealed stack is read: the evidence door serves the file and nothing a system said of the stack, no batch is formed, the gallery suggests nothing and keeps the items' order, a claim by value takes an order drawn from the campaign's seed, and every answer keeps nothing suggested beside it. `rules` is what every campaign did before: the rules' answer and System 1's, with batches of like stacks. `imported` shows only what `nils campaign suggest` brings in, never the rules, and forms no batch; suggestions are refused by a campaign made any other way. A campaign made before is written as what it showed: `imported` where suggestions were brought into it, `rules` otherwise. Registry schema 72; the HTTP API contract stays version 7, amended in place additively.
+
 ## [1.0.0-alpha.58] - 2026-09-28
 
 `nils digest --reread` reads a series at a time through an index instead of joining its target series into every page, so a re-read runs at the rate the parsers and the storage allow; a stopped, failed or killed re-read is continued by the next one (`--restart` starts over); and `--reread-exact <manufacturer>` compares the manufacturer with its case, so Siemens XA can be re-read without the older Siemens fleet. Released alone, with no desk release of the same number. The registry stays at schema 71. The HTTP API contract stays version 7; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1. The MRI pack stays 0.11.0. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.57.

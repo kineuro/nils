@@ -1022,10 +1022,65 @@ pub struct New<'a> {
     /// Record 48 R1: the share of each batch held back to be read alone,
     /// from [`HOLD_BACK_MIN`] to one; [`HOLD_BACK_MIN`] when none is given.
     pub hold_back: Option<f64>,
+    /// What the reader shows beside each item as the answer suggested:
+    /// nothing, the pack's rules, or suggestions brought in from outside;
+    /// [`Suggest::None`] when none is given.
+    pub suggest: Option<Suggest>,
 }
 
 /// Record 48 R1: the least share of a batch held back to be read alone.
 pub const HOLD_BACK_MIN: f64 = 0.1;
+
+/// What a campaign shows its raters beside each item as the answer
+/// suggested, said once when it is made and never inferred. A read
+/// registered as made without suggestions is one made without them: with
+/// `None` no door of the campaign shows what the rules or System 1 said of
+/// its stacks, nothing is filled in, no batch is formed and the claim
+/// order is drawn from the campaign's seed, never ranked by a system's
+/// confidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Suggest {
+    /// Nothing is suggested: the raters read every item unled. The default.
+    #[default]
+    None,
+    /// The pack's rules and System 1: the engine's own answer, and batches
+    /// of like stacks that share it.
+    Rules,
+    /// Only the suggestions brought in with `campaign suggest` (record 50
+    /// R3); an item none names shows nothing, and the rules are never shown.
+    Imported,
+}
+
+impl Suggest {
+    pub fn parse(s: &str) -> Result<Suggest, Error> {
+        match s.trim() {
+            "none" => Ok(Suggest::None),
+            "rules" => Ok(Suggest::Rules),
+            "imported" => Ok(Suggest::Imported),
+            other => Err(invalid(format!(
+                "suggest: none, rules or imported, not {other}"
+            ))),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Suggest::None => "none",
+            Suggest::Rules => "rules",
+            Suggest::Imported => "imported",
+        }
+    }
+
+    /// Whether the raters are shown what the rules and System 1 said.
+    pub fn shows_rules(self) -> bool {
+        self == Suggest::Rules
+    }
+
+    /// Whether the raters are shown suggestions brought in from outside.
+    pub fn shows_imported(self) -> bool {
+        self == Suggest::Imported
+    }
+}
 
 /// A campaign as read.
 #[derive(Debug, Clone, PartialEq)]
@@ -1052,6 +1107,8 @@ pub struct Campaign {
     pub agreement: Value,
     /// Record 48 R1: the share of each batch held back to be read alone.
     pub hold_back: f64,
+    /// What the reader shows beside each item as the answer suggested.
+    pub suggest: Suggest,
 }
 
 impl Campaign {
@@ -1118,6 +1175,7 @@ impl Campaign {
             "closed_by": self.closed_by,
             "agreement": self.agreement,
             "hold_back": self.hold_back,
+            "suggest": self.suggest.name(),
         })
     }
 }
@@ -1145,7 +1203,7 @@ fn json_at(r: &Row, i: usize) -> Result<Value, StoreError> {
         .unwrap_or(Value::Null))
 }
 
-const CAMPAIGN_COLUMNS: [&str; 21] = [
+const CAMPAIGN_COLUMNS: [&str; 22] = [
     "id",
     "name",
     "owner",
@@ -1167,6 +1225,7 @@ const CAMPAIGN_COLUMNS: [&str; 21] = [
     "closed_by",
     "agreement",
     "hold_back",
+    "suggest",
 ];
 
 fn campaign_of(r: &Row) -> Result<Campaign, StoreError> {
@@ -1192,6 +1251,12 @@ fn campaign_of(r: &Row) -> Result<Campaign, StoreError> {
         closed_by: r.opt_text(18)?.map(str::to_string),
         agreement: json_at(r, 19)?,
         hold_back: r.opt_double(20)?.unwrap_or(HOLD_BACK_MIN),
+        // a campaign from before this column said nothing, and showed the
+        // rules (the migration writes what each one showed)
+        suggest: r
+            .opt_text(21)?
+            .and_then(|t| Suggest::parse(t).ok())
+            .unwrap_or(Suggest::Rules),
     })
 }
 
@@ -1459,6 +1524,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         "created_at",
                         "hold_back",
                         "hold_back_seed",
+                        "suggest",
                     ],
                 )
                 .returning(&["id"]),
@@ -1481,6 +1547,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                     Param::from(now.as_str()),
                     Param::Double(hold_back),
                     Param::from(uuid::Uuid::new_v4().to_string()),
+                    Param::from(n.suggest.unwrap_or_default().name()),
                 ]],
             )?
             .first()
@@ -2785,9 +2852,20 @@ pub fn claim_with(
                                     Some(s) if sealed.contains(s) => {
                                         (1, drawn(seed, *id), *position)
                                     }
+                                    // a campaign that shows nothing is never
+                                    // ranked by what a system said either
+                                    _ if c.suggest == Suggest::None => {
+                                        (1, drawn(seed, *id), *position)
+                                    }
                                     _ => {
-                                        let mine = stack.and_then(|s| worth.get(&s)).cloned();
-                                        let w = crate::suggestion::merged(mine, told.get(id));
+                                        // what the campaign shows is what ranks it
+                                        let mine = stack
+                                            .filter(|_| c.suggest.shows_rules())
+                                            .and_then(|s| worth.get(&s))
+                                            .cloned();
+                                        let theirs =
+                                            told.get(id).filter(|_| c.suggest.shows_imported());
+                                        let w = crate::suggestion::merged(mine, theirs);
                                         by_value(w.as_ref(), *position)
                                     }
                                 };
