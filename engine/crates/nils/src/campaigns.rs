@@ -59,6 +59,10 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/mine",
     "POST /api/campaigns/{id}/answers/{answer}/amend",
     "POST /api/campaigns/{id}/raters",
+    "GET /api/campaigns/{id}/ab",
+    "GET /api/campaigns/{id}/ab/decisions",
+    "GET /api/campaigns/{id}/items/{item}/ab",
+    "POST /api/campaigns/{id}/answers/{answer}/cause",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -77,7 +81,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 "campaigns",
                 _,
                 "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery"
-                | "mine",
+                | "mine" | "ab",
             ],
         )
         | (
@@ -88,9 +92,17 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 _,
                 "items",
                 _,
-                "candidates" | "why" | "header",
+                "candidates" | "why" | "header" | "ab",
             ],
-        ) => (Need::One("campaigns:see"), Plain),
+        )
+        | ("GET", ["api", "campaigns", _, "ab", "decisions"]) => {
+            (Need::One("campaigns:see"), Plain)
+        }
+        // record 48, the reference read by judges: the cause of an axis of
+        // one's own answer on an A/B item
+        ("POST", ["api", "campaigns", _, "answers", _, "cause"]) => {
+            (Need::One("campaigns:work"), Plain)
+        }
         // record 48: what the pack derives from a partial answer, a reading
         // that takes a body and writes nothing
         ("POST", ["api", "campaigns", _, "items", _, "derive"]) => {
@@ -430,6 +442,42 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Changed a campaign's raters",
     ),
     (
+        "GET /api/campaigns/{id}/ab",
+        false,
+        false,
+        "bounded",
+        "counts per axis and choice",
+        "Reading how an A/B campaign goes",
+        "Read how an A/B campaign goes",
+    ),
+    (
+        "GET /api/campaigns/{id}/ab/decisions",
+        false,
+        false,
+        "bounded",
+        "one row per answer and axis",
+        "Reading an A/B campaign's decisions",
+        "Read an A/B campaign's decisions",
+    ),
+    (
+        "GET /api/campaigns/{id}/items/{item}/ab",
+        false,
+        false,
+        "free",
+        "one item's candidates",
+        "Reading an item's candidates",
+        "Read an item's candidates",
+    ),
+    (
+        "POST /api/campaigns/{id}/answers/{answer}/cause",
+        true,
+        false,
+        "free",
+        "one cause",
+        "Giving a cause",
+        "Gave a cause",
+    ),
+    (
         "GET /api/certificates",
         false,
         false,
@@ -458,7 +506,7 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
     ),
 ];
 
-fn campaign_err(e: campaign::Error) -> Reply {
+pub(crate) fn campaign_err(e: campaign::Error) -> Reply {
     match e {
         campaign::Error::Store(s) => Reply::error(500, s.to_string()),
         campaign::Error::Invalid(m) => Reply::error(400, m),
@@ -1109,9 +1157,13 @@ pub(crate) fn route(
                 let sealed = blind_to(registry.store(), caller, stack)?;
                 // a campaign made to show nothing is read blind whole; one
                 // that shows what was brought in hides the rules the same
-                // way and keeps its suggestions
-                let blind = sealed || c.suggest == campaign::Suggest::None;
-                let rules_hidden = sealed || hides_rules(&c);
+                // way and keeps its suggestions; and every item of an A/B
+                // campaign (record 48, the reference read by judges), whose
+                // candidates are the only answers shown, and never as a
+                // system's, whatever the campaign says it suggests
+                let ab = nils_registry::ab::is_ab(&c);
+                let blind = sealed || ab || c.suggest == campaign::Suggest::None;
+                let rules_hidden = sealed || ab || hides_rules(&c);
                 let mut doc = crate::reader::why(
                     registry.store(),
                     stack,
@@ -1253,6 +1305,7 @@ pub(crate) fn route(
             }
             ["api", "campaigns", which, "batches"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                ab_one_by_one(&c)?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let found =
                     crate::reader::batches(registry.store(), &c, principal, pack.as_deref(), None)
@@ -1408,6 +1461,15 @@ pub(crate) fn route(
             ["api", "campaigns", which, "suggestions"] if post => {
                 let doc = json_body(body)?;
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                if nils_registry::ab::is_ab(&c) {
+                    return Err(Reply::error(
+                        409,
+                        format!(
+                            "campaign {} settles its voters' candidates; a suggestion from outside would be a voter shown by name",
+                            c.name
+                        ),
+                    ));
+                }
                 if c.owner != principal && !oversees(caller) {
                     return Err(Reply::error(
                         403,
@@ -1462,6 +1524,7 @@ pub(crate) fn route(
             // small with its suggestion, for a person to check and accept
             ["api", "campaigns", which, "gallery"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                ab_one_by_one(&c)?;
                 let listed = c.raters();
                 if !listed.is_empty() && !listed.iter().any(|p| p == principal) {
                     return Err(Reply::error(
@@ -1674,6 +1737,29 @@ pub(crate) fn route(
                 Ok(Reply::ok(doc))
             }
             // record 48 R2: the certificates of sealed samples
+            // record 48, the reference read by judges: an A/B item's sheet,
+            // a cause, and how the campaign goes
+            ["api", "campaigns", which, "items", item, "ab"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                crate::ab::sheet_door(registry, caller, &c, item)
+            }
+            ["api", "campaigns", which, "ab"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::ab::summary_door(registry, caller, &c)
+            }
+            ["api", "campaigns", which, "ab", "decisions"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::ab::decisions_door(registry, caller, &c)
+            }
+            ["api", "campaigns", which, "answers", answer, "cause"] if post => {
+                let doc = json_body(body)?;
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let answer = id_of(answer)?;
+                belongs(registry.store(), c.id, "campaign_answer", answer)?;
+                crate::ab::cause_door(registry, caller, &c, answer, &doc, &now)
+            }
             ["api", "certificates"] if get => {
                 let list = labels::certificates(registry.store()).map_err(labels_err)?;
                 Ok(Reply::ok(json!({
@@ -2025,6 +2111,21 @@ pub(crate) fn route(
 /// of a sample sealed now, and the caller does not hold the certificate's
 /// grant. Sealed means sealed on every door, for a rater, an adjudicator,
 /// a reviewer and an admin alike.
+/// Record 48: an A/B campaign is settled one item at a time, from its
+/// candidates; no batch, no gallery.
+fn ab_one_by_one(c: &campaign::Campaign) -> Result<(), Reply> {
+    if nils_registry::ab::is_ab(c) {
+        return Err(Reply::error(
+            409,
+            format!(
+                "campaign {} settles candidates one item at a time: no batches, no gallery",
+                c.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result<bool, Reply> {
     Ok(!blind_among(store, caller, &[stack])?.is_empty())
 }
@@ -2123,7 +2224,7 @@ fn holds_words(what: &str) -> bool {
 /// their own answers; an adjudicator of the campaign and a holder of
 /// review:work read every one, at the answers door, through an export of
 /// the answers and in the label set it wrote.
-fn sees_all(
+pub(crate) fn sees_all(
     store: &mut Store,
     caller: &Caller,
     principal: &str,
@@ -2291,7 +2392,7 @@ pub(crate) fn pictures_through(
     Ok(None)
 }
 
-fn plain(caller: &Caller) -> bool {
+pub(crate) fn plain(caller: &Caller) -> bool {
     caller.access.detail < Detail::Quasi
 }
 
@@ -2332,7 +2433,7 @@ fn plain_answer(v: &mut Value, free: bool) {
 
 /// Whether a row of a campaign's table belongs to the campaign the path
 /// names, so that one campaign's path never reaches another's rows.
-fn belongs(store: &mut Store, campaign: i64, t: &str, id: i64) -> Result<(), Reply> {
+pub(crate) fn belongs(store: &mut Store, campaign: i64, t: &str, id: i64) -> Result<(), Reply> {
     let d = store.dialect();
     let sql = format!(
         "SELECT campaign_id FROM {} WHERE id = {}",
@@ -2458,7 +2559,8 @@ fn suggested_for(
     if !matches!(
         q,
         campaign::Question::Axis { .. } | campaign::Question::Axes { .. }
-    ) {
+    ) || nils_registry::ab::is_ab(c)
+    {
         return Ok(None);
     }
     let sql = format!(
@@ -2488,7 +2590,7 @@ fn axes_value(question: &Value, value: &mut Value) {
     }
 }
 
-fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
+pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
     let mut v = c.as_json();
     v["counts"] = campaign::counts(store, c.id).map_err(campaign_err)?;
     v["items"] = json!(
@@ -2685,7 +2787,7 @@ fn sessions_of(
 }
 
 /// The content hash of a handle.
-fn content_hash(store: &mut Store, handle: i64) -> Result<Option<String>, Reply> {
+pub(crate) fn content_hash(store: &mut Store, handle: i64) -> Result<Option<String>, Reply> {
     Ok(nils_ask::handle::get(store, handle)?.and_then(|h| h.content_hash))
 }
 
@@ -2888,7 +2990,7 @@ pub(crate) fn value_names(
 /// legal combinations frozen into it (`nils_pack::legal`), so an answer is
 /// held to the pack the campaign was made under. The constraints are never
 /// the caller's to say, and without a pack no axes question is made.
-fn complete_axes(
+pub(crate) fn complete_axes(
     question: &mut Value,
     pack: Option<&nils_pack::Pack>,
 ) -> Result<(), (u16, String)> {
@@ -3082,12 +3184,13 @@ pub(crate) fn derive_answer(
         let one = |v: &str| names.get(v).cloned().unwrap_or_else(|| v.to_string());
         let read = match &answer[axis] {
             Value::Null if answer.get(axis).is_some() => Some(Vec::new()),
-            Value::String(t) if t == campaign::CANT_TELL => None,
+            // can't tell, and not asked of a localizer: no value read
+            Value::String(t) if t == campaign::CANT_TELL || t == campaign::NOT_ASKED => None,
             Value::String(t) if t.trim().is_empty() => Some(Vec::new()),
             Value::String(t) => Some(vec![one(t.trim())]),
             Value::Array(list) => {
                 let w: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
-                if w.contains(&campaign::CANT_TELL) {
+                if w.contains(&campaign::CANT_TELL) || w.contains(&campaign::NOT_ASKED) {
                     None
                 } else {
                     Some(w.into_iter().map(one).collect())
@@ -3453,7 +3556,7 @@ fn candidates(
 
 /// Record 45 E1 and R3: how many of a campaign's stacks have their picture,
 /// and the job that builds the rest where the campaign pins a handle.
-fn pictures_of(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
+pub(crate) fn pictures_of(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
     let stacks = campaign_stacks(store, c)?;
     let mut v = crate::pyramid::pictures(store, &stacks);
     if v["missing"].as_u64().unwrap_or(0) > 0
@@ -3668,6 +3771,26 @@ pub(crate) fn write_set(
 pub(crate) enum CampaignCommand {
     /// Make a campaign from a frozen selection, a handle, or open review items
     Create(Box<CreateArgs>),
+    /// Make an A/B campaign (record 48, the reference read by judges): the
+    /// voters' readings of every stack of a selection (raters' JSON files,
+    /// the rules), an item where they differ on an asked axis, and a
+    /// pre-registered seeded audit of the stacks they agree on. The person
+    /// who settles an item sees each axis's candidates as letters with a
+    /// reason, never which voter gave which
+    Ab(Box<crate::ab::AbArgs>),
+    /// Every decision of an A/B campaign as JSON: the candidates, what was
+    /// chosen, the cause and the seconds, with the voters once the campaign
+    /// is closed
+    AbExport {
+        /// The campaign, by name or id
+        campaign: String,
+        /// Write it to this file rather than print it
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// The summary alone: counts per axis, choice and cause
+        #[arg(long)]
+        summary: bool,
+    },
     /// Every campaign, newest first
     List {
         #[arg(long)]
@@ -4065,7 +4188,7 @@ pub(crate) struct ExportArgs {
     json: bool,
 }
 
-fn who() -> String {
+pub(crate) fn who() -> String {
     std::env::var("NILS_PRINCIPAL")
         .ok()
         .filter(|p| !p.is_empty())
@@ -4101,7 +4224,7 @@ fn keyboard_author(registry: &mut Registry) -> Result<(&'static str, Option<i64>
     Ok(("model", Some(m.id)))
 }
 
-fn cerr(e: campaign::Error) -> Exit {
+pub(crate) fn cerr(e: campaign::Error) -> Exit {
     match e {
         campaign::Error::Store(s) => fail(s.to_string()),
         other => usage(other.to_string()),
@@ -4120,7 +4243,7 @@ pub(crate) fn rerr(r: Reply) -> Exit {
     if r.status >= 500 { fail(m) } else { usage(m) }
 }
 
-fn print(v: &Value) {
+pub(crate) fn print(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
 }
 
@@ -4185,6 +4308,12 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
     let now = nils_registry::time::now_iso();
     match cmd {
         CampaignCommand::Create(args) => create_verb(home, *args),
+        CampaignCommand::Ab(args) => crate::ab::make(home, *args),
+        CampaignCommand::AbExport {
+            campaign: which,
+            out,
+            summary,
+        } => crate::ab::export(home, &which, out.as_deref(), summary),
         CampaignCommand::List { json } => {
             let mut registry = crate::open(home)?;
             let list = campaign::list(registry.store()).map_err(cerr)?;

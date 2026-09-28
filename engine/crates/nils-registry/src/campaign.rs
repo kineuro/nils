@@ -328,9 +328,10 @@ impl Question {
                     value.ok_or_else(|| invalid(format!("the answer names a value of {axis}")))?;
                 // can't tell is an axes answer's word (record 48); on an axis
                 // question it would close into a decision that says it
-                if v.trim() == CANT_TELL {
+                if v.trim() == CANT_TELL || v.trim() == NOT_ASKED {
                     return Err(invalid(format!(
-                        "{CANT_TELL} is never a value of {axis}; an axes question takes it as an answer"
+                        "{} is never a value of {axis}; an axes question takes it as an answer",
+                        v.trim()
                     )));
                 }
                 if !values.is_empty() && !values.iter().any(|x| x == v) {
@@ -452,6 +453,42 @@ pub fn cant_tell(values: &[String]) -> bool {
     values.len() == 1 && values[0] == CANT_TELL
 }
 
+/// Reading guide ruling 1 (Nima, 2026-09-27), as the A/B view of record 48
+/// builds it: a localizer takes a one-key answer, its provenance and body
+/// part, and every other asked axis says "not asked for a localizer", a
+/// word of its own, neither none nor can't tell. Like [`CANT_TELL`] it is
+/// never a value of the pack and never a decision; an answer may say it
+/// only on an item the engine marked a localizer ([`crate::ab::gate`]).
+pub const NOT_ASKED: &str = "not_asked";
+
+/// Whether an axis of a joint answer is not asked for a localizer.
+pub fn not_asked(values: &[String]) -> bool {
+    values.len() == 1 && values[0] == NOT_ASKED
+}
+
+/// Whether an axis of a joint answer holds no value of the pack: the
+/// rater's can't tell, or not asked for a localizer.
+pub fn unanswered(values: &[String]) -> bool {
+    cant_tell(values) || not_asked(values)
+}
+
+/// The axes a joint answer says are not asked of a localizer, in order.
+pub fn not_asked_axes(a: &Joint) -> Vec<String> {
+    a.iter()
+        .filter(|(_, v)| not_asked(v))
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// The axes a joint answer answers with no value of the pack (can't tell,
+/// not asked), in order: a close writes no decision on them.
+pub fn unanswered_axes(a: &Joint) -> Vec<String> {
+    a.iter()
+        .filter(|(_, v)| unanswered(v))
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// The axes a joint answer says can't tell of, in order.
 pub fn cant_tell_axes(a: &Joint) -> Vec<String> {
     a.iter()
@@ -460,11 +497,11 @@ pub fn cant_tell_axes(a: &Joint) -> Vec<String> {
         .collect()
 }
 
-/// A joint answer without its can't-tell axes: what the pack's constraints
-/// and a close read.
+/// A joint answer without its can't-tell and not-asked axes: what the
+/// pack's constraints and a close read.
 pub fn told(a: &Joint) -> Joint {
     a.iter()
-        .filter(|(_, v)| !cant_tell(v))
+        .filter(|(_, v)| !unanswered(v))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
@@ -489,6 +526,11 @@ fn check_constraints(axes: &[String], c: &Value) -> Result<(), Error> {
         if words(&c["values"][a]).iter().any(|v| v == CANT_TELL) {
             return Err(invalid(format!(
                 "{a} names {CANT_TELL} as a value, and {CANT_TELL} is the rater's can't tell, never a value"
+            )));
+        }
+        if words(&c["values"][a]).iter().any(|v| v == NOT_ASKED) {
+            return Err(invalid(format!(
+                "{a} names {NOT_ASKED} as a value, and {NOT_ASKED} says a localizer is not asked it, never a value"
             )));
         }
     }
@@ -600,15 +642,19 @@ fn read_joint(
         };
         values.sort();
         values.dedup();
-        if values.iter().any(|v| v == CANT_TELL) {
+        if let Some(word) = values
+            .iter()
+            .find(|v| *v == CANT_TELL || *v == NOT_ASKED)
+            .cloned()
+        {
             if !may_cant_tell {
                 return Err(invalid(format!(
-                    "{CANT_TELL} is a rater's answer on {axis}, never a value of it"
+                    "{word} is a rater's answer on {axis}, never a value of it"
                 )));
             }
             if values.len() > 1 {
                 return Err(invalid(format!(
-                    "{axis}: {CANT_TELL} stands alone, never beside a value"
+                    "{axis}: {word} stands alone, never beside a value"
                 )));
             }
             out.insert(axis.clone(), values);
@@ -641,6 +687,8 @@ pub fn canonical_joint(constraints: &Value, a: &Joint) -> String {
     for (axis, values) in a {
         let v = if cant_tell(values) {
             json!(CANT_TELL)
+        } else if not_asked(values) {
+            json!(NOT_ASKED)
         } else if multi.contains(axis) {
             json!(values)
         } else {
@@ -3225,6 +3273,9 @@ pub struct Answer {
     /// answer no later one supersedes is the rater's answer now.
     pub supersedes_id: Option<i64>,
     pub superseded_by: Option<i64>,
+    /// Record 48, the reference read by judges: on an A/B item, what the
+    /// answer chose on each axis ([`crate::ab::choices`]).
+    pub choices: Option<Value>,
 }
 
 impl Answer {
@@ -3239,11 +3290,12 @@ impl Answer {
             "changed": self.changed, "via": self.via, "unsure": self.unsure,
             "derived": self.derived, "suggested_by": self.suggested_by,
             "supersedes_id": self.supersedes_id, "superseded_by": self.superseded_by,
+            "choices": self.choices,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 24] = [
+const ANSWER_COLUMNS: [&str; 25] = [
     "id",
     "campaign_id",
     "item_id",
@@ -3268,6 +3320,7 @@ const ANSWER_COLUMNS: [&str; 24] = [
     "suggested_by",
     "supersedes_id",
     "superseded_by",
+    "choices",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -3300,6 +3353,10 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
         suggested_by: r.opt_text(21)?.map(str::to_string),
         supersedes_id: r.opt_int(22)?,
         superseded_by: r.opt_int(23)?,
+        choices: {
+            let c = json_at(r, 24)?;
+            (!c.is_null()).then_some(c)
+        },
     })
 }
 
@@ -3968,6 +4025,8 @@ pub fn answer_with(
     }
     let question = c.question()?;
     question.check(g)?;
+    // record 48: not asked only on a localizer of an A/B campaign
+    crate::ab::gate(&c, g.value)?;
     if let Question::Derivative {
         derivative_kind, ..
     } = &question
@@ -4067,7 +4126,7 @@ pub fn answer_with(
                 a.id
             )));
         }
-        write_answer(
+        let answered = write_answer(
             store,
             &c,
             &Written {
@@ -4085,7 +4144,17 @@ pub fn answer_with(
                 derived: t.derived,
             },
             now,
-        )
+        )?;
+        // record 48: what the answer chose on an A/B item, read by the
+        // engine from the value against the item's candidates
+        crate::ab::keep_choices(
+            store,
+            &c,
+            a.item_id,
+            answered.answer,
+            stored_value.as_deref(),
+        )?;
+        Ok(answered)
     })();
     let answered = match done {
         Ok(x) => x,
@@ -4215,6 +4284,7 @@ pub fn amend(registry: &mut Registry, m: &Amend<'_>, now: &str) -> Result<Amende
         unsure: m.unsure,
     };
     question.check(&given)?;
+    crate::ab::gate(&c, m.value)?;
     if let Question::Derivative {
         derivative_kind, ..
     } = &question
@@ -4352,6 +4422,7 @@ pub fn amend(registry: &mut Registry, m: &Amend<'_>, now: &str) -> Result<Amende
             "id",
             earlier.id,
         )?;
+        crate::ab::keep_choices(store, &c, it.id, id, stored_value.as_deref())?;
         let (state, opened) = settle(store, &c, &question, &adjudication, &it, &earlier.role, now)?;
         Ok((
             Amended {
@@ -4927,6 +4998,13 @@ pub fn accept_each(
     if c.status != "open" {
         return Err(refused(format!("campaign {} is {}", c.name, c.status)));
     }
+    // record 48: an A/B campaign is settled one item at a time
+    if crate::ab::is_ab(&c) {
+        return Err(refused(format!(
+            "campaign {} settles candidates one item at a time; nothing is accepted in one move",
+            c.name
+        )));
+    }
     let listed = c.raters();
     if !listed.is_empty() && !listed.iter().any(|p| p == g.principal) {
         return Err(Error::Forbidden(format!(
@@ -4969,6 +5047,7 @@ pub fn accept_each(
         question
             .check(&given)
             .map_err(|e| invalid(format!("item {}: {e}", r.item)))?;
+        crate::ab::gate(&c, Some(r.value)).map_err(|e| invalid(format!("item {}: {e}", r.item)))?;
         let value = kept_value(&question, r.value)?;
         let suggested = r
             .suggested
@@ -6359,7 +6438,7 @@ fn close_axes(
     let mut by_axis = serde_json::Map::new();
     // record 48: an axis the item came to can't tell on is left out, with
     // no decision; its adopted question stays open
-    let unknown = cant_tell_axes(joint);
+    let unknown = unanswered_axes(joint);
     for axis in axes {
         if unknown.contains(axis) {
             continue;
@@ -6426,15 +6505,18 @@ fn close_axes(
         own.id,
         if staged { "staged" } else { "accepted" },
         by.who,
-        &json!({"campaign": c.id, "decisions": by_axis, "value": told(joint), "cant_tell": unknown}),
+        &json!({"campaign": c.id, "decisions": by_axis, "value": told(joint), "cant_tell": cant_tell_axes(joint), "not_asked": not_asked_axes(joint)}),
         first,
         now,
     )?;
     mark_review_item(store, own.id, "resolved")?;
     let mut outcome = it.outcome.clone();
     outcome["decisions"] = Value::Object(by_axis);
-    if !unknown.is_empty() {
-        outcome["cant_tell"] = json!(unknown);
+    if !cant_tell_axes(joint).is_empty() {
+        outcome["cant_tell"] = json!(cant_tell_axes(joint));
+    }
+    if !not_asked_axes(joint).is_empty() {
+        outcome["not_asked"] = json!(not_asked_axes(joint));
     }
     if !skipped.is_empty() {
         outcome["skipped"] = json!(skipped);

@@ -2158,6 +2158,13 @@ fn build_registry() -> Vec<Table> {
                 // Agreement, the outcome and the close read the answer no
                 // later one supersedes.
                 col("superseded_by", Type::Int),
+                // Record 48, the reference read by judges: on an item of an
+                // A/B campaign, what the answer chose on each axis, as the
+                // engine read it from the value against the item's
+                // candidates: a candidate's letter, `confirm` (the one
+                // value the voters agreed on), `neither`, `cant_tell` or
+                // `not_asked`. Null on any other campaign's answer.
+                col("choices", Type::Json),
             ],
         )
         // one first answer per item, rater and round: a repeat is the same
@@ -2202,6 +2209,74 @@ fn build_registry() -> Vec<Table> {
         // one suggestion per item and author: an author's later import
         // replaces its earlier one
         .unique(&["item_id", "author"])
+        .index(&["campaign_id"]),
+        // Record 48, the reference read by judges: an item of an A/B
+        // campaign, where independent voters (raters that read the header,
+        // the rules) differ on an axis of a stack (`split`), or agree on
+        // every axis and were drawn with the campaign's pre-registered seed
+        // for the audit of agreements (`audit`). The kind is never served
+        // to a rater while the campaign is open.
+        Table::new(
+            "campaign_ab_item",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("stack_id", Type::Int),
+                // split | audit
+                req("kind", Type::Text),
+                // 1 where every voter that answered said the stack is a
+                // localizer: only the axes a localizer is asked are asked
+                req("localizer", Type::Int),
+                // the axes the voters differ on, in the question's order
+                req("split_axes", Type::Json),
+            ],
+        )
+        .unique(&["item_id"])
+        .index(&["campaign_id"]),
+        // Record 48, the reference read by judges: one candidate value of
+        // one axis of an A/B item, under a letter drawn at random for the
+        // item and axis, with the one reason shown beside it. Which voters
+        // gave it (`sources`) is kept for the export and never served to
+        // the person who settles the item.
+        Table::new(
+            "campaign_ab_candidate",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("axis", Type::Text),
+                // A, B, C, ...
+                req("label", Type::Text),
+                // the axis's value as an axes answer says it
+                req("value", Type::Json),
+                // the reason shown: the header facts one voter cited
+                col("reason", Type::Text),
+                // every voter that gave the value, with its reason
+                req("sources", Type::Json),
+            ],
+        )
+        .unique(&["item_id", "axis", "label"])
+        .index(&["campaign_id"]),
+        // Record 48, the reference read by judges: the cause the person
+        // who settled an A/B item gave for one axis of their answer (rule
+        // bug, convention gap, header ambiguity, rater error, reader slip).
+        // A later row for the same answer and axis replaces the earlier as
+        // the cause in force; a row with no cause takes it away.
+        Table::new(
+            "campaign_ab_cause",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("answer_id", Type::Int),
+                req("axis", Type::Text),
+                col("cause", Type::Text),
+                req("principal", Type::Text),
+                req("at", Type::Timestamp),
+            ],
+        )
+        .index(&["answer_id"])
         .index(&["campaign_id"]),
         // Record 42 S7 (C7): labels exported with their provenance. The
         // digest covers the canonical labels.tsv, so the same state gives
@@ -2590,6 +2665,9 @@ mod tests {
             "sealed_stack",
             "certificate",
             "campaign_suggestion",
+            "campaign_ab_item",
+            "campaign_ab_candidate",
+            "campaign_ab_cause",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }
