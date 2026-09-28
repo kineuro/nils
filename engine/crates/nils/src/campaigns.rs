@@ -3057,6 +3057,25 @@ fn derived_for(
             format!("stack {stack} has no fingerprint, so nothing is derived for it"),
         ));
     };
+    Ok(Some(derive_answer(pack, &s, private, axes, derive, answer)))
+}
+
+/// Record 48: the derived axes of one stack from an answer (whole or
+/// partial, `{axis: value | [values] | null | "cant_tell"}`) through the
+/// pack's own rules, given the stack as the pack sees it. A value may be
+/// named by its identity, its label or what a row stores; an asked axis the
+/// answer does not name is taken as can't tell. Each derived axis comes back
+/// as a value, a list for a multi-valued axis, null for none, or `cant_tell`
+/// where an asked axis it reads was answered so. The reader's live line and
+/// `nils pack derive` both come through here, so the two cannot differ.
+pub(crate) fn derive_answer(
+    pack: &nils_pack::Pack,
+    stack: &nils_pack::Stack,
+    private: Vec<String>,
+    axes: &[String],
+    derive: &[String],
+    answer: &Value,
+) -> Value {
     let mut given: BTreeMap<String, Option<Vec<String>>> = BTreeMap::new();
     for axis in axes {
         let names = value_names(Some(pack), Some(axis));
@@ -3078,7 +3097,7 @@ fn derived_for(
         };
         given.insert(axis.clone(), read);
     }
-    let got = nils_pack::derive::derive(pack, &s, private, axes, derive, &given);
+    let got = nils_pack::derive::derive(pack, stack, private, axes, derive, &given);
     let mut out = serde_json::Map::new();
     for d in derive {
         let multi = pack
@@ -3097,7 +3116,7 @@ fn derived_for(
         };
         out.insert(d.clone(), v);
     }
-    Ok(Some(Value::Object(out)))
+    Value::Object(out)
 }
 
 /// Record 48: every kept answer of an axes campaign that derives axes and
