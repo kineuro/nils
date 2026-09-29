@@ -1169,6 +1169,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             // One registry per handler thread: the pool of §13.6, and the
             // ask doors' reader, pack and catalog beside it.
             let mut registry: Option<Registry> = None;
+            let mut used = Instant::now();
             let mut ask_state = crate::ask_doors::AskState::default();
             loop {
                 let Ok(request) = server.recv_timeout(Duration::from_millis(250)) else {
@@ -1181,6 +1182,18 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
                     continue;
                 };
                 let n = doors.served.fetch_add(1, Ordering::SeqCst) + 1;
+                // a connection the database closed (a restart of Postgres)
+                // is opened again, never kept: kept, it failed every
+                // request its thread took with a 500 until the engine
+                // restarted. One idle for a while is asked first, since a
+                // closed connection looks open until a call meets it.
+                if registry.as_mut().is_some_and(|r| {
+                    r.store().is_closed()
+                        || (used.elapsed() >= IDLE_CHECK && !r.store().answers(ANSWER_WITHIN))
+                }) {
+                    registry = None;
+                }
+                used = Instant::now();
                 if registry.is_none() {
                     registry = doors.home.open().ok();
                 }
@@ -1192,6 +1205,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
                     continue;
                 };
                 handle(&doors, reg, &mut ask_state, request);
+                if reg.store().is_closed() {
+                    registry = None;
+                }
                 if limit.is_some_and(|max| n >= max) {
                     server.unblock();
                     return;
@@ -1211,6 +1227,13 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     }
     Ok(())
 }
+
+/// How long a handler's registry connection may sit idle before the next
+/// request asks it whether it still answers: one round trip, and a burst
+/// of requests (a gallery's pictures, a volume's slabs) asks once.
+const IDLE_CHECK: Duration = Duration::from_secs(2);
+/// How long that question waits for the answer.
+const ANSWER_WITHIN: Duration = Duration::from_secs(2);
 
 /// The doors' listener, its connections sending without delay (TCP_NODELAY,
 /// which the accepted connections take from the listener). A response is
