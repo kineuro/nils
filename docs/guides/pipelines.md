@@ -260,6 +260,28 @@ A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metr
 
    `--from` is what the axis holds on a stack now: the decision in force there, else the classifier's value. A model's group whose stacks do not all match is split: the matching stacks each get a decision of their own by the same model, put in force, and the group's decision stays staged for the rest. The door is `POST /api/decisions/commit` with `model`, `axis`, `from`, `to` and `stacks`.
 
+## Run a model registered by its card
+
+A model registered with `nils model register --card --artifact` is checked against its file, and the file is not kept. Keep it where a run finds it before a pipeline reads it.
+
+1. Keep the artifact in the lane's output place:
+
+   ```sh
+   nils model keep bodypart-fusion-coarse@r7 --artifact mode.json
+   ```
+
+   The file is copied, never moved, to `derivatives/models/<name>-<version>/<file>` in the output place and registered as a derivative of kind `model` that belongs to the model and to no subject. A file whose sha256 is not the model's digest is refused, and so is a retired model. The same bytes kept again write nothing.
+
+2. Run the pipeline with the model:
+
+   ```sh
+   nils run bodypart-infer-fusion --select selection:every@1 --model bodypart-fusion-coarse@r7
+   ```
+
+   The kept file's folder is mounted read-only at `/inputs/<input>/`, and `/inputs/manifest.json` names the file in `models[i].artifact` beside the card.
+
+A stacks input may ask for each stack's header facts with `x-nils.input.header: true` (record 50). Each entry of `stacks.json` then carries a `header` object: the stack's fingerprint columns (`fingerprint`, null without a fingerprint row), every classification row by axis (`classification`), the name of its first ingest batch (`batch`) and the cohorts its subject is an open member of (`cohorts`). Without the flag `stacks.json` is as before, and a bids input is refused the flag.
+
 ## Curate a run's seeds
 
 1. Read the seeds a run suggested and save the stacks as a selection:

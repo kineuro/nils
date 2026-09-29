@@ -2616,3 +2616,105 @@ fn migration_73_lets_a_campaign_settle_candidates_on_both_backends() {
         );
     }
 }
+
+/// Record 50 on both backends: a registered model's artifact is a
+/// derivative of scope model, kind model, naming the model and neither a
+/// subject nor a run; anything else of that scope is refused, and the row
+/// is what a run's model input reads.
+#[test]
+fn a_kept_model_s_artifact_is_a_derivative_of_scope_model_on_both_backends() {
+    use nils_registry::derivative::{self, Belongs, New};
+    use nils_registry::model;
+    for (name, _guard, _dir, mut reg) in registries() {
+        let m = model::register(
+            &mut reg,
+            &serde_json::json!({
+                "name": "coarse", "version": "r7", "kind": "pass",
+                "digest": format!("sha256:{}", "7".repeat(64)), "task": "axis:body_part",
+            }),
+            "anna@ward-3",
+        )
+        .unwrap();
+        let belongs = Belongs::model();
+        let n = New {
+            kind: "model",
+            belongs: &belongs,
+            place_id: 1,
+            path: "derivatives/models/coarse-r7/mode.json",
+            bytes: 12,
+            sha256: &"7".repeat(64),
+            media_type: "application/json",
+            registered_by: "anna@ward-3",
+            actor: None,
+            model_id: Some(m.id),
+            run_id: None,
+            preprocess_version: None,
+            supersedes_id: None,
+            created_at: "2026-09-29T00:00:00Z",
+        };
+        let with_subject = Belongs {
+            subject_id: Some(1),
+            ..Belongs::model()
+        };
+        for bad in [
+            New {
+                kind: "mask",
+                ..n.clone()
+            },
+            New {
+                model_id: None,
+                ..n.clone()
+            },
+            New {
+                run_id: Some(1),
+                ..n.clone()
+            },
+            New {
+                belongs: &with_subject,
+                ..n.clone()
+            },
+        ] {
+            let e = derivative::insert(reg.store(), &bad).unwrap_err();
+            assert!(
+                e.to_string().contains("registered model's artifact"),
+                "{name}: {e}"
+            );
+        }
+        let id = derivative::insert(reg.store(), &n).unwrap();
+        let got = derivative::get(reg.store(), id).unwrap().unwrap();
+        assert_eq!(got.scope, "model", "{name}");
+        assert_eq!(
+            (got.subject_id, got.run_id, got.model_id),
+            (None, None, Some(m.id)),
+            "{name}"
+        );
+        let found = derivative::of_model(reg.store(), m.id, 1).unwrap();
+        assert_eq!(
+            found.iter().map(|d| d.id).collect::<Vec<_>>(),
+            [id],
+            "{name}"
+        );
+        assert!(
+            derivative::of_model(reg.store(), m.id, 2)
+                .unwrap()
+                .is_empty()
+        );
+        // a subject-less row without a run or a model is still refused
+        let none = Belongs {
+            scope: "subject".into(),
+            ..Belongs::model()
+        };
+        let e = derivative::insert(
+            reg.store(),
+            &New {
+                belongs: &none,
+                ..n.clone()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("belongs to a subject"),
+            "{name}: {e}"
+        );
+    }
+}

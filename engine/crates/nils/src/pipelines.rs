@@ -1655,11 +1655,14 @@ pub(crate) const MAX_BINDS: usize = 2000;
 /// header. Each folder that holds a file of the selection is bound
 /// read-only at `/source/<n>`, one bind per folder and never a whole source
 /// place, unless the folders are more than [`MAX_BINDS`]. The registry is
-/// read a few hundred stacks at a time, not stack by stack.
+/// read a few hundred stacks at a time, not stack by stack. With `header`
+/// (record 50, `x-nils.input.header`) each entry also carries the stack's
+/// header facts, [`stack_headers`]; without it the file is as it was.
 fn materialise_stacks(
     store: &mut Store,
     stacks: &[i64],
     input: &Path,
+    header: bool,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -1743,6 +1746,12 @@ fn materialise_stacks(
         }
     }
     let _ = d;
+    let mut headers = if header {
+        let subjects: BTreeMap<i64, i64> = info.iter().map(|(k, v)| (*k, v.1)).collect();
+        stack_headers(store, &subjects)?
+    } else {
+        BTreeMap::new()
+    };
     // one bind per folder that holds a file of the selection, or the roots
     let folder = |root: &str, path: &str| -> Result<String, String> {
         bind_folder(root, path).ok_or_else(|| {
@@ -1846,6 +1855,9 @@ fn materialise_stacks(
             "orientation": orientation, "body_part": ax.get("body_part"),
             "technique": ax.get("technique"), "slices": slices,
         }));
+        if header && let Some(entry) = entries.last_mut() {
+            entry["header"] = headers.remove(&stack).unwrap_or(Value::Null);
+        }
         units.push(Unit {
             id: unit,
             subject: None,
@@ -3146,7 +3158,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
 
     let released_before = x.resume.and_then(|r| r.input_release_id);
     let m = match (d.layout, released_before) {
-        (Layout::Stacks, _) => materialise_stacks(registry.store(), x.stacks, &input)?,
+        (Layout::Stacks, _) => materialise_stacks(registry.store(), x.stacks, &input, d.header)?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
         (Layout::Bids, None) => materialise_bids(
             home, registry, x.run_id, x.job_id, d.level, x.stacks, &run_dir, &input, x.args,
@@ -5083,6 +5095,152 @@ fn seeds_of(store: &mut Store, run: i64) -> Result<Value, String> {
         ));
     }
     serde_json::from_slice(&bytes).map_err(|e| format!("the seeds of run {run}: {e}"))
+}
+
+/// The columns of `stack_fingerprint` a stack's header object carries
+/// (record 50), each with whether it is text, an integer or a number.
+const HEADER_FINGERPRINT: [(&str, char); 22] = [
+    ("manufacturer", 't'),
+    ("modality", 't'),
+    ("orientation", 't'),
+    ("fov_x", 'f'),
+    ("fov_y", 'f'),
+    ("pixel_spacing_row", 'f'),
+    ("pixel_spacing_col", 'f'),
+    ("rows", 'i'),
+    ("columns", 'i'),
+    ("n_slices", 'i'),
+    ("slice_span_mm", 'f'),
+    ("slice_thickness", 'f'),
+    ("spacing_between_slices", 'f'),
+    ("aspect_ratio", 'f'),
+    ("field_strength_normalized", 'f'),
+    ("magnetic_field_strength", 'f'),
+    ("receive_coil_name", 't'),
+    ("text_series_description_ci", 't'),
+    ("text_protocol_name_ci", 't'),
+    ("text_sequence_name_ci", 't'),
+    ("text_series_comments_ci", 't'),
+    ("text_body_part_ci", 't'),
+];
+
+/// Each stack's header object for `stacks.json` (record 50): the named
+/// columns of its fingerprint row (null without one), every classification
+/// row by axis, the name of its first ingest batch, and the cohorts its
+/// subject is an open member of. `stacks` maps each stack to its subject.
+/// The registry is read a few hundred stacks at a time.
+fn stack_headers(
+    store: &mut Store,
+    stacks: &BTreeMap<i64, i64>,
+) -> Result<BTreeMap<i64, Value>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let ids: Vec<i64> = stacks.keys().copied().collect();
+    let mut fingerprint: BTreeMap<i64, Value> = BTreeMap::new();
+    let mut classification: BTreeMap<i64, serde_json::Map<String, Value>> = BTreeMap::new();
+    let mut batch: BTreeMap<i64, String> = BTreeMap::new();
+    let mut cohorts: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    let columns = HEADER_FINGERPRINT
+        .iter()
+        .map(|(c, _)| format!("f.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT f.stack_id, {columns} FROM {} f WHERE f.stack_id IN ({list})",
+            store.qualified("stack_fingerprint"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let mut row = serde_json::Map::new();
+            for (i, (name, ty)) in HEADER_FINGERPRINT.iter().enumerate() {
+                let at = i + 1;
+                let v = match ty {
+                    't' => json!(r.opt_text(at).map_err(err)?),
+                    'i' => json!(r.opt_int(at).map_err(err)?),
+                    _ => json!(r.opt_double(at).map_err(err)?),
+                };
+                row.insert((*name).to_string(), v);
+            }
+            fingerprint.insert(r.int(0).map_err(err)?, Value::Object(row));
+        }
+        let sql = format!(
+            "SELECT stack_id, axis, value, confidence, tier FROM {} \
+             WHERE stack_id IN ({list}) ORDER BY stack_id, axis, id",
+            store.qualified("classification_axis"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let axis = r.text(1).map_err(err)?.to_string();
+            let row = json!({
+                "value": r.opt_text(2).map_err(err)?,
+                "confidence": r.double(3).map_err(err)?,
+                "tier": r.text(4).map_err(err)?,
+            });
+            let rows = classification
+                .entry(r.int(0).map_err(err)?)
+                .or_default()
+                .entry(axis)
+                .or_insert_with(|| json!([]));
+            if let Some(a) = rows.as_array_mut() {
+                a.push(row);
+            }
+        }
+        let sql = format!(
+            "SELECT st.id, b.name FROM {} st JOIN {} b ON b.id = st.first_batch_id \
+             WHERE st.id IN ({list})",
+            store.qualified("stack"),
+            store.qualified("ingest_batch"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            batch.insert(r.int(0).map_err(err)?, r.text(1).map_err(err)?.to_string());
+        }
+    }
+    let mut subjects: Vec<i64> = stacks.values().copied().collect();
+    subjects.sort_unstable();
+    subjects.dedup();
+    let mut open: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for chunk in subjects.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT m.subject_id, c.name FROM {} m JOIN {} c ON c.id = m.cohort_id \
+             WHERE m.subject_id IN ({list}) AND m.left_at IS NULL",
+            store.qualified("cohort_member"),
+            store.qualified("cohort"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            open.entry(r.int(0).map_err(err)?)
+                .or_default()
+                .push(r.text(1).map_err(err)?.to_string());
+        }
+    }
+    for names in open.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    for (stack, subject) in stacks {
+        cohorts.insert(*stack, open.get(subject).cloned().unwrap_or_default());
+    }
+    Ok(ids
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                json!({
+                    "fingerprint": fingerprint.remove(id).unwrap_or(Value::Null),
+                    "classification": Value::Object(classification.remove(id).unwrap_or_default()),
+                    "batch": batch.remove(id),
+                    "cohorts": cohorts.remove(id).unwrap_or_default(),
+                }),
+            )
+        })
+        .collect())
 }
 
 /// Where the artifact of a model a run fitted lies under the working place:

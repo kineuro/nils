@@ -42,11 +42,15 @@ pub const RUN_KINDS: [&str; 2] = ["seeds", "model"];
 pub const TREE: &str = "derivatives";
 
 /// What a derivative belongs to, resolved against the registry: the scope
-/// and its ids, the subject filled for every scope but a run's.
+/// and its ids, the subject filled for every scope but a run's and a
+/// model's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Belongs {
-    /// `stack`, `series`, `session`, `subject`, or `run` for a file that is
-    /// a whole run's rather than any subject's (record 43: seeds, a model).
+    /// `stack`, `series`, `session`, `subject`, `run` for a file that is a
+    /// whole run's rather than any subject's (record 43: seeds, a model), or
+    /// `model` for a registered model's artifact kept in a working place by
+    /// `nils model keep` (record 50), which names the model through the
+    /// row's `model_id` and neither a subject nor a run.
     pub scope: String,
     pub stack_id: Option<i64>,
     pub series_id: Option<i64>,
@@ -60,6 +64,19 @@ impl Belongs {
     pub fn run() -> Belongs {
         Belongs {
             scope: "run".into(),
+            stack_id: None,
+            series_id: None,
+            subject_id: None,
+            session_day: None,
+        }
+    }
+
+    /// A registered model's artifact, kept where a run finds it (record
+    /// 50): it names the model, through the row's `model_id`, and no
+    /// subject and no run.
+    pub fn model() -> Belongs {
+        Belongs {
+            scope: "model".into(),
             stack_id: None,
             series_id: None,
             subject_id: None,
@@ -229,9 +246,23 @@ pub fn insert_of_run(store: &mut Store, n: &New<'_>, run_id: i64) -> Result<i64,
 }
 
 fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64, Error> {
-    if n.belongs.subject_id.is_none() && (n.belongs.scope != "run" || run_id.is_none()) {
+    if n.belongs.scope == "model" {
+        // record 50: a registered model's artifact, and nothing else
+        if n.kind != "model"
+            || n.model_id.is_none()
+            || n.belongs.subject_id.is_some()
+            || n.belongs.stack_id.is_some()
+            || n.belongs.series_id.is_some()
+            || n.belongs.session_day.is_some()
+            || run_id.or(n.run_id).is_some()
+        {
+            return Err(Error::Message(
+                "a derivative of scope model is a registered model's artifact: kind model, the model named, and no subject and no run".into(),
+            ));
+        }
+    } else if n.belongs.subject_id.is_none() && (n.belongs.scope != "run" || run_id.is_none()) {
         return Err(Error::Message(
-            "a derivative belongs to a subject, or is a pipeline run's own file".into(),
+            "a derivative belongs to a subject, or is a pipeline run's own file, or is a registered model's artifact".into(),
         ));
     }
     if let Some(model) = n.model_id
@@ -397,6 +428,24 @@ pub fn of_stacks(
         }
     }
     Ok(out)
+}
+
+/// The live derivatives of kind model that name `model_id` in one place,
+/// newest first: the artifacts a run of that model may mount (record 43),
+/// whether a run fitted it or `nils model keep` kept it (record 50).
+pub fn of_model(store: &mut Store, model_id: i64, place_id: i64) -> Result<Vec<Derivative>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "{} WHERE kind = 'model' AND model_id = {} AND place_id = {} AND withdrawn_at IS NULL ORDER BY id DESC",
+        select(store),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    store
+        .query(&sql, &[Param::Int(model_id), Param::Int(place_id)])?
+        .iter()
+        .map(of)
+        .collect()
 }
 
 /// What a listing narrows to.

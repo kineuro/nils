@@ -258,13 +258,13 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42) |
+| what | files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42); and a registered model's artifact kept where a run finds it, which belongs to the model and to no subject (record 50) |
 | where | files under derivatives in a working place, and none is bound now, so none can be added; rows of derivative in the registry |
 | holds | quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to<br>technical: the kind, the digest, the size, the media type, the place and the path, who registered it |
 | owner | the research group that owns the archive |
 | kept | for ever; a newer file supersedes an older one by a link and both stay |
 | read | `nils derivative list`<br>`nils derivative show <id>`<br>GET /api/derivatives/{id}/content<br>GET /api/derivatives/{id}/content?transport=share, where the place declares a share path |
-| change | `nils derivative add <file>` |
+| change | `nils derivative add <file>`<br>`nils model keep <model> --artifact <file>` |
 | export | GET /api/derivatives/{id}/content |
 | delete | with the registry and the working place; nils has no command for one |
 

@@ -1070,7 +1070,7 @@ paths:
   /api/derivatives/{id}:
     get:
       summary: One derivative (record 42 S4; nils derivative show)
-      description: "{id, kind (record 43 adds seeds and model, which only a pipeline run writes and the POST refuses), scope (stack, series, session or subject, or since record 43 run: a run's own file, which names no subject), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from), transports (record 43 S3: `door`, and `share` where its place declares a share path)}. `run_id` names the pipeline run that made it, null for an upload. pipelines:see."
+      description: "{id, kind (record 43 adds seeds and model, which only a pipeline run writes and the POST refuses), scope (stack, series, session or subject, or since record 43 run: a run's own file, which names no subject, or since record 50 model: a registered model's artifact kept by nils model keep, which names the model in model_id and neither a subject nor a run), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from), transports (record 43 S3: `door`, and `share` where its place declares a share path)}. `run_id` names the pipeline run that made it, null for an upload. pipelines:see."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: The derivative}

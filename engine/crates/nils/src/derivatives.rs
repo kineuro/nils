@@ -819,6 +819,8 @@ pub(crate) fn command(
                 d.stack_id
                     .or(d.series_id)
                     .or(d.subject_id)
+                    .or(d.run_id)
+                    .or(d.model_id)
                     .unwrap_or_default(),
                 d.bytes,
                 d.sha256
@@ -862,6 +864,8 @@ pub(crate) fn command(
                     d.stack_id
                         .or(d.series_id)
                         .or(d.subject_id)
+                        .or(d.run_id)
+                        .or(d.model_id)
                         .unwrap_or_default(),
                     d.bytes,
                     &d.sha256[..d.sha256.len().min(16)]
@@ -888,6 +892,8 @@ pub(crate) fn command(
                 d.stack_id
                     .or(d.series_id)
                     .or(d.subject_id)
+                    .or(d.run_id)
+                    .or(d.model_id)
                     .unwrap_or_default(),
                 d.session_day
                     .as_deref()

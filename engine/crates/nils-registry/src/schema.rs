@@ -1333,8 +1333,11 @@ fn build_registry() -> Vec<Table> {
                 req("kind", Type::Text),
                 // What it belongs to: `stack`, `series`, `session` or
                 // `subject`, and the ids that say which. The subject is
-                // filled whatever the scope, so a merge moves it and a
-                // subject's derivatives are one read.
+                // filled for each of those, so a merge moves it and a
+                // subject's derivatives are one read. Record 43's `run`
+                // (a run's own file, seeds or a model it fitted) and record
+                // 50's `model` (a registered model's artifact, kept by
+                // `nils model keep`) name no subject.
                 req("scope", Type::Text),
                 col("stack_id", Type::Int),
                 col("series_id", Type::Int),

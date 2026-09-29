@@ -272,4 +272,29 @@ mod tests {
         assert_eq!(r.missing, ["cjv"]);
         assert!(read(&spec, b"[1]").is_err());
     }
+
+    /// Record 50: a stack's score file is one object whose declared columns
+    /// are top-level numbers or words beside nested keys the descriptor
+    /// does not declare, which are left as they are.
+    #[test]
+    fn a_json_object_s_undeclared_nested_keys_are_left() {
+        let spec = Table {
+            format: "json".into(),
+            columns: vec![
+                col("p_brain", None, ColumnType::Number),
+                col("coarse", None, ColumnType::Text),
+            ],
+            unit_column: None,
+        };
+        let r = read(
+            &spec,
+            br#"{"p_brain": 0.93, "coarse": "head", "probabilities": {"brain": 0.93, "spine": 0.07}, "encoder": {"digest": "sha256:ab", "features": [1, 2]}}"#,
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert!(r.missing.is_empty() && r.refused.is_empty(), "{r:?}");
+        let v: std::collections::BTreeMap<_, _> = r.rows[0].values.iter().cloned().collect();
+        assert_eq!(v["p_brain"], 0.93);
+        assert_eq!(v["coarse"], "head");
+    }
 }

@@ -268,6 +268,8 @@ struct Lab {
     bin: TempDir,
     _src: TempDir,
     path: OsString,
+    /// A Postgres registry's DSN and schema, where the lab is one.
+    pg: Option<(String, String)>,
 }
 
 impl Lab {
@@ -276,12 +278,19 @@ impl Lab {
     }
 
     fn with_tree(name: &str, src: TempDir) -> Lab {
+        Lab::with_backend(name, src, None)
+    }
+
+    /// [`Lab::with_tree`] over a SQLite registry, or over a Postgres one in
+    /// `pg`'s schema.
+    fn with_backend(name: &str, src: TempDir, pg: Option<(String, String)>) -> Lab {
         let lab = Lab {
             home: TempDir::new(&format!("{name}-home")),
             work: TempDir::new(&format!("{name}-work")),
             bin: TempDir::new(&format!("{name}-bin")),
             _src: src,
             path: OsString::new(),
+            pg,
         };
         let fake = lab.bin.file("podman", FAKE_PODMAN.as_bytes());
         // no GPU in the lab, whatever the host has: a machine with one would
@@ -301,7 +310,27 @@ impl Lab {
         }
         let lab = Lab { path, ..lab };
         lab.ok(&["key", "add", "k"], Some("a pipelines test key\n"));
-        lab.ok(&["init", "--key", "k"], None);
+        match &lab.pg {
+            Some((dsn, schema)) => {
+                lab.ok(
+                    &[
+                        "init",
+                        "--backend",
+                        "postgres",
+                        "--dsn",
+                        dsn,
+                        "--schema",
+                        schema,
+                        "--key",
+                        "k",
+                    ],
+                    None,
+                );
+            }
+            None => {
+                lab.ok(&["init", "--key", "k"], None);
+            }
+        }
         let src = lab._src.path().to_str().unwrap().to_string();
         lab.ok(&["digest", "--name", "a", "--no-private", &src], None);
         lab.ok(&["fingerprint"], None);
@@ -416,7 +445,12 @@ impl Lab {
     }
 
     fn store(&self) -> nils_registry::Store {
-        nils_registry::Store::open_sqlite(&self.home.path().join("registry.db")).unwrap()
+        match &self.pg {
+            Some((dsn, schema)) => nils_registry::Store::connect_postgres(dsn, schema).unwrap(),
+            None => {
+                nils_registry::Store::open_sqlite(&self.home.path().join("registry.db")).unwrap()
+            }
+        }
     }
 
     fn add_descriptor(&self, name: &str, text: &str) -> Value {
@@ -4637,4 +4671,465 @@ fn the_lane_puts_a_run_s_outputs_and_its_scratch_where_it_names() {
     ]);
     assert_eq!(run["place_id"], scratch_id, "{run}");
     assert!(run["scratch_place_id"].is_null(), "{run}");
+}
+
+/// Run `test` over a lab on SQLite, and again on Postgres where
+/// `NILS_TEST_POSTGRES_DSN` names one, in a schema of its own that is
+/// dropped before and after.
+fn on_both(name: &str, schema: &str, test: impl Fn(&Lab)) {
+    test(&Lab::new(name));
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let drop = || {
+        let mut store = nils_registry::Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    test(&Lab::with_backend(
+        &format!("{name}-pg"),
+        tree(),
+        Some((dsn.clone(), schema.to_string())),
+    ));
+    drop();
+}
+
+/// A run's `stacks.json`, or a unit's where `unit` names one.
+fn stacks_json(lab: &Lab, run: i64, unit: Option<&str>) -> Value {
+    let dir = lab.work.path().join("runs").join(run.to_string());
+    let file = match unit {
+        Some(u) => dir.join("units").join(u).join("input/stacks.json"),
+        None => dir.join("input/stacks.json"),
+    };
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file:?}: {e}"));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Record 50 E1: a stacks input that asks for the header (`x-nils.input.
+/// header`) finds each stack's fingerprint columns, its classification rows
+/// by axis, its first ingest batch and its subject's open cohorts in
+/// `stacks.json`, together and apart; without the flag the file is what it
+/// was, the same entries with no header.
+#[test]
+fn a_stacks_input_carries_each_stack_s_header_when_it_asks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-header", "nils_pipelines_header", |lab| {
+        let image = format!("example.org/stack-echo@sha256:{}", "a".repeat(64));
+        let plain = stack_echo(&image);
+        lab.add_descriptor("stack-echo", &plain);
+        let with_header = plain
+            .replace("name: stack-echo", "name: stack-head")
+            .replace(
+                "input: {layout: stacks}",
+                "input: {layout: stacks, header: true}",
+            );
+        lab.add_descriptor("stack-head", &with_header);
+        lab.add_descriptor(
+            "stack-head-apart",
+            &with_header
+                .replace("name: stack-head", "name: stack-head-apart")
+                .replace(
+                    "  needs: {gpu: optional}",
+                    "  units: apart\n  needs: {gpu: optional}",
+                ),
+        );
+
+        // cohorts: two open memberships of one subject and one it left
+        let mut store = lab.store();
+        let (cohort, member) = (store.qualified("cohort"), store.qualified("cohort_member"));
+        let stack_t = store.qualified("stack");
+        let series_t = store.qualified("series");
+        let first = store
+            .query(
+                &format!(
+                    "SELECT st.id, se.subject_id FROM {stack_t} st JOIN {series_t} se ON se.id = st.series_id ORDER BY st.id"
+                ),
+                &[],
+            )
+            .unwrap();
+        let (stack1, subject1) = (first[0].int(0).unwrap(), first[0].int(1).unwrap());
+        for name in ["north", "alpha", "gone"] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {cohort} (name, owner, created_at) VALUES ('{name}', 'anna', '2026-09-01T00:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let left = if name == "gone" {
+                "'2026-09-02T00:00:00Z'"
+            } else {
+                "NULL"
+            };
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {member} (cohort_id, subject_id, joined_at, left_at, source) \
+                         SELECT id, {subject1}, '2026-09-01T00:00:00Z', {left}, 'manual' FROM {cohort} WHERE name = '{name}'"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+
+        let run = |name: &str| -> i64 {
+            let r = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
+            assert_eq!(r["status"], "done", "{r}");
+            r["id"].as_i64().unwrap()
+        };
+        let off = stacks_json(lab, run("stack-echo"), None);
+        let on = stacks_json(lab, run("stack-head"), None);
+        let entries = on["stacks"].as_array().unwrap();
+        assert_eq!(entries.len(), 4);
+
+        // without the flag, no header; with it, the same entries and a header
+        let mut stripped = on.clone();
+        for e in stripped["stacks"].as_array_mut().unwrap() {
+            assert!(e.as_object_mut().unwrap().remove("header").is_some(), "{e}");
+        }
+        assert_eq!(stripped, off, "the header is all the flag adds");
+        for e in off["stacks"].as_array().unwrap() {
+            let mut keys: Vec<String> = e.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            assert_eq!(
+                keys,
+                [
+                    "body_part",
+                    "files",
+                    "modality",
+                    "orientation",
+                    "series_id",
+                    "slices",
+                    "stack_id",
+                    "subject_id",
+                    "technique",
+                    "unit"
+                ],
+                "the keys a stacks.json had before record 50"
+            );
+        }
+
+        let fp_t = store.qualified("stack_fingerprint");
+        let axis_t = store.qualified("classification_axis");
+        let batch_t = store.qualified("ingest_batch");
+        for e in entries {
+            let stack = e["stack_id"].as_i64().unwrap();
+            let h = &e["header"];
+            let mut keys: Vec<String> = h.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            assert_eq!(
+                keys,
+                ["batch", "classification", "cohorts", "fingerprint"],
+                "{h}"
+            );
+            // the fingerprint's named columns, as the registry holds them
+            let fp = &h["fingerprint"];
+            assert_eq!(fp.as_object().unwrap().len(), 22, "{fp}");
+            let row = store
+                .query(
+                    &format!(
+                        "SELECT manufacturer, modality, orientation, rows, columns, n_slices, pixel_spacing_row, text_series_description_ci, receive_coil_name FROM {fp_t} WHERE stack_id = {stack}"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let row = &row[0];
+            assert_eq!(fp["manufacturer"], json!(row.opt_text(0).unwrap()));
+            assert_eq!(fp["manufacturer"], "SYNTHETIC");
+            assert_eq!(fp["modality"], "MR");
+            assert_eq!(fp["orientation"], json!(row.text(2).unwrap()));
+            assert_eq!(fp["rows"], 32);
+            assert_eq!(fp["columns"], 32);
+            assert_eq!(fp["n_slices"], json!(row.opt_int(5).unwrap()));
+            assert_eq!(fp["pixel_spacing_row"], json!(1.0));
+            assert_eq!(
+                fp["text_series_description_ci"],
+                json!(row.opt_text(7).unwrap())
+            );
+            assert!(
+                fp["text_series_description_ci"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("t1_mprage") || t.starts_with("t2_flair")),
+                "{fp}"
+            );
+            assert_eq!(fp["receive_coil_name"], Value::Null, "no coil in the tree");
+            // every classification row, by axis
+            let rows = store
+                .query(
+                    &format!(
+                        "SELECT axis, value, confidence, tier FROM {axis_t} WHERE stack_id = {stack} ORDER BY axis, id"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let class = h["classification"].as_object().unwrap();
+            assert_eq!(
+                class
+                    .values()
+                    .map(|v| v.as_array().unwrap().len())
+                    .sum::<usize>(),
+                rows.len(),
+                "{h}"
+            );
+            for (i, r) in rows.iter().enumerate() {
+                let axis = r.text(0).unwrap();
+                let before = rows[..i]
+                    .iter()
+                    .filter(|q| q.text(0).unwrap() == axis)
+                    .count();
+                let got = &class[axis][before];
+                assert_eq!(got["value"], json!(r.opt_text(1).unwrap()), "{axis}");
+                assert_eq!(got["confidence"], json!(r.double(2).unwrap()), "{axis}");
+                assert_eq!(got["tier"], json!(r.text(3).unwrap()), "{axis}");
+            }
+            assert_eq!(e["technique"], class["technique"][0]["value"], "{h}");
+            // the first batch, by name
+            let batch = store
+                .query(
+                    &format!(
+                        "SELECT b.name FROM {stack_t} st JOIN {batch_t} b ON b.id = st.first_batch_id WHERE st.id = {stack}"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(h["batch"], json!(batch[0].text(0).unwrap()));
+            // the open cohorts of its subject, sorted; a left one is not there
+            if e["subject_id"] == json!(subject1) {
+                assert_eq!(h["cohorts"], json!(["alpha", "north"]), "{h}");
+            } else {
+                assert_eq!(h["cohorts"], json!([]), "{h}");
+            }
+        }
+        assert!(entries.iter().any(|e| e["stack_id"] == json!(stack1)));
+
+        // apart: each unit's own stacks.json carries its stack's header
+        let apart = run("stack-head-apart");
+        for e in entries {
+            let unit = e["unit"].as_str().unwrap();
+            let own = stacks_json(lab, apart, Some(unit));
+            assert_eq!(own["stacks"].as_array().unwrap().len(), 1);
+            assert_eq!(own["stacks"][0]["header"], e["header"], "{unit}");
+        }
+    });
+}
+
+/// Record 50 E2: `nils model keep` copies a registered model's artifact
+/// into the lane's output place under derivatives/models, registered as a
+/// derivative of kind model and scope model that names no subject and no
+/// run; the wrong bytes and a retired model are refused, and a second keep
+/// writes nothing. A run given the model mounts the kept file's folder at
+/// /inputs/<input> and names the file in its manifest.
+#[test]
+fn a_kept_model_is_mounted_and_named_for_a_run_that_reads_it() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-keep", "nils_pipelines_keep", |lab| {
+        let files = TempDir::new("pipelines-keep-files");
+        // a name a mount would split on is kept under a safe one
+        let artifact = files.file("coarse mode,r7:x.json", br#"{"mode": "coarse"}"#);
+        let card = files.file(
+            "card.json",
+            br#"{"name": "bp-coarse", "version": "r7", "kind": "pass", "task": "axis:body_part"}"#,
+        );
+        let model = lab.json(&[
+            "model",
+            "register",
+            "--card",
+            card.to_str().unwrap(),
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--json",
+        ]);
+        let model_id = model["id"].as_i64().unwrap();
+
+        // the wrong bytes are refused, and nothing is written
+        let other = files.file("other.json", b"{}");
+        let (good, _, err) = lab.run(
+            &[
+                "model",
+                "keep",
+                "bp-coarse@r7",
+                "--artifact",
+                other.to_str().unwrap(),
+            ],
+            None,
+        );
+        assert!(!good);
+        assert!(err.contains("not the model's artifact"), "{err}");
+        assert!(!lab.work.path().join("derivatives/models").exists());
+
+        let kept = lab.json(&[
+            "model",
+            "keep",
+            "bp-coarse@r7",
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(kept["kept"], true, "{kept}");
+        assert_eq!(kept["kind"], "model");
+        assert_eq!(kept["scope"], "model");
+        assert_eq!(kept["model_id"], model_id);
+        assert_eq!(kept["subject_id"], Value::Null);
+        assert_eq!(kept["run_id"], Value::Null);
+        assert_eq!(kept["stack_id"], Value::Null);
+        assert_eq!(kept["media_type"], "application/json");
+        assert!(
+            kept["registered_by"]
+                .as_str()
+                .is_some_and(|w| w.contains("anna")),
+            "{kept}"
+        );
+        let bytes = std::fs::read(&artifact).unwrap();
+        assert_eq!(kept["sha256"], sha256(&bytes));
+        assert_eq!(kept["bytes"], bytes.len());
+        assert_eq!(
+            kept["path"], "derivatives/models/bp-coarse-r7/coarse_mode_r7_x.json",
+            "{kept}"
+        );
+        let copy = lab.work.path().join(kept["path"].as_str().unwrap());
+        assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+        assert!(artifact.is_file(), "copied, never moved");
+        let id = kept["id"].as_i64().unwrap();
+
+        // again: kept already, nothing written
+        let out = lab.ok(
+            &[
+                "model",
+                "keep",
+                &model_id.to_string(),
+                "--artifact",
+                artifact.to_str().unwrap(),
+            ],
+            None,
+        );
+        assert!(out.contains("kept already"), "{out}");
+        let listed = lab.json(&["derivative", "list", "--kind", "model", "--json"]);
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["id"], id);
+        let shown = lab.ok(&["derivative", "show", &id.to_string()], None);
+        assert!(
+            shown.contains(&format!("belongs to       model {model_id}")),
+            "{shown}"
+        );
+
+        // a run given the model mounts the kept file's folder, read-only
+        let descriptor = format!(
+            r#"name: reads-coarse
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/reads-coarse@sha256:{}"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  man = json.load(open(sys.argv[3] + "/manifest.json"))
+  assert man["models"][0]["artifact"] == "/" + "inputs/coarse/coarse_mode_r7_x.json", man["models"]
+  mode = json.load(open(sys.argv[4]))
+  units = []
+  for s in m["stacks"]:
+      d = os.path.join(out, s["unit"]); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "mode.txt"), "w").write(mode["mode"])
+      units.append({{"unit_id": s["unit"], "status": "succeeded"}})
+  json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [Inputs] [Inputs]/coarse/coarse_mode_r7_x.json
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  inputs:
+    - {{id: coarse, type: model}}
+  outputs:
+    - {{id: mode, kind: output, path-template: "stack-{{stack}}/mode.txt"}}
+  needs: {{gpu: optional}}
+"#,
+            "d".repeat(64)
+        );
+        lab.add_descriptor("reads-coarse", &descriptor);
+        let r = lab.json(&[
+            "run",
+            "reads-coarse",
+            "--select",
+            "selection:every@1",
+            "--model",
+            "bp-coarse@r7",
+            "--json",
+        ]);
+        assert_eq!(r["status"], "done", "{r}");
+        let run_id = r["id"].as_i64().unwrap();
+        let words = lab.podman_runs().pop().unwrap();
+        let folder = copy.parent().unwrap().to_str().unwrap().to_string();
+        assert!(
+            pair(&words, "--volume", &format!("{folder}:/inputs/coarse:ro")),
+            "{words:?}"
+        );
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(
+                lab.work
+                    .path()
+                    .join("runs")
+                    .join(run_id.to_string())
+                    .join("inputs/manifest.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let m = &manifest["models"][0];
+        assert_eq!(m["input"], "coarse");
+        assert_eq!(m["model_id"], model_id);
+        assert_eq!(m["artifact"], "/inputs/coarse/coarse_mode_r7_x.json");
+        assert_eq!(m["card"]["name"], "bp-coarse", "the card whole: {m}");
+        assert_eq!(m["card"]["task"], "axis:body_part");
+        let made = lab
+            .work
+            .path()
+            .join("derivatives/reads-coarse")
+            .join(run_id.to_string());
+        let one = std::fs::read_dir(&made)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with("stack-"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(one.path().join("mode.txt")).unwrap(),
+            "coarse"
+        );
+
+        // a retired model's artifact is not kept
+        lab.ok(
+            &["model", "retire", "bp-coarse@r7", "--why", "a test"],
+            None,
+        );
+        let (good, _, err) = lab.run(
+            &[
+                "model",
+                "keep",
+                "bp-coarse@r7",
+                "--artifact",
+                artifact.to_str().unwrap(),
+            ],
+            None,
+        );
+        assert!(!good);
+        assert!(err.contains("is retired"), "{err}");
+    });
 }
