@@ -1166,14 +1166,28 @@ flags:
       - {field: echo_train_length, ge: 2}
       - {field: pixel_bandwidth, gt: 0}
       - {field: pixel_bandwidth, lt: 600}
+  # GE's PROPELLER diffusion is read apart: GE writes it with ScanningSequence
+  # RM or SE, so no spin echo or no diffusion flag holds (`is_dwi` leaves out
+  # a GE b value beside a stated non-EPI readout, since GE writes b values on
+  # SSFSE localizers and spin echoes too). Its PROPELLER readout and its
+  # diffusion named together say it (the archive: a `DWI PROP` acquisition
+  # at b=1000, read as DWI-EPI, whose own ADC maps were DWI-TSE).
   dwi_tse:
-    all:
-      - is_dwi
-      - has_se
-      - {not: has_epi}
-      - {not: has_gre}
-      - any: [{field: echo_train_length, ge: 2}, is_radial, propeller_named, is_haste]
-      - any: [dwi_tse_named, sequence_name.is_blade_diff, is_haste, is_radial, philips_dwi_tse_bandwidth]
+    any:
+      - all:
+          - is_dwi
+          - has_se
+          - {not: has_epi}
+          - {not: has_gre}
+          - any: [{field: echo_train_length, ge: 2}, is_radial, propeller_named, is_haste]
+          - any: [dwi_tse_named, sequence_name.is_blade_diff, is_haste, is_radial, philips_dwi_tse_bandwidth]
+      - all:
+          - {text: manufacturer, prefix: ge}
+          - has_positive_b_value
+          - any: [is_radial, propeller_named]
+          - {text: technique_text, matches: '(^|[^a-z])(dwi|dti|diff)'}
+          - {not: has_epi}
+          - {not: has_gre}
 
   # --- N4: Philips writes its computed isotropic diffusion image as
   # `PROJECTION IMAGE` (the pack reads it so since 0.13.0, to keep it from

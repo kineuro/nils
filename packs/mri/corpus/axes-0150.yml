@@ -171,6 +171,58 @@ cases:
       technique: DWI-TSE
       base: DWI
 
+  - name: a GE PROPELLER diffusion written in research mode is a DWI-TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Cor DWI PROP B-1000'
+      diffusion_b_value: 1000
+      repetition_time: 6000
+      echo_time: 80
+      flip_angle: 90
+      echo_train_length: 20
+    axes:
+      technique: DWI-TSE
+      base: DWI
+
+  - name: a GE PROPELLER diffusion written SE with its PROPELLER option is a DWI-TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      scan_options: 'PROP_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax DWI PROPELLER'
+      diffusion_b_value: 1000
+      repetition_time: 6000
+      echo_time: 80
+      flip_angle: 90
+      echo_train_length: 20
+    axes:
+      technique: DWI-TSE
+      base: DWI
+
+  - name: a GE T2 PROPELLER with a b value GE wrote and no diffusion named stays a TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      scan_options: 'PROP_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 PROP'
+      diffusion_b_value: 1000
+      repetition_time: 6000
+      echo_time: 80
+      flip_angle: 90
+      echo_train_length: 24
+    axes:
+      technique: TSE
+
   - name: a Siemens single-shot EPI diffusion stays DWI-EPI
     stack:
       image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE\ND'
