@@ -33,7 +33,7 @@
 //! The doors read the catalog and the runs; the derivatives a run made are
 //! served by the derivative doors, by bytes or by a shared path (S3).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -847,6 +847,11 @@ pub(crate) struct RunArgs {
     /// The DICOM to NIfTI converter a bids input is released with
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
     pub(crate) dcm2niix: PathBuf,
+    /// Split the selection into parts of at most N stacks, in stack order,
+    /// and run each part as a run of its own, one after another: for a
+    /// selection too large for one container's input
+    #[arg(long, value_name = "N", conflicts_with_all = ["resume", "handle"])]
+    pub(crate) chunk: Option<u64>,
     /// Run nothing: say what the run would do (record 49 A3), its units,
     /// the units missing an input and why, the time, the GPU, and what a
     /// unit needs against the lane's budget
@@ -2619,113 +2624,213 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         _ => None,
     };
 
-    // the selection, frozen, and the stacks it holds
-    let (handle_id, selection) = match (&args.select, args.handle) {
+    // the selection, frozen, and the stacks it holds: whole, or with
+    // --chunk in parts of at most that many stacks, each part a run of its
+    // own over a handle of its own
+    let parts: Vec<(i64, Option<String>)> = match (&args.select, args.handle) {
         (Some(spec), _) => {
             drop(registry);
-            let h = crate::ask_cli::freeze_selection(
-                home,
-                spec,
-                nils_ask::ast::Grain::Stack,
-                args.pack_dir.clone(),
-                &args.pack,
-            )?;
+            let parts = freeze_parts(home, &args, spec)?;
             registry = crate::open(home)?;
-            (h, Some(spec.clone()))
+            parts.into_iter().map(|h| (h, Some(spec.clone()))).collect()
         }
-        (None, Some(h)) => (h, None),
+        (None, Some(_)) if args.chunk.is_some() => {
+            return Err(usage(
+                "--chunk splits a selection as it is frozen; a handle is run as it is",
+            ));
+        }
+        (None, Some(h)) => vec![(h, None)],
         (None, None) => {
             return Err(usage(
                 "a run is over a frozen selection: --select selection:<name>@<v>, or --handle <id>",
             ));
         }
     };
-    let stacks = handle_stacks(registry.store(), handle_id)?;
-    if stacks.is_empty() {
-        return Err(usage(
-            "the selection holds no stacks; there is nothing to run",
-        ));
+    let count = parts.len();
+    for (i, (handle_id, selection)) in parts.iter().enumerate() {
+        let handle_id = *handle_id;
+        let ran = (|| -> Result<(), Exit> {
+            let stacks = handle_stacks(registry.store(), handle_id)?;
+            if stacks.is_empty() {
+                return Err(usage(
+                    "the selection holds no stacks; there is nothing to run",
+                ));
+            }
+
+            // the job: one pipeline run at a time in the lane (R1, record 49 A1)
+            let who = crate::actor();
+            let actor = nils_registry::actor::current();
+            let job_id = claim_run(
+                registry.store(),
+                &p,
+                json!({
+                    "pipeline": p.label(), "select": args.select, "handle": handle_id,
+                    "part": (count > 1).then(|| json!({"part": i + 1, "of": count, "chunk": args.chunk})),
+                    "params": args.params, "models": args.models, "labels": args.labels,
+                }),
+            )?;
+            let params_value = Value::Object(params.clone());
+            let model_ids: Vec<i64> = models.iter().map(|m| m.id).collect();
+            let started = nils_registry::time::now_iso();
+            let run_id = rows::start(
+                registry.store(),
+                &rows::NewRun {
+                    pipeline_id: p.id,
+                    job_id: Some(job_id),
+                    handle_id: Some(handle_id),
+                    selection: selection.as_deref(),
+                    params: &params_value,
+                    runtime: rt.kind.name(),
+                    runtime_version: &rt.version,
+                    host: &job::hostname(),
+                    device: &device,
+                    model_ids: &model_ids,
+                    label_set_id: label_set.as_ref().map(|s| s.id),
+                    place_id: Some(places.output.id),
+                    scratch_place_id: (places.scratch.id != places.output.id)
+                        .then_some(places.scratch.id),
+                    principal: &who,
+                    actor: Some(&actor),
+                    started_at: &started,
+                },
+            )?;
+            rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
+            let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
+
+            let outcome = execute(
+                home,
+                &mut registry,
+                &Execution {
+                    pipeline: &p,
+                    descriptor: &d,
+                    params: &params,
+                    run_id,
+                    job_id,
+                    output: &places.output,
+                    scratch: &places.scratch,
+                    runtime: &rt,
+                    gpu,
+                    device: &device,
+                    stacks: &stacks,
+                    models: &models,
+                    label_set: label_set.as_ref(),
+                    threshold: args.threshold,
+                    who: &who,
+                    actor: &actor,
+                    args: &args,
+                    lane: &lane,
+                    secrets: &given,
+                    resume: None,
+                },
+            );
+            conclude(
+                &mut registry,
+                &Conclusion {
+                    pipeline: &p,
+                    run_id,
+                    job_id,
+                    handle_id,
+                    runtime: rt.kind.name(),
+                    device: &device,
+                    who: &who,
+                    json: args.json,
+                    resumed: false,
+                },
+                outcome,
+            )
+        })();
+        if let Err(e) = ran {
+            if count == 1 {
+                return Err(e);
+            }
+            let left: Vec<String> = parts[i + 1..].iter().map(|(h, _)| h.to_string()).collect();
+            let rest = if left.is_empty() {
+                "it was the last part".to_string()
+            } else {
+                format!(
+                    "the parts not run are handles {}, and nils run {} --handle <id> runs each",
+                    left.join(", "),
+                    p.label()
+                )
+            };
+            return Err(Exit {
+                code: e.code,
+                message: format!(
+                    "{} (part {} of {count}, handle {handle_id}); {rest}",
+                    e.message,
+                    i + 1
+                ),
+            });
+        }
     }
+    Ok(())
+}
 
-    // the job: one pipeline run at a time in the lane (R1, record 49 A1)
-    let who = crate::actor();
-    let actor = nils_registry::actor::current();
-    let job_id = claim_run(
-        registry.store(),
-        &p,
-        json!({
-            "pipeline": p.label(), "select": args.select, "handle": handle_id,
-            "params": args.params, "models": args.models, "labels": args.labels,
-        }),
-    )?;
-    let params_value = Value::Object(params.clone());
-    let model_ids: Vec<i64> = models.iter().map(|m| m.id).collect();
-    let started = nils_registry::time::now_iso();
-    let run_id = rows::start(
-        registry.store(),
-        &rows::NewRun {
-            pipeline_id: p.id,
-            job_id: Some(job_id),
-            handle_id: Some(handle_id),
-            selection: selection.as_deref(),
-            params: &params_value,
-            runtime: rt.kind.name(),
-            runtime_version: &rt.version,
-            host: &job::hostname(),
-            device: &device,
-            model_ids: &model_ids,
-            label_set_id: label_set.as_ref().map(|s| s.id),
-            place_id: Some(places.output.id),
-            scratch_place_id: (places.scratch.id != places.output.id).then_some(places.scratch.id),
-            principal: &who,
-            actor: Some(&actor),
-            started_at: &started,
-        },
-    )?;
-    rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
-    let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
-
-    let outcome = execute(
-        home,
-        &mut registry,
-        &Execution {
-            pipeline: &p,
-            descriptor: &d,
-            params: &params,
-            run_id,
-            job_id,
-            output: &places.output,
-            scratch: &places.scratch,
-            runtime: &rt,
-            gpu,
-            device: &device,
-            stacks: &stacks,
-            models: &models,
-            label_set: label_set.as_ref(),
-            threshold: args.threshold,
-            who: &who,
-            actor: &actor,
-            args: &args,
-            lane: &lane,
-            secrets: &given,
-            resume: None,
-        },
-    );
-    conclude(
-        &mut registry,
-        &Conclusion {
-            pipeline: &p,
-            run_id,
-            job_id,
-            handle_id,
-            runtime: rt.kind.name(),
-            device: &device,
-            who: &who,
-            json: args.json,
-            resumed: false,
-        },
-        outcome,
-    )
+/// A selection frozen for a run: whole, one handle of every stack it
+/// holds however many, or with `--chunk` one handle per part of at most
+/// that many stacks, in stack order. Each part is frozen from the saved
+/// selection as a page after the last stack of the one before.
+fn freeze_parts(home: &Home, args: &RunArgs, spec: &str) -> Result<Vec<i64>, Exit> {
+    use crate::ask_cli::{Freeze, freeze};
+    let grain = nils_ask::ast::Grain::Stack;
+    let Some(chunk) = args.chunk else {
+        let f = freeze(
+            home,
+            spec,
+            grain,
+            args.pack_dir.clone(),
+            &args.pack,
+            Freeze::Whole,
+        )?;
+        return Ok(vec![f.handle]);
+    };
+    if chunk == 0 {
+        return Err(usage("--chunk is a number of stacks, at least 1"));
+    }
+    let mut parts = Vec::new();
+    let mut after = None;
+    let mut stacks = 0usize;
+    loop {
+        let f = freeze(
+            home,
+            spec,
+            grain,
+            args.pack_dir.clone(),
+            &args.pack,
+            Freeze::Page {
+                after,
+                limit: chunk,
+            },
+        )?;
+        if f.keys == 0 {
+            // an empty selection is refused as a whole one is, by its handle
+            if parts.is_empty() {
+                parts.push(f.handle);
+            }
+            break;
+        }
+        parts.push(f.handle);
+        stacks += f.keys;
+        if (f.keys as u64) < chunk {
+            break;
+        }
+        after = f.last;
+        if after.is_none() {
+            break;
+        }
+    }
+    if parts.len() > 1 {
+        eprintln!(
+            "{spec}: {stacks} stack(s) in {} parts of at most {chunk}, handles {}",
+            parts.len(),
+            parts
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(parts)
 }
 
 /// Claim the job a run is: one pipeline run at a time (record 43 R1).
@@ -3988,9 +4093,11 @@ fn read_results(out: &Path) -> (Option<nils_pipeline::Results>, Option<String>) 
 }
 
 /// What one unit's container said of it, or what its templates find.
+#[allow(clippy::too_many_arguments)]
 fn outcome_of(
     u: &Unit,
     reported: &Option<nils_pipeline::Results>,
+    by_unit: &HashMap<String, usize>,
     unreadable: &Option<String>,
     exit_code: Option<i64>,
     unit_outputs: &[descriptor::Output],
@@ -4007,11 +4114,7 @@ fn outcome_of(
         };
     }
     if let Some(r) = reported {
-        return match r
-            .units
-            .iter()
-            .find(|e| nils_pipeline::results::normalise(&e.unit_id) == u.id)
-        {
+        return match by_unit.get(&u.id).and_then(|&i| r.units.get(i)) {
             None => Outcome {
                 status: "unreported",
                 error: Some("the pipeline's results say nothing of this unit".into()),
@@ -4187,6 +4290,14 @@ fn take_in(
     let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "intake"}));
     let (swept, shut) = sweep_batch(registry, x, b, &mut pulse)?;
     let (reported, unreadable) = read_results(&b.out);
+    // each unit's entry by its name, found once and not searched for per
+    // unit: a run of hundreds of thousands of stacks is as many entries
+    let mut by_unit: HashMap<String, usize> = HashMap::new();
+    for (i, e) in reported.iter().flat_map(|r| r.units.iter()).enumerate() {
+        by_unit
+            .entry(nils_pipeline::results::normalise(&e.unit_id))
+            .or_insert(i);
+    }
     let unit_outputs: Vec<descriptor::Output> =
         d.outputs.iter().filter(|o| !o.run_level).cloned().collect();
     let run_outputs: Vec<descriptor::Output> =
@@ -4207,6 +4318,7 @@ fn take_in(
         let o = outcome_of(
             u,
             &reported,
+            &by_unit,
             &unreadable,
             exit_code,
             &unit_outputs,

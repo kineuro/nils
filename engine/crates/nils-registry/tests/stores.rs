@@ -1861,7 +1861,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
-                59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74
+                59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75
             ],
             "{name}"
         );
@@ -2019,7 +2019,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
+            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2081,7 +2081,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
+            [63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         for (t, col) in [
@@ -2155,7 +2155,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
+            [64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2204,7 +2204,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
+            [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2245,7 +2245,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66, 67, 68, 69, 70, 71, 72, 73, 74],
+            [66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2283,7 +2283,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [67, 68, 69, 70, 71, 72, 73, 74],
+            [67, 68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2321,7 +2321,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [68, 69, 70, 71, 72, 73, 74],
+            [68, 69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2355,7 +2355,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [69, 70, 71, 72, 73, 74],
+            [69, 70, 71, 72, 73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2431,7 +2431,7 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [70, 71, 72, 73, 74],
+            [70, 71, 72, 73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2486,7 +2486,7 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [71, 72, 73, 74],
+            [71, 72, 73, 74, 75],
             "{name}"
         );
         for table in ["series_mr", "stack_fingerprint"] {
@@ -2542,7 +2542,7 @@ fn migration_72_writes_what_each_campaign_suggested_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [72, 73, 74],
+            [72, 73, 74, 75],
             "{name}"
         );
         let said: Vec<(String, String)> = store
@@ -2596,7 +2596,7 @@ fn migration_73_lets_a_campaign_settle_candidates_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [73, 74],
+            [73, 74, 75],
             "{name}"
         );
         assert!(
@@ -2610,6 +2610,45 @@ fn migration_73_lets_a_campaign_settle_candidates_on_both_backends() {
         ] {
             assert!(migrate::table_exists(&mut store, t).unwrap(), "{name}: {t}");
         }
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// The post-contrast study's single reads: a registry from before gains the
+/// campaign's `hide_header`, empty, and a campaign from before reads as one
+/// that shows the header.
+#[test]
+fn migration_75_lets_a_campaign_show_the_pictures_alone_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (c, meta) = (
+            store.qualified("campaign"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {c} DROP COLUMN hide_header;
+                 UPDATE {meta} SET value = '74' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert!(
+            !migrate::column_exists(&mut store, "campaign", "hide_header").unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [75],
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "campaign", "hide_header").unwrap(),
+            "{name}"
+        );
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()

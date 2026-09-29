@@ -2039,6 +2039,10 @@ fn build_registry() -> Vec<Table> {
                 // What the reader shows beside each item as the answer
                 // suggested: none | rules | imported, said when it is made.
                 col("suggest", Type::Text),
+                // 1 where the reader shows the pictures alone, with no text
+                // of the file's header beside them, as pair mode does; said
+                // when it is made. Null or 0 shows the header.
+                col("hide_header", Type::Int),
             ],
         )
         .unique(&["name"]),

@@ -20,6 +20,7 @@
 //! or with `NILS_TEST_PIPELINE_RUNTIME=docker` on a machine an operator lets
 //! run docker, and says so and passes elsewhere.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -5131,5 +5132,286 @@ x-nils:
         );
         assert!(!good);
         assert!(err.contains("is retired"), "{err}");
+    });
+}
+
+/// A test pipeline of the stacks layout that counts: every stack is a unit
+/// that succeeded, and nothing is written but results.json.
+const STACK_COUNT: &str = r#"name: stack-count
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/stack-count@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units = [{"unit_id": s["unit"], "status": "succeeded"} for s in m["stacks"]]
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: count
+      kind: output
+      path-template: "stack-{stack}/count.txt"
+      media-type: text/plain
+  needs: {gpu: optional}
+"#;
+
+/// Copies of the lab's first stack, `n` of them, each with one instance of
+/// the first stack's first file: a registry of thousands of stacks without
+/// reading thousands of files.
+fn add_stacks(lab: &Lab, n: usize) {
+    let mut store = lab.store();
+    let stack = store.qualified("stack");
+    let instance = store.qualified("instance");
+    let seed = store
+        .query(&format!("SELECT MIN(id) FROM {stack}"), &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {stack} (series_id, stack_index, stack_key, modality, orientation, n_instances, first_batch_id) \
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {n}) \
+                 SELECT s.series_id, s.stack_index + 1000 + n.i, s.stack_key || '-syn-' || CAST(n.i AS TEXT), \
+                 s.modality, s.orientation, 1, s.first_batch_id FROM {stack} s, n WHERE s.id = {seed}"
+            ),
+            &[],
+        )
+        .unwrap();
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {instance} (sop_instance_uid, series_id, stack_id, source_file_id, first_batch_id) \
+                 SELECT i.sop_instance_uid || '.syn.' || CAST(st.id AS TEXT), st.series_id, st.id, i.source_file_id, st.first_batch_id \
+                 FROM {stack} st, {instance} i \
+                 WHERE st.stack_key LIKE '%-syn-%' AND i.id = (SELECT MIN(id) FROM {instance} WHERE stack_id = {seed})"
+            ),
+            &[],
+        )
+        .unwrap();
+    // the seed's fingerprint, which a stack needs for an ask to see it
+    let fingerprint = store.qualified("stack_fingerprint");
+    let columns: Vec<String> = nils_registry::schema::table("stack_fingerprint")
+        .columns
+        .iter()
+        .filter(|c| c.name != "id" && c.name != "stack_id")
+        .map(|c| format!("\"{}\"", c.name))
+        .collect();
+    let from: Vec<String> = columns.iter().map(|c| format!("f.{c}")).collect();
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {fingerprint} (stack_id, {}) SELECT st.id, {} FROM {stack} st, {fingerprint} f \
+                 WHERE st.stack_key LIKE '%-syn-%' AND f.stack_id = {seed}",
+                columns.join(", "),
+                from.join(", ")
+            ),
+            &[],
+        )
+        .unwrap();
+}
+
+/// The stacks a run's units were, from its stacks.json.
+fn run_stacks(lab: &Lab, run: i64) -> BTreeSet<i64> {
+    stacks_json(lab, run, None)["stacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stack_id"].as_i64().unwrap())
+        .collect()
+}
+
+/// A pipeline run takes a selection of any size (2026-09-29): one that
+/// reaches more stacks than an answer holds (5,000) is frozen whole, and
+/// one whose document lists more ids than a statement may bind (65,535 on
+/// Postgres, 32,766 on SQLite) is compiled with its list as one value.
+/// `--chunk` splits a selection into runs of at most that many stacks that
+/// together are the selection, each once. An ask's own answer stays under
+/// its cap.
+#[test]
+fn a_run_takes_a_selection_larger_than_an_answer_holds() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-large", "nils_pipelines_large", |lab| {
+        lab.add_descriptor("stack-count", STACK_COUNT);
+        add_stacks(lab, 5_100);
+        let mut store = lab.store();
+        let all: BTreeSet<i64> = store
+            .query(&format!("SELECT id FROM {}", store.qualified("stack")), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(all.len(), 5_104);
+        let packs = packs();
+        let packs = packs.to_str().unwrap();
+
+        // the ask's own answer is still capped
+        let every = lab.work.path().join("every-ask.json");
+        std::fs::write(
+            &every,
+            json!({"ast_version": 1, "sets": {"every": {"grain": "stack"}}, "out": {"set": "every", "level": "record"}}).to_string(),
+        )
+        .unwrap();
+        let asked = lab.json(&[
+            "ask",
+            "run",
+            "--file",
+            every.to_str().unwrap(),
+            "--pack-dir",
+            packs,
+            "--json",
+        ]);
+        assert_eq!(asked["truncated"], true, "{asked}");
+
+        // a listed selection past both backends' bind limits and past the
+        // answer's cap, frozen whole: every stack but three, and 70,000 ids
+        // that are no stack
+        let top = *all.iter().max().unwrap();
+        let left_out: Vec<i64> = all.iter().copied().take(3).collect();
+        let mut ids: Vec<i64> = all
+            .iter()
+            .copied()
+            .filter(|i| !left_out.contains(i))
+            .collect();
+        ids.extend((1..=70_000).map(|i| top + 1_000 + i));
+        let doc = lab.work.path().join("listed.json");
+        std::fs::write(
+            &doc,
+            json!({"ast_version": 1, "sets": {"listed": {"grain": "stack", "where": [
+                ["in", {}, ["field", {}, "id"], ids],
+            ]}}, "out": {"set": "listed", "level": "record"}})
+            .to_string(),
+        )
+        .unwrap();
+        lab.ok(
+            &[
+                "ask",
+                "selections",
+                "save",
+                "--name",
+                "listed",
+                "--file",
+                doc.to_str().unwrap(),
+                "--pack-dir",
+                packs,
+            ],
+            None,
+        );
+        let want: BTreeSet<i64> = all
+            .iter()
+            .copied()
+            .filter(|i| !left_out.contains(i))
+            .collect();
+        let pre = lab.json(&[
+            "run",
+            "stack-count",
+            "--select",
+            "selection:listed@1",
+            "--preflight",
+            "--json",
+        ]);
+        assert_eq!(pre["stacks"], 5_101, "{pre}");
+        assert_eq!(pre["units"]["total"], 5_101, "{pre}");
+        let r = lab.json(&[
+            "run",
+            "stack-count",
+            "--select",
+            "selection:listed@1",
+            "--json",
+        ]);
+        assert_eq!(r["status"], "done", "{r}");
+        assert_eq!(run_stacks(lab, r["id"].as_i64().unwrap()), want);
+
+        // not_in over the same long list: the three left out
+        let doc_not = lab.work.path().join("unlisted.json");
+        std::fs::write(
+            &doc_not,
+            json!({"ast_version": 1, "sets": {"unlisted": {"grain": "stack", "where": [
+                ["not_in", {}, ["field", {}, "id"], ids],
+            ]}}, "out": {"set": "unlisted", "level": "record"}})
+            .to_string(),
+        )
+        .unwrap();
+        let got = lab.json(&[
+            "ask",
+            "run",
+            "--file",
+            doc_not.to_str().unwrap(),
+            "--pack-dir",
+            packs,
+            "--json",
+        ]);
+        assert_eq!(got["truncated"], false, "{got}");
+        assert_eq!(got["row_count"], 3, "{got}");
+
+        // in parts: three runs of at most 2,000 that are every stack once
+        let before: BTreeSet<i64> = lab
+            .json(&["pipeline", "runs", "--limit", "100", "--json"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        let (good, _out, err) = lab.run(
+            &[
+                "run",
+                "stack-count",
+                "--select",
+                "selection:every@1",
+                "--chunk",
+                "2000",
+                "--json",
+            ],
+            None,
+        );
+        assert!(good, "{err}");
+        assert!(
+            err.contains("5104 stack(s) in 3 parts of at most 2000"),
+            "{err}"
+        );
+        let runs: Vec<Value> = lab
+            .json(&["pipeline", "runs", "--limit", "100", "--json"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| !before.contains(&r["id"].as_i64().unwrap()))
+            .cloned()
+            .collect();
+        assert_eq!(runs.len(), 3, "{runs:?}");
+        let mut seen = BTreeSet::new();
+        let mut sizes = Vec::new();
+        for r in &runs {
+            assert_eq!(r["status"], "done", "{r}");
+            let part = run_stacks(lab, r["id"].as_i64().unwrap());
+            sizes.push(part.len());
+            for s in part {
+                assert!(seen.insert(s), "stack {s} ran twice");
+            }
+        }
+        sizes.sort_unstable();
+        assert_eq!(sizes, [1_104, 2_000, 2_000]);
+        assert_eq!(seen, all);
+
+        // a handle is run as it is
+        let (good, _, err) = lab.run(
+            &["run", "stack-count", "--handle", "1", "--chunk", "10"],
+            None,
+        );
+        assert!(!good);
+        assert!(
+            err.contains("cannot be used with") || err.contains("--chunk"),
+            "{err}"
+        );
     });
 }

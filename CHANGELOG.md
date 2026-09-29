@@ -4,6 +4,17 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `nils run --chunk N` runs a pipeline over a selection in parts of at most N stacks, in stack order, each part frozen into a handle of its own and run as a run of its own, one after another. Where a part fails, the error names the handles of the parts not run.
+- A campaign may show its raters the pictures alone: `nils campaign create --hide-header`, or `hide_header: true` on `POST /api/campaigns`, for an axis or an axes question that suggests none. Its evidence door serves no text of the file's header (no series description, sequence name or physics) and its whole-header door is refused with 409, as in pair mode. Every campaign says its `hide_header`. Schema 75 adds the campaign's column; a campaign from before shows the header as it did. The HTTP API contract stays version 7, with `hide_header` added in place.
+
+### Fixed
+
+- A pipeline run over a selection that reaches more than 5,000 stacks failed with "reaches more than one answer holds; narrow it". A run, its pre-flight and a batch of pyramids now freeze the selection whole, however many stacks it holds; an answer to a question, a campaign, a label set and an A/B campaign keep the ask's caps.
+- A selection whose document lists more ids than a statement may bind (65,535 on Postgres, 32,766 on SQLite) failed with "error parsing response from server" on Postgres and "variable number must be between" on SQLite. A list of more than 1,000 values is now bound as one JSON array and read back as rows.
+- Taking in the results of a run whose units run together looked each unit up in the whole results list, so the time grew with the square of the units; each unit's entry is now found once.
+
 ## [1.0.0-alpha.60] - 2026-09-29
 
 The MRI pack is 0.13.0: it gains the axis `body_region`, the coarse mode of body part, and fixes the rule errors of a second round on the development reference on the five header axes. The certified body-part model runs as the pipeline `bodypart-infer-fusion` of the `nils-bodypart` image 0.2.0, in both modes, with `nils model keep` to keep a registered model's files where a run finds them. Two new kinds of campaign: the A/B campaign settles what independent voters split on, blind, and pair mode reads two stacks of one subject side by side for the post-contrast gold. Pyramids read a sample's stored bits, planes at one place and eight-bit colour images, and a server thread reopens a registry connection the database closed. Reclassify with the new pack to apply it, and build again the pyramids of stacks whose pictures read black. Released with desk 1.0.0-alpha.58, which reads the A/B and pair doors. The registry is at schema 74 (migrations 73 and 74). The HTTP API contract stays version 7, amended in place with the additive A/B and pair doors; the suite contract stays version 3; the pack contract stays version 6; the job contract stays version 1, with the additive `x-nils.input.header`. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.59.

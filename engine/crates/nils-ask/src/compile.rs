@@ -383,6 +383,10 @@ fn alias_of(table: &str) -> Option<&'static str> {
     })
 }
 
+/// A list longer than this is bound as one value, not a placeholder per
+/// item.
+pub const LIST_BIND_MAX: usize = 1_000;
+
 const SPINE: &[&str] = &[
     "k",
     "subj",
@@ -2226,6 +2230,9 @@ impl<'a> Builder<'a> {
         if items.is_empty() {
             return Ok("(NULL)".into());
         }
+        if items.len() > LIST_BIND_MAX {
+            return self.long_list(items, at);
+        }
         let mut ph = Vec::with_capacity(items.len());
         for i in items {
             let ty = match &i {
@@ -2236,6 +2243,53 @@ impl<'a> Builder<'a> {
             ph.push(self.p(i, ty));
         }
         Ok(format!("({})", ph.join(", ")))
+    }
+
+    /// A long list, bound as one JSON array and read back as rows: a
+    /// placeholder per item stops at the backends' limits (65,535 bound
+    /// values on Postgres, 32,766 on SQLite), and a selection of every
+    /// stack lists hundreds of thousands. The items are of one kind, as
+    /// Postgres compares them against one type.
+    fn long_list(&mut self, items: Vec<Param>, at: &str) -> R<String> {
+        let ints = items.iter().all(|i| matches!(i, Param::Int(_)));
+        let numbers = items
+            .iter()
+            .all(|i| matches!(i, Param::Int(_) | Param::Double(_)));
+        let texts = items.iter().all(|i| matches!(i, Param::Text(_)));
+        if !(numbers || texts) {
+            return Err(err(
+                at,
+                format!(
+                    "a list of more than {LIST_BIND_MAX} values holds one kind: numbers or texts"
+                ),
+            ));
+        }
+        let array: Vec<Value> = items
+            .into_iter()
+            .map(|i| match i {
+                Param::Int(n) => Value::from(n),
+                Param::Double(d) => Value::from(d),
+                Param::Text(t) => Value::from(t),
+                _ => Value::Null,
+            })
+            .collect();
+        let doc = Value::Array(array).to_string();
+        let ph = self.p(Param::Text(doc), Type::Text);
+        Ok(match self.ctx.dialect {
+            Dialect::Sqlite => format!("(SELECT value FROM json_each({ph}))"),
+            _ => {
+                let cast = if ints {
+                    "bigint"
+                } else if numbers {
+                    "double precision"
+                } else {
+                    "text"
+                };
+                format!(
+                    "(SELECT (e.v)::{cast} FROM jsonb_array_elements_text(({ph})::jsonb) AS e(v))"
+                )
+            }
+        })
     }
 
     /// One side of a comparison, used once more: the first use is the

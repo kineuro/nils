@@ -1224,9 +1224,17 @@ pub(crate) fn route(
                         .collect::<Vec<_>>()
                 );
                 // record 48, after the first real read: blind hides the
-                // systems' answers, never the file
-                with_file(registry.store(), stack, !plain(caller), &mut doc)?;
-                doc["header_door"] = json!(format!("/api/campaigns/{}/items/{item}/header", c.id));
+                // systems' answers, never the file; a campaign made to show
+                // the pictures alone hides the file's text as well, and has
+                // no header door
+                doc["hide_header"] = json!(c.hide_header);
+                if c.hide_header {
+                    hide_header(&mut doc);
+                } else {
+                    with_file(registry.store(), stack, !plain(caller), &mut doc)?;
+                    doc["header_door"] =
+                        json!(format!("/api/campaigns/{}/items/{item}/header", c.id));
+                }
                 doc["worth"] = if blind {
                     Value::Null
                 } else {
@@ -1253,6 +1261,15 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let item = id_of(item)?;
                 belongs(registry.store(), c.id, "campaign_item", item)?;
+                if c.hide_header {
+                    return Err(Reply::error(
+                        409,
+                        format!(
+                            "campaign {} shows the pictures alone: no text of the header is served",
+                            c.name
+                        ),
+                    ));
+                }
                 let stack = item_stack(registry.store(), item)?;
                 let mut doc = crate::file_header::whole(registry.store(), stack, !plain(caller))
                     .map_err(|e| Reply::error(500, e.to_string()))?
@@ -2865,6 +2882,16 @@ fn suggest_of(v: &Value) -> Result<Option<campaign::Suggest>, Reply> {
     }
 }
 
+/// Whether the reader shows the pictures alone, as its maker says it; the
+/// header is shown when not said.
+fn hide_header_of(v: &Value) -> Result<bool, Reply> {
+    match v {
+        Value::Null => Ok(false),
+        Value::Bool(b) => Ok(*b),
+        _ => Err(Reply::error(400, "hide_header: true or false")),
+    }
+}
+
 fn inputs_of(v: &Value) -> BTreeMap<String, Vec<i64>> {
     v.as_object()
         .map(|m| {
@@ -2985,6 +3012,7 @@ fn create_at_door(
             inputs: inputs_of(&doc["inputs"]),
             hold_back: hold_back_of(&doc["hold_back"])?,
             suggest: suggest_of(&doc["suggest"])?,
+            hide_header: hide_header_of(&doc["hide_header"])?,
         },
     )
     .map_err(campaign_err)?;
@@ -3124,6 +3152,18 @@ fn with_file(store: &mut Store, stack: i64, quasi: bool, doc: &mut Value) -> Res
     doc["texts"] = Value::Object(texts);
     doc["physics"] = Value::Object(physics);
     Ok(())
+}
+
+/// A reading of a campaign that shows the pictures alone: every text of the
+/// file's header out of it, the raw values a blind reader is shown
+/// included, so what is left is the stack, its pictures and what the
+/// campaign says of itself.
+fn hide_header(doc: &mut Value) {
+    if let Some(m) = doc.as_object_mut() {
+        for k in ["header", "texts", "physics", "fields", "header_door"] {
+            m.remove(k);
+        }
+    }
 }
 
 /// The stack an item of stacks stands on.
@@ -4099,6 +4139,11 @@ pub(crate) struct CreateArgs {
     /// or imported (only what `campaign suggest` brings in)
     #[arg(long, default_value = "none", value_name = "none|rules|imported")]
     suggest: String,
+    /// Show the raters the pictures alone, with no text of the file's
+    /// header beside them, as pair mode does: for an axis or an axes
+    /// question that suggests none
+    #[arg(long)]
+    hide_header: bool,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
     #[arg(long, default_value = "mri")]
@@ -5118,6 +5163,7 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
             inputs: BTreeMap::new(),
             hold_back: a.hold_back,
             suggest: Some(campaign::Suggest::parse(&a.suggest).map_err(cerr)?),
+            hide_header: a.hide_header,
         },
     )
     .map_err(cerr)?;

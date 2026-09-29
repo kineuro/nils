@@ -133,7 +133,15 @@ nils pipeline show n4-bias-correction
    nils run n4-bias-correction --select selection:every-t1@1 --param shrink_factor=2
    ```
 
-   The selection is frozen into a handle the run pins. A parameter not given takes its default, and every parameter is recorded on the run.
+   The selection is frozen into a handle the run pins. A parameter not given takes its default, and every parameter is recorded on the run. A run takes a selection of any size: it is frozen whole, however many stacks it reaches, where an answer to a question stops at its cap.
+
+   A selection too large for one container's input, such as every stack of the registry, runs in parts:
+
+   ```sh
+   nils run bodypart-infer-fusion --select selection:every@1 --chunk 20000 --model bodypart-tiny@r7 --model bodypart-fusion@r7
+   ```
+
+   `--chunk N` freezes the selection in stack order into parts of at most N stacks, each a handle of its own, and runs each part as a run of its own, one after another. The parts together are the selection, each stack once. Where a part fails, the ones after it are not run, and the error names their handles, so `nils run <pipeline> --handle <id>` runs each; `nils run --resume <run>` takes up the one that failed.
 
 4. Read what it did:
 
@@ -336,6 +344,14 @@ nils campaign create body-parts --axis body_part --select selection:gold@1 --sug
 ```
 
 At the door it is `suggest` on `POST /api/campaigns`, and every campaign says its `suggest`.
+
+A campaign that suggests none still shows the file's header text beside the pictures: the series description, the sequence name and the physics. Where that text could give the answer away, as for a post-contrast read, make the campaign show the pictures alone, as pair mode does:
+
+```sh
+nils campaign create post-contrast-single --axis post_contrast --select selection:singles@1 --hide-header
+```
+
+Its reader shows no header text, the evidence door serves none, and the whole-header door is refused. Only an axis or an axes question that suggests none takes it. At the door it is `hide_header: true` on `POST /api/campaigns`, and every campaign says its `hide_header`.
 
 ## Read a campaign fast
 

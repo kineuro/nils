@@ -710,13 +710,15 @@ pub(crate) fn route(
         let handle = match (&selection, doc["handle"].as_i64()) {
             (Some(spec), _) => {
                 let pack = doc["pack"].as_str().unwrap_or("mri");
-                crate::ask_cli::freeze_selection(
+                crate::ask_cli::freeze(
                     home,
                     spec,
                     nils_ask::ast::Grain::Stack,
                     pack_dir.map(PathBuf::from),
                     pack,
+                    crate::ask_cli::Freeze::Whole,
                 )
+                .map(|f| f.handle)
                 .map_err(|e| Reply::error(400, e.message))?
             }
             (None, Some(h)) => h,
@@ -769,13 +771,15 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         .as_deref()
         .ok_or_else(|| usage("run <pipeline> --preflight: the pipeline to check"))?;
     let handle = match (&args.select, args.handle) {
-        (Some(spec), _) => crate::ask_cli::freeze_selection(
+        (Some(spec), _) => crate::ask_cli::freeze(
             home,
             spec,
             nils_ask::ast::Grain::Stack,
             args.pack_dir.clone(),
             &args.pack,
-        )?,
+            crate::ask_cli::Freeze::Whole,
+        )
+        .map(|f| f.handle)?,
         (None, Some(h)) => h,
         (None, None) => {
             return Err(usage(

@@ -1652,6 +1652,52 @@ pub(crate) fn freeze_selection(
     pack_dir: Option<PathBuf>,
     pack_name: &str,
 ) -> Result<i64, Exit> {
+    freeze(home, spec, want, pack_dir, pack_name, Freeze::Answer).map(|f| f.handle)
+}
+
+/// How much of a selection a freeze keeps.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Freeze {
+    /// Under the ask's own caps, as an answer is: a campaign, a label set
+    /// or an A/B view is read by people, and one wider than an answer
+    /// holds is refused.
+    Answer,
+    /// Every stack or session, however many: a pipeline run or a batch of
+    /// pyramids works through them as a job, not a person.
+    Whole,
+    /// At most `limit` keys after the key `after`, in key order: one part
+    /// of a run over a selection split into parts.
+    Page { after: Option<i64>, limit: u64 },
+}
+
+/// A frozen selection: its handle and how many keys it holds.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Frozen {
+    pub(crate) handle: i64,
+    pub(crate) keys: usize,
+    pub(crate) last: Option<i64>,
+}
+
+/// The bounds a whole freeze runs under: no row or byte cap, and a job's
+/// time rather than an answer's.
+fn whole_bounds() -> Bounds {
+    Bounds {
+        timeout_ms: 30 * 60 * 1000,
+        max_rows: u64::MAX,
+        max_bytes: u64::MAX,
+    }
+}
+
+/// Freeze a saved selection into a handle of its stacks or sessions, as
+/// much of it as `how` keeps.
+pub(crate) fn freeze(
+    home: &Home,
+    spec: &str,
+    want: nils_ask::ast::Grain,
+    pack_dir: Option<PathBuf>,
+    pack_name: &str,
+    how: Freeze,
+) -> Result<Frozen, Exit> {
     let dir = crate::pack_dir(home, pack_dir)
         .map_err(|_| usage("no packs here: pass --pack-dir DIR to freeze a selection"))?;
     let pack = load_pack(&dir, pack_name)?;
@@ -1695,12 +1741,21 @@ pub(crate) fn freeze_selection(
             node: &node,
             pack_version: Some(&pack_version),
             scheme: &scheme,
-            bounds: bounds(),
+            bounds: match how {
+                Freeze::Answer => bounds(),
+                Freeze::Whole | Freeze::Page { .. } => whole_bounds(),
+            },
             page_rows: Caps::default().page_rows as usize,
             name: None,
             keep: false,
-            after: None,
-            limit: None,
+            after: match how {
+                Freeze::Page { after, .. } => after,
+                _ => None,
+            },
+            limit: match how {
+                Freeze::Page { limit, .. } => Some(limit),
+                _ => None,
+            },
             may_project_raw: false,
             purpose: Some("freezing a selection"),
             reader: None,
@@ -1709,8 +1764,18 @@ pub(crate) fn freeze_selection(
     .map_err(|e| usage(e.to_string()))?;
     if out.answer.truncated {
         return Err(usage(format!(
-            "selection {spec} reaches more than one answer holds; narrow it"
+            "selection {spec} reaches more than one answer holds; narrow it, or run a pipeline over it, which takes any number of stacks"
         )));
     }
-    Ok(out.handle.id)
+    let keys = out.handle.row_count.max(0) as usize;
+    let last = out
+        .answer
+        .rows
+        .last()
+        .and_then(|r| r.opt_int(0).ok().flatten());
+    Ok(Frozen {
+        handle: out.handle.id,
+        keys,
+        last,
+    })
 }

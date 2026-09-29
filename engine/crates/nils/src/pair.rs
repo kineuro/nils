@@ -251,6 +251,7 @@ pub(crate) fn make(home: &Home, a: PairArgs) -> Result<(), Exit> {
             hold_back: None,
             // the two pictures are all there is: nothing is suggested
             suggest: Some(campaign::Suggest::None),
+            hide_header: false,
         },
     )
     .map_err(cerr)?;

@@ -208,6 +208,7 @@ fn new<'a>(
         inputs: Default::default(),
         hold_back: None,
         suggest: Some(nils_registry::campaign::Suggest::Imported),
+        hide_header: false,
     }
 }
 

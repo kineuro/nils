@@ -1566,3 +1566,151 @@ fn a_campaign_made_without_suggestions_shows_none_on_any_door() {
         }
     }
 }
+
+/// The post-contrast study's single reads: a campaign made to show the
+/// pictures alone serves no text of an item's header on any door, not even
+/// the raw values a blind reader is shown, and its whole-header door is
+/// refused; the same stacks in a campaign that does not ask it still show
+/// the file. It is asked only by an axis or an axes question that suggests
+/// none, and the campaign says it.
+#[test]
+fn a_campaign_made_to_hide_the_header_shows_the_pictures_alone() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let body = |name: &str, extra: Value| {
+        let mut b = json!({
+            "name": name,
+            "question": {"kind": "axis", "axis": "base"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["anna@lab", "bo@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            b[k] = v.clone();
+        }
+        b
+    };
+    // refused: anything but a boolean, a campaign that suggests, and a
+    // question not read one stack at a time
+    for (extra, words) in [
+        (json!({"hide_header": "yes"}), "hide_header: true or false"),
+        (
+            json!({"hide_header": true, "suggest": "rules"}),
+            "suggests none",
+        ),
+        (
+            json!({"hide_header": true, "question": {"kind": "free"}}),
+            "an axis or an axes question",
+        ),
+    ] {
+        let (status, doc) =
+            server.call("POST", "/api/campaigns", Some(body("odd", extra)), CURATOR);
+        assert_eq!(status, 400, "{doc}");
+        assert!(doc.to_string().contains(words), "{words}: {doc}");
+    }
+
+    let shown = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(body("shown", json!({}))),
+        CURATOR,
+    );
+    assert_eq!(shown["hide_header"], false, "{shown}");
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(body("pictures", json!({"hide_header": true}))),
+        CURATOR,
+    );
+    assert_eq!(made["hide_header"], true, "{made}");
+    assert_eq!(made["suggest"], "none", "{made}");
+    let again = server.ok("GET", "/api/campaigns/pictures", None, ANNA);
+    assert_eq!(again["hide_header"], true, "{again}");
+    let listed = server.ok("GET", "/api/campaigns", None, ANNA);
+    assert!(
+        listed.to_string().contains("\"hide_header\":true"),
+        "{listed}"
+    );
+
+    let ids = |c: &Value| -> Vec<i64> {
+        c["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_i64().unwrap())
+            .collect()
+    };
+    let (hidden, open) = (ids(&made), ids(&shown));
+    assert!(hidden.len() >= 4, "{made}");
+    // the words of the files' series descriptions and sequence name
+    let words = ["mprage", "flair", "t2 spine", "tir2d1rr99"];
+    for item in &open {
+        let why = server.ok(
+            "GET",
+            &format!("/api/campaigns/shown/items/{item}/why"),
+            None,
+            ANNA,
+        );
+        assert!(why["texts"].is_object(), "{why}");
+        assert!(why["header_door"].is_string(), "{why}");
+        assert_eq!(why["hide_header"], false, "{why}");
+    }
+    // at detail quasi the series description is served where it is not hidden
+    let mut seen_before = 0;
+    for item in &open {
+        let head = server
+            .ok(
+                "GET",
+                &format!("/api/campaigns/shown/items/{item}/header"),
+                None,
+                CURATOR,
+            )
+            .to_string()
+            .to_lowercase();
+        seen_before += words.iter().filter(|w| head.contains(*w)).count();
+    }
+    assert!(
+        seen_before > 0,
+        "the shown campaign serves the header's words"
+    );
+    for item in &hidden {
+        for who in [ANNA, CURATOR] {
+            let why = server.ok(
+                "GET",
+                &format!("/api/campaigns/pictures/items/{item}/why"),
+                None,
+                who,
+            );
+            assert_eq!(why["hide_header"], true, "{why}");
+            assert_eq!(why["blind"], true, "{why}");
+            assert!(why["pictures"].is_object(), "{why}");
+            for k in ["header", "texts", "physics", "fields", "header_door"] {
+                assert!(why.get(k).is_none(), "{k}: {why}");
+            }
+            let text = why.to_string().to_lowercase();
+            for w in words {
+                assert!(!text.contains(w), "{w}: {why}");
+            }
+        }
+        let (status, doc) = server.call(
+            "GET",
+            &format!("/api/campaigns/pictures/items/{item}/header"),
+            None,
+            ANNA,
+        );
+        assert_eq!(status, 409, "{doc}");
+        assert!(doc.to_string().contains("pictures alone"), "{doc}");
+    }
+}
