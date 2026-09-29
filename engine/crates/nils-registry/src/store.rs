@@ -447,6 +447,29 @@ impl Store {
         })
     }
 
+    /// Whether the connection is known to be gone: a Postgres connection
+    /// the server closed, noticed on the call that met it. A SQLite file
+    /// never is.
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Store::Sqlite(_) => false,
+            Store::Postgres { client, .. } => client.is_closed(),
+        }
+    }
+
+    /// Whether the connection still answers, asked of the server within
+    /// `timeout`: a Postgres connection that sat idle while the server
+    /// restarted looks open until a call meets its end. A SQLite file
+    /// always answers.
+    pub fn answers(&mut self, timeout: std::time::Duration) -> bool {
+        match self {
+            Store::Sqlite(_) => true,
+            Store::Postgres { client, .. } => {
+                !client.is_closed() && client.is_valid(timeout).is_ok()
+            }
+        }
+    }
+
     pub fn backend(&self) -> Backend {
         match self {
             Store::Sqlite(_) => Backend::Sqlite,

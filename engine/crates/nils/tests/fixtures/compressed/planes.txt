@@ -31,3 +31,7 @@ e1 5 u12 1 0 jpeg-extended
 f0 6 u12 0 0 native
 f1 6 u12 1 0 j2k
 f2 6 u12 2 0 j2k
+# Series 7: 8-bit colour, as a synthetic MR map is written: native RGB and
+# lossless JPEG 2000 (YBR_RCT).
+g0 7 rgb8 0 0 native
+g1 7 rgb8 1 0 j2k-ybr-rct
