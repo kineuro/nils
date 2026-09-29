@@ -16,6 +16,7 @@ tiers: {exclusive: 0.9, keywords: 0.85, physics: 0.7}
 order:
   - 'construct:inversion'
   - 'construct:phase'
+  - 'flag:spectroscopy'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -65,11 +66,13 @@ order:
   - 'keywords:PDw'
   - 'keywords:T1w'
   - 'keywords:MTw'
+  - 'modifier:stir'
   - 'physics:ir_stir_like'
   - 'physics:ir_standard'
   - 'physics:se_t1w'
   - 'physics:se_t2w'
   - 'physics:se_pdw'
+  - 'physics:gre_pdw'
   - 'physics:gre_t1w'
   - 'physics:gre_t2starw'
 
@@ -117,6 +120,15 @@ rules:
     set: {base: null}
     confidence: 0.9
     why: 'a phase image has no base contrast'
+
+  # MRI pack 0.14.0: a spectroscopy acquisition has no image contrast
+  # (dev-2: a GE `PROBE-SV` left empty, settled none).
+  'flag:spectroscopy':
+    clauses:
+      - {flag: is_spectroscopy, tier: keywords}
+    set: {base: null}
+    confidence: 0.85
+    why: 'a spectroscopy acquisition has no base contrast'
 
   # 3D inversion-prepared rapid gradient echo [MQ6, B1, P11, S8]
   'technique:MPRAGE':
@@ -192,9 +204,15 @@ rules:
   # settled T2*w and the rules left them empty). It reads the readout as
   # well as the technique, because spin-echo BOLD is T2-weighted [P1]: so it
   # is no constraint, and `hints.yml` keeps the usual case a hint.
+  # MRI pack 0.14.0: and a BOLD series whose file states no readout at all
+  # (Siemens `FMRI\NONE` written without ScanningSequence or a sequence
+  # name), at an echo time a spin-echo BOLD does not use (dev-2: four
+  # resting-state runs at TE 33 ms left empty, settled T2*w). A spin echo
+  # stated keeps it out.
   'bold:gre_epi':
     clauses:
       - {when: {all: [{axis: technique, is: 'BOLD-EPI'}, is_gre_epi]}, cite: 'BOLD-EPI on a gradient-echo EPI', source: technique}
+      - {when: {all: [{axis: technique, is: 'BOLD-EPI'}, {not: is_se_epi}, {not: has_se}, {field: echo_time, gt: 0}, {field: echo_time, lt: 50}]}, cite: 'BOLD-EPI with no spin echo stated, TE under 50 ms', source: technique}
     set: {base: 'T2starw'}
     confidence: 0.85
     why: 'a gradient-echo BOLD time series is T2*-weighted'
@@ -466,10 +484,23 @@ rules:
       - {keywords: ['t1w', 't1 w', 't1-w', 't1 weighted', 't1-weighted', 't1'], tier: keywords}
     set: {base: 'T1w'}
 
+  # MRI pack 0.14.0: the same words, as `mtw_named` reads them, and not
+  # where they switch it off (`MT=OFF`; dev-2: a 3D SPGR was MTw).
   'keywords:MTw':
     clauses:
-      - {keywords: ['mtw', 'mt w', 'magnetization transfer', 'magnetization-transfer', 'mt weighted'], tier: keywords}
+      - {flag: mtw_named, tier: keywords}
     set: {base: 'MTw'}
+
+  # MRI pack 0.14.0: a STIR the modifier axis found by its words, where no
+  # word and no inversion time said a base, is T2-weighted as the window
+  # below says for one with an inversion time (dev-2: a Philips MobiView
+  # `STIR_TSE` with no inversion time left empty, settled T2w) [IM3, MQ12].
+  'modifier:stir':
+    clauses:
+      - {when: {axis: modifier, is: STIR}, cite: 'a STIR', source: modifier}
+    set: {base: 'T2w'}
+    confidence: 0.75
+    why: 'a short tau inversion recovery reads as T2-weighted'
 
   # Tier 6. The acquisition's own numbers. v0 tries inversion recovery first,
   # and guards the spin-echo and gradient-echo windows with `not has_epi`: an
@@ -513,6 +544,19 @@ rules:
   'physics:se_pdw':
     clauses:
       - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 30}]}, cite: 'a long repetition and a short echo time', source: physics, tier: physics}
+    set: {base: 'PDw'}
+    confidence: 0.65
+
+  # MRI pack 0.14.0: a spoiled gradient echo flipped 10 degrees or less at a
+  # repetition time of 20 ms or more is well under the Ernst angle of brain
+  # tissue, so proton density and not T1 sets its contrast: a
+  # multi-parameter mapping protocol's PD-weighted echo is FA 5 to 6 at TR
+  # about 25, its T1-weighted one FA 20 or more [P51]. Never an
+  # inversion-prepared one (dev-2: a GE 3D SPGR at FA 10, TR 35, the MT-off
+  # partner of an MT pair, settled PDw; the rules said T1w by its echo time).
+  'physics:gre_pdw':
+    clauses:
+      - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}, {field: repetition_time, ge: 20}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a flip of 10 degrees or less at a repetition time of 20 ms or more', source: physics, tier: physics}
     set: {base: 'PDw'}
     confidence: 0.65
 

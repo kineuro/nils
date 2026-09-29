@@ -11,7 +11,7 @@
 rule_set: implied_technique
 decides: [technique]
 
-order: ['construct:mp2rage']
+order: ['construct:mp2rage', 'construct:diffusion_map']
 
 rules:
 
@@ -23,3 +23,16 @@ rules:
     set: {technique: 'MP2RAGE'}
     confidence: 0.95
     why: 'INV1, INV2 and UNI are the outputs of the MP2RAGE sequence'
+
+  # MRI pack 0.14.0: an ADC, eADC, FA, MD or trace image is computed from a
+  # diffusion acquisition, and where nothing in the file states its readout
+  # that acquisition is a diffusion EPI (dev-2: a GE `isoADC` written with
+  # ScanningSequence `2` had no technique, settled DWI-EPI). Only a technique
+  # still open is filled, and a file that states a readout that is not EPI
+  # keeps it out, since a TSE diffusion has no value of its own.
+  'construct:diffusion_map':
+    clauses:
+      - {when: {all: [{any: [{axis: construct, is: ADC}, {axis: construct, is: eADC}, {axis: construct, is: FA}, {axis: construct, is: MD}, {axis: construct, is: Trace}]}, {not: says_not_epi}]}, cite: 'a diffusion map', source: construct}
+    set: {technique: 'DWI-EPI'}
+    confidence: 0.85
+    why: 'a diffusion map whose readout the file does not state is from a diffusion EPI'

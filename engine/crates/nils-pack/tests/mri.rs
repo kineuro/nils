@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.13.0");
+    assert_eq!(pack.id(), "mri@0.14.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -34,7 +34,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        226,
+        245,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -47,7 +47,13 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          STIR by inversion time, an inversion stated, black blood, MultiVane, WATS, t1_mpr, a \
          workstation reformat, a diffusion projection, trace, b0, MD, FA \
          and eADC by name, three for filtered images, PROMO, SyMRI's \
-         tissue maps and a GE calibration scan"
+         tissue maps and a GE calibration scan, and pack 0.14.0 the 19 \
+         of dev-2's: a synthetic image or map, a FLAIR on a spin-echo \
+         readout and the IR-TSE readout it makes, PROPELLER and radial by \
+         name, a GE spin echo in research mode, a multi-echo GRE by name \
+         and the ME-GRE it makes, Philips' mFFE, GE's FSPGR, TOF by words, \
+         MobiView, radial MIP views, MT switched off, SmartBrain, \
+         spectroscopy, a GE SWI magnitude, and GE's Evec and tensor outputs"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

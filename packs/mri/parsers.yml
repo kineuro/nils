@@ -353,7 +353,8 @@ parsers:
       is_epi_ir:           {substring: epir}
       is_se:               {all: [{any_substring: ['*se1', '*se2d', se2d]}, {not: {substring: tse}}]}
       is_tse:              {any_substring: [tse1, tse2, tse3, tse_, 'tse-', tser, tseb, ts1, ts2, ts3]}
-      is_tse_body:         {substring: tser}
+      # MRI pack 0.14.0: and after BLADE's `B` (`*tseBR2d1_28`, dev-2).
+      is_tse_body:         {any_substring: [tser, tsebr]}
       is_ir_tse:           {all: [{substring: tir}, {not: {substring: stir}}]}
       is_haste:            {any_substring: [h2d, h3d, hr2d, haste]}
       # MRI pack 0.10.0: anchored at the start of the name (after `*`, the
