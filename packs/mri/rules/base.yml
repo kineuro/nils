@@ -15,6 +15,7 @@ tiers: {exclusive: 0.9, keywords: 0.85, physics: 0.7}
 
 order:
   - 'construct:inversion'
+  - 'construct:phase'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -22,6 +23,7 @@ order:
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
+  - 'bold:gre_epi'
   - 'construct:m0'
   - 'technique:ASL'
   - 'technique:Perfusion-EPI'
@@ -103,6 +105,19 @@ rules:
     confidence: 0.9
     why: 'an MP2RAGE inversion is named by its construct and has no base contrast'
 
+  # MRI pack 0.13.0: a phase image carries no base contrast, whatever its
+  # sequence (the SWI and SyMRI routes already say so for theirs; pack
+  # 0.11.0 kept the vote from filling one). dev-1: a Philips MDME `PHASE
+  # MAP` outside the SyMRI route was PDw by its echo time, and a phase image
+  # of an MT-prepared multi-echo gradient echo T2*w by its technique; both
+  # were settled none.
+  'construct:phase':
+    clauses:
+      - {when: {axis: construct, is: Phase}, cite: 'a phase image', source: construct}
+    set: {base: null}
+    confidence: 0.9
+    why: 'a phase image has no base contrast'
+
   # 3D inversion-prepared rapid gradient echo [MQ6, B1, P11, S8]
   'technique:MPRAGE':
     clauses:
@@ -171,6 +186,18 @@ rules:
     set: {base: 'DWI'}
     confidence: 0.95
     why: 'the DWI-EPI technique implies a DWI base contrast'
+
+  # MRI pack 0.13.0: a BOLD time series read out by a gradient-echo EPI is
+  # T2*-weighted [MQ1, RP1] (dev-1: both BOLD stacks, Siemens `epfid`, were
+  # settled T2*w and the rules left them empty). It reads the readout as
+  # well as the technique, because spin-echo BOLD is T2-weighted [P1]: so it
+  # is no constraint, and `hints.yml` keeps the usual case a hint.
+  'bold:gre_epi':
+    clauses:
+      - {when: {all: [{axis: technique, is: 'BOLD-EPI'}, is_gre_epi]}, cite: 'BOLD-EPI on a gradient-echo EPI', source: technique}
+    set: {base: 'T2starw'}
+    confidence: 0.85
+    why: 'a gradient-echo BOLD time series is T2*-weighted'
 
   # MRI pack 0.11.0: an ASL's M0 scan is the proton-density reference a CBF
   # quantification divides by, so it is PDw and not the perfusion weighting

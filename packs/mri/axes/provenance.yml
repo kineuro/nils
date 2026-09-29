@@ -95,9 +95,14 @@ values:
       - fractional anisotropy
       - dti
       - tensor
+      # MRI pack 0.13.0: GE's mean diffusivity, `AvDC`, a tensor's output.
+      - avdc
     alternative_flags: [has_adc, has_eadc, has_fa, has_trace]
+    # MRI pack 0.13.0: or a derived GE image named `FA` (flags.yml), which
+    # ruling 7 makes a tensor's output.
     detection:
       exclusive: is_diffusion_derived
+      combination: [fa_named]
   # An ASL series' CBF map is ASLRecon (Nima's ruling, 2026-09-28), so the
   # DSC and DCE maps are this value's and an ASL's are not.
   PerfusionRecon:
@@ -152,6 +157,9 @@ values:
     detection:
       exclusive: is_bold
   Localizer:
+    # MRI pack 0.13.0, Nima's ruling (2026-09-29): never a GE calibration
+    # scan, which the words below would otherwise take (flags.yml).
+    requires: {not: ge_calibration}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer
@@ -175,6 +183,9 @@ values:
       combination: [is_tri_plane_scout]
   ProjectionDerived:
     terms: ['projection', 'MIP', 'MinIP', 'MPR', 'reformat']
+    # MRI pack 0.13.0: not Philips' isotropic diffusion image, which it
+    # writes as a `PROJECTION IMAGE` (flags.yml, `is_diffusion_projection`).
+    requires: {not: is_diffusion_projection}
     keywords:
       - maximum intensity
       - minimum intensity

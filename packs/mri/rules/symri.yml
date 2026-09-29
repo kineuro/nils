@@ -36,6 +36,7 @@ order:
   - r1_map
   - r2_map
   - b1_map
+  - tissue_map
   - synthetic_flair
   - synthetic_dir
   - synthetic_psir
@@ -134,6 +135,14 @@ rules:
       - {keywords: ['b1 map', b1map], tier: keywords}
     set: {base: null, construct: [B1map], technique: {from: symri_technique}, directory_type: fmap}
     why: 'a transmit field map is a field map, not an anatomy'
+
+  # MRI pack 0.13.0: the tissue maps SyMRI writes (`DERIVED\PRIMARY\CSF`,
+  # WM, GM) are quantitative maps with no base contrast, where the fallback
+  # called them a magnitude (dev-1: a CSF map settled Qmap).
+  tissue_map:
+    clauses:
+      - {flag: is_symri_tissue_map, tier: exclusive}
+    set: {base: null, construct: [Qmap], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_flair:
     clauses:

@@ -51,8 +51,10 @@ values:
       - da fl
       - da-fl
       - da - fl
+    # MRI pack 0.13.0: or its inversion time (flags.yml, `is_flair_by_ti`).
     detection:
       exclusive: is_flair
+      combination: [is_flair_by_ti]
   # TIRM is Siemens' inversion-recovery TSE for both a STIR and a dark-fluid
   # FLAIR [V1, V2], so it is IR-TSE's term and not this value's. The word
   # stays a keyword: a TIRM that says nothing of dark fluid is the short-TI
@@ -69,8 +71,10 @@ values:
       - short tau
       - short ti
       - tirm
+    # MRI pack 0.13.0: or its inversion time (flags.yml, `is_stir_by_ti`).
     detection:
       exclusive: has_stir
+      combination: [is_stir_by_ti]
   DIR:
     terms: ['double inversion recovery', 'double IR']
     group: IR_CONTRAST
@@ -120,8 +124,10 @@ values:
       - multivane
       - radial
       - periodically rotated
+    # MRI pack 0.13.0: or Philips' `MV` shorthand (flags.yml).
     detection:
       exclusive: is_radial
+      combination: [multivane_named]
   Spiral:
     terms: ['spiral']
     group: TRAJECTORY
@@ -158,8 +164,10 @@ values:
       - water exc
       - proset
       - wex
+    # MRI pack 0.13.0: or Philips' water-selective WATS (flags.yml).
     detection:
       exclusive: has_water_excitation
+      combination: [wats_named]
   Dixon:
     # WFS is Canon's, WFOP and FatSep Hitachi's, FLEX GE's [V1, V2]
     terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon', 'WFS', 'WFOP', 'FatSep', 'FLEX']
@@ -196,6 +204,9 @@ values:
       - blackblood
       - dark blood
       - blood null
+    # MRI pack 0.13.0: DANTE and Philips' `BB`, as whole words (flags.yml).
+    detection:
+      combination: [black_blood_named]
   BrightBlood:
     terms: ['bright blood']
     keywords:
@@ -208,5 +219,7 @@ values:
       - mocoseries
       - motion correct
       - motioncorrect
+    # MRI pack 0.13.0: or GE's prospective motion correction, PROMO.
     detection:
       exclusive: has_moco
+      combination: [has_promo]

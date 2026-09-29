@@ -56,9 +56,14 @@ rules:
     set: {disposition: excluded, convertible: 'no'}
 
   # A planning scan. An image, and convertible, and not raw material.
+  # MRI pack 0.13.0: and a GE calibration scan (ASSET, `3D Calibration`),
+  # which Nima's ruling of 2026-09-29 makes an acquired fast spoiled GRE and
+  # no localizer: it is still not raw material, so no role takes it and a
+  # pipeline skips it.
   scout:
     clauses:
       - {when: {axis: directory_type, is: localizer}, cite: localizer, source: directory_type}
+      - {flag: ge_calibration, tier: stated}
     set: {disposition: scout, convertible: 'yes'}
 
   # MRI pack 0.12.0, Nima's ruling (2026-09-28): "we can call them reformat
@@ -141,6 +146,9 @@ rules:
       - {when: {axis: construct, is: ADC}, cite: ADC, source: construct}
       - {when: {axis: construct, is: eADC}, cite: eADC, source: construct}
       - {when: {axis: construct, is: Trace}, cite: Trace, source: construct}
+      # MRI pack 0.13.0: and isoDWI, the same image under another name
+      # (axes/construct.yml), which EPIMix writes and a reader may answer.
+      - {when: {axis: construct, is: isoDWI}, cite: isoDWI, source: construct}
       - {when: {axis: construct, is: FA}, cite: FA, source: construct}
       - {when: {axis: construct, is: MD}, cite: MD, source: construct}
       - {when: {axis: construct, is: CBF}, cite: CBF, source: construct}

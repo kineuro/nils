@@ -298,6 +298,8 @@ values:
       - fase3d
       - mvox
       - isofse
+      # MRI pack 0.13.0: GE's research `3dfse` (dev-1: two reformats).
+      - 3dfse
     # MRI pack 0.11.0: or a 3D spin echo with a train of 100 or more, which
     # is what a GE CUBE FLAIR's reformat states (flags.yml, 12).
     detection:
@@ -329,6 +331,9 @@ values:
       - ir tse
       - ir-fse
       - ir fse
+      # MRI pack 0.13.0: `IRFSE` as one word, as Picker and Elscint name
+      # their sequence (dev-1: two stacks read as TSE).
+      - irfse
     detection:
       combination: [has_ir, is_tse]
   ME-SE:
@@ -428,6 +433,9 @@ values:
     family: GRE
     keywords:
       - mprage
+      # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
+      - 'mp - rage'
+      - mp-rage
       - bravo
       - '3d tfe'
       - ir-fspgr
