@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.12.0
+version: 0.13.0
 contract: 6
 modality: MR
 
@@ -44,6 +44,9 @@ axes:
   - axes/quality.yml
   - axes/base.yml
   - axes/body_part.yml
+  # Record 50: the body part's coarse mode, folded from it, so declared and
+  # ordered after it.
+  - axes/body_region.yml
   - axes/post_contrast.yml
   - axes/directory_type.yml
   # Wave 3 §7: what to do with a stack, as opposed to what it is. Decided in a
@@ -68,6 +71,7 @@ rules:
   - rules/base.yml
   - rules/post_contrast.yml
   - rules/body_part.yml
+  - rules/body_region.yml
   - rules/intent.yml
   - rules/disposition.yml
   - rules/role.yml
@@ -78,7 +82,7 @@ rules:
 # no modifier or construct rule
 # reads the base. The two `implied_` sets fill the technique and add to the
 # modifiers from the construct, for the same reason after it.
-order: [excluded, provenance, swi, symri, epimix, stage, technique, modifier, construct, implied_technique, implied_modifier, base, quality, body_part, post_contrast, intent, disposition, role]
+order: [excluded, provenance, swi, symri, epimix, stage, technique, modifier, construct, implied_technique, implied_modifier, base, quality, body_part, body_region, post_contrast, intent, disposition, role]
 
 # Record 48 (pack contract 6): what one axis rules out on another, and what
 # is usual without being always so. Both read axis values alone; neither
@@ -178,6 +182,11 @@ review:
     # resort: a spine inferred from a tall narrow sagittal field of view
     # with the text silent, at 0.60.
     body_part: 0.65
+    # The body region is the body part folded (record 50), written at 0.65
+    # whatever the body part's confidence was. A doubtful region is a
+    # doubtful body part, and it is asked there, so the region's own
+    # threshold asks about none of its stacks.
+    body_region: 0.65
   # An axis with no value at all is a question only where a value is always
   # expected. A modifier or a construct is legitimately absent on most
   # stacks; a technique that nothing recognised is a gap in the pack.

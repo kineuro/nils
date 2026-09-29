@@ -10012,7 +10012,7 @@ mod tests {
     }
 
     /// `nils pack derive` carries answers kept anywhere through the pack
-    /// as the reader does live: the five the seven asked axes leave, a
+    /// as the reader does live: the six the seven asked axes leave, a
     /// value named by its label as well as its identity, can't tell
     /// carried to what reads it, and quality from ImageType alone.
     #[test]
@@ -10044,6 +10044,7 @@ mod tests {
         assert_eq!(
             d,
             [
+                "body_region",
                 "convertible",
                 "directory_type",
                 "disposition",
@@ -10060,6 +10061,8 @@ mod tests {
         assert_eq!(got[0]["values"]["directory_type"], "anat");
         assert_eq!(got[0]["values"]["role"], serde_json::json!(["t1w"]));
         assert_eq!(got[0]["values"]["quality"], serde_json::json!([]));
+        // MRI pack 0.13.0: the body part's coarse mode, folded from it
+        assert_eq!(got[0]["values"]["body_region"], "head");
         assert_eq!(got[1]["stack"], 2);
         assert_eq!(got[1]["values"]["role"], serde_json::json!(["flair"]));
         assert_eq!(got[2]["values"]["directory_type"], "cant_tell");
