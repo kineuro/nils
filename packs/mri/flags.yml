@@ -179,7 +179,8 @@ flags:
   # multi-echo spin echo only where the series holds several (pack 0.9.0).
   is_me_se:   {all: [sequence_name.is_me_se, is_multi_echo]}
   is_medic:   sequence_name.is_medic
-  is_mdme:    sequence_name.is_mdme
+  # MRI pack 0.15.0: or GE's MAGiC acquisition by its name (below).
+  is_mdme:    {any: [sequence_name.is_mdme, ge_magic_acquisition]}
   is_qalas:   sequence_name.is_qalas
   # MRI pack 0.10.0: Philips' scanning technique (2001,1020) decides the
   # family where Siemens' name would: T1FFE is spoiled, TFE and T1TFE the
@@ -228,6 +229,9 @@ flags:
       # with a b value of 0 (the reference read their source as a diffusion
       # EPI once Nima's ruling 7 stood, 2026-09-29).
       - all: [has_epi, {any: [md_named, fa_named, eadc_named]}]
+      # MRI pack 0.15.0: a Siemens BLADE diffusion (`blade_b`), a turbo spin
+      # echo and no EPI (below, `dwi_tse`).
+      - sequence_name.is_blade_diff
   is_bold:    {all: [image_type.has_fmri, {not: image_type.has_phase}]}
   is_asl:     image_type.has_asl
   is_perfusion: image_type.has_perfusion
@@ -838,7 +842,14 @@ flags:
       - {not: has_gre}
       - {not: is_multi_echo}
       - {not: is_mdme}
-      - {field: echo_train_length, ge: 3}
+      # MRI pack 0.15.0, Nima's ruling N2 (2026-09-30, record 48): on GE a
+      # stated train of 2 is a turbo factor of 2. A dual-echo spin echo is
+      # split into one stack per echo, so the split keeps it out above, and
+      # GE's T1 FSE runs trains of 2 to 4 (dev-2 and dev-3: ten GE T1 spin
+      # echoes of train 2, `TRF_GEMS`, settled TSE).
+      - any:
+          - {field: echo_train_length, ge: 3}
+          - all: [{text: manufacturer, prefix: ge}, {field: echo_train_length, ge: 2}]
   # GE writes a PROPELLER fast spin echo with ScanningSequence RM (research
   # mode), so no spin-echo flag holds; it is named for its blades and has an
   # echo train (dev-1: three `T2 PROP` and `Silent Propeller` stacks with no
@@ -1093,7 +1104,9 @@ flags:
     all:
       - {text: technique_text, matches: '(^|[^a-z])(angio|mra)'}
       - is_3d
-      - has_gre
+      # MRI pack 0.15.0: or an old Siemens inflow sequence named `tun`,
+      # written in research mode (below).
+      - any: [has_gre, siemens_tun_named]
       - {not: has_epi}
       - {not: is_pc}
       - {not: contrast_said}
@@ -1129,3 +1142,104 @@ flags:
       - {text: search_text, substring: swi}
       - {not: {text: search_text, matches: '^(swi|swiphase|swi phase|mip|minip|min ip|pha|phase|qsm)( |$)'}}
       - {not: {text: search_text, substring: swan}}
+
+  # === MRI pack 0.15.0: Nima's rulings on pack 0.14's disputes, and dev-3's ===
+  # rule errors on pack 0.14.0 (record 48, "Rulings on pack 0.14's disputes"
+  # and "N6 and N11 after the look-up", 2026-09-30;
+  # `studies/2026-09-29-dev2-reference/disputes-0140.md` and
+  # `studies/2026-09-29-dev3-reference/results.md` in the design repository).
+
+  # --- N3: a diffusion read out by a turbo spin echo (DWI-TSE): Philips'
+  # DWI-TSE, a PROPELLER, BLADE or MultiVane diffusion, a HASTE diffusion.
+  # Read from a diffusion flag with a stated spin echo, a train and no EPI.
+  # Philips writes its EPI diffusion as a spin echo too (ScanningSequence SE,
+  # its EPI factor as the echo train, and `DwiSE` in its private scanning
+  # technique on its DWI-TSE as well: 5,212 stacks on the archive), so "no
+  # EPI" must be said by something that names the turbo readout: the words,
+  # the radial or single-shot readout, or the pixel bandwidth. An EPI
+  # readout is sampled at 1,000 Hz per pixel or more; every Philips `DwiSE`
+  # stack under 600 Hz on the archive (12) is in a study that runs a DWI-TSE.
+  dwi_tse_named: {text: technique_text, matches: '(^|[^a-z])(tse|fse|ssfse|haste|propeller|blade|multivane)([^a-z]|$)'}
+  philips_dwi_tse_bandwidth:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - {field: echo_train_length, ge: 2}
+      - {field: pixel_bandwidth, gt: 0}
+      - {field: pixel_bandwidth, lt: 600}
+  dwi_tse:
+    all:
+      - is_dwi
+      - has_se
+      - {not: has_epi}
+      - {not: has_gre}
+      - any: [{field: echo_train_length, ge: 2}, is_radial, propeller_named, is_haste]
+      - any: [dwi_tse_named, sequence_name.is_blade_diff, is_haste, is_radial, philips_dwi_tse_bandwidth]
+
+  # --- N4: Philips writes its computed isotropic diffusion image as
+  # `PROJECTION IMAGE` (the pack reads it so since 0.13.0, to keep it from
+  # being a reformat, `is_diffusion_projection`), so such an image with a
+  # positive b value is the trace, named or not. Never its b=0 image, a
+  # maximum or minimum projection, or a map.
+  philips_trace_projection:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - image_type.is_projection_image
+      - has_positive_b_value
+      - {not: b0_named}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: projection_named}
+      - {not: {text: search_text, matches: '(^|[^a-z])(e?adc|fa)([^a-z]|$)'}}
+  trace_image: {any: [trace_named, philips_trace_projection]}
+
+  # --- R1: a GE SWI written in research mode (ScanningSequence RM) with an
+  # echo train of 32 or more is an EPI: a train of 48 inside a repetition
+  # time of 62 ms is an echo spacing of about 1 ms, an EPI factor and not 48
+  # echoes. GE's multi-echo SWI (SWAN) at a train of 16 and TR 117 ms stays
+  # ME-GRE, as dev-1 and dev-2 settled it.
+  ge_swi_epi_train:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - scanning_sequence.has_research
+      - {field: echo_train_length, ge: 32}
+
+  # --- dev-3, G1: GE's steady-state gradient echo, GRASS or MPGR: written
+  # ScanningSequence GR and SequenceVariant SS without SP, the unspoiled
+  # (steady-state) gradient echo the vocabulary files under SS-GRE, which
+  # only Siemens `fi` detected. GE writes SS on its balanced FIESTA and its
+  # fast FGRE too, at repetition times under 10 ms, so a repetition time of
+  # 20 ms or more keeps them out (dev-3: six `Ax MPGR`, `SC:AX T2 GRE` and
+  # `Ax T2* suscept GRE` stacks at TR 500 to 900 ms, settled SS-GRE).
+  ge_grass:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - scanning_sequence.has_gre
+      - has_steady_state
+      - {not: has_spoiled}
+      - {not: has_mag_prepared}
+      - {not: has_epi}
+      - {not: has_se}
+      - {field: repetition_time, ge: 20}
+
+  # --- dev-3, G3: GE's MAGiC acquisition (the multi-dynamic multi-echo
+  # spin echo SyMRI reads) named `Qmap` or `MAGiC`, written in research mode
+  # with no sequence name, split by echo or by saturation delay (dev-3: an
+  # `Ax Qmap Head` read as a dual-echo TSE, settled MDME) [P24].
+  ge_magic_acquisition:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: search_text, matches: '(^|[^a-z])(qmap|magic)([^a-z]|$)'}
+      - {not: image_type.is_derived}
+      - {not: has_epi}
+      - {not: has_gre}
+      - any: [is_multi_echo, is_multi_ti]
+      - {field: echo_train_length, ge: 2}
+
+  # --- dev-3, B14: an old Siemens inflow angiography (MAGNETOM Vision,
+  # `tun_s`), written in research mode, so no gradient echo is stated; the
+  # name is the inflow sequence as `fi3d1tun` is (dev-3: two
+  # `MRA_FAST_FLOW` stacks with no technique, settled TOF).
+  siemens_tun_named:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(fi[23]d[0-9]*)?tun'}

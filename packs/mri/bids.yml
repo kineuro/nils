@@ -191,6 +191,7 @@ acq:
   - from: technique
     tokens:
       'MS-EPI': MSEPI
+      'DWI-TSE': DWITSE
       'DWI-EPI': DWIEPI
       'DWI-STEAM': DWISTEAM
       'BOLD-EPI': BOLDEPI

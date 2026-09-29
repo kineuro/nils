@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.14.0");
+    assert_eq!(pack.id(), "mri@0.15.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -24,17 +24,18 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        231,
+        232,
         "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
          Siemens stems, the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
          dynamic FLASH, the one of pack 0.12.0: Philips' projection image \
-         without GE's collapse, and the one of pack 0.13.0: a workstation's \
-         thick-slab average"
+         without GE's collapse, the one of pack 0.13.0: a workstation's \
+         thick-slab average, and the one of pack 0.15.0: a Siemens BLADE \
+         diffusion"
     );
     assert_eq!(
         pack.flags.len(),
-        245,
+        254,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -53,7 +54,11 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          name, a GE spin echo in research mode, a multi-echo GRE by name \
          and the ME-GRE it makes, Philips' mFFE, GE's FSPGR, TOF by words, \
          MobiView, radial MIP views, MT switched off, SmartBrain, \
-         spectroscopy, a GE SWI magnitude, and GE's Evec and tensor outputs"
+         spectroscopy, a GE SWI magnitude, and GE's Evec and tensor outputs, \
+         and pack 0.15.0 the 9 of Nima's rulings of 2026-09-30 and dev-3's: \
+         a TSE diffusion by its words, by Philips' bandwidth and as the \
+         DWI-TSE it makes, Philips' projection trace and the trace image, a \
+         GE EPI SWI by its train, GE's GRASS, GE's MAGiC and Siemens' tun"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

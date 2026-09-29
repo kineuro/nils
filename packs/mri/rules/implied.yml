@@ -29,7 +29,9 @@ rules:
   # that acquisition is a diffusion EPI (dev-2: a GE `isoADC` written with
   # ScanningSequence `2` had no technique, settled DWI-EPI). Only a technique
   # still open is filled, and a file that states a readout that is not EPI
-  # keeps it out, since a TSE diffusion has no value of its own.
+  # keeps it out: a TSE diffusion is DWI-TSE (MRI pack 0.15.0), which the
+  # technique axis reads from the file, and a map whose file says no more
+  # than a spin echo is left open.
   'construct:diffusion_map':
     clauses:
       - {when: {all: [{any: [{axis: construct, is: ADC}, {axis: construct, is: eADC}, {axis: construct, is: FA}, {axis: construct, is: MD}, {axis: construct, is: Trace}]}, {not: says_not_epi}]}, cite: 'a diffusion map', source: construct}

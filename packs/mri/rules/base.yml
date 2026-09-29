@@ -24,11 +24,14 @@ order:
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
+  - 'technique:DWI-TSE'
   - 'bold:gre_epi'
   - 'construct:m0'
   - 'technique:ASL'
   - 'technique:Perfusion-EPI'
   - 'technique:DCE'
+  - 'balanced:low_flip_2d'
+  - 'balanced:t2_over_t1'
   - 'construct:diffusion'
   - 'construct:perfusion'
   - 'construct:swi'
@@ -72,6 +75,7 @@ order:
   - 'physics:se_t1w'
   - 'physics:se_t2w'
   - 'physics:se_pdw'
+  - 'physics:gre_t2starw_long_tr'
   - 'physics:gre_pdw'
   - 'physics:gre_t1w'
   - 'physics:gre_t2starw'
@@ -199,6 +203,16 @@ rules:
     confidence: 0.95
     why: 'the DWI-EPI technique implies a DWI base contrast'
 
+  # MRI pack 0.15.0, Nima's ruling N3 (2026-09-30, record 48): a diffusion
+  # read out by a turbo spin echo is diffusion-weighted as the EPI one is
+  # [D1, MQ3, RP8].
+  'technique:DWI-TSE':
+    clauses:
+      - {when: {axis: technique, is: 'DWI-TSE'}, cite: 'DWI-TSE', source: technique}
+    set: {base: 'DWI'}
+    confidence: 0.95
+    why: 'the DWI-TSE technique implies a DWI base contrast'
+
   # MRI pack 0.13.0: a BOLD time series read out by a gradient-echo EPI is
   # T2*-weighted [MQ1, RP1] (dev-1: both BOLD stacks, Siemens `epfid`, were
   # settled T2*w and the rules left them empty). It reads the readout as
@@ -251,6 +265,35 @@ rules:
     set: {base: 'PWI'}
     confidence: 0.95
     why: 'a dynamic contrast enhanced series is perfusion-weighted imaging'
+
+  # MRI pack 0.15.0, Nima's ruling N6 (2026-09-30, record 48, "N6 and N11
+  # after the look-up"): a balanced steady-state scan (TrueFISP, FIESTA,
+  # balanced FFE; CISS and FIESTA-C) is T2w, as a convention. Its contrast
+  # is T2/T1: "Balanced-SSFP is certainly not a T2-weighted sequence"
+  # (Scheffler and Lehnhardt 2003) [P52, P53]. Neither BIDS nor DICOM has a
+  # T2/T1 term, and clinical use calls these scans (heavily) T2-weighted,
+  # bright fluid; so here T2w stands for T2/T1, and the technique carries
+  # the mechanism. Never T1w, which the echo-time window below gave every
+  # one of them (dev-2: a GE `3D FIESTA` at TE 1.5 ms, settled T2w). Two
+  # exceptions follow their own rules. A 2D balanced scan at a very low flip
+  # angle, 10 degrees or less, is proton-density-like: its T2/T1 dependence
+  # fades as the flip falls (Huang et al. 2002) [P54]. A magnetisation-
+  # prepared one (an inversion or another preparation) is weighted as its
+  # preparation decides, so these two rules leave it to the rules after
+  # them. Neither is a constraint: both read flags as well as the technique.
+  'balanced:low_flip_2d':
+    clauses:
+      - {when: {all: [{any: [{axis: technique, is: bSSFP}, {axis: technique, is: CISS}]}, is_2d, {not: has_ir}, {not: has_mag_prepared}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}]}, cite: 'a 2D balanced steady state at a flip of 10 degrees or less', source: technique}
+    set: {base: 'PDw'}
+    confidence: 0.7
+    why: 'a 2D balanced steady-state scan at a very low flip angle is proton-density-like (Huang et al. 2002)'
+
+  'balanced:t2_over_t1':
+    clauses:
+      - {when: {all: [{any: [{axis: technique, is: bSSFP}, {axis: technique, is: CISS}]}, {not: has_ir}, {not: has_mag_prepared}]}, cite: 'a balanced steady state', source: technique}
+    set: {base: 'T2w'}
+    confidence: 0.85
+    why: 'a balanced steady-state scan is T2w by convention: T2w stands for its T2/T1 contrast (Scheffler and Lehnhardt 2003), which no base value names'
 
   # ADC, eADC, FA, MD and trace images are computed from diffusion-weighted
   # acquisitions [D2, D5, MQ3, MQ4, T1, P3]. isoDWI is trace under another
@@ -546,6 +589,19 @@ rules:
       - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 30}]}, cite: 'a long repetition and a short echo time', source: physics, tier: physics}
     set: {base: 'PDw'}
     confidence: 0.65
+
+  # MRI pack 0.15.0: a gradient echo at a long repetition time, a low flip
+  # and an echo time of 12 ms or more is T2*-weighted: the long TR and the
+  # low flip leave little T1 weighting, and the echo time lets T2* decay set
+  # the contrast. GE's GRASS and MPGR hemorrhage protocols run at TR 500 to
+  # 900 ms, flip 20 to 25 degrees and TE 15 to 30 ms (dev-3: two GE `Ax GRE`
+  # at TE 15 ms, flip 20, TR 500, left empty between the two windows and
+  # settled T2*w; the window below starts above 15 ms) [P8, MQ8].
+  'physics:gre_t2starw_long_tr':
+    clauses:
+      - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: repetition_time, ge: 200}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 30}, {field: echo_time, ge: 12}]}, cite: 'a flip of 30 degrees or less at a repetition time of 200 ms or more, and an echo time of 12 ms or more', source: physics, tier: physics}
+    set: {base: 'T2starw'}
+    confidence: 0.7
 
   # MRI pack 0.14.0: a spoiled gradient echo flipped 10 degrees or less at a
   # repetition time of 20 ms or more is well under the Ernst angle of brain

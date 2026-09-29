@@ -46,6 +46,12 @@ derive:
       # ME-GRE on the two SWI stacks where the axis said so and the route
       # GRE). A spoiled one is told apart since pack 0.13.0 (below).
       - {when: {all: [is_multi_echo, has_gre]}, value: ME-GRE}
+      # MRI pack 0.15.0, Nima's ruling R1 (2026-09-30, record 48): a GE SWI
+      # written in research mode with a train of 32 or more is an EPI, its
+      # train the EPI factor (a train of 48 in TR 62 ms is an echo spacing of
+      # about 1 ms), named EPI or not (flags.yml, `ge_swi_epi_train`). Before
+      # the echo train rule below, which would read it as 48 echoes.
+      - {when: ge_swi_epi_train, value: EPI}
       # MRI pack 0.13.0: nor only by a split. A Siemens `swi3d4r` and a GE
       # SWAN state their echoes in EchoTrainLength (4, 8, 16), and a series
       # split by echo whose file states no ScanningSequence is a gradient
