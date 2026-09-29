@@ -25,9 +25,12 @@ Per stack: the head's log-probabilities LP, then
   region, logged, and softmaxed at the cohort's coarse temperature or the
   global one.
 
-The cohort is the first of the subject's open cohorts (sorted), the stack's
-first ingest batch, and each part of that batch's name after a ``-`` (left
-to right) that a calibration names. A mode answers with its most probable
+The cohort is the first a calibration names of: the stack's first ingest
+batch, each part of that batch's name after a ``-`` (left to right), then
+the subject's open cohorts (sorted). The batch comes first because it is
+what the calibration was fitted by: round 7 took a stack's cohort from its
+first batch's name without the ``p0-`` or ``p0ext-`` before it, and a
+subject may be an open member of more than one cohort. A mode answers with its most probable
 value when that value's probability is at or above its threshold, and
 abstains below it.
 """
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -199,12 +203,13 @@ def resolve_cohort(header: dict, model: Model) -> tuple[str | None, str | None]:
     fine = {c for c, v in (model.calibration.get("per_cohort") or {}).items() if isinstance(v, dict) and v.get("T") is not None}
     coarse = set((model.mode or {}).get("coarse_T_per_cohort") or {})
     known = fine | coarse
-    cands: list[tuple[str, str]] = [(c, "cohort") for c in sorted(str(c) for c in header.get("cohorts") or [])]
+    cands: list[tuple[str, str]] = []
     batch = header.get("batch")
     if isinstance(batch, str) and batch:
         cands.append((batch, "batch"))
         parts = batch.split("-")
         cands += [("-".join(parts[i:]), "batch_part") for i in range(1, len(parts))]
+    cands += [(c, "cohort") for c in sorted(str(c) for c in header.get("cohorts") or [])]
     for c, where in cands:
         if c in known:
             return c, where
@@ -273,13 +278,24 @@ def predict(model: Model, files: list[tuple[str, list[int] | None]], header: dic
     fp = header.get("fingerprint")
     if not isinstance(fp, dict):
         raise NoFingerprint("the stack has no fingerprint row")
-    built = volume.build(files)
+    built = volume.build(files, fp.get("orientation"))
     P = model.encoder.probabilities(built.vol, built.geo())
     cls = header.get("classification")
     h44 = header_features.features(fp, cls, built.meta)
     LP = head_logp(model, P, h44)
     cohort, where = resolve_cohort(header, model)
     return StackResult(P, h44, LP, calibrate(model, LP, cohort), cohort, where, built.meta, header_features.rules_row(cls))
+
+
+def proposed(a: dict, nd: int = 6) -> dict[str, float]:
+    """A mode's probabilities as its proposal carries them: rounded to
+    ``nd`` places, and the value's never at or above the threshold where
+    the mode abstains, so the engine, which stages a proposal at or above
+    the card's threshold, stages exactly the answers the mode gives."""
+    r = {k: round(float(v), nd) for k, v in a["probabilities"].items()}
+    if not a["answers"]:
+        r[a["value"]] = min(r[a["value"]], math.floor(float(a["confidence"]) * 10**nd) / 10**nd)
+    return r
 
 
 def rounded(probs: dict[str, float], nd: int = 4) -> dict[str, float]:

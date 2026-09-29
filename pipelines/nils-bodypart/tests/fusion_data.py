@@ -171,7 +171,7 @@ def write_stacks(root: Path) -> dict:
     header11 = {
         "fingerprint": fingerprint("axial", n_slices=111),
         "classification": {"body_part": [{"value": "brain", "confidence": 0.65, "tier": "keywords"}], "technique": [{"value": "TSE", "confidence": 0.9, "tier": "rules"}]},
-        "batch": "import-2026-zeta",
+        "batch": "import-2026",
         "cohorts": ["gamma", "alpha"],
     }
     stacks.append({"unit": "stack-11", "stack_id": 11, "files": files, "orientation": "axial", "body_part": "brain", "technique": "TSE", "header": header11})

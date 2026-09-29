@@ -50,12 +50,37 @@ def test_the_volume_keeps_96_frames_one_per_position(world):
     st = stack(world, 11)
     b = volume.build(st.files)
     assert b.vol.shape == (64, 64, 64) and b.vol.dtype == np.uint8 and b.vol.max() > 0
-    # 111 files, two at one position: 110 positions, 96 kept evenly
-    assert b.meta["n_unique"] == 110 and b.meta["K"] == 96 and b.meta["n_frames"] == 111
+    # 111 files, two at one position: 110 positions, of which training's
+    # file list keeps 96 evenly, v0's seven slices among them
+    assert b.meta["n_unique"] == 96 and b.meta["K"] == 96 and b.meta["n_frames"] == 96
     assert (b.meta["nx"], b.meta["ny"], b.meta["nz"], b.meta["oblique_deg"]) == (0.0, 0.0, 1.0, 0.0)
     assert b.meta["fov_r"] == 256.0 and b.meta["thick"] == 1.2 and b.meta["modality"] == "MR"
     g = b.geo()
     assert g.dtype == np.float32 and g.shape == (15,) and g[8] == 96 and g[14] == 0.0
+
+
+def test_the_files_read_are_the_ones_training_listed():
+    """select_v1.py's file list, which the model's training and round 7's
+    test read: of 200 positions, 96 evenly and v0's slices beside them (the
+    centre three, and for an axial stack five at 20 to 80 %)."""
+
+    def frames(iop):
+        return [volume.Frame(f"{k:03d}.dcm", 0, (64, 64), [0.0, 0.0, float(k)] if iop == AX else [float(k), 0.0, 0.0], iop, [1.0, 1.0], 1.0, (k + 1) * 10000, "MR", k + 1) for k in range(200)]
+
+    AX, SAG = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0, -1.0]
+    even = {f"{int(round(x)):03d}.dcm" for x in np.linspace(0, 199, 96)}
+    axial = volume.preselect(frames(AX), "Axial")
+    assert len(axial) == 100 and axial - even == {"070.dcm", "099.dcm", "100.dcm", "160.dcm"}
+    sagittal = volume.preselect(frames(SAG), "sagittal")
+    assert len(sagittal) == 98 and sagittal - even == {"099.dcm", "100.dcm"}
+    # a file with no position sorts at 0 before the file there, which is
+    # then a second at its position; a file at a position already kept is
+    # still listed where it is one of v0's slices (the 6th and 7th of 12)
+    fs = frames(AX)[:10]
+    fs.append(volume.Frame("again.dcm", 0, (64, 64), [0.0, 0.0, 4.0], AX, [1.0, 1.0], 1.0, 0, "MR", 99))
+    fs.append(volume.Frame("nopos.dcm", 0, (64, 64), None, AX, [1.0, 1.0], 1.0, 0, "MR", 0))
+    assert volume.preselect(fs, "sagittal") == {f"{k:03d}.dcm" for k in range(1, 10)} | {"nopos.dcm", "again.dcm"}
+    assert volume.v0_indices(0, "axial") == [] and volume.v0_indices(1, "axial") == [0]
 
 
 def test_a_large_frame_is_shrunk_and_a_multi_frame_file_read_by_its_listed_frames(world):
@@ -102,7 +127,11 @@ def test_the_44_header_features():
 def test_the_cohort_is_the_first_the_calibration_names(world):
     m = fusion.load(world["inputs"])
     # gamma has no temperature of its own; alpha has
-    assert fusion.resolve_cohort({"cohorts": ["gamma", "alpha"], "batch": "import-2026-zeta"}, m) == ("alpha", "cohort")
+    # the batch first, as round 7 fitted the temperatures by it (p0-<cohort>)
+    assert fusion.resolve_cohort({"cohorts": ["gamma", "alpha"], "batch": "import-2026-zeta"}, m) == ("zeta", "batch_part")
+    assert fusion.resolve_cohort({"cohorts": ["alpha"], "batch": "p0ext-zeta"}, m) == ("zeta", "batch_part")
+    # then the subject's cohorts, where the batch names none
+    assert fusion.resolve_cohort({"cohorts": ["gamma", "alpha"], "batch": "import-2026"}, m) == ("alpha", "cohort")
     assert fusion.resolve_cohort({"cohorts": [], "batch": "zeta"}, m) == ("zeta", "batch")
     assert fusion.resolve_cohort({"cohorts": ["x"], "batch": "site-2025-beta"}, m) == ("beta", "batch_part")
     assert fusion.resolve_cohort({"cohorts": None, "batch": None}, m) == (None, None)
@@ -116,6 +145,12 @@ def test_the_cohort_is_the_first_the_calibration_names(world):
     assert list(a["coarse"]["probabilities"].values()) == pytest.approx(tiny.softmax_T(lpc[None, :], 1.4)[0].tolist())
     r = fusion.rounded({"a": 0.33333, "b": 0.33333, "c": 0.33334}, 2)
     assert abs(sum(r.values()) - 1) < 0.01
+    # a proposal is staged by the engine at or above the card's threshold,
+    # so an abstaining mode's value never rounds up to it
+    below = {"probabilities": {"a": 0.8969996, "b": 0.1030004}, "value": "a", "confidence": 0.8969996, "answers": False}
+    assert fusion.proposed(below)["a"] < 0.897 and fusion.rounded(below["probabilities"])["a"] == 0.897
+    at = {"probabilities": {"a": 0.897, "b": 0.103}, "value": "a", "confidence": 0.897, "answers": True}
+    assert fusion.proposed(at) == {"a": 0.897, "b": 0.103}
 
 
 # -------------------------------------------------------------- end to end
@@ -163,6 +198,8 @@ def test_the_entry_point_scores_every_stack_it_can(world):
         assert abs(sum(p["probabilities"].values()) - 1) < 0.01
         assert set(p["probabilities"]) == set(fusion.FINE if p["axis"] == "body_part" else fusion.COARSE)
         assert p["value"] == max(p["probabilities"], key=p["probabilities"].get)
+        d = json.loads((out / "bodypart-fusion" / f"{p['stack_id']}.json").read_text())[p["axis"] == "body_part" and "fine" or "coarse"]
+        assert (p["probabilities"][p["value"]] >= d["threshold"]) == d["answers"]
     assert r["metrics"]["no_fingerprint"] == 1 and r["metrics"]["no_geometry"] == 1
 
 

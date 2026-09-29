@@ -8,6 +8,13 @@ The frames are read as the model's training read them:
 - every frame of the stack's files (the frames the manifest lists for a
   multi-frame file) with its position, orientation and pixel spacing, from
   the file's header or, in a multi-frame file, its functional groups;
+- the files training listed for the stack (``select_v1.py``, ``r5_fresh.py``
+  and ``r7_drawn.py`` in the design repository): the files ordered along the
+  stack's normal (instance number, then path, breaks a tie), one per
+  position (more than 0.05 mm on from the last one kept), at most 96 of
+  them kept evenly, and v0's slices beside them (the centre three, and five
+  at 20 to 80 % of an axial stack); the frames of the other files are not
+  read, and their positions do not count;
 - the frames with all three kept, then the orientation most of them have
   (rounded to two decimals) and the shape most of those have;
 - ordered along the normal (instance number breaks a tie), one frame per
@@ -66,6 +73,7 @@ class Frame:
     thick: float | None
     inum: int
     modality: str
+    instance: int = 0  # the file's InstanceNumber
 
 
 @dataclass
@@ -125,7 +133,7 @@ def read_header_frames(path: str, frames: list[int] | None) -> list[Frame]:
             thick = float(thick)
         except Exception:
             thick = None
-        out.append(Frame(path, i, (rows, cols), ipp, iop, ps, thick, inum * 10000 + i, mod))
+        out.append(Frame(path, i, (rows, cols), ipp, iop, ps, thick, inum * 10000 + i, mod, inum))
     return out
 
 
@@ -203,6 +211,48 @@ def resample(V, o, M, pts, tol_k):
     return vals.astype(np.float32), ok
 
 
+def v0_indices(n: int, orientation: str | None) -> list[int]:
+    """v0's slices of a stack of ``n`` files (``select_v1.py``): the centre
+    three, and for an axial stack five at 20 to 80 %."""
+    if n <= 0:
+        return []
+    want = set()
+    mid = n // 2
+    for i in (mid - 1, mid, mid + 1):
+        want.add(max(0, min(n - 1, i)))
+    if (orientation or "").lower() == "axial":
+        for f in (0.20, 0.35, 0.50, 0.65, 0.80):
+            want.add(max(0, min(n - 1, int(f * n))))
+    return sorted(want)
+
+
+def preselect(frames: list[Frame], orientation: str | None) -> set[str]:
+    """The files training read of a stack (``select_v1.py``): one item per
+    file at its first frame's position along the stack's normal (0 without
+    a position), sorted with the instance number and the path; one per
+    position, more than 0.05 mm from the last one kept, at most 96 kept
+    evenly; and v0's slices of the sorted files beside them."""
+    first: dict[str, Frame] = {}
+    for f in frames:
+        first.setdefault(f.path, f)
+    with_iop = [f for f in first.values() if f.iop is not None]
+    nrm = np.array([0.0, 0.0, 1.0])
+    if with_iop:
+        key = collections.Counter(tuple(np.round(f.iop, 2)) for f in with_iop).most_common(1)[0][0]
+        iop = next(f.iop for f in with_iop if tuple(np.round(f.iop, 2)) == key)
+        nrm = np.cross(iop[:3], iop[3:])
+    items = sorted((float(np.dot(f.ipp, nrm)) if f.ipp is not None else 0.0, f.instance, p) for p, f in first.items())
+    v0i = set(v0_indices(len(items), orientation))
+    uniq, last = [], None
+    for i, it in enumerate(items):
+        if last is None or abs(it[0] - last) > 0.05:
+            uniq.append(i)
+            last = it[0]
+    if len(uniq) > MAXK:
+        uniq = [uniq[int(round(x))] for x in np.linspace(0, len(uniq) - 1, MAXK)]
+    return {items[i][2] for i in set(uniq) | v0i}
+
+
 def _select(frames: list[Frame]):
     """The kept frames along the normal, or why there are none."""
     geo = [f for f in frames if f.ipp is not None and f.iop is not None and f.ps is not None]
@@ -232,9 +282,11 @@ def _select(frames: list[Frame]):
     return geo, uniq, n, r_dir, c_dir, n_frames_all, n_unique
 
 
-def build(files: list[tuple[str, list[int] | None]]) -> Built:
+def build(files: list[tuple[str, list[int] | None]], orientation: str | None = None) -> Built:
     """The volume and geometry of a stack from its files in order, each with
-    the frames that are the stack's (None for every frame)."""
+    the frames that are the stack's (None for every frame). ``orientation``
+    is the stack's fingerprint orientation, which chooses v0's slices among
+    the files read (:func:`preselect`)."""
     errors: collections.Counter = collections.Counter()
     frames: list[Frame] = []
     seen: set[str] = set()
@@ -250,6 +302,9 @@ def build(files: list[tuple[str, list[int] | None]]) -> Built:
         frames.extend(got)
     if not frames:
         raise Unreadable("no file of the stack could be read")
+    chosen = preselect(frames, orientation)
+    frames = [f for f in frames if f.path in chosen]
+    seen = seen & chosen
     # A file whose kept frames cannot be decoded is left out and the frames
     # chosen again, as a file that could not be read at all is.
     bad: set[str] = set()

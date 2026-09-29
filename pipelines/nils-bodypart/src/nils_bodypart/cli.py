@@ -617,12 +617,12 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
         # rest review items.
         f = r.answers["fine"]
         run.proposals.append(
-            {"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.rounded(f["probabilities"]), "model_digest": model.head_part.digest}
+            {"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.proposed(f), "model_digest": model.head_part.digest}
         )
         c = r.answers.get("coarse")
         if c is not None:
             run.proposals.append(
-                {"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.rounded(c["probabilities"]), "model_digest": model.coarse_part.digest}
+                {"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c), "model_digest": model.coarse_part.digest}
             )
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value}
     return run
