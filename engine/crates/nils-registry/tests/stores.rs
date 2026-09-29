@@ -2779,7 +2779,7 @@ fn migration_74_lets_a_campaign_show_two_stacks_side_by_side_on_both_backends() 
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [74],
+            [74, 75],
             "{name}"
         );
         assert!(
