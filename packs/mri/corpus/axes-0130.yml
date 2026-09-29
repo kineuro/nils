@@ -701,3 +701,87 @@ cases:
       provenance: EPIMix
       construct: isoDWI
       disposition: scanner_derived
+
+  # --- Nima's rulings of 2026-09-29 (record 48) on three of dev-1's disputes
+
+  - name: a single-echo SWI whose SequenceVariant says SP is a spoiled GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\SWI\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 'SWI_Images'
+      echo_train_length: 1
+    axes:
+      technique: FLASH
+      construct: 'ND,SWI'
+
+  - name: a single-echo SWI whose SequenceVariant does not say SP is a GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_sequence_name: '*swi3d1r'
+      text_series_description: 'Pha_Images'
+      echo_train_length: 1
+    axes:
+      technique: GRE
+      construct: Phase
+
+  - name: a GE ASSET calibration is an acquired fast spoiled gradient echo, not a localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: FAST_GEMS
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Asset kalibrering'
+      repetition_time: 150
+      echo_time: 1.7
+    axes:
+      provenance: RawRecon
+      technique: TurboFLASH
+
+  - name: a GE 3D calibration is an acquired fast spoiled gradient echo, not a localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: '3D Calibration'
+      repetition_time: 1.5
+      echo_time: 0.5
+    axes:
+      provenance: RawRecon
+      technique: TurboFLASH
+
+  - name: another vendor's calibration word still makes a localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      manufacturer: SIEMENS
+      text_series_description: 'calibration'
+    axes:
+      provenance: Localizer
+
+  - name: Philips isoDiff is the trace image and nothing else
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'isoDiff'
+      diffusion_b_value: '1000'
+      echo_train_length: 55
+    axes:
+      construct: Trace
+      technique: DWI-EPI

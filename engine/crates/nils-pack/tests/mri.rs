@@ -34,7 +34,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        225,
+        226,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -43,11 +43,11 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          and the re-measures' fixes, pack 0.12.0 the five of dev-1's: \
          a projection plane, a projection named, a phase word that is no \
          phase image, RESTORE and an MT weighting named, and pack 0.13.0 \
-         the 21 of dev-1's second round: an echo train, PROPELLER, FLAIR and \
+         the 22 of dev-1's second round: an echo train, PROPELLER, FLAIR and \
          STIR by inversion time, an inversion stated, black blood, MultiVane, WATS, t1_mpr, a \
          workstation reformat, a diffusion projection, trace, b0, MD, FA \
-         and eADC by name, three for filtered images, PROMO and SyMRI's \
-         tissue maps"
+         and eADC by name, three for filtered images, PROMO, SyMRI's \
+         tissue maps and a GE calibration scan"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

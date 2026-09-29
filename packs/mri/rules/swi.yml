@@ -44,8 +44,7 @@ derive:
       # MRI pack 0.12.0: a series split by echo is a multi-echo gradient
       # echo, as the technique axis reads it anywhere else (dev-1 settled
       # ME-GRE on the two SWI stacks where the axis said so and the route
-      # GRE). A spoiled GRE is not told apart here: dev-1's panel said GRE on
-      # seven SWI stacks and SP-GRE on four where the axis said SP-GRE.
+      # GRE). A spoiled one is told apart since pack 0.13.0 (below).
       - {when: {all: [is_multi_echo, has_gre]}, value: ME-GRE}
       # MRI pack 0.13.0: nor only by a split. A Siemens `swi3d4r` and a GE
       # SWAN state their echoes in EchoTrainLength (4, 8, 16), and a series
@@ -55,6 +54,10 @@ derive:
       # spoiled GRE; never a GE 3D EPI SWI, whose train is its EPI factor
       # and whose file says RM, which the words take below.
       - {when: {all: [{any: [is_multi_echo, {field: echo_train_length, ge: 3}]}, {not: {text: search_text, substring: epi}}]}, value: ME-GRE}
+      # MRI pack 0.13.0, Nima's ruling (2026-09-29, record 48, group 2): a
+      # single-echo SWI is SP-GRE where SequenceVariant says SP, and GRE
+      # otherwise, as the technique axis reads any gradient echo.
+      - {when: {all: [has_gre, has_spoiled]}, value: SP-GRE}
       - {when: has_gre, value: GRE}
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}

@@ -157,6 +157,9 @@ values:
     detection:
       exclusive: is_bold
   Localizer:
+    # MRI pack 0.13.0, Nima's ruling (2026-09-29): never a GE calibration
+    # scan, which the words below would otherwise take (flags.yml).
+    requires: {not: ge_calibration}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer

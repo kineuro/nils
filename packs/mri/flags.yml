@@ -185,7 +185,8 @@ flags:
   # steady state (Philips, "Siemens to Philips sequence terminology";
   # observed on the archive, section 5.1 of the research).
   is_flash:   {any: [sequence_name.is_flash, sequence_name.is_fgre, philips_t1ffe]}
-  is_tfl:     {any: [sequence_name.is_tfl, philips_tfe]}
+  # MRI pack 0.13.0: or a GE calibration scan (below).
+  is_tfl:     {any: [sequence_name.is_tfl, philips_tfe, ge_calibration]}
   # MRI pack 0.13.0: or a Siemens `t1_mpr` protocol (below).
   is_mprage:  {any: [sequence_name.is_mprage, t1_mpr_named]}
   is_ssfp:    {any: [sequence_name.is_trufisp, philips_balanced]}
@@ -221,6 +222,10 @@ flags:
       # (below).
       - b0_named
       - all: [trace_named, has_epi]
+      # and GE's DTI outputs named `AvDC`, `FA` or `Exp attenuation`, written
+      # with a b value of 0 (the reference read their source as a diffusion
+      # EPI once Nima's ruling 7 stood, 2026-09-29).
+      - all: [has_epi, {any: [md_named, fa_named, eadc_named]}]
   is_bold:    {all: [image_type.has_fmri, {not: image_type.has_phase}]}
   is_asl:     image_type.has_asl
   is_perfusion: image_type.has_perfusion
@@ -939,6 +944,13 @@ flags:
   is_elscint_filtered: {all: [{text: manufacturer, prefix: elscint}, scan_options.has_enhanced]}
   is_ge_fl_prefix: {all: [{text: manufacturer, prefix: ge}, {text: search_text, matches: '^fl [a-e] '}]}
   is_filtered_named: {any: [is_elscint_filtered, is_ge_fl_prefix]}
+  # Nima's ruling (2026-09-29, record 48, group 6): a GE calibration scan
+  # (ASSET, `3D Calibration`, `Cal ...`) is no localizer. It is an acquired
+  # image and a fast spoiled gradient echo.
+  ge_calibration:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: search_text, matches: '(^|[^a-z])(calibration|kalibrering|cal)([^a-z0-9]|$)'}
   # GE's prospective motion correction, PROMO, in ScanOptions.
   has_promo: scan_options.has_promo_gems
   # SyMRI's tissue maps (`DERIVED\PRIMARY\CSF`, WM, GM): quantitative maps

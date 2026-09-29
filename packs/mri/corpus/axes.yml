@@ -1480,7 +1480,9 @@ cases:
       text_series_description: 'VEN_BOLD'
       echo_time: 50
     axes:
-      technique: GRE
+      # MRI pack 0.13.0, Nima's ruling (2026-09-29): a single-echo SWI whose
+      # SequenceVariant says SP is a spoiled GRE.
+      technique: FLASH
       provenance: RawRecon
       base: T2*w
 
