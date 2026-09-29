@@ -48,6 +48,7 @@ mod measures;
 mod model_cli;
 mod originals;
 mod packs;
+mod pair;
 mod pipelines;
 mod places;
 mod preflight;

@@ -117,16 +117,28 @@ pub enum Question {
     },
     /// Free text.
     Free,
+    /// Post-contrast gold, pair mode (P6 of the post-contrast study): two
+    /// stacks of one session shown side by side, left and right drawn at
+    /// random, and the answer says which of them is post (`left_post`,
+    /// `right_post`), that both are pre or both post, or can't tell. Each
+    /// answer resolves into one value of `axis` per stack: `post` for a
+    /// stack the answer says is post, `pre` for one it says is pre, and
+    /// can't tell for both ([`crate::pair::resolve`]).
+    Pair {
+        axis: String,
+        post: String,
+        pre: String,
+    },
 }
 
 /// The question kinds, as a campaign names them.
-pub const KINDS: [&str; 6] = ["axis", "axes", "pick", "form", "derivative", "free"];
+pub const KINDS: [&str; 7] = ["axis", "axes", "pick", "form", "derivative", "free", "pair"];
 
 impl Question {
     pub fn parse(v: &Value) -> Result<Question, Error> {
-        let kind = v["kind"]
-            .as_str()
-            .ok_or_else(|| invalid("question.kind: axis, axes, pick, form, derivative or free"))?;
+        let kind = v["kind"].as_str().ok_or_else(|| {
+            invalid("question.kind: axis, axes, pick, form, derivative, free or pair")
+        })?;
         Ok(match kind {
             "axis" => {
                 let axis = v["axis"]
@@ -227,9 +239,35 @@ impl Question {
                 }
             }
             "free" => Question::Free,
+            "pair" => {
+                let word = |k: &str, default: &str| -> Result<String, Error> {
+                    match &v[k] {
+                        Value::Null => Ok(default.to_string()),
+                        Value::String(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
+                        _ => Err(invalid(format!("question.{k}: a word"))),
+                    }
+                };
+                let axis = word("axis", crate::pair::AXIS)?;
+                let post = word("post", crate::pair::POST)?;
+                let pre = word("pre", crate::pair::PRE)?;
+                if post == pre {
+                    return Err(invalid(
+                        "a pair question's post and pre are two values, not one",
+                    ));
+                }
+                if [&post, &pre]
+                    .iter()
+                    .any(|w| *w == CANT_TELL || *w == NOT_ASKED)
+                {
+                    return Err(invalid(format!(
+                        "{CANT_TELL} and {NOT_ASKED} are a rater's words, never a value a pair resolves into"
+                    )));
+                }
+                Question::Pair { axis, post, pre }
+            }
             other => {
                 return Err(invalid(format!(
-                    "{other} is not a question: axis, axes, pick, form, derivative or free"
+                    "{other} is not a question: axis, axes, pick, form, derivative, free or pair"
                 )));
             }
         })
@@ -243,6 +281,7 @@ impl Question {
             Question::Form { .. } => "form",
             Question::Derivative { .. } => "derivative",
             Question::Free => "free",
+            Question::Pair { .. } => "pair",
         }
     }
 
@@ -285,6 +324,10 @@ impl Question {
                 v
             }
             Question::Free => json!({"kind": "free"}),
+            Question::Pair { axis, post, pre } => json!({
+                "kind": "pair", "axis": axis, "post": post, "pre": pre,
+                "answers": crate::pair::ANSWERS,
+            }),
         }
     }
 
@@ -300,6 +343,7 @@ impl Question {
                 derivative_kind, ..
             } => format!("derivative:{derivative_kind}"),
             Question::Free => "free".to_string(),
+            Question::Pair { axis, .. } => format!("pair:{axis}"),
         }
     }
 
@@ -381,6 +425,20 @@ impl Question {
             Question::Free => {
                 value.ok_or_else(|| invalid("the answer is a text"))?;
             }
+            Question::Pair { .. } => {
+                let v = value.map(str::trim).ok_or_else(|| {
+                    invalid(format!(
+                        "the answer says which of the pair is post: {}",
+                        crate::pair::ANSWERS.join(", ")
+                    ))
+                })?;
+                if !crate::pair::ANSWERS.contains(&v) {
+                    return Err(invalid(format!(
+                        "{v} is not a pair's answer: {}",
+                        crate::pair::ANSWERS.join(", ")
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -399,7 +457,7 @@ impl Question {
                     .map(|j| canonical_joint(constraints, &j))
                     .unwrap_or_else(|_| v.to_string())
             }),
-            Question::Axis { .. } | Question::Free => a.value.clone(),
+            Question::Axis { .. } | Question::Free | Question::Pair { .. } => a.value.clone(),
             Question::Pick { .. } => a
                 .value
                 .as_deref()
@@ -1042,6 +1100,10 @@ pub enum Items {
     Sessions(Vec<(i64, String)>),
     /// Review items already raised, adopted as they are.
     Review(Vec<i64>),
+    /// Pairs of stacks for a pair question, each as (left, right) in the
+    /// order they are shown, and the pairs in the order they are read
+    /// ([`crate::pair::draw`]).
+    Pairs(Vec<(i64, i64)>),
 }
 
 /// A campaign to create.
@@ -1470,6 +1532,15 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         )));
     }
     let grain = match (&n.items, &question) {
+        (Items::Pairs(_), Question::Pair { .. }) => "pair",
+        (Items::Pairs(_), _) => {
+            return Err(invalid("pairs of stacks are asked a pair question"));
+        }
+        (_, Question::Pair { .. }) => {
+            return Err(invalid(
+                "a pair question is asked of pairs of stacks; nils campaign pair makes one",
+            ));
+        }
         (Items::Sessions(_), Question::Axis { .. } | Question::Axes { .. }) => {
             return Err(invalid(
                 "an axis or an axes question is asked of stacks, not sessions",
@@ -1487,6 +1558,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         Items::Stacks(s) => s.len(),
         Items::Sessions(s) => s.len(),
         Items::Review(r) => r.len(),
+        Items::Pairs(p) => p.len(),
     };
     if count == 0 {
         return Err(invalid("the source names no item"));
@@ -1738,6 +1810,22 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                     ));
                 }
             }
+            // pair mode: one item per pair, raised as a question about the
+            // two stacks; its key says nothing of either, and which is shown
+            // on which side is kept apart ([`crate::pair::write_sides`])
+            Items::Pairs(pairs) => {
+                for (i, (left, right)) in pairs.iter().enumerate() {
+                    let r = raise(
+                        store,
+                        &kind,
+                        "pair",
+                        &json!({"stacks": [left, right]}),
+                        &evidence(json!({"position": i})),
+                        &now,
+                    )?;
+                    rows.push(item_row(i, r, None, None, None, &format!("pair:{i}")));
+                }
+            }
             Items::Review(_) => {
                 let mut position = 0usize;
                 for it in &adopted {
@@ -1812,6 +1900,9 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 ),
                 chunk,
             )?;
+        }
+        if let Items::Pairs(pairs) = &n.items {
+            crate::pair::write_sides(store, id, pairs)?;
         }
         Ok((id, rows.len()))
     })();
@@ -4998,8 +5089,9 @@ pub fn accept_each(
     if c.status != "open" {
         return Err(refused(format!("campaign {} is {}", c.name, c.status)));
     }
-    // record 48: an A/B campaign is settled one item at a time
-    if crate::ab::is_ab(&c) {
+    // record 48: an A/B campaign is settled one item at a time, and so is
+    // a pair, from its two pictures
+    if crate::ab::is_ab(&c) || crate::pair::is_pair(&c) {
         return Err(refused(format!(
             "campaign {} settles candidates one item at a time; nothing is accepted in one move",
             c.name
@@ -6271,6 +6363,19 @@ fn close_items(
             }
             _ => {
                 let store = registry.store();
+                // pair mode: the answer resolves into one value per stack,
+                // kept on the item's outcome as it closes
+                let mut outcome = it.outcome.clone();
+                if let Question::Pair { axis, post, pre } = question {
+                    let sides = crate::pair::sides_of(store, c.id, Some(it.id))?;
+                    if let (Some(&(left, right)), Some(said)) =
+                        (sides.get(&it.id), it.outcome["value"].as_str())
+                        && let Some(stacks) =
+                            crate::pair::resolved(said, left, right, axis, post, pre)
+                    {
+                        outcome["stacks"] = stacks;
+                    }
+                }
                 // a group asked member by member is closed with its last
                 // member's item
                 let last = member.is_none()
@@ -6286,21 +6391,20 @@ fn close_items(
                         it.review_item_id,
                         "accepted",
                         &who,
-                        &json!({"campaign": c.id, "closed_into": "none", "outcome": it.outcome}),
+                        &json!({"campaign": c.id, "closed_into": "none", "outcome": outcome}),
                         None,
                         now,
                     )?;
                     mark_review_item(store, it.review_item_id, "resolved")?;
                 }
-                store.update_by_id(
-                    table("campaign_item"),
-                    &[
-                        ("state", Param::from("resolved")),
-                        ("resolved_at", Param::from(now)),
-                    ],
-                    "id",
-                    it.id,
-                )?;
+                let mut sets = vec![
+                    ("state", Param::from("resolved")),
+                    ("resolved_at", Param::from(now)),
+                ];
+                if outcome != it.outcome {
+                    sets.push(("outcome", Param::from(outcome.to_string())));
+                }
+                store.update_by_id(table("campaign_item"), &sets, "id", it.id)?;
                 resolved_here.insert(it.id);
                 out.resolved += 1;
             }
