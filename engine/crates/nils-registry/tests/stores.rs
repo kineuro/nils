@@ -2019,7 +2019,9 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76],
+            [
+                61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76
+            ],
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
