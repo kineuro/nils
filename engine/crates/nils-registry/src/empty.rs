@@ -55,6 +55,10 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("campaign_ab_item", Row::Keeps("an A/B campaign settles it")),
     ("campaign_pair_side", Row::Keeps("a pair campaign shows it")),
     (
+        "campaign_anchor_panel",
+        Row::Keeps("an anchored campaign shows it"),
+    ),
+    (
         "review_member",
         Row::Keeps("a grouped review item holds it"),
     ),

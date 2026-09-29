@@ -129,15 +129,35 @@ pub enum Question {
         post: String,
         pre: String,
     },
+    /// Post-contrast gold, anchored reading (record 48, 2026-09-29 night): a
+    /// candidate stack beside a known-pre and a known-post anchor of the
+    /// same subject, in panels whose order the seed draws, and the answer
+    /// says the candidate looks like the pre, like the post, or can't tell.
+    /// It resolves into one value of `axis` for the candidate alone
+    /// ([`crate::anchored::resolve`]); the anchors are never labelled by it.
+    Anchored {
+        axis: String,
+        post: String,
+        pre: String,
+    },
 }
 
 /// The question kinds, as a campaign names them.
-pub const KINDS: [&str; 7] = ["axis", "axes", "pick", "form", "derivative", "free", "pair"];
+pub const KINDS: [&str; 8] = [
+    "axis",
+    "axes",
+    "pick",
+    "form",
+    "derivative",
+    "free",
+    "pair",
+    "anchored",
+];
 
 impl Question {
     pub fn parse(v: &Value) -> Result<Question, Error> {
         let kind = v["kind"].as_str().ok_or_else(|| {
-            invalid("question.kind: axis, axes, pick, form, derivative, free or pair")
+            invalid("question.kind: axis, axes, pick, form, derivative, free, pair or anchored")
         })?;
         Ok(match kind {
             "axis" => {
@@ -239,7 +259,7 @@ impl Question {
                 }
             }
             "free" => Question::Free,
-            "pair" => {
+            "pair" | "anchored" => {
                 let word = |k: &str, default: &str| -> Result<String, Error> {
                     match &v[k] {
                         Value::Null => Ok(default.to_string()),
@@ -263,11 +283,15 @@ impl Question {
                         "{CANT_TELL} and {NOT_ASKED} are a rater's words, never a value a pair resolves into"
                     )));
                 }
-                Question::Pair { axis, post, pre }
+                if kind == "anchored" {
+                    Question::Anchored { axis, post, pre }
+                } else {
+                    Question::Pair { axis, post, pre }
+                }
             }
             other => {
                 return Err(invalid(format!(
-                    "{other} is not a question: axis, axes, pick, form, derivative, free or pair"
+                    "{other} is not a question: axis, axes, pick, form, derivative, free, pair or anchored"
                 )));
             }
         })
@@ -282,6 +306,7 @@ impl Question {
             Question::Derivative { .. } => "derivative",
             Question::Free => "free",
             Question::Pair { .. } => "pair",
+            Question::Anchored { .. } => "anchored",
         }
     }
 
@@ -328,6 +353,10 @@ impl Question {
                 "kind": "pair", "axis": axis, "post": post, "pre": pre,
                 "answers": crate::pair::ANSWERS,
             }),
+            Question::Anchored { axis, post, pre } => json!({
+                "kind": "anchored", "axis": axis, "post": post, "pre": pre,
+                "answers": crate::anchored::ANSWERS,
+            }),
         }
     }
 
@@ -344,6 +373,7 @@ impl Question {
             } => format!("derivative:{derivative_kind}"),
             Question::Free => "free".to_string(),
             Question::Pair { axis, .. } => format!("pair:{axis}"),
+            Question::Anchored { axis, .. } => format!("anchored:{axis}"),
         }
     }
 
@@ -439,6 +469,19 @@ impl Question {
                     )));
                 }
             }
+            Question::Anchored { .. } => {
+                let words = crate::anchored::ANSWERS.join(", ");
+                let v = value.map(str::trim).ok_or_else(|| {
+                    invalid(format!(
+                        "the answer says what the candidate looks like beside its anchors: {words}"
+                    ))
+                })?;
+                if !crate::anchored::ANSWERS.contains(&v) {
+                    return Err(invalid(format!(
+                        "{v} is not an anchored item's answer: {words}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -457,7 +500,10 @@ impl Question {
                     .map(|j| canonical_joint(constraints, &j))
                     .unwrap_or_else(|_| v.to_string())
             }),
-            Question::Axis { .. } | Question::Free | Question::Pair { .. } => a.value.clone(),
+            Question::Axis { .. }
+            | Question::Free
+            | Question::Pair { .. }
+            | Question::Anchored { .. } => a.value.clone(),
             Question::Pick { .. } => a
                 .value
                 .as_deref()
@@ -1104,6 +1150,10 @@ pub enum Items {
     /// order they are shown, and the pairs in the order they are read
     /// ([`crate::pair::draw`]).
     Pairs(Vec<(i64, i64)>),
+    /// Anchored items for an anchored question, each a candidate and its
+    /// two anchors in the panels' order, and the items in the order they
+    /// are read ([`crate::anchored::draw`]).
+    Anchored(Vec<crate::anchored::Shown>),
 }
 
 /// A campaign to create.
@@ -1565,6 +1615,15 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 "a pair question is asked of pairs of stacks; nils campaign pair makes one",
             ));
         }
+        (Items::Anchored(_), Question::Anchored { .. }) => "anchored",
+        (Items::Anchored(_), _) => {
+            return Err(invalid("anchored items are asked an anchored question"));
+        }
+        (_, Question::Anchored { .. }) => {
+            return Err(invalid(
+                "an anchored question is asked of a candidate beside two anchors; nils campaign anchored makes one",
+            ));
+        }
         (Items::Sessions(_), Question::Axis { .. } | Question::Axes { .. }) => {
             return Err(invalid(
                 "an axis or an axes question is asked of stacks, not sessions",
@@ -1583,6 +1642,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         Items::Sessions(s) => s.len(),
         Items::Review(r) => r.len(),
         Items::Pairs(p) => p.len(),
+        Items::Anchored(a) => a.len(),
     };
     if count == 0 {
         return Err(invalid("the source names no item"));
@@ -1852,6 +1912,23 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                     rows.push(item_row(i, r, None, None, None, &format!("pair:{i}")));
                 }
             }
+            // anchored reading: one item per candidate, raised as a question
+            // about its three stacks in the panels' order; neither the key
+            // nor the item says which stack is the candidate or which anchor
+            // is which ([`crate::anchored::write_panels`])
+            Items::Anchored(shown) => {
+                for (i, s) in shown.iter().enumerate() {
+                    let r = raise(
+                        store,
+                        &kind,
+                        "anchored",
+                        &json!({"stacks": s.stacks()}),
+                        &evidence(json!({"position": i})),
+                        &now,
+                    )?;
+                    rows.push(item_row(i, r, None, None, None, &format!("anchored:{i}")));
+                }
+            }
             Items::Review(_) => {
                 let mut position = 0usize;
                 for it in &adopted {
@@ -1929,6 +2006,9 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         }
         if let Items::Pairs(pairs) = &n.items {
             crate::pair::write_sides(store, id, pairs)?;
+        }
+        if let Items::Anchored(shown) = &n.items {
+            crate::anchored::write_panels(store, id, shown)?;
         }
         Ok((id, rows.len()))
     })();
@@ -5117,7 +5197,7 @@ pub fn accept_each(
     }
     // record 48: an A/B campaign is settled one item at a time, and so is
     // a pair, from its two pictures
-    if crate::ab::is_ab(&c) || crate::pair::is_pair(&c) {
+    if crate::ab::is_ab(&c) || crate::pair::is_pair(&c) || crate::anchored::is_anchored(&c) {
         return Err(refused(format!(
             "campaign {} settles candidates one item at a time; nothing is accepted in one move",
             c.name
@@ -6398,6 +6478,18 @@ fn close_items(
                         (sides.get(&it.id), it.outcome["value"].as_str())
                         && let Some(stacks) =
                             crate::pair::resolved(said, left, right, axis, post, pre)
+                    {
+                        outcome["stacks"] = stacks;
+                    }
+                }
+                // anchored reading: the answer resolves into the candidate's
+                // value alone; the anchors keep what they were drawn as
+                if let Question::Anchored { axis, post, pre } = question {
+                    let panels = crate::anchored::panels_of(store, c.id, Some(it.id))?;
+                    if let (Some(p), Some(said)) =
+                        (panels.get(&it.id), it.outcome["value"].as_str())
+                        && let Some(stacks) =
+                            crate::anchored::resolved(said, p.candidate, axis, post, pre)
                     {
                         outcome["stacks"] = stacks;
                     }
