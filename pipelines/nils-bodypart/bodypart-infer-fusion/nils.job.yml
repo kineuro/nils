@@ -40,7 +40,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-bodypart@sha256:533f09c82b13fe4cac18425280c1dd3aceeb4a605ad2fddbd1e6179824995f9c"
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:c5e14ad7f5ce02ce5dc39bbe50351b75d8ae5c1c207a13706b8a6a7af902af92"
 
 inputs:
   - id: threads
