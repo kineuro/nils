@@ -746,6 +746,10 @@ cases:
     axes:
       provenance: RawRecon
       technique: TurboFLASH
+      # no role takes it: it is a scout, as a localizer is, whatever its base
+      base: T1w
+      disposition: scout
+      role: ''
 
   - name: a GE 3D calibration is an acquired fast spoiled gradient echo, not a localizer
     stack:
