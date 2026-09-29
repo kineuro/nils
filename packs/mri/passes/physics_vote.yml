@@ -164,6 +164,7 @@ compatibility:
     IR-TSE: SE
     ME-SE: SE
     VFA-TSE: SE
+    DWI-TSE: SE
     GRE: GRE
     FLASH: GRE
     MPRAGE: GRE

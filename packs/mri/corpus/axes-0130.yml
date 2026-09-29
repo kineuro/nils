@@ -391,7 +391,9 @@ cases:
     axes:
       provenance: RawRecon
       technique: DWI-EPI
-      construct: ''
+      # MRI pack 0.15.0, Nima's ruling N4 (2026-09-30): and it is the
+      # isotropic (trace) image, which Philips writes as a projection.
+      construct: Trace
 
   - name: a workstation MIP of an SWI is a reformat, the scanner's own MIP is not
     stack:

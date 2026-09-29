@@ -345,8 +345,12 @@ parsers:
     field: text_sequence_name
     case: lower
     predicates:
-      is_epi_diff_b0:      {all: [{any_substring: [ep_b0, blade_b0]}, {not: {substring: ep_b1}}]}
-      is_epi_diff:         {any_substring: [ep_b, blade_b, ep_calc, ep_d3ta, ep_hds]}
+      # MRI pack 0.15.0: without `blade_b`. A BLADE diffusion is a turbo
+      # spin echo read out along blades, not an EPI (record 48, N3), and is
+      # `is_blade_diff` below.
+      is_epi_diff_b0:      {all: [{substring: ep_b0}, {not: {substring: ep_b1}}]}
+      is_epi_diff:         {any_substring: [ep_b, ep_calc, ep_d3ta, ep_hds]}
+      is_blade_diff:       {substring: blade_b}
       is_epi_diff_resolve: {substring: re_b}
       is_epi_gre:          {substring: epfid}
       is_epi_se:           {substring: epse}

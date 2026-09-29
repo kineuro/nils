@@ -9,8 +9,8 @@
 # axis of a stack.
 #
 # The spin-echo family is the technique axis's `family: SE`: 3D-TSE, SS-TSE,
-# IR-TSE, ME-SE, VFA-TSE, TSE, SE, MAVRIC and MDME. GRASE (`MIXED`) is left
-# out on purpose: it is a hybrid.
+# IR-TSE, ME-SE, VFA-TSE, TSE, SE, MAVRIC, MDME and, since MRI pack 0.15.0,
+# DWI-TSE. GRASE (`MIXED`) is left out on purpose: it is a hybrid.
 
 excludes:
 

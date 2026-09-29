@@ -109,9 +109,13 @@ values:
       - isotropic dwi
     # MRI pack 0.13.0: or the isotropic image by its name, Philips'
     # `isob-1000` and `isoDiff`, GE's `Isotropic Image` [MQ3] (flags.yml).
+    # MRI pack 0.15.0, Nima's ruling N4 (2026-09-30, record 48): or a
+    # Philips diffusion image with a positive b value written `PROJECTION
+    # IMAGE`, how Philips writes its computed isotropic image
+    # (`philips_trace_projection`).
     detection:
       exclusive: has_trace
-      combination: [trace_named]
+      combination: [trace_image]
   MD:
     terms: ['mean diffusivity']
     keywords:
