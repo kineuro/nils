@@ -24,6 +24,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 mod ab;
+mod anchored;
 mod ask_cli;
 mod ask_doors;
 mod assist_cli;

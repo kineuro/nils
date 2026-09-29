@@ -17,6 +17,7 @@ use std::str::FromStr;
 
 pub mod ab;
 pub mod actor;
+pub mod anchored;
 pub mod asked;
 pub mod audit;
 pub mod campaign;

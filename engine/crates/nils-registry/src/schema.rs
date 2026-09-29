@@ -2304,6 +2304,31 @@ fn build_registry() -> Vec<Table> {
         .unique(&["item_id", "side"])
         .index(&["campaign_id"])
         .index(&["stack_id"]),
+        // Post-contrast gold, anchored reading (record 48, 2026-09-29
+        // night): one panel of an item of an anchored campaign, the stack it
+        // shows and the role it plays there (the candidate, the pre anchor
+        // or the post anchor), in the order the campaign's seed drew. The
+        // item names none of the three, so the roles are kept here alone,
+        // and an answer's like_pre or like_post is read back through it. An
+        // anchor of another session than its candidate's is flagged.
+        Table::new(
+            "campaign_anchor_panel",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                // 0, 1, 2: left to right
+                req("panel", Type::Int),
+                // candidate | pre | post
+                req("role", Type::Text),
+                req("stack_id", Type::Int),
+                req("other_session", Type::Bool),
+            ],
+        )
+        .unique(&["item_id", "panel"])
+        .unique(&["item_id", "role"])
+        .index(&["campaign_id"])
+        .index(&["stack_id"]),
         // Record 42 S7 (C7): labels exported with their provenance. The
         // digest covers the canonical labels.tsv, so the same state gives
         // the same digest and one new decision changes it.
@@ -2695,6 +2720,7 @@ mod tests {
             "campaign_ab_candidate",
             "campaign_ab_cause",
             "campaign_pair_side",
+            "campaign_anchor_panel",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

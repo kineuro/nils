@@ -126,6 +126,9 @@ pub enum Action {
     /// Post-contrast gold, pair mode: a pair campaign made, with its counts
     /// and the seed's digest.
     CampaignPair,
+    /// Post-contrast gold, anchored reading: an anchored campaign made, with
+    /// its counts and the seed's digest.
+    CampaignAnchored,
     /// Record 42 S7: a label set written out with its digest, and labels
     /// from v0 imported as person decisions.
     LabelsExport,
@@ -214,6 +217,7 @@ impl Action {
             Action::CampaignAb => "campaign.ab",
             Action::CampaignCause => "campaign.cause",
             Action::CampaignPair => "campaign.pair",
+            Action::CampaignAnchored => "campaign.anchored",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
@@ -262,6 +266,7 @@ impl Action {
                 | Action::CampaignAb
                 | Action::CampaignCause
                 | Action::CampaignPair
+                | Action::CampaignAnchored
                 | Action::LabelsExport
                 | Action::LabelsSeal
                 | Action::LabelsCertificate

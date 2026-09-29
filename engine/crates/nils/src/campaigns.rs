@@ -66,6 +66,9 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/items/{item}/pair",
     "GET /api/campaigns/{id}/pair",
     "GET /api/campaigns/{id}/pair/values",
+    "GET /api/campaigns/{id}/items/{item}/anchored",
+    "GET /api/campaigns/{id}/anchored",
+    "GET /api/campaigns/{id}/anchored/values",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -84,7 +87,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 "campaigns",
                 _,
                 "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery"
-                | "mine" | "ab" | "pair",
+                | "mine" | "ab" | "pair" | "anchored",
             ],
         )
         | (
@@ -95,11 +98,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 _,
                 "items",
                 _,
-                "candidates" | "why" | "header" | "ab" | "pair",
+                "candidates" | "why" | "header" | "ab" | "pair" | "anchored",
             ],
         )
         | ("GET", ["api", "campaigns", _, "ab", "decisions"])
-        | ("GET", ["api", "campaigns", _, "pair", "values"]) => (Need::One("campaigns:see"), Plain),
+        | ("GET", ["api", "campaigns", _, "pair" | "anchored", "values"]) => {
+            (Need::One("campaigns:see"), Plain)
+        }
         // record 48, the reference read by judges: the cause of an axis of
         // one's own answer on an A/B item
         ("POST", ["api", "campaigns", _, "answers", _, "cause"]) => {
@@ -575,14 +580,14 @@ pub(crate) fn route(
                 return Err(Reply::error(404, format!("no campaign {which}")));
             }
         }
-        // pair mode: a pair is read from its two pictures alone, so every
-        // door that would show a stack's file, its header, the rules'
-        // values or a suggestion refuses a pair campaign
+        // pair mode and anchored reading: an item is read from its
+        // pictures alone, so every door that would show a stack's file, its
+        // header, the rules' values or a suggestion refuses such a campaign
         if let ["api", "campaigns", which, rest @ ..] = segs
             && crate::pair::shows_more(rest)
         {
             let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
-            if nils_registry::pair::is_pair(&c) {
+            if nils_registry::pair::is_pair(&c) || nils_registry::anchored::is_anchored(&c) {
                 return Err(crate::pair::refusal(&c));
             }
         }
@@ -1799,6 +1804,22 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 crate::pair::values_door(registry, caller, &c)
             }
+            // anchored reading (the post-contrast study): one item's three
+            // panels, how the campaign goes, and each answer's candidate
+            ["api", "campaigns", which, "items", item, "anchored"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                crate::anchored::sheet_door(registry, caller, &c, item)
+            }
+            ["api", "campaigns", which, "anchored"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::anchored::summary_door(registry, caller, &c)
+            }
+            ["api", "campaigns", which, "anchored", "values"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::anchored::values_door(registry, caller, &c)
+            }
             ["api", "campaigns", which, "answers", answer, "cause"] if post => {
                 let doc = json_body(body)?;
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -2386,6 +2407,9 @@ pub(crate) fn pictures_through(
     // pair mode: an item of a pair campaign names neither of its stacks;
     // they are kept by side
     asked.extend(crate::pair::campaigns_showing(store, stack)?);
+    // anchored reading: nor does an item of an anchored campaign; its
+    // panels do
+    asked.extend(crate::anchored::campaigns_showing(store, stack)?);
     // the sessions the stack is of, each its subject and its day
     let sql = format!(
         "SELECT DISTINCT sc.subject_id, {} FROM {} k JOIN {} r ON r.id = k.series_id \
@@ -3480,6 +3504,10 @@ fn campaign_stacks(store: &mut Store, c: &campaign::Campaign) -> Result<Vec<i64>
     if nils_registry::pair::is_pair(c) {
         return Ok(nils_registry::pair::stacks_of(store, c.id)?);
     }
+    // anchored reading: nor do an anchored campaign's; its panels do
+    if nils_registry::anchored::is_anchored(c) {
+        return Ok(nils_registry::anchored::stacks_of(store, c.id)?);
+    }
     let mut out = Vec::new();
     for it in campaign::items(store, c.id).map_err(campaign_err)? {
         if let Some(s) = it.stack_id {
@@ -3875,6 +3903,21 @@ pub(crate) enum CampaignCommand {
     Pair(Box<crate::pair::PairArgs>),
     /// Every answer of a pair campaign resolved per stack, as JSON
     PairExport {
+        /// The campaign, by name or id
+        campaign: String,
+        /// Write it to this file rather than print it
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Make an anchored campaign (the post-contrast study): each item a
+    /// candidate stack beside a pre and a post anchor of the same subject,
+    /// in panels whose order the seed draws, with no time, name or header;
+    /// the answer says the candidate looks like the pre, like the post, or
+    /// can't tell, and resolves into the candidate's post-contrast value
+    Anchored(Box<crate::anchored::AnchoredArgs>),
+    /// Every answer of an anchored campaign resolved for its candidate, as
+    /// JSON
+    AnchoredExport {
         /// The campaign, by name or id
         campaign: String,
         /// Write it to this file rather than print it
@@ -4414,6 +4457,11 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             campaign: which,
             out,
         } => crate::pair::export(home, &which, out.as_deref()),
+        CampaignCommand::Anchored(args) => crate::anchored::make(home, *args),
+        CampaignCommand::AnchoredExport {
+            campaign: which,
+            out,
+        } => crate::anchored::export(home, &which, out.as_deref()),
         CampaignCommand::List { json } => {
             let mut registry = crate::open(home)?;
             let list = campaign::list(registry.store()).map_err(cerr)?;
