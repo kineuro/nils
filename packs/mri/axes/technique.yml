@@ -582,7 +582,7 @@ values:
       - turbo flash
       - tfe
       - fspgr
-    # MRI pack 0.14.0: or GE's `FAST_GEMS` on a gradient echo (flags.yml).
+    # MRI pack 0.14.0: or GE's `FAST_GEMS` on a spoiled gradient echo (flags.yml).
     detection:
       exclusive: is_tfl
       combination: [ge_fspgr]

@@ -1080,8 +1080,11 @@ flags:
       - {field: echo_train_length, ge: 3}
       - {field: echo_train_length, le: 16}
   # GE's fast spoiled gradient echo, FSPGR, states `FAST_GEMS` in ScanOptions
-  # (dev-2: a 3D SPGR with it read as SP-GRE, settled FSP-GRE).
-  ge_fspgr: {all: [{text: manufacturer, prefix: ge}, scan_options.has_fast_gems, has_gre, {not: has_se}, {not: has_epi}]}
+  # (dev-2: a 3D SPGR with it read as SP-GRE, settled FSP-GRE). Only a
+  # spoiled one: GE writes `FAST_GEMS` on its steady-state FGRE and FIESTA
+  # too (SequenceVariant SS without SP; the three-plane scouts, and a FIESTA
+  # dev-1 settled bSSFP), which are no spoiled gradient echo.
+  ge_fspgr: {all: [{text: manufacturer, prefix: ge}, scan_options.has_fast_gems, has_spoiled, has_gre, {not: has_se}, {not: has_epi}]}
   # An inflow (time-of-flight) angiography by its words: a 3D gradient echo
   # named for angiography, of a repetition time a contrast run does not use
   # (a CE-MRA's is under 10 ms), with no contrast and no phase contrast
@@ -1104,7 +1107,7 @@ flags:
   # `MT=OFF` (dev-2: a TSE read as MT and a 3D SPGR as MTw).
   mt_negated:
     text: search_text
-    matches: '(utan|without|ej|no|non)\s*-?\s*(mtc|magnetization-transfer)|(mtc|magnetization-transfer)\s*-?\s*(off|no|0)([^a-z0-9]|$)'
+    matches: '(^|[^a-z])(utan|without|ej|no|non)\s*-?\s*(mtc|magnetization-transfer)|(mtc|magnetization-transfer)\s*-?\s*(off|no|0)([^a-z0-9]|$)'
   # Philips' SmartExam brain survey, `SmartBrain`: a localizer, whatever its
   # 3D TFE says (dev-2: read as a ProjectionDerived MPRAGE).
   smart_survey: {text: search_text, matches: 'smartbrain|smart brain|smartexam'}

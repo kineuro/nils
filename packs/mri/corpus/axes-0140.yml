@@ -653,6 +653,21 @@ cases:
     axes:
       technique: TurboFLASH
 
+  - name: a GE steady-state FGRE with FAST_GEMS and no spoiling is no fast spoiled GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\SEQ_GEMS\PFF'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax FGRE'
+      repetition_time: 5
+      echo_time: 1.4
+      flip_angle: 30
+    axes:
+      technique: GRE
+
   - name: a Siemens 3D inflow angiography named ANGIO is a TOF
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
