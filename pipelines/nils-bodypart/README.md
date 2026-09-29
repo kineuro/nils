@@ -1,6 +1,6 @@
 # nils-bodypart
 
-v0's body-part detector as a NILS pipeline image: one image, four entry points, each with its descriptor (`bodypart-<entry>/nils.job.yml`). The engine runs them with `nils run`; the loop is in `docs/guides/pipelines.md`.
+v0's body-part detector and the certified body-part model as a NILS pipeline image: one image, five entry points, each with its descriptor (`bodypart-<entry>/nils.job.yml`). The engine runs them with `nils run`; the loop is in `docs/guides/pipelines.md`.
 
 | entry | reads | writes |
 |---|---|---|
@@ -8,6 +8,9 @@ v0's body-part detector as a NILS pipeline image: one image, four entry points, 
 | `seed` | BiomedCLIP embeddings, each stack's rule answer | seeds per body-part value and a selection a curation campaign starts from; never proposals |
 | `train` | a label set, the embeddings | a calibrated head (JSON for logistic regression, a joblib pickle for `rf` and `svm`) with its model card, and cross-validated accuracy, ECE and Brier |
 | `infer` | a registered head (`--model`), the embeddings | a `body_part` proposal per stack with every class's probability; a pickled head only with `allow_pickle=true` and a card that checks |
+| `infer-fusion` | the stacks' files and headers, the certified model's encoder, head and coarse mode file (models) | per stack a table of its scores in both modes, a `body_part` proposal (fine) and a `body_region` proposal (coarse) |
+
+`infer-fusion` runs the certified body-part model of record 50: one frozen model with two modes. It reads each stack's files into an 8 mm volume in patient axes, scores it with the image encoder (three seeds, run in numpy), and gives the encoder's answer and 44 features of the stack's header to a LightGBM head. Fine mode calibrates the head's answer to the six body_part values at the temperature of the stack's cohort, or the global one; coarse mode sums it into four regions (head, spine, chest, other) and calibrates those. A mode answers at or above its threshold and abstains below it. A stack with no fingerprint row or no geometry gets no answer and is skipped. The run is refused when an artifact is not the one its digest names, or the parts do not name each other.
 
 Every entry writes `/output/results.json` (`contracts/job/v1/results.schema.json`). An embedding file is the engine's `.emb` format, `contracts/job/v1/embedding.md`.
 
@@ -29,4 +32,4 @@ pip install -c requirements.txt -e ".[test]"
 python -m pytest -q
 ```
 
-The tests use stand-in encoders and need neither torch nor the weights.
+The tests use stand-in encoders and synthetic models, and need neither torch nor the weights; where torch is installed, one more test checks the numpy encoder against the same network in torch.

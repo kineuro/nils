@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """nils-bodypart: v0's body-part detector as a NILS pipeline image.
 
-Four entry points share this package (record 43, S5):
+Five entry points share this package (record 43, S5, and record 50):
 
 - ``embed``: v0's preparation of a slice, then BiomedCLIP and SigLIP2;
 - ``seed``: v0's two-pool seeding (keyword prior and zero-shot margin, each
@@ -9,13 +9,16 @@ Four entry points share this package (record 43, S5):
 - ``train``: scaler, PCA chosen by cross-validation, a classifier, and a
   calibration on every head;
 - ``infer``: slice probabilities, v0's axial Brain-Neck rule and per-stack
-  aggregation.
+  aggregation;
+- ``infer-fusion``: the certified body-part model of record 50, an image
+  encoder and a LightGBM head over its answer and the stack's header, in
+  two modes (body_part and body_region).
 
 Everything that reads pixels or runs an encoder is imported lazily, so the
 rules can be tested without torch.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # The preparation's version. It keys an embedding (record 43, S4): a change to
 # anything in ``preprocess.PreprocessConfig`` or to which slices are embedded
