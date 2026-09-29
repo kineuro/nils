@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 74;
+pub const SCHEMA_VERSION: i64 = 75;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,7 +350,22 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 74,
         apply: a_campaign_shows_two_stacks_side_by_side,
     },
+    Migration {
+        version: 75,
+        apply: a_campaign_may_show_the_pictures_alone,
+    },
 ];
+
+/// The post-contrast study's single reads: a campaign may show its raters
+/// the pictures alone, with no text of the file's header beside them. A
+/// campaign from before gains the column empty, and shows the header as it
+/// did.
+fn a_campaign_may_show_the_pictures_alone(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "campaign")? {
+        return Ok(());
+    }
+    add_columns(store, "campaign", &["hide_header"])
+}
 
 /// Post-contrast gold, pair mode: an item of a pair campaign shows two
 /// stacks side by side, and which is on which side is kept in a table of

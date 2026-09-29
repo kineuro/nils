@@ -240,6 +240,7 @@ fn new<'a>(
         inputs: Default::default(),
         hold_back: None,
         suggest: Some(nils_registry::campaign::Suggest::Rules),
+        hide_header: false,
     }
 }
 

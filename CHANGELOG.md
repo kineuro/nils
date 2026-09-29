@@ -4,9 +4,20 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `nils run --chunk N` runs a pipeline over a selection in parts of at most N stacks, in stack order, each part frozen into a handle of its own and run as a run of its own, one after another. Where a part fails, the error names the handles of the parts not run.
+- A campaign may show its raters the pictures alone: `nils campaign create --hide-header`, or `hide_header: true` on `POST /api/campaigns`, for an axis or an axes question that suggests none. Its evidence door serves no text of the file's header (no series description, sequence name or physics) and its whole-header door is refused with 409, as in pair mode. Every campaign says its `hide_header`. Schema 75 adds the campaign's column; a campaign from before shows the header as it did. The HTTP API contract stays version 7, with `hide_header` added in place.
+
 ### Changed
 
 - The MRI pack is 0.14.0. It fixes the rule errors of a fresh development reference on 0.13.0, on the five header axes of the certificate (provenance, technique, modifier, construct and base), and undoes 0.13.0's two regressions: an inversion time on a synthetic image or map no longer makes a FLAIR or a STIR, and a synthetic weighted image that names a tissue is no tissue map. A FLAIR on a spin-echo readout is an IR-TSE where the file states no train (GE IR alone, research mode or `mrcflair`, Philips `M_IR`). GE's PROPELLER spellings (`ksprop`, `T2prop`, `PropFSE`, `PROPPELLER`) are Radial and a TSE, and radial MIP views are not Radial. A GE series in research mode with a spin echo's flip and echo time is a spin echo, SE or TSE by its train. GE's DTI outputs named `FA-`, `Evec` and `ExpAtt-` are FA and DTIRecon, DTIRecon, and eADC, and a diffusion map whose readout the file does not state is DWI-EPI. A GE SWI named without GE's output prefix is its magnitude, and an SWI projection named neither MIP nor minIP is the MinIP. A Siemens `fl2d8` or a series named for its echoes is ME-GRE, a Philips FFE of several echoes in one image is the combined multi-echo GRE, GE's `FAST_GEMS` on a spoiled gradient echo is FSP-GRE, a 3D gradient echo named for angiography at a TOF's repetition time is TOF, and Siemens `tseBR` is VFA-TSE. Philips `MobiView` is Composed and `SmartBrain` a localizer; `utan MTC` and `MT=OFF` switch MT off. GE's collapse is a MIP, and a Philips `b0` written as a projection is no reformat. A BOLD series with no readout stated at a short echo time is T2*w, a STIR named so is T2w, a spectroscopy acquisition has no base, and a spoiled gradient echo flipped 10 degrees or less at TR 20 ms or more is PDw. Stacks need a reclassify.
+
+### Fixed
+
+- A pipeline run over a selection that reaches more than 5,000 stacks failed with "reaches more than one answer holds; narrow it". A run, its pre-flight and a batch of pyramids now freeze the selection whole, however many stacks it holds; an answer to a question, a campaign, a label set and an A/B campaign keep the ask's caps.
+- A selection whose document lists more ids than a statement may bind (65,535 on Postgres, 32,766 on SQLite) failed with "error parsing response from server" on Postgres and "variable number must be between" on SQLite. A list of more than 1,000 values is now bound as one JSON array and read back as rows.
+- Taking in the results of a run whose units run together looked each unit up in the whole results list, so the time grew with the square of the units; each unit's entry is now found once.
 
 ## [1.0.0-alpha.60] - 2026-09-29
 

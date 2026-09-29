@@ -4164,13 +4164,15 @@ fn pyramid_many(
     workers: usize,
 ) -> Result<(), Exit> {
     let handle = match (&select, handle) {
-        (Some(spec), _) => crate::ask_cli::freeze_selection(
+        (Some(spec), _) => crate::ask_cli::freeze(
             home,
             spec,
             nils_ask::ast::Grain::Stack,
             pack_dir,
             pack,
-        )?,
+            crate::ask_cli::Freeze::Whole,
+        )
+        .map(|f| f.handle)?,
         (None, Some(h)) => h,
         (None, None) => return Err(usage("--stack, --select or --handle")),
     };

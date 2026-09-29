@@ -1136,6 +1136,10 @@ pub struct New<'a> {
     /// nothing, the pack's rules, or suggestions brought in from outside;
     /// [`Suggest::None`] when none is given.
     pub suggest: Option<Suggest>,
+    /// The reader shows the pictures alone, no text of the file's header
+    /// beside them, as pair mode does. Only an axis or an axes question
+    /// that suggests none may ask it.
+    pub hide_header: bool,
 }
 
 /// Record 48 R1: the least share of a batch held back to be read alone.
@@ -1219,6 +1223,9 @@ pub struct Campaign {
     pub hold_back: f64,
     /// What the reader shows beside each item as the answer suggested.
     pub suggest: Suggest,
+    /// The reader shows the pictures alone: no door of the campaign serves
+    /// the text of an item's header.
+    pub hide_header: bool,
 }
 
 impl Campaign {
@@ -1286,6 +1293,7 @@ impl Campaign {
             "agreement": self.agreement,
             "hold_back": self.hold_back,
             "suggest": self.suggest.name(),
+            "hide_header": self.hide_header,
         })
     }
 }
@@ -1313,7 +1321,7 @@ fn json_at(r: &Row, i: usize) -> Result<Value, StoreError> {
         .unwrap_or(Value::Null))
 }
 
-const CAMPAIGN_COLUMNS: [&str; 22] = [
+const CAMPAIGN_COLUMNS: [&str; 23] = [
     "id",
     "name",
     "owner",
@@ -1336,6 +1344,7 @@ const CAMPAIGN_COLUMNS: [&str; 22] = [
     "agreement",
     "hold_back",
     "suggest",
+    "hide_header",
 ];
 
 fn campaign_of(r: &Row) -> Result<Campaign, StoreError> {
@@ -1367,6 +1376,7 @@ fn campaign_of(r: &Row) -> Result<Campaign, StoreError> {
             .opt_text(21)?
             .and_then(|t| Suggest::parse(t).ok())
             .unwrap_or(Suggest::Rules),
+        hide_header: r.opt_int(22)?.unwrap_or(0) != 0,
     })
 }
 
@@ -1525,6 +1535,20 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
     if n.lease_seconds < 1 {
         return Err(invalid("lease_seconds is one or more"));
     }
+    // the pictures alone: a reader of one stack that is shown nothing a
+    // system said of it, or the rules' lines would name the header's words
+    if n.hide_header {
+        if !matches!(question, Question::Axis { .. } | Question::Axes { .. }) {
+            return Err(invalid(
+                "hide_header is for an axis or an axes question, read one stack at a time",
+            ));
+        }
+        if n.suggest.unwrap_or_default() != Suggest::None {
+            return Err(invalid(
+                "hide_header shows the pictures alone, so the campaign suggests none",
+            ));
+        }
+    }
     let hold_back = n.hold_back.unwrap_or(HOLD_BACK_MIN);
     if !(HOLD_BACK_MIN..=1.0).contains(&hold_back) {
         return Err(invalid(format!(
@@ -1645,6 +1669,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         "hold_back",
                         "hold_back_seed",
                         "suggest",
+                        "hide_header",
                     ],
                 )
                 .returning(&["id"]),
@@ -1668,6 +1693,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                     Param::Double(hold_back),
                     Param::from(uuid::Uuid::new_v4().to_string()),
                     Param::from(n.suggest.unwrap_or_default().name()),
+                    Param::Int(i64::from(n.hide_header)),
                 ]],
             )?
             .first()

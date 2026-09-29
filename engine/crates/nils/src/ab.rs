@@ -510,6 +510,7 @@ pub(crate) fn make(home: &Home, a: AbArgs) -> Result<(), Exit> {
             // the candidates are the only answers shown, and never as a
             // system's: nothing is suggested, filled in, batched or ranked
             suggest: Some(campaign::Suggest::None),
+            hide_header: false,
         },
     )
     .map_err(cerr)?;
