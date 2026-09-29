@@ -6258,7 +6258,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "derivatives",
             "owner": "the research group that owns the archive",
-            "what": "files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42)",
+            "what": "files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42); and a registered model's artifact kept where a run finds it, which belongs to the model and to no subject (record 50)",
             "where": derivatives_where,
             "files": [],
             "holds": ["quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to", "technical: the kind, the digest, the size, the media type, the place and the path, who registered it"],
@@ -6266,7 +6266,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "for ever; a newer file supersedes an older one by a link and both stay",
             "commands": {
                 "read": ["nils derivative list", "nils derivative show <id>", "GET /api/derivatives/{id}/content", "GET /api/derivatives/{id}/content?transport=share, where the place declares a share path"],
-                "change": ["nils derivative add <file>"],
+                "change": ["nils derivative add <file>", "nils model keep <model> --artifact <file>"],
                 "export": ["GET /api/derivatives/{id}/content"],
                 "delete": "with the registry and the working place; nils has no command for one",
             },
@@ -10012,7 +10012,7 @@ mod tests {
     }
 
     /// `nils pack derive` carries answers kept anywhere through the pack
-    /// as the reader does live: the five the seven asked axes leave, a
+    /// as the reader does live: the six the seven asked axes leave, a
     /// value named by its label as well as its identity, can't tell
     /// carried to what reads it, and quality from ImageType alone.
     #[test]
@@ -10044,6 +10044,7 @@ mod tests {
         assert_eq!(
             d,
             [
+                "body_region",
                 "convertible",
                 "directory_type",
                 "disposition",
@@ -10060,6 +10061,8 @@ mod tests {
         assert_eq!(got[0]["values"]["directory_type"], "anat");
         assert_eq!(got[0]["values"]["role"], serde_json::json!(["t1w"]));
         assert_eq!(got[0]["values"]["quality"], serde_json::json!([]));
+        // MRI pack 0.13.0: the body part's coarse mode, folded from it
+        assert_eq!(got[0]["values"]["body_region"], "head");
         assert_eq!(got[1]["stack"], 2);
         assert_eq!(got[1]["values"]["role"], serde_json::json!(["flair"]));
         assert_eq!(got[2]["values"]["directory_type"], "cant_tell");

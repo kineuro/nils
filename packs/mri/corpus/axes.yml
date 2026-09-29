@@ -2326,3 +2326,94 @@ cases:
     axes:
       technique: MEGRE
       base: MTw
+
+  # --- MRI pack 0.13.0: the body region, the body part's coarse mode
+  # (record 50, one model in two modes). The rules fold the body part the
+  # rules before them decided: a brain and a brain and neck are the head, a
+  # neck and a spine the spine. Where the body part has no value the region
+  # has none either, and nothing of the file is read for it.
+
+  - name: a stated brain is the head
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: brain
+      body_region: head
+
+  - name: a brain and neck is the head
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,NECK'
+      text_series_description: 'cor t1 tse'
+    axes:
+      body_part: brain-neck
+      body_region: head
+
+  - name: a neck is the spine in the coarse mode
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'NECK'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: neck
+      body_region: spine
+
+  - name: a cervical spine is the spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'SPINE,NECK'
+      text_series_description: 'sag t2 tse HWS'
+    axes:
+      body_part: spine
+      body_region: spine
+
+  # The body part's last resort, at 0.60, still gives the region: the
+  # region reads the body part, not how sure it was.
+  - name: a portrait sagittal field of view is a spine, and so the spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'sag t2 tse'
+      orientation: Sagittal
+      fov_x: 200
+      fov_y: 400
+      aspect_ratio: 2.0
+    axes:
+      body_part: spine
+      body_region: spine
+
+  - name: no body part is no body region
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'VERTEBRALCRANIUM'
+      text_series_description: 'cs10_3D_FLAIR'
+      text_protocol_name: 'WIP cs10_3D_FLAIR'
+    axes:
+      body_part: ''
+      body_region: ''
+
+  # A stack ruled out has every class axis blank, the body part with them,
+  # so it has no region even where its stated body part names one.
+  - name: a screen save stated as a head has no body region
+    stack:
+      image_type: 'DERIVED\SECONDARY\SCREEN SAVE'
+      text_body_part: 'HEAD'
+      text_series_description: 'sag t1 screenshot'
+    axes:
+      directory_type: excluded
+      body_part: ''
+      body_region: ''
+
+  # A localizer is classified on every axis, the body part among them, and
+  # its region follows as on any stack.
+  - name: a localizer stated as a head is the head
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'HEAD'
+      text_series_description: 'localizer'
+      image_role: original_primary
+    axes:
+      directory_type: localizer
+      body_part: brain
+      body_region: head

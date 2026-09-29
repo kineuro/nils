@@ -29,7 +29,8 @@ const INSTITUTION: &str = "Nowhere Test Hospital";
 const STATION: &str = "STATION-QX9";
 const ACCESSION: &str = "ACC-55123";
 
-/// The axes Phase 0 asks, and the five the pack derives beside them.
+/// The axes Phase 0 asks, and the six the pack derives beside them (the
+/// body region since MRI pack 0.13.0).
 const ASKED: &[&str] = &[
     "provenance",
     "technique",
@@ -41,6 +42,7 @@ const ASKED: &[&str] = &[
 ];
 const DERIVED: &[&str] = &[
     "quality",
+    "body_region",
     "directory_type",
     "disposition",
     "convertible",
@@ -349,7 +351,7 @@ fn a_blind_reader_sees_the_file_and_answers_what_needs_a_person() {
     );
 
     // ------------------------------------------------ asked and derived
-    // the seven asked axes leave five to the pack, found in it when the
+    // the seven asked axes leave six to the pack, found in it when the
     // question names none
     let made = server.ok(
         "POST",
@@ -698,8 +700,14 @@ fn an_open_campaign_moves_to_the_seven_asked_axes_keeping_its_answer() {
         Some(selection_of(&[1, 2, 3])),
         &cleo,
     );
-    // made the way Phase 0's first campaigns were: all twelve axes asked
-    let twelve: Vec<&str> = ASKED.iter().chain(DERIVED).copied().collect();
+    // made the way Phase 0's first campaigns were: all twelve axes of the
+    // pack then asked, the body region (MRI pack 0.13.0) not among them
+    let twelve: Vec<&str> = ASKED
+        .iter()
+        .chain(DERIVED)
+        .copied()
+        .filter(|a| *a != "body_region")
+        .collect();
     let made = server.ok(
         "POST",
         "/api/campaigns",
@@ -812,7 +820,12 @@ fn an_open_campaign_moves_to_the_seven_asked_axes_keeping_its_answer() {
         after["answers"][0]["derived"]["directory_type"], "anat",
         "{after}"
     );
-    // the next item is answered on the seven, and derives the five
+    // an axis the old form never had is derived all the same
+    assert_eq!(
+        after["answers"][0]["derived"]["body_region"], "head",
+        "{after}"
+    );
+    // the next item is answered on the seven, and derives the six
     let claimed = server.ok(
         "POST",
         "/api/campaigns/read-r1/claim",

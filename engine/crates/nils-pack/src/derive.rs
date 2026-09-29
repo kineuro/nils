@@ -5,7 +5,7 @@
 //!
 //! Some axes of a pack are not read off the pictures at all: they are the
 //! pack's own rules applied to other axes (directory type, disposition,
-//! convertible and role in the MRI pack), or a token of the header (quality,
+//! convertible, role and body region in the MRI pack), or a token of the header (quality,
 //! from ImageType). A rater answers the axes that need a person, and these
 //! are carried through the pack from that answer. They are the rater's
 //! answer carried through the pack's rules, never the pack's opinion of the
@@ -297,17 +297,18 @@ mod tests {
         "post_contrast",
     ];
 
-    /// Phase 0's seven asked axes leave five the pack computes from them:
-    /// directory type, disposition, convertible and role from the answer,
-    /// and quality from ImageType.
+    /// Phase 0's seven asked axes leave six the pack computes from them:
+    /// directory type, disposition, convertible, role and (MRI pack 0.13.0)
+    /// body region from the answer, and quality from ImageType.
     #[test]
-    fn the_seven_asked_axes_derive_the_other_five() {
+    fn the_seven_asked_axes_derive_the_other_six() {
         let pack = mri();
         let mut got = infer(&pack, &words(PHASE0)).unwrap();
         got.sort();
         assert_eq!(
             got,
             words(&[
+                "body_region",
                 "convertible",
                 "directory_type",
                 "disposition",
@@ -316,6 +317,67 @@ mod tests {
             ])
         );
         check(&pack, &words(PHASE0), &got).unwrap();
+    }
+
+    /// Record 50: the body region is the body part folded, so a campaign
+    /// that asks the body part alone may derive it, and it reads nothing
+    /// else; one that does not ask the body part may not.
+    #[test]
+    fn the_body_region_is_derived_from_the_body_part_alone() {
+        let pack = mri();
+        let asked = words(&["body_part"]);
+        let derive = words(&["body_region"]);
+        check(&pack, &asked, &derive).unwrap();
+        assert_eq!(
+            depends(&pack, "body_region", &asked, &derive),
+            BTreeSet::from(["body_part".to_string()])
+        );
+        let e = check(&pack, &words(&["technique"]), &derive).unwrap_err();
+        assert!(e.contains("body_part"), "{e}");
+        let s = stack(&[
+            ("text_series_description", "ax t2 tse"),
+            ("text_body_part", "BRAIN,HEAD"),
+            ("image_type", "ORIGINAL\\PRIMARY\\M\\ND"),
+            ("modality", "MR"),
+        ]);
+        // the answer decides, not the stated body part
+        for (part, region) in [
+            ("brain", "head"),
+            ("brain-neck", "head"),
+            ("neck", "spine"),
+            ("spine", "spine"),
+            ("chest", "chest"),
+            ("other", "other"),
+        ] {
+            let got = super::derive(
+                &pack,
+                &s,
+                Vec::new(),
+                &asked,
+                &derive,
+                &answer(&[("body_part", Some(&[part]))]),
+            );
+            assert_eq!(got["body_region"], Some(words(&[region])), "{part}");
+        }
+        // no body part, no region; can't tell, can't tell
+        let got = super::derive(
+            &pack,
+            &s,
+            Vec::new(),
+            &asked,
+            &derive,
+            &answer(&[("body_part", Some(&[]))]),
+        );
+        assert_eq!(got["body_region"], Some(Vec::new()));
+        let got = super::derive(
+            &pack,
+            &s,
+            Vec::new(),
+            &asked,
+            &derive,
+            &answer(&[("body_part", None)]),
+        );
+        assert_eq!(got["body_region"], None);
     }
 
     /// An axis the pack reads off the file's numbers or words is never
@@ -415,6 +477,7 @@ mod tests {
         assert_eq!(got["convertible"], Some(words(&["yes"])));
         assert_eq!(got["role"], Some(words(&["t1w"])));
         assert_eq!(got["quality"], Some(Vec::new()));
+        assert_eq!(got["body_region"], Some(words(&["head"])));
 
         let flair = answer(&[
             ("provenance", Some(&["RawRecon"])),

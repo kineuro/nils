@@ -394,6 +394,11 @@ pub struct Descriptor {
     /// record 49 A3): a session without a pick of one is named by the
     /// pre-flight, with the role it lacks.
     pub roles: Vec<String>,
+    /// For a stacks input, whether each stack's entry of `stacks.json`
+    /// carries its header facts (`x-nils.input.header`, record 50): the
+    /// fingerprint row, the classification rows, its first ingest batch and
+    /// its subject's open cohorts. Off unless asked for.
+    pub header: bool,
     /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
     /// which the pre-flight estimates from until the pipeline has run here.
     pub unit_minutes: Option<f64>,
@@ -1013,6 +1018,12 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             "x-nils.input.roles are the picks a bids input carries; a stacks input has none".into(),
         );
     }
+    let header = opt_bool(&x["input"], "header", "x-nils.input.")?.unwrap_or(false);
+    if header && layout != Layout::Stacks {
+        return Err(
+            "x-nils.input.header puts each stack's header facts in stacks.json; a bids input has no stacks.json, so it is for a stacks input only".into(),
+        );
+    }
     let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
         None => None,
         Some(m) if m > 0.0 && m.is_finite() => Some(m),
@@ -1035,6 +1046,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         proposals,
         checks,
         roles,
+        header,
         unit_minutes,
         document,
     })
@@ -1700,6 +1712,52 @@ x-nils:
             let e = parse(&with(&bad)).unwrap_err();
             assert!(e.contains(words), "{words}: {e}");
         }
+    }
+
+    /// Record 50: a stacks input may ask for each stack's header facts in
+    /// `stacks.json`; it is off unless asked for, and a bids input, which
+    /// has no `stacks.json`, is refused it. A stack's table may be a JSON
+    /// object per stack, which the parser takes as it takes a CSV.
+    #[test]
+    fn a_stacks_input_may_ask_for_the_header_and_a_bids_one_may_not() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        assert!(!parse(&base).unwrap().header);
+        let stacks = |input: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace("  input: {layout: bids}\n", &format!("  input: {input}\n"))
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        let d = parse(&stacks("{layout: stacks}")).unwrap();
+        assert_eq!(d.layout, Layout::Stacks);
+        assert!(!d.header);
+        assert!(
+            !parse(&stacks("{layout: stacks, header: false}"))
+                .unwrap()
+                .header
+        );
+        let d = parse(&stacks("{layout: stacks, header: true}")).unwrap();
+        assert!(d.header);
+        let e = parse(&stacks("{layout: stacks, header: yes please}")).unwrap_err();
+        assert!(e.contains("x-nils.input.header is true or false"), "{e}");
+        let e = parse(&base.replace(
+            "  input: {layout: bids}\n",
+            "  input: {layout: bids, header: true}\n",
+        ))
+        .unwrap_err();
+        assert!(e.contains("for a stacks input only"), "{e}");
+        // a stack's scores, one JSON object per stack file
+        let table = "    - id: scores\n      kind: table\n      format: json\n      path-template: \"stack-{stack}/scores.json\"\n      columns:\n        - {name: p_brain}\n        - {name: label, type: text}\n";
+        let d = parse(&stacks("{layout: stacks, header: true}").replace(
+            "  needs: {gpu: optional}",
+            &format!("{table}  needs: {{gpu: optional}}"),
+        ))
+        .unwrap();
+        let t = d.outputs.iter().find(|o| o.id == "scores").unwrap();
+        assert_eq!(t.table.as_ref().unwrap().format, "json");
+        assert!(!t.run_level);
     }
 
     #[test]

@@ -5,7 +5,9 @@
 //! `--artifact`, checks the card's digest against the file or fills it in;
 //! `admit` records a check; `promote` puts a model in its task and slot and
 //! retires the one before it; `retire`; `list` and `show`. Each writes the
-//! same rows and audit rows as the doors under `/api/models`.
+//! same rows and audit rows as the doors under `/api/models`. `keep`
+//! (record 50) copies a registered model's artifact into the working place
+//! a run reads models from, so a pipeline's model input finds it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -66,6 +68,20 @@ pub(crate) enum ModelCommand {
         /// Why, in the person's own words
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Keep a registered model's artifact where a run finds it: a copy in
+    /// the lane's output place, under derivatives/models/<name>-<version>/,
+    /// registered as a derivative of kind model (record 50)
+    Keep {
+        /// The model: its id, its digest (sha256:...) or name@version
+        model: String,
+        /// The artifact itself: its sha256 must be the model's digest. It
+        /// is copied, never moved
+        #[arg(long, value_name = "FILE")]
+        artifact: PathBuf,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -237,6 +253,35 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
+        ModelCommand::Keep {
+            model,
+            artifact,
+            json,
+        } => {
+            let m = resolved(&mut registry, &model)?;
+            let (d, fresh) = keep(&mut registry, &m, &artifact, &who)?;
+            if json {
+                let mut doc = crate::derivatives::doc(registry.store(), &d);
+                doc["kept"] = serde_json::Value::from(fresh);
+                print_json(&doc);
+            } else if fresh {
+                println!(
+                    "kept {} as derivative {} at {}, {} bytes",
+                    m.label(),
+                    d.id,
+                    d.path,
+                    d.bytes
+                );
+            } else {
+                println!(
+                    "{} is kept already, as derivative {} at {}; nothing was written",
+                    m.label(),
+                    d.id,
+                    d.path
+                );
+            }
+            Ok(())
+        }
         ModelCommand::List {
             task,
             slot,
@@ -304,4 +349,196 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             Ok(())
         }
     }
+}
+
+/// A name as one path component a runtime's mount syntax takes: letters,
+/// digits, `.`, `-` and `_` kept, anything else (a `:` or a `,` above all,
+/// which the mounts split on) a `_`, and never a hidden or empty name.
+fn component(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if clean.is_empty() || clean.starts_with('.') {
+        format!("artifact{clean}")
+    } else {
+        clean
+    }
+}
+
+/// Copy `from` to `to` through a temporary file beside it, hashing the
+/// bytes on the way; the copy is renamed into place only when its bytes
+/// hash to `hex`. Answers how many bytes it wrote.
+fn copy_checked(from: &Path, to: &Path, hex: &str) -> Result<u64, Exit> {
+    use std::io::Write;
+    let dir = to
+        .parent()
+        .ok_or_else(|| fail(format!("{} has no folder", to.display())))?;
+    std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+    let mut nonce = [0u8; 8];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce)
+        .map_err(|_| fail("no randomness for a temporary name"))?;
+    let temp = dir.join(format!(".keep-{}", hex::encode(nonce)));
+    let result = (|| -> Result<u64, Exit> {
+        let mut src =
+            std::fs::File::open(from).map_err(|e| usage(format!("{}: {e}", from.display())))?;
+        let mut out =
+            std::fs::File::create(&temp).map_err(|e| fail(format!("{}: {e}", temp.display())))?;
+        let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut buf = vec![0u8; 1 << 20];
+        let mut total: u64 = 0;
+        loop {
+            let n = src
+                .read(&mut buf)
+                .map_err(|e| fail(format!("{}: {e}", from.display())))?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            ctx.update(&buf[..n]);
+            out.write_all(&buf[..n])
+                .map_err(|e| fail(format!("{}: {e}", temp.display())))?;
+        }
+        out.sync_all()
+            .map_err(|e| fail(format!("{}: {e}", temp.display())))?;
+        let got = hex::encode(ctx.finish().as_ref());
+        if got != hex {
+            return Err(fail(format!(
+                "the copy of {} hashes to sha256:{got}, not sha256:{hex}; the file changed while it was copied, and nothing was kept",
+                from.display()
+            )));
+        }
+        Ok(total)
+    })();
+    match result {
+        Ok(total) => {
+            std::fs::rename(&temp, to).map_err(|e| {
+                let _ = std::fs::remove_file(&temp);
+                fail(format!("{}: {e}", to.display()))
+            })?;
+            Ok(total)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
+/// `nils model keep` (record 50): copy a registered model's artifact into
+/// the working place a run reads models from, the lane's output place, and
+/// register it as a derivative of kind model and scope model, so a run
+/// given the model mounts it. The file must hash to the model's digest; a
+/// retired model is refused. The same bytes kept again write nothing.
+/// Answers the derivative and whether this call wrote it.
+fn keep(
+    registry: &mut nils_registry::Registry,
+    m: &Model,
+    artifact: &Path,
+    who: &str,
+) -> Result<(nils_registry::derivative::Derivative, bool), Exit> {
+    use nils_registry::derivative;
+    if m.state == "retired" {
+        return Err(usage(format!(
+            "model {} is retired; a run is not given a retired model, so its artifact is not kept",
+            m.label()
+        )));
+    }
+    let digest = digest_of(artifact)?;
+    if digest != m.digest {
+        return Err(usage(format!(
+            "{} is {digest} and model {} is {}: not the model's artifact",
+            artifact.display(),
+            m.label(),
+            m.digest
+        )));
+    }
+    let hex = digest.trim_start_matches("sha256:").to_string();
+    let place = crate::pipelines::run_places(registry.store())
+        .map_err(usage)?
+        .output;
+    let file = artifact
+        .file_name()
+        .map(|n| component(&n.to_string_lossy()))
+        .ok_or_else(|| usage(format!("{} names no file", artifact.display())))?;
+    let rel = format!(
+        "{}/models/{}/{file}",
+        derivative::TREE,
+        component(&format!("{}-{}", m.name, m.version))
+    );
+    let target = Path::new(&place.path).join(&rel);
+    // kept already: a live row of this model in this place, its file there
+    let prior = derivative::of_model(registry.store(), m.id, place.id)
+        .map_err(|e| fail(e.to_string()))?
+        .into_iter()
+        .find(|d| d.scope == "model" && d.sha256 == hex);
+    if let Some(d) = prior {
+        let there = Path::new(&place.path).join(&d.path);
+        let whole = there.is_file() && digest_of(&there).ok().as_deref() == Some(digest.as_str());
+        if whole {
+            return Ok((d, false));
+        }
+        // the row stands and its file went: the copy is made again where
+        // the row says, and no second row is written
+        copy_checked(artifact, &there, &hex)?;
+        return Ok((d, true));
+    }
+    let bytes = if target.is_file() && digest_of(&target)? == digest {
+        std::fs::metadata(&target)
+            .map_err(|e| fail(format!("{}: {e}", target.display())))?
+            .len()
+    } else {
+        copy_checked(artifact, &target, &hex)?
+    };
+    let media_type = match Path::new(&file).extension().and_then(|e| e.to_str()) {
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    };
+    let now = nils_registry::time::now_iso();
+    let belongs = derivative::Belongs::model();
+    let id = derivative::insert(
+        registry.store(),
+        &derivative::New {
+            kind: "model",
+            belongs: &belongs,
+            place_id: place.id,
+            path: &rel,
+            bytes: bytes as i64,
+            sha256: &hex,
+            media_type,
+            registered_by: who,
+            actor: None,
+            model_id: Some(m.id),
+            run_id: None,
+            preprocess_version: None,
+            supersedes_id: None,
+            created_at: &now,
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: who,
+            action: nils_registry::audit::Action::DerivativeRegister,
+            scope: serde_json::json!({
+                "derivative": id, "kind": "model", "scope": "model",
+                "place": place.name, "model": m.id,
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(serde_json::json!({"bytes": bytes, "sha256": hex, "kept": true})),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let d = derivative::get(registry.store(), id)
+        .map_err(|e| fail(e.to_string()))?
+        .ok_or_else(|| fail("the derivative was not written back"))?;
+    Ok((d, true))
 }

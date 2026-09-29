@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Where in the body, coarsely: the body part's coarse mode (record 50,
+# Nima's rulings of 2026-09-29). Body part has one image model, reported
+# and used in two modes: "we need one model but we can report and function
+# as two". The fine mode is `body_part` and its six values; this is the
+# coarse one, four regions, the same model's probabilities summed over the
+# merged classes. It is the answer the image model gives reliably: round 8
+# of the body-part read confirmed the coarse mode on 294 blind reads, at
+# 0.983 accuracy and a per-site calibration error of 0.011, where the fine
+# mode abstains on about a third of stacks to pass its own bar
+# (`studies/2026-09-26-body-part-image/round8.md` in the design
+# repository).
+#
+# The rules do not read the file for it. They fold the fine answer into it
+# (rules/body_region.yml), so a stack whose body part is decided has its
+# region too, and one whose body part is not has no region either. A
+# model's coarse answer reaches a stack only as a proposal on this axis
+# that a person commits, as `chest` and `other` reach the body part.
+#
+# `spine` takes the fine mode's neck (record 50, round 7's decisions). A
+# field of view aimed at the cervical vertebrae is a spine even where the
+# neck is visible; a neck is imaging aimed at the neck's soft tissue or
+# vessels (larynx, thyroid, carotids), and the coarse mode folds it into
+# the spine.
+
+axis: body_region
+kind: single
+
+values:
+  'head': {terms: ['head', 'brain', 'skull', 'neuro'], description: 'the head: a brain, or a brain and neck (the fine mode''s brain and brain-neck)'}
+  'spine': {terms: ['spine', 'neck', 'cervical spine', 'thoracic spine', 'lumbar spine', 'spinal cord', 'whole spine'], description: 'the spine or the neck: any level of the spine, and imaging aimed at the neck''s soft tissue or vessels (the fine mode''s neck and spine)'}
+  'chest': {terms: ['chest', 'thorax', 'lungs']}
+  'other': {terms: ['unknown', 'other body part', 'phantom', 'whole body'], description: 'none of the others, or not known: as for the body part''s other'}

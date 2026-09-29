@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# bodypart-infer-fusion: the certified body-part model of record 50, one
+# frozen model with two modes. Its three registered parts are the run's
+# model inputs: the image encoder (three seeds of a small network over the
+# stack's 8 mm volume and geometry), the head (a LightGBM booster over the
+# encoder's six log-probabilities and 44 header features, whose card carries
+# the fine calibration and the threshold), and, optionally, the coarse mode
+# file (the six values summed into four regions, with its own temperatures
+# and threshold). The image checks every artifact against the digest the
+# run's model manifest names, and that the head names the encoder and the
+# mode file the head, before it reads a stack.
+#
+# Per stack it reads the files as the model's training read them, the
+# stack's header (x-nils.input.header: its fingerprint, the rules' answers,
+# its first ingest batch and its subject's cohorts) and the calibration of
+# the stack's cohort, or the global one. Fine mode proposes body_part with
+# the six calibrated probabilities, coarse mode body_region with four. A
+# mode answers at or above its threshold and abstains below it; every stack
+# with an answer is proposed, and the engine stages a proposal at or above
+# the model card's threshold and makes the rest review items. A stack with
+# no fingerprint row or no geometry gets no answer, an abstention, and is
+# skipped. The engine never runs the model itself.
+#
+# Each scored stack has a table of its own, bodypart-fusion/<stack>.json:
+# the columns below, which the ask reads as measures of the stack, and the
+# detail beside them (the image's probabilities, the calibration, the
+# geometry, the rules' answer and the three models).
+#
+# The image runs offline and never reaches the network; the runner runs it
+# with --network none. The image is pinned as bodypart-embed/nils.job.yml
+# says: until the release that publishes the image with this entry point
+# repins all five descriptors, the digest below is the previous image's,
+# which has no infer-fusion.
+name: bodypart-infer-fusion
+schema-version: "0.5"
+tool-version: "0.2.0"
+description: >-
+  Propose body_part (fine) and body_region (coarse) per stack with the
+  certified body-part model: an image encoder and a LightGBM head over its
+  answer and the stack's header, calibrated per cohort.
+
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:952ab7ffaa631bca3559b78671b96e7e93f4be5ed6b485a1ec887b42480c0870"
+
+inputs:
+  - id: threads
+    name: Reading threads
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 64
+    description: Stacks read and scored at once.
+    value-key: "[THREADS]"
+    command-line-flag: --threads
+    default-value: 2
+    optional: true
+
+command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS]"
+
+output-files:
+  - id: scores
+    name: The stack's scores in both modes, with the detail beside them
+    path-template: "bodypart-fusion/{stack}.json"
+
+suggested-resources:
+  cpu-cores: 2
+  ram: 2
+  walltime-estimate: 0.1
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+    header: true
+  inputs:
+    - id: encoder
+      type: model
+      description: The certified model's image encoder (kind encoder, safetensors, three seeds)
+    - id: head
+      type: model
+      description: The certified model's head (kind head, task axis:body_part), whose card names the encoder and carries the calibration
+    - id: coarse
+      type: model
+      optional: true
+      description: The coarse mode file (task axis:body_region), which names the head; without it only fine mode runs
+  outputs:
+    - id: scores
+      kind: table
+      format: json
+      path-template: "bodypart-fusion/{stack}.json"
+      media-type: application/json
+      columns:
+        - {name: fine_brain, description: Fine mode's calibrated probability of brain}
+        - {name: fine_brain_neck, description: Fine mode's calibrated probability of brain-neck}
+        - {name: fine_neck, description: Fine mode's calibrated probability of neck}
+        - {name: fine_spine, description: Fine mode's calibrated probability of spine}
+        - {name: fine_chest, description: Fine mode's calibrated probability of chest}
+        - {name: fine_other, description: Fine mode's calibrated probability of other}
+        - {name: fine_value, type: text, description: Fine mode's most probable body_part}
+        - {name: fine_confidence, description: Its probability}
+        - {name: fine_answers, type: integer, description: 1 when the confidence is at or above the head's threshold, 0 when fine mode abstains}
+        - {name: coarse_head, description: Coarse mode's calibrated probability of head}
+        - {name: coarse_spine, description: Coarse mode's calibrated probability of spine}
+        - {name: coarse_chest, description: Coarse mode's calibrated probability of chest}
+        - {name: coarse_other, description: Coarse mode's calibrated probability of other}
+        - {name: coarse_value, type: text, description: Coarse mode's most probable body_region}
+        - {name: coarse_confidence, description: Its probability}
+        - {name: coarse_answers, type: integer, description: 1 when the confidence is at or above the coarse threshold, 0 when coarse mode abstains}
+        - {name: head_digest, type: text, description: The head that scored the stack}
+        - {name: coarse_digest, type: text, description: The coarse mode file, when the run had one}
+        - {name: encoder_digest, type: text, description: The image encoder}
+  needs:
+    gpu: none
+    memory-gb: 2
+    cores: 2
+    cores-input: threads
+  proposals:
+    - axis: body_part
+      description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest
+    - axis: body_region
+      description: Coarse mode, a value of the pack's body_region per stack with the four calibrated probabilities, by the coarse mode file's digest

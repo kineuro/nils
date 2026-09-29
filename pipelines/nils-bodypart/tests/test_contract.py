@@ -16,7 +16,7 @@ from .test_formats import write_set
 HERE = Path(__file__).resolve().parent.parent
 CONTRACT = HERE.parent.parent / "contracts" / "job" / "v1"
 MODEL = HERE.parent.parent / "contracts" / "model" / "v1"
-ENTRIES = ("bodypart-embed", "bodypart-seed", "bodypart-train", "bodypart-infer")
+ENTRIES = ("bodypart-embed", "bodypart-seed", "bodypart-train", "bodypart-infer", "bodypart-infer-fusion")
 
 
 def schema(name: str, where: Path = CONTRACT) -> dict:
@@ -92,7 +92,7 @@ def test_each_command_line_runs_against_the_image_s_entry_point(entry):
     argv = container_argv(doc)
     assert argv[0] == "nils-bodypart" and argv.count("nils-bodypart") == 1, argv
     parsed = cli.parser().parse_args(argv[1:])
-    assert parsed.entry == entry.split("-")[1]
+    assert parsed.entry == entry.split("-", 1)[1]
 
 
 def test_the_results_and_proposals_are_the_contracts(synthetic):
@@ -146,7 +146,7 @@ def test_the_train_and_infer_descriptors_expose_what_a_small_set_and_a_pickle_ne
 
 
 def test_the_descriptors_pin_one_published_image_and_real_encoder_weights():
-    """A catalog takes a descriptor as it is: all four name the same image
+    """A catalog takes a descriptor as it is: all five name the same image
     by its registry manifest digest, and the embeddings name the encoders'
     weights as the image reports them (``python -m nils_bodypart.bake
     verify``), never the placeholders the descriptors started with. A
@@ -168,3 +168,75 @@ def test_the_descriptors_pin_one_published_image_and_real_encoder_weights():
     assert len(encoders) == 2 and len(set(encoders)) == 2, encoders
     for d in encoders:
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", d) and not placeholder.fullmatch(d), d
+
+
+def test_the_fusion_descriptor_declares_its_models_table_and_axes():
+    """Record 50: the certified model's descriptor opts in to the stacks'
+    headers, takes the encoder, the head and the optional coarse mode file
+    as models, declares the table the ask reads and both proposal axes."""
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load((HERE / "bodypart-infer-fusion" / "nils.job.yml").read_text())
+    x = doc["x-nils"]
+    assert x["input"] == {"layout": "stacks", "header": True}
+    assert [(t["id"], t["type"], t.get("optional", False)) for t in x["inputs"]] == [
+        ("encoder", "model", False), ("head", "model", False), ("coarse", "model", True)
+    ]
+    assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
+    assert x["needs"] == {"gpu": "none", "memory-gb": 2, "cores": 2, "cores-input": "threads"}
+    (table,) = x["outputs"]
+    assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
+    cols = {c["name"]: c.get("type", "number") for c in table["columns"]}
+    fine = [f"fine_{v}" for v in ("brain", "brain_neck", "neck", "spine", "chest", "other")]
+    coarse = [f"coarse_{v}" for v in ("head", "spine", "chest", "other")]
+    assert list(cols) == fine + ["fine_value", "fine_confidence", "fine_answers"] + coarse + [
+        "coarse_value", "coarse_confidence", "coarse_answers", "head_digest", "coarse_digest", "encoder_digest"
+    ]
+    assert all(cols[c] == "number" for c in fine + coarse + ["fine_confidence", "coarse_confidence"])
+    assert cols["fine_answers"] == cols["coarse_answers"] == "integer"
+    assert all(cols[c] == "text" for c in ("fine_value", "coarse_value", "head_digest", "coarse_digest", "encoder_digest"))
+    assert doc["tool-version"] == "0.2.0"
+    # the image offline: the command names no host, and the entry point
+    # parses what the engine writes
+    a = cli.parser().parse_args(container_argv(doc)[1:])
+    assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 2)
+
+
+def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
+    """results.json and its proposals validate, and each stack's table holds
+    every declared column by its own name (the engine folds a key and
+    compares it with the column's name)."""
+    pytest.importorskip("lightgbm")
+    pytest.importorskip("safetensors")
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    from . import fusion_data as fd
+
+    s = fd.write_stacks(tmp_path)
+    i = fd.write_inputs(tmp_path)
+    out = tmp_path / "out"
+    assert cli.main(["infer-fusion", "--stacks", str(s["stacks"]), "--source-root", str(s["source_root"]), "--inputs", str(i["inputs"]), "--output", str(out)]) == 0
+    r = json.loads((out / "results.json").read_text())
+    validator("results.schema.json").validate(r)
+    jsonschema.validate(r["proposals"], schema("proposals.schema.json"))
+    card = validator("card.schema.json", MODEL)
+    for c in i["cards"].values():
+        card.validate(c)
+    doc = yaml.safe_load((HERE / "bodypart-infer-fusion" / "nils.job.yml").read_text())
+    declared = {c["name"]: c.get("type", "number") for c in doc["x-nils"]["outputs"][0]["columns"]}
+    import re
+
+    fold = lambda k: re.sub(r"[^a-z0-9]+", "_", k.lower()).strip("_")  # noqa: E731
+    tables = sorted((out / "bodypart-fusion").glob("*.json"))
+    assert len(tables) == 3
+    for t in tables:
+        row = json.loads(t.read_text())
+        assert isinstance(row, dict)
+        found = {fold(k): v for k, v in row.items()}
+        for name, ty in declared.items():
+            v = found[name]
+            if ty == "text":
+                assert isinstance(v, str) and v
+            elif ty == "integer":
+                assert v in (0, 1) and not isinstance(v, bool)
+            else:
+                assert isinstance(v, float) and 0 <= v <= 1

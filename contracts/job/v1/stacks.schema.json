@@ -33,6 +33,59 @@
           "body_part": {"type": ["string", "null"], "description": "Record 43: the stack's body_part as the registry holds it now, or null where it has none"},
           "technique": {"type": ["string", "null"], "description": "Record 43: the stack's technique as the registry holds it now, or null"},
           "slices": {"type": "integer", "minimum": 0, "description": "Record 43: how many slices the files hold in order: one per single-frame file and the listed frames of a multi-frame file, so a pipeline picks slices without reading every header"},
+          "header": {
+            "type": "object",
+            "description": "Record 50: present on every stack only when the descriptor sets x-nils.input.header, so a pipeline reads the facts the registry derived from the headers without reading them again",
+            "required": ["fingerprint", "classification", "batch", "cohorts"],
+            "properties": {
+              "fingerprint": {
+                "type": ["object", "null"],
+                "description": "These columns of the stack's fingerprint row, each null where the row holds none; null when the stack has no fingerprint row",
+                "properties": {
+                  "manufacturer": {"type": ["string", "null"]},
+                  "modality": {"type": ["string", "null"]},
+                  "orientation": {"type": ["string", "null"]},
+                  "fov_x": {"type": ["number", "null"]},
+                  "fov_y": {"type": ["number", "null"]},
+                  "pixel_spacing_row": {"type": ["number", "null"]},
+                  "pixel_spacing_col": {"type": ["number", "null"]},
+                  "rows": {"type": ["integer", "null"]},
+                  "columns": {"type": ["integer", "null"]},
+                  "n_slices": {"type": ["integer", "null"]},
+                  "slice_span_mm": {"type": ["number", "null"]},
+                  "slice_thickness": {"type": ["number", "null"]},
+                  "spacing_between_slices": {"type": ["number", "null"]},
+                  "aspect_ratio": {"type": ["number", "null"]},
+                  "field_strength_normalized": {"type": ["number", "null"]},
+                  "magnetic_field_strength": {"type": ["number", "null"]},
+                  "receive_coil_name": {"type": ["string", "null"]},
+                  "text_series_description_ci": {"type": ["string", "null"]},
+                  "text_protocol_name_ci": {"type": ["string", "null"]},
+                  "text_sequence_name_ci": {"type": ["string", "null"]},
+                  "text_series_comments_ci": {"type": ["string", "null"]},
+                  "text_body_part_ci": {"type": ["string", "null"]}
+                }
+              },
+              "classification": {
+                "type": "object",
+                "description": "Every classification row of the stack, by axis: a list per axis, several rows for a multi-valued axis and one row with a null value for an axis decided to nothing",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["value", "confidence", "tier"],
+                    "properties": {
+                      "value": {"type": ["string", "null"]},
+                      "confidence": {"type": "number"},
+                      "tier": {"type": "string"}
+                    }
+                  }
+                }
+              },
+              "batch": {"type": ["string", "null"], "description": "The name of the ingest batch that first brought the stack in, or null"},
+              "cohorts": {"type": "array", "items": {"type": "string"}, "description": "The names of the cohorts the stack's subject is an open member of, sorted"}
+            }
+          },
           "files": {
             "type": "array",
             "items": {

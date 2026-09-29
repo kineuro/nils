@@ -24,7 +24,10 @@ The runner also gives, since the job contract's rulings of record 43,
 ``orientation`` (which slices inference reads; none means the centre three),
 the stack's ``body_part`` and ``technique`` as the registry holds them now
 (the seeder's pools and strata; none means every stack is in the null pool)
-and ``slices``, how many slices its files hold.
+and ``slices``, how many slices its files hold. A descriptor that opts in
+with ``x-nils.input.header`` (record 50) has each stack carry ``header``:
+the stack's fingerprint, its classification per axis, its first ingest
+batch and its subject's open cohorts, which stay in ``extra``.
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ class Stack:
     body_part: str | None = None
     technique: str | None = None
     extra: dict = field(default_factory=dict)
+    # The files as the manifest lists them, each with the frames that are
+    # the stack's (from 0), or None for every frame the file holds.
+    files: list[tuple[str, list[int] | None]] = field(default_factory=list)
 
     @property
     def num_slices(self) -> int:
@@ -130,6 +136,7 @@ def parse(
         counted = s.get("slices")
         counted = counted if isinstance(counted, int) and not isinstance(counted, bool) and counted > 0 else None
         slices: list[Slice] = []
+        listed: list[tuple[str, list[int] | None]] = []
         for f in files:
             src = int(f.get("source", 0))
             if src not in mounts:
@@ -139,8 +146,11 @@ def parse(
             if frames is None:
                 n = (counted or frames_of(path)) if len(files) == 1 else 1
                 slices.extend(Slice(path, i) for i in range(n))
+                listed.append((path, None))
             else:
-                slices.extend(Slice(path, i) for i in parse_frames(str(frames)))
+                chosen = parse_frames(str(frames))
+                slices.extend(Slice(path, i) for i in chosen)
+                listed.append((path, chosen))
         out.append(
             Stack(
                 stack_id=sid,
@@ -150,6 +160,7 @@ def parse(
                 body_part=s.get("body_part") or None,
                 technique=s.get("technique"),
                 extra={k: v for k, v in s.items() if k not in KNOWN},
+                files=listed,
             )
         )
     return out

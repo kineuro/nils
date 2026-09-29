@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nils-bodypart"
-version = "0.1.0"
-description = "v0's body-part detector as a NILS pipeline image: embed, seed, train and infer"
+version = "0.2.0"
+description = "v0's body-part detector and the certified body-part model as a NILS pipeline image: embed, seed, train, infer and infer-fusion"
 license = "AGPL-3.0-only"
 requires-python = ">=3.11"
 # What the rules, the head and the file formats need. The encoders' stack
@@ -21,6 +21,9 @@ dependencies = [
     "pylibjpeg>=2.0",
     "pylibjpeg-libjpeg>=2.1",
     "pylibjpeg-openjpeg>=2.3",
+    # the certified model (record 50): its head and its encoder's weights
+    "lightgbm>=4.6",
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]

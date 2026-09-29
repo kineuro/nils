@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # nils-bodypart: v0's body-part detector as a NILS pipeline image (record 43,
-# S5). One image, four entry points (embed, seed, train, infer), each with its
+# S5). One image, five entry points (embed, seed, train, infer, and
+# infer-fusion, the certified body-part model of record 50), each with its
 # descriptor beside this file.
 #
 # CPU by default, which is how it runs until the laptop has a rootless GPU
@@ -30,6 +31,11 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     NILS_BODYPART_HOME=/opt/nils-bodypart \
     HF_HOME=/opt/nils-bodypart/hf
+
+# LightGBM's OpenMP runtime, the one system library the image adds.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # torch first, in its own layer, from the index the build asks for.
 RUN pip install --index-url "${TORCH_INDEX}" "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"

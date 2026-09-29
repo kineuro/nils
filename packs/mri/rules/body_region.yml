@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The body region is the body part folded into four (record 50, one model
+# in two modes; axes/body_region.yml). It is derived, never read: every
+# rule here reads the body part the rules before it decided, and nothing
+# of the file's own words or numbers. Where the body part has a value the
+# region follows from it; where it has none, neither does the region, so a
+# stack whose words say nothing keeps no region rather than a guess.
+#
+# The rules run right after the body part's (pack.yml `order`), so they
+# read what it decided. An image model's coarse answer is not a rule: it
+# reaches a stack only as a proposal on this axis that a person commits,
+# and a committed decision outranks these rules in the classifier, as a
+# committed `chest` or `other` does on the body part.
+#
+# Because they read the body part alone, and at the stated tier, these
+# rules are what `nils pack derive` and a reader's derived line carry a
+# rater's body-part answer through: a campaign that asks the body part
+# derives the region from the answer, never from the file.
+#
+# The confidence. A rule states a number and cannot copy the body part's.
+# The body-part rules write 0.65 on every answer but one, the portrait
+# sagittal field of view at 0.60, so 0.65 is the highest a source is ever
+# written at, and the region is never weaker than the answer it folds. It
+# is not higher either: folding a fine answer does not make the reading
+# behind it any surer, and the coarse mode's better accuracy is the image
+# model's, which reaches a stack as a decision. `review.low_confidence`
+# holds the region at 0.65 as well, so a folded answer is no question of
+# its own: a doubtful region is a doubtful body part, and asked there.
+
+rule_set: body_region
+decides: [body_region]
+tiers: {stated: 0.65}
+
+order: [head, spine, chest, other]
+
+rules:
+
+  head:
+    clauses:
+      - {when: {any: [{axis: body_part, is: brain}, {axis: body_part, is: brain-neck}]}, cite: 'a brain, or a brain and neck', source: body_part}
+    set: {body_region: head}
+    why: 'a brain and a brain and neck are both the head'
+
+  # A cervical spine is a spine with the neck in view, and a neck is the
+  # neck's soft tissue or vessels; the coarse mode folds both into the
+  # spine (record 50, round 7's decisions).
+  spine:
+    clauses:
+      - {when: {any: [{axis: body_part, is: spine}, {axis: body_part, is: neck}]}, cite: 'a spine, or a neck', source: body_part}
+    set: {body_region: spine}
+    why: 'the coarse mode folds the neck into the spine'
+
+  chest:
+    clauses:
+      - {when: {axis: body_part, is: chest}, cite: 'a chest', source: body_part}
+    set: {body_region: chest}
+
+  other:
+    clauses:
+      - {when: {axis: body_part, is: other}, cite: 'another body part, or not known', source: body_part}
+    set: {body_region: other}

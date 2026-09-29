@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The four entry points: ``nils-bodypart embed | seed | train | infer``.
+"""The entry points: ``nils-bodypart embed | seed | train | infer |
+infer-fusion``.
 
 What a container meets (``contracts/job/v1``): ``/input/stacks.json``, the
 source places read-only under ``/source/<n>``, the typed inputs read-only
@@ -533,6 +534,100 @@ def cmd_infer(a: argparse.Namespace) -> Run:
     return run
 
 
+# ------------------------------------------------------------ infer-fusion
+
+
+def _fusion_table(sid: int, r, model) -> dict:
+    """A stack's scores as one JSON object: the declared columns flat, the
+    detail nested beside them (record 50)."""
+    from .fusion import column, rounded
+
+    doc: dict = {}
+    for mode in ("fine", "coarse"):
+        a = r.answers.get(mode)
+        if a is None:
+            continue
+        for v, p in a["probabilities"].items():
+            doc[f"{mode}_{column(v)}"] = round(p, 6)
+        doc[f"{mode}_value"] = a["value"]
+        doc[f"{mode}_confidence"] = round(a["confidence"], 6)
+        doc[f"{mode}_answers"] = int(a["answers"])
+    doc["head_digest"] = model.head_part.digest
+    if model.coarse_part is not None:
+        doc["coarse_digest"] = model.coarse_part.digest
+    doc["encoder_digest"] = model.enc.digest
+    doc["stack_id"] = sid
+    for mode, a in r.answers.items():
+        doc[mode] = {**a, "probabilities": rounded(a["probabilities"], 6), "confidence": round(a["confidence"], 6)}
+    doc["image"] = {v: round(float(p), 6) for v, p in zip(model.encoder.classes, r.image)}
+    doc["calibration"] = {"cohort": r.cohort, "matched_from": r.matched_from}
+    doc["models"] = model.refs()
+    doc["geometry"] = {k: r.meta[k] for k in ("modality", "K", "n_unique", "thick", "spacing", "nx", "ny", "nz", "oblique_deg", "ext_x", "ext_y", "ext_z", "fov_r", "fov_c", "span")}
+    doc["rules"] = r.rules
+    return doc
+
+
+def cmd_infer_fusion(a: argparse.Namespace) -> Run:
+    from . import fusion, volume
+
+    model = fusion.load(a.inputs)
+    params = {"threads": a.threads, "models": model.refs(), "preprocessing": volume.PREPROCESSING}
+    run = Run("bodypart-infer-fusion", a.output, params, "cpu")
+    stacks = manifest.load(a.stacks, source_root=a.source_root)
+
+    def one(st: manifest.Stack):
+        try:
+            return st, fusion.predict(model, st.files, st.extra.get("header")), None
+        except fusion.NoFingerprint:
+            return st, None, (SKIPPED, "no fingerprint row: the model abstains")
+        except volume.NoGeometry:
+            return st, None, (SKIPPED, "no geometry (position, orientation and pixel spacing): the model abstains")
+        except volume.Unreadable:
+            return st, None, (FAILED, "no file of the stack could be read")
+        except Exception as e:  # noqa: BLE001 - a unit fails, the run goes on; never a path
+            logger.warning("a stack failed: %s", type(e).__name__)
+            return st, None, (FAILED, f"the stack could not be scored ({type(e).__name__})")
+
+    counts = {"answered_fine": 0, "answered_coarse": 0, "no_fingerprint": 0, "no_geometry": 0, "failed": 0, "cohort_calibrated": 0}
+    per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
+    with ThreadPoolExecutor(max_workers=max(1, a.threads)) as pool:
+        done = list(pool.map(one, stacks))
+    for st, r, why in done:
+        if r is None:
+            status, error = why
+            run.units.append(Unit(st.unit, status=status, error=error))
+            counts["failed" if status == FAILED else ("no_fingerprint" if "fingerprint" in error else "no_geometry")] += 1
+            continue
+        doc = _fusion_table(st.stack_id, r, model)
+        metrics = {}
+        for mode, a_ in r.answers.items():
+            metrics[f"{mode}_value"] = a_["value"]
+            metrics[f"{mode}_confidence"] = round(a_["confidence"], 4)
+            metrics[f"{mode}_answers"] = bool(a_["answers"])
+            counts[f"answered_{mode}"] += int(a_["answers"])
+            pv = per_value[mode]
+            pv[a_["value"]] = pv.get(a_["value"], 0) + 1
+        counts["cohort_calibrated"] += int(r.cohort is not None)
+        u = Unit(st.unit, metrics=metrics)
+        body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
+        u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
+        run.units.append(u)
+        # Every stack with an answer is proposed, also below the threshold:
+        # the engine stages at or above the card's threshold and makes the
+        # rest review items.
+        f = r.answers["fine"]
+        run.proposals.append(
+            {"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.proposed(f), "model_digest": model.head_part.digest}
+        )
+        c = r.answers.get("coarse")
+        if c is not None:
+            run.proposals.append(
+                {"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c), "model_digest": model.coarse_part.digest}
+            )
+    run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value}
+    return run
+
+
 # --------------------------------------------------------------------- main
 
 
@@ -595,10 +690,17 @@ def parser() -> argparse.ArgumentParser:
     i.add_argument("--head", type=Path, required=True, help="the head's folder")
     i.add_argument("--threshold", type=float, default=0.70)
     i.add_argument("--allow-pickle", type=_bool, default=False)
+
+    f = sub.add_parser("infer-fusion", help="the certified body-part model: body_part and body_region per stack")
+    f.add_argument("--stacks", type=Path, default=Path("/input/stacks.json"), help="the stacks layout's manifest, with each stack's header")
+    f.add_argument("--source-root", type=Path, default=None, help="where /source/<n> is, when not at /source")
+    f.add_argument("--inputs", type=Path, default=Path("/inputs"), help="the typed inputs and their manifest.json")
+    f.add_argument("--output", type=Path, default=Path("/output"))
+    f.add_argument("--threads", type=int, default=2, help="stacks read at once")
     return p
 
 
-ENTRIES = {"embed": cmd_embed, "seed": cmd_seed, "train": cmd_train, "infer": cmd_infer}
+ENTRIES = {"embed": cmd_embed, "seed": cmd_seed, "train": cmd_train, "infer": cmd_infer, "infer-fusion": cmd_infer_fusion}
 
 
 def main(argv: list[str] | None = None) -> int:
