@@ -434,8 +434,9 @@ fn compressed_stacks_build_and_the_ones_that_cannot_are_counted_by_reason() {
         "2",
     ];
     let out: Value = serde_json::from_str(ok(&lab.home, &args).trim()).unwrap();
-    assert_eq!(out["stacks"], 6, "{out}");
-    assert_eq!(out["built"], 4, "{out}");
+    // series 7, an 8-bit colour map, native and in JPEG 2000, builds as grey
+    assert_eq!(out["stacks"], 7, "{out}");
+    assert_eq!(out["built"], 5, "{out}");
     assert_eq!(out["failed"], 2, "{out}");
     assert_eq!(
         out["failures_by_reason"],
@@ -444,8 +445,8 @@ fn compressed_stacks_build_and_the_ones_that_cannot_are_counted_by_reason() {
     );
     let src = lab._src.path().to_str().unwrap().to_string();
     assert!(!out.to_string().contains(&src), "{out}");
-    let manifests: Vec<Value> = (1..=6).filter_map(|s| lab.manifest(s)).collect();
-    assert_eq!(manifests.len(), 4);
+    let manifests: Vec<Value> = (1..=7).filter_map(|s| lab.manifest(s)).collect();
+    assert_eq!(manifests.len(), 5);
     let lossy: Vec<&Value> = manifests.iter().filter(|m| m["lossy"] == true).collect();
     assert_eq!(lossy.len(), 1, "{manifests:?}");
     assert_eq!(lossy[0]["dtype"], "uint16");
@@ -475,6 +476,10 @@ const CURATOR: &str = "a-curator-token-of-its-length";
 
 impl Server {
     fn start(home: &TempDir) -> Server {
+        Server::start_with(home, 1)
+    }
+
+    fn start_with(home: &TempDir, workers: usize) -> Server {
         let tokens = [
             format!("{OPERATOR}=ops@lab:operator"),
             format!("{READER}=lou@lab:reader"),
@@ -489,7 +494,7 @@ impl Server {
                 "--bind",
                 "127.0.0.1:0",
                 "--workers",
-                "1",
+                &workers.to_string(),
                 "--worker",
                 "--auth",
                 "token",
@@ -774,6 +779,12 @@ fn multi_frame_stacks_build_every_frame_and_render_on_every_axis() {
 /// A registry of `n` small stacks with their pyramids built, as a grid of
 /// the viewer asks for them.
 fn grid(n: usize) -> (TempDir, TempDir, TempDir) {
+    grid_on(n, None)
+}
+
+/// [`grid`], its registry in a Postgres schema of its own where `postgres`
+/// names the connection string and the schema.
+fn grid_on(n: usize, postgres: Option<(&str, &str)>) -> (TempDir, TempDir, TempDir) {
     let home = TempDir::new("pyramids-grid-home");
     let src = TempDir::new("pyramids-grid-src");
     let work = TempDir::new("pyramids-grid-work");
@@ -803,7 +814,23 @@ fn grid(n: usize) -> (TempDir, TempDir, TempDir) {
         .write_all(b"a grid key\n")
         .unwrap();
     assert!(child.wait().unwrap().success());
-    ok(&home, &["init", "--key", "k"]);
+    match postgres {
+        Some((dsn, schema)) => ok(
+            &home,
+            &[
+                "init",
+                "--key",
+                "k",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+            ],
+        ),
+        None => ok(&home, &["init", "--key", "k"]),
+    };
     ok(
         &home,
         &[
@@ -954,4 +981,74 @@ fn a_gallery_s_picture_is_three_planes_small_and_kept() {
     // a reader without the pixels' detail reads none
     let (status, _) = server.bytes("/api/instances/1/thumb", READER);
     assert_eq!(status, 403);
+}
+
+/// A gallery's pictures after the registry's database restarted under a
+/// running engine: each handler thread held a connection the restart had
+/// closed, and kept it, so every first look at a stack (which writes the
+/// open to the audit) answered 500 on those threads until the engine was
+/// restarted, and a gallery's pictures came blank until a reload happened
+/// to land on a sound thread. The connections are opened again. Postgres
+/// only: set NILS_TEST_POSTGRES_DSN.
+#[test]
+fn a_gallery_s_pictures_come_after_the_database_restarts() {
+    let Ok(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN") else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; skipped");
+        return;
+    };
+    const GRID: usize = 12;
+    const SCHEMA: &str = "pyramids_restart";
+    let mut admin = nils_registry::Store::connect_postgres(&dsn, "public").unwrap();
+    admin
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+    let (home, _src, _work) = grid_on(GRID, Some((&dsn, SCHEMA)));
+    let server = Server::start_with(&home, 3);
+    // every thread opens its connection
+    for s in 1..=3 {
+        let (status, _) = server.bytes(&format!("/api/instances/{s}/thumb"), OPERATOR);
+        assert_eq!(status, 200, "stack {s}");
+    }
+    // the database closes every connection but this one, as a restart does
+    admin
+        .batch(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid()",
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    // the pictures not looked at yet, each a first look, all at once
+    let port = server.port;
+    let asked: Vec<_> = (4..=GRID)
+        .map(|s| {
+            std::thread::spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                let head = format!(
+                    "GET /api/instances/{s}/thumb HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {OPERATOR}\r\n\r\n"
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                (s, text.split_whitespace().nth(1).unwrap_or("").to_string(), text)
+            })
+        })
+        .collect();
+    for a in asked {
+        let (s, status, text) = a.join().unwrap();
+        assert_eq!(
+            status,
+            "200",
+            "stack {s}: {}",
+            text.chars().take(300).collect::<String>()
+        );
+    }
+    drop(server);
+    admin
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
 }

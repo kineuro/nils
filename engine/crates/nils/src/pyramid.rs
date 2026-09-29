@@ -147,7 +147,8 @@ pub struct Manifest {
     pub levels: u32,
     /// `[nz, ny, nx]` at level 0.
     pub shape: [u32; 3],
-    /// `[dz, dy, dx]` in millimetres.
+    /// `[dz, dy, dx]` in millimetres; `dz` is the files' thickness where
+    /// the planes all sit at one place, never zero.
     pub spacing: [f64; 3],
     pub dtype: String,
     /// A stored value is the modality's value as `stored * slope +
@@ -217,8 +218,8 @@ pub struct Manifest {
     /// the planes' positions: along the normal by `spacing[0]` for most
     /// stacks, and with a part in the plane where the acquisition was
     /// sheared. Absent where the planes do not say where they are, for a
-    /// single plane, and in a manifest from before, which read as along
-    /// the normal.
+    /// single plane, where the planes all sit at one place, and in a
+    /// manifest from before, which read as along the normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<[f64; 3]>,
 }
@@ -635,9 +636,67 @@ fn jpeg_ls_trimmed(frame: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One 8-bit colour frame as one grey sample a pixel: its luma (ITU-R
+/// BT.601, as YBR_FULL's Y is made), or its Y where the frame is in YBR
+/// as it stands. `planar` frames hold every pixel's first sample, then
+/// every second, then every third; the rest are interleaved.
+fn grey_of(frame: &[u8], planar: bool, ybr: bool) -> Vec<u8> {
+    let n = frame.len() / 3;
+    let at = |i: usize, c: usize| -> f64 {
+        (if planar {
+            frame[c * n + i]
+        } else {
+            frame[3 * i + c]
+        }) as f64
+    };
+    (0..n)
+        .map(|i| {
+            if ybr {
+                at(i, 0) as u8
+            } else {
+                (0.299 * at(i, 0) + 0.587 * at(i, 1) + 0.114 * at(i, 2)).round() as u8
+            }
+        })
+        .collect()
+}
+
+/// The words of 16-bit samples with fewer bits stored, as their stored bits
+/// alone: the bits between `high` and the stored ones are no part of the
+/// value (DICOM PS3.5 8.1.1), and a file may carry something else there,
+/// such as an overlay plane written into the unused high bits of a scout.
+/// Read as they are, those bits put a value of 4096 and more under the
+/// overlay's lines, the window taken from the stack's percentiles opened
+/// that wide, and the picture read black. Unsigned samples keep their
+/// stored bits; signed ones are extended from their sign bit, which a JPEG
+/// lossless or JPEG-LS codec hands back unextended.
+fn fit_to_stored(pixels: &mut [u8], stored: u16, high: u16, signed: bool) {
+    if !(1..16).contains(&stored) {
+        return;
+    }
+    // the stored bits end at the high bit; a high bit that is not past them
+    // is read as the usual stored - 1
+    let shift = if high >= stored && high < 16 {
+        high + 1 - stored
+    } else {
+        0
+    };
+    if signed {
+        if shift > 0 {
+            for px in pixels.as_chunks_mut::<2>().0 {
+                *px = (u16::from_le_bytes(*px) >> shift).to_le_bytes();
+            }
+        }
+        extend_sign(pixels, stored);
+        return;
+    }
+    let mask = (1u16 << stored) - 1;
+    for px in pixels.as_chunks_mut::<2>().0 {
+        *px = ((u16::from_le_bytes(*px) >> shift) & mask).to_le_bytes();
+    }
+}
+
 /// The words of 16-bit signed samples with fewer bits stored, extended
-/// from their sign bit: a JPEG lossless or JPEG-LS codec hands back the
-/// stored bits alone, where the native form has them extended already.
+/// from their sign bit.
 fn extend_sign(pixels: &mut [u8], stored: u16) {
     if !(1..16).contains(&stored) {
         return;
@@ -690,11 +749,17 @@ fn read_frames(
     }
     let signed = int(obj, tags::PIXEL_REPRESENTATION).unwrap_or(0) == 1;
     let samples = int(obj, tags::SAMPLES_PER_PIXEL).unwrap_or(1);
-    if samples != 1 {
+    // record 50, the second gold campaign: a colour image of eight bits (a
+    // synthetic MR map written as RGB or YBR) is read as its grey, where
+    // its stack failed and its item showed no picture
+    let colour = samples == 3 && bits == 8;
+    if samples != 1 && !colour {
         return Err(format!(
-            "{samples} samples per pixel; the pyramid reads one"
+            "{samples} samples per pixel at {bits} bits; the pyramid reads one, or three at eight bits"
         ));
     }
+    let photometric = text(obj, tags::PHOTOMETRIC_INTERPRETATION).unwrap_or_default();
+    let planar = int(obj, tags::PLANAR_CONFIGURATION).unwrap_or(0) == 1;
     let stored = int(obj, tags::BITS_STORED).unwrap_or(bits as i64) as u16;
     let lossy =
         lossy_syntax(&ts) || text(obj, tags::LOSSY_IMAGE_COMPRESSION).is_some_and(|s| s == "01");
@@ -720,7 +785,7 @@ fn read_frames(
             .collect::<Result<_, _>>()?,
     };
     let multiframe = count > 1;
-    let need = (rows * cols) as usize * (bits as usize / 8);
+    let need = (rows * cols) as usize * (bits as usize / 8) * if colour { 3 } else { 1 };
     // the pixels of each wanted frame, in the order of `frames`
     let pixels: Vec<Vec<u8>> = if NATIVE.contains(&ts.as_str()) {
         let all = pixel_data.to_bytes().map_err(|e| e.to_string())?;
@@ -762,13 +827,7 @@ fn read_frames(
                 .map(|part| {
                     s.spawn(move || {
                         part.iter()
-                            .map(|stream| {
-                                let mut px = decode_frame(header, ts, stream.clone())?;
-                                if signed && bits == 16 {
-                                    extend_sign(&mut px, stored);
-                                }
-                                Ok(px)
-                            })
+                            .map(|stream| decode_frame(header, ts, stream.clone()))
                             .collect()
                     })
                 })
@@ -792,6 +851,32 @@ fn read_frames(
             "pixel data holds {} bytes, the header says {need}",
             short.len()
         ));
+    }
+    // a colour frame as its grey: a native one as the file has it, a
+    // decoded one as the codec hands it back, interleaved and in RGB
+    let native = NATIVE.contains(&ts.as_str());
+    let pixels: Vec<Vec<u8>> = if colour {
+        pixels
+            .iter()
+            .map(|p| {
+                grey_of(
+                    &p[..need],
+                    native && planar,
+                    native && photometric.starts_with("YBR_FULL"),
+                )
+            })
+            .collect()
+    } else {
+        pixels
+    };
+    let need = if colour { need / 3 } else { need };
+    // the stored bits alone, of a native frame as of a decoded one
+    let mut pixels = pixels;
+    if bits == 16 && (1..16).contains(&stored) {
+        let high = int(obj, tags::HIGH_BIT).map_or(stored - 1, |h| h.clamp(0, 15) as u16);
+        for p in &mut pixels {
+            fit_to_stored(&mut p[..need], stored, high, signed);
+        }
     }
     // the file's own values, which a frame's functional groups override
     let shared = first_item(obj, tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE);
@@ -878,6 +963,9 @@ fn read_frames(
     }
     Ok(out)
 }
+
+/// Planes closer than this along the stack, in mm, are at one place.
+const COINCIDENT_MM: f64 = 1e-3;
 
 /// The files of one stack into one volume, in order, every frame of each.
 #[cfg(test)]
@@ -1002,12 +1090,15 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
         }
     }
     // measured along the normal where the planes say where they are, else
-    // the files' Spacing Between Slices or Slice Thickness
-    let dz = if nz > 1 && placed {
-        ((slices[nz as usize - 1].z - slices[0].z) / (nz as f64 - 1.0)).abs()
-    } else {
-        slices[0].thickness
-    };
+    // the files' Spacing Between Slices or Slice Thickness. Planes that all
+    // sit at one place (a scout taken again and again in one session, which
+    // the stack groups) measure nothing: a spacing of zero made the viewer's
+    // volume flat, and the three planes read black, so they are a
+    // thickness apart, and the frame still says they are not evenly spaced.
+    let measured = (nz > 1 && placed)
+        .then(|| ((slices[nz as usize - 1].z - slices[0].z) / (nz as f64 - 1.0)).abs())
+        .filter(|d| *d > COINCIDENT_MM);
+    let dz = measured.unwrap_or(slices[0].thickness);
     let burned_in = slices.iter().find_map(|s| s.burned_in);
     let geometry = if oriented {
         let first = slices[0].orientation.expect("every plane is oriented");
@@ -1031,14 +1122,18 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
         let last = slices[nz as usize - 1]
             .position
             .expect("every plane has a position");
-        let step = (nz > 1).then(|| {
-            let gaps = nz as f64 - 1.0;
-            [
-                (last[0] - origin[0]) / gaps,
-                (last[1] - origin[1]) / gaps,
-                (last[2] - origin[2]) / gaps,
-            ]
-        });
+        // none where the planes sit at one place: a step of nothing is no
+        // direction to read the planes along
+        let step = (nz > 1)
+            .then(|| {
+                let gaps = nz as f64 - 1.0;
+                [
+                    (last[0] - origin[0]) / gaps,
+                    (last[1] - origin[1]) / gaps,
+                    (last[2] - origin[2]) / gaps,
+                ]
+            })
+            .filter(|s| (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt() > COINCIDENT_MM);
         Some(Geometry {
             orientation: first,
             origin,
@@ -1189,8 +1284,13 @@ fn write_plane(
     Ok(bytes)
 }
 
+/// The shares of a sample at its largest value that make a plateau the
+/// window leaves out: more is the picture itself (a stack of two values).
+const PLATEAU: f64 = 0.005;
+const PLATEAU_MOST: f64 = 0.1;
+
 /// The window the viewer opens at: the first and ninety-ninth percentiles
-/// of a sample of planes.
+/// of a sample of planes, less a plateau at the top.
 fn window(vol: &Volume) -> Window {
     let nz = vol.shape[0] as usize;
     let step = (nz / 16).max(1);
@@ -1214,6 +1314,15 @@ fn window(vol: &Volume) -> Window {
         .map(|s| (*s as i64 - vol.intercept) as f64 * slope + b)
         .collect();
     values.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    // a plateau at the top, a share of the planes at the very largest value
+    // (a reformat's fill, a clipped field), is no part of the picture: left
+    // in, it set the ninety-ninth percentile and the rest read black
+    let top = values[values.len() - 1];
+    let below = values.partition_point(|v| *v < top);
+    let share = (values.len() - below) as f64 / values.len() as f64;
+    if (PLATEAU..=PLATEAU_MOST).contains(&share) {
+        values.truncate(below);
+    }
     let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize];
     let (p1, p99) = (at(0.01), at(0.99));
     Window {
@@ -1341,6 +1450,14 @@ pub fn build(
     };
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     std::fs::write(root.join("manifest.json"), text).map_err(|e| e.to_string())?;
+    // a gallery's picture of the stack, drawn now while the planes are warm:
+    // a gallery opened on a campaign just built asks for hundreds at once,
+    // and each first look otherwise decodes up to a hundred planes. A
+    // picture that cannot be drawn here is drawn at the first look.
+    let _ = thumb_cached(root, &manifest, THUMB_SIZE, 3, false);
+    if manifest.annotation.burned_in {
+        let _ = thumb_cached(root, &manifest, THUMB_SIZE, 3, true);
+    }
     Ok(manifest)
 }
 
@@ -1776,7 +1893,11 @@ pub fn thumb_cached(
     }
     let bytes = thumb(root, m, size, planes, held)?;
     if std::fs::create_dir_all(root.join("thumbs")).is_ok() {
-        let part = path.with_extension(format!("jpg.{}", std::process::id()));
+        // a part of its own per drawing: two doors drawing one picture at
+        // once in one process would otherwise write one part file together
+        static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let part = path.with_extension(format!("jpg.{}.{n}", std::process::id()));
         if std::fs::write(&part, &bytes).is_ok() {
             std::fs::rename(&part, &path).ok();
         }
@@ -2773,6 +2894,197 @@ mod tests {
         })
         .unwrap();
         assert_eq!((old.slope, old.intercept), (1.0, -32768.0));
+    }
+
+    /// A scout as a site's archive holds it, the one that read black in a
+    /// gold campaign: the same coronal plane taken three times in one
+    /// session, so every plane sits at one place, 12 bits stored of 16, and
+    /// two of the three with an overlay's lines written into bit 12, the
+    /// first unused bit. `overlay` says which planes carry it.
+    fn scout(dir: &nils_dicom::synth::TempDir, overlay: [bool; 3]) -> Vec<PathBuf> {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields};
+        let (ny, nx) = (32u32, 32u32);
+        let mut files = Vec::new();
+        for (z, lines) in overlay.iter().enumerate() {
+            let sop = format!("1.2.3.10.{}", z + 1);
+            let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+            let mut e = synth::minimal_mr("1.2.3", "1.2.3.10", &sop);
+            e.push(synth::text(
+                tags::INSTANCE_NUMBER,
+                VR::IS,
+                &(z * 40 + 3).to_string(),
+            ));
+            e.push(synth::text(
+                tags::IMAGE_POSITION_PATIENT,
+                VR::DS,
+                "-150\\0\\150",
+            ));
+            e.push(synth::text(
+                tags::IMAGE_ORIENTATION_PATIENT,
+                VR::DS,
+                "1\\0\\0\\0\\0\\-1",
+            ));
+            e.push(synth::text(
+                tags::PIXEL_SPACING,
+                VR::DS,
+                "1.171875\\1.171875",
+            ));
+            e.push(synth::text(tags::SLICE_THICKNESS, VR::DS, "10"));
+            e.push(synth::text(tags::WINDOW_CENTER, VR::DS, "185"));
+            e.push(synth::text(tags::WINDOW_WIDTH, VR::DS, "435"));
+            e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+            e.push(us(tags::ROWS, ny as u16));
+            e.push(us(tags::COLUMNS, nx as u16));
+            e.push(us(tags::BITS_ALLOCATED, 16));
+            e.push(us(tags::BITS_STORED, 12));
+            e.push(us(tags::HIGH_BIT, 11));
+            e.push(us(tags::PIXEL_REPRESENTATION, 0));
+            // a head of 150 to 400 on a background of 5, and the overlay's
+            // lines, one row in eight, in bit 12
+            let px: Vec<u8> = (0..ny)
+                .flat_map(|y| (0..nx).map(move |x| (y, x)))
+                .flat_map(|(y, x)| {
+                    let inside = (8..24).contains(&y) && (8..24).contains(&x);
+                    let v: u16 = if inside { 150 + (x as u16 - 8) * 16 } else { 5 };
+                    let v = if *lines && y % 8 == 0 { v | 0x1000 } else { v };
+                    v.to_le_bytes()
+                })
+                .collect();
+            e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, px));
+            files.push(dir.file(&sop, &synth::part10(&MetaFields::mr(&sop), &e, true)));
+        }
+        files
+    }
+
+    #[test]
+    fn a_scout_taken_again_reads_its_stored_bits_and_is_not_flat() {
+        let dir = nils_dicom::synth::TempDir::new("pyramid-scout");
+        let files = scout(&dir, [false, true, true]);
+        let vol = read_files(&files).unwrap();
+        // the bits past the stored twelve are no part of a value
+        assert!(
+            vol.data.iter().all(|v| *v < 4096),
+            "{:?}",
+            vol.data.iter().max()
+        );
+        let root = dir.path().join("pyramid");
+        let m = build(&vol, 10, &root, 2, None).unwrap();
+        // the window opens on the head, not on the overlay: before, the
+        // lines' 4096 and more made it 0 to about 4250, and the head of
+        // 150 to 400 was drawn in the darkest tenth of the grey
+        assert!(m.window.percentiles[1] <= 400, "{:?}", m.window);
+        let (w, h, plane) = decode_plane(&root, &m, 0, m.shape[0] / 2).unwrap();
+        let jpeg = render_jpeg(
+            w,
+            h,
+            &plane,
+            m.slope,
+            m.intercept,
+            m.window.center,
+            m.window.width,
+            false,
+        )
+        .unwrap();
+        let img = image::load_from_memory(&jpeg).unwrap().to_luma8();
+        let head = (8..24).flat_map(|y| (8..24).map(move |x| (x, y)));
+        let mean = head
+            .map(|(x, y)| img.get_pixel(x, y).0[0] as f64)
+            .sum::<f64>()
+            / 256.0;
+        assert!(mean > 100.0, "the head reads {mean} of 255");
+        // three planes at one place measure no spacing: they are a
+        // thickness apart, never zero, with no step, and not evenly spaced
+        assert_eq!(m.spacing[0], 10.0);
+        assert!(m.step.is_none(), "{:?}", m.step);
+        assert_eq!(m.frame.map(|f| f.evenly_spaced), Some(false));
+        // the gallery's picture is drawn with the pyramid
+        assert!(
+            root.join("thumbs")
+                .join(format!("{THUMB_SIZE}-3.jpg"))
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn a_colour_map_reads_as_its_grey_native_and_in_jpeg_2000() {
+        // the fixtures' series 7: an 8-bit RGB plane, native and lossless
+        // JPEG 2000 named YBR_RCT, as a synthetic MR map is archived
+        let vol = read_files(&fixtures(&["g0", "g1"])).unwrap();
+        assert_eq!(vol.shape, [2, 48, 64]);
+        for z in 0..2usize {
+            for (y, x) in [(0usize, 0usize), (10, 20), (47, 63), (30, 5)] {
+                let (r, g, b) = (10 + 3 * x + z, 200 - 3 * y, (5 * x + 7 * y) % 256);
+                let luma = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64).round() as u16;
+                assert_eq!(vol.plane(z)[y * 64 + x], luma, "plane {z} at {x},{y}");
+            }
+        }
+        // interleaved and planar alike, and Y as it stands in YBR
+        assert_eq!(grey_of(&[10, 20, 30, 40, 50, 60], false, false), [18, 48]);
+        assert_eq!(grey_of(&[10, 40, 20, 50, 30, 60], true, false), [18, 48]);
+        assert_eq!(grey_of(&[10, 20, 30, 40, 50, 60], false, true), [10, 40]);
+    }
+
+    #[test]
+    fn a_plateau_at_the_top_does_not_set_the_window() {
+        // a reformat of tissue from 0 to 600 whose fill outside the head is
+        // 4095, a twentieth of the plane: the window opened at 0 to 4095
+        // and the head read in the darkest seventh of the grey
+        let (ny, nx) = (64u32, 64u32);
+        let data: Vec<u16> = (0..ny * nx)
+            .map(|i| if i % 20 == 0 { 4095 } else { (i % 601) as u16 })
+            .collect();
+        let vol = Volume {
+            shape: [1, ny, nx],
+            spacing: [1.0, 1.0, 1.0],
+            intercept: 0,
+            rescale: (1.0, 0.0),
+            rescale_varies: false,
+            burned_in: None,
+            data,
+            geometry: None,
+            lossy: false,
+            syntaxes: Vec::new(),
+            order: ORDER_POSITION,
+            multiframe_files: 0,
+        };
+        let w = window(&vol);
+        assert!(w.percentiles[1] <= 600, "{w:?}");
+        // a picture that merely reaches its largest value keeps it
+        let mut ramp = vol;
+        ramp.data = (0..ny * nx).map(|i| (i % 4096) as u16).collect();
+        assert!(window(&ramp).percentiles[1] > 4000);
+    }
+
+    #[test]
+    fn stored_bits_are_read_alone_and_a_signed_sample_keeps_its_sign() {
+        let words = |v: &[u16]| v.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
+        let back = |b: &[u8]| {
+            b.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|w| u16::from_le_bytes(*w))
+                .collect::<Vec<u16>>()
+        };
+        // unsigned, 12 of 16: an overlay in bit 12 and bit 14 goes
+        let mut px = words(&[0x1000 | 300, 0x4000 | 4095, 7]);
+        fit_to_stored(&mut px, 12, 11, false);
+        assert_eq!(back(&px), [300, 4095, 7]);
+        // signed, 12 of 16: -5 unextended and -5 with an overlay bit
+        let mut px = words(&[0x0ffb, 0x1ffb, 12]);
+        fit_to_stored(&mut px, 12, 11, true);
+        assert_eq!(
+            back(&px).iter().map(|w| *w as i16).collect::<Vec<_>>(),
+            [-5, -5, 12]
+        );
+        // a high bit past the stored bits: 12 stored at bits 4 to 15
+        let mut px = words(&[300 << 4 | 0xf]);
+        fit_to_stored(&mut px, 12, 15, false);
+        assert_eq!(back(&px), [300]);
+        // all sixteen stored: nothing to do
+        let mut px = words(&[0xffff]);
+        fit_to_stored(&mut px, 16, 15, false);
+        assert_eq!(back(&px), [0xffff]);
     }
 
     #[test]

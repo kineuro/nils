@@ -27,6 +27,9 @@ grep -v "^#" planes.txt | while read -r name _ _ _ _ how; do
     jpeg-ls-near) dcmcjpls +en +md 2 "$in" "$out" ;;
     j2k) gdcmconv --j2k "$in" "$out" ;;
     j2k-lossy) gdcmconv --j2k --lossy -q 30 "$in" "$out" ;;
+    # GDCM keeps the RGB name on a colour codestream it writes with the
+    # colour transform; an archive's file names it as DICOM has it
+    j2k-ybr-rct) gdcmconv --j2k "$in" "$out" && dcmodify -nb -m "(0028,0004)=YBR_RCT" "$out" ;;
     rle) dcmcrle "$in" "$out" ;;
     deflate) dcmconv +td "$in" "$out" ;;
     big-endian) dcmconv +tb "$in" "$out" ;;

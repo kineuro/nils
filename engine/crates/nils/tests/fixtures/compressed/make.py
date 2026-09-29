@@ -24,6 +24,10 @@ def value(kind, x, y, z):
         return wave - 2048
     if kind == "u8":
         return 20 + 2 * x + 2 * y + 5 * z
+    if kind == "rgb8":
+        # a colour map as a scanner's synthetic MR writes one: red, green
+        # and blue each a ramp of their own
+        return (10 + 3 * x + z, 200 - 3 * y, (5 * x + 7 * y) % 256)
     raise ValueError(kind)
 
 
@@ -33,6 +37,7 @@ FORMS = {
     "s16": (16, 16, 1),
     "s12": (16, 12, 1),
     "u8": (8, 8, 0),
+    "rgb8": (8, 8, 0),
 }
 
 
@@ -69,7 +74,11 @@ def plane(out, name, series, kind, z, intercept):
     for y in range(ROWS):
         for x in range(COLS):
             v = value(kind, x, y, z)
-            px += struct.pack("<B" if bits == 8 else ("<h" if signed else "<H"), v)
+            if kind == "rgb8":
+                px += bytes(v)
+            else:
+                px += struct.pack("<B" if bits == 8 else ("<h" if signed else "<H"), v)
+    samples, photometric = (3, b"RGB") if kind == "rgb8" else (1, b"MONOCHROME2")
     elems = [
         elem(0x0008, 0x0008, b"CS", b"ORIGINAL\\PRIMARY"),
         elem(0x0008, 0x0016, b"UI", b"1.2.840.10008.5.1.4.1.1.4"),
@@ -83,8 +92,9 @@ def plane(out, name, series, kind, z, intercept):
         elem(0x0020, 0x0013, b"IS", str(z + 1).encode()),
         elem(0x0020, 0x0032, b"DS", f"0\\0\\{z * 2}".encode()),
         elem(0x0020, 0x0037, b"DS", b"1\\0\\0\\0\\1\\0"),
-        elem(0x0028, 0x0002, b"US", us(1)),
-        elem(0x0028, 0x0004, b"CS", b"MONOCHROME2"),
+        elem(0x0028, 0x0002, b"US", us(samples)),
+        elem(0x0028, 0x0004, b"CS", photometric),
+        *([elem(0x0028, 0x0006, b"US", us(0))] if samples == 3 else []),
         elem(0x0028, 0x0010, b"US", us(ROWS)),
         elem(0x0028, 0x0011, b"US", us(COLS)),
         elem(0x0028, 0x0030, b"DS", b"1\\1"),
