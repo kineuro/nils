@@ -123,6 +123,9 @@ pub enum Action {
     /// the voters' readings, and a cause given for an axis of an answer.
     CampaignAb,
     CampaignCause,
+    /// Post-contrast gold, pair mode: a pair campaign made, with its counts
+    /// and the seed's digest.
+    CampaignPair,
     /// Record 42 S7: a label set written out with its digest, and labels
     /// from v0 imported as person decisions.
     LabelsExport,
@@ -210,6 +213,7 @@ impl Action {
             Action::CampaignRaters => "campaign.raters",
             Action::CampaignAb => "campaign.ab",
             Action::CampaignCause => "campaign.cause",
+            Action::CampaignPair => "campaign.pair",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
@@ -257,6 +261,7 @@ impl Action {
                 | Action::CampaignRaters
                 | Action::CampaignAb
                 | Action::CampaignCause
+                | Action::CampaignPair
                 | Action::LabelsExport
                 | Action::LabelsSeal
                 | Action::LabelsCertificate

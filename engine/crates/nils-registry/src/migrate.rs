@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 73;
+pub const SCHEMA_VERSION: i64 = 74;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,7 +346,22 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 73,
         apply: a_campaign_settles_candidates_blind,
     },
+    Migration {
+        version: 74,
+        apply: a_campaign_shows_two_stacks_side_by_side,
+    },
 ];
+
+/// Post-contrast gold, pair mode: an item of a pair campaign shows two
+/// stacks side by side, and which is on which side is kept in a table of
+/// its own. A registry from before gains it empty, since no campaign before
+/// asked of pairs.
+fn a_campaign_shows_two_stacks_side_by_side(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["campaign_pair_side"])
+}
 
 /// Record 48, the reference read by judges: an A/B campaign's items carry
 /// the voters' candidates, an answer on one says what it chose on each

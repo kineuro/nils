@@ -2281,6 +2281,25 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["answer_id"])
         .index(&["campaign_id"]),
+        // Post-contrast gold, pair mode (P6 of the post-contrast study): one
+        // side of an item of a pair campaign, the stack shown on the left or
+        // on the right, drawn from the campaign's seed. The item names
+        // neither stack, so which side a stack is on is kept here alone, and
+        // an answer's `left_post` or `right_post` is read back through it.
+        Table::new(
+            "campaign_pair_side",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                // left | right
+                req("side", Type::Text),
+                req("stack_id", Type::Int),
+            ],
+        )
+        .unique(&["item_id", "side"])
+        .index(&["campaign_id"])
+        .index(&["stack_id"]),
         // Record 42 S7 (C7): labels exported with their provenance. The
         // digest covers the canonical labels.tsv, so the same state gives
         // the same digest and one new decision changes it.
@@ -2671,6 +2690,7 @@ mod tests {
             "campaign_ab_item",
             "campaign_ab_candidate",
             "campaign_ab_cause",
+            "campaign_pair_side",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

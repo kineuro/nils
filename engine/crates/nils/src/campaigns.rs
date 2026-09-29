@@ -63,6 +63,9 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/ab/decisions",
     "GET /api/campaigns/{id}/items/{item}/ab",
     "POST /api/campaigns/{id}/answers/{answer}/cause",
+    "GET /api/campaigns/{id}/items/{item}/pair",
+    "GET /api/campaigns/{id}/pair",
+    "GET /api/campaigns/{id}/pair/values",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -81,7 +84,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 "campaigns",
                 _,
                 "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery"
-                | "mine" | "ab",
+                | "mine" | "ab" | "pair",
             ],
         )
         | (
@@ -92,12 +95,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 _,
                 "items",
                 _,
-                "candidates" | "why" | "header" | "ab",
+                "candidates" | "why" | "header" | "ab" | "pair",
             ],
         )
-        | ("GET", ["api", "campaigns", _, "ab", "decisions"]) => {
-            (Need::One("campaigns:see"), Plain)
-        }
+        | ("GET", ["api", "campaigns", _, "ab", "decisions"])
+        | ("GET", ["api", "campaigns", _, "pair", "values"]) => (Need::One("campaigns:see"), Plain),
         // record 48, the reference read by judges: the cause of an axis of
         // one's own answer on an A/B item
         ("POST", ["api", "campaigns", _, "answers", _, "cause"]) => {
@@ -571,6 +573,17 @@ pub(crate) fn route(
             let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
             if !own(registry.store(), caller, &c)? {
                 return Err(Reply::error(404, format!("no campaign {which}")));
+            }
+        }
+        // pair mode: a pair is read from its two pictures alone, so every
+        // door that would show a stack's file, its header, the rules'
+        // values or a suggestion refuses a pair campaign
+        if let ["api", "campaigns", which, rest @ ..] = segs
+            && crate::pair::shows_more(rest)
+        {
+            let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+            if nils_registry::pair::is_pair(&c) {
+                return Err(crate::pair::refusal(&c));
             }
         }
         match segs {
@@ -1753,6 +1766,22 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 crate::ab::decisions_door(registry, caller, &c)
             }
+            // pair mode (the post-contrast study, P6): one pair's two
+            // stacks, how the campaign goes, and each answer per stack
+            ["api", "campaigns", which, "items", item, "pair"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                crate::pair::sheet_door(registry, caller, &c, item)
+            }
+            ["api", "campaigns", which, "pair"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::pair::summary_door(registry, caller, &c)
+            }
+            ["api", "campaigns", which, "pair", "values"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::pair::values_door(registry, caller, &c)
+            }
             ["api", "campaigns", which, "answers", answer, "cause"] if post => {
                 let doc = json_body(body)?;
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -2337,6 +2366,9 @@ pub(crate) fn pictures_through(
     for r in store.query(&sql, &[Param::Int(stack)])? {
         asked.insert(r.int(0)?);
     }
+    // pair mode: an item of a pair campaign names neither of its stacks;
+    // they are kept by side
+    asked.extend(crate::pair::campaigns_showing(store, stack)?);
     // the sessions the stack is of, each its subject and its day
     let sql = format!(
         "SELECT DISTINCT sc.subject_id, {} FROM {} k JOIN {} r ON r.id = k.series_id \
@@ -3404,6 +3436,10 @@ fn derived_differences(
 /// The stacks a campaign's items stand on: an item's stack, a session's
 /// stacks, or the members of an adopted group.
 fn campaign_stacks(store: &mut Store, c: &campaign::Campaign) -> Result<Vec<i64>, Reply> {
+    // pair mode: a pair's items name no stack; its sides do
+    if nils_registry::pair::is_pair(c) {
+        return Ok(nils_registry::pair::stacks_of(store, c.id)?);
+    }
     let mut out = Vec::new();
     for it in campaign::items(store, c.id).map_err(campaign_err)? {
         if let Some(s) = it.stack_id {
@@ -3790,6 +3826,20 @@ pub(crate) enum CampaignCommand {
         /// The summary alone: counts per axis, choice and cause
         #[arg(long)]
         summary: bool,
+    },
+    /// Make a pair campaign (the post-contrast study, P6): each item two
+    /// stacks of one session, shown side by side, left and right drawn from
+    /// the seed, with no time, name or header; the answer says the left is
+    /// post, the right is post, both pre, both post, or can't tell, and
+    /// resolves into the post-contrast value of each stack
+    Pair(Box<crate::pair::PairArgs>),
+    /// Every answer of a pair campaign resolved per stack, as JSON
+    PairExport {
+        /// The campaign, by name or id
+        campaign: String,
+        /// Write it to this file rather than print it
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
     /// Every campaign, newest first
     List {
@@ -4314,6 +4364,11 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             out,
             summary,
         } => crate::ab::export(home, &which, out.as_deref(), summary),
+        CampaignCommand::Pair(args) => crate::pair::make(home, *args),
+        CampaignCommand::PairExport {
+            campaign: which,
+            out,
+        } => crate::pair::export(home, &which, out.as_deref()),
         CampaignCommand::List { json } => {
             let mut registry = crate::open(home)?;
             let list = campaign::list(registry.store()).map_err(cerr)?;
