@@ -334,8 +334,10 @@ values:
       # MRI pack 0.13.0: `IRFSE` as one word, as Picker and Elscint name
       # their sequence (dev-1: two stacks read as TSE).
       - irfse
+    # MRI pack 0.14.0: or a FLAIR on a spin-echo readout whose header states
+    # no train (flags.yml, `flair_tse`).
     detection:
-      combination: [has_ir, is_tse]
+      combination: [is_ir_tse_readout]
   ME-SE:
     # not bare `dual echo`, which is also a dual-echo GRE and DESS [V3].
     # Pack 0.9.0, Nima's ruling (2026-09-27): a conventional multi-echo spin
@@ -431,6 +433,8 @@ values:
     terms: ['MPRAGE', 'MP-RAGE', 'MP RAGE', 'BRAVO', 'FSPGR BRAVO', 'IR-FSPGR', '3D IR-FSPGR', '3D TFE', '3D T1 TFE', 'T1 TFE 3D', 'IR-TFE', '3D IR-TFE', 'tfl3d', '3D MPRAGE', 'magnetization prepared rapid gradient echo', '3D Fast FE', '3DFFE-IR', '3D-GEIR']
     description: '3D inversion-prepared rapid gradient echo (T1-weighted)'
     family: GRE
+    # MRI pack 0.14.0: never Philips' SmartBrain survey, a localizer.
+    requires: {not: smart_survey}
     keywords:
       - mprage
       # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
@@ -456,8 +460,11 @@ values:
       - time of flight
       - tof-mra
       - inhance inflow
+    # MRI pack 0.14.0: or a 3D gradient echo named for angiography, of a
+    # time-of-flight's repetition time (flags.yml, `tof_by_words`).
     detection:
       exclusive: is_tof
+      combination: [tof_by_words]
   PC-MRA:
     terms: ['phase-contrast MRA', 'PC angio', 'Qflow', '4D flow', 'flow quantification']
     label: PC
@@ -478,8 +485,11 @@ values:
       - merge
       - mffe
       - me2d
+    # MRI pack 0.14.0: or Philips' combined multi-echo FFE by its echo
+    # train (flags.yml, `philips_mffe`).
     detection:
       exclusive: is_medic
+      combination: [philips_mffe]
   ME-GRE:
     terms: ['multi-echo GRE', 'MEGRE', 'multi-echo gradient echo']
     label: MEGRE
@@ -489,8 +499,9 @@ values:
       - me-gre
       - multi echo gre
       - multi-echo gre
+    # MRI pack 0.14.0: or by the name's echo count (flags.yml, `me_gre_named`).
     detection:
-      combination: [is_multi_echo, has_gre]
+      combination: [is_me_gre]
   # DRIVE is Philips' driven equilibrium TSE and Philips has no
   # dual-excitation bSSFP, so `3D DRIVE` is gone; PBSG is Hitachi's
   # [P48, V1, V2, M1].
@@ -571,8 +582,10 @@ values:
       - turbo flash
       - tfe
       - fspgr
+    # MRI pack 0.14.0: or GE's `FAST_GEMS` on a gradient echo (flags.yml).
     detection:
       exclusive: is_tfl
+      combination: [ge_fspgr]
   SP-GRE:
     terms: ['FLASH', 'SPGR', 'T1-FFE', 'spoiled gradient echo', 'spoiled GRE', 'RSSG']
     label: FLASH

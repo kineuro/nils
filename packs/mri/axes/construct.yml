@@ -419,8 +419,10 @@ values:
   # was stitched from agree on every other axis there is.
   Composed:
     terms: ['composed', 'composite', 'composing', 'stitched']
+    # MRI pack 0.14.0: or Philips' MobiView (flags.yml).
     detection:
       exclusive: is_composite
+      combination: [composed_named]
   # The image the scanner writes beside the echoes it combined, `MEAN` in the
   # image type, always a series of its own. It agrees with its per-echo
   # siblings on every axis the pack has and often carries no echo number at

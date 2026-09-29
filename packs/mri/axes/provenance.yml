@@ -88,7 +88,7 @@ values:
     requires:
       all:
         - {not: is_plain_dwi_map}
-        - {any: [is_derived, is_diffusion_derived, has_fa]}
+        - {any: [is_derived, is_diffusion_derived, has_fa, tensor_output_named]}
     keywords:
       - adc map
       - apparent diffusion
@@ -100,9 +100,10 @@ values:
     alternative_flags: [has_adc, has_eadc, has_fa, has_trace]
     # MRI pack 0.13.0: or a derived GE image named `FA` (flags.yml), which
     # ruling 7 makes a tensor's output.
+    # MRI pack 0.14.0: and GE's `FA-` and `Evec` outputs written ORIGINAL.
     detection:
       exclusive: is_diffusion_derived
-      combination: [fa_named]
+      combination: [tensor_output_named]
   # An ASL series' CBF map is ASLRecon (Nima's ruling, 2026-09-28), so the
   # DSC and DCE maps are this value's and an ASL's are not.
   PerfusionRecon:
@@ -177,6 +178,8 @@ values:
       - '3 - pl'
       - '- sikt'
       - surstar
+      # MRI pack 0.14.0: Philips' SmartExam brain survey (dev-2).
+      - smartbrain
     detection:
       exclusive: is_localizer
       # MRI pack 0.11.0: a tri-plane scout by its shape (flags.yml, 12).
