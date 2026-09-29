@@ -141,6 +141,9 @@ rules:
       - {when: {axis: construct, is: ADC}, cite: ADC, source: construct}
       - {when: {axis: construct, is: eADC}, cite: eADC, source: construct}
       - {when: {axis: construct, is: Trace}, cite: Trace, source: construct}
+      # MRI pack 0.13.0: and isoDWI, the same image under another name
+      # (axes/construct.yml), which EPIMix writes and a reader may answer.
+      - {when: {axis: construct, is: isoDWI}, cite: isoDWI, source: construct}
       - {when: {axis: construct, is: FA}, cite: FA, source: construct}
       - {when: {axis: construct, is: MD}, cite: MD, source: construct}
       - {when: {axis: construct, is: CBF}, cite: CBF, source: construct}

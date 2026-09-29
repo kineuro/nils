@@ -83,15 +83,19 @@ values:
       - eadc
       - exp adc
       - exponential adc
+    # MRI pack 0.13.0: or GE's `Exp attenuation` [MQ4].
     detection:
       exclusive: has_eadc
+      combination: [eadc_named]
   FA:
     terms: ['fractional anisotropy', 'FA map', 'color FA', 'colFA']
     keywords:
       - fractional anisotropy
       - fa map
+    # MRI pack 0.13.0: or a derived GE image named `FA` and nothing else.
     detection:
       exclusive: has_fa
+      combination: [fa_named]
   # the same image as isoDWI, under Siemens' and Philips' names [MQ3, D2]
   # MRI pack 0.11.0: not on a map, whose protocol name may still say
   # `3scan_trace` (Siemens `ep2d_diff_3scan_trace_ADC` was ADC and Trace).
@@ -103,14 +107,20 @@ values:
       - tracew
       - isodwi
       - isotropic dwi
+    # MRI pack 0.13.0: or the isotropic image by its name, Philips'
+    # `isob-1000` and `isoDiff`, GE's `Isotropic Image` [MQ3] (flags.yml).
     detection:
       exclusive: has_trace
+      combination: [trace_named]
   MD:
     terms: ['mean diffusivity']
     keywords:
       - mean diffusivity
       - md map
       - mean diff
+    # MRI pack 0.13.0: GE's `AvDC`, the average diffusion coefficient.
+    detection:
+      combination: [md_named]
   CBF:
     terms: ['cerebral blood flow', 'rCBF']
     keywords:
@@ -456,8 +466,11 @@ values:
       exclusive: is_ge_orig
   Filtered:
     terms: ['filtered']
+    # MRI pack 0.13.0: or Elscint's enhancement filter and GE's `FL:`
+    # prefix (flags.yml, `is_filtered_named`).
     detection:
       exclusive: is_ge_filtered
+      combination: [is_filtered_named]
   ND:
     terms: ['no distortion correction', 'not distortion corrected']
     detection:

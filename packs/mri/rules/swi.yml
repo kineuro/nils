@@ -47,6 +47,14 @@ derive:
       # GRE). A spoiled GRE is not told apart here: dev-1's panel said GRE on
       # seven SWI stacks and SP-GRE on four where the axis said SP-GRE.
       - {when: {all: [is_multi_echo, has_gre]}, value: ME-GRE}
+      # MRI pack 0.13.0: nor only by a split. A Siemens `swi3d4r` and a GE
+      # SWAN state their echoes in EchoTrainLength (4, 8, 16), and a series
+      # split by echo whose file states no ScanningSequence is a gradient
+      # echo all the same (dev-1: 17 SWI stacks settled ME-GRE were GRE).
+      # Three or more, since dev-1 settled a two-echo `fl3d2r` SWI as a
+      # spoiled GRE; never a GE 3D EPI SWI, whose train is its EPI factor
+      # and whose file says RM, which the words take below.
+      - {when: {all: [{any: [is_multi_echo, {field: echo_train_length, ge: 3}]}, {not: {text: search_text, substring: epi}}]}, value: ME-GRE}
       - {when: has_gre, value: GRE}
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
@@ -82,6 +90,11 @@ rules:
       - {flag: is_mip, tier: exclusive}
       - {when: {all: [{text: search_text, substring: mip}, {not: {text: search_text, substring: minip}}]}, cite: mip, source: text, tier: keywords}
     set:
+      # MRI pack 0.13.0: a MIP a workstation made (SECONDARY, never
+      # PRIMARY) is a reformat of the series, ProjectionDerived as every
+      # reformat is (Nima's ruling of 2026-09-28; dev-1: a GE `MIP SWAN`).
+      # The scanner's own MIP keeps SWIRecon.
+      provenance: [{value: ProjectionDerived, when: {all: [is_secondary, {not: is_primary}]}}]
       base: SWI
       construct:
         - MIP

@@ -54,6 +54,12 @@ token_replacements:
   'mt': 'magnetization-transfer'
   't1': 't1w'
   't2': 't2w'
+  # MRI pack 0.13.0: Siemens' iPAT factor (`t2_tse_sag_512_pat2`) is no
+  # T2: `pat2` held `t2` for the T2w words, and beside the `*` of a sequence
+  # name (`star`) it read `t2 star` (dev-1: three stacks).
+  'pat2': 'ipat'
+  'pat3': 'ipat'
+  'pat4': 'ipat'
   '+t2': 't2w'
   '-t2': 't2w'
   't2cube': 't2w-cube'

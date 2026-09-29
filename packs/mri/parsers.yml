@@ -141,6 +141,9 @@ parsers:
                                    COMP_AD_N, COMP_MIP, COMPOSED, COMPOSITE,
                                    MAVRIC_COMPOSITE]}
       is_mpr:         {any_token: [MPR, REFORMATTED]}
+      # MRI pack 0.13.0: a thick-slab average, as a PACS workstation writes
+      # its reformats (`DERIVED\SECONDARY\AXIAL\AVERAGE`).
+      has_average:    {token: AVERAGE}
       is_mpr_thick:   {any: [{substring: 'MPR THICK'}, {substring: 'CSA MPR THICK'}]}
 
       # --- projection ---
