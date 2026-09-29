@@ -108,7 +108,7 @@ fn pairs_in(text: &str) -> Result<Vec<(i64, i64)>, String> {
 }
 
 /// Each stack's subject and study, where the registry has the stack.
-fn whose(store: &mut Store, stacks: &[i64]) -> Result<BTreeMap<i64, (i64, i64)>, Exit> {
+pub(crate) fn whose(store: &mut Store, stacks: &[i64]) -> Result<BTreeMap<i64, (i64, i64)>, Exit> {
     let mut out = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
@@ -362,8 +362,13 @@ pub(crate) fn refusal(c: &campaign::Campaign) -> Reply {
     Reply::error(
         409,
         format!(
-            "campaign {} reads pairs from their pictures alone: no time, no name, no header, nothing suggested, one pair at a time",
-            c.name
+            "campaign {} reads {} from their pictures alone: no time, no name, no header, nothing suggested, one at a time",
+            c.name,
+            if nils_registry::anchored::is_anchored(c) {
+                "a stack beside its anchors"
+            } else {
+                "pairs"
+            }
         ),
     )
 }

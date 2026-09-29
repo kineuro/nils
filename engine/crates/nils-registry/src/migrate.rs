@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 75;
+pub const SCHEMA_VERSION: i64 = 76;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,7 +354,23 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 75,
         apply: a_campaign_may_show_the_pictures_alone,
     },
+    Migration {
+        version: 76,
+        apply: a_campaign_reads_a_stack_beside_two_anchors,
+    },
 ];
+
+/// Post-contrast gold, anchored reading: an item of an anchored campaign
+/// shows a candidate beside a pre and a post anchor, and which stack is in
+/// which panel and plays which role is kept in a table of its own. A
+/// registry from before gains it empty, since no campaign before asked of
+/// anchored items.
+fn a_campaign_reads_a_stack_beside_two_anchors(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["campaign_anchor_panel"])
+}
 
 /// The post-contrast study's single reads: a campaign may show its raters
 /// the pictures alone, with no text of the file's header beside them. A
