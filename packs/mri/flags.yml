@@ -857,6 +857,11 @@ flags:
       - {not: is_mdme}
       - {not: is_dir}
       - {not: {text: search_text, substring: dir}}
+      # MRI pack 0.14.0: and never a synthetic image or map, whose header
+      # repeats the inversion time of the contrast it was computed for
+      # (dev-2: 0.13.0 made a Siemens synthetic PD map, `tir2d2_5` at TI
+      # 2,600 ms, a FLAIR).
+      - {not: synthetic_or_map}
       - {field: inversion_time, ge: 1400}
       - {field: inversion_time, le: 2600}
   # A short tau inversion recovery from its inversion time: under 300 ms on
@@ -872,6 +877,8 @@ flags:
       - {not: has_gre}
       - {not: has_epi}
       - {not: is_mdme}
+      # MRI pack 0.14.0: nor a synthetic image or map (above).
+      - {not: synthetic_or_map}
       - {field: inversion_time, gt: 0}
       - {field: inversion_time, lt: 300}
   # An inversion the file states as such (ScanningSequence, ScanOptions or
@@ -955,5 +962,28 @@ flags:
   has_promo: scan_options.has_promo_gems
   # SyMRI's tissue maps (`DERIVED\PRIMARY\CSF`, WM, GM): quantitative maps
   # of a partial volume, with no base contrast.
-  is_symri_tissue_map: {parser: image_type, any_token: [CSF, WM, GM]}
+  # MRI pack 0.14.0: never a synthetic weighted image, which may name a
+  # tissue it adds (Philips `DERIVED\PRIMARY\T2\SYNTHETIC\CSF`, a synthetic
+  # T2w "+ CSF" that 0.13.0 made a CSF map; dev-2).
+  is_symri_tissue_map:
+    all:
+      - {parser: image_type, any_token: [CSF, WM, GM]}
+      - {not: {parser: image_type, token: SYNTHETIC}}
+      - {not: is_synthetic}
+
+  # === MRI pack 0.14.0: the rule errors of dev-2 on pack 0.13.0 ============
+  # (`studies/2026-09-29-dev2-reference/results.md` in the design
+  # repository). Each flag says what it rests on.
+
+  # A synthetic image, a map, or an image generated from other images: its
+  # inversion time is the one it was computed for, not an inversion it was
+  # acquired with. Siemens writes a synthetic image's ScanningSequence as
+  # GENERATED, and names it (`Synthetic MR IR`, `PD map`).
+  synthetic_or_map:
+    any:
+      - is_synthetic
+      - is_qmap
+      - has_pd_map
+      - scanning_sequence.is_generated
+      - {text: search_text, matches: 'synthetic|symri|(^|[^a-z])map([^a-z]|$)'}
 

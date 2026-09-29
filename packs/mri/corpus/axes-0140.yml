@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.14.0: the rule errors of the development reference dev-2 on
+# pack 0.13.0, one or more cases for each fix, and the cases that keep each
+# fix from reaching what it must not. Every stack here is invented; the
+# values are the shapes the rules turn on.
+
+cases:
+
+  # --- the regression of 0.13.0: an inversion time on a synthetic image
+
+  - name: a synthetic PD map written with the FLAIR's inversion time is no FLAIR
+    stack:
+      image_type: 'DERIVED\PRIMARY\PD'
+      scanning_sequence: GENERATED
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PD map'
+      text_protocol_name: 'Synthetic MR IR'
+      text_sequence_name: 'tir2d2_5'
+      repetition_time: 12000
+      echo_time: 100
+      inversion_time: 2600
+    axes:
+      modifier: ''
+
+  - name: an acquired inversion-recovery spin echo at 2,600 ms is still a FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ax 5mm'
+      text_sequence_name: '*tir2d1_21'
+      repetition_time: 9000
+      echo_time: 81
+      inversion_time: 2500
+    axes:
+      modifier: FLAIR
+
+  - name: a synthetic STIR's inversion time makes no STIR by time on a generated image
+    stack:
+      image_type: 'DERIVED\PRIMARY\PD'
+      scanning_sequence: GENERATED
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PD map'
+      text_sequence_name: 'tir2d2_5'
+      repetition_time: 3000
+      echo_time: 20
+      inversion_time: 150
+    axes:
+      # the sequence name still says inversion recovery, and nothing more
+      modifier: IR
+
+  # --- the regression of 0.13.0: a synthetic weighted image that names a tissue
+
+  - name: a synthetic T2w image that adds CSF is a synthetic T2w, not a CSF map
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2\SYNTHETIC\CSF'
+      scanning_sequence: SE
+      sequence_variant: SYNTHETIC
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'Created by Research Application:T2W Synthetic + CSF'
+      text_protocol_name: 'MDME_TSE'
+      repetition_time: 4500
+      echo_time: 100
+    axes:
+      construct: SyntheticT2w
+      base: T2w
+
+  - name: a SyMRI CSF map is still a quantitative map
+    stack:
+      image_type: 'DERIVED\PRIMARY\CSF'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'Created by Research Application:CSF'
+      text_protocol_name: 'SyMRI MDME_TSE'
+    axes:
+      construct: Qmap
+      base: ''
