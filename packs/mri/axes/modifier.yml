@@ -118,6 +118,8 @@ values:
     description: 'rotating blades (PROPELLER, BLADE) or radial k-space'
     group: TRAJECTORY
     priority: 1
+    # MRI pack 0.14.0: never a series of radial MIP views (flags.yml).
+    requires: {not: radial_views_named}
     keywords:
       - propeller
       - blade
@@ -125,9 +127,10 @@ values:
       - radial
       - periodically rotated
     # MRI pack 0.13.0: or Philips' `MV` shorthand (flags.yml).
+    # MRI pack 0.14.0: or GE's other PROPELLER spellings (`ksprop`, `T2prop`).
     detection:
       exclusive: is_radial
-      combination: [multivane_named]
+      combination: [radial_named]
   Spiral:
     terms: ['spiral']
     group: TRAJECTORY
@@ -183,6 +186,8 @@ values:
       combination: [has_in_phase, has_out_phase]
   MT:
     terms: ['magnetization transfer', 'MT pulse', 'MTC']
+    # MRI pack 0.14.0: not where the words switch it off (`utan MTC`).
+    requires: {not: mt_negated}
     keywords:
       - magnetization transfer
       - mtc

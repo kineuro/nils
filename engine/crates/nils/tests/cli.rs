@@ -1770,7 +1770,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.13.0"),
+            .any(|p| p["pack"] == "mri@0.14.0"),
         "{listed}"
     );
 
@@ -1782,7 +1782,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 226);
+    assert_eq!(shown["flags"], 245);
     assert_eq!(
         shown["contract"], 6,
         "record 48: the excludes and hints keys (contract 6), after the mcp key of contract 4"

@@ -62,7 +62,7 @@ derive:
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, real, swi, projection, r2star, magnitude, qsm_source_echo, qsm, mpr, fallback]
+order: [minip, mip, phase, real, swi, projection, r2star, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -159,13 +159,19 @@ rules:
       directory_type: anat
     confidence: 0.9
 
+  # MRI pack 0.14.0: a projection the route did not find named MIP or
+  # minIP is the minimum projection, the one an SWI is projected for
+  # (Philips writes its SWIp minIP as `PROJECTION IMAGE\M\FFE` named only
+  # `swi`; dev-2 settled it MinIP and ProjectionDerived, where the route
+  # made it the SWI image).
   projection:
     clauses:
       - {flag: is_projection, tier: exclusive}
     set:
+      provenance: ProjectionDerived
       base: SWI
       construct:
-        - SWI
+        - MinIP
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
       technique: {from: swi_technique}
@@ -208,6 +214,25 @@ rules:
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.85
+
+  # MRI pack 0.14.0: a GE SWI image the scanner acquired, written ORIGINAL
+  # and named without the prefix GE puts on what it computed (`SWI:`,
+  # `SWIphase:`), is its magnitude, as the rule above says of one that states
+  # it (flags.yml, `ge_swi_unprefixed`; dev-2: three `Ax SWI 3D...` stacks
+  # read as the SWI image).
+  ge_magnitude:
+    clauses:
+      - {flag: ge_swi_unprefixed, tier: exclusive}
+    set:
+      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      base: T2starw
+      construct:
+        - Magnitude
+        - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.8
 
   # Multi-echo source data from a QSM acquisition: an acquisition-style name
   # rather than a short output label, and no QSM token.

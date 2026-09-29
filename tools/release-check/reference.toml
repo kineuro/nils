@@ -22,12 +22,18 @@ names = [
   "ses-20220115/anat/Ax_T2w_2D_FLAIR_TIRM_ND",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_ADC_b1000",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_Trace_b1000",
-  "ses-20220115/func/Ax_T1w_2D_MoCo_BOLD_ND",
+  "ses-20220115/func/Ax_T2starw_2D_MoCo_BOLD_ND",
   "ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND",
   "ses-20220715/anat/Ax_T1w_3D_MPRAGE_ND_CE",
   "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e1",
   "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e2",
 ]
+
+# Amended 2026-09-29, MRI pack 0.14.0. The BOLD series, whose file states no
+# readout (no ScanningSequence, no sequence name) at a short echo time, is
+# T2*-weighted by the pack's rule for such a BOLD series, where the echo-time
+# window had called it T1w; a gradient-echo BOLD is T2*-weighted, so the
+# descriptive name is `Ax_T2starw_2D_MoCo_BOLD_ND`. Its BIDS name did not move.
 
 # Amended 2026-09-28, MRI pack 0.12.0. The SWI's magnitude, whose image type
 # holds ND, keeps construct ND beside Magnitude, as the SyMRI route's images
