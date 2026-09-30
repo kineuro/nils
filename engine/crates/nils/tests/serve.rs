@@ -1112,7 +1112,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "a longhand rule's words"
     );
     assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
-    assert_eq!(packs_doc["packs"][0]["contract"], 6, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 7, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");

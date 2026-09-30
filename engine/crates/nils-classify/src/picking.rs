@@ -1437,8 +1437,22 @@ mod tests {
     #[test]
     fn a_candidate_keeps_each_stack_s_own_values_beside_the_merged_ones() {
         let m = model(None);
-        let a = row(1, &[("technique", "MPRAGE"), ("echo_time", "2.3"), ("n_instances", "176")]);
-        let b = row(2, &[("technique", "MPRAGE"), ("echo_time", "2.3"), ("n_instances", "40")]);
+        let a = row(
+            1,
+            &[
+                ("technique", "MPRAGE"),
+                ("echo_time", "2.3"),
+                ("n_instances", "176"),
+            ],
+        );
+        let b = row(
+            2,
+            &[
+                ("technique", "MPRAGE"),
+                ("echo_time", "2.3"),
+                ("n_instances", "40"),
+            ],
+        );
         let got = group(&m, &[&b, &a]);
         assert_eq!(got[0].stacks, [1, 2]);
         assert_eq!(got[0].each.len(), 2);

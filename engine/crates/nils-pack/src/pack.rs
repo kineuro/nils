@@ -3198,7 +3198,10 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
     let fraction = |mm: &serde_json::Map<String, Value>, key: &str, at: &str| -> R<f64> {
         let n = number_at(mm, key, at)?;
         if !(0.0..=1.0).contains(&n) {
-            return Err(Error::at(at, format!("{key} is a fraction from 0 to 1, not {n}")));
+            return Err(Error::at(
+                at,
+                format!("{key} is a fraction from 0 to 1, not {n}"),
+            ));
         }
         Ok(n)
     };
@@ -3307,7 +3310,8 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
                 Some(Plain {
                     family: f.blame(yaml::text(yaml::get(pm, "family", &bat)?, &bat))?,
                     of: f.blame(named(pm, "of", &bat))?,
-                    plain_without: f.blame(yaml::texts(yaml::get(pm, "plain_without", &bat)?, &bat))?,
+                    plain_without: f
+                        .blame(yaml::texts(yaml::get(pm, "plain_without", &bat)?, &bat))?,
                     within: f.blame(fraction(pm, "within", &bat))?,
                 })
             }
@@ -3391,7 +3395,10 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
             .iter()
             .any(|x: &crate::pick::Family| x.name == name)
         {
-            return Err(here(Error::at(&fat, format!("the family {name} is declared twice"))));
+            return Err(here(Error::at(
+                &fat,
+                format!("the family {name} is declared twice"),
+            )));
         }
         families.push(crate::pick::Family {
             name,

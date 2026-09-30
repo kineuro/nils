@@ -477,7 +477,9 @@ impl Candidate {
         if v.trim().is_empty() {
             return [String::new()].into_iter().collect();
         }
-        v.split(',').map(|t| t.trim().to_ascii_lowercase()).collect()
+        v.split(',')
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect()
     }
 }
 
@@ -1367,7 +1369,11 @@ mod tests {
         assert!(p.notes["retake"].starts_with("plain: 2"), "{:?}", p.notes);
         // Half the largest is kept: `below` is strictly below.
         let p = pick(&m, "t1w", &[of("176", "88")], &r);
-        assert_eq!(p.borders, [Border::Retake], "88 is half of 176, not below it");
+        assert_eq!(
+            p.borders,
+            [Border::Retake],
+            "88 is half of 176, not below it"
+        );
         let p = pick(&m, "t1w", &[of("176", "87")], &r);
         assert!(p.borders.is_empty(), "{:?}", p.borders);
         // Under 60 slices nothing is demoted: v0 demotes only where the
@@ -1393,11 +1399,19 @@ mod tests {
                 (1..=n).map(|i| (i, &[("q", "top")][..])).collect();
             with_each(&rows, Some(fam))
         };
-        assert!(pick(&m, "t1w", &[stacks(1, "dixon")], &r).borders.is_empty());
+        assert!(
+            pick(&m, "t1w", &[stacks(1, "dixon")], &r)
+                .borders
+                .is_empty()
+        );
         let p = pick(&m, "t1w", &[stacks(2, "dixon")], &r);
         assert_eq!(p.borders, [Border::Retake]);
         assert!(p.notes["retake"].starts_with("dixon: 2"), "{:?}", p.notes);
-        assert!(pick(&m, "t1w", &[stacks(2, "mp2rage")], &r).borders.is_empty());
+        assert!(
+            pick(&m, "t1w", &[stacks(2, "mp2rage")], &r)
+                .borders
+                .is_empty()
+        );
         let p = pick(&m, "t1w", &[stacks(3, "mp2rage")], &r);
         assert_eq!(p.borders, [Border::Retake]);
         assert!(p.notes["retake"].starts_with("mp2rage: 3"), "{:?}", p.notes);
@@ -1415,7 +1429,12 @@ mod tests {
         let r = Reference::default();
         let p = pick(&m, "t1w", &[candidate(&[1], &[("q", "top")])], &r);
         assert_eq!(p.borders, [Border::UnknownDim]);
-        let p = pick(&m, "t1w", &[candidate(&[1], &[("q", "top"), ("dim", "2D")])], &r);
+        let p = pick(
+            &m,
+            "t1w",
+            &[candidate(&[1], &[("q", "top"), ("dim", "2D")])],
+            &r,
+        );
         assert!(p.borders.is_empty());
     }
 
@@ -1447,22 +1466,39 @@ mod tests {
             pick(
                 &m,
                 "t1w",
-                &[candidate(&[1], &[("q", "top"), ("n_instances", n), ("dim", dim)])],
+                &[candidate(
+                    &[1],
+                    &[("q", "top"), ("n_instances", n), ("dim", dim)],
+                )],
                 &r,
             )
         };
         // Strictly outside, as v0 compares: `<` the fifth, `>` the ninety-fifth.
         assert_eq!(at("159", "3D").borders, [Border::SliceOutlier]);
-        assert!(at("160", "3D").borders.is_empty(), "the fifth itself is inside");
-        assert!(at("192", "3D").borders.is_empty(), "the ninety-fifth itself is inside");
+        assert!(
+            at("160", "3D").borders.is_empty(),
+            "the fifth itself is inside"
+        );
+        assert!(
+            at("192", "3D").borders.is_empty(),
+            "the ninety-fifth itself is inside"
+        );
         let p = at("193", "3D");
         assert_eq!(p.borders, [Border::SliceOutlier]);
-        assert_eq!(p.notes["slice_count_outlier"], "193 outside 160 to 192 in slices:3D");
+        assert_eq!(
+            p.notes["slice_count_outlier"],
+            "193 outside 160 to 192 in slices:3D"
+        );
         // In its own bucket only: a 2D population too small to bucket says
         // nothing, as v0's missing percentiles did.
         assert!(at("24", "2D").borders.is_empty());
         // And no slice count says nothing.
-        let p = pick(&m, "t1w", &[candidate(&[1], &[("q", "top"), ("dim", "3D")])], &r);
+        let p = pick(
+            &m,
+            "t1w",
+            &[candidate(&[1], &[("q", "top"), ("dim", "3D")])],
+            &r,
+        );
         assert!(p.borders.is_empty());
     }
 
@@ -1530,7 +1566,10 @@ mod tests {
             ],
             None,
         );
-        assert_eq!(pick(&m, "t1w", &[mixed], &r).borders, [Border::EpimixFallback]);
+        assert_eq!(
+            pick(&m, "t1w", &[mixed], &r).borders,
+            [Border::EpimixFallback]
+        );
         let p = pick(
             &m,
             "t1w",
@@ -1555,7 +1594,10 @@ mod tests {
             vec![family("dixon", 1)],
         );
         let r = Reference::default();
-        let dixon = with_each(&[(1, &[("q", "top"), ("modifier", "Dixon")])], Some("dixon"));
+        let dixon = with_each(
+            &[(1, &[("q", "top"), ("modifier", "Dixon")])],
+            Some("dixon"),
+        );
         let other = |q: &str, modifier: &str| candidate(&[2], &[("q", q), ("modifier", modifier)]);
         // `within` takes the number itself.
         let p = pick(&m, "t1w", &[dixon.clone(), other("at_90", "")], &r);
@@ -1581,8 +1623,24 @@ mod tests {
         let r = Reference::default();
         let everything = with_each(
             &[
-                (1, &[("q", "top"), ("provenance", "EPIMix"), ("modifier", "Dixon"), ("n_instances", "176")]),
-                (2, &[("q", "top"), ("provenance", "EPIMix"), ("modifier", "Dixon"), ("n_instances", "176")]),
+                (
+                    1,
+                    &[
+                        ("q", "top"),
+                        ("provenance", "EPIMix"),
+                        ("modifier", "Dixon"),
+                        ("n_instances", "176"),
+                    ],
+                ),
+                (
+                    2,
+                    &[
+                        ("q", "top"),
+                        ("provenance", "EPIMix"),
+                        ("modifier", "Dixon"),
+                        ("n_instances", "176"),
+                    ],
+                ),
             ],
             Some("dixon"),
         );

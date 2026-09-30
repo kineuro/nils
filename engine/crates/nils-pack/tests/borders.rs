@@ -62,7 +62,10 @@ fn cand(stacks: &[(i64, BTreeMap<String, String>)], family: Option<&str>) -> Can
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     for (_, s) in stacks {
         for (k, v) in s {
-            match (values.get(k).and_then(|b| b.parse::<f64>().ok()), v.parse::<f64>()) {
+            match (
+                values.get(k).and_then(|b| b.parse::<f64>().ok()),
+                v.parse::<f64>(),
+            ) {
                 (Some(b), Ok(n)) if n > b => {
                     values.insert(k.clone(), v.clone());
                 }
@@ -155,13 +158,30 @@ fn v0_s_dixon_sisters_are_no_retake_and_two_in_phase_are() {
             ("construct", c),
         ])
     };
-    let mut rows = many(10, &[("technique", "VIBE"), ("modifier", "Dixon"), ("construct", "InPhase")]);
-    rows.extend(many(10, &[("technique", "VIBE"), ("modifier", "Dixon"), ("construct", "Water")]));
+    let mut rows = many(
+        10,
+        &[
+            ("technique", "VIBE"),
+            ("modifier", "Dixon"),
+            ("construct", "InPhase"),
+        ],
+    );
+    rows.extend(many(
+        10,
+        &[
+            ("technique", "VIBE"),
+            ("modifier", "Dixon"),
+            ("construct", "Water"),
+        ],
+    ));
     let r = cohort(&m, &rows);
     let one = cand(&[(1, dixon("InPhase"))], Some("dixon"));
     let p = pick::pick(&m, "t1w", &[one], &r);
     assert!(!p.borders.contains(&Border::Retake), "{:?}", p.borders);
-    let two = cand(&[(1, dixon("InPhase")), (2, dixon("InPhase"))], Some("dixon"));
+    let two = cand(
+        &[(1, dixon("InPhase")), (2, dixon("InPhase"))],
+        Some("dixon"),
+    );
     let p = pick::pick(&m, "t1w", &[two], &r);
     assert!(p.borders.contains(&Border::Retake), "{:?}", p.borders);
     assert!(p.notes["retake"].starts_with("dixon"), "{:?}", p.notes);
@@ -171,9 +191,19 @@ fn v0_s_dixon_sisters_are_no_retake_and_two_in_phase_are() {
 fn v0_s_mp2rage_retake_is_more_than_two() {
     let m = main_pick();
     let uni = || row(&[("technique", "MP2RAGE"), ("construct", "UniformDenoised")]);
-    let r = cohort(&m, &many(10, &[("technique", "MP2RAGE"), ("construct", "UniformDenoised")]));
+    let r = cohort(
+        &m,
+        &many(
+            10,
+            &[("technique", "MP2RAGE"), ("construct", "UniformDenoised")],
+        ),
+    );
     let two = cand(&[(1, uni()), (2, uni())], Some("mp2rage"));
-    assert!(!pick::pick(&m, "t1w", &[two], &r).borders.contains(&Border::Retake));
+    assert!(
+        !pick::pick(&m, "t1w", &[two], &r)
+            .borders
+            .contains(&Border::Retake)
+    );
     let three = cand(&[(1, uni()), (2, uni()), (3, uni())], Some("mp2rage"));
     let p = pick::pick(&m, "t1w", &[three], &r);
     assert!(p.borders.contains(&Border::Retake), "{:?}", p.borders);
@@ -185,16 +215,31 @@ fn v0_s_unknown_dimension() {
     // test_unknown_dim_triggers_border: a GRE with no acquisition type.
     let m = main_pick();
     let mut rows = many(10, &[]);
-    rows.push(row(&[("technique", "GRE"), ("mr_acquisition_type", ""), ("n_instances", "120")]));
+    rows.push(row(&[
+        ("technique", "GRE"),
+        ("mr_acquisition_type", ""),
+        ("n_instances", "120"),
+    ]));
     let r = cohort(&m, &rows);
     let gre = cand(
-        &[(99, row(&[("technique", "GRE"), ("mr_acquisition_type", ""), ("n_instances", "120")]))],
+        &[(
+            99,
+            row(&[
+                ("technique", "GRE"),
+                ("mr_acquisition_type", ""),
+                ("n_instances", "120"),
+            ]),
+        )],
         None,
     );
     let p = pick::pick(&m, "t1w", &[gre], &r);
     assert!(p.borders.contains(&Border::UnknownDim), "{:?}", p.borders);
     let known = cand(&[(1, row(&[]))], None);
-    assert!(!pick::pick(&m, "t1w", &[known], &r).borders.contains(&Border::UnknownDim));
+    assert!(
+        !pick::pick(&m, "t1w", &[known], &r)
+            .borders
+            .contains(&Border::UnknownDim)
+    );
 }
 
 #[test]
@@ -208,12 +253,21 @@ fn v0_s_slice_count_outlier_in_its_own_dimension() {
         rows.push(row(&[("n_instances", &n.to_string())]));
     }
     for _ in 0..5 {
-        rows.push(row(&[("technique", "TSE"), ("mr_acquisition_type", "2D"), ("n_instances", "24")]));
+        rows.push(row(&[
+            ("technique", "TSE"),
+            ("mr_acquisition_type", "2D"),
+            ("n_instances", "24"),
+        ]));
     }
     let r = cohort(&m, &rows);
     let at = |n: &str, dim: &str| {
-        let c = cand(&[(1, row(&[("n_instances", n), ("mr_acquisition_type", dim)]))], None);
-        pick::pick(&m, "t1w", &[c], &r).borders.contains(&Border::SliceOutlier)
+        let c = cand(
+            &[(1, row(&[("n_instances", n), ("mr_acquisition_type", dim)]))],
+            None,
+        );
+        pick::pick(&m, "t1w", &[c], &r)
+            .borders
+            .contains(&Border::SliceOutlier)
     };
     assert!(at("40", "3D"), "40 slices among 3D stacks of 150 to 208");
     assert!(at("400", "3D"));
@@ -234,7 +288,11 @@ fn v0_s_pre_and_post_twin_is_a_border_and_not_a_second_main() {
     let post = cand(&[(2, row(&[("post_contrast", "1")]))], None);
     let p = pick::pick(&m, "t1w", &[pre, post], &r);
     assert!(p.borders.contains(&Border::PrePostTwin), "{:?}", p.borders);
-    assert_eq!(p.winner.as_ref().unwrap().stacks.len(), 1, "one pick, not two");
+    assert_eq!(
+        p.winner.as_ref().unwrap().stacks.len(),
+        1,
+        "one pick, not two"
+    );
     let twin = &p.notes["pre_post_twin"];
     assert!(twin == "1" || twin == "2", "{twin}");
 }
@@ -247,7 +305,11 @@ fn v0_s_epimix_fallback() {
     let r = cohort(&m, &many(5, &[("provenance", "EPIMix")]));
     let epimix = cand(&[(1, row(&[("provenance", "EPIMix")]))], None);
     let p = pick::pick(&m, "t1w", &[epimix], &r);
-    assert!(p.borders.contains(&Border::EpimixFallback), "{:?}", p.borders);
+    assert!(
+        p.borders.contains(&Border::EpimixFallback),
+        "{:?}",
+        p.borders
+    );
     assert_eq!(p.scored.unwrap().penalty, 0.5);
     // Beside a RawRecon it does not win, and nothing is said.
     let raw = cand(&[(2, row(&[]))], None);
@@ -264,27 +326,59 @@ fn v0_s_dixon_against_plain() {
     // and a plain VIBE of the same session, the plain one scored close.
     let m = main_pick();
     let mut rows = many(10, &[("technique", "VIBE")]);
-    rows.extend(many(10, &[("technique", "VIBE"), ("modifier", "Dixon"), ("construct", "InPhase")]));
+    rows.extend(many(
+        10,
+        &[
+            ("technique", "VIBE"),
+            ("modifier", "Dixon"),
+            ("construct", "InPhase"),
+        ],
+    ));
     let r = cohort(&m, &rows);
     let dixon = cand(
-        &[(2, row(&[("technique", "VIBE"), ("modifier", "Dixon"), ("construct", "InPhase")]))],
+        &[(
+            2,
+            row(&[
+                ("technique", "VIBE"),
+                ("modifier", "Dixon"),
+                ("construct", "InPhase"),
+            ]),
+        )],
         Some("dixon"),
     );
     let plain = cand(&[(1, row(&[("technique", "VIBE")]))], None);
     let p = pick::pick(&m, "t1w", &[dixon, plain], &r);
-    assert_eq!(p.winner.as_ref().unwrap().stacks, [2], "the Dixon wins on its bonuses");
+    assert_eq!(
+        p.winner.as_ref().unwrap().stacks,
+        [2],
+        "the Dixon wins on its bonuses"
+    );
     let margin = p.margin;
     assert!(margin <= 0.10, "the plain VIBE is within a tenth: {margin}");
     assert!(p.borders.contains(&Border::DixonVsPlain), "{:?}", p.borders);
     assert_eq!(p.notes["dixon_vs_plain"], "1");
     // A water-excited one is not plain.
     let dixon = cand(
-        &[(2, row(&[("technique", "VIBE"), ("modifier", "Dixon"), ("construct", "InPhase")]))],
+        &[(
+            2,
+            row(&[
+                ("technique", "VIBE"),
+                ("modifier", "Dixon"),
+                ("construct", "InPhase"),
+            ]),
+        )],
         Some("dixon"),
     );
-    let we = cand(&[(1, row(&[("technique", "VIBE"), ("modifier", "WaterExc")]))], None);
+    let we = cand(
+        &[(1, row(&[("technique", "VIBE"), ("modifier", "WaterExc")]))],
+        None,
+    );
     let p = pick::pick(&m, "t1w", &[dixon, we], &r);
-    assert!(!p.borders.contains(&Border::DixonVsPlain), "{:?}", p.borders);
+    assert!(
+        !p.borders.contains(&Border::DixonVsPlain),
+        "{:?}",
+        p.borders
+    );
 }
 
 #[test]
@@ -303,7 +397,11 @@ fn v0_s_three_that_v1_already_had_still_hold() {
     rows.push(row(&[("technique", "FIESTA")]));
     let r = cohort(&m, &rows);
     let odd = cand(&[(1, row(&[("technique", "FIESTA")]))], None);
-    assert!(pick::pick(&m, "t1w", &[odd], &r).borders.contains(&Border::Rare));
+    assert!(
+        pick::pick(&m, "t1w", &[odd], &r)
+            .borders
+            .contains(&Border::Rare)
+    );
     assert_eq!(pick::pick(&m, "t1w", &[], &r).borders, [Border::Nothing]);
 }
 
@@ -345,18 +443,43 @@ fn the_mri_pack_scores_t2w_on_its_own_tables_and_declares_all_nine() {
         &m,
         &[
             many(10, &[("base", "T2w"), ("technique", "SPACE")]),
-            many(10, &[("base", "T2w"), ("technique", "TSE"), ("mr_acquisition_type", "2D"), ("n_instances", "30")]),
+            many(
+                10,
+                &[
+                    ("base", "T2w"),
+                    ("technique", "TSE"),
+                    ("mr_acquisition_type", "2D"),
+                    ("n_instances", "30"),
+                ],
+            ),
         ]
         .concat(),
     );
-    let space = cand(&[(1, row(&[("base", "T2w"), ("technique", "SPACE")]))], None);
+    let space = cand(
+        &[(1, row(&[("base", "T2w"), ("technique", "SPACE")]))],
+        None,
+    );
     let tse = cand(
-        &[(2, row(&[("base", "T2w"), ("technique", "TSE"), ("mr_acquisition_type", "2D"), ("n_instances", "30")]))],
+        &[(
+            2,
+            row(&[
+                ("base", "T2w"),
+                ("technique", "TSE"),
+                ("mr_acquisition_type", "2D"),
+                ("n_instances", "30"),
+            ]),
+        )],
         None,
     );
     let p = pick::pick(&m, "t2w", &[tse, space], &r);
     assert_eq!(p.winner.unwrap().stacks, [1]);
-    let tech = p.scored.unwrap().parts.into_iter().find(|x| x.name == "tech").unwrap();
+    let tech = p
+        .scored
+        .unwrap()
+        .parts
+        .into_iter()
+        .find(|x| x.name == "tech")
+        .unwrap();
     assert_eq!(tech.score, 1.0, "its own table's SPACE: {tech:?}");
 }
 
@@ -469,13 +592,27 @@ fn a_pack_without_the_new_keys_raises_only_the_three_it_declares() {
     assert_eq!(m.families.len(), 1);
     assert!(m.borders.retake.is_none() && m.borders.dixon_vs_plain.is_none());
     let mut rows = many(10, &[("post_contrast", "0")]);
-    rows.push(row(&[("technique", "GRE"), ("mr_acquisition_type", ""), ("provenance", "EPIMix")]));
+    rows.push(row(&[
+        ("technique", "GRE"),
+        ("mr_acquisition_type", ""),
+        ("provenance", "EPIMix"),
+    ]));
     let r = cohort(&m, &rows);
     // Everything planted: a retake of an EPIMix GRE of unknown dimension, and
     // a post-contrast twin close behind.
-    let odd = || row(&[("technique", "GRE"), ("mr_acquisition_type", ""), ("provenance", "EPIMix"), ("n_instances", "400")]);
+    let odd = || {
+        row(&[
+            ("technique", "GRE"),
+            ("mr_acquisition_type", ""),
+            ("provenance", "EPIMix"),
+            ("n_instances", "400"),
+        ])
+    };
     let planted = cand(&[(1, odd()), (2, odd())], None);
-    let twin = cand(&[(3, row(&[("post_contrast", "1"), ("provenance", "EPIMix")]))], None);
+    let twin = cand(
+        &[(3, row(&[("post_contrast", "1"), ("provenance", "EPIMix")]))],
+        None,
+    );
     let p = pick::pick(&m, "t1w", &[planted, twin], &r);
     for b in &p.borders {
         assert!(
@@ -516,7 +653,10 @@ fn a_key_of_contract_7_in_a_pack_that_declares_6_is_refused_in_words() {
     // here, rather than loaded as a contract-6 pack it is not.
     let dir = edited(6, |main| main.to_string());
     let e = refused(&dir, "new keys at 6");
-    assert!(e.contains("is pack contract 7's; this pack declares contract 6"), "{e}");
+    assert!(
+        e.contains("is pack contract 7's; this pack declares contract 6"),
+        "{e}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
     // And a pack declaring more than this engine implements is refused
     // before anything else is read: what an engine at 6 says of this one.
@@ -524,7 +664,10 @@ fn a_key_of_contract_7_in_a_pack_that_declares_6_is_refused_in_words() {
     let dir = edited(later, |main| main.to_string());
     let e = refused(&dir, "a later contract");
     assert!(
-        e.contains(&format!("the pack wants contract {later}; this engine implements {}", nils_pack::CONTRACT)),
+        e.contains(&format!(
+            "the pack wants contract {later}; this engine implements {}",
+            nils_pack::CONTRACT
+        )),
         "{e}"
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -92,7 +92,15 @@ fn registry(pg: Option<(String, String)>) -> Home {
     match &home.pg {
         Some((dsn, schema)) => {
             home.ok(&[
-                "init", "--backend", "postgres", "--dsn", dsn, "--schema", schema, "--key", "k",
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
             ]);
         }
         None => {
@@ -259,7 +267,11 @@ fn scenarios() -> Vec<(&'static str, Vec<Stack>, Vec<&'static str>)> {
             vec!["too_close"],
         ),
         // v0's rare_technique: the only T1w a CISS.
-        ("rare", vec![m().axis("technique", Some("CISS"))], vec!["rare"]),
+        (
+            "rare",
+            vec![m().axis("technique", Some("CISS"))],
+            vec!["rare"],
+        ),
         // v0's no_canonical_construct: a Dixon of a fat and an out-of-phase
         // image only.
         (
@@ -401,7 +413,7 @@ fn nine(home: &Home) {
     }
     // Each of the nine, raised once, on its own session, and counted.
     for (reason, _, _) in &planted {
-        if seen.get(reason).is_none() {
+        if !seen.contains_key(reason) {
             let subject = by_subject.iter().find(|(_, (r, _))| r == reason).unwrap().0;
             let rows = store
                 .query(
@@ -413,7 +425,10 @@ fn nine(home: &Home) {
                 )
                 .unwrap();
             for r in rows {
-                eprintln!("{}", home.ok(&["pick", "explain", &r.int(0).unwrap().to_string()]));
+                eprintln!(
+                    "{}",
+                    home.ok(&["pick", "explain", &r.int(0).unwrap().to_string()])
+                );
             }
         }
         assert_eq!(seen.get(reason), Some(&1), "{reason}: {seen:?}");
@@ -434,7 +449,10 @@ fn nine(home: &Home) {
         .unwrap();
     let parts: serde_json::Value = serde_json::from_str(row[0].text(0).unwrap()).unwrap();
     assert!(
-        parts["notes"]["retake"].as_str().unwrap().starts_with("plain"),
+        parts["notes"]["retake"]
+            .as_str()
+            .unwrap()
+            .starts_with("plain"),
         "{parts}"
     );
 
