@@ -7615,6 +7615,13 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
     println!("  session scheme   {}", row.text(10).unwrap_or_default());
     if let Some(b) = row.opt_text(6).ok().flatten() {
         println!("  worth a look     {b}");
+        // Record 51: what each border found (the retake's variant, the
+        // twin's stacks, the slice count and its bounds).
+        if let Some(notes) = parts["notes"].as_object() {
+            for (k, v) in notes {
+                println!("      {k}: {}", v.as_str().unwrap_or(""));
+            }
+        }
     }
     if let Some(list) = parts["parts"].as_array() {
         println!("  what decided it");

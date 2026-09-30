@@ -139,7 +139,12 @@ pub struct Penalty {
 }
 
 /// When a pick is not to be trusted on its own.
-#[derive(Debug, Clone)]
+///
+/// v0 raised nine reasons (`qc/cohort_main/service.py`, `_pick_for_session`);
+/// record 51 R6 carries every one of them, each defined as v0 computed it and
+/// with v0's number. A reason the pack does not declare is never raised, so a
+/// pack or an overlay written before keeps its borders.
+#[derive(Debug, Clone, Default)]
 pub struct Borders {
     /// The runner-up is within this fraction of the winner. `within`
     /// includes the fraction itself: a margin of exactly this is too close.
@@ -148,6 +153,69 @@ pub struct Borders {
     /// strictly below this, so the pick is right by the numbers and odd by
     /// the protocol. A share of exactly this is not rare.
     pub rare_within: Option<(String, f64)>,
+    /// v0's `retake`: the winner holds more than one stack of what should be
+    /// one image.
+    pub retake: Option<Retake>,
+    /// v0's `unknown_dim`: the winner has no value on this name.
+    pub unknown_dim: Option<String>,
+    /// v0's `slice_count_outlier`.
+    pub slice_outlier: Option<SliceOutlier>,
+    /// v0's `pre_post_twin`.
+    pub pre_post_twin: Option<Twin>,
+    /// v0's `epimix_fallback`: a stack of the winner holds this value of this
+    /// name, `(of, is)`.
+    pub fallback: Option<(String, String)>,
+    /// v0's `dixon_vs_plain`.
+    pub dixon_vs_plain: Option<Plain>,
+}
+
+/// v0's retake, and its partial-volume demotion read first.
+///
+/// A candidate outside a family is a retake when it holds more than one
+/// stack, counting only the stacks at or above `partial_below` of its largest
+/// slice count when that count is at least `partial_min_slices`: v0 demotes a
+/// short stack of one acquisition as a partial-volume helper or an aborted
+/// scan, "170 vs 40 is caught; 192 vs 168 is not". A candidate a family made
+/// is a retake when it keeps more stacks than the family's `retake_above`
+/// (v0: more than one of a Dixon's canonical construct, more than two of an
+/// MP2RAGE's).
+#[derive(Debug, Clone)]
+pub struct Retake {
+    /// The slice count, a field of the fingerprint.
+    pub of: String,
+    pub partial_below: f64,
+    pub partial_min_slices: f64,
+}
+
+/// v0's slice-count outlier: the winner's largest slice count is strictly
+/// below the `below` quantile or strictly above the `above` quantile of the
+/// named percentile population, in the winner's own bucket of it.
+#[derive(Debug, Clone)]
+pub struct SliceOutlier {
+    /// A population a `percentile` component of the pick builds.
+    pub population: String,
+    pub below: f64,
+    pub above: f64,
+}
+
+/// v0's pre and post twin: another candidate scores at least `at_least` of
+/// the winner, and its values of `of` share none with the winner's. v0 also
+/// made the twin a main; here it is a border only, and a person picks.
+#[derive(Debug, Clone)]
+pub struct Twin {
+    pub of: String,
+    pub at_least: f64,
+}
+
+/// v0's Dixon against plain: the winner is a candidate of the named family,
+/// and another candidate holding none of `plain_without` on `of` is within
+/// `within` of its score, the number itself included.
+#[derive(Debug, Clone)]
+pub struct Plain {
+    pub family: String,
+    pub of: String,
+    pub plain_without: Vec<String>,
+    pub within: f64,
 }
 
 /// Everything a pick needs, as the pack declares it.
@@ -162,8 +230,11 @@ pub struct Model {
     /// The names whose values identify one acquisition, so that two stacks of
     /// one acquisition are one candidate. v0's stage-1 bundle key.
     pub same_acquisition: Vec<String>,
-    /// And how the outputs of one acquisition are merged back together.
-    pub family: Option<Family>,
+    /// And how the outputs of one acquisition are merged back together, a
+    /// family per kind of acquisition that writes several images (record 51:
+    /// a Dixon, and an MP2RAGE). A stack belongs to the first whose token it
+    /// holds.
+    pub families: Vec<Family>,
 }
 
 /// One acquisition that produced several images, merged back into one
@@ -173,6 +244,8 @@ pub struct Model {
 /// without this they compete with each other for the session, four ways.
 #[derive(Debug, Clone)]
 pub struct Family {
+    /// What the pack calls it, which a border and a pick's evidence name.
+    pub name: String,
     /// Held when the candidate carries this token, and otherwise not merged.
     pub when: (String, String),
     /// The name whose values are the variants, dropped from the key.
@@ -185,6 +258,14 @@ pub struct Family {
     /// which is that a Dixon with neither an in-phase nor a water image is not
     /// a T1w anybody would measure on.
     pub canonical: Vec<String>,
+    /// What happens to a family holding none of `canonical`: dropped, which
+    /// is v0's Dixon, or left apart as the acquisitions it was before the
+    /// merge, which is v0's MP2RAGE ("tag all", for a cohort whose MP2RAGE
+    /// carries no labelled output).
+    pub apart_without_canonical: bool,
+    /// A candidate of this family keeping more stacks than this is a retake
+    /// (v0: 1 for a Dixon's canonical construct, 2 for an MP2RAGE's).
+    pub retake_above: usize,
 }
 
 impl Model {
@@ -226,7 +307,13 @@ impl Model {
         if let Some((of, _)) = &self.borders.rare_within {
             out.push(of.clone());
         }
-        if let Some(f) = &self.family {
+        let b = &self.borders;
+        out.extend(b.retake.iter().map(|r| r.of.clone()));
+        out.extend(b.unknown_dim.iter().cloned());
+        out.extend(b.pre_post_twin.iter().map(|t| t.of.clone()));
+        out.extend(b.fallback.iter().map(|(of, _)| of.clone()));
+        out.extend(b.dixon_vs_plain.iter().map(|p| p.of.clone()));
+        for f in &self.families {
             out.push(f.when.0.clone());
             out.push(f.over.clone());
             out.extend(f.ignoring.iter().cloned());
@@ -278,6 +365,30 @@ pub struct Percentiles {
     pub p95: f64,
 }
 
+impl Percentiles {
+    /// The quantiles a population keeps, which are the only ones a border may
+    /// name.
+    pub const KEPT: [f64; 5] = [0.05, 0.25, 0.50, 0.75, 0.95];
+
+    /// One of the five, by its fraction.
+    pub fn at(&self, q: f64) -> Option<f64> {
+        let near = |x: f64| (q - x).abs() < 1e-9;
+        if near(0.05) {
+            Some(self.p5)
+        } else if near(0.25) {
+            Some(self.p25)
+        } else if near(0.50) {
+            Some(self.p50)
+        } else if near(0.75) {
+            Some(self.p75)
+        } else if near(0.95) {
+            Some(self.p95)
+        } else {
+            None
+        }
+    }
+}
+
 impl Reference {
     /// The share of the population holding `value` on `axis`.
     pub fn share(&self, axis: &str, value: &str) -> f64 {
@@ -317,7 +428,7 @@ impl Reference {
 }
 
 /// One candidate: the stacks of one acquisition, judged together.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Candidate {
     /// The stack ids, which is what a pick names.
     pub stacks: Vec<i64>,
@@ -327,6 +438,12 @@ pub struct Candidate {
     /// which of the two it is naming, and because a bundle's slice count is
     /// the fullest volume in it and not an arbitrary one.
     pub values: BTreeMap<String, String>,
+    /// Each stack's own values, in the order of `stacks`, for the borders
+    /// that read the stacks one by one (a retake, a fallback). Empty where
+    /// the caller did not say, and then `values` stands for every stack.
+    pub each: Vec<BTreeMap<String, String>>,
+    /// The family whose outputs were merged into this candidate, by name.
+    pub family: Option<String>,
 }
 
 impl Candidate {
@@ -339,10 +456,33 @@ impl Candidate {
     }
 
     fn holds(&self, name: &str, token: &str) -> bool {
-        self.get(name)
-            .split(',')
-            .any(|t| t.trim().eq_ignore_ascii_case(token))
+        holds(self.get(name), token)
     }
+
+    /// Each stack's values, or the candidate's own where the caller gave
+    /// none per stack.
+    fn stacks_values(&self) -> Vec<&BTreeMap<String, String>> {
+        if self.each.is_empty() {
+            vec![&self.values; self.stacks.len().max(1)]
+        } else {
+            self.each.iter().collect()
+        }
+    }
+
+    /// The values of a multi-valued name as a set of tokens, where nothing is
+    /// a value of its own: v0 compared `post_contrast` as sets that could
+    /// hold `None`.
+    fn tokens(&self, name: &str) -> std::collections::BTreeSet<String> {
+        let v = self.get(name);
+        if v.trim().is_empty() {
+            return [String::new()].into_iter().collect();
+        }
+        v.split(',').map(|t| t.trim().to_ascii_lowercase()).collect()
+    }
+}
+
+fn holds(csv: &str, token: &str) -> bool {
+    csv.split(',').any(|t| t.trim().eq_ignore_ascii_case(token))
 }
 
 /// What one component said, and why.
@@ -535,14 +675,53 @@ pub enum Border {
     Rare,
     /// Nothing was eligible.
     Nothing,
+    /// The winner holds more than one stack of what should be one image:
+    /// the acquisition was run twice, or a family kept more of its canonical
+    /// output than it makes. v0's `retake`, `retake_dixon_canonical` and
+    /// `retake_mp2rage`, one reason with the variant in the evidence.
+    Retake,
+    /// The winner's dimension is not known, so the dimension component
+    /// scored it on a guess.
+    UnknownDim,
+    /// The winner's slice count is outside the 5th to 95th percentile of its
+    /// dimension's population.
+    SliceOutlier,
+    /// A candidate nearly as good differs from the winner in whether
+    /// contrast was given, so which of the two the session means is a
+    /// person's call.
+    PrePostTwin,
+    /// The winner is a fallback the pack penalises (v0: an EPIMix), which
+    /// wins only where nothing better was taken.
+    EpimixFallback,
+    /// The winner is a Dixon and a plain acquisition is close behind it.
+    DixonVsPlain,
 }
 
 impl Border {
+    /// Every border, in the order a pick reports them.
+    pub const ALL: [Border; 9] = [
+        Border::TooClose,
+        Border::Rare,
+        Border::Nothing,
+        Border::Retake,
+        Border::UnknownDim,
+        Border::SliceOutlier,
+        Border::PrePostTwin,
+        Border::EpimixFallback,
+        Border::DixonVsPlain,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Border::TooClose => "too_close",
             Border::Rare => "rare",
             Border::Nothing => "nothing_eligible",
+            Border::Retake => "retake",
+            Border::UnknownDim => "unknown_dim",
+            Border::SliceOutlier => "slice_count_outlier",
+            Border::PrePostTwin => "pre_post_twin",
+            Border::EpimixFallback => "epimix_fallback",
+            Border::DixonVsPlain => "dixon_vs_plain",
         }
     }
 }
@@ -558,6 +737,10 @@ pub struct Picked {
     /// How much of the winner's score separates them, as a fraction.
     pub margin: f64,
     pub borders: Vec<Border>,
+    /// What a border found, by the border's name, for the evidence: the
+    /// variant of a retake, the twin's stacks, the plain candidate's stacks,
+    /// the slice count and the bounds it fell outside.
+    pub notes: BTreeMap<&'static str, String>,
     /// Every candidate's score, for the row: what the alternatives were.
     pub considered: Vec<(Vec<i64>, f64)>,
 }
@@ -595,6 +778,7 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
             runner_up_score: 0.0,
             margin: 0.0,
             borders: vec![Border::Nothing],
+            notes: BTreeMap::new(),
             considered,
         };
     };
@@ -624,15 +808,205 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
         }
     }
 
+    let mut notes = BTreeMap::new();
+    let winner = &candidates[first];
+    let others: Vec<(&Candidate, f64)> = scored[1..]
+        .iter()
+        .map(|(i, s)| (&candidates[*i], s.score))
+        .collect();
+    more_borders(
+        model,
+        winner,
+        best.score,
+        &others,
+        reference,
+        &mut borders,
+        &mut notes,
+    );
+
     Picked {
         role: role.to_string(),
-        winner: Some(candidates[first].clone()),
+        winner: Some(winner.clone()),
         scored: Some(best),
         runner_up: second.map(|(i, _)| candidates[i].clone()),
         runner_up_score,
         margin,
         borders,
+        notes,
         considered,
+    }
+}
+
+fn stacks_text(stacks: &[i64]) -> String {
+    stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Record 51 R6: v0's six other reasons, each as v0 computed it in
+/// `_pick_for_session` at 5ee391f, in v0's order, and each only where the
+/// pack declares it. `others` are the other candidates, best first.
+fn more_borders(
+    model: &Model,
+    winner: &Candidate,
+    score: f64,
+    others: &[(&Candidate, f64)],
+    reference: &Reference,
+    borders: &mut Vec<Border>,
+    notes: &mut BTreeMap<&'static str, String>,
+) {
+    let b = &model.borders;
+    // A number the fingerprint wrote, parsed.
+    let num = |v: &BTreeMap<String, String>, name: &str| -> Option<f64> {
+        v.get(name)?.trim().parse::<f64>().ok()
+    };
+
+    // Retake. A family's candidate is judged on what the family kept; any
+    // other on its stacks, less the short ones v0 demotes first.
+    if let Some(r) = &b.retake {
+        let family = winner
+            .family
+            .as_ref()
+            .and_then(|n| model.families.iter().find(|f| &f.name == n));
+        match family {
+            Some(f) => {
+                if winner.stacks.len() > f.retake_above {
+                    borders.push(Border::Retake);
+                    notes.insert(
+                        "retake",
+                        format!(
+                            "{}: {} stacks of its canonical output, more than {}",
+                            f.name,
+                            winner.stacks.len(),
+                            f.retake_above
+                        ),
+                    );
+                }
+            }
+            None => {
+                let slices: Vec<f64> = winner
+                    .stacks_values()
+                    .iter()
+                    .map(|v| num(v, &r.of).unwrap_or(0.0))
+                    .collect();
+                let largest = slices.iter().copied().fold(0.0, f64::max);
+                let (kept, short) = if slices.len() >= 2
+                    && (largest >= r.partial_min_slices
+                        || crate::pack::at_threshold(largest, r.partial_min_slices))
+                {
+                    let cutoff = r.partial_below * largest;
+                    let kept = slices
+                        .iter()
+                        .filter(|n| **n >= cutoff || crate::pack::at_threshold(**n, cutoff))
+                        .count();
+                    (kept, slices.len() - kept)
+                } else {
+                    (slices.len(), 0)
+                };
+                if kept > 1 {
+                    borders.push(Border::Retake);
+                    notes.insert(
+                        "retake",
+                        if short > 0 {
+                            format!(
+                                "plain: {kept} full stacks of one acquisition, {short} short one(s) set aside"
+                            )
+                        } else {
+                            format!("plain: {kept} stacks of one acquisition")
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // The dimension, unknown.
+    if let Some(of) = &b.unknown_dim
+        && winner.get(of).trim().is_empty()
+    {
+        borders.push(Border::UnknownDim);
+    }
+
+    // The slice count, outside its population. v0 compares the largest
+    // slice count strictly with the fifth and the ninety-fifth percentile of
+    // the winner's dimension bucket, and says nothing where the population
+    // had too few to bucket.
+    if let Some(o) = &b.slice_outlier
+        && let Some((of, key)) = model.components.iter().find_map(|c| match &c.kind {
+            Kind::Percentile {
+                of,
+                population,
+                split_by,
+                ..
+            } if *population == o.population => Some((
+                of.clone(),
+                match split_by {
+                    Some(a) => format!("{population}:{}", winner.get(a)),
+                    None => population.clone(),
+                },
+            )),
+            _ => None,
+        })
+        && let Some(p) = reference.percentiles.get(&key)
+        && let Some(n) = winner.num(&of)
+        && n > 0.0
+        && let (Some(lo), Some(hi)) = (p.at(o.below), p.at(o.above))
+        && (n < lo || n > hi)
+    {
+        borders.push(Border::SliceOutlier);
+        notes.insert(
+            "slice_count_outlier",
+            format!("{n:.0} outside {lo:.0} to {hi:.0} in {key}"),
+        );
+    }
+
+    // A twin across contrast: the first candidate, best first, still at or
+    // above the fraction of the winner whose contrast shares nothing with
+    // the winner's. v0 stops looking at the first one below it.
+    if let Some(t) = &b.pre_post_twin {
+        let mine = winner.tokens(&t.of);
+        for (c, s) in others {
+            let floor = t.at_least * score;
+            if *s < floor && !crate::pack::at_threshold(*s, floor) {
+                break;
+            }
+            if c.tokens(&t.of).is_disjoint(&mine) {
+                borders.push(Border::PrePostTwin);
+                notes.insert("pre_post_twin", stacks_text(&c.stacks));
+                break;
+            }
+        }
+    }
+
+    // A fallback won: any stack of the winner holds it.
+    if let Some((of, is)) = &b.fallback
+        && winner
+            .stacks_values()
+            .iter()
+            .any(|v| v.get(of).is_some_and(|x| holds(x, is)))
+    {
+        borders.push(Border::EpimixFallback);
+    }
+
+    // A Dixon won and a plain acquisition is close behind: within the
+    // fraction of the winner's score, the fraction itself included.
+    if let Some(p) = &b.dixon_vs_plain
+        && winner.family.as_deref() == Some(p.family.as_str())
+        && score > 0.0
+    {
+        for (c, s) in others {
+            if p.plain_without.iter().any(|t| c.holds(&p.of, t)) {
+                continue;
+            }
+            let gap = (score - s) / score;
+            if gap <= p.within || crate::pack::at_threshold(gap, p.within) {
+                borders.push(Border::DixonVsPlain);
+                notes.insert("dixon_vs_plain", stacks_text(&c.stacks));
+                break;
+            }
+        }
     }
 }
 
@@ -684,9 +1058,10 @@ mod tests {
             borders: Borders {
                 runner_up_within: 0.05,
                 rare_within: Some(("technique".into(), 0.10)),
+                ..Borders::default()
             },
             same_acquisition: vec!["technique".into()],
-            family: None,
+            families: Vec::new(),
         }
     }
 
@@ -697,6 +1072,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
+            ..Candidate::default()
         }
     }
 
@@ -860,5 +1236,359 @@ mod tests {
         assert_eq!(p.p5, 10.0);
         assert_eq!(p.p50, 30.0);
         assert_eq!(p.p95, 50.0);
+    }
+
+    // ------------------------------------------------------------ record 51
+    //
+    // The boundaries of v0's six other reasons, on a model whose scores are
+    // chosen: one `choice` component over `q`, so a candidate scores what its
+    // `q` is worth and a fraction of the winner is exact. The cases ported
+    // from v0's own tests, on the MRI pack's numbers, are in
+    // `tests/borders.rs`.
+
+    fn chosen(borders: Borders, families: Vec<Family>) -> Model {
+        Model {
+            name: "main".into(),
+            roles: vec!["t1w".into()],
+            components: vec![
+                Component {
+                    name: "q".into(),
+                    weight: 1.0,
+                    kind: Kind::Choice {
+                        of: "q".into(),
+                        scores: [
+                            ("top", 1.0),
+                            ("at_85", 0.85),
+                            ("under_85", 0.849),
+                            ("at_90", 0.90),
+                            ("under_90", 0.899),
+                        ]
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                        missing: 0.0,
+                        crowded_by: None,
+                    },
+                },
+                Component {
+                    name: "slices".into(),
+                    weight: 0.0,
+                    kind: Kind::Percentile {
+                        of: "n_instances".into(),
+                        population: "slices".into(),
+                        split_by: Some("dim".into()),
+                        missing: 0.4,
+                        unknown: 0.6,
+                    },
+                },
+            ],
+            penalty: None,
+            borders: Borders {
+                // Far from anything below, so that too_close never joins in.
+                runner_up_within: 0.0,
+                ..borders
+            },
+            same_acquisition: vec!["q".into()],
+            families,
+        }
+    }
+
+    fn with_each(stacks: &[(i64, &[(&str, &str)])], family: Option<&str>) -> Candidate {
+        let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect()
+        };
+        let mut values = BTreeMap::new();
+        for (_, pairs) in stacks {
+            for (k, v) in map(pairs) {
+                values.entry(k).or_insert(v);
+            }
+        }
+        // The slice count at its largest, as the registry side builds it.
+        if let Some(n) = stacks
+            .iter()
+            .filter_map(|(_, p)| p.iter().find(|(k, _)| *k == "n_instances"))
+            .filter_map(|(_, v)| v.parse::<f64>().ok())
+            .reduce(f64::max)
+        {
+            values.insert("n_instances".into(), format!("{n}"));
+        }
+        Candidate {
+            stacks: stacks.iter().map(|(s, _)| *s).collect(),
+            values,
+            each: stacks.iter().map(|(_, p)| map(p)).collect(),
+            family: family.map(str::to_string),
+        }
+    }
+
+    fn retake() -> Borders {
+        Borders {
+            retake: Some(Retake {
+                of: "n_instances".into(),
+                partial_below: 0.50,
+                partial_min_slices: 60.0,
+            }),
+            ..Borders::default()
+        }
+    }
+
+    fn family(name: &str, retake_above: usize) -> Family {
+        Family {
+            name: name.into(),
+            when: ("modifier".into(), name.into()),
+            over: "construct".into(),
+            ignoring: Vec::new(),
+            canonical: vec!["InPhase".into()],
+            apart_without_canonical: false,
+            retake_above,
+        }
+    }
+
+    #[test]
+    fn a_retake_is_two_full_stacks_of_one_acquisition_and_a_short_one_is_set_aside() {
+        let m = chosen(retake(), Vec::new());
+        let r = Reference::default();
+        let of = |a: &str, b: &str| {
+            with_each(
+                &[
+                    (1, &[("q", "top"), ("n_instances", a)]),
+                    (2, &[("q", "top"), ("n_instances", b)]),
+                ],
+                None,
+            )
+        };
+        // v0's own words: "a 170 vs 40 gap is caught; 192 vs 168 is not".
+        let p = pick(&m, "t1w", &[of("170", "40")], &r);
+        assert!(!p.borders.contains(&Border::Retake), "{:?}", p.borders);
+        let p = pick(&m, "t1w", &[of("192", "168")], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("plain: 2"), "{:?}", p.notes);
+        // Half the largest is kept: `below` is strictly below.
+        let p = pick(&m, "t1w", &[of("176", "88")], &r);
+        assert_eq!(p.borders, [Border::Retake], "88 is half of 176, not below it");
+        let p = pick(&m, "t1w", &[of("176", "87")], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        // Under 60 slices nothing is demoted: v0 demotes only where the
+        // largest is at least `partial_volume_min_slices`, and 60 is.
+        let p = pick(&m, "t1w", &[of("59", "20")], &r);
+        assert_eq!(p.borders, [Border::Retake], "59 demotes nothing");
+        let p = pick(&m, "t1w", &[of("60", "20")], &r);
+        assert!(p.borders.is_empty(), "60 demotes the 20: {:?}", p.borders);
+        // One stack is no retake.
+        let one = with_each(&[(1, &[("q", "top"), ("n_instances", "176")])], None);
+        assert!(pick(&m, "t1w", &[one], &r).borders.is_empty());
+    }
+
+    #[test]
+    fn a_family_s_retake_is_counted_by_the_family() {
+        // v0: more than one of a Dixon's canonical construct, more than two
+        // of an MP2RAGE's. Sisters of one Dixon are no retake, because the
+        // family keeps only its canonical output.
+        let m = chosen(retake(), vec![family("dixon", 1), family("mp2rage", 2)]);
+        let r = Reference::default();
+        let stacks = |n: i64, fam: &str| {
+            let rows: Vec<(i64, &[(&str, &str)])> =
+                (1..=n).map(|i| (i, &[("q", "top")][..])).collect();
+            with_each(&rows, Some(fam))
+        };
+        assert!(pick(&m, "t1w", &[stacks(1, "dixon")], &r).borders.is_empty());
+        let p = pick(&m, "t1w", &[stacks(2, "dixon")], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("dixon: 2"), "{:?}", p.notes);
+        assert!(pick(&m, "t1w", &[stacks(2, "mp2rage")], &r).borders.is_empty());
+        let p = pick(&m, "t1w", &[stacks(3, "mp2rage")], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("mp2rage: 3"), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn an_unknown_dimension_is_a_border_and_a_known_one_is_not() {
+        let m = chosen(
+            Borders {
+                unknown_dim: Some("dim".into()),
+                ..Borders::default()
+            },
+            Vec::new(),
+        );
+        let r = Reference::default();
+        let p = pick(&m, "t1w", &[candidate(&[1], &[("q", "top")])], &r);
+        assert_eq!(p.borders, [Border::UnknownDim]);
+        let p = pick(&m, "t1w", &[candidate(&[1], &[("q", "top"), ("dim", "2D")])], &r);
+        assert!(p.borders.is_empty());
+    }
+
+    #[test]
+    fn a_slice_count_outside_its_bucket_s_fifth_to_ninety_fifth_is_a_border() {
+        let m = chosen(
+            Borders {
+                slice_outlier: Some(SliceOutlier {
+                    population: "slices".into(),
+                    below: 0.05,
+                    above: 0.95,
+                }),
+                ..Borders::default()
+            },
+            Vec::new(),
+        );
+        let mut r = Reference::default();
+        r.percentiles.insert(
+            "slices:3D".into(),
+            Percentiles {
+                p5: 160.0,
+                p25: 170.0,
+                p50: 176.0,
+                p75: 176.0,
+                p95: 192.0,
+            },
+        );
+        let at = |n: &str, dim: &str| {
+            pick(
+                &m,
+                "t1w",
+                &[candidate(&[1], &[("q", "top"), ("n_instances", n), ("dim", dim)])],
+                &r,
+            )
+        };
+        // Strictly outside, as v0 compares: `<` the fifth, `>` the ninety-fifth.
+        assert_eq!(at("159", "3D").borders, [Border::SliceOutlier]);
+        assert!(at("160", "3D").borders.is_empty(), "the fifth itself is inside");
+        assert!(at("192", "3D").borders.is_empty(), "the ninety-fifth itself is inside");
+        let p = at("193", "3D");
+        assert_eq!(p.borders, [Border::SliceOutlier]);
+        assert_eq!(p.notes["slice_count_outlier"], "193 outside 160 to 192 in slices:3D");
+        // In its own bucket only: a 2D population too small to bucket says
+        // nothing, as v0's missing percentiles did.
+        assert!(at("24", "2D").borders.is_empty());
+        // And no slice count says nothing.
+        let p = pick(&m, "t1w", &[candidate(&[1], &[("q", "top"), ("dim", "3D")])], &r);
+        assert!(p.borders.is_empty());
+    }
+
+    #[test]
+    fn a_twin_across_contrast_is_at_least_the_fraction_and_shares_no_contrast() {
+        let m = chosen(
+            Borders {
+                pre_post_twin: Some(Twin {
+                    of: "post_contrast".into(),
+                    at_least: 0.85,
+                }),
+                ..Borders::default()
+            },
+            Vec::new(),
+        );
+        let r = Reference::default();
+        let winner = candidate(&[1], &[("q", "top"), ("post_contrast", "0")]);
+        let twin = |q: &str, pc: &str| candidate(&[2], &[("q", q), ("post_contrast", pc)]);
+        // `at_least` takes the number itself.
+        let p = pick(&m, "t1w", &[winner.clone(), twin("at_85", "1")], &r);
+        assert_eq!(p.borders, [Border::PrePostTwin]);
+        assert_eq!(p.notes["pre_post_twin"], "2");
+        let p = pick(&m, "t1w", &[winner.clone(), twin("under_85", "1")], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        // The same contrast is no twin, however close.
+        let p = pick(&m, "t1w", &[winner.clone(), twin("at_85", "0")], &r);
+        assert!(p.borders.is_empty());
+        // Nothing stated is a value of its own, as v0's None was.
+        let p = pick(&m, "t1w", &[winner, candidate(&[2], &[("q", "at_85")])], &r);
+        assert_eq!(p.borders, [Border::PrePostTwin]);
+        let both_unstated = pick(
+            &m,
+            "t1w",
+            &[
+                candidate(&[1], &[("q", "top")]),
+                candidate(&[2], &[("q", "at_85")]),
+            ],
+            &r,
+        );
+        assert!(both_unstated.borders.is_empty());
+    }
+
+    #[test]
+    fn a_fallback_that_won_is_a_border_on_any_stack_of_the_winner() {
+        let m = chosen(
+            Borders {
+                fallback: Some(("provenance".into(), "EPIMix".into())),
+                ..Borders::default()
+            },
+            Vec::new(),
+        );
+        let r = Reference::default();
+        let p = pick(
+            &m,
+            "t1w",
+            &[candidate(&[1], &[("q", "top"), ("provenance", "EPIMix")])],
+            &r,
+        );
+        assert_eq!(p.borders, [Border::EpimixFallback]);
+        // v0 reads every stack of the winning bundle, not its first.
+        let mixed = with_each(
+            &[
+                (1, &[("q", "top"), ("provenance", "RawRecon")]),
+                (2, &[("q", "top"), ("provenance", "EPIMix")]),
+            ],
+            None,
+        );
+        assert_eq!(pick(&m, "t1w", &[mixed], &r).borders, [Border::EpimixFallback]);
+        let p = pick(
+            &m,
+            "t1w",
+            &[candidate(&[1], &[("q", "top"), ("provenance", "RawRecon")])],
+            &r,
+        );
+        assert!(p.borders.is_empty());
+    }
+
+    #[test]
+    fn a_dixon_that_won_with_a_plain_one_within_a_tenth_is_a_border() {
+        let m = chosen(
+            Borders {
+                dixon_vs_plain: Some(Plain {
+                    family: "dixon".into(),
+                    of: "modifier".into(),
+                    plain_without: vec!["Dixon".into(), "WaterExc".into()],
+                    within: 0.10,
+                }),
+                ..Borders::default()
+            },
+            vec![family("dixon", 1)],
+        );
+        let r = Reference::default();
+        let dixon = with_each(&[(1, &[("q", "top"), ("modifier", "Dixon")])], Some("dixon"));
+        let other = |q: &str, modifier: &str| candidate(&[2], &[("q", q), ("modifier", modifier)]);
+        // `within` takes the number itself.
+        let p = pick(&m, "t1w", &[dixon.clone(), other("at_90", "")], &r);
+        assert_eq!(p.borders, [Border::DixonVsPlain]);
+        assert_eq!(p.notes["dixon_vs_plain"], "2");
+        let p = pick(&m, "t1w", &[dixon.clone(), other("under_90", "")], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        // A water-excited acquisition is not plain.
+        let p = pick(&m, "t1w", &[dixon.clone(), other("at_90", "WaterExc")], &r);
+        assert!(p.borders.is_empty());
+        // And a winner that is not the family's asks nothing.
+        let lone = candidate(&[1], &[("q", "top"), ("modifier", "Dixon")]);
+        let p = pick(&m, "t1w", &[lone, other("at_90", "")], &r);
+        assert!(p.borders.is_empty());
+    }
+
+    #[test]
+    fn a_model_that_declares_none_of_the_six_raises_none_of_them() {
+        // A pack written before record 51, or an overlay that keeps its
+        // borders: every one of the six reasons planted at once, and only
+        // the old three can come out.
+        let m = chosen(Borders::default(), vec![family("dixon", 1)]);
+        let r = Reference::default();
+        let everything = with_each(
+            &[
+                (1, &[("q", "top"), ("provenance", "EPIMix"), ("modifier", "Dixon"), ("n_instances", "176")]),
+                (2, &[("q", "top"), ("provenance", "EPIMix"), ("modifier", "Dixon"), ("n_instances", "176")]),
+            ],
+            Some("dixon"),
+        );
+        let twin = candidate(&[3], &[("q", "at_90"), ("post_contrast", "1")]);
+        let p = pick(&m, "t1w", &[everything, twin], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        assert!(p.notes.is_empty());
     }
 }

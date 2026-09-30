@@ -157,7 +157,8 @@ fn every_overlay_key_the_loader_reads_is_on_the_overlay_schema() {
 }
 
 /// The MRI pack as a contract-5 pack: copied, with the keys contract 6
-/// added taken out of its manifest and the contract it declares set to 5.
+/// added taken out of its manifest, its picks left out (their file is
+/// written in contract 7's keys) and the contract it declares set to 5.
 fn mri_at_contract_5() -> std::path::PathBuf {
     fn copy(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
@@ -179,7 +180,8 @@ fn mri_at_contract_5() -> std::path::PathBuf {
     let mut out = String::new();
     let mut skipping = false;
     for line in manifest.lines() {
-        if line.starts_with("excludes:") || line.starts_with("hints:") {
+        if line.starts_with("excludes:") || line.starts_with("hints:") || line.starts_with("picks:")
+        {
             skipping = true;
             continue;
         }
