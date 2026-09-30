@@ -5748,3 +5748,194 @@ fn a_t2w_is_picked_and_released() {
     assert_eq!(units["failed"], 0, "{v}");
     assert_eq!(v["status"], "done", "{v}");
 }
+
+/// Record 51 R2's proof at the readers of picks: a person's pick of no
+/// stack, which Keep writes on a border where the run picked nothing, is
+/// read as no pick said by a person. The pre-flight names it as the reason
+/// a session misses its FLAIR, and the release of the picks writes no FLAIR
+/// for that session, where before the keep an earlier run's pick of it
+/// still applied.
+#[test]
+fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    // P1's session holds two FLAIRs of one acquisition, P2's one
+    let src = tree_of(
+        |patient, n, slice| format!("{patient}/{n}/{slice}"),
+        &[
+            (
+                "P1",
+                "20220115",
+                "1.2.826.0.1.3680043.8.498.71",
+                &[
+                    ("1", "t1_mprage_sag", "MPRAGE"),
+                    ("2", "t2_flair_sag", "FLAIR"),
+                    ("3", "t2_flair_sag", "FLAIR"),
+                ],
+            ),
+            (
+                "P2",
+                "20230310",
+                "1.2.826.0.1.3680043.8.498.72",
+                &[
+                    ("1", "t1_mprage_sag", "MPRAGE"),
+                    ("2", "t2_flair_sag", "FLAIR"),
+                ],
+            ),
+        ],
+    );
+    let lab = Lab::with_tree("pipelines-nothing", src);
+    lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+    let packs = packs();
+    let p = packs.to_str().unwrap();
+    let exported = TempDir::new("pipelines-nothing-out");
+    lab.ok(
+        &[
+            "place",
+            "add",
+            "out",
+            exported.path().to_str().unwrap(),
+            "--role",
+            "export",
+        ],
+        None,
+    );
+    let flairs = |lab: &Lab, out: &str| -> usize {
+        let dir = exported.path().join(out);
+        lab.ok(
+            &[
+                "release",
+                "--name",
+                out,
+                "--out",
+                dir.to_str().unwrap(),
+                "--layout",
+                "bids",
+                "--picked",
+                "--role",
+                "flair",
+                "--on-unknown",
+                "write",
+                "--pack-dir",
+                p,
+            ],
+            None,
+        );
+        let mut n = 0;
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.to_string_lossy().ends_with("_FLAIR.nii.gz") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let preflight = |lab: &Lab| -> Value {
+        lab.json(&[
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ])
+    };
+    // P1's two FLAIRs are one acquisition, picked together
+    assert_eq!(flairs(&lab, "before"), 3);
+
+    // P1's two FLAIRs made the outputs of one Dixon that the pack does not
+    // measure on: nothing is eligible there, and the earlier run's pick of
+    // them still applies
+    let mut store = lab.store();
+    let mut by_subject: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+    for r in store
+        .query(
+            "SELECT f.subject_id, a.stack_id FROM classification_axis a \
+             JOIN stack_fingerprint f ON f.stack_id = a.stack_id \
+             WHERE a.axis = 'role' AND a.value = 'flair' ORDER BY a.stack_id",
+            &[],
+        )
+        .unwrap()
+    {
+        by_subject
+            .entry(r.int(0).unwrap())
+            .or_default()
+            .push(r.int(1).unwrap());
+    }
+    let p1 = by_subject
+        .into_values()
+        .find(|s| s.len() == 2)
+        .expect("P1's two FLAIRs");
+    let list = p1.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+    store
+        .execute(
+            &format!(
+                "DELETE FROM classification_axis WHERE axis = 'construct' AND stack_id IN ({list})"
+            ),
+            &[],
+        )
+        .unwrap();
+    for s in &p1 {
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) VALUES \
+                     ({s}, 'modifier', 'Dixon', 1.0, 'rule'), ({s}, 'construct', 'Fat', 1.0, 'rule')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let run = lab.json(&["pick", "run", "--pack-dir", p, "--json"]);
+    assert_eq!(run["borders"]["nothing_eligible"], 1, "{run}");
+    let pre = preflight(&lab);
+    assert_eq!(
+        pre["units"]["missing"], 0,
+        "the earlier pick still applies: {pre}"
+    );
+
+    // kept: no FLAIR stands for P1's session, said by a person
+    let items = lab.json(&[
+        "review",
+        "list",
+        "--kind",
+        "pick.border",
+        "--status",
+        "open",
+        "--json",
+    ]);
+    let item = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["evidence"]["borders"] == json!(["nothing_eligible"]))
+        .unwrap_or_else(|| panic!("{items}"));
+    let kept = lab.json(&[
+        "review",
+        "accept",
+        &item["id"].as_i64().unwrap().to_string(),
+        "--json",
+    ]);
+    let person = kept["pick"]["id"].as_i64().unwrap();
+    assert_eq!(kept["pick"]["stacks"], json!([]), "{kept}");
+    let pre = preflight(&lab);
+    assert_eq!(pre["units"]["total"], 2, "{pre}");
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    let why = pre["missing"][0]["why"][0].as_str().unwrap();
+    assert!(
+        why.contains(&format!(
+            "no flair stands for it: a person's pick {person} says so"
+        )),
+        "{pre}"
+    );
+    assert_eq!(flairs(&lab, "after"), 1, "the kept nothing writes no FLAIR");
+}

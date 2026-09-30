@@ -2164,6 +2164,7 @@ pub(crate) fn route(
                 Ok(Reply::ok(json!({
                     "committed": done.decisions, "items": done.items, "left": done.left,
                     "split": done.split, "left_out_sealed": done.left_out_sealed,
+                    "left_held": done.left_held,
                 })))
             }
             _ => Err(Reply::error(

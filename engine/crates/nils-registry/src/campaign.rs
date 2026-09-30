@@ -1692,7 +1692,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 out.push(it);
             }
             let held = held_review_items(store)?;
-            if let Some(id) = ids.iter().find(|id| held.contains(id)) {
+            if let Some(id) = ids.iter().find(|id| held.contains_key(id)) {
                 return Err(refused(format!(
                     "review item {id} is asked by an open campaign already"
                 )));
@@ -2082,22 +2082,77 @@ pub fn holder(store: &mut Store, review_item: i64) -> Result<Option<(i64, String
     Ok(None)
 }
 
-fn held_review_items(store: &mut Store) -> Result<BTreeSet<i64>, Error> {
+/// Record 51 R3: what the open campaigns ask, as (stack, axis) with the
+/// asking campaign's name: every axis a review item it took from the queue
+/// asks, on its stack or on each member of its group.
+/// A decision on one of these is the campaign's to make, so a staged one
+/// is not put in force while the campaign is open.
+pub fn held_pairs(store: &mut Store) -> Result<BTreeMap<(i64, String), String>, Error> {
+    let held = held_review_items(store)?;
+    let mut out = BTreeMap::new();
+    for (id, name) in held {
+        let Some(it) = review::item(store, id).map_err(|e| invalid(e.to_string()))? else {
+            continue;
+        };
+        // a campaign's own question (`campaign.<kind>`) is how it asks a
+        // selection; only the queue's items it took (or its axes items
+        // answer, `asks`) stand for a decision made elsewhere
+        if it.kind.starts_with("campaign.") {
+            continue;
+        }
+        let mut axes: Vec<String> = it.evidence["axes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(str::to_string))
+            .collect();
+        axes.extend(it.evidence["axis"].as_str().map(str::to_string));
+        if axes.is_empty() {
+            continue;
+        }
+        let stacks: Vec<i64> = if it.scope == "group" {
+            review::members(store, id)
+                .map_err(|e| invalid(e.to_string()))?
+                .iter()
+                .map(|m| m.stack_id)
+                .collect()
+        } else {
+            it.reference["stack_id"].as_i64().into_iter().collect()
+        };
+        for s in stacks {
+            for a in &axes {
+                out.entry((s, a.clone())).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The review items the open campaigns ask, each with the asking
+/// campaign's name: the ones its items stand on, and those its axes items
+/// answer (`asks`, record 45).
+fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
     let sql = format!(
-        "SELECT i.review_item_id FROM {} i JOIN {} c ON c.id = i.campaign_id WHERE c.status IN ('open', 'closing')",
+        "SELECT i.review_item_id, c.name FROM {} i JOIN {} c ON c.id = i.campaign_id \
+         WHERE c.status IN ('open', 'closing') ORDER BY c.id, i.review_item_id",
         store.qualified("campaign_item"),
         store.qualified("campaign")
     );
-    let backing: Vec<i64> = store
+    let backing: Vec<(i64, String)> = store
         .query(&sql, &[])?
         .iter()
-        .map(|r| r.int(0))
-        .collect::<Result<_, _>>()?;
-    let mut held: BTreeSet<i64> = backing.iter().copied().collect();
+        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
+        .collect::<Result<_, StoreError>>()?;
+    let mut held: BTreeMap<i64, String> = BTreeMap::new();
+    for (id, name) in &backing {
+        held.entry(*id).or_insert_with(|| name.clone());
+    }
+    let named: BTreeMap<i64, String> = held.clone();
+    let ids: Vec<i64> = named.keys().copied().collect();
     let t = table("review_item");
-    for chunk in backing.chunks(500) {
+    for chunk in ids.chunks(500) {
         let sql = format!(
-            "SELECT {} FROM {} WHERE kind = 'campaign.axes' AND id IN ({})",
+            "SELECT id, {} FROM {} WHERE kind = 'campaign.axes' AND id IN ({})",
             store
                 .dialect()
                 .text_of(t.column("evidence").expect("evidence")),
@@ -2105,17 +2160,19 @@ fn held_review_items(store: &mut Store) -> Result<BTreeSet<i64>, Error> {
             join_ids(chunk)
         );
         for r in store.query(&sql, &[])? {
+            let by = named.get(&r.int(0)?).cloned().unwrap_or_default();
             let ev: Value = r
-                .opt_text(0)?
+                .opt_text(1)?
                 .and_then(|t| serde_json::from_str(t).ok())
                 .unwrap_or(Value::Null);
-            held.extend(
-                ev["asks"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_i64),
-            );
+            for asked in ev["asks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+            {
+                held.entry(asked).or_insert_with(|| by.clone());
+            }
         }
     }
     Ok(held)

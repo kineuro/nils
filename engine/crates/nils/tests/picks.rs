@@ -582,6 +582,36 @@ impl Served {
         Served { child, port }
     }
 
+    fn post(&self, path: &str, body: serde_json::Value, token: &str) -> (u16, serde_json::Value) {
+        self.post_as(path, body, token, "")
+    }
+
+    /// `post` with extra header lines, each ending in `\r\n`.
+    fn post_as(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        token: &str,
+        headers: &str,
+    ) -> (u16, serde_json::Value) {
+        use std::io::Read as _;
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let body = body.to_string();
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, text) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        let status: u16 = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (
+            status,
+            serde_json::from_str(text).unwrap_or(serde_json::Value::String(text.to_string())),
+        )
+    }
+
     fn get(&self, path: &str, token: &str) -> (u16, serde_json::Value) {
         use std::io::Read as _;
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
@@ -724,5 +754,462 @@ fn a_pick_campaign_s_item_names_its_candidates_on_postgres_too() {
     };
     drop();
     candidates_round(&registry(Some((dsn.clone(), schema.to_string()))));
+    drop();
+}
+
+// ------------------------------------------------------------ record 51 R1
+
+/// The open `pick.border` items, by the occasion they are about.
+fn open_borders(home: &Home) -> Vec<serde_json::Value> {
+    let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
+    items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["status"] == "open")
+        .cloned()
+        .collect()
+}
+
+/// Whether an open border is about the same occasion as `item`.
+fn same_occasion(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    a["ref"] == b["ref"]
+}
+
+/// The stacks a pick names.
+fn stacks_of(store: &mut Store, pick: i64) -> Vec<i64> {
+    store
+        .query(
+            &format!(
+                "SELECT stack_id FROM {} WHERE pick_id = {pick} ORDER BY stack_id",
+                store.qualified("pick_stack")
+            ),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect()
+}
+
+/// How many audit rows of this action.
+fn audited(store: &mut Store, action: &str) -> i64 {
+    store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE action = '{action}'",
+                store.qualified("audit")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap()
+}
+
+/// How a border is kept: at the keyboard, or at the door.
+enum Keeper<'a> {
+    Keyboard,
+    Door(&'a Served),
+}
+
+impl Keeper<'_> {
+    /// Keep review item `id`, having seen the run's pick `seen`: the
+    /// person's pick it wrote, or the words it was refused in.
+    fn keep(&self, home: &Home, id: i64, seen: i64) -> Result<serde_json::Value, String> {
+        match self {
+            Keeper::Keyboard => {
+                let (good, out, err) = home.run(
+                    &[
+                        "review",
+                        "accept",
+                        &id.to_string(),
+                        "--pick",
+                        &seen.to_string(),
+                        "--json",
+                    ],
+                    None,
+                );
+                if good {
+                    Ok(serde_json::from_str(&out).unwrap())
+                } else {
+                    Err(err)
+                }
+            }
+            Keeper::Door(server) => {
+                let (status, doc) = server.post(
+                    &format!("/api/review/{id}/accept"),
+                    serde_json::json!({"pick_id": seen}),
+                    CURATOR,
+                );
+                if status == 200 {
+                    Ok(doc)
+                } else {
+                    assert_eq!(status, 409, "{doc}");
+                    Err(doc.to_string())
+                }
+            }
+        }
+    }
+
+    fn who(&self) -> &'static str {
+        match self {
+            Keeper::Keyboard => "anna@ward-3",
+            Keeper::Door(_) => "cleo@lab",
+        }
+    }
+}
+
+/// Record 51's proof of A: Keep on a `pick.border` item is a person's pick
+/// of the run's stacks, which the next run leaves standing and asks nothing
+/// more about, and Withdraw lets the border come back. A keep of a pick a
+/// run has replaced since it was read is refused and writes nothing.
+fn keep_round(home: &Home, keeper: &Keeper<'_>) {
+    let p = packs();
+    let first = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let raised = first["raised"].as_i64().unwrap();
+    assert!(raised > 0, "{first}");
+    let item = open_borders(home)
+        .into_iter()
+        .find(|i| i["evidence"]["pick_id"].is_i64())
+        .expect("a border on an occasion the run picked on");
+    let id = item["id"].as_i64().unwrap();
+    let read = item["evidence"]["pick_id"].as_i64().unwrap();
+    let mut store = home.store();
+    let run_stacks = stacks_of(&mut store, read);
+    assert!(!run_stacks.is_empty());
+    // the border names where the run looked, for a keep of nothing
+    assert!(item["evidence"]["scheme"]["digest"].is_string(), "{item}");
+    assert!(item["evidence"]["pack_version"].is_string(), "{item}");
+
+    // a run between reading and keeping: the pick read is not the run's now
+    home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let persons = |store: &mut Store| -> i64 {
+        store
+            .query(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE author_kind = 'person'",
+                    store.qualified("pick")
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    let before = (
+        persons(&mut store),
+        audited(&mut store, "review.accept"),
+        audited(&mut store, "pick.set"),
+    );
+    let err = keeper.keep(home, id, read).unwrap_err();
+    assert!(err.contains("the run changed its pick"), "{err}");
+    assert_eq!(
+        (
+            persons(&mut store),
+            audited(&mut store, "review.accept"),
+            audited(&mut store, "pick.set"),
+        ),
+        before,
+        "a stale keep writes nothing"
+    );
+    let now = open_borders(home)
+        .into_iter()
+        .find(|i| i["id"] == id)
+        .expect("the item is still open");
+    let current = now["evidence"]["pick_id"].as_i64().unwrap();
+    assert_ne!(current, read);
+    assert_eq!(stacks_of(&mut store, current), run_stacks);
+
+    // kept, with the pick the person read now
+    let kept = keeper.keep(home, id, current).unwrap();
+    assert_eq!(kept["review_item"], id, "{kept}");
+    assert_eq!(kept["accepted_by"], keeper.who(), "{kept}");
+    let pick = &kept["pick"];
+    let person = pick["id"].as_i64().unwrap();
+    assert_eq!(pick["stacks"], serde_json::json!(run_stacks), "{kept}");
+    assert_eq!(pick["overruled"], serde_json::json!([current]), "{kept}");
+    assert_eq!(pick["answered"], 1, "{kept}");
+    assert_eq!(audited(&mut store, "review.accept"), before.1 + 1);
+    assert_eq!(audited(&mut store, "pick.set"), before.2 + 1);
+    let shown = home.json(&["review", "show", &id.to_string(), "--json"]);
+    assert_eq!(shown["status"], "accepted", "{shown}");
+    assert_eq!(shown["accepted_by"], keeper.who(), "{shown}");
+    assert_eq!(shown["decision"]["pick_id"], person, "{shown}");
+
+    // the next run leaves it standing and raises nothing on the occasion
+    let second = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert_eq!(second["standing"], 1, "{second}");
+    assert_eq!(second["raised"].as_i64().unwrap(), raised - 1, "{second}");
+    assert!(
+        !open_borders(home).iter().any(|i| same_occasion(i, &item)),
+        "no open pick.border on the kept occasion"
+    );
+    let listed = home.json(&["pick", "list", "--json"]);
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == person)
+        .unwrap_or_else(|| panic!("the kept pick stands: {listed}"));
+    assert_eq!(row["author_kind"], "person", "{row}");
+    assert_eq!(row["actor"], keeper.who(), "{row}");
+    assert_eq!(row["stacks"], run_stacks.len() as i64, "{row}");
+    let why = row["why"].as_str().unwrap();
+    assert!(why.starts_with("kept the run's pick ("), "{why}");
+    for b in item["evidence"]["borders"].as_array().unwrap() {
+        assert!(why.contains(b.as_str().unwrap()), "{why}");
+    }
+    // the ask reads the stacks the person kept
+    let seen = picked(home);
+    assert!(run_stacks.iter().all(|s| seen.contains(s)), "{seen:?}");
+
+    // withdrawn, the run's pick applies again and the border comes back
+    let done = home.json(&["pick", "withdraw", &person.to_string(), "--json"]);
+    assert_eq!(done["restored"].as_array().unwrap().len(), 1, "{done}");
+    let third = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert_eq!(third["standing"], 0, "{third}");
+    assert_eq!(third["raised"].as_i64().unwrap(), raised, "{third}");
+    assert!(
+        open_borders(home).iter().any(|i| same_occasion(i, &item)),
+        "the border is raised again"
+    );
+}
+
+#[test]
+fn a_kept_border_stands_through_the_next_pick_run() {
+    keep_round(&registry(None), &Keeper::Keyboard);
+}
+
+#[test]
+fn a_kept_border_stands_through_the_next_pick_run_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_picks_kept";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    keep_round(
+        &registry(Some((dsn.clone(), schema.to_string()))),
+        &Keeper::Keyboard,
+    );
+    drop();
+}
+
+#[test]
+fn a_border_kept_at_the_door_stands_through_the_next_pick_run() {
+    let home = registry(None);
+    let server = Served::start(&home);
+    keep_round(&home, &Keeper::Door(&server));
+    // no such item
+    let (status, doc) = server.post(
+        "/api/review/999999/accept",
+        serde_json::json!({"pick_id": 1}),
+        CURATOR,
+    );
+    assert_eq!(status, 404, "{doc}");
+
+    // the border raised again after the withdraw
+    let item = open_borders(&home)
+        .into_iter()
+        .find(|i| i["evidence"]["pick_id"].is_i64())
+        .expect("a border the run picked on");
+    let id = item["id"].as_i64().unwrap();
+    let path = format!("/api/review/{id}/accept");
+    let mut store = home.store();
+    let before = (
+        audited(&mut store, "review.accept"),
+        audited(&mut store, "pick.set"),
+    );
+    // a pick is a person's: an agent acting does not keep one
+    let (status, doc) = server.post_as(
+        &path,
+        serde_json::json!({"pick_id": item["evidence"]["pick_id"]}),
+        CURATOR,
+        "X-Nils-Actor: {\"kind\": \"agent\", \"name\": \"ask-help\"}\r\n",
+    );
+    assert_eq!(status, 403, "{doc}");
+    // a caller who read a border with no run's pick (pick_id null) does
+    // not keep the pick a run has made there since
+    let (status, doc) = server.post(&path, serde_json::json!({"pick_id": null}), CURATOR);
+    assert_eq!(status, 409, "{doc}");
+    assert!(
+        doc.to_string().contains("the run changed its pick"),
+        "{doc}"
+    );
+    assert_eq!(
+        (
+            audited(&mut store, "review.accept"),
+            audited(&mut store, "pick.set"),
+        ),
+        before,
+        "neither wrote anything"
+    );
+    let shown = home.json(&["review", "show", &id.to_string(), "--json"]);
+    assert_eq!(shown["status"], "open", "{shown}");
+}
+
+/// Every stack of one occasion made an output of one Dixon acquisition that
+/// is neither its in-phase nor its water image, which the pack does not
+/// measure on: the occasion has nothing eligible for `t1w`.
+fn nothing_eligible_on(home: &Home, stacks: &[i64]) {
+    assert!(
+        stacks.len() >= 2,
+        "a family of one is a candidate either way"
+    );
+    let mut store = home.store();
+    let axis = store.qualified("classification_axis");
+    let fp = store.qualified("stack_fingerprint");
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    store
+        .execute(
+            &format!("DELETE FROM {axis} WHERE axis <> 'role' AND stack_id IN ({list})"),
+            &[],
+        )
+        .unwrap();
+    for (n, s) in stacks.iter().enumerate() {
+        let construct = if n % 2 == 0 { "Fat" } else { "OutPhase" };
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {axis} (stack_id, axis, value, confidence, tier) VALUES \
+                     ({s}, 'modifier', 'Dixon', 1.0, 'rule'), ({s}, 'construct', '{construct}', 1.0, 'rule')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    store
+        .execute(
+            &format!(
+                "UPDATE {fp} SET mr_acquisition_type = '3D', orientation = 'Axial' WHERE stack_id IN ({list})"
+            ),
+            &[],
+        )
+        .unwrap();
+}
+
+/// Record 51 R2: Keep on a border where the run picked nothing writes a
+/// person's pick of no stack. It stands through runs, overrules what an
+/// earlier run picked there, and the ask reads it as no pick.
+fn nothing_round(home: &Home) {
+    let p = packs();
+    home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    // a subject whose first occasion the run picked on
+    let mut store = home.store();
+    let (subject, day, earlier, occasion) = {
+        let r = &store
+            .query(
+                &format!(
+                    "SELECT subject_id, CAST(session_day AS TEXT), id, CAST(considered AS TEXT) FROM {} \
+                     WHERE role = 't1w' AND withdrawn_at IS NULL ORDER BY subject_id, session_day LIMIT 1",
+                    store.qualified("pick")
+                ),
+                &[],
+            )
+            .unwrap()[0];
+        let considered: serde_json::Value = serde_json::from_str(r.text(3).unwrap()).unwrap();
+        let mut occasion: Vec<i64> = considered
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["stacks"].as_array().unwrap().iter())
+            .map(|s| s.as_i64().unwrap())
+            .collect();
+        occasion.sort_unstable();
+        (
+            r.int(0).unwrap(),
+            r.text(1).unwrap()[..10].to_string(),
+            r.int(2).unwrap(),
+            occasion,
+        )
+    };
+    let earlier_stacks = stacks_of(&mut store, earlier);
+    nothing_eligible_on(home, &occasion);
+    let again = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert!(
+        again["borders"]["nothing_eligible"].as_i64().unwrap() >= 1,
+        "{again}"
+    );
+    let item = open_borders(home)
+        .into_iter()
+        .find(|i| i["ref"]["subject_id"] == subject && i["ref"]["session_day"] == day.as_str())
+        .expect("a nothing_eligible border on the planted occasion");
+    assert_eq!(
+        item["evidence"]["borders"],
+        serde_json::json!(["nothing_eligible"]),
+        "{item}"
+    );
+    assert!(item["evidence"]["pick_id"].is_null(), "{item}");
+    // an earlier run's pick is still there, and the ask reads it
+    let seen = picked(home);
+    assert!(earlier_stacks.iter().all(|s| seen.contains(s)), "{seen:?}");
+
+    let id = item["id"].as_i64().unwrap();
+    let kept = home.json(&["review", "accept", &id.to_string(), "--json"]);
+    let pick = &kept["pick"];
+    let person = pick["id"].as_i64().unwrap();
+    assert_eq!(pick["stacks"], serde_json::json!([]), "{kept}");
+    assert_eq!(pick["overruled"], serde_json::json!([earlier]), "{kept}");
+    let text = home.ok(&["pick", "explain", &person.to_string()]);
+    assert!(text.contains("no stack stands for the role here"), "{text}");
+    let listed = home.ok(&["pick", "list", "--role", "t1w"]);
+    assert!(
+        listed
+            .lines()
+            .any(|l| l.contains(&format!("{person} ")) && l.contains("no stack stands here")),
+        "{listed}"
+    );
+
+    // it stands through the next run, which asks nothing more
+    let third = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert!(third["standing"].as_i64().unwrap() >= 1, "{third}");
+    assert!(
+        !open_borders(home).iter().any(|i| same_occasion(i, &item)),
+        "no open border on the kept occasion"
+    );
+    // and the ask reads no pick there, where the earlier run's was
+    let seen = picked(home);
+    assert!(earlier_stacks.iter().all(|s| !seen.contains(s)), "{seen:?}");
+}
+
+#[test]
+fn keeping_nothing_eligible_is_a_person_s_pick_of_no_stack() {
+    nothing_round(&registry(None));
+}
+
+#[test]
+fn keeping_nothing_eligible_is_a_person_s_pick_of_no_stack_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_picks_nothing";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    nothing_round(&registry(Some((dsn.clone(), schema.to_string()))));
     drop();
 }
