@@ -621,6 +621,7 @@ fn every_descriptor_the_repository_ships_validates_against_the_job_contract() {
         "synthstrip",
         "synthseg",
         "samseg-lesions",
+        "segcsvd",
         "mriqc",
         "freesurfer-recon-all",
     ];

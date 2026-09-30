@@ -430,6 +430,37 @@ pub fn of_stacks(
     Ok(out)
 }
 
+/// The live derivatives of one kind in one place that belong to a session
+/// or to the whole subject of one of `subjects`, read a few hundred
+/// subjects at a time: what a pipeline run of the bids layout registers,
+/// which names no stack, taken as a later run's derivative input.
+pub fn of_subjects(
+    store: &mut Store,
+    kind: &str,
+    subjects: &[i64],
+    place_id: i64,
+) -> Result<Vec<Derivative>, Error> {
+    let d = store.dialect();
+    let mut out = Vec::new();
+    for chunk in subjects.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "{} WHERE kind = {} AND place_id = {} AND withdrawn_at IS NULL AND scope IN ('session', 'subject') AND subject_id IN ({list}) ORDER BY id",
+            select(store),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::from(kind), Param::Int(place_id)])? {
+            out.push(of(&r)?);
+        }
+    }
+    Ok(out)
+}
+
 /// The live derivatives of kind model that name `model_id` in one place,
 /// newest first: the artifacts a run of that model may mount (record 43),
 /// whether a run fitted it or `nils model keep` kept it (record 50).
