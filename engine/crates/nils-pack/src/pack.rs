@@ -1054,9 +1054,18 @@ fn load_private(
                         .in_file(&f.path, Some(&f.source)),
                 );
             }
+            // a vendor's sequence name: at detail quasi and above only
+            let quasi = match im.get("quasi") {
+                None => false,
+                Some(v) => v.as_bool().ok_or_else(|| {
+                    Error::at(format!("{at}.quasi"), "is true or false")
+                        .in_file(&f.path, Some(&f.source))
+                })?,
+            };
             shown.push(crate::private::Shown {
                 name,
                 why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
+                quasi,
             });
         }
     }

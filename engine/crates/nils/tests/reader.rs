@@ -117,6 +117,8 @@ const OTTO: &str = "otto-certifier-token-of-length";
 /// Record 48, D1 of the move: the token a certificate's computation runs
 /// under, which alone reads what a system said of a sealed stack.
 const SEALED: &str = "sealed-reading-token-of-length";
+/// An operator, at detail sensitive, who also runs campaigns.
+const STEWARD: &str = "steward-operator-token-of-length";
 
 impl Server {
     fn start(home: &TempDir) -> Server {
@@ -135,6 +137,7 @@ impl Server {
             // the certificate's computation: a reviewer with the one grant
             // that reads sealed stacks
             format!("{SEALED}=certify@lab:reviewer,sealed:see"),
+            format!("{STEWARD}=stina@lab:operator,campaigns:work"),
         ]
         .join(",");
         let mut child = nils()
@@ -1739,6 +1742,8 @@ fn registry_with_private() -> TempDir {
     e.push(synth::text(tags::SCANNING_SEQUENCE, VR::CS, "EP"));
     e.push(synth::text(tags::ECHO_TIME, VR::DS, "100"));
     e.push(synth::text(tags::REPETITION_TIME, VR::DS, "3000"));
+    // a vendor's sequence name in the standard element
+    e.push(synth::text(tags::PULSE_SEQUENCE_NAME, VR::SH, "psn_site_7"));
     e.push(synth::text(
         dicom_core::Tag(0x0019, 0x0010),
         VR::LO,
@@ -1846,23 +1851,35 @@ fn a_rater_is_shown_the_private_elements_the_pack_lists_and_nothing_else() {
         CURATOR,
     );
     let item = shown["items"][0]["id"].as_i64().unwrap();
-    // The rater's reading and the header door, blind or not: the two shown
+    // The rater's reading and the header door, blind or not: the shown
     // elements, typed; the one shaped like an identifier withheld and
-    // counted; the ingested one the pack does not show absent.
-    for (path, who) in [
-        (format!("/api/campaigns/private/items/{item}/why"), ANNA),
-        (format!("/api/campaigns/private/items/{item}/header"), ANNA),
+    // counted; the ingested one the pack does not show absent. GE's pulse
+    // sequence name is a vendor's sequence name, shown at detail quasi and
+    // above only (the rater reads at plain).
+    for (path, who, quasi) in [
+        (
+            format!("/api/campaigns/private/items/{item}/why"),
+            ANNA,
+            false,
+        ),
+        (
+            format!("/api/campaigns/private/items/{item}/header"),
+            ANNA,
+            false,
+        ),
         (
             format!("/api/campaigns/private/items/{item}/header"),
             CURATOR,
+            true,
         ),
     ] {
         let doc = server.ok("GET", &path, None, who);
-        assert_eq!(
-            doc["private"],
-            json!({"ge_pulse_sequence_name": "ksepimix_2", "ge_private_image_type": 0}),
-            "{path}: {doc}"
-        );
+        let want = if quasi {
+            json!({"ge_pulse_sequence_name": "ksepimix_2", "ge_private_image_type": 0})
+        } else {
+            json!({"ge_private_image_type": 0})
+        };
+        assert_eq!(doc["private"], want, "{path}: {doc}");
         assert_eq!(doc["private_withheld"], 1, "{path}: {doc}");
         let text = doc.to_string();
         assert!(!text.contains("121212"), "{path}: {doc}");
@@ -1890,4 +1907,86 @@ fn a_rater_is_shown_the_private_elements_the_pack_lists_and_nothing_else() {
     assert!(doc.get("private").is_none(), "{doc}");
     assert!(doc.get("private_withheld").is_none(), "{doc}");
     assert!(!doc.to_string().contains("ksepimix"), "{doc}");
+}
+
+/// Nima's ruling, 2026-10-01: a vendor's sequence name is shown at detail
+/// quasi and above only, as the standard sequence name is: GE's pulse
+/// sequence name among the private elements and the standard
+/// PulseSequenceName, where Siemens XA writes its sequence name, in the
+/// reader's documents, the header door and so in any packet built from them.
+#[test]
+fn a_vendor_sequence_name_is_shown_at_detail_quasi_and_above_only() {
+    let home = registry_with_private();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "names",
+            "question": {"kind": "axis", "axis": "provenance"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["anna@lab", "stina@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+        })),
+        CURATOR,
+    );
+    let item = made["items"][0]["id"].as_i64().unwrap();
+    let stack = made["items"][0]["stack"].as_i64().unwrap_or(1);
+    // plain: a rater and a reader of the queue; quasi: a reviewer;
+    // sensitive: an operator
+    let levels = [
+        ("plain", ANNA, false),
+        ("plain", RITA, false),
+        ("quasi", CURATOR, true),
+        ("sensitive", STEWARD, true),
+    ];
+    for (detail, who, shown) in levels {
+        let mut paths = vec![format!("/api/stacks/{stack}/why")];
+        if who != RITA {
+            paths.push(format!("/api/campaigns/names/items/{item}/why"));
+            paths.push(format!("/api/campaigns/names/items/{item}/header"));
+        }
+        let mut read = 0;
+        for path in paths {
+            let (status, doc) = server.call("GET", &path, None, who);
+            if status == 403 {
+                // a door this caller's grants do not open says nothing
+                continue;
+            }
+            read += 1;
+            assert_eq!(status, 200, "{detail} {path}: {doc}");
+            let text = doc.to_string();
+            assert_eq!(
+                doc["private"].get("ge_pulse_sequence_name").is_some(),
+                shown,
+                "{detail} {path}: {doc}"
+            );
+            assert_eq!(text.contains("ksepimix"), shown, "{detail} {path}: {doc}");
+            assert_eq!(text.contains("psn_site_7"), shown, "{detail} {path}: {doc}");
+            // what is no sequence name is shown at every detail
+            assert_eq!(
+                doc["private"]["ge_private_image_type"], 0,
+                "{detail} {path}: {doc}"
+            );
+            if path.ends_with("/header") && !shown {
+                assert!(
+                    doc["left_out"]["below_detail"].as_u64().unwrap_or(0) > 0,
+                    "{detail} {path}: {doc}"
+                );
+            }
+        }
+        assert!(read > 0, "{detail}: no door read");
+    }
 }
