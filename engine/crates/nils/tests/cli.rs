@@ -1678,7 +1678,7 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(out.status.success(), "{}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("mri@"), "{said}");
-    assert!(said.contains("232 predicates"), "{said}");
+    assert!(said.contains("233 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
     // and what its rules can reach (record 41)
     assert!(said.contains("values reached by a rule"), "{said}");
@@ -1782,7 +1782,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 254);
+    assert_eq!(shown["flags"], 257);
     assert_eq!(
         shown["contract"], 7,
         "record 51: v0's nine pick borders and a list of families (contract 7), after record \

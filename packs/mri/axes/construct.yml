@@ -68,9 +68,11 @@ order:
 values:
   # MRI pack 0.11.0: not an exponential ADC, whose name holds `adc` too
   # (Philips `eADC` was ADC and eADC on the 2026-09-28 re-measure).
+  # MRI pack 0.16.0: nor a Siemens acquired diffusion image, whose protocol
+  # is named for the ADC map it also makes (flags.yml, dev-4 H4).
   ADC:
     terms: ['apparent diffusion coefficient', 'ADC map']
-    requires: {all: [{not: has_eadc}, {not: eadc_words}]}
+    requires: {all: [{not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}]}
     keywords:
       - adc
       - apparent diffusion coefficient
@@ -215,6 +217,8 @@ values:
       - opposed phase
       - out of phase
       - opp phase
+      # MRI pack 0.16.0: GE IDEAL's `OutPhase:` (dev-4, H5).
+      - outphase
     detection:
       exclusive: has_out_phase
   # The quantitative maps are one exclusion group, and a map that says

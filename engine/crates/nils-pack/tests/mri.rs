@@ -24,18 +24,19 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        232,
+        233,
         "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
          Siemens stems, the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
          dynamic FLASH, the one of pack 0.12.0: Philips' projection image \
          without GE's collapse, the one of pack 0.13.0: a workstation's \
-         thick-slab average, and the one of pack 0.15.0: a Siemens BLADE \
-         diffusion"
+         thick-slab average, the one of pack 0.15.0: a Siemens BLADE \
+         diffusion, and the one of pack 0.16.0: a Siemens BLADE turbo spin \
+         echo by its stem"
     );
     assert_eq!(
         pack.flags.len(),
-        254,
+        257,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -58,7 +59,10 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          and pack 0.15.0 the 9 of Nima's rulings of 2026-09-30 and dev-3's: \
          a TSE diffusion by its words, by Philips' bandwidth and as the \
          DWI-TSE it makes, Philips' projection trace and the trace image, a \
-         GE EPI SWI by its train, GE's GRASS, GE's MAGiC and Siemens' tun"
+         GE EPI SWI by its train, GE's GRASS, GE's MAGiC and Siemens' tun, \
+         and pack 0.16.0 the 3 of dev-4's: a reformat named for another \
+         plane than its protocol, a dual-echo spin echo named FLAIR and a \
+         Siemens acquired diffusion image"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

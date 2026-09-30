@@ -13,6 +13,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - The MRI pack is 0.17.0 and declares pack contract 7. Its main pick carries v0's MP2RAGE preference, which the pack did not carry before: an MP2RAGE's images are one candidate, its UniformDenoised image, else its Uniform image, and where neither is labelled its acquisitions stand apart as before. Expect more `pick.border` items at the next `nils pick run`: the six new reasons and the new role raise their own. A person's pick stands through them as before.
+- The MRI pack is 0.16.0. It fixes the rule errors of a fourth development reference. A Siemens BLADE named only by its sequence stem (`*tseB`) and GE's `PROPks` are Radial. A derived image of a 3D acquisition named for another plane than its protocol is a reformat (ProjectionDerived, MPR). A dual-echo spin echo that only its name calls FLAIR, with no inversion in its header, is a TSE whose echo decides its base. A Siemens acquired diffusion image takes no ADC from a protocol named for its ADC map. GE IDEAL's `OutPhase:` output is OutPhase. Stacks need a reclassify.
 
 ## [1.0.0-alpha.62] - 2026-09-30
 

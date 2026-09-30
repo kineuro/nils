@@ -337,6 +337,9 @@ values:
     terms: ['TIRM', 'FSE-IR', 'IR TSE', 'TSE-IR', 'turbo inversion recovery', 'TIR', 'FastIR', 'Fast IR', 'FIR']
     label: TIRM
     family: SE
+    # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
+    # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
+    requires: {not: flair_named_dual_echo}
     keywords:
       - tirm
       - stir

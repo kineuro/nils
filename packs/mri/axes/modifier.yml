@@ -41,6 +41,9 @@ values:
     terms: ['fluid attenuated inversion recovery', 'dark fluid', 'darkfluid', 'T2 FLAIR', 'T1 FLAIR', 'FastFLAIR']  # GE [V1, V2]
     group: IR_CONTRAST
     priority: 1
+    # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
+    # FLAIR (flags.yml, dev-4 H3).
+    requires: {not: flair_named_dual_echo}
     keywords:
       - flair
       - t2 flair
