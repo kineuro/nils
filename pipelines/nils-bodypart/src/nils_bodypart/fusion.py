@@ -271,20 +271,40 @@ class NoFingerprint(Exception):
     pass
 
 
-def predict(model: Model, files: list[tuple[str, list[int] | None]], header: dict | None) -> StackResult:
-    """One stack. Raises ``NoFingerprint``, ``volume.NoGeometry`` (both
-    abstentions) or ``volume.Unreadable``."""
+@dataclass
+class Prepared:
+    """A stack read and built, before the model scores it: what a worker
+    hands on when the encoder runs elsewhere (the GPU path)."""
+
+    built: volume.Built
+    header: dict
+
+
+def prepare(files: list[tuple[str, list[int] | None]], header: dict | None, decode=None) -> Prepared:
+    """One stack's volume and geometry. Raises ``NoFingerprint``,
+    ``volume.NoGeometry`` (both abstentions) or ``volume.Unreadable``."""
     header = header if isinstance(header, dict) else {}
     fp = header.get("fingerprint")
     if not isinstance(fp, dict):
         raise NoFingerprint("the stack has no fingerprint row")
-    built = volume.build(files, fp.get("orientation"))
-    P = model.encoder.probabilities(built.vol, built.geo())
+    return Prepared(volume.build(files, fp.get("orientation"), decode=decode), header)
+
+
+def finish(model: Model, prep: Prepared, P: np.ndarray) -> StackResult:
+    """The head and both modes from the encoder's six probabilities ``P``."""
+    header, built = prep.header, prep.built
     cls = header.get("classification")
-    h44 = header_features.features(fp, cls, built.meta)
+    h44 = header_features.features(header["fingerprint"], cls, built.meta)
     LP = head_logp(model, P, h44)
     cohort, where = resolve_cohort(header, model)
     return StackResult(P, h44, LP, calibrate(model, LP, cohort), cohort, where, built.meta, header_features.rules_row(cls))
+
+
+def predict(model: Model, files: list[tuple[str, list[int] | None]], header: dict | None, decode=None) -> StackResult:
+    """One stack. Raises ``NoFingerprint``, ``volume.NoGeometry`` (both
+    abstentions) or ``volume.Unreadable``."""
+    prep = prepare(files, header, decode)
+    return finish(model, prep, model.encoder.probabilities(prep.built.vol, prep.built.geo()))
 
 
 def proposed(a: dict, nd: int = 6) -> dict[str, float]:

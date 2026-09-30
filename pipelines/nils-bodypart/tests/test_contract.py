@@ -182,7 +182,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
         ("encoder", "model", False), ("head", "model", False), ("coarse", "model", True)
     ]
     assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
-    assert x["needs"] == {"gpu": "none", "memory-gb": 2, "cores": 2, "cores-input": "threads"}
+    assert x["needs"] == {"gpu": "none", "memory-gb": 8, "cores": 16, "cores-input": "threads"}
     (table,) = x["outputs"]
     assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
     cols = {c["name"]: c.get("type", "number") for c in table["columns"]}
@@ -194,11 +194,11 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     assert all(cols[c] == "number" for c in fine + coarse + ["fine_confidence", "coarse_confidence"])
     assert cols["fine_answers"] == cols["coarse_answers"] == "integer"
     assert all(cols[c] == "text" for c in ("fine_value", "coarse_value", "head_digest", "coarse_digest", "encoder_digest"))
-    assert doc["tool-version"] == "0.2.0"
+    assert doc["tool-version"] == "0.3.0"
     # the image offline: the command names no host, and the entry point
     # parses what the engine writes
     a = cli.parser().parse_args(container_argv(doc)[1:])
-    assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 2)
+    assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 16)
 
 
 def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
