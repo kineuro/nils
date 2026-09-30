@@ -567,31 +567,39 @@ def _fusion_table(sid: int, r, model) -> dict:
     return doc
 
 
+def _fusion_device(asked: str) -> str:
+    """cpu or cuda: ``auto`` takes a card where this process sees one."""
+    asked = (asked or "auto").strip().lower()
+    if asked not in ("auto", "cpu", "cuda"):
+        raise RunError(f"--device is auto, cpu or cuda, not {asked!r}")
+    if asked == "cpu":
+        return "cpu"
+    from .gpu import cuda_available
+
+    if cuda_available():
+        return "cuda"
+    if asked == "cuda":
+        logger.warning("no CUDA card is available: the run goes on on the CPU")
+    return "cpu"
+
+
 def cmd_infer_fusion(a: argparse.Namespace) -> Run:
-    from . import fusion, volume
+    from . import fusion, scoring, volume
 
     model = fusion.load(a.inputs)
+    device = _fusion_device(a.device)
+    encoder_device = "cuda" if device == "cuda" and a.encoder_device == "cuda" else "cpu"
     params = {"threads": a.threads, "models": model.refs(), "preprocessing": volume.PREPROCESSING}
-    run = Run("bodypart-infer-fusion", a.output, params, "cpu")
+    if device != "cpu":
+        params.update({"decode_device": device, "encoder_device": encoder_device})
+        if encoder_device != "cpu":
+            params["batch"] = a.batch
+    run = Run("bodypart-infer-fusion", a.output, params, device)
     stacks = manifest.load(a.stacks, source_root=a.source_root)
-
-    def one(st: manifest.Stack):
-        try:
-            return st, fusion.predict(model, st.files, st.extra.get("header")), None
-        except fusion.NoFingerprint:
-            return st, None, (SKIPPED, "no fingerprint row: the model abstains")
-        except volume.NoGeometry:
-            return st, None, (SKIPPED, "no geometry (position, orientation and pixel spacing): the model abstains")
-        except volume.Unreadable:
-            return st, None, (FAILED, "no file of the stack could be read")
-        except Exception as e:  # noqa: BLE001 - a unit fails, the run goes on; never a path
-            logger.warning("a stack failed: %s", type(e).__name__)
-            return st, None, (FAILED, f"the stack could not be scored ({type(e).__name__})")
-
+    decoded: dict = {}
+    done = scoring.score(model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded)
     counts = {"answered_fine": 0, "answered_coarse": 0, "no_fingerprint": 0, "no_geometry": 0, "failed": 0, "cohort_calibrated": 0}
     per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
-    with ThreadPoolExecutor(max_workers=max(1, a.threads)) as pool:
-        done = list(pool.map(one, stacks))
     for st, r, why in done:
         if r is None:
             status, error = why
@@ -625,6 +633,8 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
                 {"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c), "model_digest": model.coarse_part.digest}
             )
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value}
+    if decoded:
+        run.metrics["decoded_frames"] = decoded
     return run
 
 
@@ -696,7 +706,10 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--source-root", type=Path, default=None, help="where /source/<n> is, when not at /source")
     f.add_argument("--inputs", type=Path, default=Path("/inputs"), help="the typed inputs and their manifest.json")
     f.add_argument("--output", type=Path, default=Path("/output"))
-    f.add_argument("--threads", type=int, default=2, help="stacks read at once")
+    f.add_argument("--threads", type=int, default=2, help="stacks read and scored at once, each in a process of its own")
+    f.add_argument("--device", default=os.environ.get("NILS_BODYPART_DEVICE", "auto"), help="auto, cpu or cuda: where lossless JPEG 2000 is decoded")
+    f.add_argument("--encoder-device", choices=("cpu", "cuda"), default="cpu", help="cuda runs the image encoder on the card in batches (not bit for bit the CPU's)")
+    f.add_argument("--batch", type=int, default=64, help="stacks a batch of the encoder on the card")
     return p
 
 
