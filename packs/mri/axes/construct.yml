@@ -183,6 +183,7 @@ values:
   PBP:
     terms: ['percentage of baseline at peak', 'PBP', 'peak signal drop', 'percent signal recovery at peak']
     description: 'the percentage of baseline at peak of a DSC bolus: the peak signal drop relative to baseline (Siemens inline perfusion), a surrogate of blood volume and no CBV'
+    requires: pbp_stated
     keywords:
       - pbp
       - percentage of baseline
@@ -191,6 +192,8 @@ values:
   K2:
     terms: ['K2', 'leakage coefficient', 'leakage map', 'rLeakage', 'permeability surrogate']
     description: 'the leakage coefficient of a DSC (K2), from a leakage-corrected fit: contrast leaking out of the vessels'
+    # Its keyword only where the flag holds: a DSC map, never an ASL.
+    requires: k2_stated
     keywords:
       - leakage
     detection:

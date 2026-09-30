@@ -1912,9 +1912,11 @@ flags:
   # --- technique MRS (case 16): a spectroscopy acquisition as GE writes it,
   # a few MR images of the PROBE result, never a planning series or a
   # localizer.
+  # Read from the technique's text: GE's exam protocol that names a
+  # spectroscopy would otherwise make every short series of the exam MRS.
   is_mrs:
     all:
-      - is_spectroscopy
+      - {text: technique_text, matches: '(^|[^a-z])(probe\s*-?\s*(sv|p|s|press|steam)?|spectroscopy|svs|csi)([^a-z]|$)'}
       - {field: n_instances, gt: 0}
       - {field: n_instances, le: 16}
       - {not: {text: search_text, matches: 'locali[sz]er|scout|survey|(^|[^a-z])(loc|plan|planning)([^a-z]|$)'}}
@@ -1941,6 +1943,16 @@ flags:
       - {not: has_epi}
       - {not: has_se}
       - {not: is_pc}
+      # nor a TOF the header states, an ASL (a non-contrast 4D MRA) or a
+      # DCE run (a TWIST-VIBE)
+      - {not: sequence_name.is_tof}
+      - {not: sequence_variant.is_tof}
+      - {not: scan_options.has_inflow_gems}
+      - {not: philips_inflow_named}
+      - {not: is_asl}
+      - {not: asl_words}
+      - {not: dce_words}
+      - {not: {text: technique_text, matches: 'vibe'}}
       # `tof` anywhere, as the TOF value's own keyword reads it (`3DTOF`)
       - {not: {text: technique_text, matches: 'tof|time of flight|inflow'}}
       - any:
@@ -1954,13 +1966,18 @@ flags:
   pbp_stated:
     any:
       - image_type.has_peak_bolus
-      - {text: search_text, matches: '(^|[^a-z])pbp([^a-z]|$)|percentage of baseline'}
+      - {text: technique_text, matches: '(^|[^a-z])pbp([^a-z]|$)|percentage of baseline'}
+  # The words only on a map `perfusion_map_named` takes (no ASL, no stated
+  # readout other than EPI, no time series): a bare `K2` or `leakage` says
+  # nothing on any other series.
   k2_stated:
     all:
       - any:
           - image_type.has_k2
           - image_type.has_leakage
-          - {text: search_text, matches: '(^|[^a-z])k2([^a-z0-9]|$)|leakage'}
+          - all:
+              - {text: technique_text, matches: '(^|[^a-z])k2([^a-z0-9]|$)|leakage'}
+              - perfusion_map_named
       - {not: is_asl}
 
   # --- construct Velocity (case 19): a phase contrast's velocity image,
@@ -1969,7 +1986,7 @@ flags:
     all:
       - is_pc
       - {not: has_magnitude}
-      - {not: {text: search_text, matches: '(^|[^a-z])(magn|mag|magnitude)([^a-z]|$)'}}
+      - {not: {text: technique_text, matches: '(^|[^a-z])(magn|mag|magnitude)([^a-z]|$)'}}
       - any:
           - {parser: image_type, any_token: [VELOCITY, VEL, VELOCITY_MAP]}
-          - {text: search_text, matches: '(^|[^a-z])(velocity|vel|venc)([^a-z]|$)'}
+          - {text: technique_text, matches: '(^|[^a-z])(velocity|vel|venc)([^a-z]|$)'}
