@@ -6147,6 +6147,14 @@ fn runs_over_disjoint_stacks_go_on_together_within_one_lane() {
         select_stacks(lab, "left", &s[..2]);
         select_stacks(lab, "right", &s[2..]);
         select_stacks(lab, "wide", &s[1..3]);
+        // the first run is held in its intake until the refusals below are
+        // made, so it is still running however slowly this machine starts
+        // them; its units run long enough that the second run's first unit
+        // starts beside them
+        let mut holder = lab.store();
+        let held = nils_registry::lock::try_take(&mut holder, "pipeline-intake")
+            .unwrap()
+            .expect("the intake lock is free");
         let t = lab.work.path().join("trace-side");
         let mut a = lab.start(
             &t,
@@ -6156,7 +6164,7 @@ fn runs_over_disjoint_stacks_go_on_together_within_one_lane() {
                 "--select",
                 "selection:left@1",
                 "--param",
-                "sleep=4",
+                "sleep=15",
                 "--json",
             ],
             &[],
@@ -6194,6 +6202,8 @@ fn runs_over_disjoint_stacks_go_on_together_within_one_lane() {
             err.contains("holds 1 of the stacks this run would take"),
             "{err}"
         );
+        nils_registry::lock::release(&mut holder, held).unwrap();
+        drop(holder);
         let (ok, out, err) = b.finish(120);
         assert!(ok, "{err}");
         let rb: Value = serde_json::from_str(&out).unwrap();
