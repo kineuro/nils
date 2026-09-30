@@ -1055,6 +1055,120 @@ fn the_earliest_event_anchors_and_the_nearest_event_is_found_with_its_tie_rule()
     }
 }
 
+/// Pipeline runs side by side (2026-09-30), on both backends: a claim that
+/// lets a fresh job of its kind be runs beside it, one it refuses says
+/// why, and a plain claim of the kind still refuses as ever.
+#[test]
+fn a_claim_beside_runs_where_it_is_let_and_says_why_where_not() {
+    use nils_registry::job::{self, Claim};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let claim = |handle: i64| Claim {
+            kind: "pipeline",
+            name: "p@1",
+            args: serde_json::json!({ "handle": handle }),
+        };
+        // a job holds what its handle names: 1 and 2 are apart, 2 and 2 meet
+        let mut meets = |_: &mut Store, id: i64, its: &serde_json::Value| {
+            Ok((its["handle"].as_i64() == Some(2)).then(|| format!("job {id} holds handle 2")))
+        };
+        let first = job::claim(&mut store, &claim(1)).unwrap();
+        let second = job::claim_beside(&mut store, &claim(2), &mut meets).unwrap();
+        assert_ne!(first, second, "{name}");
+        let third = job::claim_beside(&mut store, &claim(2), &mut meets);
+        match third {
+            Err(job::Error::Held { job_id, why }) => {
+                assert_eq!(job_id, second, "{name}");
+                assert_eq!(why, format!("job {second} holds handle 2"), "{name}");
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        // both run, and a plain claim of the kind is refused by the first
+        let running = job::list(&mut store, false, 10).unwrap();
+        assert_eq!(running.len(), 2, "{name}");
+        assert!(
+            matches!(
+                job::claim(&mut store, &claim(3)),
+                Err(job::Error::Busy { .. })
+            ),
+            "{name}"
+        );
+    }
+}
+
+/// The registry's named locks (2026-09-30), on both backends: one
+/// connection holds a name at a time, names are apart, a lock given back
+/// is free, and a lock goes with the connection or file that held it.
+#[test]
+fn a_registry_lock_is_held_by_one_connection_at_a_time() {
+    use nils_registry::lock;
+    fn check(name: &str, a: &mut Store, b: &mut Store, closed: &mut dyn FnMut() -> Store) {
+        let held = lock::try_take(a, "pipeline-intake").unwrap().expect(name);
+        assert!(
+            lock::try_take(b, "pipeline-intake").unwrap().is_none(),
+            "{name}: two connections held one lock"
+        );
+        let other = lock::try_take(b, "pipeline-lane")
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name}: another name is another lock"));
+        lock::release(b, other).unwrap();
+        lock::release(a, held).unwrap();
+        let held = lock::try_take(b, "pipeline-intake")
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name}: a lock given back is free"));
+        assert!(
+            lock::try_take(a, "pipeline-intake").unwrap().is_none(),
+            "{name}"
+        );
+        lock::release(b, held).unwrap();
+        // a holder that goes away without giving it back, as a killed run
+        // does, leaves it free
+        let mut gone = closed();
+        let held = lock::try_take(&mut gone, "pipeline-intake")
+            .unwrap()
+            .expect(name);
+        drop(held);
+        drop(gone);
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(h) = lock::try_take(a, "pipeline-intake").unwrap() {
+                lock::release(a, h).unwrap();
+                break;
+            }
+            assert!(
+                started.elapsed().as_secs() < 10,
+                "{name}: a lock outlived the connection that held it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    let dir = TempDir::new("locks");
+    let db = dir.path().join("registry.db");
+    let mut a = Store::open_sqlite(&db).unwrap();
+    let mut b = Store::open_sqlite(&db).unwrap();
+    check("sqlite", &mut a, &mut b, &mut || {
+        Store::open_sqlite(&db).unwrap()
+    });
+    // an in-memory store is one connection, and takes every lock
+    let mut alone = Store::sqlite_in_memory().unwrap();
+    let h = lock::try_take(&mut alone, "pipeline-intake")
+        .unwrap()
+        .unwrap();
+    lock::release(&mut alone, h).unwrap();
+    if let Some((_guard, mut a)) = postgres_store(SCHEMA) {
+        let dsn = postgres_dsn().unwrap();
+        let mut b = Store::connect_postgres(&dsn, SCHEMA).unwrap();
+        check("postgres", &mut a, &mut b, &mut || {
+            Store::connect_postgres(&dsn, SCHEMA).unwrap()
+        });
+        // two registries in one database hold their locks apart
+        assert_ne!(
+            lock::advisory_key("nils", "pipeline-intake"),
+            lock::advisory_key("nils_other", "pipeline-intake")
+        );
+    }
+}
+
 /// Wave 4a §9.1: the one job model, on both backends. A claim holds its
 /// kind and no other, a stale job of any kind is taken over, a cancel
 /// asked from outside is seen at the heartbeat, and the queue is rows.

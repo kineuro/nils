@@ -137,6 +137,9 @@ pub fn claim_for(registry: &mut Registry, settings: &Settings, kind: &str) -> Re
         job::Error::Busy { job_id, since, .. } => Error::Busy { job_id, since },
         job::Error::Store(e) => Error::Store(e),
         job::Error::Message(m) => Error::Store(nils_registry::store::Error::Message(m)),
+        e @ job::Error::Held { .. } => {
+            Error::Store(nils_registry::store::Error::Message(e.to_string()))
+        }
     })
 }
 

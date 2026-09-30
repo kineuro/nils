@@ -15,6 +15,10 @@
 //! stops the way a signal would stop it, so what is written stays written,
 //! and a job is resumable because nothing is in flight (principle 4).
 //!
+//! A kind whose jobs may run side by side, as pipeline runs over stacks no
+//! other run holds do, claims with [`claim_beside`]: a fresh job of the
+//! kind refuses it only where the verb says the two meet.
+//!
 //! A queue is rows in state `queued` with the command line to run; a worker
 //! takes the oldest and runs it, which is how the doors of §11 run anything
 //! heavy and answer 202 with the job's id.
@@ -90,6 +94,12 @@ pub enum Error {
         job_id: i64,
         since: String,
     },
+    /// A fresh job of the same kind holds what this one would take, in
+    /// the words of the verb that asked ([`claim_beside`]).
+    Held {
+        job_id: i64,
+        why: String,
+    },
     Store(StoreError),
     Message(String),
 }
@@ -106,6 +116,7 @@ impl fmt::Display for Error {
                 "a {kind} job (id {job_id}) holds this registry, last heard from at {since}; \
                  wait, or `nils jobs cancel {job_id}` if it is not running anywhere"
             ),
+            Error::Held { why, .. } => f.write_str(why),
             Error::Store(e) => write!(f, "{e}"),
             Error::Message(m) => f.write_str(m),
         }
@@ -192,6 +203,33 @@ pub fn words_of(own: &[String]) -> Vec<String> {
 /// Take the kind, failing what is stale and refusing what is fresh, and
 /// record this run as a running job. Returns the job's id.
 pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
+    claim_with(store, claim, None)
+}
+
+/// What decides whether a fresh job of the claim's kind holds the claim
+/// off: given that job's id and args, `Some(why)` when it does.
+pub type Beside<'a> =
+    dyn FnMut(&mut Store, i64, &serde_json::Value) -> Result<Option<String>, Error> + 'a;
+
+/// [`claim`] for a kind whose jobs may run side by side, as pipeline runs
+/// over stacks no other run holds do: a fresh job of the kind refuses the claim only where
+/// `holds` says it does, with its words as [`Error::Held`]; a fresh job
+/// `holds` lets be is left running. What is stale is failed on the way as
+/// ever. Two claims that must not both pass are the caller's to take one
+/// at a time.
+pub fn claim_beside(
+    store: &mut Store,
+    claim: &Claim<'_>,
+    holds: &mut Beside<'_>,
+) -> Result<i64, Error> {
+    claim_with(store, claim, Some(holds))
+}
+
+fn claim_with(
+    store: &mut Store,
+    claim: &Claim<'_>,
+    mut holds: Option<&mut Beside<'_>>,
+) -> Result<i64, Error> {
     let now = now_iso();
     let host = hostname();
     let pid = i64::from(std::process::id());
@@ -202,9 +240,10 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
     // store reads a Postgres timestamp only so), and the select sees a row
     // only when another job is running, which is when it must not fail.
     let sql = format!(
-        "SELECT id, kind, {}, {}, pid, host FROM {} WHERE state IN ('running', 'cancelling')",
+        "SELECT id, kind, {}, {}, pid, host, {} FROM {} WHERE state IN ('running', 'cancelling')",
         stamp(store, "heartbeat_at"),
         stamp(store, "started_at"),
+        stamp(store, "args"),
         store.qualified("job")
     );
     for j in store.query(&sql, &[])? {
@@ -226,11 +265,20 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
         let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < FRESH_SECS);
         if fresh && !gone {
             if its_kind == claim.kind {
-                return Err(Error::Busy {
-                    kind: its_kind,
-                    job_id: id,
-                    since: last,
-                });
+                let Some(holds) = holds.as_deref_mut() else {
+                    return Err(Error::Busy {
+                        kind: its_kind,
+                        job_id: id,
+                        since: last,
+                    });
+                };
+                let its_args: serde_json::Value = j
+                    .opt_text(6)?
+                    .and_then(|a| serde_json::from_str(a).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                if let Some(why) = holds(store, id, &its_args)? {
+                    return Err(Error::Held { job_id: id, why });
+                }
             }
             continue;
         }
