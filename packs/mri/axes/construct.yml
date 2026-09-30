@@ -30,6 +30,8 @@ order:
   - MTT
   - Tmax
   - TTP
+  - PBP
+  - K2
   - DeltaM
   - M0
   - Water
@@ -50,6 +52,7 @@ order:
   - QSM
   - MIP
   - MinIP
+  - StdDevProj
   - MPR
   - Composed
   - EchoCombined
@@ -58,6 +61,7 @@ order:
   - FieldmapRef
   - B0map
   - B1map
+  - Velocity
   - Magnitude
   - Real
   - Imaginary
@@ -171,6 +175,26 @@ values:
       - time to peak
     detection:
       exclusive: has_ttp
+  # MRI pack 0.18.0 (Nima, 2026-09-30: "we cannot force things to category
+  # they don't belong to"): two DSC maps the vocabulary had no value for (the
+  # deep research, case 17: "PBP has no vocabulary value (it is a
+  # peak-signal-drop surrogate, not CBV); Cercare K2 (leakage) ... have no
+  # value"). On the archive 15 PBP and 10 K2 or leakage stacks.
+  PBP:
+    terms: ['percentage of baseline at peak', 'PBP', 'peak signal drop', 'percent signal recovery at peak']
+    description: 'the percentage of baseline at peak of a DSC bolus: the peak signal drop relative to baseline (Siemens inline perfusion), a surrogate of blood volume and no CBV'
+    keywords:
+      - pbp
+      - percentage of baseline
+    detection:
+      exclusive: pbp_stated
+  K2:
+    terms: ['K2', 'leakage coefficient', 'leakage map', 'rLeakage', 'permeability surrogate']
+    description: 'the leakage coefficient of a DSC (K2), from a leakage-corrected fit: contrast leaking out of the vessels'
+    keywords:
+      - leakage
+    detection:
+      exclusive: k2_stated
   # MRI pack 0.11.0, ruled 2026-09-28 (`studies/2026-09-28-sequence-research/
   # decisions.md` in the design repository): the ASL label-control difference
   # and the M0 scan, which BIDS names (`aslcontext` volume type `deltam`, the
@@ -363,6 +387,15 @@ values:
       - min ip
     detection:
       exclusive: is_minip
+  # MRI pack 0.18.0: a standard deviation projection through a volume
+  # (Siemens `STDDEV_COR`, `STDDEV_SAG`, `STDDEV_TRA`): neither a maximum nor
+  # a minimum projection (the deep research, case 35: "no construct fits";
+  # 2 archive stacks, on a TOF).
+  StdDevProj:
+    terms: ['standard deviation projection', 'STDDEV projection', 'SD projection']
+    description: 'a standard deviation projection through a volume, each pixel the standard deviation of the voxels along the ray'
+    detection:
+      exclusive: stddev_projection
   # MRI pack 0.12.0: a projection is a MIP or a MinIP and not a plane as
   # well, though a workstation writes `MPR` on both (Siemens
   # `DERIVED\SECONDARY\MPR` on a MIP; dev-1 settled MIP alone on six stacks
@@ -370,7 +403,8 @@ values:
   # reformat (flags.yml, `is_projection_plane`).
   MPR:
     terms: ['multiplanar reformat', 'MPR', 'reformat']
-    requires: {not: {any: [is_mip, is_minip, projection_named]}}
+    # MRI pack 0.18.0: nor a standard deviation projection.
+    requires: {not: {any: [is_mip, is_minip, projection_named, stddev_projection]}}
     keywords:
       - multiplanar reformat
       - reformatted
@@ -465,6 +499,16 @@ values:
     requires: {not: ttest_on_asl}
     detection:
       exclusive: is_ttest
+  # MRI pack 0.18.0: the velocity image of a phase-contrast acquisition,
+  # the phase difference scaled to velocity (the deep research, case 19:
+  # "velocity -> Phase (Velocity is missing)"). Read where the image type or
+  # the words say velocity on a phase contrast; a phase image that says
+  # nothing more stays Phase.
+  Velocity:
+    terms: ['velocity', 'velocity image', 'velocity map', 'flow velocity', 'VENC image']
+    description: 'the velocity image of a phase-contrast acquisition: the phase difference scaled to velocity by the encoding velocity'
+    detection:
+      exclusive: velocity_image
   Magnitude:
     terms: ['magnitude', 'magnitude image']
     keywords:
@@ -559,7 +603,8 @@ values:
   # were Phase by the word).
   Phase:
     terms: ['phase', 'phase image']
-    requires: {not: phase_not_an_image}
+    # MRI pack 0.18.0: nor a phase contrast's velocity image (above).
+    requires: {all: [{not: phase_not_an_image}, {not: velocity_image}]}
     keywords:
       - phase
       - phase map

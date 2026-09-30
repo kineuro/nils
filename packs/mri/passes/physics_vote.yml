@@ -193,6 +193,10 @@ compatibility:
     GRASE: EPI
     ASL: OTHER
     Perfusion: OTHER
+    # MRI pack 0.18.0 (vocabulary)
+    CE-MRA: GRE
+    ZTE: GRE
+    MRS: OTHER
     MRF: OTHER
     BOLD: OTHER
   rules:

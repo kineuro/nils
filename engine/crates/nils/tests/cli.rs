@@ -1782,7 +1782,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 306);
+    assert_eq!(shown["flags"], 314);
     assert_eq!(
         shown["contract"], 7,
         "record 51: v0's nine pick borders and a list of families (contract 7), after record \

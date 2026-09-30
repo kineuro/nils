@@ -129,6 +129,7 @@ entities:
     provenance:
       SyMRI: SyMRI
       EPIMix: EPIMix
+      NeuroMix: NeuroMix
       STAGE: STAGE
       SWIRecon: SWIRecon
       DTIRecon: DTIRecon
@@ -138,6 +139,7 @@ entities:
     construct:
       MIP: MIP
       MinIP: MinIP
+      StdDevProj: StdDev
       MPR: MPR
       UniformDenoised: Denoised
       Filtered: Filtered
@@ -194,6 +196,8 @@ acq:
       'DWI-TSE': DWITSE
       'DWI-EPI': DWIEPI
       'DWI-STEAM': DWISTEAM
+      ZTE: ZTE
+      MRS: MRS
       'BOLD-EPI': BOLDEPI
       ASL: ASL
       DCE: DCE
@@ -213,6 +217,7 @@ acq:
       MP2RAGE: MP2RAGE
       MEMPRAGE: MEMPRAGE
       MPRAGE: MPRAGE
+      'CE-MRA': CEMRA
       'TOF-MRA': TOFMRA
       'PC-MRA': PCMRA
       'comb-ME-GRE': combMEGRE
@@ -259,6 +264,9 @@ acq:
       MTT: MTT
       Tmax: Tmax
       TTP: TTP
+      PBP: PBP
+      K2: K2
+      Velocity: Velocity
       Water: Water
       Fat: Fat
       InPhase: InPhase
@@ -290,6 +298,7 @@ acq:
       Imaginary: Imag
       MIP: MIP
       MinIP: MinIP
+      StdDevProj: StdDev
       MPR: MPR
       UniformDenoised: Denoised
       Filtered: Filtered
@@ -308,6 +317,7 @@ acq:
     tokens:
       SyMRI: SyMRI
       EPIMix: EPIMix
+      NeuroMix: NeuroMix
       STAGE: STAGE
       SWIRecon: SWIRecon
       DTIRecon: DTIRecon

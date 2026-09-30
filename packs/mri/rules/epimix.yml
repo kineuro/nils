@@ -8,7 +8,8 @@
 # and when it does not, the inversion and echo times do.
 
 rule_set: epimix
-enter_when: {axis: provenance, is: EPIMix}
+# MRI pack 0.18.0: and NeuroMix, a provenance of its own.
+enter_when: {any: [{axis: provenance, is: EPIMix}, {axis: provenance, is: NeuroMix}]}
 decides: [base, construct, modifier, technique, directory_type]
 # v0's branch adds its modifiers to what the modifier rules found; only the
 # construct list is replaced.
@@ -54,6 +55,7 @@ rules:
                 # MRI pack 0.18.0: never an EPIMix by its name or pulse
                 # sequence, whose T2-FLAIR is a spin-echo EPI (sealed-1
                 # A10, the deep research, case 12).
+                - {axis: provenance, is: NeuroMix}
                 - all:
                     - {text: search_text, any_substring: [neuromix, mix2, mix3]}
                     - {not: {text: search_text, substring: epi}}
