@@ -1198,15 +1198,16 @@ fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPick
 /// (`nothing_eligible`), the pick names no stack: nothing stands for the
 /// role here, said by a person.
 ///
-/// `seen` is the run's pick the person looked at, when the caller knows it:
-/// if a run has picked again since, the keep is refused and nothing is
-/// written, so a person never keeps a pick they did not see.
+/// `seen` is the run's pick the person looked at, when the caller knows it
+/// (`Some(None)`: a border where the run picked nothing): if a run has
+/// picked again since, the keep is refused and nothing is written, so a
+/// person never keeps a pick they did not see.
 pub fn keep(
     registry: &mut Registry,
     item: i64,
     actor: &str,
     why: Option<&str>,
-    seen: Option<i64>,
+    seen: Option<Option<i64>>,
 ) -> Result<PersonPicked, PersonError> {
     let store = registry.store();
     let it = review::item(store, item)
@@ -1272,8 +1273,7 @@ pub fn keep(
     )?;
     let current_id = current.as_ref().map(|r| r.int(0)).transpose()?;
     // record 51 R1: a run since the person looked is a pick they did not see
-    let changed =
-        (named.is_some() && current_id != named) || seen.is_some_and(|s| Some(s) != named);
+    let changed = (named.is_some() && current_id != named) || seen.is_some_and(|s| s != named);
     if changed {
         return Err(refused(format!(
             "the run changed its pick on review item {item}'s occasion since it was read; look again"

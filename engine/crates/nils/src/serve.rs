@@ -3251,15 +3251,25 @@ fn routed(
             unsealed_item(registry, caller, id)?;
             // record 51 R3: an item a campaign holds is not accepted here
             not_held(registry, id)?;
+            // record 51 R1: `pick_id` names the run's pick the caller read,
+            // and null that it read a border where the run picked nothing
+            let seen = match doc.get("pick_id") {
+                None => None,
+                Some(serde_json::Value::Null) => Some(None),
+                Some(v) => Some(Some(v.as_i64().ok_or_else(|| {
+                    Reply::error(400, "pick_id is the id of a pick, or null")
+                })?)),
+            };
             let done = crate::review_accept_as(
                 registry,
                 id,
                 doc["why"].as_str().map(String::from),
                 principal,
                 author_of(caller).0,
-                doc["pick_id"].as_i64(),
+                seen,
             )
             .map_err(|e| match e {
+                crate::AcceptError::Missing(m) => Reply::error(404, m),
                 crate::AcceptError::Refused(m) => Reply::error(409, m),
                 crate::AcceptError::Forbidden(m) => Reply::error(403, m),
                 crate::AcceptError::Failed(m) => Reply::error(500, m),

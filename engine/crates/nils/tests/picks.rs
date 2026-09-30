@@ -583,11 +583,22 @@ impl Served {
     }
 
     fn post(&self, path: &str, body: serde_json::Value, token: &str) -> (u16, serde_json::Value) {
+        self.post_as(path, body, token, "")
+    }
+
+    /// `post` with extra header lines, each ending in `\r\n`.
+    fn post_as(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        token: &str,
+        headers: &str,
+    ) -> (u16, serde_json::Value) {
         use std::io::Read as _;
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let body = body.to_string();
         let head = format!(
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(head.as_bytes()).unwrap();
@@ -1000,13 +1011,52 @@ fn a_border_kept_at_the_door_stands_through_the_next_pick_run() {
     let home = registry(None);
     let server = Served::start(&home);
     keep_round(&home, &Keeper::Door(&server));
-    // an item that is no border keeps no pick
+    // no such item
     let (status, doc) = server.post(
         "/api/review/999999/accept",
         serde_json::json!({"pick_id": 1}),
         CURATOR,
     );
-    assert!(status == 404 || status == 409, "{status} {doc}");
+    assert_eq!(status, 404, "{doc}");
+
+    // the border raised again after the withdraw
+    let item = open_borders(&home)
+        .into_iter()
+        .find(|i| i["evidence"]["pick_id"].is_i64())
+        .expect("a border the run picked on");
+    let id = item["id"].as_i64().unwrap();
+    let path = format!("/api/review/{id}/accept");
+    let mut store = home.store();
+    let before = (
+        audited(&mut store, "review.accept"),
+        audited(&mut store, "pick.set"),
+    );
+    // a pick is a person's: an agent acting does not keep one
+    let (status, doc) = server.post_as(
+        &path,
+        serde_json::json!({"pick_id": item["evidence"]["pick_id"]}),
+        CURATOR,
+        "X-Nils-Actor: {\"kind\": \"agent\", \"name\": \"ask-help\"}\r\n",
+    );
+    assert_eq!(status, 403, "{doc}");
+    // a caller who read a border with no run's pick (pick_id null) does
+    // not keep the pick a run has made there since
+    let (status, doc) = server.post(&path, serde_json::json!({"pick_id": null}), CURATOR);
+    assert_eq!(status, 409, "{doc}");
+    assert!(
+        doc.to_string().contains("the run changed its pick"),
+        "{doc}"
+    );
+    assert_eq!(
+        (
+            audited(&mut store, "review.accept"),
+            audited(&mut store, "pick.set"),
+        ),
+        before,
+        "neither wrote anything"
+    );
+    let shown = home.json(&["review", "show", &id.to_string(), "--json"]);
+    assert_eq!(shown["status"], "open", "{shown}");
 }
 
 /// Every stack of one occasion made an output of one Dixon acquisition that

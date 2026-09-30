@@ -5598,8 +5598,8 @@ fn review_accept(
     json: bool,
 ) -> Result<(), Exit> {
     let who = actor();
-    let done =
-        review_accept_as(registry, id, why, &who, actor_kind(), seen).map_err(|e| e.into_exit())?;
+    let done = review_accept_as(registry, id, why, &who, actor_kind(), seen.map(Some))
+        .map_err(|e| e.into_exit())?;
     if json {
         println!(
             "{}",
@@ -5648,6 +5648,8 @@ impl Accepted {
 /// Why an accept was not written: in the caller's words (a refusal) or
 /// not (the store).
 pub(crate) enum AcceptError {
+    /// No such item: a 404 at the door.
+    Missing(String),
     Refused(String),
     /// A pick is a person's: an agent or a model does not keep one.
     Forbidden(String),
@@ -5657,7 +5659,9 @@ pub(crate) enum AcceptError {
 impl AcceptError {
     fn into_exit(self) -> Exit {
         match self {
-            AcceptError::Refused(m) | AcceptError::Forbidden(m) => usage(m),
+            AcceptError::Missing(m) | AcceptError::Refused(m) | AcceptError::Forbidden(m) => {
+                usage(m)
+            }
             AcceptError::Failed(m) => fail(m),
         }
     }
@@ -5676,7 +5680,7 @@ pub(crate) fn review_accept_as(
     why: Option<String>,
     who: &str,
     author_kind: &str,
-    seen: Option<i64>,
+    seen: Option<Option<i64>>,
 ) -> Result<Accepted, AcceptError> {
     let who = who.to_string();
     let now = nils_registry::time::now_iso();
@@ -5688,7 +5692,7 @@ pub(crate) fn review_accept_as(
         d.param(1, Type::Int)
     );
     let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
-        return Err(AcceptError::Refused(format!("no review item {id}")));
+        return Err(AcceptError::Missing(format!("no review item {id}")));
     };
     let status = row.text(0)?.to_string();
     let kind = row.text(1)?.to_string();
@@ -5714,7 +5718,7 @@ pub(crate) fn review_accept_as(
             )?,
         )
     } else {
-        if seen.is_some() {
+        if matches!(seen, Some(Some(_))) {
             return Err(AcceptError::Refused(format!(
                 "review item {id} is a {kind}; only a pick.border item names the run's pick it keeps"
             )));

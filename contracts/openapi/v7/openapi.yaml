@@ -355,7 +355,7 @@ paths:
   /api/review/{id}/accept:
     post:
       summary: Acknowledge an item without a decision (nils review accept)
-      description: "Added in place by record 51, additively. On a `pick.border` item, Keep is a decision (R1): it writes a person's pick of the stacks the run picked on the item's occasion, through the one person's-pick writer (as `POST /api/picks` would), with the caller and a why (the body's, or `kept the run's pick (<borders>)`), closes the item as accepted with the pick as its decision, and answers with the pick; like any person's pick it stands through later pick runs until a person withdraws it. On a border where the run picked nothing (`nothing_eligible`), the pick names no stack (R2): no stack stands for the role on that occasion, said by a person. `pick_id` names the run's pick the caller read; when a run has picked again since, the accept is refused (409) and nothing is written. A pick is a person's: an agent or a model acting (X-Nils-Actor) is refused (403) on a `pick.border` item. Every other kind of item is acknowledged as before and writes no decision. An item an open campaign asks (its items stand on it, or its axes item answers it) is refused with 409, naming the campaign, as at the apply door (R3)."
+      description: "Added in place by record 51, additively. On a `pick.border` item, Keep is a decision (R1): it writes a person's pick of the stacks the run picked on the item's occasion, through the one person's-pick writer (as `POST /api/picks` would), with the caller and a why (the body's, or `kept the run's pick (<borders>)`), closes the item as accepted with the pick as its decision, and answers with the pick; like any person's pick it stands through later pick runs until a person withdraws it. On a border where the run picked nothing (`nothing_eligible`), the pick names no stack (R2): no stack stands for the role on that occasion, said by a person. `pick_id` names the run's pick the caller read, and null that the caller read a border where the run picked nothing; when a run has picked again since, the accept is refused (409) and nothing is written. A pick is a person's: an agent or a model acting (X-Nils-Actor) is refused (403) on a `pick.border` item. Every other kind of item is acknowledged as before and writes no decision. An item an open campaign asks (its items stand on it, or its axes item answers it) is refused with 409, naming the campaign, as at the apply door (R3)."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       requestBody:
         content:
@@ -364,9 +364,10 @@ paths:
               type: object
               properties:
                 why: {type: string}
-                pick_id: {type: integer, description: "Record 51: on a pick.border item, the run's pick the caller read (the item's evidence.pick_id); refused if the run has picked again since"}
+                pick_id: {type: [integer, "null"], description: "Record 51: on a pick.border item, the run's pick the caller read (the item's evidence.pick_id), null where it named none; refused if the run has picked again since"}
       responses:
         "200": {description: "{review_item, accepted_by, pick: {id, model, role, subject_id, session_day, stacks, overruled, replaced, answered} | null}"}
+        "400": {description: "Record 51: pick_id that is neither a pick's id nor null"}
         "403": {description: "Record 51: a pick.border item kept by an agent or a model acting"}
         "404": {description: No such item}
         "409": {description: "Record 51: the item is already closed, an open campaign asks it (named), or the run changed its pick since it was read"}
