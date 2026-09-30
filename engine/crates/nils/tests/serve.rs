@@ -1112,7 +1112,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "a longhand rule's words"
     );
     assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
-    assert_eq!(packs_doc["packs"][0]["contract"], 6, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 7, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -4945,7 +4945,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@0.16.0", "{classified}");
+    assert_eq!(classified["pack"], "mri@0.17.0", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the

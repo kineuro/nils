@@ -38,8 +38,12 @@ use crate::yaml::{self, File};
 /// value's word list to an overlay, as `lists.<axis>.<value>` beside the
 /// `buckets`, and writes the overlay document down as a schema of its own.
 /// Version 6 (record 48) adds the optional `excludes` and `hints` keys:
-/// constraints between axes over axis values alone, hard and soft.
-pub const CONTRACT: u32 = 6;
+/// constraints between axes over axis values alone, hard and soft. Version 7
+/// (record 51) changes no manifest key: a pick gains v0's six other border
+/// reasons and a list of families, and a role must have its own tables.
+/// Those keys are refused in a pack that declares less, so that an engine at
+/// 6 refuses a pack using them instead of picking without them.
+pub const CONTRACT: u32 = 7;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -681,7 +685,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
 
     let mut picks = Vec::new();
     for f in files_of(m, &manifest, dir, "picks")? {
-        let model = load_pick(&f, &axes)?;
+        let model = load_pick(&f, &axes, contract)?;
         if picks
             .iter()
             .any(|p: &crate::pick::Model| p.name == model.name)
@@ -2923,8 +2927,10 @@ fn load_rule_set(
 // Picks (§10). The engine provides the component kinds; the pack provides the
 // numbers, which is v0's `main_qc_weights.yaml` in the place it belongs.
 
-fn load_pick(f: &File, axes: &[Axis]) -> R<crate::pick::Model> {
-    use crate::pick::{Bonus, Borders, Component, Kind, Model, Penalty};
+fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
+    use crate::pick::{
+        Bonus, Borders, Component, Kind, Model, Penalty, Plain, Retake, SliceOutlier, Twin,
+    };
 
     let m = f.blame(yaml::obj(&f.value, "pick"))?;
     let name = f.blame(yaml::text(yaml::get(m, "pick", "pick")?, "pick"))?;
@@ -3121,7 +3127,97 @@ fn load_pick(f: &File, axes: &[Axis]) -> R<crate::pick::Model> {
         }
     };
 
+    // Record 51 R7: a role is scored on its own numbers. A role a component
+    // keeps tables per role for, and has none in, would score on the
+    // component's `missing` alone, which is another role's pick with the
+    // numbers taken out.
+    for c in &components {
+        let (per_role, what) = match &c.kind {
+            Kind::Tier { per_role, .. } => (per_role, "tiers"),
+            Kind::Tokens { per_role, .. } => (per_role, "modifier table"),
+            _ => continue,
+        };
+        for r in &roles {
+            if !per_role.contains_key(r) {
+                return Err(here(Error::at(
+                    format!("{at}.components.{}", c.name),
+                    format!(
+                        "the role {r} has no {what} in {}; a role is scored on its own numbers, \
+                         never on another role's or on none (record 51 R7)",
+                        c.name
+                    ),
+                )));
+            }
+        }
+    }
+
+    // Record 51: what a key of pack contract 7 needs, said where a pack
+    // declaring less uses one, since an engine of that contract would read
+    // the pack without it.
+    let needs_7 = |key: &str| -> R<()> {
+        if contract < 7 {
+            return Err(here(Error::at(
+                format!("{at}.{key}"),
+                format!(
+                    "{key} is pack contract 7's; this pack declares contract {contract}, \
+                     and an engine of {contract} would pick without it"
+                ),
+            )));
+        }
+        Ok(())
+    };
+
     let bm = f.blame(yaml::obj(yaml::get(m, "borders", &at)?, &at))?;
+    const BORDER_KEYS: &[&str] = &[
+        "runner_up_within",
+        "rare_within",
+        "retake",
+        "unknown_dim",
+        "slice_outlier",
+        "pre_post_twin",
+        "fallback",
+        "dixon_vs_plain",
+    ];
+    // A border this engine does not know is refused, never skipped: a pick
+    // that silently raises fewer reasons than its pack says is the failure
+    // record 51 set out to end.
+    for k in bm.keys() {
+        if !BORDER_KEYS.contains(&k.as_str()) {
+            return Err(here(Error::at(
+                format!("{at}.borders.{k}"),
+                format!(
+                    "{k} is not a border this engine knows; it knows {}",
+                    BORDER_KEYS.join(", ")
+                ),
+            )));
+        }
+        if !matches!(k.as_str(), "runner_up_within" | "rare_within") {
+            needs_7(&format!("borders.{k}"))?;
+        }
+    }
+    let fraction = |mm: &serde_json::Map<String, Value>, key: &str, at: &str| -> R<f64> {
+        let n = number_at(mm, key, at)?;
+        if !(0.0..=1.0).contains(&n) {
+            return Err(Error::at(
+                at,
+                format!("{key} is a fraction from 0 to 1, not {n}"),
+            ));
+        }
+        Ok(n)
+    };
+    let border_obj = |key: &str| -> R<Option<&serde_json::Map<String, Value>>> {
+        match bm.get(key) {
+            None => Ok(None),
+            Some(v) => Ok(Some(f.blame(yaml::obj(v, &format!("{at}.borders.{key}")))?)),
+        }
+    };
+    let populations: Vec<String> = components
+        .iter()
+        .filter_map(|c| match &c.kind {
+            Kind::Percentile { population, .. } => Some(population.clone()),
+            _ => None,
+        })
+        .collect();
     let borders = Borders {
         runner_up_within: f.blame(number_at(bm, "runner_up_within", &at))?,
         rare_within: match bm.get("rare_within") {
@@ -3134,41 +3230,194 @@ fn load_pick(f: &File, axes: &[Axis]) -> R<crate::pick::Model> {
                 ))
             }
         },
+        retake: match border_obj("retake")? {
+            None => None,
+            Some(rm) => {
+                let bat = format!("{at}.borders.retake");
+                Some(Retake {
+                    of: f.blame(named(rm, "of", &bat))?,
+                    partial_below: f.blame(fraction(rm, "partial_below", &bat))?,
+                    partial_min_slices: f.blame(number_at(rm, "partial_min_slices", &bat))?,
+                })
+            }
+        },
+        unknown_dim: match border_obj("unknown_dim")? {
+            None => None,
+            Some(um) => Some(f.blame(named(um, "of", &format!("{at}.borders.unknown_dim")))?),
+        },
+        slice_outlier: match border_obj("slice_outlier")? {
+            None => None,
+            Some(om) => {
+                let bat = format!("{at}.borders.slice_outlier");
+                let population = f.blame(yaml::text(yaml::get(om, "population", &bat)?, &bat))?;
+                if !populations.contains(&population) {
+                    return Err(here(Error::at(
+                        &bat,
+                        format!(
+                            "{population} is not a population a percentile component of this pick builds"
+                        ),
+                    )));
+                }
+                let quantile = |key: &str| -> R<f64> {
+                    let q = f.blame(fraction(om, key, &bat))?;
+                    if crate::pick::Percentiles::KEPT
+                        .iter()
+                        .all(|k| (k - q).abs() > 1e-9)
+                    {
+                        return Err(here(Error::at(
+                            &bat,
+                            format!(
+                                "{key} is one of the quantiles a population keeps \
+                                 (0.05, 0.25, 0.50, 0.75, 0.95), not {q}"
+                            ),
+                        )));
+                    }
+                    Ok(q)
+                };
+                let below = quantile("below")?;
+                let above = quantile("above")?;
+                Some(SliceOutlier {
+                    population,
+                    below,
+                    above,
+                })
+            }
+        },
+        pre_post_twin: match border_obj("pre_post_twin")? {
+            None => None,
+            Some(tm) => {
+                let bat = format!("{at}.borders.pre_post_twin");
+                Some(Twin {
+                    of: f.blame(named(tm, "of", &bat))?,
+                    at_least: f.blame(fraction(tm, "at_least", &bat))?,
+                })
+            }
+        },
+        fallback: match border_obj("fallback")? {
+            None => None,
+            Some(fm) => {
+                let bat = format!("{at}.borders.fallback");
+                Some((
+                    f.blame(named(fm, "of", &bat))?,
+                    f.blame(yaml::text(yaml::get(fm, "is", &bat)?, &bat))?,
+                ))
+            }
+        },
+        dixon_vs_plain: match border_obj("dixon_vs_plain")? {
+            None => None,
+            Some(pm) => {
+                let bat = format!("{at}.borders.dixon_vs_plain");
+                Some(Plain {
+                    family: f.blame(yaml::text(yaml::get(pm, "family", &bat)?, &bat))?,
+                    of: f.blame(named(pm, "of", &bat))?,
+                    plain_without: f
+                        .blame(yaml::texts(yaml::get(pm, "plain_without", &bat)?, &bat))?,
+                    within: f.blame(fraction(pm, "within", &bat))?,
+                })
+            }
+        },
     };
 
     let mut same_acquisition = Vec::new();
     for n in &f.blame(yaml::texts(yaml::get(m, "same_acquisition", &at)?, &at))? {
         same_acquisition.push(f.blame(known(n, &at)).map_err(here)?);
     }
-    let family = match m.get("family") {
-        None => None,
-        Some(v) => {
-            let fm = f.blame(yaml::obj(v, &at))?;
-            let wm = f.blame(yaml::obj(yaml::get(fm, "when", &at)?, &at))?;
-            let canonical = f.blame(yaml::texts(yaml::get(fm, "canonical", &at)?, &at))?;
-            if canonical.is_empty() {
-                return Err(here(Error::at(
-                    &at,
-                    "a family needs `canonical`: which of its variants are worth keeping",
-                )));
+    // A family, or since record 51 a list of them: the first whose token a
+    // stack holds is the one it belongs to.
+    let mut families = Vec::new();
+    let entries: Vec<&Value> = match m.get("family") {
+        None => Vec::new(),
+        Some(Value::Array(list)) => {
+            needs_7("family (a list)")?;
+            list.iter().collect()
+        }
+        Some(v) => vec![v],
+    };
+    for (i, v) in entries.into_iter().enumerate() {
+        let fat = format!("{at}.family[{i}]");
+        let fm = f.blame(yaml::obj(v, &fat))?;
+        let wm = f.blame(yaml::obj(yaml::get(fm, "when", &fat)?, &fat))?;
+        let canonical = f.blame(yaml::texts(yaml::get(fm, "canonical", &fat)?, &fat))?;
+        if canonical.is_empty() {
+            return Err(here(Error::at(
+                &fat,
+                "a family needs `canonical`: which of its variants are worth keeping",
+            )));
+        }
+        let mut ignoring = Vec::new();
+        if let Some(g) = fm.get("ignoring") {
+            for n in &f.blame(yaml::texts(g, &fat))? {
+                ignoring.push(f.blame(known(n, &fat)).map_err(here)?);
             }
-            let mut ignoring = Vec::new();
-            if let Some(g) = fm.get("ignoring") {
-                for n in &f.blame(yaml::texts(g, &at))? {
-                    ignoring.push(f.blame(known(n, &at)).map_err(here)?);
+        }
+        let when = (
+            f.blame(named(wm, "of", &fat))?,
+            f.blame(yaml::text(yaml::get(wm, "token", &fat)?, &fat))?,
+        );
+        let name = match fm.get("name") {
+            Some(n) => {
+                needs_7("family.name")?;
+                f.blame(yaml::text(n, &fat))?
+            }
+            None => when.1.to_ascii_lowercase(),
+        };
+        let apart_without_canonical = match fm.get("without_canonical") {
+            None => false,
+            Some(w) => {
+                needs_7("family.without_canonical")?;
+                match f.blame(yaml::text(w, &fat))?.as_str() {
+                    "drop" => false,
+                    "apart" => true,
+                    other => {
+                        return Err(here(Error::at(
+                            &fat,
+                            format!("without_canonical is drop or apart, not {other}"),
+                        )));
+                    }
                 }
             }
-            Some(crate::pick::Family {
-                when: (
-                    f.blame(named(wm, "of", &at))?,
-                    f.blame(yaml::text(yaml::get(wm, "token", &at)?, &at))?,
-                ),
-                over: f.blame(named(fm, "over", &at))?,
-                ignoring,
-                canonical,
-            })
+        };
+        let retake_above = match fm.get("retake_above") {
+            None => 1,
+            Some(n) => {
+                needs_7("family.retake_above")?;
+                let n = f.blame(yaml::number(n, &fat))?;
+                if n < 1.0 || n.fract() != 0.0 {
+                    return Err(here(Error::at(
+                        &fat,
+                        format!("retake_above is a whole number of stacks, 1 or more, not {n}"),
+                    )));
+                }
+                n as usize
+            }
+        };
+        if families
+            .iter()
+            .any(|x: &crate::pick::Family| x.name == name)
+        {
+            return Err(here(Error::at(
+                &fat,
+                format!("the family {name} is declared twice"),
+            )));
         }
-    };
+        families.push(crate::pick::Family {
+            name,
+            when,
+            over: f.blame(named(fm, "over", &fat))?,
+            ignoring,
+            canonical,
+            apart_without_canonical,
+            retake_above,
+        });
+    }
+    if let Some(p) = &borders.dixon_vs_plain
+        && !families.iter().any(|x| x.name == p.family)
+    {
+        return Err(here(Error::at(
+            format!("{at}.borders.dixon_vs_plain"),
+            format!("{} is not a family this pick declares", p.family),
+        )));
+    }
 
     Ok(Model {
         name,
@@ -3177,7 +3426,7 @@ fn load_pick(f: &File, axes: &[Axis]) -> R<crate::pick::Model> {
         penalty,
         borders,
         same_acquisition,
-        family,
+        families,
     })
 }
 

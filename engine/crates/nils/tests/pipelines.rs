@@ -5611,6 +5611,144 @@ fn a_run_takes_a_selection_larger_than_an_answer_holds() {
     });
 }
 
+/// A pipeline of the bids layout that reads each session's T1w and T2w, as
+/// FreeSurfer's pial refinement or SAMSEG's multi-contrast mode would, and
+/// fails a unit whose input holds no T2w.
+const NEEDS_T2W: &str = r#"name: needs-t2w
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/needs-t2w@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+command-line: |
+  python3 -c '
+  import glob, os, shutil, sys
+  src, out = sys.argv[1], sys.argv[2]
+  n = 0
+  for t in sorted(glob.glob(src + "/sub-*/ses-*/anat/*_T2w.nii.gz")):
+      rel = os.path.relpath(t, src)
+      d = os.path.join(out, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
+      shutil.copy(t, os.path.join(d, os.path.basename(rel).replace("_T2w", "_desc-seen_T2w")))
+      n += 1
+  sys.exit(0 if n else 3)
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids, roles: [t1w, t2w]}
+  units: apart
+  outputs:
+    - id: seen
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-seen_T2w.nii.gz"
+  needs: {cores: 1, memory-gb: 1, unit-minutes: 2}
+"#;
+
+/// Record 51 R8: the role `t2w`, end to end. P1's session holds a T1w, a 3D
+/// T2w turbo spin echo and a 2D-named one; P2's a T1w alone. The run picks
+/// P1's T2w on the T2w's own tables, `nils pick list --role t2w` lists it,
+/// the pre-flight counts P1 ready and P2 missing its T2w, and the run
+/// releases P1's pick into the input as its `_T2w`.
+#[test]
+fn a_t2w_is_picked_and_released() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let src = tree_of(
+        |patient, n, slice| format!("{patient}/{n}/{slice}"),
+        &[
+            (
+                "P1",
+                "20220115",
+                "1.2.826.0.1.3680043.8.498.81",
+                &[
+                    ("1", "t1_mprage_sag", "MPRAGE"),
+                    ("2", "t2_space_sag", "T2 SPACE"),
+                    ("3", "t2_tse_tra", "T2 TSE"),
+                ],
+            ),
+            (
+                "P2",
+                "20230310",
+                "1.2.826.0.1.3680043.8.498.82",
+                &[("1", "t1_mprage_sag", "MPRAGE")],
+            ),
+        ],
+    );
+    let lab = Lab::with_tree("pipelines-t2w", src);
+    lab.add_descriptor("needs-t2w", NEEDS_T2W);
+
+    // Both T2w stacks are candidates, and the SPACE is picked on the T2w's
+    // own tiers.
+    let mut store = lab.store();
+    let candidates = store
+        .query(
+            "SELECT a.stack_id, t.value FROM classification_axis a \
+             JOIN classification_axis t ON t.stack_id = a.stack_id AND t.axis = 'technique' \
+             WHERE a.axis = 'role' AND a.value = 't2w' ORDER BY a.stack_id",
+            &[],
+        )
+        .unwrap();
+    let techniques: Vec<String> = candidates
+        .iter()
+        .map(|r| r.text(1).unwrap().to_string())
+        .collect();
+    assert_eq!(techniques.len(), 2, "two T2w candidates: {techniques:?}");
+    let space = candidates
+        .iter()
+        .find(|r| r.text(1).unwrap() == "SPACE")
+        .unwrap_or_else(|| panic!("a SPACE among {techniques:?}"))
+        .int(0)
+        .unwrap();
+    let listed = lab.json(&["pick", "list", "--role", "t2w", "--json"]);
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "one T2w pick, P1's: {listed:?}");
+    let pick = listed[0]["id"].as_i64().unwrap();
+    let explained = lab.json(&["pick", "explain", &pick.to_string(), "--json"]);
+    assert_eq!(explained["role"], "t2w", "{explained}");
+    assert_eq!(explained["stacks"], json!([space]), "{explained}");
+    let tech = explained["parts"]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "tech")
+        .unwrap();
+    assert_eq!(tech["score"], 1.0, "the T2w table's SPACE: {explained}");
+
+    // The pre-flight counts P1 ready and P2 missing its T2w.
+    let pre = lab.json(&[
+        "run",
+        "needs-t2w",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["units"]["total"], 2, "{pre}");
+    assert_eq!(pre["units"]["ready"], 1, "{pre}");
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    let why = pre["missing"][0]["why"][0].as_str().unwrap();
+    assert!(why.contains("no t2w is picked"), "{pre}");
+    // the 2D-named T2w no pick takes is left out
+    assert_eq!(pre["left_out"]["stacks"], 1, "{pre}");
+
+    // And the run releases P1's pick as its T2w: the container finds it.
+    let v = lab.json(&[
+        "run",
+        "needs-t2w",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    let units = &v["summary"]["units"];
+    assert_eq!(units["succeeded"], 1, "{v}");
+    assert_eq!(units["skipped"], 1, "{v}");
+    assert_eq!(units["failed"], 0, "{v}");
+    assert_eq!(v["status"], "done", "{v}");
+}
+
 /// Record 51 R2's proof at the readers of picks: a person's pick of no
 /// stack, which Keep writes on a border where the run picked nothing, is
 /// read as no pick said by a person. The pre-flight names it as the reason

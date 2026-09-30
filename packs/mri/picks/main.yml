@@ -13,7 +13,9 @@
 # sessions that hold a T1w hold more than one, and the worst holds 462.
 
 pick: main
-roles: [t1w, flair]
+# Record 51 R8: `t2w` joins the two v0 knew. A role is scored on tables of its
+# own (R7), and the pack refuses to load a role that has none.
+roles: [t1w, flair, t2w]
 
 # Two stacks of one acquisition are one candidate, so that the two echoes of a
 # series do not compete with each other for the session. v0's stage-1 bundle
@@ -35,18 +37,38 @@ same_acquisition:
   - flip_angle
 
 # And one acquisition that produced several images is merged back into one
-# candidate. A Dixon gives an in-phase, an out-of-phase, a water and a fat
-# image; without this they compete with each other four ways.
+# candidate, one family per kind of acquisition that writes several (record
+# 51: v0 carried two preferences, and the pack before 0.17.0 carried only the
+# Dixon one). A stack belongs to the first family whose token it holds.
 family:
-  when: {of: modifier, token: Dixon}
-  over: construct
-  # The outputs of one Dixon may differ slightly in timing, which is v0's
-  # reason for dropping it from the family key.
-  ignoring: [echo_time, repetition_time, inversion_time, flip_angle]
-  # Best first. A family holding neither is not a candidate at all: v0 drops
-  # it, and its comment says why, which is that a Dixon with no in-phase and
-  # no water image is not a T1w anybody measures on.
-  canonical: [InPhase, Water]
+  # A Dixon gives an in-phase, an out-of-phase, a water and a fat image;
+  # without this they compete with each other four ways.
+  - name: dixon
+    when: {of: modifier, token: Dixon}
+    over: construct
+    # The outputs of one Dixon may differ slightly in timing, which is v0's
+    # reason for dropping it from the family key.
+    ignoring: [echo_time, repetition_time, inversion_time, flip_angle]
+    # Best first. A family holding neither is not a candidate at all: v0 drops
+    # it, and its comment says why, which is that a Dixon with no in-phase and
+    # no water image is not a T1w anybody measures on.
+    canonical: [InPhase, Water]
+    # v0's `retake_dixon_canonical`: more than one stack of the canonical
+    # output is the acquisition run twice.
+    retake_above: 1
+  # An MP2RAGE gives two inversions and the uniform image, often denoised
+  # too. v0's `mp2rage_canonical_priority` is "Denoised,Uniform" and then
+  # "Uniform", which this pack names UniformDenoised and Uniform.
+  - name: mp2rage
+    when: {of: technique, token: MP2RAGE}
+    over: construct
+    ignoring: [echo_time, repetition_time, inversion_time, flip_angle]
+    canonical: [UniformDenoised, Uniform]
+    # v0: where neither is labelled, "tag all (cohort with bare MP2RAGE, no
+    # labeled sister)", so the acquisitions stand apart as they were.
+    without_canonical: apart
+    # v0's `retake_mp2rage`: more than two.
+    retake_above: 2
 
 components:
 
@@ -93,6 +115,29 @@ components:
         GRASE: 0.65
         RESOLVE: 0.50
         Unknown: 0.40
+      # Record 51 R8, and ours, not v0's (v0 had no T2w role). Drafted from
+      # what the analyses that read a T2w take and from the development
+      # corpus: of its 124 T2w candidates under this pack, 65 are TSE, 30
+      # TIRM (a STIR), 21 RESTORE, 3 SPACE, 2 MRF and one each CISS, GRASE
+      # and HASTE. A 3D turbo spin echo first, because FreeSurfer's pial
+      # refinement and SAMSEG want an isotropic volume; then the 2D turbo
+      # spin echo nearly every protocol runs and its fast-recovery variant;
+      # the single-shot and the inversion-recovery ones lower, because
+      # neither is the T2w a volume analysis measures on. A balanced steady
+      # state is T2w by this pack's convention (0.15.0) and is T2/T1, so it
+      # sits at the floor with what the table does not name.
+      t2w:
+        SPACE: 1.00
+        TSE: 0.90
+        RESTORE: 0.80
+        GRASE: 0.65
+        MESE: 0.55
+        SE: 0.50
+        HASTE: 0.45
+        TIRM: 0.40
+        CISS: 0.30
+        FIESTA: 0.30
+        Unknown: 0.30
     bonuses:
       - of: modifier
         token: Dixon
@@ -119,6 +164,13 @@ components:
       flair:
         Dixon: -0.10
         WaterExc: -0.05
+      # Ours (record 51 R8). A fat-suppressed T2w is a good one for lesions
+      # and a poorer one for the volume analyses that read a T2w beside a
+      # T1w; a Dixon T2w is rare and usually not the canonical one, as v0
+      # says of a FLAIR.
+      t2w:
+        Dixon: -0.10
+        FatSat: -0.05
 
   # Where this volume's slice count falls among the population's, in its own
   # dimension bucket: a 2D stack is not short for being 2D.
@@ -187,3 +239,31 @@ borders:
   # strictly below: a technique held by exactly a tenth of the population is
   # not rare.
   rare_within: {of: technique, share_below: 0.10}
+
+  # Record 51 R6: v0's other six reasons, each as v0's `_pick_for_session`
+  # computed it at 5ee391f and each with v0's number from
+  # `border_thresholds`. A pack that leaves one out never raises it.
+
+  # v0's `retake`: the winner holds more than one stack of one acquisition.
+  # v0's partial-volume demotion is read first: where the largest slice
+  # count is at least `partial_min_slices`, a stack under `partial_below` of
+  # it is a helper or an aborted scan and not a second take ("a 170 vs 40
+  # gap is caught; 192 vs 168 is not"). A family's candidate is a retake by
+  # its family's `retake_above` instead.
+  retake: {of: n_instances, partial_below: 0.50, partial_min_slices: 60}
+  # v0's `unknown_dim`: the winner's dimension is not known.
+  unknown_dim: {of: mr_acquisition_type}
+  # v0's `slice_count_outlier` (`slice_pctile_lo`, `slice_pctile_hi`): the
+  # winner's largest slice count strictly outside the 5th to 95th percentile
+  # of its dimension's population, the one the `slices` component builds.
+  slice_outlier: {population: slices, below: 0.05, above: 0.95}
+  # v0's `pre_post_twin_pct`: another candidate at least this fraction of
+  # the winner's score, whose contrast shares nothing with the winner's.
+  # v0 also made the twin a main; here it is a border, and a person picks.
+  pre_post_twin: {of: post_contrast, at_least: 0.85}
+  # v0's `epimix_fallback`: a stack of the winner is an EPIMix, which the
+  # penalty above lets win only where nothing better was taken.
+  fallback: {of: provenance, is: EPIMix}
+  # v0's `dixon_vs_plain_pct`: a Dixon won and a candidate that is neither
+  # a Dixon nor water-excited is within a tenth of it, the tenth included.
+  dixon_vs_plain: {family: dixon, of: modifier, plain_without: [Dixon, WaterExc], within: 0.10}

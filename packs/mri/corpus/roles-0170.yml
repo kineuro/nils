@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.17.0 (record 51 R8): the role `t2w`, a T2w acquisition that is
+# not a FLAIR, beside the two roles v0 knew. Invented stacks, one per claim.
+
+cases:
+
+  - name: a 2D T2w turbo spin echo is a candidate T2w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*tse2d1_17'
+      text_series_description: 'ax T2 tse'
+      mr_acquisition_type: 2D
+      echo_time: '98'
+      repetition_time: '6000'
+      image_role: original_primary
+    axes:
+      base: T2w
+      technique: TSE
+      directory_type: anat
+      disposition: acquisition
+      role: t2w
+
+  - name: and so is a 3D one, which the pick prefers
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*spc_314ns'
+      text_series_description: 'sag T2 space'
+      mr_acquisition_type: 3D
+      echo_time: '386'
+      repetition_time: '3200'
+      image_role: original_primary
+    axes:
+      base: T2w
+      technique: SPACE
+      directory_type: anat
+      disposition: acquisition
+      role: t2w
+
+  - name: a T2 FLAIR is a candidate FLAIR and not a candidate T2w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      text_sequence_name: '*tir2d1_15'
+      text_series_description: 'ax T2 FLAIR'
+      image_role: original_primary
+    axes:
+      base: T2w
+      modifier: FLAIR
+      role: flair
+
+  - name: a T1w is a candidate T1w and not a candidate T2w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 'sag T1 mprage'
+      mr_acquisition_type: 3D
+      image_role: original_primary
+    axes:
+      base: T1w
+      role: t1w
+
+  - name: a synthetic T2w is not a candidate, because it is not an acquisition
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND'
+      text_series_description: 'SyMRI synthetic T2w'
+      image_role: derived
+    axes:
+      disposition: scanner_derived
+      role: ''

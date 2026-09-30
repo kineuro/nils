@@ -38,7 +38,7 @@ decides: [role]
 collect: true
 tiers: {stated: 1.0}
 
-order: [t1w, flair]
+order: [t1w, flair, t2w]
 
 rules:
 
@@ -65,3 +65,19 @@ rules:
         cite: 'an anatomical T2w acquisition with a FLAIR modifier'
         source: axes
     set: {role: flair}
+
+  # Record 51 R8: a T2w that is not a FLAIR. Ours, not v0's: v0's cohort pick
+  # knew T1w and FLAIR only. A balanced steady state is T2w by this pack's
+  # convention (0.15.0) and is a candidate here, which the pick's tiers score
+  # near the floor.
+  t2w:
+    clauses:
+      - when:
+          all:
+            - {axis: disposition, missing_or: acquisition}
+            - {axis: directory_type, is: anat}
+            - {axis: base, is: T2w}
+            - not: {axis: modifier, is: FLAIR}
+        cite: 'an anatomical T2w acquisition that is not a FLAIR'
+        source: axes
+    set: {role: t2w}

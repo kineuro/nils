@@ -2482,7 +2482,10 @@ pub struct PickBorder<'a> {
     pub role: &'a str,
     pub subject_id: i64,
     pub day: &'a str,
-    /// The run's reasons, by name (`too_close`, `rare`, `nothing_eligible`).
+    /// The run's reasons, by name (`too_close`, `rare`, `nothing_eligible`,
+    /// and since record 51 v0's other six: `retake`, `unknown_dim`,
+    /// `slice_count_outlier`, `pre_post_twin`, `epimix_fallback`,
+    /// `dixon_vs_plain`).
     pub borders: &'a [&'a str],
     /// What the run wrote, when it wrote anything.
     pub pick_id: Option<i64>,
@@ -2491,6 +2494,10 @@ pub struct PickBorder<'a> {
     pub runner_up_score: Option<f64>,
     /// Every candidate's stacks and score, best first.
     pub considered: &'a serde_json::Value,
+    /// Record 51: what each border found, by the border's name (the variant
+    /// of a retake, a twin's or a plain candidate's stacks, a slice count
+    /// and its bounds). An empty object where none has anything to add.
+    pub notes: &'a serde_json::Value,
     pub job_id: Option<i64>,
     /// Record 51 R2: where the run looked, `{name, digest, definition}` of
     /// the session scheme, and the pack and its version, so that Keep on an
@@ -2518,7 +2525,7 @@ pub fn raise_pick_border(
     let evidence = serde_json::json!({
         "borders": b.borders, "pick_id": b.pick_id, "score": b.score, "margin": b.margin,
         "runner_up_score": b.runner_up_score, "candidates": candidates,
-        "considered": b.considered, "scheme": b.scheme, "pack": b.pack,
+        "considered": b.considered, "notes": b.notes, "scheme": b.scheme, "pack": b.pack,
         "pack_version": b.pack_version,
     });
     if let Some((id, _)) = open_item(store, PICK_BORDER_KIND, &key)? {

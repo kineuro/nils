@@ -23,3 +23,6 @@ values:
   t1w: {}
   # And its FLAIR, which is what a lesion is counted on.
   flair: {}
+  # Record 51 R8: its T2w, which FreeSurfer's pial refinement, SAMSEG's
+  # multi-contrast mode and MRIQC take. Not a v0 role.
+  t2w: {}
