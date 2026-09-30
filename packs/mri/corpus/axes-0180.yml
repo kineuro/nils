@@ -284,7 +284,7 @@ cases:
     axes:
       base: T2w
 
-  - name: a GE exam protocol named for a trial called MRC says nothing of MRCP
+  - name: a GE exam protocol that names MRCP says nothing of each series
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: SE
@@ -292,7 +292,7 @@ cases:
       mr_acquisition_type: 2D
       manufacturer: GE MEDICAL SYSTEMS
       text_series_description: 'Cor T1'
-      text_protocol_name: 'MRC 100 trial'
+      text_protocol_name: 'Liver and MRCP'
       repetition_time: 300
       echo_time: 9
       flip_angle: 90
@@ -1310,3 +1310,41 @@ cases:
     axes:
       technique: MPRAGE
       modifier: ''
+
+  # --- words read from the series, never from GE's exam-level ProtocolName
+
+  - name: a GE series in an exam whose protocol says SUB is no subtraction
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 FSE'
+      text_protocol_name: 'Brain SUB'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 16
+      flip_angle: 90
+    flags:
+      sub_named: false
+    axes:
+      provenance: RawRecon
+
+  - name: a GE FIESTA in an exam whose protocol says FIESTA-C is no CISS
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SS'
+      scan_options: 'FAST_GEMS\EDR_GEMS\PFF'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax FIESTA'
+      text_protocol_name: 'IAC FIESTA-C'
+      ge_pulse_sequence_name: efgre3d
+      repetition_time: 5.6
+      echo_time: 2.2
+      flip_angle: 55
+    axes:
+      technique: FIESTA

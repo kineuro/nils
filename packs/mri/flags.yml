@@ -270,7 +270,7 @@ flags:
   # archive its 11 stacks are FSE, FRFSE, Cube and PROPELLER by their pulse
   # sequence, with no fingerprinting word (the deep research, case 23;
   # `empirical-conventions.md`, case 23). The value's words still say it.
-  is_mrf:     {all: [scan_options.has_mrf_gems, {text: search_text, matches: 'fingerprint|(^|[^a-z])mrf([^a-z]|$)'}]}
+  is_mrf:     {all: [scan_options.has_mrf_gems, {text: technique_text, matches: 'fingerprint|(^|[^a-z])mrf([^a-z]|$)'}]}
   is_radial:  {any: [scan_options.has_propeller_gems, image_type.layout_radial]}
   is_spiral:  scan_options.has_spiral_gems
   is_mavric:  image_type.has_mavric
@@ -1060,7 +1060,7 @@ flags:
       - {all: [{text: manufacturer, prefix: ge}, {text: search_text, matches: '^fa\s*-\s'}]}
       # MRI pack 0.18.0: the FA of a GE DTI whose header a third-party
       # toolkit rewrote with numbers, named FA (sealed-1 A9).
-      - {all: [ge_numeric_header, {text: search_text, matches: '(^|[^a-z])fa([^a-z]|$)'}]}
+      - {all: [ge_numeric_header, {text: technique_text, matches: '(^|[^a-z])fa([^a-z]|$)'}]}
   eadc_named: {text: search_text, matches: 'exp attenuation|^expatt\s*-\s'}
   # GE's eigenvectors of a tensor, `Evec1-<series>` to `Evec3-`: a tensor's
   # output, DTIRecon under ruling 7 (dev-2).
@@ -1462,6 +1462,8 @@ flags:
   # conventions follow the deep research, except where our archive's counts
   # or our vocabulary overrule it. No stack below comes from a header: each
   # is written from the pattern those files name.
+  # A word that decides a value is read from `technique_text`, so GE's
+  # exam-level ProtocolName cannot put it on every series of an exam.
 
   # --- A9 and case 24: GE headers whose ScanOptions (and sometimes
   # ScanningSequence) a third-party toolkit rewrote as numbers (fo-dicom 5 on
@@ -1478,7 +1480,7 @@ flags:
   # 16 archive stacks named FIESTA-C, all stored bSSFP). The keywords it
   # replaces, `fiesta-c` and `fiesta c`, missed the normalizer's `fiesta - c`
   # and matched `FIESTA COR` (9 plain FIESTA stacks stored CISS).
-  fiesta_c_named: {text: search_text, matches: 'fiesta\s*(-\s*)?c([^a-z0-9]|$)|fiestac'}
+  fiesta_c_named: {text: technique_text, matches: 'fiesta\s*(-\s*)?c([^a-z0-9]|$)|fiestac'}
 
   # --- the stated forms of the three SyMRI maps, by token or by name
   # (A15: a Philips QMAP T2 map).
@@ -1513,7 +1515,7 @@ flags:
   ge_numeric_diffusion_named:
     all:
       - ge_numeric_header
-      - {text: search_text, matches: '(^|[^a-z])(dti|dwi|diff|diffusion|tensor|fa|adc|isoadc|avdc|b0|b1000|isotropic|trace|expatt)([^a-z]|$)|exp attenuation'}
+      - {text: technique_text, matches: '(^|[^a-z])(dti|dwi|diff|diffusion|tensor|fa|adc|isoadc|avdc|b0|b1000|isotropic|trace|expatt)([^a-z]|$)|exp attenuation'}
 
   # --- A6 and case 22: an enhanced MR object states no ScanningSequence,
   # and our packets and registry carry none of the MR Pulse Sequence
@@ -1689,7 +1691,7 @@ flags:
       - philips_feepi
       - image_type.has_b1_map
       - image_type.has_b0_map
-      - {text: search_text, matches: 'b1\s*-?\s*map|flip angle map|(^|[^a-z0-9])t?b1([^a-z0-9]|$)|tfl\s*b1'}
+      - {text: technique_text, matches: 'b1\s*-?\s*map|flip angle map|(^|[^a-z0-9])t?b1([^a-z0-9]|$)|tfl\s*b1'}
 
   # --- A16 and cases 7, 32, 33: GE's SPGR by name or pulse sequence, TRICKS,
   # the SPGR-EPI, and the re-adjudication's fast steady-state echo.
@@ -1755,8 +1757,8 @@ flags:
     any:
       - {text: ge_pulse_sequence_name, matches: 'silen'}
       - all:
-          - {text: search_text, matches: 'silen'}
-          - {text: search_text, matches: 'mra|angio|(^|[^a-z])tof([^a-z]|$)'}
+          - {text: technique_text, matches: 'silen'}
+          - {text: technique_text, matches: 'mra|angio|(^|[^a-z])tof([^a-z]|$)'}
 
   # --- A20 and case 27: Siemens writes `TTEST` on the subtraction image of
   # its 3D GRASE ASL: all 354 archive stacks carry `SUB` and 350 are named
@@ -1784,7 +1786,7 @@ flags:
       - {text: search_text, matches: 'thick|slab|mpr|reformat|(^|[^a-z])(mip|minip)([^a-z]|$)|radials'}
   sub_named:
     all:
-      - {text: search_text, matches: '(^|[^a-z])sub([^a-z]|$)|subtract'}
+      - {text: technique_text, matches: '(^|[^a-z])sub([^a-z]|$)|subtract'}
       - {not: is_asl}
       - {not: asl_words}
   qmap_t2_named: {all: [image_type.is_derived, {text: search_text, matches: '(^|[^a-z])(qmap\s*-?\s*t2w?|t2w?\s*-?\s*qmap)([^a-z]|$)'}]}
@@ -1807,7 +1809,7 @@ flags:
       - any: [is_se_epi, {text: technique_text, matches: '(^|[^a-z])(dwi|dti|diff|diffusion|b0|hardi)'}]
 
   # --- A7: a base the words and the echo time tell.
-  # Read from the technique's text: GE's exam protocol names a trial `MRC`.
+  # Read from the technique's text: GE's ProtocolName names the whole exam.
   mrcp_named: {text: technique_text, matches: 'mrcp|cholangio'}
 
   # --- A13 and case 15: an inversion-recovery spin echo is FLAIR only where
