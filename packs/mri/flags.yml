@@ -1271,9 +1271,9 @@ flags:
   # === MRI pack 0.16.0: dev-4's rule errors ================================
 
   # --- dev-4, H1: Siemens' BLADE turbo spin echo named by its sequence
-  # alone, `*tseB2d1_17`, is Radial. The words and `tseBR` were all 0.15.0
-  # read (an ESSENZA `t2_tse_tra`; dev-1 and dev-4 settled Radial on every
-  # `tseB` stack). The flag is in `radial_named` above; on the archive, 19
+  # alone, `*tseB2d1_17`, is Radial. 0.15.0 read Radial from the words
+  # only; `tseBR` gave the restore (VFA-TSE) and no Radial (an ESSENZA
+  # `t2_tse_tra`; dev-1 and dev-4 settled Radial on every `tseB` stack). The flag is in `radial_named` above; on the archive, 19
   # `tseB` stacks carry no BLADE word.
 
   # --- dev-4, H2: a reformat whose name gives another plane than the
