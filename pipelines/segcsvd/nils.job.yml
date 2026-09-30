@@ -141,6 +141,8 @@ x-nils:
       columns:
         - {name: wmh_volume, unit: mm3, description: "White-matter hyperintensity volume on the FLAIR; absent where the session has no FLAIR"}
         - {name: pvs_volume, unit: mm3, description: "Enlarged perivascular space volume on the T1w"}
+  qc:
+    - {metric: pvs_volume, op: ">", value: 0, description: "A starting point: no enlarged perivascular space at all is more often a failed segmentation than an adult brain without any"}
   needs:
     cores-input: threads
     gpu: none

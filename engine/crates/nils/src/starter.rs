@@ -200,7 +200,11 @@ mod tests {
             strip.document["x-nils"]["needs"]["memory-gb"].as_f64() >= Some(8.0),
             "synthstrip declares the memory it peaks at"
         );
-        let recon = descriptor::parse(CATALOG[5].1).unwrap();
+        let (_, recon) = CATALOG
+            .iter()
+            .find(|(name, _)| *name == "freesurfer-recon-all")
+            .unwrap();
+        let recon = descriptor::parse(recon).unwrap();
         assert_eq!(
             recon.document["x-nils"]["secrets"][0]["env"], "FS_LICENSE",
             "recon-all reads the lab's licence as a secret input (R3)"
