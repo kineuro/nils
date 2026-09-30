@@ -1141,14 +1141,17 @@ cases:
       construct: Phase
       base: ''
 
-  - name: an echo-combined SWI magnitude is computed, so it keeps its product
+  # MRI pack 0.20.0: an echo-combined magnitude is the acquisition's echoes
+  # averaged, no SWI processing's product (record 48, dev-5's case 5).
+  - name: an echo-combined SWI magnitude is the acquisition's, its echoes combined
     stack:
       image_type: 'DERIVED\PRIMARY\M\MEAN'
       scanning_sequence: GR
       text_series_description: 'swi mag combined'
       echo_time: 20
     axes:
-      provenance: SWIRecon
+      provenance: RawRecon
+      technique: MEDIC
       construct: EchoCombined,Magnitude
       base: T2*w
 
@@ -1670,7 +1673,10 @@ cases:
       technique: FIESTA
 
   # Provenance: value 1 decides a motion-corrected copy and no map.
-  - name: a motion-corrected DSC run written DERIVED is the scanner's
+  # MRI pack 0.20.0: RawRecon with MoCo, the acquisition registered, whatever
+  # value 1 says (record 48, dev-5's case 9, which withdraws the ruling of
+  # 2026-09-28 this case held).
+  - name: a motion-corrected DSC run written DERIVED is the acquisition's, with MoCo
     stack:
       image_type: 'DERIVED\PRIMARY\PERFUSION\DIS2D\MOCO'
       scanning_sequence: EP
@@ -1680,7 +1686,7 @@ cases:
     axes:
       technique: Perfusion
       modifier: MoCo
-      provenance: PerfusionRecon
+      provenance: RawRecon
 
   - name: a Siemens relCBF map written ORIGINAL is still the scanner's map
     stack:
@@ -2046,7 +2052,9 @@ cases:
       disposition: reformat
 
   # Gradient echo.
-  - name: a Philips 2D T1W_FFE is a spoiled gradient echo
+  # MRI pack 0.20.0: the private technique `FFE` is the steady state, and the
+  # site's "T1W" names the contrast, not T1-FFE (record 48, dev-5's case 1).
+  - name: a Philips 2D T1W_FFE of the private technique FFE is SS-GRE
     stack:
       image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
       scanning_sequence: GR
@@ -2056,7 +2064,7 @@ cases:
       philips_scanning_technique: FFE
       text_series_description: 'T1W_FFE'
     axes:
-      technique: FLASH
+      technique: FISP
 
   - name: a FLASH named T2 is T2*-weighted
     stack:

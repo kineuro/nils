@@ -24,6 +24,7 @@ order:
   - 'technique:TOF-MRA'
   - 'technique:CE-MRA'
   - 'technique:ZTE-silent-mra'
+  - 'construct:in_opposed_gre'
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
@@ -136,9 +137,12 @@ rules:
 
   # MRI pack 0.14.0: a spectroscopy acquisition has no image contrast
   # (dev-2: a GE `PROBE-SV` left empty, settled none).
+  # MRI pack 0.20.0: and any stack the technique axis reads as MRS (dev-5's
+  # A1: a GE single-voxel result named "MRS", given PWI by the vote).
   'flag:spectroscopy':
     clauses:
       - {flag: is_spectroscopy, tier: keywords}
+      - {when: {axis: technique, is: MRS}, cite: 'MRS', source: technique}
     set: {base: null}
     confidence: 0.85
     why: 'a spectroscopy acquisition has no base contrast'
@@ -211,6 +215,18 @@ rules:
     set: {base: null}
     confidence: 0.85
     why: 'a Silent MRA is a label-minus-control angiogram with no tissue weighting'
+
+  # MRI pack 0.20.0: the in-phase or opposed-phase echo of a two-point
+  # Dixon or in/opposed-phase gradient echo is T1-weighted, whatever its
+  # echo count makes the technique (dev-5's A3: the in-phase echo of a 2D
+  # FLASH at TR 90 ms and flip 70 was T2*w as a multi-echo gradient echo).
+  # Never a spin echo's, whose Dixon echoes keep the spin echo's weighting.
+  'construct:in_opposed_gre':
+    clauses:
+      - {when: {all: [{any: [{axis: construct, is: InPhase}, {axis: construct, is: OutPhase}]}, has_gre, {not: has_se}, {not: has_epi}]}, cite: 'an in-phase or opposed-phase gradient echo', source: construct}
+    set: {base: 'T1w'}
+    confidence: 0.85
+    why: 'a two-point Dixon or in/opposed-phase gradient echo is T1-weighted'
 
   'technique:ME-GRE':
     clauses:

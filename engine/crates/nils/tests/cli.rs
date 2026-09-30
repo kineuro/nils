@@ -1770,7 +1770,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.19.0"),
+            .any(|p| p["pack"] == "mri@0.20.0"),
         "{listed}"
     );
 
@@ -1782,7 +1782,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 337);
+    assert_eq!(shown["flags"], 366);
     assert_eq!(
         shown["contract"], 8,
         "record 53: a session pass, a fallback border over several values and the private \
@@ -5977,7 +5977,7 @@ fn a_pack_is_replayed_over_header_packets() {
         assert_eq!(got[0]["stack"], 1);
         assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
         assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
-        assert!(stderr(&out).contains("2 packets replayed through mri@0.19.0"));
+        assert!(stderr(&out).contains("2 packets replayed through mri@0.20.0"));
     }
     let bad = dir.file("bad.jsonl", b"{not json\n");
     let out = nils()

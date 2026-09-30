@@ -136,12 +136,14 @@ values:
       - time to peak
       - perfusion map
     alternative_flags: [has_cbf, has_cbv, has_mtt, has_ttp, has_tmax]
-    # Nima's ruling (2026-09-28): a motion-corrected DSC run written DERIVED
-    # is the scanner's (`DERIVED\PRIMARY\PERFUSION\DIS2D\MOCO` on 22 stacks
-    # of the archive that came out RawRecon); written ORIGINAL it is not.
-    # MRI pack 0.18.0: or a DSC map named for what it is, and a derived
-    # motion-corrected DSC run without the `PERFUSION` token (flags.yml,
+    # MRI pack 0.18.0: or a DSC map named for what it is (flags.yml,
     # `perfusion_recon_extra`; sealed-1 A1, the deep research, case 17).
+    # MRI pack 0.20.0: only the maps. A motion-corrected DSC run is the
+    # acquisition's series registered, RawRecon with MoCo, whatever its
+    # image type's first value says (record 48, dev-5's case 9: DICOM's
+    # DERIVED says nothing of a perfusion model, and ORIGINAL BOLD and ASL
+    # runs are ruled so). Nima's ruling of 2026-09-28, that a DERIVED one is
+    # PerfusionRecon, is withdrawn.
     detection:
       exclusive: is_perfusion_derived
       combination: [perfusion_recon_extra]
@@ -208,7 +210,10 @@ values:
     detection:
       exclusive: is_localizer
       # MRI pack 0.11.0: a tri-plane scout by its shape (flags.yml, 12).
-      combination: [is_tri_plane_scout]
+      # MRI pack 0.20.0: or a series of at most 5 slices a plane named for
+      # planning (record 48, dev-5's case 6: "true mid-line"), or a survey
+      # named `ÖSIKT` (dev-5's A10) (flags.yml, section 17).
+      combination: [localizer_by_shape]
   ProjectionDerived:
     terms: ['projection', 'MIP', 'MinIP', 'MPR', 'reformat']
     # MRI pack 0.13.0: not Philips' isotropic diffusion image, which it
