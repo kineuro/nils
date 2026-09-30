@@ -69,11 +69,13 @@ const TEXTS: &[(&str, &str, &str, bool)] = &[
     // fingerprint. A classic image has none of the mechanism, and nothing
     // is shown for it.
     ("sop_class_uid", "fingerprint", "sop_class_uid", false),
+    // a vendor's sequence name, as the sequence name is (Nima's ruling,
+    // 2026-10-01): Siemens XA writes its sequence name here
     (
         "pulse_sequence_name",
         "fingerprint",
         "pulse_sequence_name",
-        false,
+        true,
     ),
     (
         "echo_pulse_sequence",
@@ -176,6 +178,12 @@ const UIDS_SHOWN: &[&str] = &[
     "transfer_syntax_uid",
     "implementation_class_uid",
 ];
+
+/// The columns the catalogue calls technical that are shown at detail quasi
+/// and above only: a vendor's sequence name, as the sequence name is
+/// (Nima's ruling, 2026-10-01). Siemens XA writes its sequence name into
+/// PulseSequenceName.
+const QUASI_SHOWN: &[&str] = &["pulse_sequence_name"];
 
 /// The keys of one stack's rows: series, study, modality and its
 /// representative instance (the lowest instance number of the stack).
@@ -361,11 +369,13 @@ pub(crate) fn texts_and_physics(
 /// withheld because their value was shaped like an identifier
 /// ([`nils_pack::private::shown_value`]). An allowlist: an element the pack
 /// does not list under `shown` is never read here, and without a pack
-/// nothing is.
+/// nothing is. Below detail quasi an element the pack marks `quasi` (a
+/// vendor's sequence name) is left out, as the sequence name is.
 pub(crate) fn private_shown(
     store: &mut Store,
     stack: i64,
     pack: Option<&nils_pack::Pack>,
+    quasi: bool,
 ) -> Result<(Map<String, Value>, usize), StoreError> {
     let mut out = Map::new();
     let Some(pack) = pack.filter(|p| !p.shown.is_empty()) else {
@@ -390,7 +400,7 @@ pub(crate) fn private_shown(
         .and_then(|t| serde_json::from_str(t).ok())
         .unwrap_or_default();
     let mut withheld = 0usize;
-    for s in &pack.shown {
+    for s in pack.shown.iter().filter(|s| quasi || !s.quasi) {
         let Some(i) = pack.ingest.iter().find(|i| i.name == s.name) else {
             continue;
         };
@@ -485,7 +495,9 @@ pub(crate) fn whole(
                 identifying += 1;
                 continue;
             }
-            if !quasi && f.class == Sensitivity::QuasiIdentifying {
+            if !quasi
+                && (f.class == Sensitivity::QuasiIdentifying || QUASI_SHOWN.contains(&f.column))
+            {
                 below += 1;
                 continue;
             }

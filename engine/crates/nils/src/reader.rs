@@ -404,8 +404,8 @@ pub(crate) fn why(
     let blind = false;
     let asked = asked_of(store, stack)?;
     let mut head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
-    // the sequence name is quasi-identifying text (catalogue.md): below
-    // detail quasi it is not shown, in the header, a clause's or the line
+    // the sequence names are quasi-identifying text (catalogue.md): below
+    // detail quasi they are not shown, in the header, a clause's or the line
     if !quasi {
         head.retain(|f, _| !HASHED_ONLY.contains(&f.as_str()));
     }
@@ -853,8 +853,11 @@ fn rounded(v: &Value) -> Value {
 }
 
 /// The fields a batch's signature is hashed with and never returned, since
-/// they are quasi-identifying text (the sequence name, `catalogue.md`).
-const HASHED_ONLY: &[&str] = &["text_sequence_name"];
+/// they are quasi-identifying text (the sequence name, `catalogue.md`), and
+/// shown below detail quasi nowhere: the sequence name and the pulse
+/// sequence name, where Siemens XA writes it (Nima's ruling, 2026-10-01: a
+/// vendor's sequence name is shown at detail quasi and above only).
+const HASHED_ONLY: &[&str] = &["text_sequence_name", "pulse_sequence_name"];
 
 /// One batch: like stacks suggested one answer.
 #[derive(Debug, Clone)]

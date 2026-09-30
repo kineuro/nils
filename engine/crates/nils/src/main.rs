@@ -10643,7 +10643,7 @@ pub(crate) fn pack_document(
         // carries, by name, with the address a packet builder reads them at
         "shown": pack.shown.iter().filter_map(|s| {
             let i = pack.ingest.iter().find(|i| i.name == s.name)?;
-            Some(json!({"name": s.name, "address": i.address(), "kind": i.kind, "why": s.why}))
+            Some(json!({"name": s.name, "address": i.address(), "kind": i.kind, "why": s.why, "quasi": s.quasi}))
         }).collect::<Vec<_>>(),
         "rule_sets": pack.rule_sets.iter().map(|r| json!({
             "rule_set": r.name, "rules": r.rules.len(),
