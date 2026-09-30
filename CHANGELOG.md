@@ -7,6 +7,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Added
 
 - segcsvd is a starter (record 49 R1's fourth analysis): white-matter hyperintensities on each session's FLAIR and enlarged perivascular spaces on its T1w, a mask and a probability map for each and their volumes in mm3 as a table, from the session's SynthSeg label map. The image is segcsvd rc03 as its authors publish it on Hugging Face (GPL-3.0), pinned by the digest of a public registry copy whose layers are that archive's.
+- A model that disagrees with a person's decision is shown, never applied (record 51 R5). Where a pipeline run proposes, at or above the model card's threshold, another value than a person's decision in force on a stack, it raises an `<axis>:decision` review item on that stack, with the model, its value and its confidence as the evidence (`source: model`). Nothing is staged and the person's decision stays in force. There is one open such item per stack, axis and model: a newer run of the model refreshes it, or closes it as superseded once it agrees, and one a campaign asks is left to it, with none raised beside it. Below the threshold, or against an agent's decision, the proposal is only counted, as before. The run's `proposals.ingested` says `disagreements` and `agreed_again`; the HTTP API contract stays version 7, amended in place.
+- `GET /api/packs/{name}` and `nils pack show --json` list the pack's `picks`, each with its name and the roles it picks for, so the desk offers the served pack's roles (record 51). The HTTP API contract stays version 7, amended in place.
 
 ### Changed
 
