@@ -21,6 +21,7 @@ search: search_text
 # below is vocabulary a route sets (spec section 6.5).
 order:
   - SyMRI
+  - NeuroMix
   - EPIMix
   - STAGE
   - SWIRecon
@@ -47,17 +48,29 @@ values:
     alternative_flags: [has_t1_synthetic, has_t2_synthetic, has_pd_synthetic, has_flair_synthetic, is_mdme, is_qalas, has_multi_qmap]
     detection:
       combination: [is_synthetic, is_derived]
+  # MRI pack 0.18.0: GE's NeuroMix, EPIMix's successor, whose blocks are
+  # single-shot EPIs and single-shot fast spin echoes (the deep research,
+  # case 12: "NeuroMix is a missing provenance value (using EPIMix for them
+  # is a stretch)"; 73 archive stacks, pulse sequence `ksneuromix*`). The
+  # EPIMix route reads both.
+  NeuroMix:
+    terms: ['NeuroMix', 'ksneuromix']
+    description: 'GE NeuroMix: a rapid multicontrast examination of single-shot EPI and single-shot fast spin echo blocks, and each of its outputs'
+    keywords:
+      - neuromix
+      - ksneuromix
+    detection:
+      combination: [neuromix_psd]
   EPIMix:
-    terms: ['EPIMix', 'NeuroMix']
+    terms: ['EPIMix']
     keywords:
       - epimix
       - ksepimix
       - axepimix
-      - neuromix
       - mix2
       - mix3
-    # MRI pack 0.18.0: or by GE's pulse sequence, `ksepimix*` or
-    # `ksneuromix*` (the deep research, case 12: every output is EPIMix).
+    # MRI pack 0.18.0: or by GE's pulse sequence, `ksepimix*` (the deep
+    # research, case 12: every output is EPIMix).
     detection:
       combination: [epimix_psd]
   STAGE:

@@ -38,10 +38,15 @@ search: technique_text
 # combined multi-echo before multi-echo, the variable flip angle, and the
 # named interpolated 3D before the turbo, spoiled and steady-state families.
 order:
+  # MRI pack 0.18.0: a spectrum first, since its header states an imaging
+  # readout it does not have.
+  - MRS
   - MS-EPI
   - DWI-TSE
   - DWI-EPI
   - DWI-STEAM
+  # MRI pack 0.18.0: before ASL, whose token GE writes on its Silent MRA.
+  - ZTE
   - ASL
   - DCE
   - Perfusion-EPI
@@ -59,6 +64,8 @@ order:
   - VFA-TSE
   - TSE
   - SE
+  # MRI pack 0.18.0: before TOF-MRA, whose GE option its protocols carry.
+  - CE-MRA
   - TOF-MRA
   - PC-MRA
   - QALAS
@@ -92,6 +99,20 @@ order:
 # acronyms, MQ mriquestions.com, RP Radiopaedia, S8 the brain tumour imaging
 # protocol consensus, P a paper. The table is in PROVENANCE.md.
 values:
+  # MRI pack 0.18.0 (Nima, 2026-09-30: "we cannot force things to category
+  # they don't belong to"): magnetic resonance spectroscopy. The deep
+  # research, case 16: no technique value exists for it. Our registries hold
+  # no MR Spectroscopy Storage object; GE writes its PROBE single-voxel and
+  # CSI results as a few MR images (35 archive stacks named for
+  # spectroscopy, 12 of them one image), so the value is read from those
+  # words on a stack of at most 16 images, and the stack's base is none.
+  MRS:
+    terms: ['MR spectroscopy', 'MRS', 'single voxel spectroscopy', 'SVS', 'PRESS', 'STEAM spectroscopy', 'chemical shift imaging', 'CSI', 'MRSI', 'PROBE']
+    label: MRS
+    description: 'magnetic resonance spectroscopy (single voxel or chemical shift imaging): a spectrum, or the images a scanner writes of one, with no image contrast'
+    family: OTHER
+    detection:
+      exclusive: is_mrs
   MS-EPI:
     # MUSE and IRIS are interleaved multishot EPI, RESOLVE readout-segmented;
     # the value covers both, its label only the second [P50, V2]
@@ -167,6 +188,23 @@ values:
     detection:
       exclusive: is_bold
       combination: [is_bold_structural]
+  # MRI pack 0.18.0: a zero echo time 3D radial readout: GE's Silenz and
+  # Siemens' PETRA, silent structural scans, and GE's Silent MRA, which
+  # prepares it with an arterial spin labelling module and subtracts control
+  # from label (the deep research, case 29: "no technique value fits"; 13
+  # archive stacks, pulse sequence `Silenz`, stored SP-GRE 12 and ASL 1).
+  # Its trajectory is Radial on the modifier axis.
+  ZTE:
+    terms: ['zero echo time', 'ZTE', 'Silenz', 'Silent MRA', 'Silent scan', 'PETRA', 'pointwise encoding time reduction with radial acquisition']
+    label: ZTE
+    description: 'a zero echo time 3D radial readout (GE Silenz, Siemens PETRA); with an arterial spin labelling preparation, GE Silent MRA'
+    family: GRE
+    keywords:
+      - zte
+      - petra
+      - silenz
+    detection:
+      exclusive: is_zte
   # Record 48: named for the labelling and not a readout. The consensus
   # readouts are 3D GRASE and a 3D spiral fast spin echo, with 2D EPI an
   # alternative [P20, RP5]. The identity was ASL-EPI before pack 0.6.0, and
@@ -463,6 +501,24 @@ values:
     detection:
       exclusive: is_mprage
       combination: [has_ir, has_gre, is_3d]
+  # MRI pack 0.18.0: contrast-enhanced MR angiography, single phase or time
+  # resolved (TRICKS, TWIST, 4D-TRAK): a T1-weighted 3D spoiled gradient echo
+  # timed to the arterial bolus. The deep research, cases 2 and 33: "our
+  # vocabulary lacks a CE-MRA technique; that is a missing value". On the
+  # archive 114 TRICKS stacks and 20 contrast-MRA-named GE stacks with
+  # `VASCTOF_GEMS` had no value of their own. A TOF given contrast stays TOF
+  # by its words.
+  CE-MRA:
+    terms: ['contrast-enhanced MRA', 'CE-MRA', 'CEMRA', 'time-resolved MRA', 'TRICKS', 'TWIST', '4D-TRAK', 'bolus chase', 'Fluoro Triggered MRA']
+    label: CE-MRA
+    description: 'contrast-enhanced MR angiography: a T1-weighted 3D spoiled gradient echo timed to the arterial bolus, single phase or time resolved'
+    family: GRE
+    keywords:
+      - ce-mra
+      - ce - mra
+      - cemra
+    detection:
+      combination: [is_ce_mra]
   # Bare Inhance Inflow (2D inflow) is a TOF [V1, V2]; GE's Inhance Inflow
   # IR is a non-contrast bSSFP angiography [V4, V1], and the normalizer
   # writes its `IR` as `inversion-recovery`, so it is kept out.

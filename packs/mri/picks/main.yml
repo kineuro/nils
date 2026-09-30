@@ -225,7 +225,8 @@ components:
 # buys it back.
 penalty:
   of: provenance
-  by_value: {EPIMix: 0.5}
+  # MRI pack 0.18.0: NeuroMix, a provenance of its own since, takes the same.
+  by_value: {EPIMix: 0.5, NeuroMix: 0.5}
 
 borders:
   # v0's `runner_up_within_pct`. At or under this the order between the top

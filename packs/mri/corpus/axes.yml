@@ -1512,8 +1512,9 @@ cases:
       text_sequence_name: '*fldyn3d1_ns'
       text_series_description: 'mra-ce sag twist 5s'
       temporal_positions: 50
+    # MRI pack 0.18.0: CE-MRA, the value the vocabulary lacked.
     axes:
-      technique: FLASH
+      technique: CE-MRA
 
   - name: a liver VIBE of four phases is a VIBE and not DCE
     stack:

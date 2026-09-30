@@ -439,7 +439,7 @@ cases:
       echo_time: 90
       inversion_time: 2400
     axes:
-      provenance: EPIMix
+      provenance: NeuroMix
       technique: HASTE
 
   - name: an EPIMix ADC is a diffusion EPI's map
@@ -783,7 +783,7 @@ cases:
       technique: GRE-EPI
       base: T1w
 
-  - name: a GE TRICKS is a fast spoiled gradient echo
+  - name: a GE TRICKS is a contrast-enhanced angiography
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: GR
@@ -796,7 +796,8 @@ cases:
       echo_time: 1.3
       flip_angle: 30
     axes:
-      technique: TurboFLASH
+      technique: CE-MRA
+      base: T1w
 
   - name: a GE 2D gradient echo named SPGR with FAST_GEMS is a fast spoiled gradient echo
     stack:
@@ -1047,7 +1048,7 @@ cases:
       echo_time: 1.5
       flip_angle: 30
     axes:
-      technique: TurboFLASH
+      technique: CE-MRA
 
   - name: a GE sagittal 3D SPGR with VASCTOF_GEMS is no TOF
     stack:

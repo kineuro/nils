@@ -1,0 +1,277 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.18.0: the values the vocabulary lacked, which the deep research
+# of 2026-09-30 names as missing (technique CE-MRA, MRS and ZTE, provenance
+# NeuroMix, construct PBP, K2, Velocity and StdDevProj), and the cases that
+# keep each from reaching what it must not. Every stack here is invented.
+
+cases:
+
+  - name: a Siemens TWIST angiography given contrast is CE-MRA and T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'twist_mra_carotids'
+      text_sequence_name: '*fl3d1'
+      repetition_time: 3
+      echo_time: 1.1
+      flip_angle: 25
+    axes:
+      technique: CE-MRA
+      base: T1w
+
+  - name: a TOF named so and given contrast stays TOF, not CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'tof_3d_multi-slab post gd'
+      text_sequence_name: '*fl3d3r_t70'
+      text_contrast: Dotarem
+      repetition_time: 22
+      echo_time: 3.6
+      flip_angle: 18
+    axes:
+      technique: TOF
+
+  - name: a phase-contrast angiography given contrast stays PC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'pc angio + gd'
+      text_sequence_name: '*pc3d1'
+      text_contrast: Dotarem
+    axes:
+      technique: PC
+
+  - name: a contrast-enhanced 3D T1 that is no angiography is no CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_mprage_sag + gd'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_contrast: Dotarem
+    axes:
+      technique: MPRAGE
+
+  - name: a GE single-voxel PROBE is MRS with no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      scan_options: 'CINE_GEMS\SAT_GEMS\EDR_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'PROBE-SV 35'
+      repetition_time: 1500
+      echo_time: 35
+      flip_angle: 90
+      n_instances: 1
+    axes:
+      technique: MRS
+      base: ''
+
+  - name: a planning series named for spectroscopy is no MRS
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'T2 plan for spectroscopy'
+      repetition_time: 3000
+      echo_time: 100
+      echo_train_length: 16
+      n_instances: 24
+    axes:
+      technique: TSE
+
+  - name: GE's Silent MRA is ZTE, radial, with no base and no ASL
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Silent MRA COW'
+      ge_pulse_sequence_name: Silenz
+      repetition_time: 400
+      echo_time: 0
+      flip_angle: 5
+    axes:
+      technique: ZTE
+      modifier: Radial
+      construct: ''
+      base: ''
+
+  - name: a GE silent PROPELLER is no ZTE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Silent PROPELLER T2'
+      repetition_time: 5000
+      echo_time: 100
+      echo_train_length: 24
+      flip_angle: 90
+    flags:
+      is_zte: false
+    axes:
+      technique: TSE
+
+  - name: a NeuroMix output by its pulse sequence alone is NeuroMix
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\SE'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2*'
+      ge_pulse_sequence_name: 'ksneuromix'
+      repetition_time: 3000
+      echo_time: 40
+    axes:
+      provenance: NeuroMix
+      technique: GRE-EPI
+
+  - name: an EPIMix stays EPIMix
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\SE'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'EPIMix T2'
+    axes:
+      provenance: EPIMix
+
+  - name: a Siemens PBP map is PBP, PerfusionRecon and PWI, filed perf
+    stack:
+      image_type: 'DERIVED\PRIMARY\PERFUSION\PBP'
+      scanning_sequence: EP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf_PBP'
+      text_sequence_name: '*epfid2d1_128'
+    axes:
+      provenance: PerfusionRecon
+      construct: PBP
+      base: PWI
+      directory_type: perf
+
+  - name: a leakage map named K2 is K2
+    stack:
+      image_type: 'DERIVED\SECONDARY'
+      scanning_sequence: EP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'K2 leakage [cSVD]'
+      n_instances: 20
+      n_slices: 20
+    axes:
+      provenance: PerfusionRecon
+      construct: K2
+
+  - name: an ASL series named for leakage is no K2
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\RELCBF'
+      scanning_sequence: RM
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'relCBF leakage check'
+      text_sequence_name: 'tgse3d1_2'
+    flags:
+      k2_stated: false
+
+  - name: a phase contrast's image named velocity is Velocity with no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'flow_venc150_velocity'
+      text_sequence_name: '*pc2d1'
+    axes:
+      construct: 'ND,Velocity'
+      base: ''
+
+  - name: a phase contrast's phase image that says nothing more stays Phase
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'pc3d_sag'
+      text_sequence_name: '*pc3d1'
+    axes:
+      construct: 'ND,Phase'
+
+  - name: a Siemens standard deviation projection is StdDevProj and a reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\STDDEV_TRA\ND'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'tof_3d_STDDEV_TRA'
+      text_sequence_name: '*fl3d3r_t70'
+    axes:
+      provenance: ProjectionDerived
+      construct: 'ND,StdDevProj'
+      disposition: reformat
+
+  - name: a spin echo named K2 is no leakage map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra K2'
+      text_sequence_name: '*tse2d1_15'
+      repetition_time: 5000
+      echo_time: 100
+    flags:
+      k2_stated: false
+    axes:
+      construct: ND
+
+  - name: a Siemens TWIST-VIBE dynamic run is no CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_twist_vibe_tra_dyn'
+      text_sequence_name: '*fl3d1'
+      text_contrast: Dotarem
+      temporal_positions: 40
+      repetition_time: 4
+      echo_time: 1.5
+      flip_angle: 12
+    flags:
+      is_ce_mra: false
+
+  - name: a GE series in an exam whose protocol names spectroscopy is no MRS
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T1'
+      text_protocol_name: 'Brain and PROBE spectroscopy'
+      repetition_time: 500
+      echo_time: 10
+      flip_angle: 90
+      n_instances: 12
+    flags:
+      is_mrs: false

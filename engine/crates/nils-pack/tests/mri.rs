@@ -37,7 +37,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        306,
+        314,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -74,7 +74,9 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          by its technique, MobiView, an acquired SWI echo, Silent MRA, TTEST \
          on an ASL, the projections and reformats, a subtraction, the QMap \
          maps by name, Philips' isotropic image, a diffusion SBRef, MRCP, \
-         VASCTOF as TOF, FIESTA-C and the CSF null of an inversion"
+         VASCTOF as TOF, FIESTA-C and the CSF null of an inversion, and \
+         the 8 of the values the vocabulary lacked: MRS, ZTE, CE-MRA and \
+         its words, NeuroMix's pulse sequence, PBP, K2 and a velocity image"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

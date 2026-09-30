@@ -1143,7 +1143,8 @@ flags:
   propeller_named: {text: technique_text, matches: 'prop(p?eller|fse|ks)?([^a-z]|$)'}
   # MRI pack 0.16.0: or a Siemens BLADE by its sequence name (parsers.yml,
   # `is_blade_tse`).
-  radial_named: {any: [multivane_named, propeller_named, sequence_name.is_blade_tse]}
+  # MRI pack 0.18.0: or a zero echo time 3D radial readout (below, `is_zte`).
+  radial_named: {any: [multivane_named, propeller_named, sequence_name.is_blade_tse, is_zte]}
   # A GE spin echo written in research mode: ScanningSequence RM, so no
   # readout is stated, but a flip of 80 degrees or more and an echo time of
   # 8 ms or more, which a gradient echo does not have outside an EPI.
@@ -1638,7 +1639,9 @@ flags:
   # --- A10, cases 12 and 25: EPIMix by its pulse sequence (`ksepimix*`,
   # 0019,109C), where its words do not say it (5 archive EPIMix stacks were
   # RawRecon); NeuroMix (`ksneuromix*`) the same.
-  epimix_psd: {text: ge_pulse_sequence_name, matches: 'epimix|neuromix'}
+  epimix_psd: {text: ge_pulse_sequence_name, matches: 'epimix'}
+  # MRI pack 0.18.0 (vocabulary): NeuroMix, a provenance of its own.
+  neuromix_psd: {text: ge_pulse_sequence_name, matches: 'neuromix'}
   epimix_not_neuromix:
     any:
       - {text: search_text, matches: 'epimix'}
@@ -1900,3 +1903,90 @@ flags:
       - {field: inversion_time, ge: 300}
       - {field: inversion_time, lt: 1400}
       - {not: ti_near_csf_null}
+
+  # === MRI pack 0.18.0: the values the vocabulary lacked ====================
+  # Nima, 2026-09-30: "if we need to add something just do it. we cannot
+  # force things to category they don't belong to." The deep research names
+  # each as missing; `empirical-conventions.md` counts them.
+
+  # --- technique MRS (case 16): a spectroscopy acquisition as GE writes it,
+  # a few MR images of the PROBE result, never a planning series or a
+  # localizer.
+  # Read from the technique's text: GE's exam protocol that names a
+  # spectroscopy would otherwise make every short series of the exam MRS.
+  is_mrs:
+    all:
+      - {text: technique_text, matches: '(^|[^a-z])(probe\s*-?\s*(sv|p|s|press|steam)?|spectroscopy|svs|csi)([^a-z]|$)'}
+      - {field: n_instances, gt: 0}
+      - {field: n_instances, le: 16}
+      - {not: {text: search_text, matches: 'locali[sz]er|scout|survey|(^|[^a-z])(loc|plan|planning)([^a-z]|$)'}}
+
+  # --- technique ZTE (case 29): GE's `Silenz` pulse sequence, Siemens'
+  # PETRA, or GE's Silent MRA by its words. Never a silent PROPELLER or a
+  # silent FSE, which are quiet turbo spin echoes.
+  is_zte:
+    any:
+      - {text: ge_pulse_sequence_name, matches: '^\s*silen'}
+      - {text: technique_text, matches: '(^|[^a-z])(zte|petra|silenz)([^a-z]|$)'}
+      - silent_mra_named
+
+  # --- technique CE-MRA (cases 2 and 33): a 3D gradient echo that is an
+  # angiography given contrast, or a time-resolved angiography (always
+  # contrast), or GE's `VASCTOF_GEMS` where the TOF reading does not hold
+  # and no SPGR name says otherwise. Never a series whose words say TOF or
+  # inflow, and never a phase contrast.
+  ce_mra_words: {text: technique_text, matches: '(^|[^a-z])(ce\s*-?\s*mra|cemra|tricks|twist|trak|4d\s*-?\s*mra|time\s*-?\s*resolved|bolus\s*chase|smartprep|care\s*bolus|fluoro\s*-?\s*trig)'}
+  is_ce_mra:
+    all:
+      - is_3d
+      - has_gre
+      - {not: has_epi}
+      - {not: has_se}
+      - {not: is_pc}
+      # nor a TOF the header states, an ASL (a non-contrast 4D MRA) or a
+      # DCE run (a TWIST-VIBE)
+      - {not: sequence_name.is_tof}
+      - {not: sequence_variant.is_tof}
+      - {not: scan_options.has_inflow_gems}
+      - {not: philips_inflow_named}
+      - {not: is_asl}
+      - {not: asl_words}
+      - {not: dce_words}
+      - {not: {text: technique_text, matches: 'vibe'}}
+      # `tof` anywhere, as the TOF value's own keyword reads it (`3DTOF`)
+      - {not: {text: technique_text, matches: 'tof|time of flight|inflow'}}
+      - any:
+          - ce_mra_words
+          - all:
+              - {text: technique_text, matches: '(^|[^a-z])(mra|angio|angiography)'}
+              - any: [contrast_said, {text: technique_text, matches: '(^|[^a-z])ce([^a-z]|$)'}]
+          - all: [scan_options.has_tof_gems, {not: ge_vasctof_as_tof}, {not: ge_spgr_named}]
+
+  # --- construct PBP and K2 (case 17): by Siemens' tokens or the name.
+  pbp_stated:
+    any:
+      - image_type.has_peak_bolus
+      - {text: technique_text, matches: '(^|[^a-z])pbp([^a-z]|$)|percentage of baseline'}
+  # The words only on a map `perfusion_map_named` takes (no ASL, no stated
+  # readout other than EPI, no time series): a bare `K2` or `leakage` says
+  # nothing on any other series.
+  k2_stated:
+    all:
+      - any:
+          - image_type.has_k2
+          - image_type.has_leakage
+          - all:
+              - {text: technique_text, matches: '(^|[^a-z])k2([^a-z0-9]|$)|leakage'}
+              - perfusion_map_named
+      - {not: is_asl}
+
+  # --- construct Velocity (case 19): a phase contrast's velocity image,
+  # where its image type or its words say velocity.
+  velocity_image:
+    all:
+      - is_pc
+      - {not: has_magnitude}
+      - {not: {text: technique_text, matches: '(^|[^a-z])(magn|mag|magnitude)([^a-z]|$)'}}
+      - any:
+          - {parser: image_type, any_token: [VELOCITY, VEL, VELOCITY_MAP]}
+          - {text: technique_text, matches: '(^|[^a-z])(velocity|vel|venc)([^a-z]|$)'}

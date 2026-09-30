@@ -130,6 +130,8 @@ rules:
       - {when: {axis: provenance, is: ProjectionDerived}, cite: ProjectionDerived, source: provenance}
       - {when: {axis: construct, is: MIP}, cite: MIP, source: construct}
       - {when: {axis: construct, is: MinIP}, cite: MinIP, source: construct}
+      # MRI pack 0.18.0 (vocabulary)
+      - {when: {axis: construct, is: StdDevProj}, cite: StdDevProj, source: construct}
     set: {disposition: reformat, convertible: 'yes'}
 
   # A workstation resliced a volume. v0 carries the same list under the name
@@ -156,6 +158,10 @@ rules:
       - {when: {axis: construct, is: MTT}, cite: MTT, source: construct}
       - {when: {axis: construct, is: Tmax}, cite: Tmax, source: construct}
       - {when: {axis: construct, is: TTP}, cite: TTP, source: construct}
+      # MRI pack 0.18.0 (vocabulary)
+      - {when: {axis: construct, is: PBP}, cite: PBP, source: construct}
+      - {when: {axis: construct, is: K2}, cite: K2, source: construct}
+      - {when: {axis: construct, is: Velocity}, cite: Velocity, source: construct}
       - {when: {axis: construct, is: T1map}, cite: T1map, source: construct}
       - {when: {axis: construct, is: T2map}, cite: T2map, source: construct}
       - {when: {axis: construct, is: R1map}, cite: R1map, source: construct}

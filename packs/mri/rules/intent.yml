@@ -87,6 +87,9 @@ rules:
             - {axis: construct, is: MTT}
             - {axis: construct, is: Tmax}
             - {axis: construct, is: TTP}
+            # MRI pack 0.18.0 (vocabulary)
+            - {axis: construct, is: PBP}
+            - {axis: construct, is: K2}
             # MRI pack 0.11.0: the ASL difference image and its M0 scan
             - {axis: construct, is: DeltaM}
             - {axis: construct, is: M0}

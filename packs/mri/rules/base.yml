@@ -22,6 +22,8 @@ order:
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
   - 'technique:TOF-MRA'
+  - 'technique:CE-MRA'
+  - 'technique:ZTE-silent-mra'
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
@@ -126,6 +128,8 @@ rules:
   'construct:phase':
     clauses:
       - {when: {axis: construct, is: Phase}, cite: 'a phase image', source: construct}
+      # MRI pack 0.18.0: and a phase contrast's velocity image.
+      - {when: {axis: construct, is: Velocity}, cite: 'a velocity image', source: construct}
     set: {base: null}
     confidence: 0.9
     why: 'a phase image has no base contrast'
@@ -189,6 +193,25 @@ rules:
   # T1-weighted [MQ8, P14, P16, P15]. So it is no constraint (hints.yml says
   # what is usual), and the rule reads the file's own Dixon and phase flags,
   # which keeps it a reading of the stack rather than a law of the schema.
+  # MRI pack 0.18.0 (vocabulary): a contrast-enhanced angiography is a
+  # T1-weighted spoiled gradient echo timed to the bolus.
+  'technique:CE-MRA':
+    clauses:
+      - {when: {axis: technique, is: 'CE-MRA'}, cite: 'CE-MRA', source: technique}
+    set: {base: 'T1w'}
+    confidence: 0.9
+    why: 'a contrast-enhanced angiography is a T1-weighted spoiled gradient echo'
+
+  # MRI pack 0.18.0 (vocabulary): GE's Silent MRA subtracts control from
+  # label, an angiogram with no tissue weighting (the deep research, case 29:
+  # base none).
+  'technique:ZTE-silent-mra':
+    clauses:
+      - {when: {all: [{axis: technique, is: 'ZTE'}, silent_mra_named]}, cite: 'a Silent MRA', source: technique}
+    set: {base: null}
+    confidence: 0.85
+    why: 'a Silent MRA is a label-minus-control angiogram with no tissue weighting'
+
   'technique:ME-GRE':
     clauses:
       - {when: {all: [{axis: technique, is: 'ME-GRE'}, {not: {any: [has_dixon, has_water, has_fat, has_in_phase, has_out_phase, mtw_named]}}]}, cite: 'ME-GRE', source: technique}
@@ -334,7 +357,7 @@ rules:
   # technique [D6, RP2, RP5, MQ2]
   'construct:perfusion':
     clauses:
-      - {when: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}, {axis: construct, is: DeltaM}]}, cite: 'a perfusion map', source: construct}
+      - {when: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}, {axis: construct, is: PBP}, {axis: construct, is: K2}, {axis: construct, is: DeltaM}]}, cite: 'a perfusion map', source: construct}
     set: {base: 'PWI'}
     confidence: 0.95
     why: 'CBF, CBV, MTT, Tmax and TTP are perfusion parameters, from DSC, DCE or ASL, and an ASL difference image is perfusion-weighted'

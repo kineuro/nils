@@ -699,8 +699,9 @@ cases:
       repetition_time: 3.2
       echo_time: 1.2
       flip_angle: 25
+    # MRI pack 0.18.0: CE-MRA, the value the vocabulary lacked.
     axes:
-      technique: FLASH
+      technique: CE-MRA
 
   - name: a Siemens BLADE with RESTORE is the flip-back TSE with blades
     stack:
