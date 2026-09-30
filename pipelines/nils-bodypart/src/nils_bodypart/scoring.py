@@ -68,7 +68,18 @@ def readahead(st: manifest.Stack) -> None:
             os.close(fd)
 
 
+def one_thread():
+    """Hold numpy's BLAS and LightGBM's OpenMP to one thread in this process.
+    A BLAS matrix product's last bits depend on how many threads share it,
+    so this is also what makes a stack's numbers the same whatever the
+    run's threads and the machine's cores."""
+    from threadpoolctl import threadpool_limits
+
+    return threadpool_limits(limits=1)
+
+
 def _init(inputs: str, gpu_decode: bool, prepare_only: bool, prefetch: bool) -> None:
+    one_thread()
     _W["model"] = None if prepare_only else fusion.load(Path(inputs))
     _W["prepare_only"], _W["prefetch"] = prepare_only, prefetch
     _W["decode"] = None
@@ -104,11 +115,13 @@ def _chunk(stacks: list[manifest.Stack]):
 
 
 def _serial(model, stacks, decode):
-    for st in stacks:
-        try:
-            yield st, fusion.predict(model, st.files, st.extra.get("header"), decode), None
-        except Exception as e:  # noqa: BLE001
-            yield st, None, outcome(e)
+    with one_thread():
+        for st in stacks:
+            try:
+                r = fusion.predict(model, st.files, st.extra.get("header"), decode), None
+            except Exception as e:  # noqa: BLE001
+                r = None, outcome(e)
+            yield st, *r
 
 
 def score(
