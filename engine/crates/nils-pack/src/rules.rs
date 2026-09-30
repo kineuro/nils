@@ -74,6 +74,7 @@ impl Tier {
 /// | answer | `answer` | a person's pinned answer |
 /// | vote | `neighbours` | a pass's vote among similar stacks already classified |
 /// | decision | `decision` | a decision document (a person's or a model's) overrode the rules |
+/// | session | `session` | record 53: the session pass, from the other stacks of the session |
 /// | anything else | `other` | a tier this engine does not know |
 pub fn basis_of(tier: &str) -> &'static str {
     match tier {
@@ -84,6 +85,7 @@ pub fn basis_of(tier: &str) -> &'static str {
         "answer" => "answer",
         "vote" => "neighbours",
         "decision" => "decision",
+        "session" => "session",
         _ => "other",
     }
 }

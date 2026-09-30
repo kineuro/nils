@@ -9,8 +9,8 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.18.0
-contract: 7
+version: 0.19.0
+contract: 8
 modality: MR
 
 parsers:
@@ -97,6 +97,9 @@ hints:
 # The phases that read more than one stack (spec section 7). A pack that
 # declares none gets none.
 passes:
+  # MRI pack 0.19.0 (record 53): the session pass, before the vote, so a
+  # stack it decides is not voted on as well.
+  - passes/session.yml
   - passes/physics_vote.yml
 
 # Which stack stands for a session's role (Wave 3 section 10). A pack that

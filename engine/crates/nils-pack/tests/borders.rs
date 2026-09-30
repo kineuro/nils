@@ -530,9 +530,48 @@ fn edited(contract: u32, edit: impl Fn(&str) -> String) -> PathBuf {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(to.join("pack.yml"), manifest).unwrap();
+    if contract < 8 {
+        without_contract_8(&to);
+    }
     let main = std::fs::read_to_string(to.join("picks/main.yml")).unwrap();
     std::fs::write(to.join("picks/main.yml"), edit(&main)).unwrap();
     to
+}
+
+/// Record 53: the MRI pack without what pack contract 8 added (its session
+/// pass, its fallback border's list and the private elements it shows), so
+/// a copy can declare an earlier contract.
+fn without_contract_8(dir: &Path) {
+    let edit = |name: &str, f: &dyn Fn(&str) -> String| {
+        let p = dir.join(name);
+        let text = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, f(&text)).unwrap();
+    };
+    edit("pack.yml", &|t| {
+        t.lines()
+            .filter(|l| l.trim() != "- passes/session.yml")
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    edit("picks/main.yml", &|t| {
+        t.replace("is: [EPIMix, NeuroMix]}", "is: EPIMix}")
+    });
+    edit("private.yml", &|t| {
+        let mut out = Vec::new();
+        let mut skipping = false;
+        for l in t.lines() {
+            if l == "  shown:" {
+                skipping = true;
+                continue;
+            }
+            if skipping && (l.starts_with("    ") || l.trim().is_empty()) {
+                continue;
+            }
+            skipping = false;
+            out.push(l);
+        }
+        out.join("\n")
+    });
 }
 
 /// The pick file as it was before record 51: one family, the old three

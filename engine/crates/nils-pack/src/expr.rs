@@ -275,6 +275,18 @@ impl Expr {
         }
     }
 
+    /// Record 53: the (axis, stored value) pairs this expression requires,
+    /// read from its top-level conjunction. A stack on which one of them does
+    /// not hold is no match, so a runner may look up only the stacks that
+    /// hold them all. Empty when the expression requires none.
+    pub fn required_axes(&self) -> Vec<(usize, String)> {
+        match self {
+            Expr::Axis { axis, value } => vec![(*axis, value.clone())],
+            Expr::All(xs) => xs.iter().flat_map(Expr::required_axes).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Evaluate. `subj` is the subject in scope, if any. A subject atom with
     /// no subject is false, and the loader is what stops that from happening.
     pub fn eval<C: Ctx + ?Sized>(&self, subj: Option<&Subject<'_>>, c: &C) -> bool {

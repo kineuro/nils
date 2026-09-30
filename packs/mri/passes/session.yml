@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The session pass (record 53, the deep research's case 9): a stack whose
+# own header does not say which output of an acquisition it is, decided from
+# the other stacks of its session.
+#
+# The engine owns the algorithm and its guards (`nils_pack::session`): only
+# a rule declared here reads the session; a sibling is seen by its header
+# alone, through `sibling_fields`, never by what was decided of it; a value
+# a header flag or number decided, a person answered or a decision set is
+# never replaced, and one read from the name, inferred or defaulted only at
+# or below `replaces_at_most`; every value written has tier `session`, so a
+# reader, a grade and a learner count it apart from the header's.
+#
+# The research recommends session context only as a flagged secondary rule,
+# certified separately, never overriding a series' own explicit header
+# (confidence medium). Our counts (`studies/2026-09-28-certificate/
+# empirical-conventions.md` in the design repository, case 9): 756 GE
+# susceptibility stacks written ORIGINAL say nothing beyond ORIGINAL,
+# PRIMARY and OTHER and no output word; pack 0.15 made 398 of them the
+# processed SWI image (the route's fallback) and 349 the magnitude (GE's
+# unprefixed name). The session holds a stack that differs from them in
+# header on 63; on 659 the siblings look the same, and only the series
+# order and the names tell them apart.
+#
+# One rule, written from GE's own convention, which the SWI route already
+# reads on a stack's own name (`ge_swi_unprefixed`): GE names what it
+# computed from an acquisition with a prefix (`SWI:`, `SWIphase:`, `mIP:`)
+# and gives it a series number in the acquisition's hundreds (series 5's
+# outputs are 500 to 599) or next to it. An unprefixed SWAN image the route
+# could only call the processed image by its fallback, beside such a
+# computed output of the same geometry and frame of reference, is the image
+# GE acquired: its magnitude, RawRecon and T2*-weighted, as the route says
+# of an unprefixed SWI image. Written at 0.65, below the review threshold,
+# so each answer is also asked about until the rule is certified.
+
+pass: session_context
+kind: session_context
+phase: after
+
+# The stacks the pass may decide: a GE susceptibility image written
+# ORIGINAL, unprefixed and without a token that names its output, which the
+# route made the processed image by its fallback.
+target:
+  when:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - image_type.is_original
+      - {not: image_type.is_derived}
+      - {axis: provenance, is: SWIRecon}
+      - {axis: construct, is: SWI}
+      - {not: has_swi}
+      - {not: has_phase}
+      - {not: has_magnitude}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: is_projection}
+      - {not: is_mpr}
+      - {not: is_mean}
+      - {not: has_nd}
+      - {not: {text: search_text, matches: '^(swi|swiphase|swi phase|mip|minip|min ip|pha|phase|qsm)( |$)'}}
+
+session:
+  # What a sibling is seen by, and what a header packet's session list
+  # carries: its maker, its image type, the six texts the pack's
+  # `search_text` is made of, and its shape and series number.
+  sibling_fields:
+    - manufacturer
+    - image_type
+    - text_series_description
+    - text_protocol_name
+    - text_sequence_name
+    - text_body_part
+    - text_series_comments
+    - text_image_comments
+    - orientation
+    - rows
+    - columns
+    - n_slices
+    - series_number
+  # The route's fallback writes the construct and the base at 0.7 and the
+  # provenance is read from the name at 0.85; nothing above that is
+  # replaced.
+  replaces_at_most: 0.85
+
+rules:
+  - rule: ge_swan_beside_its_computed_output
+    sibling:
+      series_number: {within: 1, family: [100]}
+      same: [orientation, rows, columns, n_slices]
+      same_frame_of_reference: true
+      when:
+        all:
+          - {text: manufacturer, prefix: ge}
+          - {text: search_text, matches: '^(swi|swiphase|swi phase|mip|minip|min ip|pha|phase)( |$)'}
+    require: some
+    set:
+      provenance: RawRecon
+      construct: Magnitude
+      base: T2starw
+    confidence: 0.65
+    why: 'GE wrote a computed output of this acquisition beside it, so this unprefixed image is the one GE acquired: its magnitude'
+    sources:
+      - 'the deep research, case 9 (session context as a flagged secondary rule)'
+      - 'MRI pack 0.14.0, ge_swi_unprefixed (dev-2: GE prefixes what it computed)'
+
+emit:
+  # Below the review threshold of 0.70, so every answer is a question too.
+  review_item_below: 0.70

@@ -1770,7 +1770,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.18.0"),
+            .any(|p| p["pack"] == "mri@0.19.0"),
         "{listed}"
     );
 
@@ -1782,11 +1782,12 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 314);
+    assert_eq!(shown["flags"], 337);
     assert_eq!(
-        shown["contract"], 7,
-        "record 51: v0's nine pick borders and a list of families (contract 7), after record \
-         48's excludes and hints keys of contract 6"
+        shown["contract"], 8,
+        "record 53: a session pass, a fallback border over several values and the private \
+         elements a reader is shown (contract 8), after record 51's nine pick borders \
+         (contract 7)"
     );
     assert!(
         shown["buckets"]["diffusion_tokens"]

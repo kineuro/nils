@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.19.0 (record 53): the deep research's case 22, the mapping
+# table of the MR Pulse Sequence module, which the fingerprint carries since
+# record 53 S1; case 16, an MR spectroscopy object by its SOP class; and the
+# cases that keep both from reaching a classic image, whose reading is
+# unchanged. Every stack is invented: an enhanced object that states no
+# ScanningSequence, as 1,665 archive stacks do. The session pass (case 9)
+# reads other stacks, so its cases are engine tests, not corpus cases.
+
+cases:
+
+  # --- case 22: the table, value by value
+
+  - name: an enhanced spin echo with EPI is SE-EPI
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, echo_planar_pulse_sequence: 'YES', multiple_spin_echo: 'NO', repetition_time: 3000, echo_time: 80, flip_angle: 90}
+    axes: {technique: SE-EPI}
+
+  - name: an enhanced gradient echo with EPI is GRE-EPI
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'YES', repetition_time: 2000, echo_time: 30, flip_angle: 75}
+    axes: {technique: GRE-EPI}
+
+  - name: an enhanced object with both echoes and EPI is GRASE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: BOTH, echo_planar_pulse_sequence: 'YES', repetition_time: 4000, echo_time: 20, flip_angle: 90}
+    axes: {technique: GRASE}
+
+  - name: an enhanced single-shot spin echo train is SS-TSE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', segmented_k_space_traversal: FULL, repetition_time: 1000, echo_time: 90, flip_angle: 90, echo_train_length: 120}
+    axes: {technique: HASTE}
+
+  - name: an enhanced 3D spin echo train is 3D-TSE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', segmented_k_space_traversal: PARTIAL, repetition_time: 2500, echo_time: 250, flip_angle: 90, echo_train_length: 150}
+    axes: {technique: SPACE}
+
+  - name: an enhanced 2D spin echo train is TSE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', segmented_k_space_traversal: PARTIAL, repetition_time: 4000, echo_time: 100, flip_angle: 90, echo_train_length: 15}
+    axes: {technique: TSE}
+
+  - name: an enhanced spin echo of one echo per excitation is SE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'NO', echo_planar_pulse_sequence: 'NO', segmented_k_space_traversal: SINGLE, repetition_time: 500, echo_time: 15, flip_angle: 90}
+    axes: {technique: SE}
+
+  - name: an enhanced gradient echo in free precession is bSSFP
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: FREE_PRECESSION, repetition_time: 5, echo_time: 2.5, flip_angle: 50}
+    axes: {technique: FIESTA}
+
+  - name: an enhanced transverse steady state is SS-GRE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: TRANSVERSE, repetition_time: 20, echo_time: 5, flip_angle: 30}
+    axes: {technique: FISP}
+
+  - name: an enhanced time-reversed steady state is SSFP
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: TIME_REVERSED, repetition_time: 10, echo_time: 5, flip_angle: 30}
+    axes: {technique: PSIF}
+
+  - name: an enhanced spoiled gradient echo is SP-GRE
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: LONGITUDINAL, spoiling: RF_AND_GRADIENT, repetition_time: 8, echo_time: 4, flip_angle: 8}
+    axes: {technique: FLASH}
+
+  - name: an enhanced time of flight is TOF-MRA
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', time_of_flight_contrast: 'YES', steady_state_pulse_sequence: LONGITUDINAL, repetition_time: 23, echo_time: 3.5, flip_angle: 18}
+    axes: {technique: TOF}
+
+  - name: an enhanced phase contrast is PC-MRA
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', phase_contrast: 'YES', repetition_time: 10, echo_time: 4, flip_angle: 10}
+    axes: {technique: PC}
+
+  - name: an enhanced arterial spin labelling is ASL
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'YES', arterial_spin_labeling_contrast: PSEUDOCONTINUOUS, repetition_time: 4000, echo_time: 15, flip_angle: 90}
+    axes: {technique: ASL}
+
+  - name: the module's radial k-space is the Radial modifier
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', geometry_of_k_space_traversal: RADIAL, repetition_time: 4000, echo_time: 100, flip_angle: 90, echo_train_length: 20}
+    flags: {is_radial: true}
+
+  - name: the module's inversion recovery is read as one
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', inversion_recovery: 'YES', repetition_time: 4800, echo_time: 300, inversion_time: 1650, flip_angle: 90, echo_train_length: 170}
+    flags: {has_ir: true, is_space: true}
+
+  # --- what the table does not reach
+
+  - name: a stated module keeps the train rule of pack 0.18.0 out
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', repetition_time: 500, echo_time: 10, flip_angle: 90, echo_train_length: 4}
+    flags: {se_by_train_unstated: false, has_gre: true}
+
+  - name: an enhanced object without the module still reads by its train, as in pack 0.18.0
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, repetition_time: 4000, echo_time: 100, flip_angle: 90, echo_train_length: 15}
+    flags: {se_by_train_unstated: true}
+
+  - name: a classic image with ScanningSequence reads as before, the module being absent
+    stack: {image_type: 'ORIGINAL\PRIMARY\M\ND', scanning_sequence: GR, sequence_variant: 'SP\OSP', mr_acquisition_type: 3D, manufacturer: SIEMENS, text_sequence_name: '*fl3d1', repetition_time: 8, echo_time: 4, flip_angle: 8}
+    flags: {mech_gradient: false, mech_spin: false}
+    axes: {technique: FLASH}
+
+  # --- case 16: an MR spectroscopy object by its SOP class
+
+  - name: an MR spectroscopy object is MRS whatever it is named, with no base
+    stack: {sop_class_uid: '1.2.840.10008.5.1.4.1.1.4.2', image_type: 'ORIGINAL\PRIMARY\SPECTROSCOPY\NONE', manufacturer: GE MEDICAL SYSTEMS, echo_pulse_sequence: SPIN, text_series_description: 'Ax 2', repetition_time: 2000, echo_time: 35, n_instances: 1}
+    flags: {mrs_object: true}
+    axes: {technique: MRS}
+
+  - name: an image named for a spectrum but written as an image stays read by its words
+    stack: {sop_class_uid: '1.2.840.10008.5.1.4.1.1.4', image_type: 'ORIGINAL\PRIMARY\OTHER', manufacturer: GE MEDICAL SYSTEMS, text_series_description: 'PROBE-SV 35', repetition_time: 2000, echo_time: 35, n_instances: 1}
+    flags: {mrs_object: false}
+    axes: {technique: MRS}
+
+  # --- the rater-visible private elements are read as before
+
+  - name: a Philips diffusion isotropic image by its private direction still reads as one
+    stack: {image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE', scanning_sequence: SE, mr_acquisition_type: 2D, manufacturer: Philips Medical Systems, text_series_description: 'DTI_high', philips_diffusion_direction: I, philips_scanning_technique: DwiSE, diffusion_b_value: 1000, repetition_time: 5000, echo_time: 80}
+    axes: {construct: Trace}

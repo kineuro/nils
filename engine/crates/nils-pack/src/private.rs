@@ -94,6 +94,105 @@ impl Ingest {
     }
 }
 
+/// Record 53 S3: an ingested element a person reading a stack is shown, and
+/// a replay over header packets reads, by its ingest name.
+///
+/// An allowlist, never a rule: an element is shown only when the pack names
+/// it here, and the loader refuses a name whose ingest entry does not declare
+/// a technical kind ([`SHOWN_KINDS`]) or whose address is one the engine never
+/// shows ([`never_shown`]). Each value is checked again when it is shown
+/// ([`shown_value`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    pub name: String,
+    /// Why a person may see it: what it says of the acquisition.
+    pub why: String,
+}
+
+/// The kinds of ingested element that may be shown: what the scanner did,
+/// never who or where. `unknown`, or no kind at all, is never shown.
+pub const SHOWN_KINDS: &[&str] = &[
+    "parameter",
+    "diffusion",
+    "timing",
+    "geometry",
+    "reconstruction",
+];
+
+/// Whether the engine refuses to show an element whatever a pack says: the
+/// vendors' identification groups and the blocks that have carried a
+/// person's or an institution's name in shipping firmware. Group 0009 is GE's
+/// identification group (GEMS_IDEN_01) and holds Philips' and older vendors'
+/// study identifiers too; a Siemens CSA or MEDCOM header embeds the whole
+/// protocol text, operator names included.
+pub fn never_shown(creator: &str, group: u16, element: u8) -> bool {
+    let c = creator.trim().to_ascii_uppercase();
+    group == 0x0009
+        || c.contains("IDEN")
+        || c.starts_with("SIEMENS CSA")
+        || c.starts_with("SIEMENS MEDCOM")
+        || c.starts_with("SIENET")
+        || c.starts_with("SPI RELEASE")
+        || (c == "GEMS_PARM_01" && group == 0x0043 && element == 0x62)
+}
+
+/// A value as it may be shown, or None where it is withheld: longer than 64
+/// characters, an address (`@`), a UID, or a run of digits shaped like a
+/// personnummer or a date (eight digits, or six then a `-` or `+` and four).
+/// In a purely numeric value the digits after a decimal point are a fraction
+/// and not a run, so a pixel spacing of 0.4296875000 is shown.
+pub fn shown_value(v: &str) -> Option<&str> {
+    let t = v.trim();
+    if t.len() > 64 || t.contains('@') {
+        return None;
+    }
+    let numeric = !t.is_empty()
+        && t.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '\\' | '-' | '+' | 'e' | 'E' | ' '));
+    // the text the digit checks read: fractions dropped from a number
+    let mut plain = String::with_capacity(t.len());
+    let mut in_fraction = false;
+    for c in t.chars() {
+        if numeric && c == '.' {
+            in_fraction = true;
+            plain.push('.');
+            continue;
+        }
+        if in_fraction && c.is_ascii_digit() {
+            continue;
+        }
+        in_fraction = false;
+        plain.push(c);
+    }
+    if t.split('.')
+        .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        .count()
+        >= 4
+    {
+        return None;
+    }
+    let b = plain.as_bytes();
+    let mut run = 0usize;
+    for (i, c) in b.iter().enumerate() {
+        if c.is_ascii_digit() {
+            run += 1;
+            if run >= 8 {
+                return None;
+            }
+        } else {
+            if run == 6
+                && matches!(c, b'-' | b'+')
+                && b.len() >= i + 5
+                && b[i + 1..i + 5].iter().all(u8::is_ascii_digit)
+            {
+                return None;
+            }
+            run = 0;
+        }
+    }
+    Some(t)
+}
+
 /// What the dictionary knows about one private element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -217,6 +316,46 @@ mod tests {
         assert!(e.starts_with("line 1:"), "{e}");
         let e = Dictionary::parse("A\tzz\t0C\tIS\t1\tx\n").unwrap_err();
         assert!(e.contains("hex group"), "{e}");
+    }
+
+    #[test]
+    fn a_value_shaped_like_an_identifier_is_withheld() {
+        for ok in [
+            "epi2",
+            "3dasl",
+            "T1TFE",
+            "DwiSE",
+            "I",
+            "1000",
+            "0.4296875000",
+            "3\\1\\0",
+            "PSEUDOCONTINUOUS",
+            "ksepimix_1",
+        ] {
+            assert_eq!(shown_value(ok), Some(ok), "{ok}");
+        }
+        for withheld in [
+            "19121212-1212",
+            "191212121212",
+            "121212-1212",
+            "121212+1212",
+            "20260930",
+            "study 20260930 x",
+            "1.2.840.113619.2.55",
+            "someone@example.org",
+            &"x".repeat(65),
+        ] {
+            assert_eq!(shown_value(withheld), None, "{withheld}");
+        }
+    }
+
+    #[test]
+    fn identification_blocks_are_never_shown() {
+        assert!(never_shown("GEMS_IDEN_01", 0x0009, 0x02));
+        assert!(never_shown("GEMS_PARM_01", 0x0043, 0x62));
+        assert!(never_shown("SIEMENS CSA HEADER", 0x0029, 0x10));
+        assert!(!never_shown("GEMS_ACQU_01", 0x0019, 0x9C));
+        assert!(!never_shown("Philips Imaging DD 001", 0x2001, 0x20));
     }
 
     #[test]

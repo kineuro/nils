@@ -263,8 +263,10 @@ borders:
   # v0 also made the twin a main; here it is a border, and a person picks.
   pre_post_twin: {of: post_contrast, at_least: 0.85}
   # v0's `epimix_fallback`: a stack of the winner is an EPIMix, which the
-  # penalty above lets win only where nothing better was taken.
-  fallback: {of: provenance, is: EPIMix}
+  # penalty above lets win only where nothing better was taken. MRI pack
+  # 0.19.0 (record 53, pack contract 8): or a NeuroMix, which pack 0.18.0
+  # took apart from EPIMix and the penalty already reads.
+  fallback: {of: provenance, is: [EPIMix, NeuroMix]}
   # v0's `dixon_vs_plain_pct`: a Dixon won and a candidate that is neither
   # a Dixon nor water-excited is within a tenth of it, the tenth included.
   dixon_vs_plain: {family: dixon, of: modifier, plain_without: [Dixon, WaterExc], within: 0.10}

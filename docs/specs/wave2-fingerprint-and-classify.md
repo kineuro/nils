@@ -792,6 +792,40 @@ either candidate until it sorts again; what v1 adds is that sorting again fixes
 it, which makes re-classification after a pack change the ordinary operation it
 should be rather than a thing to be avoided.
 
+### 7.5 The session pass (record 53)
+
+Added with pack contract 8: a pass of kind `session_context` decides a stack
+whose own header does not say which output of an acquisition it is from the
+other stacks of its session (the deep research's case 9, which recommends it
+only as a flagged secondary rule, certified apart, that never overrides the
+series' own header). The guards are the engine's, not the pack's:
+
+- **Only a rule of a session pass reads the session.** A rule set never sees
+  another stack. The pass runs after the rules and before the disposition, in
+  the order the pack declares its passes, and a vote after it does not fill
+  what it wrote.
+- **A sibling is seen by its header alone**: the other stacks of the same
+  study, through the fields the pass names (`session.sibling_fields`), their
+  series number, whether they are of the stack's own series and whether they
+  share its frame of reference. Never by what a rule or a person decided of
+  them, so the answer does not depend on the order stacks were classified in,
+  and a header packet that carries those fields for each sibling replays the
+  pass exactly. The loader refuses a sibling condition that reads anything
+  else, through any flag, parser or derived text.
+- **It never replaces what the header states.** A value a header tier decided
+  (exclusive, combination, alternative, physics), a person's answer or a
+  decision stays. A value read from the name, inferred by a longhand rule,
+  defaulted or voted is replaced only at or below `replaces_at_most`. A rule
+  whose answer would change a protected axis changes nothing, and is counted
+  as held.
+- **It is flagged.** Every value it writes has tier and basis `session`; its
+  evidence row names the pass, the rule and the sibling stacks by id; below
+  the pass's `review_item_below` each answer is also a review item of kind
+  `<axis>:session`.
+
+The decision is `nils_pack::session::decide`, which the engine runs over the
+registry (`nils-classify`'s `session` module) and a replay runs over packets.
+
 ## 8. Evidence, review and decisions (D7, C15)
 
 ### 8.1 Evidence is stored

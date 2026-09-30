@@ -148,7 +148,38 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
 /// The select that reads one window of fingerprints, ordered by stack. With
 /// `ids`, it also says which series and subject each stack belongs to, which
 /// is what a decision wider than a stack is matched on.
-fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
+pub(crate) fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
+    let (cols, joins) = select_parts(store, ids);
+    let filter = match modality {
+        Some(m) => format!(" AND f.modality = '{}'", m.replace('\'', "''")),
+        None => String::new(),
+    };
+    format!(
+        "SELECT {} FROM {} AS f{joins} WHERE f.stack_id > {}{filter} ORDER BY f.stack_id LIMIT {}",
+        cols.join(", "),
+        store.qualified("stack_fingerprint"),
+        store.dialect().param(1, Type::Int),
+        store.dialect().param(2, Type::Int),
+    )
+}
+
+/// Record 53: the same columns as [`select`] without ids, for the stacks
+/// named, in stack order: the siblings of a session.
+pub(crate) fn select_stacks(store: &Store, stacks: &[i64]) -> String {
+    let (cols, joins) = select_parts(store, false);
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT {} FROM {} AS f{joins} WHERE f.stack_id IN ({list}) ORDER BY f.stack_id",
+        cols.join(", "),
+        store.qualified("stack_fingerprint"),
+    )
+}
+
+fn select_parts(store: &Store, ids: bool) -> (Vec<String>, String) {
     let t = table("stack_fingerprint");
     let dialect = store.dialect();
     let head = if ids {
@@ -202,17 +233,7 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
             store.qualified("stack"),
         )
     };
-    let filter = match modality {
-        Some(m) => format!(" AND f.modality = '{}'", m.replace('\'', "''")),
-        None => String::new(),
-    };
-    format!(
-        "SELECT {} FROM {} AS f{joins} WHERE f.stack_id > {}{filter} ORDER BY f.stack_id LIMIT {}",
-        cols.join(", "),
-        store.qualified("stack_fingerprint"),
-        dialect.param(1, Type::Int),
-        dialect.param(2, Type::Int),
-    )
+    (cols, joins)
 }
 
 /// One stack as the pack sees it, with its series' private elements, for

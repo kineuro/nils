@@ -176,6 +176,7 @@ fn mri_at_contract_5() -> std::path::PathBuf {
     let to = std::env::temp_dir().join(format!("nils-contract-5-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&to);
     copy(&mri, &to);
+    without_contract_8(&to);
     let manifest = std::fs::read_to_string(to.join("pack.yml")).unwrap();
     let mut out = String::new();
     let mut skipping = false;
@@ -284,4 +285,40 @@ fn the_mri_pack_s_manifest_keeps_to_the_contract() {
             "packs/mri/pack.yml lacks {key}"
         );
     }
+}
+
+/// Record 53: the MRI pack without what pack contract 8 added (its session
+/// pass, its fallback border's list and the private elements it shows), so
+/// a copy can declare an earlier contract.
+fn without_contract_8(dir: &Path) {
+    let edit = |name: &str, f: &dyn Fn(&str) -> String| {
+        let p = dir.join(name);
+        let text = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, f(&text)).unwrap();
+    };
+    edit("pack.yml", &|t| {
+        t.lines()
+            .filter(|l| l.trim() != "- passes/session.yml")
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    edit("picks/main.yml", &|t| {
+        t.replace("is: [EPIMix, NeuroMix]}", "is: EPIMix}")
+    });
+    edit("private.yml", &|t| {
+        let mut out = Vec::new();
+        let mut skipping = false;
+        for l in t.lines() {
+            if l == "  shown:" {
+                skipping = true;
+                continue;
+            }
+            if skipping && (l.starts_with("    ") || l.trim().is_empty()) {
+                continue;
+            }
+            skipping = false;
+            out.push(l);
+        }
+        out.join("\n")
+    });
 }

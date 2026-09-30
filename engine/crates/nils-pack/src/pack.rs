@@ -42,8 +42,14 @@ use crate::yaml::{self, File};
 /// (record 51) changes no manifest key: a pick gains v0's six other border
 /// reasons and a list of families, and a role must have its own tables.
 /// Those keys are refused in a pack that declares less, so that an engine at
-/// 6 refuses a pack using them instead of picking without them.
-pub const CONTRACT: u32 = 7;
+/// 6 refuses a pack using them instead of picking without them. Version 8
+/// (record 53) changes no manifest key: a pass may be of the kind
+/// `session_context`, whose rules read the other stacks of a stack's
+/// session; a pick's `fallback` border may name several values; and a
+/// private file may list the ingested elements a reader is shown
+/// (`shown`). Each is refused in a pack that declares less, so an engine
+/// at 7 refuses such a pack instead of reading it without them.
+pub const CONTRACT: u32 = 8;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -141,6 +147,10 @@ pub struct Pack {
     /// Wave 4a §5.3: which vendors the private lists were measured on,
     /// stated rather than implied by a count of entries.
     pub private_coverage: Vec<String>,
+    /// Record 53 S3: the ingested elements a person reading a stack is
+    /// shown and a replay over header packets reads, by name. An allowlist:
+    /// nothing else of `ingest` is shown.
+    pub shown: Vec<crate::private::Shown>,
     /// §9.2: how this pack's vocabulary maps onto BIDS. A pack that declares
     /// none cannot be released in the BIDS layout, and says so rather than
     /// writing a tree of stacks it could not name.
@@ -405,6 +415,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     let mut ingest: Vec<crate::private::Ingest> = Vec::new();
     let mut release: Vec<crate::private::Allowed> = Vec::new();
     let mut private_coverage: Vec<String> = Vec::new();
+    let mut shown: Vec<crate::private::Shown> = Vec::new();
     for f in files_of(m, &manifest, dir, "private")? {
         load_private(
             &f,
@@ -412,7 +423,52 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             &mut ingest,
             &mut release,
             &mut private_coverage,
+            &mut shown,
+            contract,
         )?;
+        // Record 53 S3: every name shown is an ingested element of a
+        // technical kind at an address the engine may show, checked once
+        // every list so far is read.
+        for (i, s) in shown.iter().enumerate() {
+            let at = format!("private.shown[{i}]");
+            let Some(e) = ingest.iter().find(|x| x.name == s.name) else {
+                return Err(Error::at(
+                    at,
+                    format!(
+                        "{} is not an ingested element; only those can be shown",
+                        s.name
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            };
+            if !e
+                .kind
+                .as_deref()
+                .is_some_and(|k| crate::private::SHOWN_KINDS.contains(&k))
+            {
+                return Err(Error::at(
+                    at,
+                    format!(
+                        "{} is of kind {}; only {} are shown",
+                        s.name,
+                        e.kind.as_deref().unwrap_or("none"),
+                        crate::private::SHOWN_KINDS.join(", ")
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            if crate::private::never_shown(&e.creator, e.group, e.element) {
+                return Err(Error::at(
+                    at,
+                    format!(
+                        "{} is at {}, which this engine never shows: an identification block",
+                        s.name,
+                        e.text()
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+        }
     }
 
     // --- text the pack derives for itself. Early, because a parser, a flag
@@ -794,7 +850,14 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     // --- passes, last: a pass may name an axis and a flag, and both exist now
     let mut passes: Vec<Pass> = Vec::new();
     for pf in files_of(m, &manifest, dir, "passes")? {
-        let pass = load_pass(&pf, &axes, &derived, &buckets, &mut regexes)?;
+        let ctx = PassContext {
+            ingest: &ingest,
+            flag_ix: &flag_ix,
+            parsers: &parsers,
+            parser_ix: &parser_ix,
+            contract,
+        };
+        let pass = load_pass(&pf, &axes, &derived, &buckets, &mut regexes, &ctx)?;
         if passes.iter().any(|p: &Pass| p.name == pass.name) {
             return Err(
                 Error::at(format!("pass {}", pass.name), "is declared twice")
@@ -816,6 +879,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         dictionary,
         fields,
         private_coverage,
+        shown,
         bids,
         passes,
         name,
@@ -837,6 +901,9 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         excludes,
         hints,
     };
+
+    // Record 53: a session pass's siblings are seen by the fields it names.
+    crate::session::check(&pack)?;
 
     // The pack's own corpus is the last thing between it and use, and it
     // judges the pack as its author wrote it.
@@ -871,6 +938,8 @@ fn load_private(
     ingest: &mut Vec<crate::private::Ingest>,
     release: &mut Vec<crate::private::Allowed>,
     coverage: &mut Vec<String>,
+    shown: &mut Vec<crate::private::Shown>,
+    contract: u32,
 ) -> R<()> {
     let top = f.blame(yaml::obj(&f.value, "private"))?;
     let pm = f.blame(yaml::obj(yaml::get(top, "private", "private")?, "private"))?;
@@ -957,6 +1026,36 @@ fn load_private(
                 vr,
                 dictionary_name: entry.map(|e| e.name.clone()),
                 kind,
+                why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
+            });
+        }
+    }
+    if let Some(list) = pm.get("shown") {
+        if contract < 8 {
+            return Err(Error::at(
+                "private.shown",
+                format!(
+                    "shown is pack contract 8's; this pack declares contract {contract}, \
+                     and an engine of {contract} would show nothing"
+                ),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+        let list = list.as_array().ok_or_else(|| {
+            Error::at("private.shown", "is a list").in_file(&f.path, Some(&f.source))
+        })?;
+        for (i, item) in list.iter().enumerate() {
+            let at = format!("private.shown[{i}]");
+            let im = f.blame(yaml::obj(item, &at))?;
+            let name = f.blame(yaml::text(yaml::get(im, "name", &at)?, &at))?;
+            if shown.iter().any(|s| s.name == name) {
+                return Err(
+                    Error::at(format!("{at}.name"), format!("{name} is shown twice"))
+                        .in_file(&f.path, Some(&f.source)),
+                );
+            }
+            shown.push(crate::private::Shown {
+                name,
                 why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
             });
         }
@@ -3297,10 +3396,22 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
             None => None,
             Some(fm) => {
                 let bat = format!("{at}.borders.fallback");
-                Some((
-                    f.blame(named(fm, "of", &bat))?,
-                    f.blame(yaml::text(yaml::get(fm, "is", &bat)?, &bat))?,
-                ))
+                // Record 53: `is` may be a list of values, pack contract 8's.
+                let is = yaml::get(fm, "is", &bat)?;
+                if is.is_array() && contract < 8 {
+                    return Err(here(Error::at(
+                        format!("{bat}.is"),
+                        format!(
+                            "a list of values is pack contract 8's; this pack declares contract \
+                             {contract}, and an engine of {contract} would read one value"
+                        ),
+                    )));
+                }
+                let values = f.blame(yaml::texts(is, &bat))?;
+                if values.is_empty() {
+                    return Err(here(Error::at(format!("{bat}.is"), "names no value")));
+                }
+                Some((f.blame(named(fm, "of", &bat))?, values))
             }
         },
         dixon_vs_plain: match border_obj("dixon_vs_plain")? {
@@ -3435,12 +3546,48 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
 // provides. Nothing here is an algorithm; everything here is the numbers one
 // runs on.
 
+/// What a pass may name beyond the axes: record 53's session pass reads
+/// flags, parsers and the ingested private elements as a rule does.
+struct PassContext<'a> {
+    ingest: &'a [crate::private::Ingest],
+    flag_ix: &'a HashMap<String, usize>,
+    parsers: &'a [ParserDef],
+    parser_ix: &'a HashMap<String, usize>,
+    contract: u32,
+}
+
+/// What a pass writes down about itself, the same for every kind.
+fn load_emit(f: &File, m: &serde_json::Map<String, Value>, at: &str) -> R<Emit> {
+    Ok(match m.get("emit") {
+        None => Emit {
+            evidence: true,
+            review_below: 0.0,
+            review_all_touched: false,
+        },
+        Some(e) => {
+            let em = f.blame(yaml::obj(e, &format!("{at}.emit")))?;
+            Emit {
+                evidence: !matches!(em.get("evidence").and_then(|v| v.as_str()), Some("never")),
+                review_below: match em.get("review_item_below") {
+                    Some(v) => f.blame(yaml::number(v, &format!("{at}.emit.review_item_below")))?,
+                    None => 0.0,
+                },
+                review_all_touched: em
+                    .get("review_all_touched")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            }
+        }
+    })
+}
+
 fn load_pass(
     f: &File,
     axes: &[Axis],
     derived: &[Normalizer],
     buckets: &BTreeMap<String, Vec<String>>,
     regexes: &mut Vec<Regex>,
+    ctx: &PassContext<'_>,
 ) -> R<Pass> {
     let m = f.blame(yaml::obj(&f.value, "pass"))?;
     let name = f.blame(yaml::text(yaml::get(m, "pass", "pass")?, "pass"))?;
@@ -3457,6 +3604,9 @@ fn load_pass(
             }
         },
     };
+    if kind_name == "session_context" {
+        return load_session_pass(f, m, name, &at, phase, axes, derived, buckets, regexes, ctx);
+    }
 
     let axis_ix = |n: &str, at: &str| -> R<usize> {
         axes.iter()
@@ -3567,27 +3717,7 @@ fn load_pass(
     };
 
     // --- what it writes down about itself
-    let emit = match m.get("emit") {
-        None => Emit {
-            evidence: true,
-            review_below: 0.0,
-            review_all_touched: false,
-        },
-        Some(e) => {
-            let em = f.blame(yaml::obj(e, &format!("{at}.emit")))?;
-            Emit {
-                evidence: !matches!(em.get("evidence").and_then(|v| v.as_str()), Some("never")),
-                review_below: match em.get("review_item_below") {
-                    Some(v) => f.blame(yaml::number(v, &format!("{at}.emit.review_item_below")))?,
-                    None => 0.0,
-                },
-                review_all_touched: em
-                    .get("review_all_touched")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-            }
-        }
-    };
+    let emit = load_emit(f, m, &at)?;
 
     let kind = match kind_name.as_str() {
         "nearest_neighbour_vote" => Kind::Vote(load_vote(
@@ -3603,7 +3733,7 @@ fn load_pass(
             return Err(Error::at(
                 "kind",
                 format!(
-                    "{other} is not a pass kind this engine provides; it has nearest_neighbour_vote"
+                    "{other} is not a pass kind this engine provides; it has nearest_neighbour_vote and session_context"
                 ),
             )
             .in_file(&f.path, Some(&f.source)));
@@ -3617,6 +3747,317 @@ fn load_pass(
         target,
         reference,
         emit,
+    })
+}
+
+/// Record 53 S2: a `session_context` pass (`crate::session`). Its target
+/// and its rules read what a rule reads (fields, flags, parsers, the
+/// ingested private elements and the axes decided); a sibling's condition
+/// reads the sibling's header alone, which the loader checks once the pack
+/// exists ([`crate::session::check`]).
+#[allow(clippy::too_many_arguments)]
+fn load_session_pass(
+    f: &File,
+    m: &serde_json::Map<String, Value>,
+    name: String,
+    at: &str,
+    phase: Phase,
+    axes: &[Axis],
+    derived: &[Normalizer],
+    buckets: &BTreeMap<String, Vec<String>>,
+    regexes: &mut Vec<Regex>,
+    ctx: &PassContext<'_>,
+) -> R<Pass> {
+    let here = |e: Error| e.in_file(&f.path, Some(&f.source));
+    if ctx.contract < 8 {
+        return Err(here(Error::at(
+            "kind",
+            format!(
+                "session_context is pack contract 8's; this pack declares contract {}, \
+                 and an engine of {} would not know the pass",
+                ctx.contract, ctx.contract
+            ),
+        )));
+    }
+    if phase != Phase::After {
+        return Err(here(Error::at(
+            "phase",
+            "a session pass reads what the rules decided, so it runs after them",
+        )));
+    }
+    let compile_full = |body: &Value, at: &str, regexes: &mut Vec<Regex>| -> R<Expr> {
+        let mut sc = Scope {
+            derived,
+            ingest: ctx.ingest,
+            axes,
+            parsers: ctx.parsers,
+            parser_ix: ctx.parser_ix,
+            buckets,
+            within: None,
+            flags: Some(ctx.flag_ix),
+            regexes,
+            deps: HashSet::new(),
+        };
+        compile(body, at, &mut sc)
+    };
+    let target = match m.get("target") {
+        None => None,
+        Some(t) => {
+            let tm = f.blame(yaml::obj(t, &format!("{at}.target")))?;
+            let w = yaml::get(tm, "when", &format!("{at}.target"))?;
+            Some(f.blame(compile_full(w, &format!("{at}.target.when"), regexes))?)
+        }
+    };
+
+    let sat = format!("{at}.session");
+    let sm = f.blame(yaml::obj(yaml::get(m, "session", at)?, &sat))?;
+    let mut sibling_fields = Vec::new();
+    for n in f.blame(yaml::texts(
+        yaml::get(sm, "sibling_fields", &sat)?,
+        &format!("{sat}.sibling_fields"),
+    ))? {
+        let i = resolve_field(derived, ctx.ingest, &n).ok_or_else(|| {
+            here(Error::at(
+                format!("{sat}.sibling_fields"),
+                format!("{n} is not a field of this pack"),
+            ))
+        })?;
+        if (crate::stack::FIELDS.len()..crate::stack::FIELDS.len() + derived.len()).contains(&i) {
+            return Err(here(Error::at(
+                format!("{sat}.sibling_fields"),
+                format!(
+                    "{n} is a text the pack derives; name the fields it is derived from, which a packet carries"
+                ),
+            )));
+        }
+        sibling_fields.push(i);
+    }
+    let replaces_at_most = f.blame(yaml::number(
+        yaml::get(sm, "replaces_at_most", &sat)?,
+        &format!("{sat}.replaces_at_most"),
+    ))?;
+    if !(0.0..=1.0).contains(&replaces_at_most) {
+        return Err(here(Error::at(
+            format!("{sat}.replaces_at_most"),
+            "is a confidence, from 0 to 1",
+        )));
+    }
+
+    let list = yaml::get(m, "rules", at)?
+        .as_array()
+        .ok_or_else(|| here(Error::at(format!("{at}.rules"), "is a list")))?;
+    if list.is_empty() {
+        return Err(here(Error::at(format!("{at}.rules"), "names no rule")));
+    }
+    let mut rules: Vec<crate::session::SessionRule> = Vec::new();
+    for (i, item) in list.iter().enumerate() {
+        let rat = format!("{at}.rules[{i}]");
+        let rm = f.blame(yaml::obj(item, &rat))?;
+        let rule = f.blame(yaml::text(yaml::get(rm, "rule", &rat)?, &rat))?;
+        if rules.iter().any(|r| r.name == rule) {
+            return Err(here(Error::at(&rat, format!("{rule} is declared twice"))));
+        }
+        let rat = format!("{at}.rules.{rule}");
+        let when = match rm.get("when") {
+            None => None,
+            Some(w) => Some(f.blame(compile_full(w, &format!("{rat}.when"), regexes))?),
+        };
+        let bat = format!("{rat}.sibling");
+        let bm = f.blame(yaml::obj(yaml::get(rm, "sibling", &rat)?, &bat))?;
+        const SIBLING_KEYS: &[&str] = &[
+            "series_number",
+            "same",
+            "same_frame_of_reference",
+            "own_series",
+            "when",
+        ];
+        for k in bm.keys() {
+            if !SIBLING_KEYS.contains(&k.as_str()) {
+                return Err(here(Error::at(
+                    format!("{bat}.{k}"),
+                    format!(
+                        "is not a key of a sibling; those are {}",
+                        SIBLING_KEYS.join(", ")
+                    ),
+                )));
+            }
+        }
+        let series_number = match bm.get("series_number") {
+            None => None,
+            Some(v) => {
+                let nat = format!("{bat}.series_number");
+                let nm = f.blame(yaml::obj(v, &nat))?;
+                let within = match nm.get("within") {
+                    Some(w) => f.blame(yaml::number(w, &format!("{nat}.within")))?,
+                    None => 0.0,
+                };
+                let family = match nm.get("family") {
+                    None => Vec::new(),
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .enumerate()
+                        .map(|(j, x)| f.blame(yaml::number(x, &format!("{nat}.family[{j}]"))))
+                        .collect::<R<Vec<f64>>>()?,
+                    Some(x) => vec![f.blame(yaml::number(x, &format!("{nat}.family")))?],
+                };
+                if within < 0.0 || family.iter().any(|k| *k < 2.0) {
+                    return Err(here(Error::at(
+                        nat,
+                        "within is zero or more, and a family is a number of 2 or more",
+                    )));
+                }
+                Some(crate::session::SeriesNumber { within, family })
+            }
+        };
+        let same = match bm.get("same") {
+            None => Vec::new(),
+            Some(v) => f
+                .blame(yaml::texts(v, &format!("{bat}.same")))?
+                .into_iter()
+                .map(|n| {
+                    field_index(&n).ok_or_else(|| {
+                        here(Error::at(
+                            format!("{bat}.same"),
+                            format!("{n} is not a field of the fingerprint"),
+                        ))
+                    })
+                })
+                .collect::<R<Vec<usize>>>()?,
+        };
+        let flag = |k: &str| -> R<bool> {
+            match bm.get(k) {
+                None => Ok(false),
+                Some(Value::Bool(b)) => Ok(*b),
+                Some(_) => Err(here(Error::at(format!("{bat}.{k}"), "is true or false"))),
+            }
+        };
+        let same_frame_of_reference = flag("same_frame_of_reference")?;
+        let own_series = flag("own_series")?;
+        let swhen = f.blame(compile_full(
+            yaml::get(bm, "when", &bat)?,
+            &format!("{bat}.when"),
+            regexes,
+        ))?;
+        let mut read_axes = Vec::new();
+        swhen.axes_read(&mut read_axes);
+        if !read_axes.is_empty() {
+            return Err(here(Error::at(
+                format!("{bat}.when"),
+                "reads an axis; a sibling is seen by its header alone, never by what was decided about it",
+            )));
+        }
+        let require = match rm.get("require") {
+            None => crate::session::Require::Some,
+            Some(v) => match f.blame(yaml::text(v, &format!("{rat}.require")))?.as_str() {
+                "some" => crate::session::Require::Some,
+                "none" => crate::session::Require::None,
+                other => {
+                    return Err(here(Error::at(
+                        format!("{rat}.require"),
+                        format!("some or none, not {other}"),
+                    )));
+                }
+            },
+        };
+        let mut sets = Vec::new();
+        let sm = f.blame(yaml::obj(
+            yaml::get(rm, "set", &rat)?,
+            &format!("{rat}.set"),
+        ))?;
+        if sm.is_empty() {
+            return Err(here(Error::at(format!("{rat}.set"), "sets no axis")));
+        }
+        for (axis, v) in sm {
+            let sat = format!("{rat}.set.{axis}");
+            let ai = axes
+                .iter()
+                .position(|a| a.name == *axis)
+                .ok_or_else(|| here(Error::at(&sat, format!("no axis named {axis}"))))?;
+            let a = &axes[ai];
+            if a.phase != AxisPhase::Class {
+                return Err(here(Error::at(
+                    &sat,
+                    format!("{axis} is decided after the passes, from what they decided"),
+                )));
+            }
+            let ids = match v {
+                Value::Null => Vec::new(),
+                other => f.blame(yaml::texts(other, &sat))?,
+            };
+            if ids.len() > 1 && !a.multi {
+                return Err(here(Error::at(&sat, format!("{axis} holds one value"))));
+            }
+            let mut stored = Vec::new();
+            for id in ids {
+                let vi = a.value_index(&id).ok_or_else(|| {
+                    here(Error::at(&sat, format!("{id} is not a value of {axis}")))
+                })?;
+                stored.push(a.stored(vi).to_string());
+            }
+            sets.push((ai, stored));
+        }
+        let confidence = f.blame(yaml::number(
+            yaml::get(rm, "confidence", &rat)?,
+            &format!("{rat}.confidence"),
+        ))?;
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(here(Error::at(
+                format!("{rat}.confidence"),
+                "is a confidence, from 0 to 1",
+            )));
+        }
+        rules.push(crate::session::SessionRule {
+            name: rule,
+            when,
+            sibling: crate::session::Sibling {
+                series_number,
+                same,
+                same_frame_of_reference,
+                own_series,
+                when: swhen,
+            },
+            require,
+            sets,
+            confidence,
+            why: f.blame(yaml::text(
+                yaml::get(rm, "why", &rat)?,
+                &format!("{rat}.why"),
+            ))?,
+            sources: match rm.get("sources") {
+                Some(v) => f.blame(yaml::texts(v, &format!("{rat}.sources")))?,
+                None => Vec::new(),
+            },
+        });
+    }
+
+    let scope = match m.get("reference") {
+        None => "session".to_string(),
+        Some(r) => {
+            let rm = f.blame(yaml::obj(r, &format!("{at}.reference")))?;
+            match rm.get("scope") {
+                Some(v) => f.blame(yaml::text(v, &format!("{at}.reference.scope")))?,
+                None => "session".to_string(),
+            }
+        }
+    };
+    Ok(Pass {
+        name,
+        phase,
+        kind: Kind::Session(crate::session::Session {
+            sibling_fields,
+            replaces_at_most,
+            rules,
+        }),
+        target,
+        reference: Reference {
+            scope,
+            filter: Vec::new(),
+            partition_by: None,
+            fallback: false,
+            fallback_when: Vec::new(),
+            fallback_except: Vec::new(),
+        },
+        emit: load_emit(f, m, at)?,
     })
 }
 

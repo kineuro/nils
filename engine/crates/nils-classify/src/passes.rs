@@ -167,12 +167,28 @@ pub fn run(
     }
     let corpus = read_corpus(store, pack, settings.modality.as_deref())?;
     let mut out = Vec::new();
+    // Record 53: what a session pass wrote in this run, which a vote read
+    // from the corpus before it must not fill again.
+    let mut filled: HashSet<(i64, String)> = HashSet::new();
     for pass in wanted {
         if cancel.stop() {
             break;
         }
+        if let Some(session) = pass.session() {
+            out.push(crate::session::run(
+                store,
+                pack,
+                pass,
+                session,
+                settings,
+                cancel,
+                job_id,
+                &mut filled,
+            )?);
+            continue;
+        }
         let Some(vote) = pass.vote() else { continue };
-        out.push(run_one(store, pack, pass, vote, &corpus, job_id)?);
+        out.push(run_one(store, pack, pass, vote, &corpus, job_id, &filled)?);
     }
     Ok(out)
 }
@@ -184,6 +200,7 @@ fn run_one(
     vote: &Vote,
     corpus: &Corpus,
     job_id: i64,
+    filled: &HashSet<(i64, String)>,
 ) -> Result<Ran, Error> {
     let mut ran = Ran {
         pass: pass.name.clone(),
@@ -217,10 +234,10 @@ fn run_one(
             // gap, it does not overrule the rules.
             let current = corpus.axis_of(a.at, *axis);
             let fills = current.is_empty() || vote.write_when.iter().any(|w| w == current);
-            if !fills {
+            let name = pack.axes[*axis].name.as_str();
+            if !fills || filled.contains(&(stack_id, name.to_string())) {
                 continue;
             }
-            let name = pack.axes[*axis].name.as_str();
             axis_rows.extend(crate::classify::axis_rows(
                 stack_id, name, stored, confidence, "vote",
             ));

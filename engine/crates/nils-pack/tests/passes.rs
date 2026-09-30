@@ -57,7 +57,11 @@ fn corpus(pack: &Pack, rows: &[(Stack, &str, &str, &str)]) -> Corpus {
 #[test]
 fn a_stack_votes_among_the_stacks_whose_physics_is_its_own() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
 
     let mut rows: Vec<(Stack, &str, &str, &str)> = Vec::new();
@@ -103,7 +107,11 @@ fn a_stack_votes_among_the_stacks_whose_physics_is_its_own() {
 #[test]
 fn an_even_split_decides_nothing() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
 
     let mut rows: Vec<(Stack, &str, &str, &str)> = Vec::new();
@@ -126,7 +134,11 @@ fn an_even_split_decides_nothing() {
 #[test]
 fn one_neighbour_is_not_a_vote() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
     let rows: Vec<(Stack, &str, &str, &str)> = vec![
         (stack(4000.0, 90.0, "SE"), "T2w", "TSE", "anat"),
@@ -143,7 +155,11 @@ fn one_neighbour_is_not_a_vote() {
 #[test]
 fn the_same_reference_gives_the_same_answer_twice() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
     let mut rows: Vec<(Stack, &str, &str, &str)> = Vec::new();
     for i in 0..30 {
@@ -171,7 +187,11 @@ fn the_same_reference_gives_the_same_answer_twice() {
 #[test]
 fn a_zero_echo_time_is_not_a_short_one_to_the_vote_either() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
 
     let mut rows: Vec<(Stack, &str, &str, &str)> = Vec::new();
@@ -213,7 +233,11 @@ fn a_zero_echo_time_is_not_a_short_one_to_the_vote_either() {
 #[test]
 fn a_phase_image_is_no_gap_to_fill() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
 
     let mut c = Corpus::new(&pack);
@@ -250,7 +274,11 @@ fn a_phase_image_is_no_gap_to_fill() {
 #[test]
 fn an_mdme_image_is_no_gap_and_a_reformat_no_voter() {
     let pack = mri();
-    let pass = &pack.passes[0];
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
     let vote = pass.vote().expect("the physics vote");
 
     let mut c = Corpus::new(&pack);
