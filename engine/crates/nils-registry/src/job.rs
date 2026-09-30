@@ -183,13 +183,19 @@ pub fn process_alive(_pid: i64) -> Option<bool> {
 
 /// When a process of this host started, in seconds since the epoch, where
 /// the system says: Linux's `/proc/<pid>/stat`, read against the boot time
-/// in `/proc/stat` at the 100 ticks a second the kernel reports in.
+/// in `/proc/stat` at the 100 ticks a second the kernel reports in. A
+/// process that has ended and waits for its parent to reap it (a zombie)
+/// runs no more, and has none.
 pub fn process_started(pid: i64) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // the fields after the command's closing parenthesis: the state is the
     // third field of the line, the start time the twenty-second
     let rest = &stat[stat.rfind(')')? + 1..];
-    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    let mut fields = rest.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X" | "x") {
+        return None;
+    }
+    let ticks: u64 = fields.nth(18)?.parse().ok()?;
     let boot: u64 = std::fs::read_to_string("/proc/stat")
         .ok()?
         .lines()
@@ -937,4 +943,36 @@ pub fn take(store: &mut Store, job_id: i64) -> Result<bool, Error> {
         ],
     )?;
     Ok(n == 1)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// A process that has ended and is not yet reaped is still there to a
+    /// signal, but runs no more: it has no start time, so a job whose
+    /// process it was is never held as running here by it.
+    #[test]
+    fn an_ended_process_waiting_to_be_reaped_does_not_run_here() {
+        let now = now_iso();
+        let own = i64::from(std::process::id());
+        assert!(process_started(own).is_some());
+        assert!(runs_here(Some(hostname().as_str()), Some(own), &now));
+
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i64::from(child.id());
+        // until it is reaped, the ended child is a zombie
+        let started = std::time::Instant::now();
+        while std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| !s[s.rfind(')').unwrap() + 1..].trim_start().starts_with('Z'))
+            .unwrap_or(true)
+        {
+            assert!(started.elapsed().as_secs() < 10, "the child never ended");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(process_alive(pid), Some(true));
+        assert_eq!(process_started(pid), None);
+        assert!(!runs_here(Some(hostname().as_str()), Some(pid), &now_iso()));
+        child.wait().unwrap();
+    }
 }
