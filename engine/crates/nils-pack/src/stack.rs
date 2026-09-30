@@ -115,7 +115,7 @@ pub fn field_index(name: &str) -> Option<usize> {
 
 /// One stack, as a pack sees it: numbers by index, text by index, nothing
 /// else. Built by whoever has the row.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Stack {
     num: Vec<Option<f64>>,
     text: Vec<String>,

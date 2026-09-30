@@ -162,9 +162,10 @@ pub struct Borders {
     pub slice_outlier: Option<SliceOutlier>,
     /// v0's `pre_post_twin`.
     pub pre_post_twin: Option<Twin>,
-    /// v0's `epimix_fallback`: a stack of the winner holds this value of this
-    /// name, `(of, is)`.
-    pub fallback: Option<(String, String)>,
+    /// v0's `epimix_fallback`: a stack of the winner holds one of these
+    /// values of this name, `(of, is)`. Record 53 (pack contract 8): several
+    /// values, so a NeuroMix winner raises it as an EPIMix one does.
+    pub fallback: Option<(String, Vec<String>)>,
     /// v0's `dixon_vs_plain`.
     pub dixon_vs_plain: Option<Plain>,
 }
@@ -982,14 +983,21 @@ fn more_borders(
         }
     }
 
-    // A fallback won: any stack of the winner holds it.
-    if let Some((of, is)) = &b.fallback
-        && winner
+    // A fallback won: any stack of the winner holds one of its values.
+    if let Some((of, is)) = &b.fallback {
+        let held: std::collections::BTreeSet<&str> = winner
             .stacks_values()
             .iter()
-            .any(|v| v.get(of).is_some_and(|x| holds(x, is)))
-    {
-        borders.push(Border::EpimixFallback);
+            .filter_map(|v| v.get(of))
+            .flat_map(|x| is.iter().filter(|i| holds(x, i)).map(String::as_str))
+            .collect();
+        if !held.is_empty() {
+            borders.push(Border::EpimixFallback);
+            notes.insert(
+                "epimix_fallback",
+                held.into_iter().collect::<Vec<_>>().join(", "),
+            );
+        }
     }
 
     // A Dixon won and a plain acquisition is close behind: within the
@@ -1545,7 +1553,7 @@ mod tests {
     fn a_fallback_that_won_is_a_border_on_any_stack_of_the_winner() {
         let m = chosen(
             Borders {
-                fallback: Some(("provenance".into(), "EPIMix".into())),
+                fallback: Some(("provenance".into(), vec!["EPIMix".into()])),
                 ..Borders::default()
             },
             Vec::new(),
@@ -1577,6 +1585,26 @@ mod tests {
             &r,
         );
         assert!(p.borders.is_empty());
+        // Record 53: a list of values, each raising the one border, and the
+        // note names which the winner held.
+        let m = chosen(
+            Borders {
+                fallback: Some((
+                    "provenance".into(),
+                    vec!["EPIMix".into(), "NeuroMix".into()],
+                )),
+                ..Borders::default()
+            },
+            Vec::new(),
+        );
+        let p = pick(
+            &m,
+            "t1w",
+            &[candidate(&[1], &[("q", "top"), ("provenance", "NeuroMix")])],
+            &r,
+        );
+        assert_eq!(p.borders, [Border::EpimixFallback]);
+        assert_eq!(p.notes["epimix_fallback"], "NeuroMix");
     }
 
     #[test]

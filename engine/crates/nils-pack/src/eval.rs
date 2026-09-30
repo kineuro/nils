@@ -119,6 +119,20 @@ impl<'a> Evaluated<'a> {
         e
     }
 
+    /// Record 53: whether an expression holds on this stack, with its axes as
+    /// `decided` says, one entry per axis of the pack in its order, as a row
+    /// stores them. What the session pass reads its target and its rules by,
+    /// where they name flags as well as axes.
+    pub fn holds_with(&self, expr: &crate::expr::Expr, decided: &[Vec<String>]) -> bool {
+        {
+            let mut d = self.decided.borrow_mut();
+            for (i, slot) in d.iter_mut().enumerate() {
+                *slot = decided.get(i).cloned().unwrap_or_default();
+            }
+        }
+        expr.eval(None, self)
+    }
+
     pub fn flag(&self, name: &str) -> Option<bool> {
         self.pack.flag_index(name).map(|i| self.flags[i])
     }

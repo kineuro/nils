@@ -329,6 +329,31 @@ private:
   #                  shape on the legacy cohort, 0 of 911 varied within and 96 distinct, and
   #                  a constant on the other two; unnamed).
 
+  # MRI pack 0.19.0 (record 53, pack contract 8): the ingested elements a
+  # person reading a stack is shown beside the header, and a replay over
+  # header packets reads, so a rule that reads one acts there as it does in
+  # production. An allowlist: nothing else of `ingest` is shown. Each is a
+  # technical parameter of the acquisition, never who or where; the engine
+  # refuses a name that is not ingested, not of a technical kind or at an
+  # identification block, and withholds a value shaped like an identifier.
+  # The first four are the ones the rules read (pack 0.18.0: GE's EPIMix,
+  # NeuroMix, SPGR and Silenz by pulse sequence, GE's ASL pass, Philips'
+  # `DwiSE`, balanced FFE and isotropic direction `I`); the other two say
+  # what a GE image is where its standard header does not.
+  shown:
+    - name: ge_pulse_sequence_name
+      why: "GE's pulse sequence (epi, 3dasl, ksepimix): its counterpart of Siemens' sequence name, which GE leaves empty"
+    - name: ge_asl_contrast_technique
+      why: "GE's ASL labelling as the scanner states it (CONTINUOUS, PSEUDOCONTINUOUS)"
+    - name: philips_scanning_technique
+      why: "Philips' scanning technique (SE, TSE, T1TFE, DwiSE): its counterpart of Siemens' sequence name"
+    - name: philips_diffusion_direction
+      why: "Philips' diffusion direction (I for the isotropic image, O, P, S): which diffusion image a stack is"
+    - name: ge_internal_pulse_sequence_name
+      why: "GE's internal pulse sequence name, EPI for a gradient-echo and EPI2 for a spin-echo EPI"
+    - name: ge_private_image_type
+      why: "GE's image type: 0 magnitude, 1 phase, 2 real, 3 imaginary"
+
   # What a release keeps. These six are the ones Wave 1 reads and Wave 3
   # section 6 derives from: a release that dropped them would export
   # diffusion nobody can use. Everything else, ingested or not, is dropped.

@@ -105,6 +105,9 @@ flags:
               {not: scanning_sequence.has_gre}]
       # MRI pack 0.14.0: a GE spin echo written in research mode (below).
       - ge_research_se
+      # MRI pack 0.19.0: an enhanced object's EchoPulseSequence SPIN (the
+      # deep research's case 22, section 16 below).
+      - mech_spin
 
   # MRI pack 0.18.0: ScanningSequence as stated, except the bare `GE` a
   # third-party toolkit writes on the GE headers whose ScanOptions it
@@ -117,17 +120,23 @@ flags:
           sequence_name.is_tof, sequence_name.is_pc, sequence_name.is_epi_gre,
           # MRI pack 0.10.0: every Siemens gradient-echo stem, and Philips'
           # gradient-echo scanning techniques
-          sequence_name.is_gre_stem, philips_gre_technique]
+          sequence_name.is_gre_stem, philips_gre_technique,
+          # MRI pack 0.19.0: an enhanced object's EchoPulseSequence GRADIENT
+          mech_gradient]
 
   has_epi:
     any: [scanning_sequence.has_epi, sequence_name.is_epi_diff,
           sequence_name.is_epi_gre, sequence_name.is_epi_se,
           sequence_name.is_epi_ir, sequence_name.is_epi_diff_resolve,
-          sequence_name.is_epi_diff_b0, philips_feepi, philips_seepi]
+          sequence_name.is_epi_diff_b0, philips_feepi, philips_seepi,
+          # MRI pack 0.19.0: EchoPlanarPulseSequence YES
+          mech_epi]
 
   has_ir:
     any:
       - scanning_sequence.has_ir
+      # MRI pack 0.19.0: the MR Modifier group's InversionRecovery YES
+      - mech_ir
       - scanning_sequence.has_irfse
       - image_type.hint_ir
       - image_type.has_dir
@@ -185,8 +194,12 @@ flags:
               {not: scanning_sequence.has_gre}]
       - se_echo_train
       - propeller_fse
-  is_space:   {any: [sequence_name.is_space, sequence_name.is_space_ir]}
-  is_haste:   sequence_name.is_haste
+      # MRI pack 0.19.0: SPIN with several echoes per excitation, no EPI
+      - mech_tse
+  # MRI pack 0.19.0: or the enhanced table's 3D multiple spin echo, and its
+  # single-shot one (case 22).
+  is_space:   {any: [sequence_name.is_space, sequence_name.is_space_ir, mech_3d_tse]}
+  is_haste:   {any: [sequence_name.is_haste, mech_ss_tse]}
   # GE's `memp` names its spin echo whatever the number of echoes, so it is a
   # multi-echo spin echo only where the series holds several (pack 0.9.0).
   is_me_se:   {all: [sequence_name.is_me_se, is_multi_echo]}
@@ -208,20 +221,20 @@ flags:
   is_tfl:     {any: [sequence_name.is_tfl, philips_tfe, {all: [ge_calibration, {not: ge_fast_ss}]}]}
   # MRI pack 0.13.0: or a Siemens `t1_mpr` protocol (below).
   is_mprage:  {any: [sequence_name.is_mprage, t1_mpr_named]}
-  is_ssfp:    {any: [sequence_name.is_trufisp, philips_balanced]}
+  is_ssfp:    {any: [sequence_name.is_trufisp, philips_balanced, mech_bssfp]}
   is_ciss:    sequence_name.is_ciss
   is_dess:    sequence_name.is_dess
-  is_psif:    {any: [sequence_name.is_psif, sequence_variant.has_trss, philips_t2ffe]}
-  is_fisp:    sequence_name.is_fisp
+  is_psif:    {any: [sequence_name.is_psif, sequence_variant.has_trss, philips_t2ffe, mech_ssfp]}
+  is_fisp:    {any: [sequence_name.is_fisp, mech_ss_gre]}
   is_swi:     {any: [sequence_name.is_swi, image_type.has_swi]}
   has_swi:    image_type.has_swi
   # MRI pack 0.18.0: GE's `VASCTOF_GEMS` only where nothing says the series
   # is something else (below, `ge_vasctof_as_tof`).
   is_tof:     {any: [sequence_name.is_tof, sequence_variant.is_tof,
                      ge_vasctof_as_tof, scan_options.has_inflow_gems,
-                     philips_inflow_named]}
+                     philips_inflow_named, mech_tof]}
   # MRI pack 0.18.0: `hint_pca` also reads Philips' `PCA` token (parsers.yml).
-  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca]}
+  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca, mech_pc]}
   is_flair:   {any: [sequence_name.is_flair_seq, scan_options.has_t1flair_gems,
                      scan_options.has_t2flair_gems, image_type.has_flair_synthetic]}
   is_dir:     {any: [image_type.has_dir, image_type.has_dir_synthetic]}
@@ -264,15 +277,15 @@ flags:
       - philips_dwi_technique
       - diffusion_sbref
   is_bold:    {all: [image_type.has_fmri, {not: image_type.has_phase}]}
-  is_asl:     image_type.has_asl
+  is_asl:     {any: [image_type.has_asl, mech_asl]}
   is_perfusion: image_type.has_perfusion
   # MRI pack 0.18.0: GE's `MRF_GEMS` alone is no fingerprinting. On the
   # archive its 11 stacks are FSE, FRFSE, Cube and PROPELLER by their pulse
   # sequence, with no fingerprinting word (the deep research, case 23;
   # `empirical-conventions.md`, case 23). The value's words still say it.
   is_mrf:     {all: [scan_options.has_mrf_gems, {text: technique_text, matches: 'fingerprint|(^|[^a-z])mrf([^a-z]|$)'}]}
-  is_radial:  {any: [scan_options.has_propeller_gems, image_type.layout_radial]}
-  is_spiral:  scan_options.has_spiral_gems
+  is_radial:  {any: [scan_options.has_propeller_gems, image_type.layout_radial, mech_radial]}
+  is_spiral:  {any: [scan_options.has_spiral_gems, mech_spiral]}
   is_mavric:  image_type.has_mavric
   is_ideal:   scan_options.has_ideal_gems
   is_cine:    scan_options.has_cine_gems
@@ -280,7 +293,7 @@ flags:
 
   # === 3. sequence variants =================================================
 
-  has_spoiled:          sequence_variant.has_spoiled
+  has_spoiled:          {any: [sequence_variant.has_spoiled, mech_spoiled]}
   has_steady_state:     sequence_variant.has_steady_state
   has_segmented_kspace: sequence_variant.has_segmented_kspace
   # SequenceVariant MP alone. GE's `MP_GEMS` is no magnetisation
@@ -1529,6 +1542,9 @@ flags:
   se_by_train_unstated:
     all:
       - {field: scanning_sequence, present: false}
+      # MRI pack 0.19.0: only where the module says nothing either; where it
+      # does, its table decides (section 16).
+      - {field: echo_pulse_sequence, present: false}
       - {not: ss_gre_stated}
       - {not: image_type.hint_gre}
       - {not: sequence_name.is_gre}
@@ -1914,12 +1930,18 @@ flags:
   # localizer.
   # Read from the technique's text: GE's exam protocol that names a
   # spectroscopy would otherwise make every short series of the exam MRS.
+  # MRI pack 0.19.0: or, first, an MR Spectroscopy Storage object, whatever
+  # it is named (case 16, record 53 S1): its SOP class is the one statement
+  # a planning image named for a spectrum cannot make.
   is_mrs:
-    all:
-      - {text: technique_text, matches: '(^|[^a-z])(probe\s*-?\s*(sv|p|s|press|steam)?|spectroscopy|svs|csi)([^a-z]|$)'}
-      - {field: n_instances, gt: 0}
-      - {field: n_instances, le: 16}
-      - {not: {text: search_text, matches: 'locali[sz]er|scout|survey|(^|[^a-z])(loc|plan|planning)([^a-z]|$)'}}
+    any:
+      - mrs_object
+      - all:
+          - {text: technique_text, matches: '(^|[^a-z])(probe\s*-?\s*(sv|p|s|press|steam)?|spectroscopy|svs|csi)([^a-z]|$)'}
+          - {field: n_instances, gt: 0}
+          - {field: n_instances, le: 16}
+          - {not: {text: search_text, matches: 'locali[sz]er|scout|survey|(^|[^a-z])(loc|plan|planning)([^a-z]|$)'}}
+  mrs_object: {text: sop_class_uid, equals: '1.2.840.10008.5.1.4.1.1.4.2'}
 
   # --- technique ZTE (case 29): GE's `Silenz` pulse sequence, Siemens'
   # PETRA, or GE's Silent MRA by its words. Never a silent PROPELLER or a
@@ -1990,3 +2012,51 @@ flags:
       - any:
           - {parser: image_type, any_token: [VELOCITY, VEL, VELOCITY_MAP]}
           - {text: technique_text, matches: '(^|[^a-z])(velocity|vel|venc)([^a-z]|$)'}
+
+  # === 16. MRI pack 0.19.0 (record 53): the enhanced object's mechanism =====
+  # The deep research's case 22 (PS3.3 C.8.13.4, the MR Pulse Sequence
+  # module): an enhanced MR or MR spectroscopy object says how it was
+  # acquired in attributes a classic image never writes, which the
+  # fingerprint carries since record 53 S1. They are the most mechanism
+  # specific field there is, so each reaches the flag the technique axis
+  # already reads (`has_se`, `has_gre`, `has_epi`, `is_tse`, `is_space`,
+  # `is_haste`, `is_se_epi`, `is_gre_epi`, `is_tof`, `is_pc`, `is_asl`,
+  # `is_ssfp`, `is_psif`, `is_fisp`, `has_spoiled`, `is_radial`,
+  # `is_spiral`, `has_ir`) and GRASE's own. A classic image has none of them,
+  # so nothing here holds on one and its reading is unchanged. The table:
+  #   EPI YES + SPIN -> SE-EPI; EPI YES + GRADIENT -> GRE-EPI;
+  #   BOTH + EPI -> GRASE; SPIN + MSE YES + FULL -> SS-TSE;
+  #   SPIN + MSE YES + 3D -> 3D-TSE; SPIN + MSE YES -> TSE;
+  #   SPIN + MSE NO -> SE; GRADIENT + FREE_PRECESSION -> bSSFP;
+  #   TRANSVERSE -> SS-GRE; TIME_REVERSED -> SSFP; LONGITUDINAL or
+  #   spoiled -> SP-GRE; TOF YES -> TOF-MRA; PC YES -> PC-MRA;
+  #   ASL present -> ASL; RADIAL or SPIRAL -> the modifiers.
+  # A text is read lower-cased.
+  mech_spin: {text: echo_pulse_sequence, equals: spin}
+  mech_gradient: {text: echo_pulse_sequence, equals: gradient}
+  mech_both: {text: echo_pulse_sequence, equals: both}
+  mech_epi: {text: echo_planar_pulse_sequence, equals: 'yes'}
+  mech_train: {text: multiple_spin_echo, equals: 'yes'}
+  mech_single_shot: {text: segmented_k_space_traversal, equals: full}
+  mech_se_epi: {all: [mech_spin, mech_epi]}
+  mech_gre_epi: {all: [mech_gradient, mech_epi]}
+  mech_grase: {all: [mech_both, mech_epi]}
+  mech_ss_tse: {all: [mech_spin, mech_train, mech_single_shot, {not: mech_epi}]}
+  mech_3d_tse: {all: [mech_spin, mech_train, is_3d, {not: mech_single_shot}, {not: mech_epi}]}
+  mech_tse: {all: [mech_spin, mech_train, {not: mech_epi}]}
+  mech_bssfp: {all: [mech_gradient, {text: steady_state_pulse_sequence, equals: free_precession}]}
+  mech_ss_gre: {all: [mech_gradient, {text: steady_state_pulse_sequence, equals: transverse}]}
+  mech_ssfp: {all: [mech_gradient, {text: steady_state_pulse_sequence, equals: time_reversed}]}
+  mech_spoiled:
+    all:
+      - mech_gradient
+      - {not: mech_epi}
+      - any:
+          - {text: steady_state_pulse_sequence, equals: longitudinal}
+          - {text: spoiling, matches: '^(rf|gradient|rf_and_gradient)$'}
+  mech_tof: {text: time_of_flight_contrast, equals: 'yes'}
+  mech_pc: {text: phase_contrast, equals: 'yes'}
+  mech_asl: {text: arterial_spin_labeling_contrast, matches: '^(continuous|pseudocontinuous|pulsed)$'}
+  mech_radial: {text: geometry_of_k_space_traversal, equals: radial}
+  mech_spiral: {text: geometry_of_k_space_traversal, equals: spiral}
+  mech_ir: {text: inversion_recovery, equals: 'yes'}

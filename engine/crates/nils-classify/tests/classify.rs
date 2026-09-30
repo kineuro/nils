@@ -424,8 +424,11 @@ fn the_reference_holds_what_a_rule_decided_and_not_what_a_pass_did() {
                 nils_pack::pass::Phase::After,
                 1,
             )
-            .unwrap()[0]
-                .pool
+            .unwrap()
+            .into_iter()
+            .find(|r| r.kind == "nearest_neighbour_vote")
+            .expect("the physics vote ran")
+            .pool
         };
         assert_eq!(
             pool(&mut reg),

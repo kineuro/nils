@@ -159,8 +159,11 @@ pub struct Vote {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Kind {
     Vote(Vote),
+    /// Record 53 S2: the session pass (`crate::session`).
+    Session(crate::session::Session),
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +181,15 @@ impl Pass {
     pub fn vote(&self) -> Option<&Vote> {
         match &self.kind {
             Kind::Vote(v) => Some(v),
+            Kind::Session(_) => None,
+        }
+    }
+
+    /// Record 53: the session pass's rules, where it is one.
+    pub fn session(&self) -> Option<&crate::session::Session> {
+        match &self.kind {
+            Kind::Session(s) => Some(s),
+            Kind::Vote(_) => None,
         }
     }
 
@@ -185,6 +197,7 @@ impl Pass {
     pub fn kind_name(&self) -> &'static str {
         match &self.kind {
             Kind::Vote(_) => "nearest_neighbour_vote",
+            Kind::Session(_) => "session_context",
         }
     }
 }
@@ -635,6 +648,11 @@ impl Corpus {
     pub fn new(pack: &crate::Pack) -> Corpus {
         let mut needed: Vec<usize> = Vec::new();
         for pass in &pack.passes {
+            // Record 53: the session pass reads whole stacks of a session,
+            // not the corpus.
+            if pass.session().is_some() {
+                continue;
+            }
             if let Some(t) = &pass.target {
                 t.fields(&mut needed);
             }

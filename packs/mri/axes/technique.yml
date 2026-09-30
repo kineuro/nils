@@ -288,6 +288,10 @@ values:
       - grase
       - turbogse
       - tgse
+    # MRI pack 0.19.0: an enhanced object's EchoPulseSequence BOTH with EPI
+    # (the deep research's case 22).
+    detection:
+      exclusive: mech_grase
   SE-EPI:
     family: MIXED
     keywords:

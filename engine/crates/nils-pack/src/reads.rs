@@ -90,6 +90,26 @@ pub fn field_name(pack: &Pack, i: usize) -> Option<(String, bool)> {
         .map(|p| (p.name.clone(), false))
 }
 
+/// Record 53: every field an expression reads, by number, through every
+/// flag and parser it names, with a text the pack derives read as the fields
+/// it is derived from. What a session pass's sibling condition is checked
+/// against: a packet carries fields, not the pack's own texts.
+pub fn expr_fields(pack: &Pack, e: &Expr) -> BTreeSet<usize> {
+    let mut w = Walk::default();
+    w.expr(pack, e);
+    let mut out = BTreeSet::new();
+    for i in w.fields {
+        let d = i.checked_sub(stack::FIELDS.len());
+        match d.and_then(|j| pack.derived.get(j)) {
+            Some(n) => out.extend(n.from.iter().copied()),
+            None => {
+                out.insert(i);
+            }
+        }
+    }
+    out
+}
+
 /// What a whole rule reads, with what gates it (record 48, derived axes):
 /// its clauses, its `requires`, the conditions on the values it sets, and
 /// its set's entry condition and derived values.
