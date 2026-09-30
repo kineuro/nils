@@ -38,13 +38,16 @@ pass: session_context
 kind: session_context
 phase: after
 
-# The stacks the pass may decide: a GE susceptibility image written
-# ORIGINAL, unprefixed and without a token that names its output, which the
-# route made the processed image by its fallback.
+# The stacks the pass may decide: a GE SWAN image written ORIGINAL,
+# unprefixed and without a token that names its output, which the route made
+# the processed image by its fallback. Named SWAN: an unprefixed GE image
+# named SWI is the route's own `ge_magnitude`, and one named for another
+# susceptibility output (QSM, R2*) is not this acquisition's magnitude.
 target:
   when:
     all:
       - {text: manufacturer, prefix: ge}
+      - {text: search_text, substring: swan}
       - image_type.is_original
       - {not: image_type.is_derived}
       - {axis: provenance, is: SWIRecon}

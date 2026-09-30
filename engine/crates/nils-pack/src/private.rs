@@ -136,14 +136,24 @@ pub fn never_shown(creator: &str, group: u16, element: u8) -> bool {
         || (c == "GEMS_PARM_01" && group == 0x0043 && element == 0x62)
 }
 
+/// A date written with separators, year first or last: `2026-09-30`,
+/// `30.09.2026`, `2026/9/30`.
+static DATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(^|[^0-9])([0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2}|[0-9]{1,2}[-./][0-9]{1,2}[-./][0-9]{4})([^0-9]|$)",
+    )
+    .expect("a date pattern")
+});
+
 /// A value as it may be shown, or None where it is withheld: longer than 64
-/// characters, an address (`@`), a UID, or a run of digits shaped like a
-/// personnummer or a date (eight digits, or six then a `-` or `+` and four).
-/// In a purely numeric value the digits after a decimal point are a fraction
-/// and not a run, so a pixel spacing of 0.4296875000 is shown.
+/// characters, an address (`@`), a UID, a date written with separators, or a
+/// run of digits shaped like a personnummer or a date (eight digits, or six
+/// then a `-` or `+` and four). In a purely numeric value the digits after a
+/// decimal point are a fraction and not a run, so a pixel spacing of
+/// 0.4296875000 is shown.
 pub fn shown_value(v: &str) -> Option<&str> {
     let t = v.trim();
-    if t.len() > 64 || t.contains('@') {
+    if t.len() > 64 || t.contains('@') || DATE.is_match(t) {
         return None;
     }
     let numeric = !t.is_empty()
@@ -329,6 +339,8 @@ mod tests {
             "1000",
             "0.4296875000",
             "3\\1\\0",
+            "1.5\\2.0",
+            "0.9\\0.9\\3.0",
             "PSEUDOCONTINUOUS",
             "ksepimix_1",
         ] {
@@ -341,6 +353,10 @@ mod tests {
             "121212+1212",
             "20260930",
             "study 20260930 x",
+            "2026-09-30",
+            "30.09.2026",
+            "2026/9/30",
+            "scanned 30-09-2026 am",
             "1.2.840.113619.2.55",
             "someone@example.org",
             &"x".repeat(65),

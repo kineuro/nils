@@ -14,8 +14,8 @@
 //!    the fields the pass names and nothing else.
 //! 3. What the pass writes replaces the axis, at tier `session`, with an
 //!    evidence row naming the pass, the rule and the siblings by stack id,
-//!    and a review item where the rule's confidence is below the pass's own
-//!    threshold. A rule that held back writes nothing and is counted.
+//!    and a review item, whatever the pass's `emit` says (record 53 R4). A
+//!    rule that held back writes nothing and is counted.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -362,51 +362,48 @@ pub fn run(
             let stored = values.join(",");
             axis_rows_out.extend(axis_rows(t.id, name, &stored, answer.confidence, TIER));
             touched.push((t.id, name.to_string()));
-            if pass.emit.evidence {
-                evidence.push(vec![
-                    Param::Int(t.id),
-                    Param::from(name),
-                    Param::from(stored.as_str()),
-                    Param::from(TIER),
-                    Param::Double(answer.confidence),
-                    Param::from(pass.name.as_str()),
-                    Param::from(answer.rule.as_str()),
-                    Param::from("session"),
-                    Param::from(cited.as_str()),
-                    Param::from(pass.name.as_str()),
-                    Param::from(pass.reference.scope.as_str()),
-                ]);
-            }
+            // Record 53 R4: every value a session pass writes names its
+            // evidence and is asked about, whatever the pass's `emit` says;
+            // no session answer is ever sure.
+            evidence.push(vec![
+                Param::Int(t.id),
+                Param::from(name),
+                Param::from(stored.as_str()),
+                Param::from(TIER),
+                Param::Double(answer.confidence),
+                Param::from(pass.name.as_str()),
+                Param::from(answer.rule.as_str()),
+                Param::from("session"),
+                Param::from(cited.as_str()),
+                Param::from(pass.name.as_str()),
+                Param::from(pass.reference.scope.as_str()),
+            ]);
             if nils_pack::at_threshold(answer.confidence, pass.emit.review_below) {
                 ran.at_threshold += 1;
             }
-            if nils_pack::weaker_than(answer.confidence, pass.emit.review_below)
-                || pass.emit.review_all_touched
-            {
-                reviews.push(vec![
-                    Param::from(format!("{name}:session")),
-                    Param::from("stack"),
-                    Param::from(serde_json::json!({"stack_id": t.id}).to_string()),
-                    Param::from(
-                        serde_json::json!({
-                            "axis": name,
-                            "value": stored,
-                            "confidence": answer.confidence,
-                            "tier": TIER,
-                            "pass": pass.name,
-                            "rule": answer.rule,
-                            "siblings": answer.cited,
-                            "was": t.in_force[*axis].values,
-                            "job": job_id,
-                        })
-                        .to_string(),
-                    ),
-                    Param::from("open"),
-                    Param::from(now.as_str()),
-                    Param::Int(job_id),
-                ]);
-                ran.review_items += 1;
-            }
+            reviews.push(vec![
+                Param::from(format!("{name}:session")),
+                Param::from("stack"),
+                Param::from(serde_json::json!({"stack_id": t.id}).to_string()),
+                Param::from(
+                    serde_json::json!({
+                        "axis": name,
+                        "value": stored,
+                        "confidence": answer.confidence,
+                        "tier": TIER,
+                        "pass": pass.name,
+                        "rule": answer.rule,
+                        "siblings": answer.cited,
+                        "was": t.in_force[*axis].values,
+                        "job": job_id,
+                    })
+                    .to_string(),
+                ),
+                Param::from("open"),
+                Param::from(now.as_str()),
+                Param::Int(job_id),
+            ]);
+            ran.review_items += 1;
         }
     }
 

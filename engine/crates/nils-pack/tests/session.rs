@@ -215,6 +215,39 @@ fn the_mri_session_pass_decides_only_from_a_related_computed_output() {
         ),
         None
     );
+    let mut no_swi = in_force(&pack, "stated");
+    no_swi[axis("construct")].values = vec!["Magnitude".into()];
+    assert_eq!(
+        decide(
+            &pack,
+            target,
+            session,
+            &me,
+            &[],
+            &no_swi,
+            &[sib(7, computed("500", "SWI: Ax SWAN"), false, Some(true))],
+        ),
+        None,
+        "the route did not leave the construct at SWI"
+    );
+
+    // Nor a GE susceptibility image that is not named SWAN, beside the
+    // same computed output: only a SWAN acquisition is read this way.
+    for name in ["Ax QSM 3D", "Ax susceptibility"] {
+        assert_eq!(
+            decide(
+                &pack,
+                target,
+                session,
+                &computed("5", name),
+                &[],
+                &in_force(&pack, "stated"),
+                &[sib(7, computed("500", "SWI: Ax SWAN"), false, Some(true))],
+            ),
+            None,
+            "{name}"
+        );
+    }
 }
 
 /// The MRI pack, copied, with `edit` applied to one of its files.

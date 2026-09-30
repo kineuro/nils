@@ -819,9 +819,9 @@ series' own header). The guards are the engine's, not the pack's:
   whose answer would change a protected axis changes nothing, and is counted
   as held.
 - **It is flagged.** Every value it writes has tier and basis `session`; its
-  evidence row names the pass, the rule and the sibling stacks by id; below
-  the pass's `review_item_below` each answer is also a review item of kind
-  `<axis>:session`.
+  evidence row names the pass, the rule and the sibling stacks by id; and
+  each answer is also a review item of kind `<axis>:session`, whatever the
+  pass's `emit` says, so no session answer is ever sure.
 
 The decision is `nils_pack::session::decide`, which the engine runs over the
 registry (`nils-classify`'s `session` module) and a replay runs over packets.

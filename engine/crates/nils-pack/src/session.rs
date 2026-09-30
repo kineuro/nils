@@ -157,12 +157,14 @@ pub struct InForce {
 }
 
 impl InForce {
-    /// Whether a session answer may take this axis's place: it is empty, or
-    /// what decided it read no header flag or number and no person said it,
-    /// at no more than `at_most`.
+    /// Whether a session answer may take this axis's place: nothing decided
+    /// it, or what decided it read no header flag or number and no person
+    /// said it, at no more than `at_most`. The tier is what protects an axis,
+    /// not its values: a person's answer, a decision or a header rule that
+    /// decided an axis to nothing stays nothing.
     pub fn replaceable(&self, at_most: f64) -> bool {
-        if self.values.iter().all(String::is_empty) {
-            return true;
+        if self.tier.is_empty() {
+            return self.values.iter().all(String::is_empty);
         }
         matches!(
             self.tier.as_str(),
@@ -407,5 +409,27 @@ mod tests {
         ] {
             assert!(!at(tier, 0.1).replaceable(0.99), "{tier}");
         }
+        // An axis decided to nothing is protected by what decided it.
+        let nothing = |tier: &str, c: f64| InForce {
+            values: Vec::new(),
+            tier: tier.into(),
+            confidence: c,
+        };
+        for tier in [
+            "exclusive",
+            "combination",
+            "alternative",
+            "physics",
+            "answer",
+            "decision",
+            "something new",
+        ] {
+            assert!(!nothing(tier, 1.0).replaceable(0.99), "{tier} said none");
+        }
+        assert!(nothing("stated", 0.5).replaceable(0.7));
+        assert!(
+            !nothing("keywords", 0.9).replaceable(0.85),
+            "above the bound"
+        );
     }
 }
