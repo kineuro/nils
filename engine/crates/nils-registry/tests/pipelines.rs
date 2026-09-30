@@ -1551,3 +1551,251 @@ fn a_commit_by_model_from_and_to_commits_only_its_part() {
         assert_eq!(now.len(), 6, "{name}: {now:?}");
     }
 }
+
+/// A decision on a stack's body part, by a person or an agent, in force.
+fn decide(reg: &mut Registry, stack: i64, value: &str, kind: &str) -> i64 {
+    let asked = row(
+        reg.store(),
+        "review_item",
+        &[
+            ("kind", Param::from("body_part:low_confidence")),
+            ("scope", Param::from("stack")),
+            ("ref", Param::from(json!({"stack_id": stack}).to_string())),
+            (
+                "evidence",
+                Param::from(json!({"axis": "body_part", "value": value}).to_string()),
+            ),
+            ("status", Param::from("open")),
+        ],
+    );
+    review::apply(
+        reg,
+        &Apply {
+            item: asked,
+            member: None,
+            scope: "stack",
+            value: Some(value),
+            author: Author {
+                who: if kind == "person" {
+                    "anna@lab"
+                } else {
+                    "agent@lab"
+                },
+                kind,
+                version: None,
+                model: None,
+            },
+            stage: false,
+            why: None,
+            campaign: None,
+        },
+    )
+    .unwrap()
+    .decision
+}
+
+/// The value in force on a stack's body part, and who decided it.
+fn in_force(reg: &mut Registry, stack: i64) -> (Option<String>, String) {
+    let labels = labels::decision_labels(
+        reg.store(),
+        &DecisionQuery {
+            axis: "body_part",
+            stacks: Some(&[stack]),
+            authors: &[],
+            campaign: None,
+            staged_too: false,
+        },
+    )
+    .unwrap();
+    let l = labels.first().expect("a decision in force");
+    (l.value.clone(), l.author_kind.clone())
+}
+
+/// Record 51 R5: a model that disagrees with a person's decision at or
+/// above its threshold raises one `<axis>:decision` item on the stack,
+/// with the model, its value and its confidence as the evidence. Nothing is
+/// staged and the person's decision stays in force. Below the threshold,
+/// and against an agent's decision, the proposal is only counted. A newer
+/// run of the model refreshes the item, and closes it once it agrees.
+#[test]
+fn a_model_that_disagrees_with_a_person_is_asked_and_never_applied() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let m = head(reg, "1", '1', Some(0.8));
+        let run = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+            stacks: None,
+            models: None,
+        };
+        // a person decided three stacks, an agent the fourth, which a
+        // person put in force (record 42 R6)
+        decide(reg, ids[0], "spine", "person");
+        decide(reg, ids[1], "spine", "person");
+        decide(reg, ids[2], "brain", "person");
+        let by_agent = decide(reg, ids[3], "spine", "agent");
+        review::commit(reg, Some(by_agent), true, "anna@lab").unwrap();
+        let decisions = count(reg, "decision", "");
+        let open = " WHERE kind = 'body_part:decision' AND status = 'open'";
+
+        // above the threshold and against the person: asked; below it, or
+        // agreeing, or against an agent: counted only
+        let done = proposals::ingest(
+            reg,
+            &run(1),
+            &[
+                proposal(ids[0], "brain", 0.95, m.id),
+                proposal(ids[1], "brain", 0.6, m.id),
+                proposal(ids[2], "brain", 0.99, m.id),
+                proposal(ids[3], "brain", 0.99, m.id),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(done.decided, 4, "{name}: every decided stack is counted");
+        assert!(
+            done.groups.is_empty(),
+            "{name}: no model item on a decided stack"
+        );
+        assert_eq!(done.staged_members, 0, "{name}");
+        assert_eq!(
+            done.disagreements.len(),
+            1,
+            "{name}: {:?}",
+            done.disagreements
+        );
+        let dis = &done.disagreements[0];
+        assert_eq!(
+            (
+                dis.stack_id,
+                dis.value.as_str(),
+                dis.decision.as_deref(),
+                dis.refreshed
+            ),
+            (ids[0], "brain", Some("spine"), false),
+            "{name}"
+        );
+        assert_eq!(count(reg, "review_item", open), 1, "{name}");
+        let item = review::item(reg.store(), dis.item).unwrap().unwrap();
+        assert_eq!(item.kind, "body_part:decision", "{name}");
+        assert_eq!(item.scope, "stack", "{name}");
+        assert_eq!(item.reference["stack_id"], ids[0], "{name}");
+        let ev = &item.evidence;
+        assert_eq!(ev["source"], "model", "{name}");
+        assert_eq!(ev["axis"], "body_part", "{name}");
+        assert_eq!(ev["decision"], "spine", "{name}");
+        assert_eq!(ev["value"], "brain", "{name}");
+        assert_eq!(ev["confidence"], 0.95, "{name}");
+        assert_eq!(ev["model_id"], m.id, "{name}");
+        assert_eq!(ev["model"]["name"], "bp-head", "{name}");
+        // nothing staged, nothing written as a decision, the person's stands
+        assert_eq!(
+            count(reg, "decision", ""),
+            decisions,
+            "{name}: nothing staged"
+        );
+        for (stack, value, kind) in [
+            (ids[0], "spine", "person"),
+            (ids[1], "spine", "person"),
+            (ids[3], "spine", "agent"),
+        ] {
+            assert_eq!(
+                in_force(reg, stack),
+                (Some(value.to_string()), kind.to_string()),
+                "{name}: stack {stack}"
+            );
+        }
+        assert_eq!(
+            done.to_json()["disagreements"][0]["item"],
+            dis.item,
+            "{name}"
+        );
+
+        // a newer run that still disagrees refreshes the one item
+        let again = proposals::ingest(reg, &run(2), &[proposal(ids[0], "brain", 0.97, m.id)], None)
+            .unwrap();
+        assert_eq!(again.disagreements.len(), 1, "{name}");
+        assert!(again.disagreements[0].refreshed, "{name}");
+        assert_eq!(again.disagreements[0].item, dis.item, "{name}");
+        assert_eq!(
+            count(reg, "review_item", open),
+            1,
+            "{name}: one open item per stack"
+        );
+        let item = review::item(reg.store(), dis.item).unwrap().unwrap();
+        assert_eq!(item.evidence["run_id"], 2, "{name}");
+        assert_eq!(item.evidence["confidence"], 0.97, "{name}");
+
+        // a newer run that agrees closes it as superseded
+        let agrees =
+            proposals::ingest(reg, &run(3), &[proposal(ids[0], "spine", 0.9, m.id)], None).unwrap();
+        assert!(agrees.disagreements.is_empty(), "{name}");
+        assert_eq!(agrees.agreed_again, 1, "{name}");
+        assert_eq!(count(reg, "review_item", open), 0, "{name}");
+        assert_eq!(
+            count(reg, "decision", ""),
+            decisions,
+            "{name}: still nothing staged"
+        );
+        assert_eq!(
+            in_force(reg, ids[0]),
+            (Some("spine".to_string()), "person".to_string()),
+            "{name}"
+        );
+
+        // a question a campaign asks is left to it: a newer run that still
+        // disagrees raises none beside it, and one that agrees leaves it open
+        let raised =
+            proposals::ingest(reg, &run(4), &[proposal(ids[0], "brain", 0.95, m.id)], None)
+                .unwrap();
+        assert_eq!(raised.disagreements.len(), 1, "{name}");
+        assert!(!raised.disagreements[0].refreshed, "{name}");
+        let held = raised.disagreements[0].item;
+        let campaign = row(
+            reg.store(),
+            "campaign",
+            &[
+                ("name", Param::from("asks")),
+                ("status", Param::from("open")),
+            ],
+        );
+        row(
+            reg.store(),
+            "campaign_item",
+            &[
+                ("campaign_id", Param::Int(campaign)),
+                ("review_item_id", Param::Int(held)),
+                ("state", Param::from("open")),
+            ],
+        );
+        let beside =
+            proposals::ingest(reg, &run(5), &[proposal(ids[0], "brain", 0.97, m.id)], None)
+                .unwrap();
+        assert!(
+            beside.disagreements.is_empty(),
+            "{name}: {:?}",
+            beside.disagreements
+        );
+        assert_eq!(
+            count(reg, "review_item", open),
+            1,
+            "{name}: none beside the campaign's"
+        );
+        let item = review::item(reg.store(), held).unwrap().unwrap();
+        assert_eq!(
+            item.evidence["run_id"], 4,
+            "{name}: the campaign's question is not rewritten"
+        );
+        let agreed =
+            proposals::ingest(reg, &run(6), &[proposal(ids[0], "spine", 0.9, m.id)], None).unwrap();
+        assert_eq!(agreed.agreed_again, 0, "{name}");
+        assert_eq!(
+            count(reg, "review_item", open),
+            1,
+            "{name}: left to the campaign"
+        );
+    }
+}
