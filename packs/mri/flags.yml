@@ -836,8 +836,11 @@ flags:
       - {not: is_psif}
       - {not: image_type.is_posdisp}
       - {field: echo_time, ge: 8}
-      # MRI pack 0.20.0: and Philips' `optT2` (dev-5's A5).
-      - {text: search_text, matches: '(^|[^a-z0-9]|opt)t2w?([^a-z0-9*]|$)'}
+      - any:
+          - {text: search_text, matches: '(^|[^a-z0-9])t2w?([^a-z0-9*]|$)'}
+          # MRI pack 0.20.0: and Philips' `optT2` (dev-5's A5), read from
+          # the series' own words, never GE's exam-level ProtocolName.
+          - {text: technique_text, matches: 'optt2w?([^a-z0-9*]|$)'}
       - {not: {text: search_text, matches: 't2\*|t2star|t2 star'}}
 
   # --- diffusion: the tensor's outputs against a plain DWI's. Nima's ruling 7
@@ -1284,7 +1287,13 @@ flags:
   smart_survey: {text: search_text, matches: 'smartbrain|smart brain|smartexam'}
   # A spectroscopy acquisition (GE `PROBE-SV`, `PROBE-P`, a CSI): no image
   # contrast at all (dev-2: a GE PROBE left with an empty base, settled none).
-  is_spectroscopy: {text: search_text, matches: '(^|[^a-z])(probe\s*-?\s*(sv|p|s|press|steam)?|spectroscopy|svs|csi|mrs|mrsi)([^a-z]|$)|(single|singel|singe) ?voxel'}
+  # MRI pack 0.20.0: and a series named MRS, MRSI or single voxel (dev-5's
+  # A1), read from the series' own words: the flag leaves the base empty, so
+  # GE's exam-level ProtocolName must never carry it to every series.
+  is_spectroscopy:
+    any:
+      - {text: search_text, matches: '(^|[^a-z])(probe\s*-?\s*(sv|p|s|press|steam)?|spectroscopy|svs|csi)([^a-z]|$)'}
+      - {text: technique_text, matches: '(^|[^a-z])(mrs|mrsi)([^a-z]|$)|(single|singel|singe) ?voxel'}
   # A GE SWI image as the scanner acquired it: GE names its computed outputs
   # with a prefix (`SWI:`, `SWIphase:`, `mIP:`), and an `Ax SWI 3D...` written
   # ORIGINAL with none is the magnitude (dev-2: three read as the SWI image).
@@ -2384,7 +2393,8 @@ flags:
 
   # --- A10: a Philips survey named in Swedish, `ÖSIKT` (översikt), which
   # the normalizer spells `sikt`.
-  survey_swedish: {text: search_text, matches: '(^|[^a-z])sikt([^a-z]|$)'}
+  # Read from the series' own words, never GE's exam-level ProtocolName.
+  survey_swedish: {text: technique_text, matches: '(^|[^a-z])sikt([^a-z]|$)'}
 
   # --- A11: GE Inhance 3D Velocity, named so, is a phase contrast whatever
   # `IFLOW_GEMS` says; Inhance with no velocity word stays inflow (TOF). Its

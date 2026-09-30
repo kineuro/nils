@@ -744,6 +744,25 @@ cases:
       technique: MRS
       base: ''
 
+  - name: a GE series in an exam whose protocol says MRS is no spectroscopy
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 FSE'
+      text_protocol_name: 'Tumour MRS single voxel'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 16
+      flip_angle: 90
+    flags:
+      is_spectroscopy: false
+    axes:
+      base: T2w
+
   # --- A2 and A3: a Siemens Dixon or in/opposed-phase FLASH with no Dixon
   # token, by its name and its echo time at its field
 
@@ -914,6 +933,21 @@ cases:
       technique: GRE
       base: T2*w
 
+  - name: a GE gradient echo in an exam whose protocol says optT2 is not T2*w by it
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax GRE'
+      text_protocol_name: 'MS optT2'
+      repetition_time: 250
+      echo_time: 10
+      flip_angle: 70
+    flags:
+      is_t2_named_gre: false
+
   # --- A6: GE research mode
 
   - name: a GE research-mode spin echo with a train of 24 and no flip written is TSE
@@ -1053,6 +1087,27 @@ cases:
       n_instances: 9
     axes:
       provenance: Localizer
+
+  - name: a GE series in an exam whose protocol says ÖSIKT is no localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 FSE'
+      text_protocol_name: 'ÖSIKT HJÄRNA'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 16
+      flip_angle: 90
+      n_slices: 24
+      n_instances: 24
+    flags:
+      survey_swedish: false
+    axes:
+      provenance: RawRecon
 
   # --- A11: GE Inhance 3D Velocity
 
