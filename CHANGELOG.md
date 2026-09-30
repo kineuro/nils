@@ -4,9 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- segcsvd is a starter (record 49 R1's fourth analysis): white-matter hyperintensities on each session's FLAIR and enlarged perivascular spaces on its T1w, a mask and a probability map for each and their volumes in mm3 as a table, from the session's SynthSeg label map. The image is segcsvd rc03 as its authors publish it on Hugging Face (GPL-3.0), pinned by the digest of a public registry copy whose layers are that archive's.
+
 ### Changed
 
 - The MRI pack is 0.16.0. It fixes the rule errors of a fourth development reference. A Siemens BLADE named only by its sequence stem (`*tseB`) and GE's `PROPks` are Radial. A derived image of a 3D acquisition named for another plane than its protocol is a reformat (ProjectionDerived, MPR). A dual-echo spin echo that only its name calls FLAIR, with no inversion in its header, is a TSE whose echo decides its base. A Siemens acquired diffusion image takes no ADC from a protocol named for its ADC map. GE IDEAL's `OutPhase:` output is OutPhase. Stacks need a reclassify.
+- A pipeline's `derivative:<kind>` input also takes the derivatives of the selection's sessions and subjects, which a run of the bids layout registers, beside those of its stacks. One bids run now reads what an earlier one made, as segcsvd reads SynthSeg's label maps.
+- The SynthSeg starter's memory need is 24 GB, up from 12: robust SynthSeg on a 1 mm T1w was killed under a 12 GB container cap, and the unit was still counted as succeeded without its label map.
 
 ## [1.0.0-alpha.62] - 2026-09-30
 

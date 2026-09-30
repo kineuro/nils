@@ -13,7 +13,8 @@
 # manifest digest, resolved 2026-09-24 by a registry manifest request, not
 # pulled. mri_synthseg runs on the CPU here (--cpu); whether FreeSurfer's
 # mri_synthseg reads the licence file was not checked, and this descriptor
-# declares none.
+# declares none. Robust SynthSeg on a 1 mm 256x228x256 T1w was killed
+# under a 12 GB container cap and finished under 24 GB, so the need is 24.
 name: synthseg
 schema-version: "0.5"
 tool-version: "freesurfer-8.2.0"
@@ -124,5 +125,5 @@ x-nils:
     cores-input: threads
     gpu: none
     cores: 4
-    memory-gb: 12
+    memory-gb: 24
     unit-minutes: 5

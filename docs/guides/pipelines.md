@@ -75,7 +75,7 @@ A unit starts only when the cores and memory its descriptor declares (`x-nils.ne
 
 ## Use the starter catalog
 
-The engine seeds the first analyses of record 49 into its catalog each time it starts, when they are not there: N4, SynthStrip, SynthSeg, SAMSEG with lesions, MRIQC and FreeSurfer recon-all. Each is marked as a starter, and each image is pinned by its registry manifest digest. Each runs its sessions apart (`x-nils.units: apart`), a container a session, so the lane runs as many at once as its budget holds.
+The engine seeds the first analyses of record 49 into its catalog each time it starts, when they are not there: N4, SynthStrip, SynthSeg, SAMSEG with lesions, segcsvd, MRIQC and FreeSurfer recon-all. Each is marked as a starter, and each image is pinned by its registry manifest digest. Each runs its sessions apart (`x-nils.units: apart`), a container a session, so the lane runs as many at once as its budget holds.
 
 1. See what the catalog holds of each:
 
@@ -100,7 +100,7 @@ A version a person added is never gone over, and a starter a person retired stay
 
 > **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
 
-> **Warning:** segcsvd, record 49's fourth analysis, is not a starter: it ships only as an image archive on Hugging Face, with no public registry image to pin by digest.
+> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first; a run of segcsvd without one is refused. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone.
 
 ## Add a pipeline
 

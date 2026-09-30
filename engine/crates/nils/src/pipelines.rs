@@ -5403,7 +5403,9 @@ fn bind_folder(root: &str, path: &str) -> Option<String> {
 
 /// The live derivatives of the working place each derivative input of a
 /// descriptor takes, over the selection's stacks, read a few hundred
-/// stacks at a time.
+/// stacks at a time; and those of the selection's sessions and subjects,
+/// which a run of the bids layout registers, so one such run takes what
+/// an earlier one made (SynthSeg's label map for segcsvd).
 fn derivative_inputs(
     store: &mut Store,
     d: &Descriptor,
@@ -5411,6 +5413,18 @@ fn derivative_inputs(
     places: &[&nils_registry::place::Place],
 ) -> Result<BTreeMap<String, Vec<derivative::Derivative>>, String> {
     let mut out: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
+    let wanted = d.inputs.iter().any(|t| t.ty.starts_with("derivative:"));
+    let sessions = if wanted {
+        sessions_of(store, stacks)?
+    } else {
+        Default::default()
+    };
+    let subjects: Vec<i64> = sessions
+        .iter()
+        .map(|(s, _)| *s)
+        .collect::<std::collections::BTreeSet<i64>>()
+        .into_iter()
+        .collect();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
         let mut rows = Vec::new();
@@ -5418,8 +5432,56 @@ fn derivative_inputs(
             rows.extend(
                 derivative::of_stacks(store, kind, stacks, pl.id).map_err(|e| e.to_string())?,
             );
+            for r in
+                derivative::of_subjects(store, kind, &subjects, pl.id).map_err(|e| e.to_string())?
+            {
+                let ours = match (r.scope.as_str(), r.subject_id, &r.session_day) {
+                    ("subject", Some(_), _) => true,
+                    ("session", Some(s), Some(day)) => sessions.contains(&(s, day.clone())),
+                    _ => false,
+                };
+                if ours {
+                    rows.push(r);
+                }
+            }
         }
         out.insert(t.id.clone(), rows);
+    }
+    Ok(out)
+}
+
+/// The sessions of these stacks, each as its subject and its day, the day
+/// a run of the bids layout names a session's derivatives by.
+fn sessions_of(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<std::collections::BTreeSet<(i64, String)>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let labels = nils_session::labels_by_study(store, &nils_registry::session::Scheme::default())
+        .unwrap_or_default();
+    let mut out = std::collections::BTreeSet::new();
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT se.subject_id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
+             WHERE st.id IN ({list})",
+            store.qualified("stack"),
+            store.qualified("series"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let (Some(subject), Some(study)) =
+                (r.opt_int(0).map_err(err)?, r.opt_int(1).map_err(err)?)
+            else {
+                continue;
+            };
+            if let Some(l) = labels.get(&study) {
+                out.insert((subject, l.first.to_string()));
+            }
+        }
     }
     Ok(out)
 }

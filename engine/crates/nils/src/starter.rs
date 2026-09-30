@@ -11,9 +11,6 @@
 //! person added, or a starter a person retired, is never gone over. Each
 //! seeded version says `origin: starter`. The setting `pipeline_starter`
 //! (`nils pipeline starter --off`) turns the seeding off.
-//!
-//! segcsvd, R1's fourth analysis, is not here: it ships only as an image
-//! archive on Hugging Face, with no public registry image to pin by digest.
 
 use nils_pipeline::descriptor;
 use nils_registry::Registry;
@@ -21,7 +18,7 @@ use nils_registry::pipeline::{self as rows, STARTER};
 use serde_json::{Value, json};
 
 /// The starter descriptors, in R1's order.
-pub(crate) const CATALOG: [(&str, &str); 6] = [
+pub(crate) const CATALOG: [(&str, &str); 7] = [
     (
         "n4-bias-correction",
         include_str!("../../../../pipelines/n4-bias-correction/nils.job.yml"),
@@ -37,6 +34,10 @@ pub(crate) const CATALOG: [(&str, &str); 6] = [
     (
         "samseg-lesions",
         include_str!("../../../../pipelines/samseg-lesions/nils.job.yml"),
+    ),
+    (
+        "segcsvd",
+        include_str!("../../../../pipelines/segcsvd/nils.job.yml"),
     ),
     (
         "mriqc",
