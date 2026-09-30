@@ -137,9 +137,13 @@ parsers:
       is_resampled:   {any: [{token: RESAMPLED}, {substring: 'CSA RESAMPLED'}]}
       is_mean:        {token: MEAN}
       is_sum:         {token: MSUM}
+      # MRI pack 0.18.0: without GE's `MAVRIC_COMPOSITE`. The MAVRIC SL
+      # composite is the sum of squares over the spectral bins of one
+      # acquisition, its standard output and no stitching of stations: no
+      # construct (the 2026-09-30 deep research, case 3, high confidence; the
+      # archive holds 5 such stacks, all stored Composed by pack 0.15).
       is_composite:   {any_token: [MULTIECHOCOMBINED, COMP_AD, COMP_SP, COMP_AN,
-                                   COMP_AD_N, COMP_MIP, COMPOSED, COMPOSITE,
-                                   MAVRIC_COMPOSITE]}
+                                   COMP_AD_N, COMP_MIP, COMPOSED, COMPOSITE]}
       is_mpr:         {any_token: [MPR, REFORMATTED]}
       # MRI pack 0.13.0: a thick-slab average, as a PACS workstation writes
       # its reformats (`DERIVED\SECONDARY\AXIAL\AVERAGE`).
@@ -183,7 +187,14 @@ parsers:
       hint_gre: {any_token: [M_FFE, SW_M_FFE, SW_P_FFE]}
       hint_se:  {token: M_SE}
       hint_ir:  {token: M_IR}
-      hint_pca: {token: M_PCA}
+      # MRI pack 0.18.0: and Philips' `PCA` token itself, which its phase
+      # contrast projections carry without `M_PCA`
+      # (`ORIGINAL\PRIMARY\M\PCA\IMAG\PROJECTION IMAGE`: 14 of the 22 Philips
+      # PCA stacks on the archive, all stored SP-GRE by pack 0.15; the deep
+      # research, case 19).
+      hint_pca: {any_token: [M_PCA, PCA]}
+      # MRI pack 0.18.0: a scout by its image type (GE `SCOUT`).
+      is_scout: {token: SCOUT}
 
       # --- synthetic markers ---
       is_synthetic:       {any: [{token: SYNTHETIC}, {substring: SYNTHETIC}]}
@@ -203,6 +214,10 @@ parsers:
 
       # --- QA / other ---
       is_qa:         {any_token: [CTH, COV, STDDEV_COR, STDDEV_SAG, STDDEV_TRA]}
+      # MRI pack 0.18.0: Siemens' standard deviation projection through a
+      # volume (`STDDEV_COR`, `STDDEV_SAG`, `STDDEV_TRA`, on a TOF): a
+      # projection, so ProjectionDerived (the deep research, case 35).
+      has_stddev:    {any_token: [STDDEV_COR, STDDEV_SAG, STDDEV_TRA]}
       # A t test map is a statistic over a series, not an image of the
       # person: 357 stacks, and the thing that tells 209 colliding names
       # apart.

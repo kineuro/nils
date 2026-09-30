@@ -65,7 +65,7 @@ rules:
 
   t1_map:
     clauses:
-      - {flag: has_qmap_t1, tier: exclusive}
+      - {flag: qmap_t1_stated, tier: exclusive}
       # A derived map with no QMAP prefix: v0 reaches into the token set here.
       - when:
           all:
@@ -83,7 +83,7 @@ rules:
 
   t2_map:
     clauses:
-      - {flag: has_qmap_t2, tier: exclusive}
+      - {flag: qmap_t2_stated, tier: exclusive}
       # A derived map with no QMAP prefix: v0 reaches into the token set here.
       - when:
           all:
@@ -101,7 +101,7 @@ rules:
 
   pd_map:
     clauses:
-      - {flag: has_qmap_pd, tier: exclusive}
+      - {flag: qmap_pd_stated, tier: exclusive}
       # A derived map with no QMAP prefix: v0 reaches into the token set here.
       - when:
           all:

@@ -653,6 +653,9 @@ cases:
     axes:
       technique: TurboFLASH
 
+  # MRI pack 0.18.0: record 48, "Rulings after the re-adjudication" (Nima,
+  # 2026-09-30): this pattern, `SS\SK` with FAST_GEMS and not spoiled, is
+  # SS-GRE. It stays no fast spoiled GRE.
   - name: a GE steady-state FGRE with FAST_GEMS and no spoiling is no fast spoiled GRE
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
@@ -666,7 +669,7 @@ cases:
       echo_time: 1.4
       flip_angle: 30
     axes:
-      technique: GRE
+      technique: FISP
 
   - name: a Siemens 3D inflow angiography named ANGIO is a TOF
     stack:

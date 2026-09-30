@@ -17,6 +17,7 @@ order:
   - 'construct:inversion'
   - 'construct:phase'
   - 'flag:spectroscopy'
+  - 'construct:b1map'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -28,6 +29,7 @@ order:
   - 'bold:gre_epi'
   - 'construct:m0'
   - 'technique:ASL'
+  - 'perfusion:single_volume'
   - 'technique:Perfusion-EPI'
   - 'technique:DCE'
   - 'balanced:low_flip_2d'
@@ -58,12 +60,14 @@ order:
   - 'dual_echo:t2'
   - 'dual_echo:short_echo'
   - 'dual_echo:long_echo'
+  - 'keywords:mrcp'
   - 'keywords:DWI'
   - 'keywords:PWI'
   - 'keywords:SWI'
   - 'keywords:T1rho'
   - 'keywords:T2rho'
   - 'keywords:T2starw'
+  - 'technique:GRE-EPI'
   - 'gre:t2_named'
   - 'keywords:T2w'
   - 'keywords:PDw'
@@ -75,6 +79,7 @@ order:
   - 'physics:se_t1w'
   - 'physics:se_t2w'
   - 'physics:se_pdw'
+  - 'physics:se_long_te'
   - 'physics:gre_t2starw_long_tr'
   - 'physics:gre_pdw'
   - 'physics:gre_t1w'
@@ -135,6 +140,16 @@ rules:
     why: 'a spectroscopy acquisition has no base contrast'
 
   # 3D inversion-prepared rapid gradient echo [MQ6, B1, P11, S8]
+  # MRI pack 0.18.0: a B1 (flip angle) map is a map of the transmit field,
+  # with no contrast weighting, as the SyMRI route already says of its own
+  # (sealed-1 A17: a B1 map read as DWI).
+  'construct:b1map':
+    clauses:
+      - {when: {axis: construct, is: B1map}, cite: 'a B1 map', source: construct}
+    set: {base: null}
+    confidence: 0.9
+    why: 'a B1 (flip angle) map measures the transmit field and has no base contrast'
+
   'technique:MPRAGE':
     clauses:
       - {when: {axis: technique, is: 'MPRAGE'}, cite: 'MPRAGE', source: technique}
@@ -252,6 +267,16 @@ rules:
 
   # DSC, DCE and ASL are the three perfusion-weighted techniques [RP2, MQ2,
   # D3, P2]
+  # MRI pack 0.18.0: a DSC image of one volume, written ORIGINAL, is a single
+  # gradient-echo EPI and T2*-weighted; perfusion weighting needs the bolus
+  # (the deep research, case 8; flags.yml, `single_volume_dsc`).
+  'perfusion:single_volume':
+    clauses:
+      - {when: {all: [{axis: technique, is: 'Perfusion-EPI'}, single_volume_dsc]}, cite: 'one volume of a DSC EPI', source: technique}
+    set: {base: 'T2starw'}
+    confidence: 0.8
+    why: 'one volume of a gradient-echo EPI carries no bolus: it is T2*-weighted'
+
   'technique:Perfusion-EPI':
     clauses:
       - {when: {axis: technique, is: 'Perfusion-EPI'}, cite: 'Perfusion-EPI', source: technique}
@@ -475,6 +500,14 @@ rules:
     confidence: 0.8
 
   # Tier 5. Keywords, in the axis's own priority order.
+  # MRI pack 0.18.0: MR cholangiopancreatography is heavily T2-weighted,
+  # whatever its repetition time (sealed-1 A7: its base was left empty).
+  'keywords:mrcp':
+    clauses:
+      - {flag: mrcp_named, tier: keywords}
+    set: {base: 'T2w'}
+    why: 'MRCP is a heavily T2-weighted fluid image'
+
   'keywords:DWI':
     clauses:
       - {keywords: ['dwi', 'diffusion', 'dti', 'diff ', 'hardi'], tier: keywords}
@@ -508,6 +541,16 @@ rules:
   # MRI pack 0.11.0: a gradient echo named T2 is T2*-weighted [P8, MQ8]:
   # `t2_fl2d_tra_hemo`, a FLASH of TE 26 ms, was T2w by its word on the
   # 2026-09-28 re-measure. Before the T2w words, which would take it.
+  # MRI pack 0.18.0: a gradient-echo EPI that no earlier rule placed (not a
+  # diffusion, perfusion, BOLD or SWI series) is T2*-weighted, unless its
+  # words say T1 (GE's SPGR-EPI, case 32) (sealed-1 A7).
+  'technique:GRE-EPI':
+    clauses:
+      - {when: {all: [{axis: technique, is: 'GRE-EPI'}, {not: {text: search_text, matches: '(^|[^a-z0-9])t1'}}]}, cite: 'GRE-EPI', source: technique}
+    set: {base: 'T2starw'}
+    confidence: 0.8
+    why: 'a gradient-echo EPI is T2*-weighted'
+
   'gre:t2_named':
     clauses:
       - {flag: is_t2_named_gre, tier: keywords}
@@ -599,6 +642,16 @@ rules:
   # 900 ms, flip 20 to 25 degrees and TE 15 to 30 ms (dev-3: two GE `Ax GRE`
   # at TE 15 ms, flip 20, TR 500, left empty between the two windows and
   # settled T2*w; the window below starts above 15 ms) [P8, MQ8].
+  # MRI pack 0.18.0: a spin echo with an echo time of 80 ms or more is
+  # T2-weighted at any repetition time: a fast-recovery or respiratory-
+  # triggered one states a short TR (sealed-1 A7: a 3D fast-recovery FSE
+  # left without a base).
+  'physics:se_long_te':
+    clauses:
+      - {when: {all: [has_se, {not: has_epi}, {field: echo_time, ge: 80}]}, cite: 'an echo time of 80 ms or more', source: physics, tier: physics}
+    set: {base: 'T2w'}
+    confidence: 0.7
+
   'physics:gre_t2starw_long_tr':
     clauses:
       - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: repetition_time, ge: 200}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 30}, {field: echo_time, ge: 12}]}, cite: 'a flip of 30 degrees or less at a repetition time of 200 ms or more, and an echo time of 12 ms or more', source: physics, tier: physics}

@@ -51,9 +51,13 @@ rules:
             - {not: {text: search_text, matches: '\bt1(?:w|flair|\s|$|-)'}}
             - any:
                 - {text: search_text, any_substring: [ssfse, 'ss-fse', haste, 'single shot fse', 'single-shot fse']}
+                # MRI pack 0.18.0: never an EPIMix by its name or pulse
+                # sequence, whose T2-FLAIR is a spin-echo EPI (sealed-1
+                # A10, the deep research, case 12).
                 - all:
                     - {text: search_text, any_substring: [neuromix, mix2, mix3]}
                     - {not: {text: search_text, substring: epi}}
+                    - {not: epimix_not_neuromix}
         cite: 't2 flair on a single-shot readout'
         source: text
         tier: keywords
@@ -83,13 +87,18 @@ rules:
   adc:
     clauses:
       - {when: {any: [{text: search_text, substring: ' adc'}, {text: search_text, substring: 'adc '}, {text: search_text, prefix: adc}]}, cite: adc, source: text, tier: keywords}
-    set: {base: DWI, construct: [ADC], technique: 'SE-EPI', directory_type: dwi}
+    # MRI pack 0.18.0: the diffusion outputs are DWI-EPI (the deep research,
+    # case 12; sealed-1 A10: the route gave the b0 DWI-EPI and these SE-EPI).
+    set: {base: DWI, construct: [ADC], technique: 'DWI-EPI', directory_type: dwi}
     confidence: 0.9
 
   iso_dwi:
     clauses:
       - {keywords: ['iso dwi', isodwi], tier: keywords}
-    set: {base: DWI, construct: [isoDWI], technique: 'SE-EPI', directory_type: dwi}
+    # MRI pack 0.18.0: Trace, the one value for the isotropic image (Nima's
+    # ruling D9, 2026-09-29; the construct axis's Trace is "the same image as
+    # isoDWI"), where the deep research, case 25, had isoDWI.
+    set: {base: DWI, construct: [Trace], technique: 'DWI-EPI', directory_type: dwi}
     confidence: 0.9
 
   t2star:

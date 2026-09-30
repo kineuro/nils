@@ -72,7 +72,9 @@ values:
   # is named for the ADC map it also makes (flags.yml, dev-4 H4).
   ADC:
     terms: ['apparent diffusion coefficient', 'ADC map']
-    requires: {all: [{not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}]}
+    # MRI pack 0.18.0: nor any acquired diffusion image whose protocol, not
+    # its own name, says ADC (sealed-1 A11).
+    requires: {all: [{not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}, {not: adc_only_in_protocol}]}
     keywords:
       - adc
       - apparent diffusion coefficient
@@ -86,9 +88,10 @@ values:
       - exp adc
       - exponential adc
     # MRI pack 0.13.0: or GE's `Exp attenuation` [MQ4].
+    # MRI pack 0.18.0: or Siemens' `EXP` token (the deep research, case 30).
     detection:
       exclusive: has_eadc
-      combination: [eadc_named]
+      combination: [eadc_stated]
   FA:
     terms: ['fractional anisotropy', 'FA map', 'color FA', 'colFA']
     keywords:
@@ -239,7 +242,7 @@ values:
       - t1 mapping
     detection:
       exclusive: has_t1_map
-      combination: [has_qmap_t1]
+      combination: [qmap_t1_stated]
   T2map:
     terms: ['T2 map', 'T2 mapping', 'T2 relaxometry']
     group: QUANT_MAP
@@ -251,7 +254,7 @@ values:
       - t2 mapping
     detection:
       exclusive: has_t2_map
-      combination: [has_qmap_t2]
+      combination: [qmap_t2_stated]
   R1map:
     terms: ['R1 map']
     group: QUANT_MAP
@@ -280,7 +283,7 @@ values:
       - proton density map
     detection:
       exclusive: has_pd_map
-      combination: [has_qmap_pd]
+      combination: [qmap_pd_stated]
   # A file that says it is a quantitative map and not of what. Last of the
   # group, so it is what is left when no quantity was named.
   Qmap:
@@ -319,8 +322,11 @@ values:
       - synt pd
     detection:
       exclusive: has_pd_synthetic
+  # MRI pack 0.18.0: only on a computed image: a clinical word on an
+  # acquired one is no map (sealed-1 A11).
   MyelinMap:
     terms: ['myelin water fraction', 'MWF', 'myelin map', 'MyC']
+    requires: {any: [has_myelin, is_derived, is_synthetic]}
     keywords:
       - myelin map
       - myelin
@@ -340,7 +346,9 @@ values:
   # keyword `mip` (dev-1: three SWI minIPs were MIP and MinIP).
   MIP:
     terms: ['maximum intensity projection', 'MIP']
-    requires: {not: is_minip}
+    # MRI pack 0.18.0: nor a slice whose protocol, not its own name, says
+    # MIP (sealed-1 A11).
+    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}]}
     keywords:
       - mip
       - maximum intensity projection
@@ -375,11 +383,14 @@ values:
   SBRef:
     terms: ['single-band reference', 'SBRef', 'single band reference']
     description: 'the single-band reference image of a multiband EPI run (BIDS sbref)'
-    requires: is_sbref
+    # MRI pack 0.18.0: or a diffusion run's SBRef (flags.yml,
+    # `diffusion_sbref`; the deep research, case 6).
+    requires: {any: [is_sbref, diffusion_sbref]}
     keywords:
       - sbref
     detection:
       exclusive: is_sbref_numbered
+      combination: [diffusion_sbref]
   FieldmapRef:
     terms: ['reverse phase-encoding EPI', 'blip-up blip-down', 'pepolar', 'TOPUP reference', 'EPI field map']
     description: 'an EPI of a few volumes with the phase encoding reversed, for distortion correction (BIDS fmap epi)'
@@ -401,7 +412,8 @@ values:
   # is named (MRI pack 0.11.0).
   B0map:
     terms: ['B0 map', 'field map', 'fieldmap']
-    requires: {not: is_epi_fieldmap_ref}
+    # MRI pack 0.18.0: nor the magnitude echo of a field map (sealed-1 A11).
+    requires: {all: [{not: is_epi_fieldmap_ref}, {not: fieldmap_magnitude}]}
     keywords:
       - b0 map
       - b0map
@@ -448,7 +460,9 @@ values:
   # series' own image, and 249 of them were a t test map (record 41).
   TTestMap:
     terms: ['t-test map', 't map', 'statistical map']
-    requires: {not: is_asl}
+    # MRI pack 0.18.0: nor on any ASL output, the subtraction or a map, with
+    # or without the `ASL` token (flags.yml, `ttest_on_asl`; sealed-1 A20).
+    requires: {not: ttest_on_asl}
     detection:
       exclusive: is_ttest
   Magnitude:

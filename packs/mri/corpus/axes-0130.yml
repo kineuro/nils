@@ -508,7 +508,10 @@ cases:
 
   # --- filtered images
 
-  - name: an Elscint image enhanced by its filter is Filtered
+  # MRI pack 0.18.0: the deep research, case 10 (Nima, 2026-09-30: the
+  # conventions follow it): Elscint's `ENHANCED` is routine filtering, no
+  # construct.
+  - name: an Elscint image enhanced by its filter takes no construct
     stack:
       image_type: 'DERIVED\SECONDARY'
       scanning_sequence: SE
@@ -519,7 +522,7 @@ cases:
       text_series_description: 'CVE:STD9_enh_06.par/'
       text_sequence_name: 'SE'
     axes:
-      construct: Filtered
+      construct: ''
 
   - name: an Elscint image that names its filter file but is not enhanced is not Filtered
     stack:
@@ -691,6 +694,8 @@ cases:
 
   # --- the derived disposition of an isotropic image
 
+  # MRI pack 0.18.0: the EPIMix route writes Trace, the one value for the
+  # isotropic image (ruling D9), and DWI-EPI.
   - name: an EPIMix isoDWI is computed by the scanner, as a Trace is
     stack:
       image_type: 'DERIVED\PRIMARY\OTHER'
@@ -701,7 +706,8 @@ cases:
       image_role: derived
     axes:
       provenance: EPIMix
-      construct: isoDWI
+      technique: DWI-EPI
+      construct: Trace
       disposition: scanner_derived
 
   # --- Nima's rulings of 2026-09-29 (record 48) on three of dev-1's disputes
@@ -734,7 +740,11 @@ cases:
       technique: GRE
       construct: Phase
 
-  - name: a GE ASSET calibration is an acquired fast spoiled gradient echo, not a localizer
+  # MRI pack 0.18.0: record 48, "Rulings after the re-adjudication" (Nima,
+  # 2026-09-30), on this header shape (`SS\SK`, FAST_GEMS, not spoiled):
+  # SS-GRE, not the fast spoiled echo of the earlier group 6 ruling. It
+  # stays an acquired image and no localizer.
+  - name: a GE ASSET calibration is an acquired image, not a localizer, and its unspoiled fast echo SS-GRE
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: GR
@@ -747,7 +757,7 @@ cases:
       echo_time: 1.7
     axes:
       provenance: RawRecon
-      technique: TurboFLASH
+      technique: FISP
       # no role takes it: it is a scout, as a localizer is, whatever its base
       base: T1w
       disposition: scout

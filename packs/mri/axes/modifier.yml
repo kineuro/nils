@@ -43,7 +43,10 @@ values:
     priority: 1
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3).
-    requires: {not: flair_named_dual_echo}
+    # MRI pack 0.18.0: nor an inversion recovery whose short inversion time
+    # is far from the one that nulls CSF at its repetition time (flags.yml,
+    # `ir_far_from_csf_null`; the deep research, case 15).
+    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}]}
     keywords:
       - flair
       - t2 flair
@@ -112,8 +115,12 @@ values:
     requires: {not: {axis: technique, is: MDME}}
     keywords:
       - inversion recovery
+    # MRI pack 0.18.0: or an inversion recovery whose short inversion time
+    # is far from the CSF null (flags.yml, `ir_far_from_csf_null`; the deep
+    # research, case 15), which FLAIR no longer takes.
     detection:
       exclusive: has_ir_se
+      combination: [ir_far_from_csf_null]
   # PROPELLER is rotating blades, a hybrid rather than radial in the strict
   # sense [MQ16]; RADAR is Hitachi's [V1, V2, S8]
   Radial:
@@ -122,7 +129,9 @@ values:
     group: TRAJECTORY
     priority: 1
     # MRI pack 0.14.0: never a series of radial MIP views (flags.yml).
-    requires: {not: radial_views_named}
+    # MRI pack 0.18.0: nor a PROPELLER named only in GE's exam protocol
+    # (sealed-1 A11).
+    requires: {all: [{not: radial_views_named}, {not: ge_exam_only_propeller}]}
     keywords:
       - propeller
       - blade

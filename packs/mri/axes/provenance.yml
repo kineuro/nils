@@ -56,12 +56,19 @@ values:
       - neuromix
       - mix2
       - mix3
+    # MRI pack 0.18.0: or by GE's pulse sequence, `ksepimix*` or
+    # `ksneuromix*` (the deep research, case 12: every output is EPIMix).
+    detection:
+      combination: [epimix_psd]
   STAGE:
     terms: ['strategically acquired gradient echo']
     keywords:
       - stage
+  # MRI pack 0.18.0: never a DSC EPI, whatever its words say (flags.yml,
+  # `dsc_not_swi`; sealed-1 A2, the deep research, case 18).
   SWIRecon:
     terms: ['SWI reconstruction', 'SWAN', 'SWI']
+    requires: {not: dsc_not_swi}
     keywords:
       - swi
       - swan
@@ -119,9 +126,12 @@ values:
     # Nima's ruling (2026-09-28): a motion-corrected DSC run written DERIVED
     # is the scanner's (`DERIVED\PRIMARY\PERFUSION\DIS2D\MOCO` on 22 stacks
     # of the archive that came out RawRecon); written ORIGINAL it is not.
+    # MRI pack 0.18.0: or a DSC map named for what it is, and a derived
+    # motion-corrected DSC run without the `PERFUSION` token (flags.yml,
+    # `perfusion_recon_extra`; sealed-1 A1, the deep research, case 17).
     detection:
       exclusive: is_perfusion_derived
-      combination: [is_perfusion, is_derived_moco]
+      combination: [perfusion_recon_extra]
   # Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images are
   # RawRecon and what the scanner computed from them takes the product. An
   # ASL series as acquired is RawRecon; its CBF map, and the perfusion-weighted
@@ -160,7 +170,9 @@ values:
   Localizer:
     # MRI pack 0.13.0, Nima's ruling (2026-09-29): never a GE calibration
     # scan, which the words below would otherwise take (flags.yml).
-    requires: {not: ge_calibration}
+    # MRI pack 0.18.0: nor Philips' MobiView without a survey word, a
+    # composed image (sealed-1 A18, the deep research, case 28).
+    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}]}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer
@@ -193,7 +205,9 @@ values:
       - maximum intensity
       - minimum intensity
       - multiplanar reformat
-    alternative_flags: [is_mip, is_minip, is_mpr, is_projection]
+    # MRI pack 0.18.0: and Siemens' standard deviation projection, a minIP
+    # named so, and a radial thick-slab reformat (sealed-1 A14; case 35).
+    alternative_flags: [is_mip, is_minip, is_mpr, is_projection, projection_extra]
   SubtractionDerived:
     terms: ['subtraction', 'SUB', 'post minus pre']
     keywords:
@@ -201,6 +215,9 @@ values:
       - subtracted
       - difference
       - pre post
+    # MRI pack 0.18.0: or named SUB, a subtraction written ORIGINAL
+    # (sealed-1 A15).
     detection:
       exclusive: is_subtraction
+      combination: [sub_named]
   RawRecon: {terms: ['acquired', 'scanner reconstruction', 'original acquisition', 'raw']}
