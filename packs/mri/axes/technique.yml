@@ -521,15 +521,19 @@ values:
   # DRIVE is Philips' driven equilibrium TSE and Philips has no
   # dual-excitation bSSFP, so `3D DRIVE` is gone; PBSG is Hitachi's
   # [P48, V1, V2, M1].
+  # MRI pack 0.18.0: FIESTA-C by its name (flags.yml, `fiesta_c_named`; the
+  # deep research, case 13), and never Philips' balanced FFE, which a site's
+  # name "ciss" does not make phase cycled (case 5: bSSFP unless the header
+  # shows phase cycling, which no Philips field does).
   CISS:
     terms: ['CISS', 'FIESTA-C', 'PBSG', 'Phase Balanced SARGE']
     family: GRE
+    requires: {not: philips_balanced}
     keywords:
       - ciss
-      - fiesta-c
-      - fiesta c
     detection:
       exclusive: is_ciss
+      combination: [fiesta_c_named]
   bSSFP:
     terms: ['TrueFISP', 'FIESTA', 'balanced FFE', 'bFFE', 'True SSFP', 'balanced SSFP', 'trufi', 'BASG']  # BASG: Hitachi [V1, V2]
     label: FIESTA
@@ -630,9 +634,12 @@ values:
     # sequence without RF spoiling".
     # MRI pack 0.15.0: or GE's GRASS and MPGR, a steady-state gradient echo
     # at a repetition time no balanced one has (flags.yml, `ge_grass`).
+    # MRI pack 0.18.0: or GE's fast `SS\SK` echo with `FAST_GEMS`, not
+    # spoiled (record 48, "Rulings after the re-adjudication"; flags.yml,
+    # `ge_fast_ss`).
     detection:
       exclusive: is_fisp
-      combination: [ge_grass]
+      combination: [ge_steady_state_gre]
   GRE:
     terms: ['gradient echo', 'gradient recalled echo', 'field echo', 'FE']
     family: GRE

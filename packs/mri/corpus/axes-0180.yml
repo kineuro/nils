@@ -1,0 +1,1312 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.18.0: the rule bugs of the sealed-1 checkpoint (groups A1 to
+# A20) and the vendor conventions of the 2026-09-30 deep research (Part A,
+# cases 1 to 35), as Nima ruled them (record 48, "After the sealed
+# checkpoint" and "After dev-5's reading": the conventions follow the deep
+# research, except where the archive's counts or the vocabulary overrule
+# it). One or more cases for each change, and the cases that keep each
+# change from reaching what it must not. Every stack here is invented from
+# the pattern the design repository's files name; none is a real header.
+
+cases:
+
+  # --- A1, case 17: DSC maps and a derived motion-corrected DSC run
+
+  - name: a DSC rCBV map named by a third-party tool, with no map token, is PerfusionRecon and CBV
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'rCBV calculated with Lupe'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 20
+      n_slices: 20
+    axes:
+      provenance: PerfusionRecon
+      construct: 'CBV,ND'
+      base: PWI
+
+  - name: a leakage map named K2 is PerfusionRecon
+    stack:
+      image_type: 'DERIVED\SECONDARY'
+      scanning_sequence: EP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'K2 leakage [cSVD]'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 20
+      n_slices: 20
+    axes:
+      provenance: PerfusionRecon
+
+  - name: a Siemens percentage of baseline at peak map is PerfusionRecon
+    stack:
+      image_type: 'DERIVED\PRIMARY\PERFUSION\PBP\ND'
+      scanning_sequence: EP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf_PBP'
+      text_sequence_name: '*epfid2d1_128'
+    axes:
+      provenance: PerfusionRecon
+      technique: Perfusion
+
+  - name: a derived motion-corrected DSC run without the PERFUSION token is PerfusionRecon
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND\MOCO\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf_MoCo'
+      text_sequence_name: '*epfid2d1_128'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 50
+    axes:
+      provenance: PerfusionRecon
+      technique: Perfusion
+      modifier: MoCo
+
+  - name: an acquired DSC run named for the CBV it is computed for stays RawRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf rCBV'
+      text_sequence_name: '*epfid2d1_128'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 50
+    axes:
+      provenance: RawRecon
+      technique: Perfusion
+      base: PWI
+
+  # --- A2, case 18: a DSC EPI named for susceptibility is perfusion, never SWI
+
+  - name: a Siemens DSC EPI named for susceptibility is an acquired perfusion series, not SWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf susceptibility'
+      text_protocol_name: 'ep2d_perf susceptibility'
+      text_sequence_name: '*epfid2d1_128'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 50
+    axes:
+      provenance: RawRecon
+      technique: Perfusion
+      construct: ND
+      base: PWI
+
+  - name: a Siemens SWI on a gradient-echo EPI stays SWIRecon
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\SWI\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'SWI_Images'
+      text_sequence_name: '*epfid3d1_15'
+      repetition_time: 60
+      echo_time: 30
+    axes:
+      provenance: SWIRecon
+      base: SWI
+
+  # --- A3, case 19: Philips phase contrast by its PCA token
+
+  - name: a Philips phase-contrast projection written with PCA and no M_PCA is PC-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\PCA\IMAG\PROJECTION IMAGE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'PCA 3D venous'
+      repetition_time: 20
+      echo_time: 5
+      flip_angle: 15
+    axes:
+      technique: PC
+
+  - name: a Philips TOF projection without PCA is no phase contrast
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\FFE\PROJECTION IMAGE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'TOF 3D multi slab'
+      repetition_time: 23
+      echo_time: 3.5
+      flip_angle: 18
+    axes:
+      technique: TOF
+
+  # --- A4, case 20: Philips s3DI is an inflow (TOF) acquisition
+
+  - name: a Philips 3D inflow projection named s3DI is TOF
+    stack:
+      image_type: 'DERIVED\PRIMARY\PROJECTION IMAGE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'MIP s3DI_MC'
+      repetition_time: 25
+      echo_time: 3.5
+      flip_angle: 20
+    axes:
+      technique: TOF
+
+  # --- A5, case 21: Philips QMap phase images are MDME
+
+  - name: a Philips QMap phase image whose private technique says TSE is MDME, RawRecon and Phase
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\PHASE\MAP\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'QMap'
+      philips_scanning_technique: TSE
+      split_reason: multi_echo
+      stacks_in_series: 8
+      repetition_time: 4000
+      echo_time: 20
+      echo_train_length: 10
+      flip_angle: 90
+    axes:
+      provenance: RawRecon
+      technique: MDME
+      construct: Phase
+      base: ''
+
+  - name: a Philips T2 turbo spin echo split by echo and not named QMap is no MDME
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2 multi echo'
+      split_reason: multi_echo
+      stacks_in_series: 6
+      repetition_time: 3000
+      echo_time: 20
+      echo_train_length: 6
+      flip_angle: 90
+    axes:
+      technique: MESE
+
+  # --- A6, case 22: an enhanced object that states no ScanningSequence
+
+  - name: an enhanced 2D object with a train of 15 at 90 degrees and no ScanningSequence is a TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2W ax'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 15
+      flip_angle: 90
+    axes:
+      technique: TSE
+      base: T2w
+
+  - name: an enhanced 3D object with a train of 90 and no ScanningSequence is a 3D TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: '3D brain view'
+      repetition_time: 2500
+      echo_time: 250
+      echo_train_length: 90
+      flip_angle: 90
+    axes:
+      technique: SPACE
+
+  - name: an enhanced object at a low flip with no ScanningSequence is no spin echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: '3D T1 sag'
+      repetition_time: 8
+      echo_time: 4
+      echo_train_length: 200
+      flip_angle: 8
+    flags:
+      has_se: false
+
+  - name: an enhanced diffusion object with no ScanningSequence is no turbo spin echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'DWI b1000'
+      repetition_time: 4000
+      echo_time: 80
+      echo_train_length: 53
+      flip_angle: 90
+      diffusion_b_value: 1000
+    flags:
+      has_se: false
+    axes:
+      technique: DWI-EPI
+
+  # --- A7: a base the words and the echo time tell
+
+  - name: an MRCP is T2-weighted whatever its repetition time
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'MRCP thick slab'
+      repetition_time: 1
+      echo_time: 700
+    axes:
+      base: T2w
+
+  - name: a GE exam protocol named for a trial called MRC says nothing of MRCP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Cor T1'
+      text_protocol_name: 'MRC 100 trial'
+      repetition_time: 300
+      echo_time: 9
+      flip_angle: 90
+    axes:
+      base: T1w
+
+  - name: a 3D fast-recovery FSE at a short repetition time and a long echo is T2-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS\FR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sag 3D FRFSE'
+      repetition_time: 1500
+      echo_time: 100
+      echo_train_length: 40
+      flip_angle: 90
+    axes:
+      base: T2w
+
+  - name: a plain gradient-echo EPI is T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_fid_tra'
+      text_sequence_name: '*epfid2d1_64'
+      repetition_time: 3000
+      echo_time: 30
+      n_instances: 30
+      n_slices: 30
+    axes:
+      technique: GRE-EPI
+      base: T2*w
+
+  # --- A8, case 23: GE's MRF_GEMS alone is no fingerprinting
+
+  - name: a GE fast spin echo with MRF_GEMS and no fingerprinting word is a TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS\MRF_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 FSE'
+      ge_pulse_sequence_name: 'fse-xl'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 16
+      flip_angle: 90
+    axes:
+      technique: TSE
+
+  - name: a series named for fingerprinting is MRF
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      scan_options: 'MRF_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'MR fingerprinting brain'
+    axes:
+      technique: MRF
+
+  # --- A9, case 24: GE headers rewritten with numbers
+
+  - name: a GE DTI FA whose ScanOptions is a number and ScanningSequence says 2 is a DTI output
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: '2'
+      scan_options: '1140850688'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'FA'
+      repetition_time: 10000
+      echo_time: 80
+    axes:
+      provenance: DTIRecon
+      technique: DWI-EPI
+      construct: FA
+      base: DWI
+
+  - name: a GE DTI b0 whose ScanningSequence is written GE is a diffusion image, not a gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GE
+      scan_options: '1140852736'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'b0 DTI 25 dir'
+      repetition_time: 10000
+      echo_time: 80
+    flags:
+      has_gre: false
+    axes:
+      provenance: RawRecon
+      technique: DWI-EPI
+      base: DWI
+
+  - name: a GE header with ScanningSequence GE and named ScanOptions stays a gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GE
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax GRE'
+    flags:
+      has_gre: true
+
+  # --- A10, cases 12 and 25: the EPIMix route
+
+  - name: an EPIMix T2 FLAIR named mix2 is a spin-echo EPI, not a single-shot FSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\SE'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'T2FLAIR mix2'
+      ge_pulse_sequence_name: 'ksepimix2'
+      repetition_time: 8000
+      echo_time: 90
+      inversion_time: 2400
+    axes:
+      provenance: EPIMix
+      technique: SE-EPI
+      modifier: FLAIR
+      base: T2w
+
+  - name: a NeuroMix T2 FLAIR stays the single-shot FSE block
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'NeuroMix T2FLAIR'
+      ge_pulse_sequence_name: 'ksneuromix'
+      repetition_time: 8000
+      echo_time: 90
+      inversion_time: 2400
+    axes:
+      provenance: EPIMix
+      technique: HASTE
+
+  - name: an EPIMix ADC is a diffusion EPI's map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\SE'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'EPIMix ADC'
+    axes:
+      provenance: EPIMix
+      technique: DWI-EPI
+      construct: ADC
+      base: DWI
+
+  - name: an EPIMix output named by its pulse sequence alone is EPIMix
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\SE'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2'
+      ge_pulse_sequence_name: 'ksepimix'
+      repetition_time: 8000
+      echo_time: 90
+    axes:
+      provenance: EPIMix
+      technique: SE-EPI
+      base: T2w
+
+  # --- A11: names read as what they do not mean
+
+  - name: a GE PROPELLER named only in the exam protocol takes no Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 FSE'
+      text_protocol_name: 'Brain PROPELLER routine'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 16
+      flip_angle: 90
+    axes:
+      modifier: ''
+
+  - name: a GE PROPELLER named in its own series is Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 PROPELLER'
+      repetition_time: 4000
+      echo_time: 100
+      echo_train_length: 16
+      flip_angle: 90
+    axes:
+      modifier: Radial
+
+  - name: an acquired diffusion image whose protocol alone says ADC is no ADC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'DWI b1000'
+      text_protocol_name: 'DWI ADC SENSE'
+      diffusion_b_value: 1000
+      repetition_time: 4000
+      echo_time: 80
+      echo_train_length: 53
+    axes:
+      construct: ''
+
+  - name: slices whose protocol alone says MIP are no MIP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'tof_3d_multi-slab'
+      text_protocol_name: 'tof MIP'
+      text_sequence_name: '*fl3d3r_t70'
+      repetition_time: 22
+      echo_time: 3.6
+      flip_angle: 18
+    axes:
+      provenance: RawRecon
+      construct: ND
+
+  - name: the magnitude echo of a field map is no B0 map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'gre_field_mapping'
+      text_sequence_name: '*fm2d2r'
+      repetition_time: 500
+      echo_time: 4.92
+    axes:
+      construct: ND
+
+  - name: the phase difference of a field map stays a B0 map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'gre_field_mapping'
+      text_sequence_name: '*fm2d2r'
+      repetition_time: 500
+      echo_time: 7.38
+    axes:
+      construct: 'B0map,ND,Phase'
+
+  - name: a clinical word for myelin on an acquired image is no myelin map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra myelin'
+      text_sequence_name: '*tse2d1_15'
+      repetition_time: 5000
+      echo_time: 100
+    axes:
+      construct: ND
+
+  # --- A12: gradient echoes read as spin echoes or T2w
+
+  - name: an EPI named T2* is a gradient-echo EPI whatever ScanningSequence says
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\SE'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2* EPI'
+      repetition_time: 3000
+      echo_time: 40
+      n_instances: 30
+      n_slices: 30
+    axes:
+      technique: GRE-EPI
+      base: T2*w
+
+  - name: a gradient-echo EPI that states a b value is no diffusion
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_fid'
+      text_sequence_name: '*epfid2d1_64'
+      diffusion_b_value: 1000
+      repetition_time: 3000
+      echo_time: 30
+      n_instances: 30
+      n_slices: 30
+    axes:
+      technique: GRE-EPI
+      base: T2*w
+
+  - name: a Philips FFE named T2-weighted at an echo time of 10 ms is T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2W_FFE'
+      repetition_time: 600
+      echo_time: 10
+      flip_angle: 18
+    axes:
+      base: T2*w
+
+  # --- A13, case 26: GE FLEX is Dixon
+
+  - name: a GE LAVA-Flex water image with FLEX_GEMS is Dixon
+    stack:
+      image_type: 'DERIVED\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\FLEX_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'WATER: Ax 3D T1'
+      repetition_time: 4
+      echo_time: 1.7
+      flip_angle: 12
+    axes:
+      modifier: Dixon
+
+  # --- A14 and A15, cases 30 and 35: projections, reformats and computed images
+
+  - name: a Siemens standard deviation projection is ProjectionDerived
+    stack:
+      image_type: 'DERIVED\PRIMARY\STDDEV_COR\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'tof_3d_STDDEV_COR'
+      text_sequence_name: '*fl3d3r_t70'
+    axes:
+      provenance: ProjectionDerived
+
+  - name: a derived minimum projection named minIP is ProjectionDerived and MinIP
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\FFE'
+      scanning_sequence: GR
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SWIp minIP'
+      repetition_time: 31
+      echo_time: 7.2
+      flip_angle: 17
+    axes:
+      provenance: ProjectionDerived
+      construct: MinIP
+
+  - name: a radial thick-slab reformat is ProjectionDerived
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER'
+      scanning_sequence: SE
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'radial thick slab'
+    axes:
+      provenance: ProjectionDerived
+
+  - name: a subtraction written ORIGINAL and named SUB is SubtractionDerived
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_vibe_tra_SUB'
+      text_sequence_name: '*fl3d1'
+    axes:
+      provenance: SubtractionDerived
+
+  - name: a Philips composed spine image is Composed
+    stack:
+      image_type: 'DERIVED\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2 sag spine composed'
+    axes:
+      construct: Composed
+
+  - name: a Philips QMAP T2 map named so is a T2 map
+    stack:
+      image_type: 'DERIVED\PRIMARY\MAP'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'QMAP T2'
+    axes:
+      construct: T2map
+
+  - name: a Siemens RESOLVE EXP image is an exponential ADC
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIFFUSION\EXP'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'resolve_EXP'
+      text_sequence_name: '*re_b1000t'
+      diffusion_b_value: 1000
+    axes:
+      provenance: RawRecon
+      technique: RESOLVE
+      construct: eADC
+      base: DWI
+
+  - name: a Philips isotropic image of a named DTI by its private direction I is Trace and RawRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'DTI_high_iso'
+      philips_diffusion_direction: I
+      diffusion_b_value: 1000
+      repetition_time: 5000
+      echo_time: 80
+      echo_train_length: 53
+    axes:
+      provenance: RawRecon
+      technique: DWI-EPI
+      construct: Trace
+      base: DWI
+
+  - name: a Philips diffusion image of one direction is no Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'DTI_high_iso'
+      philips_diffusion_direction: A
+      diffusion_b_value: 1000
+      repetition_time: 5000
+      echo_time: 80
+      echo_train_length: 53
+    axes:
+      construct: ''
+
+  # --- A16, cases 7, 32 and 33, and the re-adjudication's ruling
+
+  - name: a GE SPGR-EPI is a gradient-echo EPI and T1-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: '3D T1 SPGR-EPI'
+      ge_pulse_sequence_name: ksepi
+      repetition_time: 20
+      echo_time: 6
+      flip_angle: 15
+    axes:
+      technique: GRE-EPI
+      base: T1w
+
+  - name: a GE TRICKS is a fast spoiled gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SS'
+      scan_options: 'FAST_GEMS\MP_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'TRICKS carotids'
+      repetition_time: 4
+      echo_time: 1.3
+      flip_angle: 30
+    axes:
+      technique: TurboFLASH
+
+  - name: a GE 2D gradient echo named SPGR with FAST_GEMS is a fast spoiled gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: SS
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T1 SPGR'
+      ge_pulse_sequence_name: fgre
+      repetition_time: 200
+      echo_time: 4
+      flip_angle: 70
+    axes:
+      technique: TurboFLASH
+
+  - name: a GE fast unspoiled gradient echo SS and SK with FAST_GEMS is SS-GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SS'
+      scan_options: 'FAST_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T1 FGRE'
+      repetition_time: 8
+      echo_time: 2
+      flip_angle: 30
+    axes:
+      technique: FISP
+
+  - name: a GE MEMP of one echo is a spin echo, not a multi-echo one
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T1 SE'
+      text_sequence_name: 'memp'
+      repetition_time: 500
+      echo_time: 10
+      echo_train_length: 1
+    axes:
+      technique: SE
+
+  # --- A17: a B1 map and a Philips diffusion b0
+
+  - name: a B1 map that states b=1 is no diffusion and has no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\FLIP ANGLE MAP\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'B1map'
+      text_sequence_name: '*tfl2d1_16'
+      diffusion_b_value: 1
+      repetition_time: 5000
+      echo_time: 2
+    axes:
+      technique: TurboFLASH
+      construct: 'B1map,ND'
+      base: ''
+
+  - name: a Philips diffusion b=0 image with no b0 in its name is a diffusion EPI by its private technique
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'Ax SSh'
+      philips_scanning_technique: DwiSE
+      diffusion_b_value: 0
+      repetition_time: 4000
+      echo_time: 80
+      echo_train_length: 53
+      pixel_bandwidth: 2000
+    axes:
+      technique: DWI-EPI
+      base: DWI
+
+  # --- A18, case 28: localizers
+
+  - name: a GE image typed SCOUT is a localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\SCOUT'
+      scanning_sequence: GR
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax plane'
+      repetition_time: 5
+      echo_time: 1.5
+    axes:
+      provenance: Localizer
+
+  - name: a Philips MobiView without a survey word is a composed image, not a localizer
+    stack:
+      image_type: 'DERIVED\SECONDARY\M_SE\M\SE'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2W_TSE mobiview'
+      split_reason: multi_orientation
+      n_slices: 3
+      repetition_time: 3000
+      echo_time: 100
+      echo_train_length: 20
+    axes:
+      provenance: RawRecon
+      construct: Composed
+
+  - name: a Philips MobiView survey stays a localizer
+    stack:
+      image_type: 'DERIVED\SECONDARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'Survey MobiView'
+    axes:
+      provenance: Localizer
+
+  # --- A19: a copy of a multi-echo SWI, and GE's Silent MRA
+
+  - name: an echo of a multi-echo SWI copied by a third party, written ORIGINAL, is an acquired echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      mr_acquisition_type: 3D
+      manufacturer: Cercare Medical
+      text_series_description: 'Ax SWAN'
+      split_reason: multi_echo
+      stacks_in_series: 8
+      repetition_time: 40
+      echo_time: 25
+      echo_train_length: 8
+      flip_angle: 15
+    axes:
+      provenance: RawRecon
+      base: T2*w
+
+  - name: a GE Silent MRA written with the ASL token is no ASL M0 scan
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL'
+      scanning_sequence: RM
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Silent MRA'
+      ge_pulse_sequence_name: Silenz
+      repetition_time: 400
+      echo_time: 0
+      flip_angle: 5
+    axes:
+      construct: ''
+
+  # --- A20, case 27: TTEST on an ASL output is no t-test map
+
+  - name: a Siemens ASL perfusion-weighted image with TTEST and no ASL token is no t-test map
+    stack:
+      image_type: 'DERIVED\PRIMARY\PERFUSION\ND\TTEST'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'perfusion_weighted'
+      text_sequence_name: '*epfid2d1_64'
+    flags:
+      ttest_on_asl: true
+
+  - name: a Siemens BOLD t-test map stays a t-test map
+    stack:
+      image_type: 'DERIVED\PRIMARY\T\TTEST\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_bold_moco_TTEST'
+      text_sequence_name: '*epfid2d1_64'
+    axes:
+      construct: TTestMap
+
+  # --- case 1: Siemens epse and epir
+
+  - name: a Siemens epse written GR is a spin-echo EPI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'EP\GR'
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_se'
+      text_sequence_name: '*epse2d1_128'
+      repetition_time: 3000
+      echo_time: 60
+      flip_angle: 180
+    axes:
+      technique: SE-EPI
+
+  - name: a Siemens epir written GR is a spin-echo EPI with its inversion
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'EP\GR'
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_ir'
+      text_sequence_name: '*epir2d1_128'
+      repetition_time: 9000
+      echo_time: 80
+      inversion_time: 2500
+      flip_angle: 180
+    axes:
+      technique: SE-EPI
+      modifier: FLAIR
+
+  - name: a Siemens epfid written SE is a gradient-echo EPI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\EP'
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d'
+      text_sequence_name: '*epfid2d1_64'
+      repetition_time: 3000
+      echo_time: 30
+      n_instances: 30
+      n_slices: 30
+    axes:
+      technique: GRE-EPI
+
+  # --- case 2: GE VASCTOF_GEMS
+
+  - name: a GE contrast MRA with VASCTOF_GEMS and a contrast agent is no TOF
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'VASCTOF_GEMS\FAST_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'CE MRA carotids'
+      text_contrast: Gadovist
+      repetition_time: 5
+      echo_time: 1.5
+      flip_angle: 30
+    axes:
+      technique: TurboFLASH
+
+  - name: a GE sagittal 3D SPGR with VASCTOF_GEMS is no TOF
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'VASCTOF_GEMS\MT_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sag 3D SPGR'
+      repetition_time: 30
+      echo_time: 4
+      flip_angle: 20
+    axes:
+      technique: FLASH
+
+  - name: a GE TOF with VASCTOF_GEMS stays TOF
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'VASCTOF_GEMS\MT_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: '3D COW'
+      repetition_time: 25
+      echo_time: 3
+      flip_angle: 20
+    axes:
+      technique: TOF
+
+  - name: a GE TOF named TOF and given contrast stays TOF by its words
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'VASCTOF_GEMS\MT_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: '3D TOF + Gd'
+      text_contrast: Dotarem
+      repetition_time: 25
+      echo_time: 3
+      flip_angle: 20
+    axes:
+      technique: TOF
+
+  # --- case 5: a Philips balanced FFE named ciss
+
+  - name: a Philips balanced FFE named ciss is bSSFP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SS
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: '3D ciss IAC'
+      philips_scanning_technique: B-FFE
+      repetition_time: 6
+      echo_time: 3
+      flip_angle: 50
+    axes:
+      technique: FIESTA
+
+  - name: a Siemens CISS stays CISS
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_ci3d_tra'
+      text_sequence_name: '*ci3d1'
+    axes:
+      technique: CISS
+
+  # --- case 6: a diffusion SBRef
+
+  - name: a reversed-blip diffusion SBRef is SBRef and DWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'cmrr_diff_PA_SBRef'
+      text_sequence_name: '*epse2d1_104'
+      repetition_time: 5000
+      echo_time: 80
+      n_instances: 1
+    axes:
+      construct: 'ND,SBRef'
+      base: DWI
+
+  # --- case 8: a single-volume DSC
+
+  - name: a single volume of a Siemens DSC written ORIGINAL is perfusion EPI and T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf'
+      text_sequence_name: '*epfid2d1_128'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 20
+      n_slices: 20
+    axes:
+      technique: Perfusion
+      base: T2*w
+
+  - name: a Siemens DSC run of 50 volumes stays perfusion-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\NONE\ND\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_perf'
+      text_sequence_name: '*epfid2d1_128'
+      repetition_time: 1500
+      echo_time: 30
+      n_instances: 50
+    axes:
+      base: PWI
+
+  # --- case 13: FIESTA-C
+
+  - name: a GE FIESTA-C is CISS by its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SS'
+      scan_options: 'FAST_GEMS\EDR_GEMS\PFF'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax FIESTA-C IAC'
+      ge_pulse_sequence_name: efgre3d
+      repetition_time: 5.6
+      echo_time: 2.2
+      flip_angle: 55
+    axes:
+      technique: CISS
+      base: T2w
+
+  - name: a GE FIESTA named COR is no FIESTA-C
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SS'
+      scan_options: 'FAST_GEMS\EDR_GEMS\PFF'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'FIESTA COR'
+      ge_pulse_sequence_name: efgre3d
+      repetition_time: 5.6
+      echo_time: 2.2
+      flip_angle: 55
+    axes:
+      technique: FIESTA
+
+  # --- case 14: Philips MAXIMUM
+
+  - name: a Philips MAXIMUM image beside DERIVED is a MIP
+    stack:
+      image_type: 'DERIVED\PRIMARY\T1\MAXIMUM'
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T1 max'
+    flags:
+      is_mip: true
+
+  - name: a MAXIMUM token with neither DERIVED nor a projection is no MIP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\T1\MAXIMUM'
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T1'
+    flags:
+      is_mip: false
+
+  # --- case 15: FLAIR or IR by the CSF null
+
+  - name: a T1 inversion recovery at TR 2,000 ms and TI 800 ms nulls CSF and is FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_IR\M\IR'
+      scanning_sequence: IR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T1W_IR_TSE'
+      repetition_time: 2000
+      echo_time: 20
+      inversion_time: 800
+      echo_train_length: 7
+    axes:
+      modifier: FLAIR
+      base: T1w
+
+  - name: a GE T1 FLAIR at TR 2,800 ms and TI 840 ms is far from the CSF null and is IR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FAST_GEMS\T1FLAIR_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sag T1 FLAIR'
+      repetition_time: 2800
+      echo_time: 26
+      inversion_time: 840
+      echo_train_length: 9
+    axes:
+      technique: TIRM
+      modifier: IR
+      base: T1w
+
+  - name: a T2 FLAIR at TR 9,000 ms and TI 2,500 ms stays FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_tra_dark-fluid'
+      text_sequence_name: '*tir2d1_16'
+      repetition_time: 9000
+      echo_time: 85
+      inversion_time: 2500
+    axes:
+      modifier: FLAIR
+
+  - name: a STIR at TI 150 ms stays STIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_cor'
+      text_sequence_name: '*tir2d1_16'
+      repetition_time: 4000
+      echo_time: 40
+      inversion_time: 150
+    axes:
+      modifier: STIR
+
+  - name: an MPRAGE whose inversion time sits at the CSF null of its repetition time is no FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_mprage_sag'
+      text_sequence_name: '*tfl3d1_16ns'
+      repetition_time: 2300
+      echo_time: 2.3
+      inversion_time: 900
+    axes:
+      technique: MPRAGE
+      modifier: ''

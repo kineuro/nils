@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.17.0");
+    assert_eq!(pack.id(), "mri@0.18.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -24,19 +24,20 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        233,
+        235,
         "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
          Siemens stems, the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
          dynamic FLASH, the one of pack 0.12.0: Philips' projection image \
          without GE's collapse, the one of pack 0.13.0: a workstation's \
          thick-slab average, the one of pack 0.15.0: a Siemens BLADE \
-         diffusion, and the one of pack 0.16.0: a Siemens BLADE turbo spin \
-         echo by its stem"
+         diffusion, the one of pack 0.16.0: a Siemens BLADE turbo spin \
+         echo by its stem, and the two of pack 0.18.0: GE's SCOUT and \
+         Siemens' standard deviation projections"
     );
     assert_eq!(
         pack.flags.len(),
-        257,
+        306,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -62,7 +63,18 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          GE EPI SWI by its train, GE's GRASS, GE's MAGiC and Siemens' tun, \
          and pack 0.16.0 the 3 of dev-4's: a reformat named for another \
          plane than its protocol, a dual-echo spin echo named FLAIR and a \
-         Siemens acquired diffusion image"
+         Siemens acquired diffusion image, and pack 0.18.0 the 49 of the \
+         sealed checkpoint's rule bugs and the vendor conventions of the \
+         deep research: GE's rewritten numeric headers, an enhanced object's \
+         spin echo by its train, a DSC that is no SWI, the DSC maps and a \
+         derived MoCo DSC, a single-volume DSC, Philips' s3DI and QMap, \
+         EPIMix by its pulse sequence, the names read as what they do not \
+         mean, an EPI named T2*, a b value that is no diffusion, GE's SPGR, \
+         TRICKS, SPGR-EPI and fast steady-state echo, a Philips diffusion \
+         by its technique, MobiView, an acquired SWI echo, Silent MRA, TTEST \
+         on an ASL, the projections and reformats, a subtraction, the QMap \
+         maps by name, Philips' isotropic image, a diffusion SBRef, MRCP, \
+         VASCTOF as TOF, FIESTA-C and the CSF null of an inversion"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());
@@ -144,14 +156,12 @@ fn every_image_type_identity_record_37_named_reaches_an_axis() {
         // apart.
         ("DERIVED\\PRIMARY\\TTEST", "construct", "TTestMap"),
         // The metal artefact technique, 16 stacks in two spellings, in a
-        // dead `is_mavric`. The composite it also writes is a composed image.
+        // dead `is_mavric`. The composite it also writes is the sum over the
+        // spectral bins of one acquisition, and since MRI pack 0.18.0 no
+        // construct (the 2026-09-30 deep research, case 3).
         ("ORIGINAL\\PRIMARY\\M\\MAVRIC", "technique", "MAVRIC"),
         ("DERIVED\\PRIMARY\\MAVRIC_COMPOSITE", "technique", "MAVRIC"),
-        (
-            "DERIVED\\PRIMARY\\MAVRIC_COMPOSITE",
-            "construct",
-            "Composed",
-        ),
+        ("DERIVED\\PRIMARY\\MAVRIC_COMPOSITE", "construct", ""),
         // And what the file says is wrong with its own image.
         (
             "DERIVED\\PRIMARY\\SWI\\NAVAIL",

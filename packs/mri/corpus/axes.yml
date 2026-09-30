@@ -418,13 +418,15 @@ cases:
     axes:
       provenance: ProjectionDerived
 
-  - name: the metal artefact technique is a technique, and its composite an image
+  # MRI pack 0.18.0: the composite is MAVRIC's standard output, the bins of
+  # one acquisition summed, and takes no construct (the deep research, case 3).
+  - name: the metal artefact technique is a technique, and its composite is no composed image
     stack:
       image_type: 'DERIVED\PRIMARY\MAVRIC_COMPOSITE'
       text_series_description: 'cor hip'
     axes:
       technique: MAVRIC
-      construct: Composed
+      construct: ''
 
   - name: a derived image made without one of its inputs says so
     stack:
