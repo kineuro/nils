@@ -100,7 +100,7 @@ A version a person added is never gone over, and a starter a person retired stay
 
 > **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
 
-> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first; a run of segcsvd without one is refused. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone.
+> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first: a run of segcsvd with none is refused, and a session without one fails. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone.
 
 ## Add a pipeline
 

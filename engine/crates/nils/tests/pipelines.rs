@@ -1267,6 +1267,102 @@ fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
             std::fs::read_to_string(lab.work.path().join(d["path"].as_str().unwrap())).unwrap();
         assert_eq!(text.lines().count(), 2, "{d}: {text}");
     }
+
+    // only the selection's own sessions and subjects: a file of another
+    // day of one of its subjects is never taken, a file of the whole
+    // subject is, and a run over one subject's stacks takes nothing of the
+    // other subject's (a run of one stack each: a T1w or a FLAIR of one
+    // session)
+    let subject = prev[0]["subject_id"].as_i64().unwrap();
+    let file = lab.work.path().join("x_desc-n4_T1w.nii.gz");
+    let add = |bytes: &[u8], day: Option<&str>| -> i64 {
+        std::fs::write(&file, bytes).unwrap();
+        let s = subject.to_string();
+        let mut args = vec![
+            "derivative",
+            "add",
+            file.to_str().unwrap(),
+            "--kind",
+            "output",
+            "--subject",
+            &s,
+        ];
+        if let Some(d) = day {
+            args.extend(["--day", d]);
+        }
+        args.push("--json");
+        let v = lab.json(&args);
+        v["id"].as_i64().unwrap_or_else(|| panic!("{v}"))
+    };
+    let other_day = add(b"another occasion", Some("1999-01-01"));
+    let whole = add(b"the whole subject", None);
+    std::fs::remove_file(&file).unwrap();
+    let before: BTreeSet<i64> = lab
+        .json(&["pipeline", "runs", "--limit", "100", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    let (good, _, err) = lab.run(
+        &[
+            "run",
+            "bids-reader",
+            "--select",
+            "selection:every@1",
+            "--chunk",
+            "1",
+            "--json",
+        ],
+        None,
+    );
+    assert!(good, "{err}");
+    let parts: Vec<i64> = lab
+        .json(&["pipeline", "runs", "--limit", "100", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(parts.len(), 4, "{parts:?}");
+    let mut n4 = 0;
+    let mut wholes = 0;
+    for part in parts {
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                lab.work
+                    .path()
+                    .join(format!("runs/{part}/inputs/manifest.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let units: BTreeSet<i64> = manifest["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["subject_id"].as_i64().unwrap())
+            .collect();
+        for p in manifest["derivatives"]["prev"].as_array().unwrap() {
+            let id = p["id"].as_i64().unwrap();
+            assert_ne!(id, other_day, "another day's file was taken: {manifest}");
+            assert!(
+                units.contains(&p["subject_id"].as_i64().unwrap()),
+                "a file of a subject outside the run was taken: {manifest}"
+            );
+            if id == whole {
+                wholes += 1;
+            } else if p["path"].as_str().unwrap().ends_with("_desc-n4_T1w.nii.gz") {
+                n4 += 1;
+            }
+        }
+    }
+    assert_eq!(
+        (n4, wholes),
+        (4, 2),
+        "each run its session's file, and the subject's two runs its file"
+    );
 }
 
 /// A server with the worker beside the doors, on the lab's search path.

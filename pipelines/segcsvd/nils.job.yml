@@ -7,8 +7,8 @@
 #
 # segcsvd reads a SynthSeg 2.0 label map beside each image, so it runs
 # after the synthseg starter: that run's label maps are this one's input
-# `synthseg` (a derivative of kind mask), and a session's newest map is
-# taken. The map is resliced onto the T1w's grid with segcsvd's own tool
+# `synthseg` (a derivative of kind mask), and the map of the same T1w
+# from the newest synthseg run is taken. The map is resliced onto the T1w's grid with segcsvd's own tool
 # first, since segcsvd's T1 mask step reads it on that grid. Where the
 # session has a FLAIR, the WMH are segmented on it (segcsvd reslices the
 # map itself) and, resliced onto the T1w, they are the WMH prior of the
@@ -21,7 +21,8 @@
 # for each target, the WMH named for the FLAIR and on its grid, the PVS
 # for the T1w and on its, and a table of the WMH and PVS volumes in mm3
 # out. The thresholds, patch sizes and gammas are the authors' (their
-# README). On one open 1 mm session (a 3D T1w and a 3D FLAIR) at 4 cores a
+# README). A unit fails, and registers nothing, when its label map is
+# missing or a step writes no mask. On one open 1 mm session (a 3D T1w and a 3D FLAIR) at 4 cores a
 # unit took 29 minutes, half of it segcsvd's own bias correction, and
 # under 2 GB of memory.
 #
@@ -75,32 +76,35 @@ inputs:
     maximum: 32
 
 command-line: >-
-  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset]; rc=0;
   export OMP_NUM_THREADS=[THREADS] ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=[THREADS];
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
   b=$(basename "$f" .nii.gz); b=${b%_T1w};
-  s=$(find [Inputs]/synthseg -path "*/$a/*_desc-synthseg_dseg.nii.gz" | sort -V | tail -n 1);
-  if [ -z "$s" ]; then echo "$a has no SynthSeg label map: run synthseg on it first"; continue; fi;
+  s=""; n=-1; for p in $(find [Inputs]/synthseg -path "*/$a/${b}_desc-synthseg_dseg.nii.gz" | sort); do
+  q=${p#[Inputs]/synthseg/}; q=${q#*/}; r=${q%%/*};
+  if [ "$r" -eq "$r" ] 2>/dev/null && [ "$r" -gt "$n" ]; then n=$r; s=$p; fi; done;
+  if [ -z "$s" ]; then echo "$f has no SynthSeg label map from a synthseg run: run synthseg on it first"; rc=1; continue; fi;
+  echo "$f: the SynthSeg label map of run $n";
   w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mkdir -p "$w/outdir"; export MPLCONFIGDIR=$w HOME=$w;
   fl=""; for g in $a/*_FLAIR.nii.gz; do fl=$g; break; done; c=$(basename "$fl" .nii.gz); c=${c%_FLAIR};
-  sbtResliceLike "$s" "$f" "$w/synthseg.nii.gz" 1 || { rm -rf "$w"; continue; };
+  sbtResliceLike "$s" "$f" "$w/synthseg.nii.gz" 1 || { rc=1; rm -rf "$w"; continue; };
   v="";
   if [ -n "$fl" ]; then
-  segment_wmh "$fl" "$s" "$w/outdir/wmh.nii.gz" 1 "96,128" [WMH_THRESHOLD] 1 false true || { rm -rf "$w"; continue; };
-  [ -s "$w/outdir/thr_wmh.nii.gz" ] || { echo "$a: segment_wmh wrote no mask"; rm -rf "$w"; continue; };
-  sbtResliceLike "$w/outdir/thr_wmh.nii.gz" "$f" "$w/prior.nii.gz" 1 || { rm -rf "$w"; continue; };
+  segment_wmh "$fl" "$s" "$w/outdir/wmh.nii.gz" 1 "96,128" [WMH_THRESHOLD] 1 false true || { rc=1; rm -rf "$w"; continue; };
+  [ -s "$w/outdir/thr_wmh.nii.gz" ] || { echo "$a: segment_wmh wrote no mask"; rc=1; rm -rf "$w"; continue; };
+  sbtResliceLike "$w/outdir/thr_wmh.nii.gz" "$f" "$w/prior.nii.gz" 1 || { rc=1; rm -rf "$w"; continue; };
   mv "$w/outdir/thr_wmh.nii.gz" "$d/${c}_label-WMH_desc-segcsvd_mask.nii.gz";
   mv "$w/outdir/wmh.nii.gz" "$d/${c}_label-WMH_desc-segcsvd_probseg.nii.gz";
   v="wmh_volume $d/${c}_label-WMH_desc-segcsvd_mask.nii.gz";
   else echo "$a holds no FLAIR, so no WMH and an empty prior for the PVS";
-  python3 -c "import sys, nibabel as n, numpy as np; i = n.load(sys.argv[1]); n.save(n.Nifti1Image(np.zeros(i.shape[:3], np.uint8), i.affine), sys.argv[2])" "$f" "$w/prior.nii.gz" || { rm -rf "$w"; continue; }; fi;
-  segment_pvs "$f" "$w/synthseg.nii.gz" "$w/prior.nii.gz" "$w/outdir/pvs.nii.gz" "1.0,1.4" 0 false true [PVS_THRESHOLD] || { rm -rf "$w"; continue; };
-  [ -s "$w/outdir/thr_pvs.nii.gz" ] || { echo "$a: segment_pvs wrote no mask"; rm -rf "$w"; continue; };
+  python3 -c "import sys, nibabel as n, numpy as np; i = n.load(sys.argv[1]); n.save(n.Nifti1Image(np.zeros(i.shape[:3], np.uint8), i.affine), sys.argv[2])" "$f" "$w/prior.nii.gz" || { rc=1; rm -rf "$w"; continue; }; fi;
+  segment_pvs "$f" "$w/synthseg.nii.gz" "$w/prior.nii.gz" "$w/outdir/pvs.nii.gz" "1.0,1.4" 0 false true [PVS_THRESHOLD] || { rc=1; rm -rf "$w"; continue; };
+  [ -s "$w/outdir/thr_pvs.nii.gz" ] || { echo "$a: segment_pvs wrote no mask"; rc=1; rm -rf "$w"; continue; };
   mv "$w/outdir/thr_pvs.nii.gz" "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz";
   mv "$w/outdir/pvs.nii.gz" "$d/${b}_label-PVS_desc-segcsvd_probseg.nii.gz";
-  python3 -c "import sys, json, nibabel as n, numpy as np; a = sys.argv[1:]; print(json.dumps(dict((a[i], float((np.asarray(n.load(a[i + 1]).dataobj) > 0).sum() * np.prod(n.load(a[i + 1]).header.get_zooms()[:3]))) for i in range(0, len(a), 2))))" pvs_volume "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz" $v > "$d/${b}_desc-segcsvd_volumes.json";
-  rm -rf "$w"; done'
+  python3 -c "import sys, json, nibabel as n, numpy as np; a = sys.argv[1:]; print(json.dumps(dict((a[i], float((np.asarray(n.load(a[i + 1]).dataobj) > 0).sum() * np.prod(n.load(a[i + 1]).header.get_zooms()[:3]))) for i in range(0, len(a), 2))))" pvs_volume "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz" $v > "$d/${b}_desc-segcsvd_volumes.json" || { echo "$a: the volumes were not measured"; rc=1; };
+  rm -rf "$w"; done; exit $rc'
 
 x-nils:
   contract: 1
