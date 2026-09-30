@@ -219,6 +219,7 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Pseudo
         }
         Err(job::Error::Store(e)) => return Err(e.into()),
         Err(job::Error::Message(m)) => return Err(PseudonymizeError::Message(m)),
+        Err(e @ job::Error::Held { .. }) => return Err(PseudonymizeError::Message(e.to_string())),
     };
     store.begin()?;
     let result = (|| -> Result<Run, PseudonymizeError> {

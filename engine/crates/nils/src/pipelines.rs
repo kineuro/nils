@@ -8,9 +8,12 @@
 //! digest; `list` and `show` read it back.
 //!
 //! The runner: `nils run <pipeline> --select selection:<name>@<v>` is one run
-//! over a frozen selection, a job of kind `pipeline` that the queue's worker
-//! runs one at a time (R1), queued at `POST /api/jobs` under `pipelines:work`
-//! at detail quasi, since a pipeline reads pixels. In order:
+//! over a frozen selection, a job of kind `pipeline`, queued at `POST
+//! /api/jobs` under `pipelines:work` at detail quasi, since a pipeline reads
+//! pixels. Runs whose stacks do not meet go on side by side within the
+//! lane's one budget; a run that would take a stack a running run holds is
+//! refused (R1, as widened on 2026-09-30), and the steps that write what
+//! every run shares are taken one run at a time. In order:
 //!
 //! 1. The descriptor, its parameters with the defaults filled, the models
 //!    and the label set it reads, the working place and a runtime (rootless
@@ -2385,24 +2388,11 @@ fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<
     Ok(out)
 }
 
-/// Whether a job is running now: not over, heard from within the freshness
-/// a claim allows, and its process on this host still there.
+/// Whether a job is running now, as a claim judges it (`job::is_live`):
+/// not over, and heard from within the freshness a claim allows or its
+/// process on this host still there.
 fn job_alive(store: &mut Store, id: i64) -> bool {
-    match job::show(store, id) {
-        Ok(Some(j)) if !j.state.is_over() => {
-            let gone = j.host.as_deref() == Some(job::hostname().as_str())
-                && j.pid.is_some_and(|p| job::process_alive(p) == Some(false));
-            let fresh = j
-                .heartbeat_at
-                .as_deref()
-                .and_then(nils_registry::time::secs_of)
-                .is_some_and(|s| {
-                    nils_registry::time::now_secs().saturating_sub(s) < job::FRESH_SECS
-                });
-            fresh && !gone
-        }
-        _ => false,
-    }
+    matches!(job::show(store, id), Ok(Some(j)) if job::is_live(&j))
 }
 
 /// How often the lane takes a run up again by itself before it leaves the
@@ -2657,12 +2647,14 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 ));
             }
 
-            // the job: one pipeline run at a time in the lane (R1, record 49 A1)
+            // the job: beside every run whose stacks are not these, and
+            // refused while a running run holds one of them
             let who = crate::actor();
             let actor = nils_registry::actor::current();
             let job_id = claim_run(
                 registry.store(),
                 &p,
+                handle_id,
                 json!({
                     "pipeline": p.label(), "select": args.select, "handle": handle_id,
                     "part": (count > 1).then(|| json!({"part": i + 1, "of": count, "chunk": args.chunk})),
@@ -2833,23 +2825,155 @@ fn freeze_parts(home: &Home, args: &RunArgs, spec: &str) -> Result<Vec<i64>, Exi
     Ok(parts)
 }
 
-/// Claim the job a run is: one pipeline run at a time (record 43 R1).
-fn claim_run(store: &mut Store, p: &Pipeline, args: Value) -> Result<i64, Exit> {
-    job::claim(
+/// The registry locks runs take around what they read and then write that
+/// every run shares, so runs that go on side by side take those steps one
+/// run at a time (see `nils_registry::lock`): the claim, which looks at
+/// the stacks the running runs hold; the lane, whose budget a unit is
+/// started within; the intake of what a run made into the review spine,
+/// the models and the embeddings; the release of a bids input; and the
+/// build of an image apptainer keeps.
+pub(crate) const CLAIM_LOCK: &str = "pipeline-claim";
+pub(crate) const LANE_LOCK: &str = "pipeline-lane";
+pub(crate) const INTAKE_LOCK: &str = "pipeline-intake";
+pub(crate) const RELEASE_LOCK: &str = "pipeline-release";
+
+/// The lock of one image apptainer keeps, by its digest.
+fn image_lock(digest: &str) -> String {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    format!("pipeline-image-{}", &hex[..hex.len().min(16)])
+}
+
+/// How long a run waits between looks at a lock another run holds.
+const LOCK_LOOK: Duration = Duration::from_millis(50);
+
+/// Take a registry lock, waiting while another run holds it and beating
+/// the job's heart meanwhile, so a wait is never read as a run that went
+/// away. Where `cancellable`, a cancel asked while it waits answers none.
+fn wait_lock(
+    store: &mut Store,
+    name: &str,
+    job_id: Option<i64>,
+    cancellable: bool,
+) -> Result<Option<nils_registry::lock::Held>, String> {
+    let mut beaten = Instant::now();
+    loop {
+        if let Some(held) = nils_registry::lock::try_take(store, name)
+            .map_err(|e| format!("the registry's {name} lock: {e}"))?
+        {
+            return Ok(Some(held));
+        }
+        if let Some(job_id) = job_id
+            && beaten.elapsed() >= Duration::from_secs(5)
+        {
+            beaten = Instant::now();
+            if let Ok(job::Asked::Cancel) = job::beat(store, job_id, None)
+                && cancellable
+            {
+                return Ok(None);
+            }
+        }
+        std::thread::sleep(LOCK_LOOK);
+    }
+}
+
+/// Run `f` under a registry lock, taken as [`wait_lock`] takes it and
+/// given back however `f` ends. The registry's metadata is read again
+/// first, since another run may have moved its epoch.
+fn with_lock<T>(
+    registry: &mut Registry,
+    name: &str,
+    job_id: Option<i64>,
+    f: impl FnOnce(&mut Registry) -> Result<T, String>,
+) -> Result<T, String> {
+    let held = wait_lock(registry.store(), name, job_id, false)?
+        .ok_or_else(|| format!("the registry's {name} lock was not taken"))?;
+    let _ = registry.refresh_meta();
+    let out = f(registry);
+    let released = nils_registry::lock::release(registry.store(), held)
+        .map_err(|e| format!("the registry's {name} lock: {e}"));
+    let out = out?;
+    released?;
+    Ok(out)
+}
+
+/// Whether a running pipeline job holds any of the stacks of `handle`:
+/// the words that say which run and how many, where it does. A job that
+/// has not said which stacks it runs over holds them all until it does.
+fn holds_stacks(
+    store: &mut Store,
+    handle: i64,
+    job_id: i64,
+    args: &Value,
+) -> Result<Option<String>, job::Error> {
+    let who = match (
+        args["run"].as_i64().or(args["resume"].as_i64()),
+        args["pipeline"].as_str(),
+    ) {
+        (Some(run), Some(p)) => format!("run {run} of {p} (job {job_id})"),
+        (Some(run), None) => format!("run {run} (job {job_id})"),
+        (None, Some(p)) => format!("a run of {p} (job {job_id})"),
+        (None, None) => format!("pipeline job {job_id}"),
+    };
+    let cure = format!(
+        "runs over the same stacks run one after another: wait for it to end, or nils jobs cancel {job_id} if it is not running anywhere"
+    );
+    let Some(theirs) = args["handle"].as_i64() else {
+        return Ok(Some(format!(
+            "{who} is running and has not yet said which stacks it runs over; {cure}"
+        )));
+    };
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT COUNT(DISTINCT a.key), MIN(a.key) FROM {m} a JOIN {m} b \
+         ON b.handle_id = {} AND b.key = a.key WHERE a.handle_id = {}",
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        m = store.qualified("handle_member"),
+    );
+    let row = store.query_opt(&sql, &[Param::Int(theirs), Param::Int(handle)])?;
+    let (shared, first) = match row {
+        Some(r) => (r.int(0)?, r.opt_int(1)?),
+        None => (0, None),
+    };
+    if shared == 0 {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{who} holds {shared} of the stacks this run would take{}; {cure}",
+        first
+            .map(|s| format!(", stack {s} the first"))
+            .unwrap_or_default()
+    )))
+}
+
+/// Claim the job a run is (record 43 R1, as widened on 2026-09-30): runs
+/// whose stacks no other running run holds go on side by side, and a run
+/// that would take a stack a running run holds is refused, naming that
+/// run. The claim is taken under the claim lock, so two runs over the
+/// same stacks that start at once never both pass.
+fn claim_run(store: &mut Store, p: &Pipeline, handle: i64, args: Value) -> Result<i64, Exit> {
+    let lock = wait_lock(store, CLAIM_LOCK, None, false)
+        .map_err(fail)?
+        .ok_or_else(|| fail("the claim lock was not taken"))?;
+    let claimed = job::claim_beside(
         store,
         &job::Claim {
             kind: "pipeline",
             name: &p.label(),
             args,
         },
-    )
-    .map_err(|e| match e {
-        job::Error::Busy { .. } => Exit {
+        &mut |store: &mut Store, id: i64, its: &Value| holds_stacks(store, handle, id, its),
+    );
+    let released = nils_registry::lock::release(store, lock);
+    let id = claimed.map_err(|e| match e {
+        job::Error::Busy { .. } | job::Error::Held { .. } => Exit {
             code: crate::BUSY,
             message: e.to_string(),
         },
         other => fail(other.to_string()),
-    })
+    })?;
+    released.map_err(|e| fail(e.to_string()))?;
+    Ok(id)
 }
 
 /// `nils run --resume <run>` (record 49 A1): a run that stopped, was
@@ -2966,6 +3090,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     let job_id = claim_run(
         registry.store(),
         &p,
+        handle_id,
         json!({"pipeline": p.label(), "resume": run_id, "handle": handle_id}),
     )?;
     rows::resume(registry.store(), run_id, job_id)?;
@@ -3053,26 +3178,31 @@ fn conclude(
     // record 49 A3: a run that loaded measures changed what the ask
     // answers, so it moves the epoch and the ask's catalog is built again
     let measures_loaded = summary["numbers"]["measures"].as_u64().unwrap_or(0) > 0;
-    nils_registry::audit::record_judging(
-        registry,
-        &nils_registry::audit::Entry {
-            principal: c.who,
-            action: nils_registry::audit::Action::PipelineRun,
-            scope: json!({
-                "run": run_id, "pipeline": c.pipeline.label(), "handle": c.handle_id,
-                "units": summary["units"], "derivatives": summary["derivatives"],
-                "resumed": c.resumed,
-            }),
-            policy: None,
-            job_id: Some(c.job_id),
-            details: Some(json!({
-                "status": status, "runtime": c.runtime, "device": c.device,
-                "results": digest, "review_items": summary["review_items"],
-                "measures": summary["numbers"]["measures"],
-            })),
-        },
-        measures_loaded,
-    )?;
+    // the epoch is read and moved, so runs that close at once take turns
+    with_lock(registry, INTAKE_LOCK, Some(c.job_id), |registry| {
+        nils_registry::audit::record_judging(
+            registry,
+            &nils_registry::audit::Entry {
+                principal: c.who,
+                action: nils_registry::audit::Action::PipelineRun,
+                scope: json!({
+                    "run": run_id, "pipeline": c.pipeline.label(), "handle": c.handle_id,
+                    "units": summary["units"], "derivatives": summary["derivatives"],
+                    "resumed": c.resumed,
+                }),
+                policy: None,
+                job_id: Some(c.job_id),
+                details: Some(json!({
+                    "status": status, "runtime": c.runtime, "device": c.device,
+                    "results": digest, "review_items": summary["review_items"],
+                    "measures": summary["numbers"]["measures"],
+                })),
+            },
+            measures_loaded,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .map_err(fail)?;
     let job_state = match status {
         "done" | "partial" => job::State::Done,
         "cancelled" => job::State::Cancelled,
@@ -3170,7 +3300,6 @@ struct Running {
     batch: Batch,
     child: std::process::Child,
     inv: Invocation,
-    gpu_mib: Option<u64>,
 }
 
 /// What every batch of a run shares.
@@ -3208,6 +3337,58 @@ fn folder_word(id: &str) -> Result<&str, String> {
 /// Materialise, schedule the containers in the lane, take in what each
 /// left as it ends, and close with what the run as a whole said.
 fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
+    let heart = Heart::start(registry, x.job_id);
+    let ended = execute_run(home, registry, x);
+    if let Some(h) = heart {
+        h.stop();
+    }
+    ended
+}
+
+/// A run's heart, beaten from a thread of its own on a connection of its
+/// own for as long as the run goes on, so a step that runs long between
+/// the run's own beats (the intake of thousands of proposals, a release, a
+/// wait for a lock) never reads as a run whose engine went away. The run's
+/// own beats still carry its progress and hear a cancel; this one only
+/// says the run is there.
+struct Heart {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Heart {
+    /// Start beating; none where no second connection opens, and the run
+    /// goes on with its own beats alone.
+    fn start(registry: &Registry, job_id: i64) -> Option<Heart> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut store = registry.open_reader().ok()?;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        // six beats in the freshness a claim allows: ten seconds, as the
+        // worker beats
+        let every =
+            Duration::from_millis((job::fresh_secs().saturating_mul(1000) / 6).clamp(250, 10_000));
+        let thread = std::thread::spawn(move || {
+            let mut beaten = Instant::now();
+            while !stopped.load(Ordering::SeqCst) {
+                if beaten.elapsed() >= every {
+                    beaten = Instant::now();
+                    let _ = job::beat(&mut store, job_id, None);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Some(Heart { stop, thread })
+    }
+
+    fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.thread.join();
+    }
+}
+
+/// [`execute`] under the run's heart.
+fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
     let p = x.pipeline;
     let d = x.descriptor;
     // record 49 R7: the outputs under the output place, the scratch under
@@ -3265,9 +3446,32 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     let m = match (d.layout, released_before) {
         (Layout::Stacks, _) => materialise_stacks(registry.store(), x.stacks, &input, d.header)?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
-        (Layout::Bids, None) => materialise_bids(
-            home, registry, x.run_id, x.job_id, d.level, x.stacks, &run_dir, &input, x.args,
-        )?,
+        (Layout::Bids, None) => {
+            // a release is a job of its own kind, one at a time: the runs
+            // that release an input take turns rather than refuse each other
+            match wait_lock(registry.store(), RELEASE_LOCK, Some(x.job_id), true)? {
+                None => Materialised {
+                    units: Vec::new(),
+                    mounts: Vec::new(),
+                    release_id: None,
+                    stopped: true,
+                    scope: Value::Null,
+                    entries: Vec::new(),
+                    listed: Vec::new(),
+                },
+                Some(lock) => {
+                    let m = materialise_bids(
+                        home, registry, x.run_id, x.job_id, d.level, x.stacks, &run_dir, &input,
+                        x.args,
+                    );
+                    let released = nils_registry::lock::release(registry.store(), lock)
+                        .map_err(|e| format!("the registry's release lock: {e}"));
+                    let m = m?;
+                    released?;
+                    m
+                }
+            }
+        }
     };
     if m.stopped {
         return Ok((
@@ -3437,7 +3641,26 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
 
     // the image apptainer runs, built once from the pinned digest
     let local_image = if x.runtime.kind == runtime::Kind::Apptainer {
-        match ensure_image(registry, x, &scratch_root, &run_dir)? {
+        // two runs of one image never build or replace it at once: the one
+        // that comes second finds it built
+        let lock = wait_lock(
+            registry.store(),
+            &image_lock(&x.pipeline.image_digest),
+            Some(x.job_id),
+            true,
+        )?;
+        let built = match lock {
+            None => None,
+            Some(lock) => {
+                let built = ensure_image(registry, x, &scratch_root, &run_dir);
+                let released = nils_registry::lock::release(registry.store(), lock)
+                    .map_err(|e| format!("the registry's image lock: {e}"));
+                let built = built?;
+                released?;
+                built
+            }
+        };
+        match built {
             Some(path) => Some(path),
             None => {
                 return Ok(("cancelled", json!({"phase": "image"}), None, None, None));
@@ -3569,9 +3792,176 @@ enum Scheduled {
     Cancelled,
 }
 
+/// What the lane's running units hold on this host, across every run that
+/// is going on (2026-09-30): the cores, the memory and the card memory
+/// each unit declared when it started, as its row keeps them. A run whose
+/// engine went away holds nothing, though its rows still say running; this
+/// run's own units are counted as they stand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LaneHeld {
+    cores: u32,
+    memory_mib: u64,
+    gpu_mib: u64,
+    runs: usize,
+}
+
+fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<LaneHeld, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let d = store.dialect();
+    // one container holds its unit's ask once, however many units it runs
+    // together: the rows are counted by container, not by unit
+    let sql = format!(
+        "SELECT c.run_id, r.job_id, CAST(COALESCE(SUM(c.cores), 0) AS BIGINT), \
+         CAST(COALESCE(SUM(c.memory_mb), 0) AS BIGINT), \
+         CAST(COALESCE(SUM(CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END), 0) AS BIGINT) \
+         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb \
+         FROM {} WHERE state = 'running' AND host = {}) c \
+         JOIN {} r ON r.id = c.run_id WHERE r.status = 'running' \
+         GROUP BY c.run_id, r.job_id",
+        d.param(1, Type::Int),
+        store.qualified("pipeline_unit"),
+        d.param(2, Type::Text),
+        store.qualified("pipeline_run"),
+    );
+    let rows = store
+        .query(&sql, &[Param::Int(i64::from(card)), Param::from(host)])
+        .map_err(err)?;
+    let mut held = LaneHeld::default();
+    for r in rows {
+        let run = r.int(0).map_err(err)?;
+        let job_id = r.opt_int(1).map_err(err)?;
+        if run != run_id && !job_id.is_some_and(|j| job_alive(store, j)) {
+            continue;
+        }
+        let n = |i: usize| r.int(i).map(|v| v.max(0) as u64).map_err(err);
+        held.cores = held
+            .cores
+            .saturating_add(n(2)?.min(u64::from(u32::MAX)) as u32);
+        held.memory_mib += n(3)?;
+        held.gpu_mib += n(4)?;
+        held.runs += 1;
+    }
+    Ok(held)
+}
+
+/// What the scheduler of one run carries between its looks at the lane.
+struct Lanes {
+    ask: lane::Ask,
+    gpu_need: Option<u64>,
+    smi: Option<PathBuf>,
+    card: u32,
+    host: String,
+    /// The lane as every run holds it, as last read.
+    seen: lane::Ledger,
+    /// When the lane was last read, and the card last asked.
+    looked: Option<Instant>,
+    card_asked: Option<Instant>,
+    waiting: Option<String>,
+}
+
+/// Start the next batch if it fits the lane as every run holds it, under
+/// the lane lock, so two runs never both take the last of the budget or
+/// the same free memory of the card: the lane is read, the card asked, the
+/// container spawned and its units marked running before the lock is
+/// given back. Answers none, and why in `l.waiting`, when it does not fit.
+#[allow(clippy::too_many_arguments)]
+fn start_next(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    m: &Materialised,
+    shared: &Shared,
+    row_of: &BTreeMap<String, (i64, String)>,
+    pending: &mut std::collections::VecDeque<Batch>,
+    l: &mut Lanes,
+) -> Result<Option<Running>, String> {
+    let held = lane_held(registry.store(), x.run_id, &l.host, l.card)?;
+    l.looked = Some(Instant::now());
+    l.seen = x.lane.ledger;
+    l.seen.held_cores = held.cores;
+    l.seen.held_memory_mib = held.memory_mib;
+    if !l.seen.fits(l.ask) {
+        l.waiting = Some(format!(
+            "the lane's budget: {} of {} cores and {} of {} MiB held{}",
+            l.seen.held_cores,
+            l.seen.cores,
+            l.seen.held_memory_mib,
+            l.seen.memory_mib,
+            if held.runs > 1 {
+                format!(", by {} runs", held.runs)
+            } else {
+                String::new()
+            }
+        ));
+        return Ok(None);
+    }
+    let mut gpu_mib = None;
+    if let Some(need) = l.gpu_need {
+        l.card_asked = Some(Instant::now());
+        let card = l.card;
+        let free = match &l.smi {
+            Some(smi) => lane::gpu_free_mib(smi, card),
+            None => Err("nvidia-smi is not on the search path".into()),
+        };
+        let held_gpu = held.gpu_mib;
+        match free {
+            Ok(free) if lane::lease_fits(free, held_gpu, need) => gpu_mib = Some(need),
+            Ok(free) => {
+                l.waiting = Some(format!(
+                    "card {card}: {free} MiB free, {held_gpu} MiB held by the lane's running units, and a unit needs {need} MiB"
+                ));
+                return Ok(None);
+            }
+            Err(e) => {
+                l.waiting = Some(format!("card {card}: {e}"));
+                return Ok(None);
+            }
+        }
+    }
+    let Some(b) = pending.pop_front() else {
+        return Ok(None);
+    };
+    let mut inv = invocation_of(x, m, &b, shared)?;
+    inv.card = gpu_mib.map(|_| l.card);
+    if let Some(dir) = b.log.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
+    }
+    let child = runtime::spawn(x.runtime, &inv, &b.log)
+        .map_err(|e| format!("{} could not start the container: {e}", x.runtime.name()))?;
+    let now = nils_registry::time::now_iso();
+    for i in &b.units {
+        if let Some((id, _)) = row_of.get(&m.units[*i].id) {
+            rows::unit_started(
+                registry.store(),
+                *id,
+                &rows::UnitStart {
+                    cores: i64::from(l.ask.cores),
+                    memory_mb: l.ask.memory_mib as i64,
+                    gpu_card: gpu_mib.map(|_| i64::from(l.card)),
+                    gpu_memory_mb: gpu_mib.map(|g| g as i64),
+                    device: if gpu_mib.is_some() { x.device } else { "cpu" },
+                    container: &inv.name,
+                    pid: Some(i64::from(child.id())),
+                    host: &l.host,
+                    started_at: &now,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    l.seen.take(l.ask);
+    l.waiting = None;
+    Ok(Some(Running {
+        batch: b,
+        child,
+        inv,
+    }))
+}
+
 /// Run the batches within the lane's budget, a GPU batch only under a lease
-/// on the lane's card, and take in each as it ends. Those still running
-/// when it returns are the caller's to stop.
+/// on the lane's card, and take in each as it ends. The budget and the
+/// lease are the lane's, held across every run that goes on at once: what
+/// the other runs' units hold is read from the registry before a unit
+/// starts. Those still running when it returns are the caller's to stop.
 #[allow(clippy::too_many_arguments)]
 fn schedule(
     registry: &mut Registry,
@@ -3585,102 +3975,81 @@ fn schedule(
 ) -> Result<Scheduled, String> {
     let d = x.descriptor;
     let ask = ask_of(d);
-    let gpu_need = x.gpu.then(|| lane::mib_of_gb(d.needs.gpu_memory_gb));
-    let smi = runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref());
+    // this run's own units, which alone may fill the lane
     let mut ledger = x.lane.ledger;
     let total = m.units.len();
-    let mut waiting: Option<String> = None;
-    let mut card_asked: Option<Instant> = None;
     let mut beaten: Option<Instant> = None;
-    let host = job::hostname();
-    // the one card a GPU unit leases and is given: the lane's, 0 where it
-    // names none (record 49, after review)
-    let card = x.lane.card.unwrap_or(0);
+    let mut l = Lanes {
+        ask,
+        gpu_need: x.gpu.then(|| lane::mib_of_gb(d.needs.gpu_memory_gb)),
+        smi: runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref()),
+        // the one card a GPU unit leases and is given: the lane's, 0 where
+        // it names none (record 49, after review)
+        card: x.lane.card.unwrap_or(0),
+        host: job::hostname(),
+        seen: x.lane.ledger,
+        looked: None,
+        card_asked: None,
+        waiting: None,
+    };
     loop {
         // start what fits
         while !pending.is_empty() {
             if !ledger.fits(ask) {
-                waiting = Some(format!(
+                l.waiting = Some(format!(
                     "the lane's budget: {} of {} cores and {} of {} MiB held",
                     ledger.held_cores, ledger.cores, ledger.held_memory_mib, ledger.memory_mib
                 ));
                 break;
             }
-            let mut gpu_mib = None;
-            if let Some(need) = gpu_need {
-                if card_asked.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
-                    break;
-                }
-                card_asked = Some(Instant::now());
-                let held: u64 = running.iter().filter_map(|r| r.gpu_mib).sum();
-                let free = match &smi {
-                    Some(smi) => lane::gpu_free_mib(smi, card),
-                    None => Err("nvidia-smi is not on the search path".into()),
-                };
-                match free {
-                    Ok(free) if lane::lease_fits(free, held, need) => gpu_mib = Some(need),
-                    Ok(free) => {
-                        waiting = Some(format!(
-                            "card {card}: {free} MiB free, {held} MiB held by this run's units, and a unit needs {need} MiB"
-                        ));
-                        break;
-                    }
-                    Err(e) => {
-                        waiting = Some(format!("card {card}: {e}"));
-                        break;
-                    }
-                }
+            // while it waits, the lane is read again twice a second and the
+            // card asked every two seconds, not on every turn
+            if l.waiting.is_some()
+                && l.looked
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+            {
+                break;
             }
-            let Some(b) = pending.pop_front() else { break };
-            let mut inv = invocation_of(x, m, &b, shared)?;
-            inv.card = gpu_mib.map(|_| card);
-            if let Some(dir) = b.log.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
+            if l.gpu_need.is_some()
+                && l.card_asked
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+            {
+                break;
             }
-            let child = runtime::spawn(x.runtime, &inv, &b.log)
-                .map_err(|e| format!("{} could not start the container: {e}", x.runtime.name()))?;
-            ledger.take(ask);
-            let now = nils_registry::time::now_iso();
-            for i in &b.units {
-                if let Some((id, _)) = row_of.get(&m.units[*i].id) {
-                    rows::unit_started(
-                        registry.store(),
-                        *id,
-                        &rows::UnitStart {
-                            cores: i64::from(ask.cores),
-                            memory_mb: ask.memory_mib as i64,
-                            gpu_card: gpu_mib.map(|_| i64::from(card)),
-                            gpu_memory_mb: gpu_mib.map(|g| g as i64),
-                            device: if gpu_mib.is_some() { x.device } else { "cpu" },
-                            container: &inv.name,
-                            pid: Some(i64::from(child.id())),
-                            host: &host,
-                            started_at: &now,
-                        },
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
+            let lock = wait_lock(registry.store(), LANE_LOCK, Some(x.job_id), false)?
+                .ok_or("the lane lock was not taken")?;
+            let started = start_next(registry, x, m, shared, row_of, pending, &mut l);
+            let released = nils_registry::lock::release(registry.store(), lock)
+                .map_err(|e| format!("the registry's lane lock: {e}"));
+            if let Some(r) = started? {
+                ledger.take(ask);
+                running.push(r);
             }
-            running.push(Running {
-                batch: b,
-                child,
-                inv,
-                gpu_mib,
-            });
-            waiting = None;
+            released?;
+            if l.waiting.is_some() {
+                break;
+            }
         }
         // the heart, and a cancel
         if beaten.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
             beaten = Some(Instant::now());
+            if l.looked
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+                && let Ok(held) = lane_held(registry.store(), x.run_id, &l.host, l.card)
+            {
+                l.seen.held_cores = held.cores;
+                l.seen.held_memory_mib = held.memory_mib;
+            }
             let in_flight: usize = running.iter().map(|r| r.batch.units.len()).sum();
             let queued: usize = pending.iter().map(|b| b.units.len()).sum();
             let progress = json!({
                 "run": x.run_id, "phase": "run", "units": total,
                 "over": total - in_flight - queued, "running": in_flight, "queued": queued,
-                "waiting": waiting,
+                "waiting": l.waiting,
                 "lane": {
-                    "cores": ledger.cores, "held_cores": ledger.held_cores,
-                    "memory_mb": ledger.memory_mib, "held_memory_mb": ledger.held_memory_mib,
+                    "cores": l.seen.cores, "held_cores": l.seen.held_cores,
+                    "memory_mb": l.seen.memory_mib, "held_memory_mb": l.seen.held_memory_mib,
+                    "run_cores": ledger.held_cores, "run_memory_mb": ledger.held_memory_mib,
                 },
             });
             if let Ok(job::Asked::Cancel) = job::beat(registry.store(), x.job_id, Some(&progress)) {
@@ -4453,18 +4822,22 @@ fn register_unit(
         // the row names the file where it is, never a link to it
         let path = place_path(&working, &file)?;
         if kind == nils_registry::embedding::KIND {
-            match register_embedding(
-                registry,
-                x,
-                u,
-                &declared.encoders,
-                &file,
-                &path,
-                bytes,
-                &sha,
-                cards,
-                now,
-            ) {
+            // an encoder a card names is registered once, by whichever run
+            // meets it first, so the two are taken one run at a time
+            match with_lock(registry, INTAKE_LOCK, Some(x.job_id), |registry| {
+                register_embedding(
+                    registry,
+                    x,
+                    u,
+                    &declared.encoders,
+                    &file,
+                    &path,
+                    bytes,
+                    &sha,
+                    cards,
+                    now,
+                )
+            }) {
                 Ok(nils_registry::embedding::Registered::New(_)) => {
                     embedded += 1;
                     registered += 1;
@@ -4671,343 +5044,263 @@ fn finalize(
     let reports: Vec<nils_pipeline::Results> =
         folders.iter().filter_map(|f| read_results(f).0).collect();
 
-    // the run's own files (record 43): a model it fitted, registered from
-    // its card, and any other run-level output; only a run that completed
-    // with its units together
-    let run_outputs: Vec<descriptor::Output> =
-        d.outputs.iter().filter(|o| o.run_level).cloned().collect();
-    let mut run_files: Vec<Value> = Vec::new();
-    let mut models_made: Vec<Value> = Vec::new();
-    if !apart && exit_code == Some(0) {
-        for o in &run_outputs {
-            let found = nils_pipeline::files::found(out, &o.template, &[]);
-            if o.kind == "model" {
-                match found.as_slice() {
-                    [rel] => match register_model(registry, x, o, out, rel, &now) {
-                        Ok((model, id, sha)) => {
-                            registered += 1;
-                            run_files.push(json!({"path": rel, "sha256": sha}));
-                            models_made.push(json!({
-                                "output": o.id, "model": model.named(), "derivative": id,
-                                "encoders": model.encoder_model_ids, "trained_on": model.trained_on,
-                            }));
-                        }
-                        Err(why) => refused.push(json!({"output": o.id, "file": rel, "why": why})),
-                    },
-                    [] => refused.push(json!({"output": o.id, "why": "the run wrote no model"})),
-                    many => refused.push(json!({
-                        "output": o.id,
-                        "why": format!("{} files match; a model output is one file", many.len()),
-                    })),
-                }
-                continue;
-            }
-            for rel in found {
-                let file = match nils_pipeline::files::inside(out, &rel) {
-                    Ok(f) => f,
-                    Err(why) => {
-                        refused.push(json!({"output": o.id, "file": rel, "why": why}));
-                        continue;
+    // what follows reads and writes what every run shares: a model
+    // registered by its name, the review items a newer run supersedes, the
+    // measures and the epoch; runs going on side by side take it one run
+    // at a time (2026-09-30)
+    let (
+        run_files,
+        models_made,
+        seeds_doc,
+        results_digest,
+        items,
+        breached,
+        measures_written,
+        proposed,
+    ) = with_lock(registry, INTAKE_LOCK, Some(x.job_id), |registry| {
+        // the run's own files (record 43): a model it fitted, registered from
+        // its card, and any other run-level output; only a run that completed
+        // with its units together
+        let run_outputs: Vec<descriptor::Output> =
+            d.outputs.iter().filter(|o| o.run_level).cloned().collect();
+        let mut run_files: Vec<Value> = Vec::new();
+        let mut models_made: Vec<Value> = Vec::new();
+        if !apart && exit_code == Some(0) {
+            for o in &run_outputs {
+                let found = nils_pipeline::files::found(out, &o.template, &[]);
+                if o.kind == "model" {
+                    match found.as_slice() {
+                        [rel] => match register_model(registry, x, o, out, rel, &now) {
+                            Ok((model, id, sha)) => {
+                                registered += 1;
+                                run_files.push(json!({"path": rel, "sha256": sha}));
+                                models_made.push(json!({
+                                    "output": o.id, "model": model.named(), "derivative": id,
+                                    "encoders": model.encoder_model_ids, "trained_on": model.trained_on,
+                                }));
+                            }
+                            Err(why) => refused.push(json!({"output": o.id, "file": rel, "why": why})),
+                        },
+                        [] => refused.push(json!({"output": o.id, "why": "the run wrote no model"})),
+                        many => refused.push(json!({
+                            "output": o.id,
+                            "why": format!("{} files match; a model output is one file", many.len()),
+                        })),
                     }
-                };
-                if !taken_files.insert(file.clone()) {
-                    refused.push(json!({
-                        "output": o.id, "file": rel,
-                        "why": "the same file as another output of the run, by another name",
-                    }));
                     continue;
                 }
-                let (bytes, sha) =
-                    nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
-                let media = nils_pipeline::files::media_type(&rel, o.media_type.as_deref());
-                let id = derivative::insert_of_run(
-                    registry.store(),
-                    &derivative::New {
-                        kind: &o.kind,
-                        belongs: &Belongs::run(),
-                        place_id: x.output.id,
-                        path: &place_path(working, &file)?,
-                        bytes: bytes as i64,
-                        sha256: &sha,
-                        media_type: &media,
-                        registered_by: x.who,
-                        actor: Some(x.actor),
-                        model_id: None,
-                        run_id: None,
-                        preprocess_version: None,
-                        supersedes_id: None,
-                        created_at: &now,
-                    },
-                    x.run_id,
-                )
-                .map_err(|e| e.to_string())?;
-                registered += 1;
-                bytes_total += bytes;
-                // a run's table: each row's unit by its unit column (record
-                // 49 A3), and only a unit that succeeded
-                if o.table.is_some() {
-                    let units: Vec<(String, Option<Belongs>)> = statuses
-                        .iter()
-                        .map(|(i, status, ..)| {
-                            let u = &m.units[*i];
-                            (
-                                u.id.clone(),
-                                (status == "succeeded").then(|| u.belongs()).flatten(),
-                            )
-                        })
-                        .collect();
-                    let read = std::fs::read(&file)
-                        .map_err(|e| e.to_string())
-                        .and_then(|b| {
-                            crate::measures::run_table(o, &b, &units, id, &mut notes, &mut measured)
-                        });
-                    if let Err(why) = read {
+                for rel in found {
+                    let file = match nils_pipeline::files::inside(out, &rel) {
+                        Ok(f) => f,
+                        Err(why) => {
+                            refused.push(json!({"output": o.id, "file": rel, "why": why}));
+                            continue;
+                        }
+                    };
+                    if !taken_files.insert(file.clone()) {
                         refused.push(json!({
                             "output": o.id, "file": rel,
-                            "why": format!("its rows could not be read: {why}"),
+                            "why": "the same file as another output of the run, by another name",
                         }));
+                        continue;
                     }
+                    let (bytes, sha) = nils_pipeline::files::sha256_file(&file)
+                        .map_err(|e| format!("{rel}: {e}"))?;
+                    let media = nils_pipeline::files::media_type(&rel, o.media_type.as_deref());
+                    let id = derivative::insert_of_run(
+                        registry.store(),
+                        &derivative::New {
+                            kind: &o.kind,
+                            belongs: &Belongs::run(),
+                            place_id: x.output.id,
+                            path: &place_path(working, &file)?,
+                            bytes: bytes as i64,
+                            sha256: &sha,
+                            media_type: &media,
+                            registered_by: x.who,
+                            actor: Some(x.actor),
+                            model_id: None,
+                            run_id: None,
+                            preprocess_version: None,
+                            supersedes_id: None,
+                            created_at: &now,
+                        },
+                        x.run_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    registered += 1;
+                    bytes_total += bytes;
+                    // a run's table: each row's unit by its unit column (record
+                    // 49 A3), and only a unit that succeeded
+                    if o.table.is_some() {
+                        let units: Vec<(String, Option<Belongs>)> = statuses
+                            .iter()
+                            .map(|(i, status, ..)| {
+                                let u = &m.units[*i];
+                                (
+                                    u.id.clone(),
+                                    (status == "succeeded").then(|| u.belongs()).flatten(),
+                                )
+                            })
+                            .collect();
+                        let read = std::fs::read(&file)
+                            .map_err(|e| e.to_string())
+                            .and_then(|b| {
+                                crate::measures::run_table(
+                                    o,
+                                    &b,
+                                    &units,
+                                    id,
+                                    &mut notes,
+                                    &mut measured,
+                                )
+                            });
+                        if let Err(why) = read {
+                            refused.push(json!({
+                                "output": o.id, "file": rel,
+                                "why": format!("its rows could not be read: {why}"),
+                            }));
+                        }
+                    }
+                    run_files.push(json!({"path": rel, "sha256": sha}));
                 }
-                run_files.push(json!({"path": rel, "sha256": sha}));
             }
         }
-    }
-    run_files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        run_files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
 
-    // the seeds and the selection it suggests (record 43): kept whole as the
-    // run's one derivative of kind seeds, apart from any proposal
-    let mut seeds_doc = Value::Null;
-    let mut seeds_digest = Value::Null;
-    let all_seeds: Vec<&nils_pipeline::results::Seed> =
-        reports.iter().flat_map(|r| r.seeds.iter()).collect();
-    let any_selection = reports.iter().any(|r| r.selection.is_some());
-    if !all_seeds.is_empty() || any_selection {
-        let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
-        let taken: Vec<&Value> = all_seeds
-            .iter()
-            .filter(|s| ours.contains(&s.stack_id))
-            .map(|s| &s.entry)
-            .collect();
-        let outside = all_seeds.len() - taken.len();
-        let mut selection: Vec<i64> = reports
-            .iter()
-            .flat_map(|r| r.selection.iter().flatten().copied())
-            .filter(|s| ours.contains(s))
-            .collect();
-        selection.sort_unstable();
-        selection.dedup();
-        let doc = json!({
-            "contract": nils_pipeline::CONTRACT, "run": x.run_id, "pipeline": p.label(),
-            "seeds": taken, "selection": {"stacks": selection},
-        });
-        let text = nils_pipeline::canonical(&doc);
-        // into a folder of the engine's own beside the output, which the
-        // container never saw, created new and never through a link
-        let own = working.join(format!("{rel_out}.nils"));
-        match std::fs::symlink_metadata(&own) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => {
-                return Err(format!(
-                    "{rel_out}.nils is there already and is not a folder"
-                ));
+        // the seeds and the selection it suggests (record 43): kept whole as the
+        // run's one derivative of kind seeds, apart from any proposal
+        let mut seeds_doc = Value::Null;
+        let mut seeds_digest = Value::Null;
+        let all_seeds: Vec<&nils_pipeline::results::Seed> =
+            reports.iter().flat_map(|r| r.seeds.iter()).collect();
+        let any_selection = reports.iter().any(|r| r.selection.is_some());
+        if !all_seeds.is_empty() || any_selection {
+            let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
+            let taken: Vec<&Value> = all_seeds
+                .iter()
+                .filter(|s| ours.contains(&s.stack_id))
+                .map(|s| &s.entry)
+                .collect();
+            let outside = all_seeds.len() - taken.len();
+            let mut selection: Vec<i64> = reports
+                .iter()
+                .flat_map(|r| r.selection.iter().flatten().copied())
+                .filter(|s| ours.contains(s))
+                .collect();
+            selection.sort_unstable();
+            selection.dedup();
+            let doc = json!({
+                "contract": nils_pipeline::CONTRACT, "run": x.run_id, "pipeline": p.label(),
+                "seeds": taken, "selection": {"stacks": selection},
+            });
+            let text = nils_pipeline::canonical(&doc);
+            // into a folder of the engine's own beside the output, which the
+            // container never saw, created new and never through a link
+            let own = working.join(format!("{rel_out}.nils"));
+            match std::fs::symlink_metadata(&own) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "{rel_out}.nils is there already and is not a folder"
+                    ));
+                }
+                Err(_) => {
+                    std::fs::create_dir(&own).map_err(|e| format!("the run's own folder: {e}"))?
+                }
             }
-            Err(_) => {
-                std::fs::create_dir(&own).map_err(|e| format!("the run's own folder: {e}"))?
+            let rel = format!("{rel_out}.nils/{}", nils_pipeline::results::SEEDS_FILE);
+            let at = working.join(&rel);
+            if std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_file()) {
+                // a resume writes what the run says now
+                let _ = std::fs::remove_file(&at);
             }
-        }
-        let rel = format!("{rel_out}.nils/{}", nils_pipeline::results::SEEDS_FILE);
-        let at = working.join(&rel);
-        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_file()) {
-            // a resume writes what the run says now
-            let _ = std::fs::remove_file(&at);
-        }
-        nils_pipeline::files::write_new(&at, text.as_bytes()).map_err(|e| format!("{rel}: {e}"))?;
-        let sha = hex_of(&nils_pipeline::sha256(text.as_bytes()));
-        let id = derivative::insert_of_run(
-            registry.store(),
-            &derivative::New {
-                kind: "seeds",
-                belongs: &Belongs::run(),
-                place_id: x.output.id,
-                path: &rel,
-                bytes: text.len() as i64,
-                sha256: &sha,
-                media_type: "application/json",
-                registered_by: x.who,
-                actor: Some(x.actor),
-                model_id: None,
-                run_id: None,
-                preprocess_version: None,
-                supersedes_id: None,
-                created_at: &now,
-            },
-            x.run_id,
-        )
-        .map_err(|e| e.to_string())?;
-        registered += 1;
-        bytes_total += text.len() as u64;
-        seeds_doc = json!({
-            "seeds": taken.len(), "outside": outside, "selection": selection.len(),
-            "derivative": id,
-        });
-        seeds_digest = json!(sha);
-    }
-
-    let proposals: Vec<Value> = reports
-        .iter()
-        .flat_map(|r| r.proposals.iter().cloned())
-        .collect();
-    let results_digest = nils_pipeline::sha256(
-        nils_pipeline::canonical(&json!({
-            "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
-        }))
-        .as_bytes(),
-    );
-
-    // the units no one can vouch for become review items; a container
-    // that failed as a whole, with no results.json to say more, is one
-    // item of the run, not one per unit (wave 43's proof: three failed
-    // runs left 2,023 items, each run for a single cause), and so is a run
-    // whose every unit's container did
-    let mut items: Vec<i64> = Vec::new();
-    let label = p.label();
-    if whole && !m.units.is_empty() {
-        let error = statuses
-            .first()
-            .and_then(|s| s.2.clone())
-            .unwrap_or_else(|| "the run failed".into());
-        let log = unit_rows
-            .first()
-            .and_then(|u| u.outcome["log"].as_str().map(str::to_string))
-            .unwrap_or_else(|| format!("{RUNS}/{}/log.txt", x.run_id));
-        let id = nils_registry::review::raise_pipeline_qc(
-            registry.store(),
-            &nils_registry::review::PipelineQc {
-                run_id: x.run_id,
-                pipeline: &label,
-                unit: "run",
-                stack_id: None,
-                subject_id: None,
-                session_day: None,
-                status: "failed",
-                error: Some(&error),
-                metrics: &json!({
-                    "units": m.units.len(), "exit_code": exit_code, "log": log,
-                }),
-                job_id: Some(x.job_id),
-            },
-            &now,
-        )
-        .map_err(|e| e.to_string())?;
-        items.push(id);
-    }
-    for (i, status, error, metrics, _) in &statuses {
-        if whole || (status != "failed" && status != "unreported") {
-            continue;
-        }
-        let u = &m.units[*i];
-        let id = nils_registry::review::raise_pipeline_qc(
-            registry.store(),
-            &nils_registry::review::PipelineQc {
-                run_id: x.run_id,
-                pipeline: &label,
-                unit: &u.id,
-                stack_id: u.stack_id,
-                subject_id: u.subject_id,
-                session_day: u.session_day.as_deref(),
-                status: if status == "unreported" {
-                    "unreported"
-                } else {
-                    "failed"
+            nils_pipeline::files::write_new(&at, text.as_bytes())
+                .map_err(|e| format!("{rel}: {e}"))?;
+            let sha = hex_of(&nils_pipeline::sha256(text.as_bytes()));
+            let id = derivative::insert_of_run(
+                registry.store(),
+                &derivative::New {
+                    kind: "seeds",
+                    belongs: &Belongs::run(),
+                    place_id: x.output.id,
+                    path: &rel,
+                    bytes: text.len() as i64,
+                    sha256: &sha,
+                    media_type: "application/json",
+                    registered_by: x.who,
+                    actor: Some(x.actor),
+                    model_id: None,
+                    run_id: None,
+                    preprocess_version: None,
+                    supersedes_id: None,
+                    created_at: &now,
                 },
-                error: error.as_deref(),
-                metrics,
-                job_id: Some(x.job_id),
-            },
-            &now,
-        )
-        .map_err(|e| e.to_string())?;
-        items.push(id);
-    }
+                x.run_id,
+            )
+            .map_err(|e| e.to_string())?;
+            registered += 1;
+            bytes_total += text.len() as u64;
+            seeds_doc = json!({
+                "seeds": taken.len(), "outside": outside, "selection": selection.len(),
+                "derivative": id,
+            });
+            seeds_digest = json!(sha);
+        }
 
-    // a file the engine refused, a unit's or the run's own, is a review
-    // item too (record 43 review)
-    for r in &refused {
-        let unit = r["unit"].as_str().unwrap_or("run");
-        let u = m.units.iter().find(|u| u.id == unit);
-        let id = nils_registry::review::raise_pipeline_qc(
-            registry.store(),
-            &nils_registry::review::PipelineQc {
-                run_id: x.run_id,
-                pipeline: &label,
-                unit,
-                stack_id: u.and_then(|u| u.stack_id),
-                subject_id: u.and_then(|u| u.subject_id),
-                session_day: u.and_then(|u| u.session_day.as_deref()),
-                status: "refused",
-                error: r["why"].as_str(),
-                metrics: &json!({"file": r["file"], "output": r["output"]}),
-                job_id: Some(x.job_id),
-            },
-            &now,
-        )
-        .map_err(|e| e.to_string())?;
-        if !items.contains(&id) {
+        let proposals: Vec<Value> = reports
+            .iter()
+            .flat_map(|r| r.proposals.iter().cloned())
+            .collect();
+        let results_digest = nils_pipeline::sha256(
+            nils_pipeline::canonical(&json!({
+                "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
+            }))
+            .as_bytes(),
+        );
+
+        // the units no one can vouch for become review items; a container
+        // that failed as a whole, with no results.json to say more, is one
+        // item of the run, not one per unit (wave 43's proof: three failed
+        // runs left 2,023 items, each run for a single cause), and so is a run
+        // whose every unit's container did
+        let mut items: Vec<i64> = Vec::new();
+        let label = p.label();
+        if whole && !m.units.is_empty() {
+            let error = statuses
+                .first()
+                .and_then(|s| s.2.clone())
+                .unwrap_or_else(|| "the run failed".into());
+            let log = unit_rows
+                .first()
+                .and_then(|u| u.outcome["log"].as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{RUNS}/{}/log.txt", x.run_id));
+            let id = nils_registry::review::raise_pipeline_qc(
+                registry.store(),
+                &nils_registry::review::PipelineQc {
+                    run_id: x.run_id,
+                    pipeline: &label,
+                    unit: "run",
+                    stack_id: None,
+                    subject_id: None,
+                    session_day: None,
+                    status: "failed",
+                    error: Some(&error),
+                    metrics: &json!({
+                        "units": m.units.len(), "exit_code": exit_code, "log": log,
+                    }),
+                    job_id: Some(x.job_id),
+                },
+                &now,
+            )
+            .map_err(|e| e.to_string())?;
             items.push(id);
         }
-    }
-
-    // record 49 A3: the declared checks, held against each unit that
-    // succeeded, a breach one pipeline:qc item naming the metric and its
-    // value; a unit that has an item already keeps it
-    let mut breached: Vec<Value> = Vec::new();
-    if !whole {
-        let already: std::collections::BTreeSet<String> = statuses
-            .iter()
-            .filter(|(_, status, ..)| status == "failed" || status == "unreported")
-            .map(|(i, ..)| m.units[*i].id.clone())
-            .chain(
-                refused
-                    .iter()
-                    .filter_map(|r| r["unit"].as_str().map(str::to_string)),
-            )
-            .collect();
-        for (i, status, _, metrics, _) in &statuses {
-            if status != "succeeded" || d.checks.is_empty() {
+        for (i, status, error, metrics, _) in &statuses {
+            if whole || (status != "failed" && status != "unreported") {
                 continue;
             }
             let u = &m.units[*i];
-            let mine: BTreeMap<String, f64> = measured
-                .iter()
-                .filter(|p| p.unit_id == u.id)
-                .filter_map(|p| Some((p.name.clone(), p.number?)))
-                .collect();
-            let (breaches, taken, unchecked) = crate::measures::hold(&d.checks, metrics, &mine);
-            notes.unchecked += unchecked;
-            if let Some(b) = u.belongs() {
-                for (metric, value) in taken {
-                    measured.push(crate::measures::Pending {
-                        unit_id: u.id.clone(),
-                        belongs: b.clone(),
-                        derivative_id: None,
-                        source: nils_registry::measure::METRICS.into(),
-                        name: metric,
-                        ty: "number".into(),
-                        number: Some(value),
-                        text: None,
-                        unit: None,
-                    });
-                }
-            }
-            if breaches.is_empty() {
-                continue;
-            }
-            notes.breaches += breaches.len();
-            breached.push(json!({"unit": u.id, "breaches": breaches}));
-            if already.contains(&u.id) {
-                continue;
-            }
-            let words = crate::measures::breach_words(&breaches);
             let id = nils_registry::review::raise_pipeline_qc(
                 registry.store(),
                 &nils_registry::review::PipelineQc {
@@ -5017,9 +5310,38 @@ fn finalize(
                     stack_id: u.stack_id,
                     subject_id: u.subject_id,
                     session_day: u.session_day.as_deref(),
-                    status: "breach",
-                    error: Some(&words),
-                    metrics: &json!({"breaches": breaches, "metrics": metrics}),
+                    status: if status == "unreported" {
+                        "unreported"
+                    } else {
+                        "failed"
+                    },
+                    error: error.as_deref(),
+                    metrics,
+                    job_id: Some(x.job_id),
+                },
+                &now,
+            )
+            .map_err(|e| e.to_string())?;
+            items.push(id);
+        }
+
+        // a file the engine refused, a unit's or the run's own, is a review
+        // item too (record 43 review)
+        for r in &refused {
+            let unit = r["unit"].as_str().unwrap_or("run");
+            let u = m.units.iter().find(|u| u.id == unit);
+            let id = nils_registry::review::raise_pipeline_qc(
+                registry.store(),
+                &nils_registry::review::PipelineQc {
+                    run_id: x.run_id,
+                    pipeline: &label,
+                    unit,
+                    stack_id: u.and_then(|u| u.stack_id),
+                    subject_id: u.and_then(|u| u.subject_id),
+                    session_day: u.and_then(|u| u.session_day.as_deref()),
+                    status: "refused",
+                    error: r["why"].as_str(),
+                    metrics: &json!({"file": r["file"], "output": r["output"]}),
                     job_id: Some(x.job_id),
                 },
                 &now,
@@ -5029,55 +5351,139 @@ fn finalize(
                 items.push(id);
             }
         }
-    }
-    let measures_written =
-        crate::measures::write(registry.store(), x.run_id, p.id, &p.name, &measured, &now)?;
 
-    // the proposals on the axes it declares, through the review spine
-    // (record 43 S6): grouped model items, staged at the model's threshold
-    let (declared, undeclared): (Vec<Value>, Vec<Value>) =
-        proposals.iter().cloned().partition(|p| {
-            p["axis"]
-                .as_str()
-                .is_some_and(|a| d.proposals.iter().any(|x| x == a))
-        });
-    // a run speaks for its own stacks, and for the models it was given or
-    // made (record 43 review)
-    let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
-    let speaks_for: std::collections::BTreeSet<i64> = x
-        .models
-        .iter()
-        .map(|m| m.id)
-        .chain(models_made.iter().filter_map(|m| m["model"]["id"].as_i64()))
-        .collect();
-    let mut proposed = json!({
-        "given": proposals.len(), "declared": declared.len(),
-        "undeclared": undeclared.len(), "taken": 0,
-    });
-    if !declared.is_empty() {
-        let taken =
-            nils_registry::proposals::parse(&json!({ "proposals": declared })).and_then(|parsed| {
-                nils_registry::proposals::ingest(
-                    registry,
-                    &nils_registry::proposals::Run {
-                        id: x.run_id,
-                        job_id: Some(x.job_id),
-                        principal: x.who,
-                        stacks: Some(&ours),
-                        models: Some(&speaks_for),
-                    },
-                    &parsed,
-                    x.threshold,
+        // record 49 A3: the declared checks, held against each unit that
+        // succeeded, a breach one pipeline:qc item naming the metric and its
+        // value; a unit that has an item already keeps it
+        let mut breached: Vec<Value> = Vec::new();
+        if !whole {
+            let already: std::collections::BTreeSet<String> = statuses
+                .iter()
+                .filter(|(_, status, ..)| status == "failed" || status == "unreported")
+                .map(|(i, ..)| m.units[*i].id.clone())
+                .chain(
+                    refused
+                        .iter()
+                        .filter_map(|r| r["unit"].as_str().map(str::to_string)),
                 )
-            });
-        match taken {
-            Ok(done) => {
-                proposed["taken"] = json!(done.members);
-                proposed["ingested"] = done.to_json();
+                .collect();
+            for (i, status, _, metrics, _) in &statuses {
+                if status != "succeeded" || d.checks.is_empty() {
+                    continue;
+                }
+                let u = &m.units[*i];
+                let mine: BTreeMap<String, f64> = measured
+                    .iter()
+                    .filter(|p| p.unit_id == u.id)
+                    .filter_map(|p| Some((p.name.clone(), p.number?)))
+                    .collect();
+                let (breaches, taken, unchecked) = crate::measures::hold(&d.checks, metrics, &mine);
+                notes.unchecked += unchecked;
+                if let Some(b) = u.belongs() {
+                    for (metric, value) in taken {
+                        measured.push(crate::measures::Pending {
+                            unit_id: u.id.clone(),
+                            belongs: b.clone(),
+                            derivative_id: None,
+                            source: nils_registry::measure::METRICS.into(),
+                            name: metric,
+                            ty: "number".into(),
+                            number: Some(value),
+                            text: None,
+                            unit: None,
+                        });
+                    }
+                }
+                if breaches.is_empty() {
+                    continue;
+                }
+                notes.breaches += breaches.len();
+                breached.push(json!({"unit": u.id, "breaches": breaches}));
+                if already.contains(&u.id) {
+                    continue;
+                }
+                let words = crate::measures::breach_words(&breaches);
+                let id = nils_registry::review::raise_pipeline_qc(
+                    registry.store(),
+                    &nils_registry::review::PipelineQc {
+                        run_id: x.run_id,
+                        pipeline: &label,
+                        unit: &u.id,
+                        stack_id: u.stack_id,
+                        subject_id: u.subject_id,
+                        session_day: u.session_day.as_deref(),
+                        status: "breach",
+                        error: Some(&words),
+                        metrics: &json!({"breaches": breaches, "metrics": metrics}),
+                        job_id: Some(x.job_id),
+                    },
+                    &now,
+                )
+                .map_err(|e| e.to_string())?;
+                if !items.contains(&id) {
+                    items.push(id);
+                }
             }
-            Err(e) => proposed["refused"] = json!(e.to_string()),
         }
-    }
+        let measures_written =
+            crate::measures::write(registry.store(), x.run_id, p.id, &p.name, &measured, &now)?;
+
+        // the proposals on the axes it declares, through the review spine
+        // (record 43 S6): grouped model items, staged at the model's threshold
+        let (declared, undeclared): (Vec<Value>, Vec<Value>) =
+            proposals.iter().cloned().partition(|p| {
+                p["axis"]
+                    .as_str()
+                    .is_some_and(|a| d.proposals.iter().any(|x| x == a))
+            });
+        // a run speaks for its own stacks, and for the models it was given or
+        // made (record 43 review)
+        let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
+        let speaks_for: std::collections::BTreeSet<i64> = x
+            .models
+            .iter()
+            .map(|m| m.id)
+            .chain(models_made.iter().filter_map(|m| m["model"]["id"].as_i64()))
+            .collect();
+        let mut proposed = json!({
+            "given": proposals.len(), "declared": declared.len(),
+            "undeclared": undeclared.len(), "taken": 0,
+        });
+        if !declared.is_empty() {
+            let taken = nils_registry::proposals::parse(&json!({ "proposals": declared }))
+                .and_then(|parsed| {
+                    nils_registry::proposals::ingest(
+                        registry,
+                        &nils_registry::proposals::Run {
+                            id: x.run_id,
+                            job_id: Some(x.job_id),
+                            principal: x.who,
+                            stacks: Some(&ours),
+                            models: Some(&speaks_for),
+                        },
+                        &parsed,
+                        x.threshold,
+                    )
+                });
+            match taken {
+                Ok(done) => {
+                    proposed["taken"] = json!(done.members);
+                    proposed["ingested"] = done.to_json();
+                }
+                Err(e) => proposed["refused"] = json!(e.to_string()),
+            }
+        }
+        Ok((
+            run_files,
+            models_made,
+            seeds_doc,
+            results_digest,
+            items,
+            breached,
+            measures_written,
+            proposed,
+        ))
+    })?;
 
     let count = |s: &str| statuses.iter().filter(|x| x.1 == s).count();
     let first_log = unit_rows

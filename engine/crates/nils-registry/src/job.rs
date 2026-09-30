@@ -8,12 +8,17 @@
 //!
 //! The rules, which are Wave 1 §10's: a claim refuses while a job **of the
 //! same kind** is fresh, takes over one that is stale or whose process on
-//! this host is gone, and records the new job as running with this
+//! this host is gone (a job whose own process still runs on this host is
+//! never stale, however long it goes without a beat: [`runs_here`]), and records the new job as running with this
 //! process's id and host. A stale job of any other kind is failed on the
 //! way, since a stale row is a stale row. A cancel from outside sets the
 //! state to `cancelling`; the running job sees it at its next heartbeat and
 //! stops the way a signal would stop it, so what is written stays written,
 //! and a job is resumable because nothing is in flight (principle 4).
+//!
+//! A kind whose jobs may run side by side, as pipeline runs over stacks no
+//! other run holds do, claims with [`claim_beside`]: a fresh job of the
+//! kind refuses it only where the verb says the two meet.
 //!
 //! A queue is rows in state `queued` with the command line to run; a worker
 //! takes the oldest and runs it, which is how the doors of §11 run anything
@@ -27,6 +32,21 @@ use crate::time::{now_iso, now_secs, secs_of};
 
 /// A running job whose heartbeat is younger than this holds its kind.
 pub const FRESH_SECS: u64 = 60;
+
+/// The variable a test sets to shorten [`FRESH_SECS`], so a job left
+/// without a heartbeat is stale in seconds rather than a minute. Nothing
+/// but a test sets it.
+pub const FRESH_VAR: &str = "NILS_TEST_JOB_FRESH_SECS";
+
+/// How long a heartbeat keeps a job fresh: [`FRESH_SECS`], or what a test
+/// set in [`FRESH_VAR`].
+pub fn fresh_secs() -> u64 {
+    std::env::var(FRESH_VAR)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(FRESH_SECS)
+}
 
 /// What a claim says about the job it makes.
 #[derive(Debug, Clone)]
@@ -90,6 +110,12 @@ pub enum Error {
         job_id: i64,
         since: String,
     },
+    /// A fresh job of the same kind holds what this one would take, in
+    /// the words of the verb that asked ([`claim_beside`]).
+    Held {
+        job_id: i64,
+        why: String,
+    },
     Store(StoreError),
     Message(String),
 }
@@ -106,6 +132,7 @@ impl fmt::Display for Error {
                 "a {kind} job (id {job_id}) holds this registry, last heard from at {since}; \
                  wait, or `nils jobs cancel {job_id}` if it is not running anywhere"
             ),
+            Error::Held { why, .. } => f.write_str(why),
             Error::Store(e) => write!(f, "{e}"),
             Error::Message(m) => f.write_str(m),
         }
@@ -154,6 +181,74 @@ pub fn process_alive(_pid: i64) -> Option<bool> {
     None
 }
 
+/// When a process of this host started, in seconds since the epoch, where
+/// the system says: Linux's `/proc/<pid>/stat`, read against the boot time
+/// in `/proc/stat` at the 100 ticks a second the kernel reports in. A
+/// process that has ended and waits for its parent to reap it (a zombie)
+/// runs no more, and has none.
+pub fn process_started(pid: i64) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // the fields after the command's closing parenthesis: the state is the
+    // third field of the line, the start time the twenty-second
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X" | "x") {
+        return None;
+    }
+    let ticks: u64 = fields.nth(18)?.parse().ok()?;
+    let boot: u64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(boot + ticks / 100)
+}
+
+/// Whether a job's own process still runs on this host: its host is this
+/// one, a process has its id, and that process started no later than the
+/// job was last heard from, so it is the job's and not a later process
+/// that took the id after the job's had ended. A job whose process runs
+/// is never failed as stale, however long it goes without a heartbeat:
+/// one step of it, such as a pipeline run's intake of thousands of
+/// proposals, may take longer than [`FRESH_SECS`].
+pub fn runs_here(host: Option<&str>, pid: Option<i64>, last: &str) -> bool {
+    let Some(pid) = pid else {
+        return false;
+    };
+    if host != Some(hostname().as_str()) || process_alive(pid) != Some(true) {
+        return false;
+    }
+    let Some(heard) = secs_of(last) else {
+        return false;
+    };
+    // a start time and a stamp in whole seconds, and a tick's rounding
+    process_started(pid).is_some_and(|started| started <= heard + 2)
+}
+
+/// Whether a job is running now: not over, and either heard from within
+/// the freshness a claim allows, or its process on this host still there
+/// ([`runs_here`]); a job of this host whose process is gone is not,
+/// however fresh its last beat.
+pub fn is_live(j: &Job) -> bool {
+    if j.state.is_over() || j.state == State::Queued {
+        return false;
+    }
+    let last = j
+        .heartbeat_at
+        .as_deref()
+        .unwrap_or(j.started_at.as_str())
+        .to_string();
+    let here = j.host.as_deref() == Some(hostname().as_str());
+    let gone = here && j.pid.is_some_and(|p| process_alive(p) == Some(false));
+    if gone {
+        return false;
+    }
+    let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs());
+    fresh || runs_here(j.host.as_deref(), j.pid, &last)
+}
+
 fn stamp(store: &Store, column: &str) -> String {
     let t = table("job");
     store.dialect().text_of(
@@ -192,6 +287,33 @@ pub fn words_of(own: &[String]) -> Vec<String> {
 /// Take the kind, failing what is stale and refusing what is fresh, and
 /// record this run as a running job. Returns the job's id.
 pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
+    claim_with(store, claim, None)
+}
+
+/// What decides whether a fresh job of the claim's kind holds the claim
+/// off: given that job's id and args, `Some(why)` when it does.
+pub type Beside<'a> =
+    dyn FnMut(&mut Store, i64, &serde_json::Value) -> Result<Option<String>, Error> + 'a;
+
+/// [`claim`] for a kind whose jobs may run side by side, as pipeline runs
+/// over stacks no other run holds do: a fresh job of the kind refuses the claim only where
+/// `holds` says it does, with its words as [`Error::Held`]; a fresh job
+/// `holds` lets be is left running. What is stale is failed on the way as
+/// ever. Two claims that must not both pass are the caller's to take one
+/// at a time.
+pub fn claim_beside(
+    store: &mut Store,
+    claim: &Claim<'_>,
+    holds: &mut Beside<'_>,
+) -> Result<i64, Error> {
+    claim_with(store, claim, Some(holds))
+}
+
+fn claim_with(
+    store: &mut Store,
+    claim: &Claim<'_>,
+    mut holds: Option<&mut Beside<'_>>,
+) -> Result<i64, Error> {
     let now = now_iso();
     let host = hostname();
     let pid = i64::from(std::process::id());
@@ -202,9 +324,10 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
     // store reads a Postgres timestamp only so), and the select sees a row
     // only when another job is running, which is when it must not fail.
     let sql = format!(
-        "SELECT id, kind, {}, {}, pid, host FROM {} WHERE state IN ('running', 'cancelling')",
+        "SELECT id, kind, {}, {}, pid, host, {} FROM {} WHERE state IN ('running', 'cancelling')",
         stamp(store, "heartbeat_at"),
         stamp(store, "started_at"),
+        stamp(store, "args"),
         store.qualified("job")
     );
     for j in store.query(&sql, &[])? {
@@ -223,14 +346,26 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
         // A job of this host whose process is gone left no one to beat its
         // heart: it is over, however fresh the last beat.
         let gone = its_host == host && its_pid.is_some_and(|p| process_alive(p) == Some(false));
-        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < FRESH_SECS);
-        if fresh && !gone {
+        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs());
+        // a job whose process runs on this host is not stale, however long
+        // since its last beat
+        let live = fresh || runs_here(Some(its_host), its_pid, &last);
+        if live && !gone {
             if its_kind == claim.kind {
-                return Err(Error::Busy {
-                    kind: its_kind,
-                    job_id: id,
-                    since: last,
-                });
+                let Some(holds) = holds.as_deref_mut() else {
+                    return Err(Error::Busy {
+                        kind: its_kind,
+                        job_id: id,
+                        since: last,
+                    });
+                };
+                let its_args: serde_json::Value = j
+                    .opt_text(6)?
+                    .and_then(|a| serde_json::from_str(a).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                if let Some(why) = holds(store, id, &its_args)? {
+                    return Err(Error::Held { job_id: id, why });
+                }
             }
             continue;
         }
@@ -808,4 +943,36 @@ pub fn take(store: &mut Store, job_id: i64) -> Result<bool, Error> {
         ],
     )?;
     Ok(n == 1)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// A process that has ended and is not yet reaped is still there to a
+    /// signal, but runs no more: it has no start time, so a job whose
+    /// process it was is never held as running here by it.
+    #[test]
+    fn an_ended_process_waiting_to_be_reaped_does_not_run_here() {
+        let now = now_iso();
+        let own = i64::from(std::process::id());
+        assert!(process_started(own).is_some());
+        assert!(runs_here(Some(hostname().as_str()), Some(own), &now));
+
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i64::from(child.id());
+        // until it is reaped, the ended child is a zombie
+        let started = std::time::Instant::now();
+        while std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| !s[s.rfind(')').unwrap() + 1..].trim_start().starts_with('Z'))
+            .unwrap_or(true)
+        {
+            assert!(started.elapsed().as_secs() < 10, "the child never ended");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(process_alive(pid), Some(true));
+        assert_eq!(process_started(pid), None);
+        assert!(!runs_here(Some(hostname().as_str()), Some(pid), &now_iso()));
+        child.wait().unwrap();
+    }
 }

@@ -1,6 +1,6 @@
 # Pipelines
 
-A pipeline is a container image that takes a frozen selection and writes files the engine registers as derivatives. Its descriptor, `nils.job.yml`, says what it is; the contract is `contracts/job/v1`. The engine runs one pipeline at a time, rootless, with no network, in a lane of its own beside every other job, so a long run never holds up a digest; the units of a run run side by side within the lane's budget.
+A pipeline is a container image that takes a frozen selection and writes files the engine registers as derivatives. Its descriptor, `nils.job.yml`, says what it is; the contract is `contracts/job/v1`. The engine runs pipelines rootless, with no network, in a lane of its own beside every other job, so a long run never holds up a digest. Runs whose stacks do not meet go on side by side, and the units of every run share the lane's one budget.
 
 ## Turn pipelines on
 
@@ -45,7 +45,7 @@ A pipeline is a container image that takes a frozen selection and writes files t
 
 ## Set the lane
 
-Pipeline runs have a lane of their own: `nils serve --worker` runs them in a worker beside the one that runs every other job. The lane holds up to 48 cores and 512 GB of memory for all the units it runs at once, and never more than this machine, or the container the engine runs in, offers.
+Pipeline runs have a lane of their own: `nils serve --worker` runs them in a worker beside the one that runs every other job. The lane holds up to 48 cores and 512 GB of memory for all the units it runs at once, of every run on this machine together, and never more than this machine, or the container the engine runs in, offers.
 
 1. Read the lane:
 
@@ -71,7 +71,7 @@ Pipeline runs have a lane of their own: `nils serve --worker` runs them in a wor
 
 > **Warning:** the budget is the engine's own bookkeeping. Keep the container's own memory cap below the host's memory, so that what the lane is allowed is really there.
 
-A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units leave. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the lane's own running units there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. Each unit holds its lease until its container ends, and is given that card alone. Podman and docker hold each container to the cores and memory its unit declares (`--cpus`, `--memory`), and apptainer does where the host's cgroups delegate those controllers; elsewhere the budget is the engine's bookkeeping alone. A descriptor names the parameter its tool is told the threads by under `x-nils.needs.cores-input` (and the memory under `memory-input`): left out of a run it is the declared value, and asked above it the run is refused.
+A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units of every run on this machine leave, as their rows in the registry say. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the running units of every run there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. The units of a run whose engine went away hold nothing, though their rows still say running. Each unit holds its lease until its container ends, and is given that card alone. Podman and docker hold each container to the cores and memory its unit declares (`--cpus`, `--memory`), and apptainer does where the host's cgroups delegate those controllers; elsewhere the budget is the engine's bookkeeping alone. A descriptor names the parameter its tool is told the threads by under `x-nils.needs.cores-input` (and the memory under `memory-input`): left out of a run it is the declared value, and asked above it the run is refused.
 
 ## Use the starter catalog
 
@@ -170,6 +170,34 @@ curl -X POST http://127.0.0.1:8437/api/pipelines/samseg-lesions/preflight \
 
 The pre-flight's budget check reads the lane's own budget (see *Set the lane*).
 
+## Run several at once
+
+Runs whose stacks do not meet go on side by side, each a job of its own, and all of them within the lane's one budget.
+
+1. Start each run over its own stacks, for example one `--handle` each of the parts `--chunk` named:
+
+   ```sh
+   nils run bodypart-infer-fusion --handle 41 --model bodypart-fusion@r7 &
+   nils run bodypart-infer-fusion --handle 42 --model bodypart-fusion@r7 &
+   wait
+   ```
+
+   A run that would take a stack a running run holds is refused before it starts, and the refusal names that run, its job and how many of the stacks it holds. Start it again once that run has ended, or cancel that run with `nils jobs cancel <job>`.
+
+2. Read what each waits for:
+
+   ```sh
+   nils jobs list
+   ```
+
+   A unit of one run waits for the cores, memory and card memory the units of the others hold. The run's progress says so under `waiting`, and `lane` gives what every run holds beside what this run holds.
+
+The steps that write what every run shares are taken one run at a time: the intake of a run's proposals into review groups, with the supersede of what an earlier run of the model left untaken, the review items, the measures and the audit's epoch that close a run, a model a run registers, an encoder an embedding names, the release of a bids input and the build of an image apptainer keeps. A run beats its job's heart from a thread of its own for as long as it goes on, so a long intake or a wait for a lock never reads as a run whose engine went away, and a claim never fails a job whose own process still runs on this machine, however long since its last beat. The lock is the database's own: an advisory lock on Postgres, and on SQLite a file lock on `registry.db-pipeline-<step>.lock` beside the database. Either goes with the process that held it, however it ends.
+
+`--chunk` still runs its parts one after another in one process, and the pipeline lane's worker still takes the queue's runs one at a time; runs started at the keyboard go on beside them.
+
+> **Warning:** on SQLite a statement waits at most five seconds for another process's transaction. A very large intake of proposals can hold one longer, and a run beside it then fails on its own bookkeeping. Keep a registry that runs many large runs at once on Postgres.
+
 ## Take a run up again
 
 A run whose units run apart (`x-nils.units: apart`) keeps each unit it finished. When the engine goes away mid-run, the pipeline lane's worker finds the run, marks it `interrupted`, and queues it to go on under what its job recorded; it does so three times at most, then leaves the run to a person.
@@ -187,6 +215,8 @@ A run whose units run apart (`x-nils.units: apart`) keeps each unit it finished.
    ```
 
    The units in flight when it stopped run again from a clean folder; a unit whose container had ended is taken in from what it left, and nothing is registered twice. `nils jobs resume <job>` of the run's job does the same. A run whose units run together goes on from the start, unless its container had ended, when it is taken in from what that left.
+
+   A run taken up again goes on beside the runs whose stacks it does not share, and is refused, as a new run is, while a running run holds one of its stacks.
 
 ## Give a pipeline a secret
 
@@ -455,7 +485,7 @@ What a run does, in order:
 | step | what |
 |---|---|
 | input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session. `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
-| lane | a run is one job in the pipeline lane; its containers start while the cores and memory each declares fit in the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
+| lane | a run is one job in the pipeline lane, beside the runs whose stacks it does not share; its containers start while the cores and memory each declares fit in what the running units of every run leave of the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
 | container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
 | GPU | the lane's card alone, passed through CDI (`nvidia.com/gpu=<card>`, podman), `--nv` with `CUDA_VISIBLE_DEVICES=<card>` (apptainer) or `--gpus device=<card>` (docker) where the descriptor needs one, the host has one and the lane names a card; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |
 | apptainer | `apptainer run --containall --cleanenv --no-home --net --network none`, each folder bound with `--bind`, so the image's ENTRYPOINT runs before the descriptor's command line as it does under podman, the image built once from its digest into `<working>/images/` |

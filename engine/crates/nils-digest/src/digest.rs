@@ -204,6 +204,7 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Digest
         }
         Err(job::Error::Store(e)) => return Err(e.into()),
         Err(job::Error::Message(m)) => return Err(DigestError::Message(m)),
+        Err(e @ job::Error::Held { .. }) => return Err(DigestError::Message(e.to_string())),
     };
     // A batch a stale job left running is failed with the job (§9.3).
     let d = store.dialect();

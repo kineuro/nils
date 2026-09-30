@@ -5939,3 +5939,792 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
     );
     assert_eq!(flairs(&lab, "after"), 1, "the kept nothing writes no FLAIR");
 }
+
+// ------------------------------------------------------- runs side by side
+
+/// The lab's stacks, in id order.
+fn stack_ids(lab: &Lab) -> Vec<i64> {
+    lab.store()
+        .query("SELECT id FROM stack ORDER BY id", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect()
+}
+
+/// Save a selection of these stacks under `name`, as its version 1.
+fn select_stacks(lab: &Lab, name: &str, ids: &[i64]) {
+    let doc = lab.work.path().join(format!("{name}.json"));
+    std::fs::write(
+        &doc,
+        json!({"ast_version": 1, "sets": {name: {"grain": "stack", "where": [
+            ["in", {}, ["field", {}, "id"], ids],
+        ]}}, "out": {"set": name, "level": "record"}})
+        .to_string(),
+    )
+    .unwrap();
+    let packs = packs();
+    lab.ok(
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            name,
+            "--file",
+            doc.to_str().unwrap(),
+            "--pack-dir",
+            packs.to_str().unwrap(),
+        ],
+        None,
+    );
+    std::fs::remove_file(&doc).unwrap();
+}
+
+/// An engine started in the background, in a process group of its own so
+/// that a kill takes its containers with it; one still running when the
+/// test ends, or fails, is killed with its group.
+struct Started {
+    child: Option<Child>,
+    /// Where its stdout and stderr go: files, so that a run that says a
+    /// great deal never fills a pipe no one reads while it runs.
+    said: (PathBuf, PathBuf),
+}
+
+impl Started {
+    /// Kill the engine and everything it started, as a crash would.
+    fn kill(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let killed = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status()
+                .unwrap();
+            assert!(killed.success(), "the engine's group was not killed");
+            let _ = child.wait();
+        }
+    }
+
+    /// Wait for the engine to end, within `secs`: whether it succeeded, and
+    /// what it printed.
+    fn finish(&mut self, secs: u64) -> (bool, String, String) {
+        let started = std::time::Instant::now();
+        loop {
+            let child = self.child.as_mut().unwrap();
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if started.elapsed().as_secs() >= secs {
+                self.kill();
+                panic!(
+                    "the run did not end within {secs} s: {}",
+                    std::fs::read_to_string(&self.said.1).unwrap_or_default()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let status = self.child.take().unwrap().wait().unwrap();
+        (
+            status.success(),
+            std::fs::read_to_string(&self.said.0).unwrap_or_default(),
+            std::fs::read_to_string(&self.said.1).unwrap_or_default(),
+        )
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if self.child.is_some() {
+            self.kill();
+        }
+    }
+}
+
+impl Lab {
+    /// Start `nils` in the background with these words, its units noting
+    /// themselves in `trace`, with `env` beside the lab's own.
+    fn start(&self, trace: &Path, args: &[&str], env: &[(&str, &Path)]) -> Started {
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static STARTED: AtomicUsize = AtomicUsize::new(0);
+        let n = STARTED.fetch_add(1, Ordering::SeqCst);
+        let said = (
+            self.work.path().join(format!("started-{n}.out")),
+            self.work.path().join(format!("started-{n}.err")),
+        );
+        let mut c = self.command(&self.path);
+        c.args(args)
+            .env("LANE_TRACE", trace)
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&said.0).unwrap())
+            .stderr(std::fs::File::create(&said.1).unwrap())
+            .process_group(0);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        Started {
+            child: Some(c.spawn().unwrap()),
+            said,
+        }
+    }
+
+    /// Wait until `sql` counts at least `n`, within a minute.
+    fn wait_count(&self, sql: &str, n: i64, what: &str) {
+        let started = std::time::Instant::now();
+        while self.count(sql) < n {
+            assert!(started.elapsed().as_secs() < 60, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// The units of a trace whose names are among `units`: when the first of
+/// them started, and when the last ended.
+fn span(events: &[(String, f64, String, String)], units: &[String]) -> (f64, f64) {
+    let mine = events.iter().filter(|e| units.contains(&e.2));
+    let first = mine
+        .clone()
+        .filter(|e| e.0 == "start")
+        .map(|e| e.1)
+        .fold(f64::INFINITY, f64::min);
+    let last = mine
+        .filter(|e| e.0 == "end")
+        .map(|e| e.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    (first, last)
+}
+
+/// The most units that ran at once, by the trace, counting only the units
+/// that ended: a start with no end is a unit whose engine was killed.
+fn most_at_once_ended(path: &Path) -> usize {
+    let mut open: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    for (w, at, unit, _) in trace(path) {
+        if w == "start" {
+            open.insert(unit, at);
+        } else if let Some(from) = open.remove(&unit) {
+            spans.push((from, at));
+        }
+    }
+    let mut edges: Vec<(f64, i32)> = spans
+        .iter()
+        .flat_map(|(a, b)| [(*a, 1), (*b, -1)])
+        .collect();
+    edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+    let (mut now, mut most) = (0i32, 0i32);
+    for (_, d) in edges {
+        now += d;
+        most = most.max(now);
+    }
+    most as usize
+}
+
+fn units_of(stacks: &[i64]) -> Vec<String> {
+    stacks.iter().map(|s| format!("stack-{s}")).collect()
+}
+
+/// 2026-09-30: runs whose stacks do not meet go on side by side, within
+/// the lane's one budget, which holds across them: a unit of the second
+/// run waits for the cores the first run's units hold, though its own run
+/// holds almost none. A run that would take a stack a running run holds is
+/// refused, naming that run, and runs once that run has ended.
+#[test]
+fn runs_over_disjoint_stacks_go_on_together_within_one_lane() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-side-by-side", "nils_pipelines_side", |lab| {
+        lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+        // three cores: the first run's two units and one of the second's
+        lab.ok(
+            &["pipeline", "lane", "--cores", "3", "--memory-gb", "100"],
+            None,
+        );
+        let s = stack_ids(lab);
+        assert_eq!(s.len(), 4);
+        select_stacks(lab, "left", &s[..2]);
+        select_stacks(lab, "right", &s[2..]);
+        select_stacks(lab, "wide", &s[1..3]);
+        // the first run is held in its intake until the refusals below are
+        // made, so it is still running however slowly this machine starts
+        // them; its units run long enough that the second run's first unit
+        // starts beside them
+        let mut holder = lab.store();
+        let held = nils_registry::lock::try_take(&mut holder, "pipeline-intake")
+            .unwrap()
+            .expect("the intake lock is free");
+        let t = lab.work.path().join("trace-side");
+        let mut a = lab.start(
+            &t,
+            &[
+                "run",
+                "slow",
+                "--select",
+                "selection:left@1",
+                "--param",
+                "sleep=15",
+                "--json",
+            ],
+            &[],
+        );
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit WHERE state = 'running'",
+            2,
+            "the first run's units never started",
+        );
+        let mut b = lab.start(
+            &t,
+            &[
+                "run",
+                "slow",
+                "--select",
+                "selection:right@1",
+                "--param",
+                "sleep=1",
+                "--json",
+            ],
+            &[],
+        );
+        // the same stacks, and one stack of each, are refused while they run
+        let (ok, _, err) = lab.run(&["run", "slow", "--select", "selection:left@1"], None);
+        assert!(!ok);
+        assert!(
+            err.contains("run 1 of slow")
+                && err.contains("holds 2 of the stacks this run would take")
+                && err.contains("nils jobs cancel"),
+            "{err}"
+        );
+        let (ok, _, err) = lab.run(&["run", "slow", "--select", "selection:wide@1"], None);
+        assert!(!ok);
+        assert!(
+            err.contains("holds 1 of the stacks this run would take"),
+            "{err}"
+        );
+        nils_registry::lock::release(&mut holder, held).unwrap();
+        drop(holder);
+        let (ok, out, err) = b.finish(120);
+        assert!(ok, "{err}");
+        let rb: Value = serde_json::from_str(&out).unwrap();
+        let (ok, out, err) = a.finish(120);
+        assert!(ok, "{err}");
+        let ra: Value = serde_json::from_str(&out).unwrap();
+        for r in [&ra, &rb] {
+            assert_eq!(r["status"], "done", "{r}");
+            assert_eq!(r["summary"]["units"]["succeeded"], 2, "{r}");
+        }
+        // the two ran at once, and never more units than the lane's cores
+        let events = trace(&t);
+        let (a_first, a_last) = span(&events, &units_of(&s[..2]));
+        let (b_first, b_last) = span(&events, &units_of(&s[2..]));
+        assert!(
+            b_first < a_last && a_first < b_last,
+            "the runs never overlapped: {events:?}"
+        );
+        assert_eq!(most_at_once(&t), 3, "{events:?}");
+        // none refused left a run behind; the wide one runs now
+        assert_eq!(lab.count("SELECT COUNT(*) FROM pipeline_run"), 2);
+        let rc = lab.json(&["run", "slow", "--select", "selection:wide@1", "--json"]);
+        assert_eq!(rc["status"], "done", "{rc}");
+        assert_eq!(lab.count("SELECT COUNT(DISTINCT path) FROM derivative"), 6);
+    });
+}
+
+/// 2026-09-30: the card's lease is the lane's across its runs. Two GPU
+/// runs over other stacks, at once, on a card with room for one unit's
+/// need: one unit at a time across both, each run's image built once by
+/// the first run that needs it, and both runs done.
+#[test]
+fn two_runs_take_the_card_s_lease_one_unit_at_a_time() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the stand-ins need it, so this test is skipped");
+        return;
+    }
+    on_both("pipelines-side-gpu", "nils_pipelines_side_gpu", |lab| {
+        let fake = lab.bin.file("apptainer", FAKE_APPTAINER.as_bytes());
+        let smi = lab.bin.file("nvidia-smi", FAKE_SMI.as_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [&fake, &smi] {
+                std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let free = lab.work.path().join("gpu-free");
+        std::fs::write(&free, "6000").unwrap();
+        let asked = lab.work.path().join("gpu-asked");
+        let apptainer_args = lab.bin.path().join("apptainer.log");
+        let t = lab.work.path().join("trace-gpu");
+        lab.add_descriptor(
+            "gpu-slow",
+            &stack_slow(
+                "gpu-slow",
+                "{gpu: required, gpu-memory-gb: 4, cores: 1, memory-gb: 1}",
+                "",
+            ),
+        );
+        lab.ok(&["pipeline", "runtime", "--set", "apptainer"], None);
+        lab.ok(
+            &[
+                "pipeline",
+                "lane",
+                "--cores",
+                "8",
+                "--memory-gb",
+                "100",
+                "--gpu-card",
+                "1",
+            ],
+            None,
+        );
+        let s = stack_ids(lab);
+        select_stacks(lab, "left", &s[..2]);
+        select_stacks(lab, "right", &s[2..]);
+        let env: [(&str, &Path); 3] = [
+            ("FAKE_APPTAINER_ARGS", &apptainer_args),
+            ("FAKE_GPU_FREE", &free),
+            ("FAKE_GPU_ASKED", &asked),
+        ];
+        let words = |sel: &'static str| {
+            [
+                "run", "gpu-slow", "--select", sel, "--param", "sleep=1", "--json",
+            ]
+        };
+        let mut a = lab.start(&t, &words("selection:left@1"), &env);
+        let mut b = lab.start(&t, &words("selection:right@1"), &env);
+        for run in [&mut a, &mut b] {
+            let (ok, out, err) = run.finish(180);
+            assert!(ok, "{err}");
+            let r: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(r["status"], "done", "{r}");
+            assert_eq!(r["device"], "cuda:Stand-in Card", "{r}");
+        }
+        // room for one unit's 4 GB on the card: one lease at a time, though
+        // each run alone would have taken one
+        assert_eq!(trace(&t).len(), 8, "{:?}", trace(&t));
+        assert_eq!(most_at_once(&t), 1, "{:?}", trace(&t));
+        assert!(trace(&t).iter().all(|e| e.3 == "1"), "{:?}", trace(&t));
+        let builds = std::fs::read_to_string(&apptainer_args)
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("[\"build\""))
+            .count();
+        assert_eq!(builds, 1, "the image was built once");
+    });
+}
+
+/// A pipeline of the stacks layout that proposes `brain` on the body part
+/// of each of its stacks, by the model it is given.
+const PROPOSE: &str = r#"name: propose
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/propose@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  man = json.load(open(sys.argv[3] + "/manifest.json"))
+  model = man["models"][0]["model_id"]
+  units = [{"unit_id": s["unit"], "status": "succeeded"} for s in m["stacks"]]
+  props = [{"stack_id": s["stack_id"], "axis": "body_part", "value": "brain", "probabilities": {"brain": 0.9, "spine": 0.1}, "model_id": model} for s in m["stacks"]]
+  json.dump({"schema_version": "1", "units": units, "proposals": props}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [Inputs]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  inputs:
+    - {id: model, type: model}
+  outputs:
+    - {id: note, kind: output, path-template: "notes/{stack}.txt"}
+  proposals: [{axis: body_part}]
+"#;
+
+/// The open `body_part:model` groups, each with its member stacks.
+fn open_groups(lab: &Lab) -> Vec<(i64, BTreeSet<i64>)> {
+    let mut store = lab.store();
+    let items: Vec<i64> = store
+        .query(
+            "SELECT id FROM review_item WHERE kind = 'body_part:model' \
+             AND status IN ('open', 'staged') ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    items
+        .into_iter()
+        .map(|id| {
+            let members = store
+                .query(
+                    &format!("SELECT stack_id FROM review_member WHERE item_id = {id}"),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| r.int(0).unwrap())
+                .collect();
+            (id, members)
+        })
+        .collect()
+}
+
+/// 2026-09-30: two runs that take their results in at once take the
+/// shared steps one at a time. Two runs of one model over halves of what
+/// an earlier run proposed supersede its group between them, and no stack
+/// is left in two open groups, nor carried for a run that proposed it
+/// again; two runs that meet one unregistered encoder register it once.
+#[test]
+fn two_runs_taking_in_at_once_leave_one_group_per_stack() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-side-intake",
+        "nils_pipelines_side_intake",
+        |lab| {
+            lab.add_descriptor("propose", PROPOSE);
+            let card = lab.work.path().join("card.json");
+            std::fs::write(
+                &card,
+                json!({"name": "bp-side", "version": "1", "kind": "pass",
+                   "digest": format!("sha256:{}", "7".repeat(64)), "task": "axis:body_part"})
+                .to_string(),
+            )
+            .unwrap();
+            lab.ok(
+                &["model", "register", "--card", card.to_str().unwrap()],
+                None,
+            );
+            // a thousand stacks, so each intake takes long enough to meet the
+            // other's
+            add_stacks(lab, 996);
+            let s = stack_ids(lab);
+            assert_eq!(s.len(), 1000);
+            select_stacks(lab, "left", &s[..500]);
+            select_stacks(lab, "right", &s[500..]);
+            let all: BTreeSet<i64> = s.iter().copied().collect();
+            // the earlier run: one group of every stack
+            let r0 = lab.json(&[
+                "run",
+                "propose",
+                "--select",
+                "selection:every@1",
+                "--model",
+                "bp-side@1",
+                "--json",
+            ]);
+            assert_eq!(r0["status"], "done", "{r0}");
+            let groups = open_groups(lab);
+            assert_eq!(groups.len(), 1, "{groups:?}");
+            assert_eq!(groups[0].1, all);
+
+            // two newer runs, one over each half, that come to take in their
+            // results while the intake lock is held here: both wait for it,
+            // beating their hearts, and neither writes a review item
+            let mut holder = lab.store();
+            let held = nils_registry::lock::try_take(&mut holder, "pipeline-intake")
+                .unwrap()
+                .expect("the intake lock is free");
+            let t = lab.work.path().join("trace-intake");
+            let words = |sel: &'static str| {
+                [
+                    "run",
+                    "propose",
+                    "--select",
+                    sel,
+                    "--model",
+                    "bp-side@1",
+                    "--json",
+                ]
+            };
+            let mut a = lab.start(&t, &words("selection:left@1"), &[]);
+            let mut b = lab.start(&t, &words("selection:right@1"), &[]);
+            lab.wait_count(
+                "SELECT COUNT(*) FROM pipeline_unit WHERE run_id IN (2, 3) AND state = 'over'",
+                1000,
+                "the two runs' containers never ended",
+            );
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            assert_eq!(
+                lab.count("SELECT COUNT(*) FROM pipeline_run WHERE status = 'running'"),
+                2,
+                "a run closed while the intake lock was held"
+            );
+            assert_eq!(
+                lab.count(
+                    "SELECT COUNT(*) FROM review_item WHERE group_key LIKE 'run:2|%' \
+                 OR group_key LIKE 'run:3|%'"
+                ),
+                0,
+                "a run took its proposals in while the intake lock was held"
+            );
+            // let go: the two take it one after the other
+            nils_registry::lock::release(&mut holder, held).unwrap();
+            drop(holder);
+            let mut superseded = 0;
+            for run in [&mut a, &mut b] {
+                let (ok, out, err) = run.finish(120);
+                assert!(ok, "{err}");
+                let r: Value = serde_json::from_str(&out).unwrap();
+                assert_eq!(r["status"], "done", "{r}");
+                let ingested = &r["summary"]["proposals"]["ingested"];
+                assert_eq!(ingested["items"], 1, "{r}");
+                superseded += ingested["superseded"].as_i64().unwrap();
+            }
+            // the earlier group, and what the first of the two carried of it
+            // for the other, are superseded; each stack is in one open group,
+            // the newer run's own
+            assert_eq!(superseded, 2);
+            let groups = open_groups(lab);
+            assert_eq!(groups.len(), 2, "{groups:?}");
+            let mut seen = BTreeSet::new();
+            for (_, members) in &groups {
+                assert_eq!(members.len(), 500, "{groups:?}");
+                for m in members {
+                    assert!(
+                        seen.insert(*m),
+                        "stack {m} is in two open groups: {groups:?}"
+                    );
+                }
+            }
+            assert_eq!(seen, all);
+            assert_eq!(
+                lab.count(
+                    "SELECT COUNT(*) FROM review_item WHERE kind = 'body_part:model' \
+                 AND group_key LIKE '%carried%'"
+                ),
+                1,
+                "one carried group, by the first of the two"
+            );
+
+            // two runs that meet an encoder no one registered register it once
+            lab.add_descriptor("bp-embed", &stand_in("bp-embed"));
+            select_stacks(lab, "two", &s[..2]);
+            select_stacks(lab, "other_two", &s[2..4]);
+            let t = lab.work.path().join("trace-embed");
+            let words = |sel: &'static str| ["run", "bp-embed", "--select", sel, "--json"];
+            let mut a = lab.start(&t, &words("selection:two@1"), &[]);
+            let mut b = lab.start(&t, &words("selection:other_two@1"), &[]);
+            for run in [&mut a, &mut b] {
+                let (ok, out, err) = run.finish(120);
+                assert!(ok, "{err}");
+                let r: Value = serde_json::from_str(&out).unwrap();
+                assert_eq!(r["status"], "done", "{r}");
+                assert_eq!(r["summary"]["embeddings"]["registered"], 2, "{r}");
+            }
+            assert_eq!(
+                lab.count("SELECT COUNT(*) FROM model WHERE kind = 'encoder'"),
+                1
+            );
+            assert_eq!(
+                lab.count("SELECT COUNT(*) FROM derivative WHERE kind = 'embedding'"),
+                4
+            );
+        },
+    );
+}
+
+/// 2026-09-30: a run killed with units in flight, beside another run,
+/// holds nothing of the lane once its engine is gone, though its rows
+/// still say running: the other run starts its units in the whole lane.
+/// Taken up again while that other run goes on, it finishes, and nothing
+/// of it is registered twice.
+#[test]
+fn a_run_killed_beside_another_is_taken_up_while_the_other_goes_on() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-side-crash", "nils_pipelines_side_crash", |lab| {
+        lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+        lab.ok(
+            &["pipeline", "lane", "--cores", "2", "--memory-gb", "100"],
+            None,
+        );
+        let s = stack_ids(lab);
+        select_stacks(lab, "left", &s[..2]);
+        select_stacks(lab, "right", &s[2..]);
+        let t = lab.work.path().join("trace-crash");
+        let mut a = lab.start(
+            &t,
+            &[
+                "run",
+                "slow",
+                "--select",
+                "selection:left@1",
+                "--param",
+                "sleep=30",
+            ],
+            &[],
+        );
+        // the lane is full of the first run's units; then its engine dies
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit WHERE state = 'running'",
+            2,
+            "the first run's units never started",
+        );
+        a.kill();
+        assert_eq!(
+            lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'running'"),
+            2,
+            "a killed engine leaves its units saying running"
+        );
+        // the other run has the whole lane: both its units at once
+        let mut b = lab.start(
+            &t,
+            &[
+                "run",
+                "slow",
+                "--select",
+                "selection:right@1",
+                "--param",
+                "sleep=3",
+                "--json",
+            ],
+            &[],
+        );
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit u JOIN pipeline_run r ON r.id = u.run_id \
+             WHERE r.id = 2 AND u.state = 'running'",
+            2,
+            "the second run waited for a lane the killed run no longer holds",
+        );
+        // the killed run, taken up while the other goes on
+        let mut resumed = lab.start(&t, &["run", "--resume", "1", "--json"], &[]);
+        let (ok, out, err) = resumed.finish(120);
+        assert!(ok, "{err}");
+        let r1: Value = serde_json::from_str(&out).unwrap();
+        let (ok, out, err) = b.finish(120);
+        assert!(ok, "{err}");
+        let r2: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r1["status"], "done", "{r1}");
+        assert_eq!(r1["resumes"], 1, "{r1}");
+        assert_eq!(r1["summary"]["units"]["succeeded"], 2, "{r1}");
+        assert_eq!(r2["status"], "done", "{r2}");
+        assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+        assert_eq!(lab.count("SELECT COUNT(DISTINCT path) FROM derivative"), 4);
+        // the lane never held more than its two cores of live units: the
+        // units taken up again waited for the other run's
+        assert_eq!(most_at_once_ended(&t), 2, "{:?}", trace(&t));
+    });
+}
+
+/// 2026-09-30: a run whose intake is held past the freshness a claim
+/// allows keeps its job. Its heart beats from a thread of its own while
+/// the run waits and writes, so a second run over other stacks, claimed
+/// from another host where the first run's process cannot be seen, finds
+/// it fresh and leaves it running, and both finish. The freshness is three
+/// seconds here, and the first run's own beats come every five.
+#[test]
+fn a_run_held_in_its_intake_past_the_freshness_is_not_taken_over() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-side-heart", "nils_pipelines_side_heart", |lab| {
+        lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+        let s = stack_ids(lab);
+        select_stacks(lab, "left", &s[..2]);
+        select_stacks(lab, "right", &s[2..]);
+        // the freshness, as the environment carries it
+        let fresh = Path::new("3");
+        let mut holder = lab.store();
+        let held = nils_registry::lock::try_take(&mut holder, "pipeline-intake")
+            .unwrap()
+            .expect("the intake lock is free");
+        let t = lab.work.path().join("trace-heart");
+        let mut a = lab.start(
+            &t,
+            &[
+                "run",
+                "slow",
+                "--select",
+                "selection:left@1",
+                "--param",
+                "sleep=0",
+                "--json",
+            ],
+            &[("NILS_TEST_JOB_FRESH_SECS", fresh)],
+        );
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit WHERE run_id = 1 AND state = 'over'",
+            2,
+            "the first run's units never ended",
+        );
+        // held in its intake for three freshnesses and more
+        let age = |lab: &Lab| -> u64 {
+            let mut store = lab.store();
+            let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+            let j = nils_registry::job::show(&mut store, job).unwrap().unwrap();
+            let heard = j
+                .heartbeat_at
+                .as_deref()
+                .and_then(nils_registry::time::secs_of);
+            nils_registry::time::now_secs().saturating_sub(heard.unwrap_or(0))
+        };
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(age(lab) < 3, "the held run's heart stopped");
+        }
+        // a run over other stacks, from another host, claims beside it
+        let mut b = {
+            use std::os::unix::process::CommandExt;
+            let out = lab.work.path().join("b.out");
+            let err = lab.work.path().join("b.err");
+            let mut c = lab.command(&lab.path);
+            c.args([
+                "run",
+                "slow",
+                "--select",
+                "selection:right@1",
+                "--param",
+                "sleep=0",
+                "--json",
+            ])
+            .env("HOSTNAME", "ward-4")
+            .env("NILS_TEST_JOB_FRESH_SECS", "3")
+            .env("LANE_TRACE", &t)
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&out).unwrap())
+            .stderr(std::fs::File::create(&err).unwrap())
+            .process_group(0);
+            Started {
+                child: Some(c.spawn().unwrap()),
+                said: (out, err),
+            }
+        };
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit WHERE run_id = 2 AND state = 'over'",
+            2,
+            "the second run's units never ended",
+        );
+        assert_eq!(
+            lab.count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline' AND state = 'running'"),
+            2,
+            "a claim failed the held run"
+        );
+        nils_registry::lock::release(&mut holder, held).unwrap();
+        drop(holder);
+        for run in [&mut a, &mut b] {
+            let (ok, out, err) = run.finish(120);
+            assert!(ok, "{err}");
+            let r: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(r["status"], "done", "{r}");
+        }
+        assert_eq!(
+            lab.count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline' AND state = 'done'"),
+            2
+        );
+    });
+}
