@@ -1819,6 +1819,23 @@ fn pack_list_and_show_read_the_pack_directory() {
         shown["site"].as_object().unwrap().is_empty(),
         "no registry here"
     );
+    // record 51: the picks the pack declares, with the roles each picks for
+    let main = shown["picks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "main")
+        .unwrap_or_else(|| panic!("{}", shown["picks"]));
+    let roles: Vec<&str> = main["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect();
+    assert!(
+        roles.contains(&"t1w") && roles.contains(&"flair"),
+        "{roles:?}"
+    );
 
     // a name that is not there says so rather than listing nothing
     let out = nils()

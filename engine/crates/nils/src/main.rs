@@ -10537,6 +10537,11 @@ pub(crate) fn pack_document(
             "rule_set": r.name, "rules": r.rules.len(),
             "decides": r.decides, "entered": r.enter_when.is_some(),
         })).collect::<Vec<_>>(),
+        // record 51: the picks the pack declares and the roles each picks
+        // for, so a reader offers the pack's roles rather than a list of its own
+        "picks": pack.picks.iter().map(|p| json!({
+            "name": p.name, "roles": p.roles,
+        })).collect::<Vec<_>>(),
         "buckets": pack.buckets,
         "lists": pack.lists,
         "site": site.iter().map(|(l, s)| (l.clone(), site_json(s))).collect::<serde_json::Map<_, _>>(),
