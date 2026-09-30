@@ -113,11 +113,13 @@ class J2KDecoder:
         from nvidia import nvimgcodec
 
         self._nv = nvimgcodec
-        # the card alone, and one CPU thread: the run's parallelism is its
-        # worker processes, each with a decoder of its own
-        self._dec = nvimgcodec.Decoder(
-            device_id=device_id, max_num_cpu_threads=1, backends=[nvimgcodec.Backend(nvimgcodec.BackendKind.GPU_ONLY)]
-        )
+        # few CPU threads of its own: the run's parallelism is its worker
+        # processes; a decoder that cannot be made so is made as the library
+        # makes it by default
+        try:
+            self._dec = nvimgcodec.Decoder(device_id=device_id, max_num_cpu_threads=2)
+        except Exception:  # noqa: BLE001
+            self._dec = nvimgcodec.Decoder(device_id=device_id)
         self._params = nvimgcodec.DecodeParams(
             allow_any_depth=True, color_spec=nvimgcodec.ColorSpec.UNCHANGED, apply_exif_orientation=False
         )

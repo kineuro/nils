@@ -592,12 +592,15 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
     params = {"threads": a.threads, "models": model.refs(), "preprocessing": volume.PREPROCESSING}
     if device != "cpu":
         params.update({"decode_device": device, "encoder_device": encoder_device})
+        params["gpu_workers"] = min(a.gpu_workers, a.threads)
         if encoder_device != "cpu":
             params["batch"] = a.batch
     run = Run("bodypart-infer-fusion", a.output, params, device)
     stacks = manifest.load(a.stacks, source_root=a.source_root)
     decoded: dict = {}
-    done = scoring.score(model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded)
+    done = scoring.score(
+        model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded, gpu_workers=a.gpu_workers
+    )
     counts = {"answered_fine": 0, "answered_coarse": 0, "no_fingerprint": 0, "no_geometry": 0, "failed": 0, "cohort_calibrated": 0}
     per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
     for st, r, why in done:
@@ -710,6 +713,7 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--device", default=os.environ.get("NILS_BODYPART_DEVICE", "auto"), help="auto, cpu or cuda: where lossless JPEG 2000 is decoded")
     f.add_argument("--encoder-device", choices=("cpu", "cuda"), default="cpu", help="cuda runs the image encoder on the card in batches (not bit for bit the CPU's)")
     f.add_argument("--batch", type=int, default=64, help="stacks a batch of the encoder on the card")
+    f.add_argument("--gpu-workers", type=int, default=4, help="of the workers, how many decode on the card; the others decode on the CPU")
     return p
 
 

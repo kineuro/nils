@@ -78,11 +78,17 @@ def one_thread():
     return threadpool_limits(limits=1)
 
 
-def _init(inputs: str, gpu_decode: bool, prepare_only: bool, prefetch: bool) -> None:
+def _init(inputs: str, gpu_decode: bool, prepare_only: bool, prefetch: bool, started=None, gpu_workers: int = 0) -> None:
     one_thread()
     _W["model"] = None if prepare_only else fusion.load(Path(inputs))
     _W["prepare_only"], _W["prefetch"] = prepare_only, prefetch
     _W["decode"] = None
+    if gpu_decode and started is not None:
+        # only the first gpu_workers workers decode on the card: a card is
+        # one queue, and more processes on it only wait on each other
+        with started.get_lock():
+            gpu_decode = started.value < gpu_workers
+            started.value += 1
     if gpu_decode:
         try:
             from .gpu import J2KDecoder
@@ -135,6 +141,7 @@ def score(
     chunk: int = 4,
     prefetch: bool | None = None,
     stats: dict | None = None,
+    gpu_workers: int = 4,
 ) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
     """Every stack's answer, in the manifest's order."""
     if prefetch is None:
@@ -164,7 +171,7 @@ def score(
     saved = {k: os.environ.get(k) for k in ONE_THREAD}
     os.environ.update(ONE_THREAD)
     try:
-        yield from _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats)
+        yield from _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats, gpu_workers)
     finally:
         for k, v in saved.items():
             if v is None:
@@ -173,12 +180,13 @@ def score(
                 os.environ[k] = v
 
 
-def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats):
+def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats, gpu_workers):
+    ctx = mp.get_context("spawn")
     pool = ProcessPoolExecutor(
         max_workers=max(1, workers),
-        mp_context=mp.get_context("spawn"),
+        mp_context=ctx,
         initializer=_init,
-        initargs=(str(inputs), gpu_decode, torch_encoder is not None, prefetch),
+        initargs=(str(inputs), gpu_decode, torch_encoder is not None, prefetch, ctx.Value("i", 0), gpu_workers),
     )
     chunks = [stacks[i : i + chunk] for i in range(0, len(stacks), chunk)]
     window = max(2, workers) * 2
