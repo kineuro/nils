@@ -27,7 +27,16 @@
 //! is a review item and nothing more, open for a person or a campaign.
 //!
 //! A stack whose axis a person or an agent has decided, with the decision
-//! in force, is not asked again: it is counted, and left out.
+//! in force, is not asked again: it is counted, and left out. Record 51
+//! R5: where the decision is a person's and the model proposes another
+//! value at or above its threshold, the disagreement is shown, never
+//! applied: an `<axis>:decision` item on the stack, the kind that already
+//! says "a decision stands and something disagrees", with the model, its
+//! value and its confidence as the evidence. Nothing is staged and the
+//! person's decision stays in force. There is one open such item per stack,
+//! axis and model; a newer run of the model refreshes it, or closes it as
+//! superseded where it no longer disagrees. Below the threshold the
+//! proposal is only counted.
 //!
 //! A newer run of a model supersedes what its earlier runs proposed on the
 //! same axis, on the stacks it proposes again, and nobody took: their
@@ -173,6 +182,59 @@ pub struct Group {
     pub staged: Option<i64>,
 }
 
+/// Record 51 R5: a model that disagrees with a person's decision, at or
+/// above its threshold, raised as an `<axis>:decision` item.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Disagreement {
+    /// The review item, raised or refreshed.
+    pub item: i64,
+    pub stack_id: i64,
+    pub axis: String,
+    /// The person's decision in force, or none where they decided nothing.
+    pub decision: Option<String>,
+    /// What the model proposes instead, and how sure it is.
+    pub value: String,
+    pub model_id: i64,
+    pub confidence: f64,
+    /// Whether an earlier run's open item was refreshed rather than a new
+    /// one raised.
+    pub refreshed: bool,
+}
+
+/// A decision in force on a stack's axis, as the ingest reads it.
+#[derive(Debug, Clone)]
+struct Decided {
+    value: Option<String>,
+    person: bool,
+    decision_id: Option<i64>,
+    actor: String,
+}
+
+impl Decided {
+    /// Whether the decision holds `value`, one of a multi-valued axis's
+    /// values included.
+    fn holds(&self, value: &str) -> bool {
+        self.value
+            .as_deref()
+            .is_some_and(|v| v.split(',').any(|x| x.trim() == value))
+    }
+}
+
+/// What a run proposed on a stack a person decided, before it is written.
+#[derive(Debug, Clone)]
+struct Against {
+    stack_id: i64,
+    axis: String,
+    model_id: i64,
+    /// The proposal's evidence, when it disagrees at or above the
+    /// threshold; none when it agrees or falls below, which closes an
+    /// earlier run's item of the model on the stack.
+    evidence: Option<Value>,
+    decision: Option<String>,
+    value: String,
+    confidence: f64,
+}
+
 /// What an ingest did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ingested {
@@ -187,6 +249,13 @@ pub struct Ingested {
     /// Proposals left out because a person's or an agent's decision on
     /// the axis is in force on the stack.
     pub decided: i64,
+    /// Record 51 R5: of those, the proposals that disagree with a person's
+    /// decision at or above the model's threshold, each raised as (or
+    /// refreshing) an `<axis>:decision` item, never staged.
+    pub disagreements: Vec<Disagreement>,
+    /// The `<axis>:decision` items of the model's earlier runs closed as
+    /// superseded because this run no longer disagrees on their stack.
+    pub agreed_again: i64,
     /// Why a group at or above the threshold was not staged, once per
     /// model: not admitted or promoted, or registered for another task.
     pub not_staged: Vec<String>,
@@ -211,6 +280,12 @@ impl Ingested {
             "staged_members": self.staged_members,
             "staged_decisions": self.groups.iter().filter(|g| g.staged.is_some()).count(),
             "decided": self.decided,
+            "disagreements": self.disagreements.iter().map(|d| json!({
+                "item": d.item, "stack_id": d.stack_id, "axis": d.axis, "decision": d.decision,
+                "value": d.value, "model_id": d.model_id, "confidence": d.confidence,
+                "refreshed": d.refreshed,
+            })).collect::<Vec<_>>(),
+            "agreed_again": self.agreed_again,
             "sealed": self.sealed,
             "not_staged": self.not_staged,
             "superseded": self.superseded,
@@ -463,8 +538,8 @@ pub fn ingest(
             e.insert(threshold(m, asked)?);
         }
     }
-    // the stacks a person or an agent decided, per axis
-    let mut decided: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+    // the stacks a person or an agent decided, per axis, with the decision
+    let mut decided: BTreeMap<String, BTreeMap<i64, Decided>> = BTreeMap::new();
     let axes: BTreeSet<&str> = proposals.iter().map(|p| p.axis.as_str()).collect();
     let persons = ["person".to_string(), "agent".to_string()];
     for axis in axes {
@@ -489,7 +564,22 @@ pub fn ingest(
         })?;
         decided.insert(
             axis.to_string(),
-            labels.iter().filter_map(|l| l.stack_id).collect(),
+            labels
+                .iter()
+                .filter_map(|l| {
+                    l.stack_id.map(|s| {
+                        (
+                            s,
+                            Decided {
+                                value: l.value.clone(),
+                                person: l.author_kind == "person",
+                                decision_id: l.decision_id,
+                                actor: l.author.clone(),
+                            },
+                        )
+                    })
+                })
+                .collect(),
         );
     }
     let mut out = Ingested {
@@ -541,17 +631,46 @@ pub fn ingest(
     // (axis, model, value, band) -> members
     let mut groups: BTreeMap<(String, i64, String, String), Gathered> = BTreeMap::new();
     let mut models: BTreeMap<i64, Model> = BTreeMap::new();
+    let mut against: Vec<Against> = Vec::new();
     for (i, m) in resolved {
         let p = &proposals[i];
         if sealed.contains(&p.stack_id) {
             out.sealed += 1;
             continue;
         }
-        if decided
-            .get(&p.axis)
-            .is_some_and(|s| s.contains(&p.stack_id))
-        {
+        if let Some(dec) = decided.get(&p.axis).and_then(|s| s.get(&p.stack_id)) {
             out.decided += 1;
+            // record 51 R5: a model that disagrees with a person's decision
+            // at or above its threshold is asked about, never applied
+            let confidence = p.confidence();
+            let at = thresholds[&m.id].unwrap_or(f64::INFINITY);
+            let disagrees = dec.person && confidence >= at && !dec.holds(&p.value);
+            let evidence = disagrees.then(|| {
+                json!({
+                    "axis": p.axis,
+                    "decision": dec.value,
+                    "decision_id": dec.decision_id,
+                    "decided_by": dec.actor,
+                    "source": "model",
+                    "model": m.named(),
+                    "model_id": m.id,
+                    "value": p.value,
+                    "confidence": confidence,
+                    "threshold": thresholds[&m.id],
+                    "probabilities": p.probabilities,
+                    "run_id": run.id,
+                    "note": p.note,
+                })
+            });
+            against.push(Against {
+                stack_id: p.stack_id,
+                axis: p.axis.clone(),
+                model_id: m.id,
+                evidence,
+                decision: dec.value.clone(),
+                value: p.value.clone(),
+                confidence,
+            });
             continue;
         }
         let confidence = p.confidence();
@@ -587,7 +706,9 @@ pub fn ingest(
         groups,
         &models,
         &mut out,
-    ) {
+    )
+    .and_then(|()| disagree(registry, run, &against, &mut out))
+    {
         Ok(()) => {
             registry.store().commit()?;
             Ok(out)
@@ -763,6 +884,142 @@ fn write(
         });
     }
     out.not_staged = refusals.into_iter().collect();
+    Ok(())
+}
+
+/// Record 51 R5: raise, refresh or close the `<axis>:decision` items of a
+/// model that disagrees with a person's decision. One open item per stack,
+/// axis and model: a newer run refreshes its evidence where the model still
+/// disagrees at or above its threshold, and closes it as superseded where
+/// it no longer does. An item an unfinished campaign asks is left to the
+/// campaign. Nothing is staged and no decision is touched.
+fn disagree(
+    registry: &mut Registry,
+    run: &Run<'_>,
+    against: &[Against],
+    out: &mut Ingested,
+) -> Result<(), Error> {
+    let now = now_iso();
+    let store = registry.store();
+    let d = store.dialect();
+    let t = table("review_item");
+    let find = format!(
+        "SELECT id, {} FROM {ri} WHERE kind = {} AND scope = 'stack' AND status = 'open' \
+         AND ref = {} AND id NOT IN (SELECT ci.review_item_id FROM {ci} ci JOIN {c} c \
+         ON c.id = ci.campaign_id WHERE c.status IN ('open', 'closing') \
+         AND ci.review_item_id IS NOT NULL) ORDER BY id",
+        d.text_of(t.column("evidence").expect("evidence")),
+        d.param(1, Type::Text),
+        d.param(2, Type::Json),
+        ri = store.qualified("review_item"),
+        ci = store.qualified("campaign_item"),
+        c = store.qualified("campaign"),
+    );
+    for a in against {
+        let kind = format!("{}:decision", a.axis);
+        let reference = json!({"stack_id": a.stack_id}).to_string();
+        let store = registry.store();
+        let mut earlier: Vec<i64> = Vec::new();
+        for r in store.query(
+            &find,
+            &[Param::from(kind.as_str()), Param::from(reference.as_str())],
+        )? {
+            let ev: Value = r
+                .opt_text(1)?
+                .and_then(|e| serde_json::from_str(e).ok())
+                .unwrap_or(Value::Null);
+            if ev["source"] == "model" && ev["model_id"].as_i64() == Some(a.model_id) {
+                earlier.push(r.int(0)?);
+            }
+        }
+        let Some(evidence) = &a.evidence else {
+            // the model no longer disagrees: its earlier question is closed
+            let why = json!({"superseded_by": {"run_id": run.id, "model_id": a.model_id}});
+            for item in earlier {
+                out.agreed_again += store.execute(
+                    &format!(
+                        "UPDATE {} SET status = '{}', decided_at = {}, actor = {}, decision = {} \
+                         WHERE id = {} AND status = 'open'",
+                        store.qualified("review_item"),
+                        review::RESOLVED,
+                        d.param(1, Type::Timestamp),
+                        d.param(2, Type::Text),
+                        d.param(3, Type::Json),
+                        d.param(4, Type::Int)
+                    ),
+                    &[
+                        Param::from(now.as_str()),
+                        Param::from(run.principal),
+                        Param::from(why.to_string()),
+                        Param::Int(item),
+                    ],
+                )? as i64;
+            }
+            continue;
+        };
+        let (item, refreshed) = match earlier.first() {
+            Some(&item) => {
+                store.execute(
+                    &format!(
+                        "UPDATE {} SET evidence = {}, job_id = {} WHERE id = {}",
+                        store.qualified("review_item"),
+                        d.param(1, Type::Json),
+                        d.param(2, Type::Int),
+                        d.param(3, Type::Int)
+                    ),
+                    &[
+                        Param::from(evidence.to_string()),
+                        run.job_id.map_or(Param::Null, Param::Int),
+                        Param::Int(item),
+                    ],
+                )?;
+                (item, true)
+            }
+            None => {
+                let item = store
+                    .insert(
+                        &Insert::new(
+                            table("review_item"),
+                            &[
+                                "kind",
+                                "scope",
+                                "ref",
+                                "evidence",
+                                "status",
+                                "created_at",
+                                "job_id",
+                            ],
+                        )
+                        .returning(&["id"]),
+                        &[vec![
+                            Param::from(kind.as_str()),
+                            Param::from("stack"),
+                            Param::from(reference.as_str()),
+                            Param::from(evidence.to_string()),
+                            Param::from("open"),
+                            Param::from(now.as_str()),
+                            run.job_id.map_or(Param::Null, Param::Int),
+                        ]],
+                    )?
+                    .first()
+                    .ok_or_else(|| {
+                        StoreError::Message("the disagreement item was not written back".into())
+                    })?
+                    .int(0)?;
+                (item, false)
+            }
+        };
+        out.disagreements.push(Disagreement {
+            item,
+            stack_id: a.stack_id,
+            axis: a.axis.clone(),
+            decision: a.decision.clone(),
+            value: a.value.clone(),
+            model_id: a.model_id,
+            confidence: a.confidence,
+            refreshed,
+        });
+    }
     Ok(())
 }
 
