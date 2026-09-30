@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.65 published, so `bodypart-infer-fusion` 0.3.0 runs the code its descriptor describes. Its baked encoder weights verify with the same two digests as before, so those pins stay (kineuro/nils#322).
+
 ## [1.0.0-alpha.65] - 2026-09-30
 
 Pipeline runs whose stacks do not meet go on side by side within the lane's one budget, with the steps that write what every run shares taken one run at a time under a registry lock, and a job whose own process still runs on this machine is never taken over as stale. The body-part image is `nils-bodypart` 0.3.0: `bodypart-infer-fusion` is about ten times faster on a network file system, with the same answers, and its descriptor asks for 16 cores and 8 GB. This release publishes that image; the body-part descriptors in this tag still pin the image 1.0.0-alpha.63 published, and a change after it pins them to the new one. No desk release comes with it; installs keep desk 1.0.0-alpha.61. The registry stays at schema 76; the HTTP API contract stays version 7, the suite contract version 3, the pack contract version 7 and the job contract version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.64. It carries kineuro/nils#319 and #320.
