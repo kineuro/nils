@@ -1240,6 +1240,18 @@ The automatic pick is an **agent's** (§10.1), so a person's call is
 distinguishable from it wherever it is read, and a run replaces its own rows
 and never a person's.
 
+**Record 51 amends this section.** The carry first took three of v0's nine
+reasons for a look (`too_close`, `rare`, `nothing_eligible`). The other six are
+borders the pack declares, each defined as v0 computed it and with v0's
+number: `retake` (read after v0's partial-volume demotion, and per family for
+a Dixon or an MP2RAGE), `unknown_dim`, `slice_count_outlier`,
+`pre_post_twin` (a border only; v0 also made the twin a main),
+`epimix_fallback` and `dixon_vs_plain`. A pack that leaves one out never
+raises it. `family` is a list, so v0's MP2RAGE preference (UniformDenoised,
+then Uniform) is carried beside the Dixon one. A role is scored on tables of
+its own, and a role without them is refused at load. The MRI pack adds the
+role `t2w`, whose tables are this project's and not v0's.
+
 ### 10.1 Who authored a decision
 
 A small addition, made here because it has to exist before anything writes
