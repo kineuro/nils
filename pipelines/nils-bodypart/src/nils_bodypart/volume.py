@@ -137,12 +137,15 @@ def read_header_frames(path: str, frames: list[int] | None) -> list[Frame]:
     return out
 
 
-def decode_frames(path: str, indices: list[int]) -> dict[int, np.ndarray]:
+def decode_frames(path: str, indices: list[int], ds=None, plugin: str = "") -> dict[int, np.ndarray]:
     """The listed frames of one file, rescaled, float32: RGB (or YBR) to its
-    mean, then slope and intercept."""
+    mean, then slope and intercept. ``ds`` is the file already read, and
+    ``plugin`` the pydicom decoding plugin to use (the GPU path's, which gives
+    the same pixels); by default pydicom chooses, as it always has."""
     import pydicom
 
-    ds = pydicom.dcmread(path, force=True)
+    if ds is None:
+        ds = pydicom.dcmread(path, force=True)
     photo = str(getattr(ds, "PhotometricInterpretation", "") or "")
     nf = int(getattr(ds, "NumberOfFrames", 1) or 1)
     slope = float(getattr(ds, "RescaleSlope", 1) or 1)
@@ -154,6 +157,8 @@ def decode_frames(path: str, indices: list[int]) -> dict[int, np.ndarray]:
 
     out: dict[int, np.ndarray] = {}
     if nf == 1:
+        if plugin:
+            ds.pixel_array_options(decoding_plugin=plugin)
         arr = ds.pixel_array
         if colour or (arr.ndim == 3 and arr.shape[-1] == 3):
             arr = arr.astype(np.float32).mean(axis=-1)
@@ -170,7 +175,7 @@ def decode_frames(path: str, indices: list[int]) -> dict[int, np.ndarray]:
     from pydicom.pixels import pixel_array
 
     for i in indices:
-        arr = pixel_array(ds, index=i)
+        arr = pixel_array(ds, index=i, decoding_plugin=plugin)
         if colour:
             arr = arr.astype(np.float32).mean(axis=-1)
         out[i] = finish(arr)
@@ -282,11 +287,26 @@ def _select(frames: list[Frame]):
     return geo, uniq, n, r_dir, c_dir, n_frames_all, n_unique
 
 
-def build(files: list[tuple[str, list[int] | None]], orientation: str | None = None) -> Built:
+def decode_each(need: dict[str, list[int]]) -> dict[str, dict[int, np.ndarray] | Exception]:
+    """The frames each file must give, decoded one file after another on the
+    CPU: per file its frames, or the exception that stopped it."""
+    out: dict[str, dict[int, np.ndarray] | Exception] = {}
+    for path, idx in need.items():
+        try:
+            out[path] = decode_frames(path, idx)
+        except Exception as e:  # noqa: BLE001 - counted by kind by the caller
+            out[path] = e
+    return out
+
+
+def build(files: list[tuple[str, list[int] | None]], orientation: str | None = None, decode=None) -> Built:
     """The volume and geometry of a stack from its files in order, each with
     the frames that are the stack's (None for every frame). ``orientation``
     is the stack's fingerprint orientation, which chooses v0's slices among
-    the files read (:func:`preselect`)."""
+    the files read (:func:`preselect`). ``decode`` decodes the frames the
+    volume needs (:func:`decode_each`, the default, or the GPU path's, which
+    gives the same pixels)."""
+    decode = decode or decode_each
     errors: collections.Counter = collections.Counter()
     frames: list[Frame] = []
     seen: set[str] = set()
@@ -318,11 +338,11 @@ def build(files: list[tuple[str, list[int] | None]], orientation: str | None = N
             need.setdefault(geo[oi].path, []).append(geo[oi].index)
         pixels: dict[tuple[str, int], np.ndarray] = {}
         failed = False
+        decoded = decode(need)
         for path, idx in need.items():
-            try:
-                got = decode_frames(path, idx)
-            except Exception as e:  # noqa: BLE001
-                errors["decode:" + type(e).__name__] += 1
+            got = decoded[path]
+            if isinstance(got, Exception):
+                errors["decode:" + type(got).__name__] += 1
                 bad.add(path)
                 failed = True
                 continue

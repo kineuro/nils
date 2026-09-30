@@ -6,8 +6,11 @@
 # descriptor beside this file.
 #
 # CPU by default, which is how it runs until the laptop has a rootless GPU
-# path (record 43 R5). A CUDA build takes the wheel index of a CUDA torch; the
-# wheels carry the CUDA runtime, so the base stays the same:
+# path (record 43 R5). infer-fusion decodes lossless JPEG 2000 on a card where
+# the runner gives it one, with the nvImageCodec wheels in requirements.txt,
+# in this same image. A CUDA build of torch, for embed and for infer-fusion's
+# encoder on the card, takes the wheel index of a CUDA torch; the wheels carry
+# the CUDA runtime, so the base stays the same:
 #
 #   docker build -t nils-bodypart pipelines/nils-bodypart
 #   docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 \
