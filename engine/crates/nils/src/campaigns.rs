@@ -1152,7 +1152,13 @@ pub(crate) fn route(
                 .ok_or_else(|| {
                     Reply::error(404, format!("stack {stack} has not been classified"))
                 })?;
-                with_file(registry.store(), stack, !plain(caller), &mut doc)?;
+                with_file(
+                    registry.store(),
+                    stack,
+                    !plain(caller),
+                    pack.as_deref(),
+                    &mut doc,
+                )?;
                 Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "items", item, "why"] if get => {
@@ -1236,7 +1242,13 @@ pub(crate) fn route(
                 if c.hide_header {
                     hide_header(&mut doc);
                 } else {
-                    with_file(registry.store(), stack, !plain(caller), &mut doc)?;
+                    with_file(
+                        registry.store(),
+                        stack,
+                        !plain(caller),
+                        pack.as_deref(),
+                        &mut doc,
+                    )?;
                     doc["header_door"] =
                         json!(format!("/api/campaigns/{}/items/{item}/header", c.id));
                 }
@@ -1286,6 +1298,13 @@ pub(crate) fn route(
                     c.suggest == campaign::Suggest::None
                         || blind_to(registry.store(), caller, stack)?
                 );
+                // record 53 S3: the private elements the served pack shows
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let (private, withheld) =
+                    crate::file_header::private_shown(registry.store(), stack, pack.as_deref())
+                        .map_err(|e| Reply::error(500, e.to_string()))?;
+                doc["private"] = Value::Object(private);
+                doc["private_withheld"] = json!(withheld);
                 // record 48, after the first gold campaign: a stored header
                 // does not change, so the reader keeps it while it reads
                 let mut r = Reply::ok(doc);
@@ -3171,11 +3190,25 @@ fn vocabulary_of(question: &Value, pack: Option<&nils_pack::Pack>) -> Option<Val
 /// Record 48, after the first real read: the file's own text and physics
 /// beside a reader's document, blind or not. These are what a radiologist
 /// reads, never anything a system said of the stack.
-fn with_file(store: &mut Store, stack: i64, quasi: bool, doc: &mut Value) -> Result<(), Reply> {
+///
+/// Record 53 S3: and `private`, the private elements the served pack shows,
+/// by name, with `private_withheld`, how many were held back because their
+/// value was shaped like an identifier.
+fn with_file(
+    store: &mut Store,
+    stack: i64,
+    quasi: bool,
+    pack: Option<&nils_pack::Pack>,
+    doc: &mut Value,
+) -> Result<(), Reply> {
     let (texts, physics) = crate::file_header::texts_and_physics(store, stack, quasi)
         .map_err(|e| Reply::error(500, e.to_string()))?;
     doc["texts"] = Value::Object(texts);
     doc["physics"] = Value::Object(physics);
+    let (private, withheld) = crate::file_header::private_shown(store, stack, pack)
+        .map_err(|e| Reply::error(500, e.to_string()))?;
+    doc["private"] = Value::Object(private);
+    doc["private_withheld"] = json!(withheld);
     Ok(())
 }
 
@@ -3185,7 +3218,15 @@ fn with_file(store: &mut Store, stack: i64, quasi: bool, doc: &mut Value) -> Res
 /// campaign says of itself.
 fn hide_header(doc: &mut Value) {
     if let Some(m) = doc.as_object_mut() {
-        for k in ["header", "texts", "physics", "fields", "header_door"] {
+        for k in [
+            "header",
+            "texts",
+            "physics",
+            "private",
+            "private_withheld",
+            "fields",
+            "header_door",
+        ] {
             m.remove(k);
         }
     }

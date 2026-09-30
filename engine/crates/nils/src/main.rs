@@ -2450,6 +2450,26 @@ enum PackCommand {
         #[arg(long, value_name = "FILE")]
         overlay: Option<PathBuf>,
     },
+    /// What a pack decides of each stack from its header packet, offline
+    /// (record 53): the reader's packet, `{stack, header: {texts, sequence,
+    /// physics, geometry, private}, session: [...]}` or a flat `fields`
+    /// object, with the private elements the pack shows and the session
+    /// list, so the rules that read a private element and the session pass
+    /// act as they do in production. JSON lines out: `{stack, values,
+    /// tiers, session, private, withheld}`. The physics vote reads the
+    /// whole registry and is not replayed
+    Replay {
+        /// The pack directory
+        dir: PathBuf,
+        /// A file of packets, one JSON object a line, or a directory of
+        /// packet files (`*.json`, one packet each, in name order); stdin
+        /// when not given
+        #[arg(long, value_name = "FILE|DIR")]
+        input: Option<PathBuf>,
+        /// Load it under this overlay
+        #[arg(long, value_name = "FILE")]
+        overlay: Option<PathBuf>,
+    },
 }
 
 /// Whether a directory is a pack directory: one that holds at least one
@@ -3527,6 +3547,24 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
             );
             Ok(())
         }
+        PackCommand::Replay {
+            dir,
+            input,
+            overlay,
+        } => {
+            let ov = load_overlay(overlay.as_ref())?;
+            let pack = nils_pack::load(&dir, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
+            let packets = read_packets(input.as_deref()).map_err(fail)?;
+            let mut n = 0usize;
+            for (at, p) in &packets {
+                let out =
+                    nils_pack::replay::replay(&pack, p).map_err(|e| fail(format!("{at}: {e}")))?;
+                println!("{out}");
+                n += 1;
+            }
+            eprintln!("{n} packets replayed through {}", pack.id());
+            Ok(())
+        }
         PackCommand::Shape { dir, overlay, json } => {
             let ov = load_overlay(overlay.as_ref())?;
             let pack = nils_pack::load(&dir, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
@@ -3541,6 +3579,54 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 print!("{shape}");
             }
             Ok(())
+        }
+    }
+}
+
+/// `nils pack replay`'s packets, each with where it came from: the lines of
+/// a file, the `*.json` files of a directory in name order, or stdin.
+fn read_packets(input: Option<&Path>) -> Result<Vec<(String, serde_json::Value)>, String> {
+    let lines = |text: &str, from: &str| -> Result<Vec<(String, serde_json::Value)>, String> {
+        let mut out = Vec::new();
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let at = format!("{from} line {}", n + 1);
+            let v = serde_json::from_str(line).map_err(|e| format!("{at}: not JSON ({e})"))?;
+            out.push((at, v));
+        }
+        Ok(out)
+    };
+    match input {
+        Some(p) if p.is_dir() => {
+            let mut files: Vec<PathBuf> = fs::read_dir(p)
+                .map_err(|e| format!("{}: {e}", p.display()))?
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|f| f.extension().is_some_and(|x| x == "json"))
+                .collect();
+            files.sort();
+            let mut out = Vec::new();
+            for f in files {
+                let text = fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                let v = serde_json::from_str(&text)
+                    .map_err(|e| format!("{}: not JSON ({e})", f.display()))?;
+                out.push((f.display().to_string(), v));
+            }
+            Ok(out)
+        }
+        Some(p) => {
+            let text = fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            lines(&text, &p.display().to_string())
+        }
+        None => {
+            let mut t = String::new();
+            io::stdin()
+                .read_to_string(&mut t)
+                .map_err(|e| format!("stdin: {e}"))?;
+            lines(&t, "stdin")
         }
     }
 }
@@ -10535,11 +10621,30 @@ pub(crate) fn pack_document(
                 })
             }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
-        "passes": pack.passes.iter().map(|p| json!({
-            "pass": p.name, "kind": p.kind_name(),
-            "phase": format!("{:?}", p.phase).to_lowercase(),
-            "reference": p.reference.scope,
-        })).collect::<Vec<_>>(),
+        "passes": pack.passes.iter().map(|p| {
+            let mut v = json!({
+                "pass": p.name, "kind": p.kind_name(),
+                "phase": format!("{:?}", p.phase).to_lowercase(),
+                "reference": p.reference.scope,
+            });
+            // record 53: what a packet's session list must carry of each
+            // other stack for this pass to be replayed from it
+            if let Some(s) = p.session() {
+                v["sibling_fields"] = json!(nils_pack::session::sibling_reads(s)
+                    .into_iter()
+                    .filter_map(|f| nils_pack::reads::field_name(pack, f).map(|(n, _)| n))
+                    .collect::<Vec<_>>());
+                v["relations"] = json!(["same_series", "same_frame_of_reference", "series_number"]);
+                v["rules"] = json!(s.rules.iter().map(|r| &r.name).collect::<Vec<_>>());
+            }
+            v
+        }).collect::<Vec<_>>(),
+        // record 53: the private elements a reader is shown and a packet
+        // carries, by name, with the address a packet builder reads them at
+        "shown": pack.shown.iter().filter_map(|s| {
+            let i = pack.ingest.iter().find(|i| i.name == s.name)?;
+            Some(json!({"name": s.name, "address": i.address(), "kind": i.kind, "why": s.why}))
+        }).collect::<Vec<_>>(),
         "rule_sets": pack.rule_sets.iter().map(|r| json!({
             "rule_set": r.name, "rules": r.rules.len(),
             "decides": r.decides, "entered": r.enter_when.is_some(),

@@ -28,6 +28,7 @@ pub mod pass;
 pub mod pick;
 pub mod private;
 pub mod reads;
+pub mod replay;
 pub mod rules;
 pub mod session;
 pub mod shape;

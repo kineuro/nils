@@ -356,6 +356,57 @@ pub(crate) fn texts_and_physics(
     Ok((texts, physics))
 }
 
+/// Record 53 S3: the private elements of a stack's series that the served
+/// pack shows a reader (`private.shown`), by name, and how many of them were
+/// withheld because their value was shaped like an identifier
+/// ([`nils_pack::private::shown_value`]). An allowlist: an element the pack
+/// does not list under `shown` is never read here, and without a pack
+/// nothing is.
+pub(crate) fn private_shown(
+    store: &mut Store,
+    stack: i64,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<(Map<String, Value>, usize), StoreError> {
+    let mut out = Map::new();
+    let Some(pack) = pack.filter(|p| !p.shown.is_empty()) else {
+        return Ok((out, 0));
+    };
+    let Some(k) = keys(store, stack)? else {
+        return Ok((out, 0));
+    };
+    let t = table("series_private");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE series_id = {}",
+        d.text_of(t.column("elements").expect("series_private.elements")),
+        store.qualified("series_private"),
+        d.param(1, Type::Int)
+    );
+    let Some(r) = store.query_opt(&sql, &[Param::Int(k.series)])? else {
+        return Ok((out, 0));
+    };
+    let elements: std::collections::HashMap<String, String> = r
+        .opt_text(0)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_default();
+    let mut withheld = 0usize;
+    for s in &pack.shown {
+        let Some(i) = pack.ingest.iter().find(|i| i.name == s.name) else {
+            continue;
+        };
+        let Some(v) = elements.get(&i.address()).filter(|v| !v.trim().is_empty()) else {
+            continue;
+        };
+        match nils_pack::private::shown_value(v) {
+            Some(v) => {
+                out.insert(s.name.clone(), typed(json!(v)));
+            }
+            None => withheld += 1,
+        }
+    }
+    Ok((out, withheld))
+}
+
 /// The tags a field of the catalogue reads.
 fn tags_of(source: &Source) -> Vec<Tag> {
     match source {

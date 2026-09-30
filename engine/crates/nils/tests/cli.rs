@@ -1789,6 +1789,41 @@ fn pack_list_and_show_read_the_pack_directory() {
          elements a reader is shown (contract 8), after record 51's nine pick borders \
          (contract 7)"
     );
+    // record 53: what a packet must carry to replay the pack: the private
+    // elements it shows, with where a builder reads them, and what the
+    // session pass reads of each other stack
+    let names: Vec<&str> = shown["shown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "ge_pulse_sequence_name",
+            "ge_asl_contrast_technique",
+            "philips_scanning_technique",
+            "philips_diffusion_direction",
+            "ge_internal_pulse_sequence_name",
+            "ge_private_image_type"
+        ]
+    );
+    assert_eq!(shown["shown"][0]["address"], "0019xx9C GEMS_ACQU_01");
+    let session = shown["passes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "session_context")
+        .expect("a session pass");
+    assert!(
+        session["sibling_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "series_number"),
+        "{session}"
+    );
     assert!(
         shown["buckets"]["diffusion_tokens"]
             .as_array()
@@ -5900,5 +5935,62 @@ fn repair_closes_the_review_items_on_sealed_stacks_and_audits_them() {
         ),
         1,
         "a run that closes nothing writes no audit row"
+    );
+}
+
+/// Record 53 S3: `nils pack replay` reads packets as a file of lines or a
+/// directory of files, and says what the pack decides of each, the private
+/// elements it shows included.
+#[test]
+fn a_pack_is_replayed_over_header_packets() {
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = nils_dicom::synth::TempDir::new("cli-replay");
+    let packet = |stack: i64, psd: &str| {
+        serde_json::json!({
+            "stack": stack,
+            "header": {
+                "texts": {"series_description": "Ax T2"},
+                "sequence": {"image_type": "ORIGINAL\\PRIMARY\\OTHER", "scanning_sequence": "EP"},
+                "physics": {"manufacturer": "GE MEDICAL SYSTEMS", "repetition_time": 3000, "echo_time": 100},
+                "private": {"ge_pulse_sequence_name": psd},
+            },
+        })
+    };
+    let lines = format!("{}\n\n{}\n", packet(1, "ksepimix_2"), packet(2, "epi2"));
+    let file = dir.file("packets.jsonl", lines.as_bytes());
+    dir.file("one/1.json", packet(1, "ksepimix_2").to_string().as_bytes());
+    dir.file("one/2.json", packet(2, "epi2").to_string().as_bytes());
+    for input in [file, dir.path().join("one")] {
+        let out = nils()
+            .args(["pack", "replay"])
+            .arg(&packs)
+            .arg("--input")
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let got: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0]["stack"], 1);
+        assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
+        assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
+        assert!(stderr(&out).contains("2 packets replayed through mri@0.19.0"));
+    }
+    let bad = dir.file("bad.jsonl", b"{not json\n");
+    let out = nils()
+        .args(["pack", "replay"])
+        .arg(&packs)
+        .arg("--input")
+        .arg(&bad)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("line 1: not JSON"),
+        "{}",
+        stderr(&out)
     );
 }
