@@ -362,90 +362,115 @@ fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
         groups.entry(key_of(r, &[], None)).or_default().push(r);
     }
 
-    // Stage two: the outputs of one acquisition, merged. Only where the
-    // family's token is held, and only where more than one output exists;
-    // a lone in-phase image is one acquisition either way.
-    let mut merged: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
-    if let Some(family) = &model.family {
-        let mut families: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
-        for (key, members) in groups {
-            let is_family = members.first().is_some_and(|r| {
-                r.values
-                    .get(&family.when.0)
-                    .is_some_and(|v| holds(v, &family.when.1))
-            });
-            if !is_family {
-                merged.insert(key, members);
-                continue;
+    // Stage two: the outputs of one acquisition, merged, per family, and a
+    // stack belongs to the first family whose token it holds. Only where
+    // more than one output exists; a lone in-phase image is one acquisition
+    // either way.
+    let mut plain: Vec<Vec<&Row>> = Vec::new();
+    let mut families: BTreeMap<(usize, String), Vec<Vec<&Row>>> = BTreeMap::new();
+    for (_, members) in groups {
+        let family = model.families.iter().position(|f| {
+            members[0]
+                .values
+                .get(&f.when.0)
+                .is_some_and(|v| holds(v, &f.when.1))
+        });
+        match family {
+            None => plain.push(members),
+            Some(i) => {
+                let f = &model.families[i];
+                families
+                    .entry((i, key_of(members[0], &f.ignoring, Some(&f.over))))
+                    .or_default()
+                    .push(members);
             }
-            let fkey = key_of(members[0], &family.ignoring, Some(&family.over));
-            families.entry(fkey).or_default().extend(members);
         }
-        for (key, members) in families {
-            merged.insert(format!("family\u{1}{key}"), members);
-        }
-    } else {
-        merged = groups;
     }
 
-    let mut out = Vec::new();
-    for members in merged.into_values() {
-        // Within a family, only the variants worth keeping. A family with
-        // none of them is not a candidate at all.
-        let kept: Vec<&&Row> = match &model.family {
-            Some(f) if members.len() > 1 && is_family(&members, f) => {
-                let mut kept: Vec<&&Row> = Vec::new();
-                for want in &f.canonical {
-                    kept = members
-                        .iter()
-                        .filter(|r| r.values.get(&f.over).is_some_and(|v| holds(v, want)))
-                        .collect();
-                    if !kept.is_empty() {
-                        break;
-                    }
-                }
-                if kept.is_empty() {
-                    continue;
-                }
-                kept
-            }
-            _ => members.iter().collect(),
-        };
-
-        // The values of the group: what they agree on, and each number at its
-        // largest, because a bundle's slice count is the fullest volume in it.
-        let mut values: BTreeMap<String, String> = BTreeMap::new();
-        for name in model.reads() {
-            let mut best: Option<String> = None;
-            for r in &kept {
-                let Some(v) = r.values.get(&name) else {
-                    continue;
-                };
-                best = Some(match (best, v.parse::<f64>(), v) {
-                    (None, _, v) => v.clone(),
-                    (Some(b), Ok(n), v) => match b.parse::<f64>() {
-                        Ok(m) if n > m => v.clone(),
-                        Ok(_) => b,
-                        Err(_) => b,
-                    },
-                    (Some(b), Err(_), _) => b,
-                });
-            }
-            if let Some(v) = best {
-                values.insert(name, v);
+    let mut out: Vec<Candidate> = Vec::new();
+    for members in plain {
+        out.push(candidate(model, &members, None));
+    }
+    for ((i, _), parts) in families {
+        let f = &model.families[i];
+        let all: Vec<&Row> = parts.iter().flatten().copied().collect();
+        if all.len() == 1 {
+            out.push(candidate(model, &all, None));
+            continue;
+        }
+        // Within a family, only the variants worth keeping, best first.
+        let mut kept: Vec<&Row> = Vec::new();
+        for want in &f.canonical {
+            kept = all
+                .iter()
+                .filter(|r| r.values.get(&f.over).is_some_and(|v| holds(v, want)))
+                .copied()
+                .collect();
+            if !kept.is_empty() {
+                break;
             }
         }
-        let mut stacks: Vec<i64> = kept.iter().map(|r| r.stack).collect();
-        stacks.sort_unstable();
-        out.push(Candidate { stacks, values });
+        if !kept.is_empty() {
+            out.push(candidate(model, &kept, Some(&f.name)));
+        } else if f.apart_without_canonical {
+            // v0's MP2RAGE with no labelled output: the acquisitions stand
+            // as they were before the merge.
+            for members in parts {
+                out.push(candidate(model, &members, None));
+            }
+        }
+        // And otherwise, v0's Dixon: a family with none of them is not a
+        // candidate at all.
     }
     out
 }
 
-fn is_family(members: &[&Row], f: &nils_pack::pick::Family) -> bool {
-    members
-        .first()
-        .is_some_and(|r| r.values.get(&f.when.0).is_some_and(|v| holds(v, &f.when.1)))
+/// One candidate of the rows of one acquisition: what they agree on, each
+/// number at its largest, because a bundle's slice count is the fullest
+/// volume in it, and each stack's own values beside.
+fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
+    let reads = model.reads();
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    for name in &reads {
+        let mut best: Option<String> = None;
+        for r in kept {
+            let Some(v) = r.values.get(name) else {
+                continue;
+            };
+            best = Some(match (best, v.parse::<f64>(), v) {
+                (None, _, v) => v.clone(),
+                (Some(b), Ok(n), v) => match b.parse::<f64>() {
+                    Ok(m) if n > m => v.clone(),
+                    Ok(_) => b,
+                    Err(_) => b,
+                },
+                (Some(b), Err(_), _) => b,
+            });
+        }
+        if let Some(v) = best {
+            values.insert(name.clone(), v);
+        }
+    }
+    let mut each: Vec<(i64, BTreeMap<String, String>)> = kept
+        .iter()
+        .map(|r| {
+            (
+                r.stack,
+                r.values
+                    .iter()
+                    .filter(|(k, _)| reads.contains(k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    each.sort_by_key(|(s, _)| *s);
+    Candidate {
+        stacks: each.iter().map(|(s, _)| *s).collect(),
+        values,
+        each: each.into_iter().map(|(_, v)| v).collect(),
+        family: family.map(str::to_string),
+    }
 }
 
 fn holds(csv: &str, token: &str) -> bool {
@@ -521,6 +546,8 @@ fn write(
         "scheme": serde_json::from_str::<serde_json::Value>(scheme_json)
             .unwrap_or(serde_json::Value::Null),
         "penalty": scored.penalty,
+        // Record 51: what each border found, by its name.
+        "notes": notes_json(picked),
         "parts": scored
             .parts
             .iter()
@@ -737,11 +764,25 @@ fn border_item(
             margin: picked.winner.as_ref().map(|_| picked.margin),
             runner_up_score: picked.runner_up.as_ref().map(|_| picked.runner_up_score),
             considered: &considered,
+            notes: &notes_json(picked),
             job_id,
         },
         &now_iso(),
     )?;
     Ok(true)
+}
+
+/// What each border of a pick found, by the border's name: the variant of a
+/// retake, the stacks of a twin or of the plain candidate, the slice count
+/// and its bounds.
+fn notes_json(picked: &pick::Picked) -> serde_json::Value {
+    serde_json::Value::Object(
+        picked
+            .notes
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), serde_json::Value::from(v.as_str())))
+            .collect(),
+    )
 }
 
 // ------------------------------------------------------------- person picks
@@ -1236,7 +1277,7 @@ mod tests {
             penalty: None,
             borders: Borders {
                 runner_up_within: 0.05,
-                rare_within: None,
+                ..Borders::default()
             },
             same_acquisition: vec![
                 "technique".into(),
@@ -1244,16 +1285,19 @@ mod tests {
                 "construct".into(),
                 "echo_time".into(),
             ],
-            family,
+            families: family.into_iter().collect(),
         }
     }
 
     fn dixon() -> Family {
         Family {
+            name: "dixon".into(),
             when: ("modifier".into(), "Dixon".into()),
             over: "construct".into(),
             ignoring: vec!["echo_time".into()],
             canonical: vec!["InPhase".into(), "Water".into()],
+            apart_without_canonical: false,
+            retake_above: 1,
         }
     }
 
@@ -1339,6 +1383,81 @@ mod tests {
         let got = group(&m, &[&w]);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].stacks, [1]);
+    }
+
+    fn mp2rage() -> Family {
+        Family {
+            name: "mp2rage".into(),
+            when: ("technique".into(), "MP2RAGE".into()),
+            over: "construct".into(),
+            ignoring: vec!["echo_time".into()],
+            canonical: vec!["UniformDenoised".into(), "Uniform".into()],
+            apart_without_canonical: true,
+            retake_above: 2,
+        }
+    }
+
+    #[test]
+    fn an_mp2rage_is_one_candidate_of_its_denoised_uniform_image() {
+        // Record 51: v0's MP2RAGE preference, UniformDenoised and then
+        // Uniform, which the pack before 0.17.0 did not carry. The two
+        // inversions and the uniform image no longer compete with the
+        // denoised one for the session.
+        let mut m = model(Some(dixon()));
+        m.families.push(mp2rage());
+        let of = |stack, construct, te| {
+            row(
+                stack,
+                &[
+                    ("technique", "MP2RAGE"),
+                    ("construct", construct),
+                    ("echo_time", te),
+                ],
+            )
+        };
+        let a = of(1, "INV1", "2.9");
+        let b = of(2, "INV2", "2.9");
+        let c = of(3, "Uniform", "2.9");
+        let d = of(4, "UniformDenoised", "2.9");
+        let got = group(&m, &[&a, &b, &c, &d]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].stacks, [4]);
+        assert_eq!(got[0].family.as_deref(), Some("mp2rage"));
+        // Without the denoised one, the uniform image.
+        let got = group(&m, &[&a, &b, &c]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].stacks, [3]);
+        // And with neither labelled, v0 "tags all": the acquisitions stand
+        // apart as they were before the merge, and none is dropped.
+        let got = group(&m, &[&a, &b]);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().all(|c| c.family.is_none()));
+    }
+
+    #[test]
+    fn a_candidate_keeps_each_stack_s_own_values_beside_the_merged_ones() {
+        let m = model(None);
+        let a = row(
+            1,
+            &[
+                ("technique", "MPRAGE"),
+                ("echo_time", "2.3"),
+                ("n_instances", "176"),
+            ],
+        );
+        let b = row(
+            2,
+            &[
+                ("technique", "MPRAGE"),
+                ("echo_time", "2.3"),
+                ("n_instances", "40"),
+            ],
+        );
+        let got = group(&m, &[&b, &a]);
+        assert_eq!(got[0].stacks, [1, 2]);
+        assert_eq!(got[0].each.len(), 2);
+        assert_eq!(got[0].each[0]["n_instances"], "176");
+        assert_eq!(got[0].each[1]["n_instances"], "40");
     }
 
     #[test]

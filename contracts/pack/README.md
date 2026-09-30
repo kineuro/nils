@@ -27,6 +27,7 @@ and gets a version; nothing is amended in place.
 | 4 | [`v4/pack.schema.json`](v4/pack.schema.json) | Wave 4b slice 11, 2026-09-07: the optional `mcp` key, what the MCP door tells a model and which doors it opts in as tools (Wave 4b section 12.3) |
 | 5 | [`v5/pack.schema.json`](v5/pack.schema.json), [`v5/overlay.schema.json`](v5/overlay.schema.json) | 2026-09-16: no manifest key changes; every axis value's `keywords` list is a site's to amend through an overlay, named `lists.<axis>.<value>` beside the `buckets`, and the overlay document has a schema of its own. The flags, the physics, the thresholds and the order values are tried in stay the pack's. An engine at 5 loads a contract-4 pack unchanged |
 | 6 | [`v6/pack.schema.json`](v6/pack.schema.json), [`v6/overlay.schema.json`](v6/overlay.schema.json) | 2026-09-26, record 48: the optional `excludes` and `hints` keys, files of constraints between axes over axis values alone. An exclusion rules values of one axis out where its condition holds, and an answer holding one is refused; a hint names the value usually found on an axis, with its reason, and is shown and never enforced. Neither decides an axis of a stack. The overlay schema is unchanged. An engine at 6 loads a contract-5 pack unchanged |
+| 7 | [`v7/pack.schema.json`](v7/pack.schema.json), [`v7/overlay.schema.json`](v7/overlay.schema.json) | 2026-09-30, record 51: no manifest key changes. A pick file (`picks:`) gains v0's six other border reasons under `borders` (`retake`, `unknown_dim`, `slice_outlier`, `pre_post_twin`, `fallback`, `dixon_vs_plain`), and `family` may be a list of families, each with a `name`, what a family holding none of its canonical outputs becomes (`without_canonical: drop` or `apart`) and how many kept stacks make a retake (`retake_above`). A role that a component with per-role tables scores must have a table of its own there, and a border the engine does not know is refused. An engine at 7 loads a contract-6 pack unchanged and refuses these keys in a pack that declares less than 7, so an engine at 6, which would ignore them, refuses the pack instead. The overlay schema is unchanged |
 
 Added in place to version 6, additively, as the files it names grew keys a
 contract-6 engine reads and an older pack never writes: the BIDS mapping's
@@ -41,7 +42,7 @@ release writes as the `aslcontext.tsv` beside the image, one row per volume
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.
 
-**The overlay** (`v6/overlay.schema.json`, unchanged since 5) is the one document a site writes
+**The overlay** (`v7/overlay.schema.json`, unchanged since 5) is the one document a site writes
 against a pack: `overlay`, `version`, `pack`, an origin `scope`, the
 `buckets` and `lists` it amends (each an `add` and a `remove`), and its
 `cases`. The same document is what `POST /api/classify/try` rehearses and
