@@ -14,7 +14,7 @@
 # localizer, and not SyMRI, projection- or subtraction-derived.
 #
 # The image is pinned by its registry manifest digest (record 43 R3): the
-# image the release workflow published as v1.0.0-alpha.62, by the digest it
+# image the release workflow published as v1.0.0-alpha.65, by the digest it
 # printed. A release that publishes a new image repins all five descriptors.
 name: bodypart-embed
 schema-version: "0.5"
