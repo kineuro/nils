@@ -892,7 +892,8 @@ fn write(
 /// axis and model: a newer run refreshes its evidence where the model still
 /// disagrees at or above its threshold, and closes it as superseded where
 /// it no longer does. An item an unfinished campaign asks is left to the
-/// campaign. Nothing is staged and no decision is touched.
+/// campaign, and no second one is raised beside it while the campaign asks.
+/// Nothing is staged and no decision is touched.
 fn disagree(
     registry: &mut Registry,
     run: &Run<'_>,
@@ -904,10 +905,10 @@ fn disagree(
     let d = store.dialect();
     let t = table("review_item");
     let find = format!(
-        "SELECT id, {} FROM {ri} WHERE kind = {} AND scope = 'stack' AND status = 'open' \
-         AND ref = {} AND id NOT IN (SELECT ci.review_item_id FROM {ci} ci JOIN {c} c \
+        "SELECT id, {}, CASE WHEN id IN (SELECT ci.review_item_id FROM {ci} ci JOIN {c} c \
          ON c.id = ci.campaign_id WHERE c.status IN ('open', 'closing') \
-         AND ci.review_item_id IS NOT NULL) ORDER BY id",
+         AND ci.review_item_id IS NOT NULL) THEN 1 ELSE 0 END FROM {ri} WHERE kind = {} \
+         AND scope = 'stack' AND status = 'open' AND ref = {} ORDER BY id",
         d.text_of(t.column("evidence").expect("evidence")),
         d.param(1, Type::Text),
         d.param(2, Type::Json),
@@ -919,7 +920,10 @@ fn disagree(
         let kind = format!("{}:decision", a.axis);
         let reference = json!({"stack_id": a.stack_id}).to_string();
         let store = registry.store();
+        // the model's open items on the stack: those free to refresh or
+        // close, and whether a campaign asks one, which is left to it
         let mut earlier: Vec<i64> = Vec::new();
+        let mut asked = false;
         for r in store.query(
             &find,
             &[Param::from(kind.as_str()), Param::from(reference.as_str())],
@@ -929,7 +933,11 @@ fn disagree(
                 .and_then(|e| serde_json::from_str(e).ok())
                 .unwrap_or(Value::Null);
             if ev["source"] == "model" && ev["model_id"].as_i64() == Some(a.model_id) {
-                earlier.push(r.int(0)?);
+                if r.int(2)? == 1 {
+                    asked = true;
+                } else {
+                    earlier.push(r.int(0)?);
+                }
             }
         }
         let Some(evidence) = &a.evidence else {
@@ -958,6 +966,9 @@ fn disagree(
             continue;
         };
         let (item, refreshed) = match earlier.first() {
+            // a campaign asks the question already: one open item per stack,
+            // axis and model, so none is raised beside it
+            None if asked => continue,
             Some(&item) => {
                 store.execute(
                     &format!(

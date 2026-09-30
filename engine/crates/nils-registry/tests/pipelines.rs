@@ -1745,5 +1745,57 @@ fn a_model_that_disagrees_with_a_person_is_asked_and_never_applied() {
             (Some("spine".to_string()), "person".to_string()),
             "{name}"
         );
+
+        // a question a campaign asks is left to it: a newer run that still
+        // disagrees raises none beside it, and one that agrees leaves it open
+        let raised =
+            proposals::ingest(reg, &run(4), &[proposal(ids[0], "brain", 0.95, m.id)], None)
+                .unwrap();
+        assert_eq!(raised.disagreements.len(), 1, "{name}");
+        assert!(!raised.disagreements[0].refreshed, "{name}");
+        let held = raised.disagreements[0].item;
+        let campaign = row(
+            reg.store(),
+            "campaign",
+            &[
+                ("name", Param::from("asks")),
+                ("status", Param::from("open")),
+            ],
+        );
+        row(
+            reg.store(),
+            "campaign_item",
+            &[
+                ("campaign_id", Param::Int(campaign)),
+                ("review_item_id", Param::Int(held)),
+                ("state", Param::from("open")),
+            ],
+        );
+        let beside =
+            proposals::ingest(reg, &run(5), &[proposal(ids[0], "brain", 0.97, m.id)], None)
+                .unwrap();
+        assert!(
+            beside.disagreements.is_empty(),
+            "{name}: {:?}",
+            beside.disagreements
+        );
+        assert_eq!(
+            count(reg, "review_item", open),
+            1,
+            "{name}: none beside the campaign's"
+        );
+        let item = review::item(reg.store(), held).unwrap().unwrap();
+        assert_eq!(
+            item.evidence["run_id"], 4,
+            "{name}: the campaign's question is not rewritten"
+        );
+        let agreed =
+            proposals::ingest(reg, &run(6), &[proposal(ids[0], "spine", 0.9, m.id)], None).unwrap();
+        assert_eq!(agreed.agreed_again, 0, "{name}");
+        assert_eq!(
+            count(reg, "review_item", open),
+            1,
+            "{name}: left to the campaign"
+        );
     }
 }
