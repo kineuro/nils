@@ -165,6 +165,17 @@ otherwise do per stack, materialized and typed once**. Per stack, in
   catalogue is a Wave 1 change, not a fingerprint's to make.
 - **Contrast**: the administration fields v0 joins into its contrast blob,
   folded, since a contrast agent's name is a fact about the study.
+- **Mechanism and object kind** (record 53, S1): the SOP class the series
+  was written as, and what an enhanced MR or MR spectroscopy object says of
+  its mechanism in the MR Pulse Sequence module (echo pulse sequence, multiple
+  spin echo, echo planar, steady state, phase contrast, time of flight and
+  arterial spin labelling contrast, the geometry and segmentation of k-space)
+  and in the MR Modifier functional group (spoiling, inversion recovery), as
+  written, not folded. A classic image writes none of the mechanism, so a
+  pack reads it as the stronger evidence where it is present and falls back
+  on ScanningSequence and the vendor names where it is not (the deep
+  research's case 22). The SOP class is what tells an MR spectroscopy object
+  from a planning image named for one (case 16).
 
 Deliberately **not** in it, and this settles the open question §14 carried:
 

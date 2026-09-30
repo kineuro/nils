@@ -87,6 +87,23 @@ pub const FIELDS: &[&str] = &[
     // The 2026-09-28 sequence research: PulseSequenceName (0018,9005), which
     // Siemens XA writes where it leaves SequenceName empty.
     "pulse_sequence_name",
+    // Record 53 S1: the SOP class the file was written as (an MR
+    // spectroscopy object is told by it, the deep research's case 16), and the
+    // mechanism attributes of the MR Pulse Sequence module with the MR
+    // Modifier group's spoiling and inversion recovery, which an enhanced
+    // object writes where it leaves ScanningSequence out (case 22).
+    "sop_class_uid",
+    "echo_pulse_sequence",
+    "multiple_spin_echo",
+    "echo_planar_pulse_sequence",
+    "steady_state_pulse_sequence",
+    "phase_contrast",
+    "time_of_flight_contrast",
+    "arterial_spin_labeling_contrast",
+    "geometry_of_k_space_traversal",
+    "segmented_k_space_traversal",
+    "spoiling",
+    "inversion_recovery",
 ];
 
 /// Where the text half begins.

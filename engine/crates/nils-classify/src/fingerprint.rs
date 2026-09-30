@@ -23,7 +23,9 @@ use crate::{coverage, derived, dwi, fold};
 /// 3: record 38, S2. The centre of the slices, the earliest acquisition, the
 ///    series number, the gradient directions and the temporal position.
 /// 4: the 2026-09-28 sequence research. PulseSequenceName (0018,9005).
-pub const REVISION: i64 = 4;
+/// 5: record 53, S1. The SOP class and the MR Pulse Sequence module's
+///    mechanism attributes.
+pub const REVISION: i64 = 5;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -78,6 +80,9 @@ const SERIES: &[&str] = &[
     "contrast_flow_duration",
     // Record 38 S2: the order a `run-` index follows after the time.
     "series_number",
+    // Record 53 S1: which kind of object the file is, so a pack tells an MR
+    // spectroscopy object from an image (the deep research's case 16).
+    "sop_class_uid",
 ];
 
 /// The MR detail columns, absent for a CT or PET stack.
@@ -110,6 +115,20 @@ const MR: &[&str] = &[
     // The 2026-09-28 sequence research: what Siemens XA names the sequence
     // where it leaves SequenceName empty.
     "pulse_sequence_name",
+    // Record 53 S1: the MR Pulse Sequence module's mechanism attributes and
+    // the MR Modifier group's spoiling and inversion recovery (the deep
+    // research's case 22), in the order `WRITTEN` names them.
+    "echo_pulse_sequence",
+    "multiple_spin_echo",
+    "echo_planar_pulse_sequence",
+    "steady_state_pulse_sequence",
+    "phase_contrast",
+    "time_of_flight_contrast",
+    "arterial_spin_labeling_contrast",
+    "geometry_of_k_space_traversal",
+    "segmented_k_space_traversal",
+    "spoiling",
+    "inversion_recovery",
 ];
 
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
@@ -211,6 +230,18 @@ pub const WRITTEN: &[&str] = &[
     "dwi_directions",
     "dwi_directions_source",
     "pulse_sequence_name",
+    "sop_class_uid",
+    "echo_pulse_sequence",
+    "multiple_spin_echo",
+    "echo_planar_pulse_sequence",
+    "steady_state_pulse_sequence",
+    "phase_contrast",
+    "time_of_flight_contrast",
+    "arterial_spin_labeling_contrast",
+    "geometry_of_k_space_traversal",
+    "segmented_k_space_traversal",
+    "spoiling",
+    "inversion_recovery",
     "job_id",
     "epoch",
 ];
@@ -693,6 +724,18 @@ pub fn derive(
         int(diffusion.directions),
         opt(diffusion.directions_source),
         opt(text(r, E + 16)?), // pulse_sequence_name
+        opt(text(r, S + 25)?), // sop_class_uid
+        opt(text(r, E + 17)?), // echo_pulse_sequence
+        opt(text(r, E + 18)?), // multiple_spin_echo
+        opt(text(r, E + 19)?), // echo_planar_pulse_sequence
+        opt(text(r, E + 20)?), // steady_state_pulse_sequence
+        opt(text(r, E + 21)?), // phase_contrast
+        opt(text(r, E + 22)?), // time_of_flight_contrast
+        opt(text(r, E + 23)?), // arterial_spin_labeling_contrast
+        opt(text(r, E + 24)?), // geometry_of_k_space_traversal
+        opt(text(r, E + 25)?), // segmented_k_space_traversal
+        opt(text(r, E + 26)?), // spoiling
+        opt(text(r, E + 27)?), // inversion_recovery
         Param::Int(job_id),
         Param::Int(epoch),
     ])

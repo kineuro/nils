@@ -47,9 +47,27 @@ LEVELS: dict[str, Level] = {
         "series", "series", absent=frozenset({"burned_in_annotation", "series_number"})
     ),
     # PulseSequenceName (0018,9005) is v1's addition (the 2026-09-28
-    # sequence research): v0 never read it, so there is nothing to compare.
+    # sequence research), and so are the MR Pulse Sequence module's
+    # mechanism attributes and the MR Modifier group's spoiling and inversion
+    # recovery (record 53): v0 never read them, so there is nothing to compare.
     "series_mr": Level(
-        "series_mr", "mri_series_details", absent=frozenset({"pulse_sequence_name"})
+        "series_mr",
+        "mri_series_details",
+        absent=frozenset(
+            {
+                "pulse_sequence_name",
+                "echo_pulse_sequence",
+                "multiple_spin_echo",
+                "echo_planar_pulse_sequence",
+                "steady_state_pulse_sequence",
+                "time_of_flight_contrast",
+                "arterial_spin_labeling_contrast",
+                "geometry_of_k_space_traversal",
+                "segmented_k_space_traversal",
+                "spoiling",
+                "inversion_recovery",
+            }
+        ),
     ),
     "series_ct": Level("series_ct", "ct_series_details"),
     "series_pet": Level("series_pet", "pet_series_details"),

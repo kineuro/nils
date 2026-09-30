@@ -251,6 +251,58 @@ const PULSE_SEQUENCE_CHAIN: &[Step] = &[
     Top(tags::PULSE_SEQUENCE_NAME),
     Private(tags::PULSE_SEQUENCE_NAME),
 ];
+/// Record 53 S1: the mechanism attributes of the MR Pulse Sequence module
+/// (PS3.3 C.8.13.4), which an enhanced MR object and an MR spectroscopy
+/// object write at the top level and a classic object never does. As for
+/// PulseSequenceName, the private per-frame sequences are tried after, since
+/// a vendor that copies enhanced attributes into a classic file puts them
+/// there. The deep research's case 22 maps them onto the technique axis.
+const ECHO_PULSE_SEQUENCE_CHAIN: &[Step] = &[
+    Top(tags::ECHO_PULSE_SEQUENCE),
+    Private(tags::ECHO_PULSE_SEQUENCE),
+];
+const MULTIPLE_SPIN_ECHO_CHAIN: &[Step] = &[
+    Top(tags::MULTIPLE_SPIN_ECHO),
+    Private(tags::MULTIPLE_SPIN_ECHO),
+];
+const ECHO_PLANAR_CHAIN: &[Step] = &[
+    Top(tags::ECHO_PLANAR_PULSE_SEQUENCE),
+    Private(tags::ECHO_PLANAR_PULSE_SEQUENCE),
+];
+const STEADY_STATE_CHAIN: &[Step] = &[
+    Top(tags::STEADY_STATE_PULSE_SEQUENCE),
+    Private(tags::STEADY_STATE_PULSE_SEQUENCE),
+];
+const PHASE_CONTRAST_CHAIN: &[Step] = &[Top(tags::PHASE_CONTRAST), Private(tags::PHASE_CONTRAST)];
+const TIME_OF_FLIGHT_CHAIN: &[Step] = &[
+    Top(tags::TIME_OF_FLIGHT_CONTRAST),
+    Private(tags::TIME_OF_FLIGHT_CONTRAST),
+];
+const ASL_CONTRAST_CHAIN: &[Step] = &[
+    Top(tags::ARTERIAL_SPIN_LABELING_CONTRAST),
+    Private(tags::ARTERIAL_SPIN_LABELING_CONTRAST),
+];
+const K_SPACE_GEOMETRY_CHAIN: &[Step] = &[
+    Top(tags::GEOMETRY_OF_K_SPACE_TRAVERSAL),
+    Private(tags::GEOMETRY_OF_K_SPACE_TRAVERSAL),
+];
+const K_SPACE_SEGMENTS_CHAIN: &[Step] = &[
+    Top(tags::SEGMENTED_K_SPACE_TRAVERSAL),
+    Private(tags::SEGMENTED_K_SPACE_TRAVERSAL),
+];
+/// Spoiling and inversion recovery are not in the module's table: the
+/// standard puts them in the MR Modifier functional group, shared or per
+/// frame (the deep research, case 22).
+const SPOILING_CHAIN: &[Step] = &[
+    Top(tags::SPOILING),
+    Fg(tags::MR_MODIFIER_SEQUENCE, tags::SPOILING),
+    Private(tags::SPOILING),
+];
+const INVERSION_RECOVERY_CHAIN: &[Step] = &[
+    Top(tags::INVERSION_RECOVERY),
+    Fg(tags::MR_MODIFIER_SEQUENCE, tags::INVERSION_RECOVERY),
+    Private(tags::INVERSION_RECOVERY),
+];
 const ORIENTATION_CHAIN: &[Step] = &[
     Top(tags::IMAGE_ORIENTATION_PATIENT),
     Fg(
@@ -964,10 +1016,10 @@ pub static CATALOGUE: &[Field] = &[
     f(
         "phase_contrast",
         SeriesMr,
-        T(tags::PHASE_CONTRAST),
+        Chain(PHASE_CONTRAST_CHAIN),
         Text,
         Tech,
-        "",
+        "PhaseContrast (0018,9014); record 53: the private per-frame sequences too",
     ),
     f(
         "number_of_averages",
@@ -1079,6 +1131,86 @@ pub static CATALOGUE: &[Field] = &[
         Text,
         Tech,
         "addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28)",
+    ),
+    f(
+        "echo_pulse_sequence",
+        SeriesMr,
+        Chain(ECHO_PULSE_SEQUENCE_CHAIN),
+        Text,
+        Tech,
+        "addition: EchoPulseSequence (0018,9008), SPIN, GRADIENT or BOTH (record 53)",
+    ),
+    f(
+        "multiple_spin_echo",
+        SeriesMr,
+        Chain(MULTIPLE_SPIN_ECHO_CHAIN),
+        Text,
+        Tech,
+        "addition: MultipleSpinEcho (0018,9011), YES or NO (record 53)",
+    ),
+    f(
+        "echo_planar_pulse_sequence",
+        SeriesMr,
+        Chain(ECHO_PLANAR_CHAIN),
+        Text,
+        Tech,
+        "addition: EchoPlanarPulseSequence (0018,9018), YES or NO (record 53)",
+    ),
+    f(
+        "steady_state_pulse_sequence",
+        SeriesMr,
+        Chain(STEADY_STATE_CHAIN),
+        Text,
+        Tech,
+        "addition: SteadyStatePulseSequence (0018,9017), FREE_PRECESSION, TRANSVERSE, TIME_REVERSED, LONGITUDINAL or NONE (record 53)",
+    ),
+    f(
+        "time_of_flight_contrast",
+        SeriesMr,
+        Chain(TIME_OF_FLIGHT_CHAIN),
+        Text,
+        Tech,
+        "addition: TimeOfFlightContrast (0018,9015), YES or NO (record 53)",
+    ),
+    f(
+        "arterial_spin_labeling_contrast",
+        SeriesMr,
+        Chain(ASL_CONTRAST_CHAIN),
+        Text,
+        Tech,
+        "addition: ArterialSpinLabelingContrast (0018,9250), CONTINUOUS, PSEUDOCONTINUOUS or PULSED (record 53)",
+    ),
+    f(
+        "geometry_of_k_space_traversal",
+        SeriesMr,
+        Chain(K_SPACE_GEOMETRY_CHAIN),
+        Text,
+        Tech,
+        "addition: GeometryOfKSpaceTraversal (0018,9032), RECTILINEAR, RADIAL or SPIRAL (record 53)",
+    ),
+    f(
+        "segmented_k_space_traversal",
+        SeriesMr,
+        Chain(K_SPACE_SEGMENTS_CHAIN),
+        Text,
+        Tech,
+        "addition: SegmentedKSpaceTraversal (0018,9033), SINGLE, PARTIAL or FULL (record 53)",
+    ),
+    f(
+        "spoiling",
+        SeriesMr,
+        Chain(SPOILING_CHAIN),
+        Text,
+        Tech,
+        "addition: Spoiling (0018,9016), RF, GRADIENT, RF_AND_GRADIENT or NONE, from the MR Modifier group where the top level has none (record 53)",
+    ),
+    f(
+        "inversion_recovery",
+        SeriesMr,
+        Chain(INVERSION_RECOVERY_CHAIN),
+        Text,
+        Tech,
+        "addition: InversionRecovery (0018,9009), YES or NO, from the MR Modifier group where the top level has none (record 53)",
     ),
     f(
         "transmit_coil_name",
@@ -1806,10 +1938,10 @@ mod tests {
         // records a multi-shell acquisition as its smallest shell.
         assert_eq!(count(Instance), 34);
         assert_eq!(count(Stack), 14);
-        assert_eq!(count(SeriesMr), 33);
+        assert_eq!(count(SeriesMr), 43);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 180);
+        assert_eq!(CATALOGUE.len(), 190);
     }
 
     #[test]
@@ -1897,7 +2029,7 @@ mod tests {
             "EchoTime, then fg MREchoSequence.EffectiveEchoTime, then private per-frame .EchoTime"
         ));
         let md = render_markdown();
-        assert!(md.contains("## series_mr (33, MR only)"));
-        assert!(md.contains("180 columns."));
+        assert!(md.contains("## series_mr (43, MR only)"));
+        assert!(md.contains("190 columns."));
     }
 }

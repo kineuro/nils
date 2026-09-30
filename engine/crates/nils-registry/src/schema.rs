@@ -859,6 +859,21 @@ fn build_registry() -> Vec<Table> {
                 // (0018,9005) from the series, which Siemens XA writes where
                 // it leaves SequenceName empty.
                 col("pulse_sequence_name", Type::Text),
+                // Record 53 S1: the SOP class, and the mechanism attributes
+                // of the MR Pulse Sequence module an enhanced MR object
+                // writes (the deep research's cases 16 and 22).
+                col("sop_class_uid", Type::Text),
+                col("echo_pulse_sequence", Type::Text),
+                col("multiple_spin_echo", Type::Text),
+                col("echo_planar_pulse_sequence", Type::Text),
+                col("steady_state_pulse_sequence", Type::Text),
+                col("phase_contrast", Type::Text),
+                col("time_of_flight_contrast", Type::Text),
+                col("arterial_spin_labeling_contrast", Type::Text),
+                col("geometry_of_k_space_traversal", Type::Text),
+                col("segmented_k_space_traversal", Type::Text),
+                col("spoiling", Type::Text),
+                col("inversion_recovery", Type::Text),
                 // what made it
                 req("job_id", Type::Int),
                 req("epoch", Type::Int),

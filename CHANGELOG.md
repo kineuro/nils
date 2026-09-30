@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A pack may read what an enhanced MR object and an MR spectroscopy object say of how they were acquired, and which kind of object a file is (record 53). The MR Pulse Sequence module's mechanism attributes, EchoPulseSequence (0018,9008), MultipleSpinEcho (0018,9011), EchoPlanarPulseSequence (0018,9018), SteadyStatePulseSequence (0018,9017), TimeOfFlightContrast (0018,9015), ArterialSpinLabelingContrast (0018,9250), GeometryOfKSpaceTraversal (0018,9032) and SegmentedKSpaceTraversal (0018,9033), are read from the top level of the file or the private per-frame sequences, and Spoiling (0018,9016) and InversionRecovery (0018,9009) from the MR Modifier functional group as well. The digest keeps them on the MR series; the fingerprint carries them, the phase contrast the series already held, and the series' SOP class, and a pack reads them under their own names (`echo_pulse_sequence`, `sop_class_uid` and so on). A classic image writes none of them, and they read empty there. The reader's `texts` shows each where the file has it. The fingerprint's revision moves to 5, so the next `nils fingerprint` derives every stack again and the SOP class and the phase contrast fill at once; the new series columns fill when the files are read again (`nils digest <root> --reread <manufacturer>`). Registry schema 77; the pack contract stays version 7, with fields added; the HTTP API contract stays version 7, amended in place.
+
 ### Changed
 
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.65 published, so `bodypart-infer-fusion` 0.3.0 runs the code its descriptor describes. Its baked encoder weights verify with the same two digests as before, so those pins stay (kineuro/nils#323).

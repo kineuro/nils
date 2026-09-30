@@ -91,6 +91,21 @@ const MORE: &[(&str, &str)] = &[
     ("pixel_bandwidth", "bandwidth"),
     ("image_role", "role"),
     ("acquisition_type_filled", "acquisition"),
+    // Record 53 S1: the SOP class and the MR Pulse Sequence module's
+    // mechanism, which an enhanced object's rules read.
+    ("sop_class_uid", "SOP class"),
+    ("pulse_sequence_name", "pulse sequence"),
+    ("echo_pulse_sequence", "echo"),
+    ("multiple_spin_echo", "multiple spin echo"),
+    ("echo_planar_pulse_sequence", "echo planar"),
+    ("steady_state_pulse_sequence", "steady state"),
+    ("phase_contrast", "phase contrast"),
+    ("time_of_flight_contrast", "time of flight"),
+    ("arterial_spin_labeling_contrast", "ASL"),
+    ("geometry_of_k_space_traversal", "k-space"),
+    ("segmented_k_space_traversal", "k-space segments"),
+    ("spoiling", "spoiling"),
+    ("inversion_recovery", "inversion recovery"),
 ];
 
 /// The fields a batch's signature always holds, beside those the deciding

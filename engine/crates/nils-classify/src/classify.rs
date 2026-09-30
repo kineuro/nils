@@ -125,6 +125,24 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("acquisition_matrix", "acquisition_matrix"),
     ("receive_coil_name", "receive_coil_name"),
     ("pulse_sequence_name", "pulse_sequence_name"),
+    ("sop_class_uid", "sop_class_uid"),
+    ("echo_pulse_sequence", "echo_pulse_sequence"),
+    ("multiple_spin_echo", "multiple_spin_echo"),
+    ("echo_planar_pulse_sequence", "echo_planar_pulse_sequence"),
+    ("steady_state_pulse_sequence", "steady_state_pulse_sequence"),
+    ("phase_contrast", "phase_contrast"),
+    ("time_of_flight_contrast", "time_of_flight_contrast"),
+    (
+        "arterial_spin_labeling_contrast",
+        "arterial_spin_labeling_contrast",
+    ),
+    (
+        "geometry_of_k_space_traversal",
+        "geometry_of_k_space_traversal",
+    ),
+    ("segmented_k_space_traversal", "segmented_k_space_traversal"),
+    ("spoiling", "spoiling"),
+    ("inversion_recovery", "inversion_recovery"),
 ];
 
 /// The select that reads one window of fingerprints, ordered by stack. With
