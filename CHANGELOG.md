@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The MRI pack is 0.16.0. It fixes the rule errors of a fourth development reference. A Siemens BLADE named only by its sequence stem (`*tseB`) and GE's `PROPks` are Radial. A derived image of a 3D acquisition named for another plane than its protocol is a reformat (ProjectionDerived, MPR). A dual-echo spin echo that only its name calls FLAIR, with no inversion in its header, is a TSE whose echo decides its base. A Siemens acquired diffusion image takes no ADC from a protocol named for its ADC map. GE IDEAL's `OutPhase:` output is OutPhase. Stacks need a reclassify.
+
 ## [1.0.0-alpha.62] - 2026-09-30
 
 The MRI pack is 0.15.0: it follows the rulings on 0.14.0's disputes and fixes the rule errors of a third development reference, with a new technique `DWI-TSE` for a diffusion read out by a turbo spin echo. Reclassify with the new pack to apply it. The engine's code is unchanged since 1.0.0-alpha.61, and no desk release comes with it: desk 1.0.0-alpha.59 stays the newest. The registry stays at schema 76; the HTTP API contract stays version 7, the suite contract version 3, the pack contract version 6 and the job contract version 1. The body-part descriptors pin the `nils-bodypart` image that 1.0.0-alpha.61 published, a new build of the same 0.2.0 sources with the same encoder weights. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.61.

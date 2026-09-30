@@ -412,31 +412,33 @@ rules:
     set: {base: 'T1w'}
 
   # Tier 3. FLAIR can be T1 or T2 weighted; the text decides, then the echo time.
+  # MRI pack 0.16.0: never on a dual-echo spin echo that only its name calls
+  # FLAIR (flags.yml, `flair_named_dual_echo`, dev-4 H3).
   'flair:t1_text':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {text: search_text, substring: t1}]}, cite: t1, source: text, tier: keywords}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: search_text, substring: t1}]}, cite: t1, source: text, tier: keywords}
     set: {base: 'T1w'}
 
   'flair:t2_text':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {text: search_text, substring: t2}]}, cite: t2, source: text, tier: keywords}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: search_text, substring: t2}]}, cite: t2, source: text, tier: keywords}
     set: {base: 'T2w'}
 
   'flair:short_te':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'a measured echo time under 40 ms', source: physics, tier: physics}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'a measured echo time under 40 ms', source: physics, tier: physics}
     set: {base: 'T1w'}
     confidence: 0.85
 
   'flair:long_te':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {field: echo_time, ge: 40}]}, cite: 'echo time 40 ms or more', source: physics, tier: physics}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {field: echo_time, ge: 40}]}, cite: 'echo time 40 ms or more', source: physics, tier: physics}
     set: {base: 'T2w'}
     confidence: 0.85
 
   'flair:default':
     clauses:
-      - {when: {any: [is_flair, {text: search_text, substring: flair}]}, cite: flair, source: text, tier: keywords}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}]}, cite: flair, source: text, tier: keywords}
     set: {base: 'T2w'}
     confidence: 0.7
     why: 'a FLAIR with no echo time is taken as T2-weighted'
