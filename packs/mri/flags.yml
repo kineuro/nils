@@ -2103,11 +2103,11 @@ flags:
   # never on dev-5. Every corpus stack is invented from the pattern those
   # files name.
 
-  # --- case 5, outside the SWI route: a Siemens MEAN phase of a multi-echo
-  # gradient echo (`fl2d8`, 8 of the archive's 11 MEAN phases) is its echoes
-  # combined, comb-ME-GRE, as the route says of an SWI's. The ruling names
-  # the phase; the MEAN magnitude of such a series stays ME-GRE as the
-  # references settle it (pack 0.14.0) until it is ruled.
+  # --- case 5, outside the SWI route: a Siemens MEAN phase or magnitude of
+  # a multi-echo gradient echo (`fl2d8`: 8 of the archive's 11 MEAN phases,
+  # and 51 MEAN magnitudes) is its echoes combined, comb-ME-GRE, as the route
+  # says of an SWI's: a mean over echoes is an echo combination (the deep
+  # research's header rule for case 5, P or M with MEAN; record 48).
   siemens_mean_echoes:
     all:
       - {text: manufacturer, prefix: siemens}
@@ -2118,10 +2118,10 @@ flags:
       - {not: is_mip}
       - {not: is_minip}
       - {not: is_projection}
-      - has_phase
+      - any: [has_phase, has_magnitude]
       - any: [{field: echo_train_length, ge: 2}, me_gre_named]
   # comb-ME-GRE's combination: Philips' combined mFFE (pack 0.14.0) and a
-  # Siemens MEAN phase over echoes.
+  # Siemens MEAN phase or magnitude over echoes.
   combined_echoes_stated: {any: [philips_mffe, siemens_mean_echoes]}
 
   # --- case 1: a Philips FFE. What the scanner states decides, never the

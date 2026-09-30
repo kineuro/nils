@@ -467,6 +467,23 @@ cases:
       provenance: RawRecon
       technique: MEDIC
 
+  - name: the MEAN magnitude of a Siemens 8-echo 2D gradient echo is comb-ME-GRE and RawRecon
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\DIS2D\NORM\MEAN\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d8'
+      text_series_description: 'Results MEAN_gre_8echoes'
+      repetition_time: 2800
+      echo_time: 5.5
+      flip_angle: 55
+      echo_train_length: 8
+    axes:
+      provenance: RawRecon
+      technique: MEDIC
+
   - name: one echo of a Siemens 8-echo 2D gradient echo stays ME-GRE
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\DIS2D'

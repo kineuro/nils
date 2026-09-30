@@ -575,7 +575,7 @@ values:
     # its own, nor a single-echo FFE, whatever it is named (record 48, "The
     # nine, after our counts"; flags.yml, `philips_not_combined_ffe`).
     requires: {not: philips_not_combined_ffe}
-    # MRI pack 0.20.0: or a Siemens MEAN phase over the echoes of
+    # MRI pack 0.20.0: or a Siemens MEAN phase or magnitude over the echoes of
     # a multi-echo gradient echo (record 48, dev-5's case 5; flags.yml,
     # `combined_echoes_stated`).
     detection:

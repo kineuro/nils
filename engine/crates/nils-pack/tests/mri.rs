@@ -80,7 +80,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          0.20.0 the 30 of a development grade's nine disputes and rule \
          bugs, less the derived MoCo DSC it withdraws: a Philips FFE by its \
          spoiling, private technique and steady state, a Philips SWIp \
-         output of combined echoes, a Siemens MEAN phase over echoes, a \
+         output of combined echoes, a Siemens MEAN phase or magnitude over echoes, a \
          Philips FFE written one echo per stack or with one echo, a Siemens \
          real inversion recovery, a tensor's source by name, GE's AvDC as a \
          tensor output, a planning series of few slices and a Swedish \
