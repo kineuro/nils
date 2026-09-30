@@ -8,7 +8,8 @@
 //!
 //! The rules, which are Wave 1 §10's: a claim refuses while a job **of the
 //! same kind** is fresh, takes over one that is stale or whose process on
-//! this host is gone, and records the new job as running with this
+//! this host is gone (a job whose own process still runs on this host is
+//! never stale, however long it goes without a beat: [`runs_here`]), and records the new job as running with this
 //! process's id and host. A stale job of any other kind is failed on the
 //! way, since a stale row is a stale row. A cancel from outside sets the
 //! state to `cancelling`; the running job sees it at its next heartbeat and
@@ -31,6 +32,21 @@ use crate::time::{now_iso, now_secs, secs_of};
 
 /// A running job whose heartbeat is younger than this holds its kind.
 pub const FRESH_SECS: u64 = 60;
+
+/// The variable a test sets to shorten [`FRESH_SECS`], so a job left
+/// without a heartbeat is stale in seconds rather than a minute. Nothing
+/// but a test sets it.
+pub const FRESH_VAR: &str = "NILS_TEST_JOB_FRESH_SECS";
+
+/// How long a heartbeat keeps a job fresh: [`FRESH_SECS`], or what a test
+/// set in [`FRESH_VAR`].
+pub fn fresh_secs() -> u64 {
+    std::env::var(FRESH_VAR)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(FRESH_SECS)
+}
 
 /// What a claim says about the job it makes.
 #[derive(Debug, Clone)]
@@ -165,6 +181,68 @@ pub fn process_alive(_pid: i64) -> Option<bool> {
     None
 }
 
+/// When a process of this host started, in seconds since the epoch, where
+/// the system says: Linux's `/proc/<pid>/stat`, read against the boot time
+/// in `/proc/stat` at the 100 ticks a second the kernel reports in.
+pub fn process_started(pid: i64) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // the fields after the command's closing parenthesis: the state is the
+    // third field of the line, the start time the twenty-second
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    let boot: u64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(boot + ticks / 100)
+}
+
+/// Whether a job's own process still runs on this host: its host is this
+/// one, a process has its id, and that process started no later than the
+/// job was last heard from, so it is the job's and not a later process
+/// that took the id after the job's had ended. A job whose process runs
+/// is never failed as stale, however long it goes without a heartbeat:
+/// one step of it, such as a pipeline run's intake of thousands of
+/// proposals, may take longer than [`FRESH_SECS`].
+pub fn runs_here(host: Option<&str>, pid: Option<i64>, last: &str) -> bool {
+    let Some(pid) = pid else {
+        return false;
+    };
+    if host != Some(hostname().as_str()) || process_alive(pid) != Some(true) {
+        return false;
+    }
+    let Some(heard) = secs_of(last) else {
+        return false;
+    };
+    // a start time and a stamp in whole seconds, and a tick's rounding
+    process_started(pid).is_some_and(|started| started <= heard + 2)
+}
+
+/// Whether a job is running now: not over, and either heard from within
+/// the freshness a claim allows, or its process on this host still there
+/// ([`runs_here`]); a job of this host whose process is gone is not,
+/// however fresh its last beat.
+pub fn is_live(j: &Job) -> bool {
+    if j.state.is_over() || j.state == State::Queued {
+        return false;
+    }
+    let last = j
+        .heartbeat_at
+        .as_deref()
+        .unwrap_or(j.started_at.as_str())
+        .to_string();
+    let here = j.host.as_deref() == Some(hostname().as_str());
+    let gone = here && j.pid.is_some_and(|p| process_alive(p) == Some(false));
+    if gone {
+        return false;
+    }
+    let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs());
+    fresh || runs_here(j.host.as_deref(), j.pid, &last)
+}
+
 fn stamp(store: &Store, column: &str) -> String {
     let t = table("job");
     store.dialect().text_of(
@@ -262,8 +340,11 @@ fn claim_with(
         // A job of this host whose process is gone left no one to beat its
         // heart: it is over, however fresh the last beat.
         let gone = its_host == host && its_pid.is_some_and(|p| process_alive(p) == Some(false));
-        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < FRESH_SECS);
-        if fresh && !gone {
+        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs());
+        // a job whose process runs on this host is not stale, however long
+        // since its last beat
+        let live = fresh || runs_here(Some(its_host), its_pid, &last);
+        if live && !gone {
             if its_kind == claim.kind {
                 let Some(holds) = holds.as_deref_mut() else {
                     return Err(Error::Busy {

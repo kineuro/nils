@@ -1096,6 +1096,97 @@ fn a_claim_beside_runs_where_it_is_let_and_says_why_where_not() {
     }
 }
 
+/// A job whose own process still runs on this host is never failed as
+/// stale (2026-09-30), on both backends: a pipeline run whose intake goes
+/// longer than the freshness without a beat keeps its job. A process that
+/// started after the job was last heard from is not the job's, whatever
+/// its id, and the job is taken over as ever.
+#[test]
+fn a_job_whose_process_runs_here_is_not_failed_as_stale() {
+    use nils_registry::job::{self, Claim};
+    use nils_registry::time::{iso_of, now_secs};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let host = job::hostname();
+        let mut running = |kind: &str, pid: i64, heard: &str| -> i64 {
+            store
+                .insert(
+                    &Insert::new(
+                        table("job"),
+                        &[
+                            "kind",
+                            "name",
+                            "args",
+                            "state",
+                            "pid",
+                            "host",
+                            "started_at",
+                            "heartbeat_at",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::from(kind),
+                        Param::from("held"),
+                        Param::from("{}"),
+                        Param::from("running"),
+                        Param::Int(pid),
+                        Param::from(host.as_str()),
+                        Param::from(heard),
+                        Param::from(heard),
+                    ]],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        // the first process of the host has run since before the last beat
+        // of a minute ago; this test's process started after 2020
+        let minute_ago = iso_of(now_secs() - job::FRESH_SECS - 5);
+        let long = running("pipeline", 1, &minute_ago);
+        let reused = running(
+            "pipeline",
+            i64::from(std::process::id()),
+            "2020-01-01T00:00:00Z",
+        );
+        let shown = |store: &mut Store, id: i64| job::show(store, id).unwrap().unwrap();
+        assert!(job::is_live(&shown(&mut store, long)), "{name}");
+        assert!(!job::is_live(&shown(&mut store, reused)), "{name}");
+        // a claim of another kind fails the one whose process is not its own
+        // and leaves the one whose process runs
+        job::claim(
+            &mut store,
+            &Claim {
+                kind: "digest",
+                name: "d",
+                args: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+        let l = shown(&mut store, long);
+        assert_eq!(l.state, job::State::Running, "{name}: {l:?}");
+        let r = shown(&mut store, reused);
+        assert_eq!(r.state, job::State::Failed, "{name}: {r:?}");
+        assert!(
+            r.error.as_deref().unwrap_or("").contains("stale"),
+            "{name}: {r:?}"
+        );
+        // and one of its kind is held off by it, as by a fresh one
+        let again = job::claim(
+            &mut store,
+            &Claim {
+                kind: "pipeline",
+                name: "p",
+                args: serde_json::json!({}),
+            },
+        );
+        assert!(
+            matches!(again, Err(job::Error::Busy { job_id, .. }) if job_id == long),
+            "{name}: {again:?}"
+        );
+    }
+}
+
 /// The registry's named locks (2026-09-30), on both backends: one
 /// connection holds a name at a time, names are apart, a lock given back
 /// is free, and a lock goes with the connection or file that held it.

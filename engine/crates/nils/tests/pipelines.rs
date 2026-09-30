@@ -6607,3 +6607,114 @@ fn a_run_killed_beside_another_is_taken_up_while_the_other_goes_on() {
         assert_eq!(most_at_once_ended(&t), 2, "{:?}", trace(&t));
     });
 }
+
+/// 2026-09-30: a run whose intake is held past the freshness a claim
+/// allows keeps its job. Its heart beats from a thread of its own while
+/// the run waits and writes, so a second run over other stacks, claimed
+/// from another host where the first run's process cannot be seen, finds
+/// it fresh and leaves it running, and both finish. The freshness is three
+/// seconds here, and the first run's own beats come every five.
+#[test]
+fn a_run_held_in_its_intake_past_the_freshness_is_not_taken_over() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-side-heart", "nils_pipelines_side_heart", |lab| {
+        lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+        let s = stack_ids(lab);
+        select_stacks(lab, "left", &s[..2]);
+        select_stacks(lab, "right", &s[2..]);
+        // the freshness, as the environment carries it
+        let fresh = Path::new("3");
+        let mut holder = lab.store();
+        let held = nils_registry::lock::try_take(&mut holder, "pipeline-intake")
+            .unwrap()
+            .expect("the intake lock is free");
+        let t = lab.work.path().join("trace-heart");
+        let mut a = lab.start(
+            &t,
+            &[
+                "run",
+                "slow",
+                "--select",
+                "selection:left@1",
+                "--param",
+                "sleep=0",
+                "--json",
+            ],
+            &[("NILS_TEST_JOB_FRESH_SECS", fresh)],
+        );
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit WHERE run_id = 1 AND state = 'over'",
+            2,
+            "the first run's units never ended",
+        );
+        // held in its intake for three freshnesses and more
+        let age = |lab: &Lab| -> u64 {
+            let mut store = lab.store();
+            let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+            let j = nils_registry::job::show(&mut store, job).unwrap().unwrap();
+            let heard = j
+                .heartbeat_at
+                .as_deref()
+                .and_then(nils_registry::time::secs_of);
+            nils_registry::time::now_secs().saturating_sub(heard.unwrap_or(0))
+        };
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(age(lab) < 3, "the held run's heart stopped");
+        }
+        // a run over other stacks, from another host, claims beside it
+        let mut b = {
+            use std::os::unix::process::CommandExt;
+            let out = lab.work.path().join("b.out");
+            let err = lab.work.path().join("b.err");
+            let mut c = lab.command(&lab.path);
+            c.args([
+                "run",
+                "slow",
+                "--select",
+                "selection:right@1",
+                "--param",
+                "sleep=0",
+                "--json",
+            ])
+            .env("HOSTNAME", "ward-4")
+            .env("NILS_TEST_JOB_FRESH_SECS", "3")
+            .env("LANE_TRACE", &t)
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&out).unwrap())
+            .stderr(std::fs::File::create(&err).unwrap())
+            .process_group(0);
+            Started {
+                child: Some(c.spawn().unwrap()),
+                said: (out, err),
+            }
+        };
+        lab.wait_count(
+            "SELECT COUNT(*) FROM pipeline_unit WHERE run_id = 2 AND state = 'over'",
+            2,
+            "the second run's units never ended",
+        );
+        assert_eq!(
+            lab.count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline' AND state = 'running'"),
+            2,
+            "a claim failed the held run"
+        );
+        nils_registry::lock::release(&mut holder, held).unwrap();
+        drop(holder);
+        for run in [&mut a, &mut b] {
+            let (ok, out, err) = run.finish(120);
+            assert!(ok, "{err}");
+            let r: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(r["status"], "done", "{r}");
+        }
+        assert_eq!(
+            lab.count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline' AND state = 'done'"),
+            2
+        );
+    });
+}

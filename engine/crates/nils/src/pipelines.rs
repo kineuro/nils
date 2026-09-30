@@ -2388,24 +2388,11 @@ fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<
     Ok(out)
 }
 
-/// Whether a job is running now: not over, heard from within the freshness
-/// a claim allows, and its process on this host still there.
+/// Whether a job is running now, as a claim judges it (`job::is_live`):
+/// not over, and heard from within the freshness a claim allows or its
+/// process on this host still there.
 fn job_alive(store: &mut Store, id: i64) -> bool {
-    match job::show(store, id) {
-        Ok(Some(j)) if !j.state.is_over() => {
-            let gone = j.host.as_deref() == Some(job::hostname().as_str())
-                && j.pid.is_some_and(|p| job::process_alive(p) == Some(false));
-            let fresh = j
-                .heartbeat_at
-                .as_deref()
-                .and_then(nils_registry::time::secs_of)
-                .is_some_and(|s| {
-                    nils_registry::time::now_secs().saturating_sub(s) < job::FRESH_SECS
-                });
-            fresh && !gone
-        }
-        _ => false,
-    }
+    matches!(job::show(store, id), Ok(Some(j)) if job::is_live(&j))
 }
 
 /// How often the lane takes a run up again by itself before it leaves the
@@ -3350,6 +3337,58 @@ fn folder_word(id: &str) -> Result<&str, String> {
 /// Materialise, schedule the containers in the lane, take in what each
 /// left as it ends, and close with what the run as a whole said.
 fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
+    let heart = Heart::start(registry, x.job_id);
+    let ended = execute_run(home, registry, x);
+    if let Some(h) = heart {
+        h.stop();
+    }
+    ended
+}
+
+/// A run's heart, beaten from a thread of its own on a connection of its
+/// own for as long as the run goes on, so a step that runs long between
+/// the run's own beats (the intake of thousands of proposals, a release, a
+/// wait for a lock) never reads as a run whose engine went away. The run's
+/// own beats still carry its progress and hear a cancel; this one only
+/// says the run is there.
+struct Heart {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Heart {
+    /// Start beating; none where no second connection opens, and the run
+    /// goes on with its own beats alone.
+    fn start(registry: &Registry, job_id: i64) -> Option<Heart> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut store = registry.open_reader().ok()?;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        // six beats in the freshness a claim allows: ten seconds, as the
+        // worker beats
+        let every =
+            Duration::from_millis((job::fresh_secs().saturating_mul(1000) / 6).clamp(250, 10_000));
+        let thread = std::thread::spawn(move || {
+            let mut beaten = Instant::now();
+            while !stopped.load(Ordering::SeqCst) {
+                if beaten.elapsed() >= every {
+                    beaten = Instant::now();
+                    let _ = job::beat(&mut store, job_id, None);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Some(Heart { stop, thread })
+    }
+
+    fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.thread.join();
+    }
+}
+
+/// [`execute`] under the run's heart.
+fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
     let p = x.pipeline;
     let d = x.descriptor;
     // record 49 R7: the outputs under the output place, the scratch under
