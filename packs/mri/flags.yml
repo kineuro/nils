@@ -381,8 +381,11 @@ flags:
   # A curved planar reformat is a reformat: v0 parses `CPR` and reads it
   # nowhere.
   # MRI pack 0.13.0: or a PACS workstation's reformat (below).
+  # MRI pack 0.16.0: or a derived image whose name gives another plane than
+  # its protocol (below).
   is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
-                        has_mpr_in_text, is_projection_plane, is_workstation_reformat]}
+                        has_mpr_in_text, is_projection_plane, is_workstation_reformat,
+                        plane_reformat_named]}
   # MRI pack 0.12.0: Philips writes a reformat as `PROJECTION IMAGE`
   # (`ORIGINAL\PRIMARY\PROJECTION IMAGE\M\FFE`, or DERIVED or SECONDARY),
   # a plane and a maximum projection alike, and only the words or a MIP
@@ -1036,6 +1039,9 @@ flags:
   flair_tse:
     all:
       - any: [is_flair, is_flair_by_ti, {text: technique_text, substring: flair}]
+      # MRI pack 0.16.0: never a dual-echo spin echo that only its name
+      # calls FLAIR (dev-4, H3).
+      - {not: flair_named_dual_echo}
       - any: [has_se, scanning_sequence.has_ir, scanning_sequence.has_research, image_type.hint_ir]
       - {not: has_gre}
       - {not: has_epi}
@@ -1045,8 +1051,12 @@ flags:
   # GE's PROPELLER by its other names: `ksprop`, `T2prop`, `T1FLAIRprop`,
   # `PropFSE` and a misspelt `PROPPELLER` (dev-2: eleven stacks without
   # Radial). The normalizer already makes `prop` alone `propeller`.
-  propeller_named: {text: search_text, matches: 'prop(p?eller|fse)?([^a-z]|$)'}
-  radial_named: {any: [multivane_named, propeller_named]}
+  # MRI pack 0.16.0: or `PROPks` (dev-4: a GE `Ax T1 FLAIR PROPks`, dev-2's
+  # B2 on a spelling 0.14.0 did not reach).
+  propeller_named: {text: search_text, matches: 'prop(p?eller|fse|ks)?([^a-z]|$)'}
+  # MRI pack 0.16.0: or a Siemens BLADE by its sequence name (parsers.yml,
+  # `is_blade_tse`).
+  radial_named: {any: [multivane_named, propeller_named, sequence_name.is_blade_tse]}
   # A GE spin echo written in research mode: ScanningSequence RM, so no
   # readout is stated, but a flip of 80 degrees or more and an echo time of
   # 8 ms or more, which a gradient echo does not have outside an EPI.
@@ -1257,3 +1267,76 @@ flags:
     all:
       - {text: manufacturer, prefix: siemens}
       - {text: text_sequence_name, matches: '^\*?(fi[23]d[0-9]*)?tun'}
+
+  # === MRI pack 0.16.0: dev-4's rule errors ================================
+
+  # --- dev-4, H1: Siemens' BLADE turbo spin echo named by its sequence
+  # alone, `*tseB2d1_17`, is Radial. The words and `tseBR` were all 0.15.0
+  # read (an ESSENZA `t2_tse_tra`; dev-1 and dev-4 settled Radial on every
+  # `tseB` stack). The flag is in `radial_named` above; on the archive, 19
+  # `tseB` stacks carry no BLADE word.
+
+  # --- dev-4, H2: a reformat whose name gives another plane than the
+  # protocol it was made from: a derived image of a 3D acquisition named
+  # `Cor` or `Ax` from a protocol named `Sag` (dev-4: a Terra.X `Cor T1
+  # MP2RAGE 2mm` from `Sag 3D T1 MP2RAGE`, written
+  # `DERIVED\PRIMARY\T1\UNIFORM`, settled ProjectionDerived with MPR and
+  # Uniform). Axial and transverse are one plane. Never a projection or
+  # Siemens' position display. On the archive, 36 derived 3D stacks meet it
+  # that no other reformat rule reached, every one a plane reformat by its
+  # name (MP2RAGE, SPACE FLAIR, MPRAGE and `ax reformat`).
+  plane_reformat_named:
+    all:
+      - image_type.is_derived
+      - is_3d
+      - {not: image_type.is_posdisp}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: projection_named}
+      - {text: text_protocol_name, matches: '(^|[^a-z])(sag|cor|ax|tra)([^a-z]|$)'}
+      - any:
+          - all:
+              - {text: text_series_description, matches: '(^|[^a-z])sag([^a-z]|$)'}
+              - {not: {text: text_protocol_name, matches: '(^|[^a-z])sag([^a-z]|$)'}}
+          - all:
+              - {text: text_series_description, matches: '(^|[^a-z])cor([^a-z]|$)'}
+              - {not: {text: text_protocol_name, matches: '(^|[^a-z])cor([^a-z]|$)'}}
+          - all:
+              - {text: text_series_description, matches: '(^|[^a-z])(ax|tra)([^a-z]|$)'}
+              - {not: {text: text_protocol_name, matches: '(^|[^a-z])(ax|tra)([^a-z]|$)'}}
+
+  # --- dev-4, H3: a dual-echo spin echo named FLAIR is no FLAIR when
+  # nothing in its header inverts: split by echo, no inversion time, no
+  # inversion recovery stated, no gradient echo or EPI (dev-4: a MAGNETOM
+  # Vision `FLAIR`, sequence `tse2-5`, TR 4,761 ms, TE 22 ms, settled TSE,
+  # no modifier and PDw; both adjudicators cite the missing inversion). A
+  # FLAIR is one echo. On the archive, the 20 stacks named FLAIR that are
+  # split by echo with no inversion time and a spin-echo name are all the
+  # Vision's `tse2-5` at TE 22 and 90 ms. The name then decides nothing:
+  # the dual-echo rules read the echo.
+  flair_named_dual_echo:
+    all:
+      - is_multi_echo
+      - {text: search_text, substring: flair}
+      - {not: has_ir}
+      - {not: {field: inversion_time, gt: 0}}
+      - {not: has_gre}
+      - {not: has_epi}
+
+  # --- dev-4, H4: a Siemens acquired diffusion image whose protocol is
+  # named for the ADC it also makes (`ep2d_diff_trace_ADC`): ORIGINAL, a b
+  # value above 0, and no ADC in the image type. Siemens writes ADC in the
+  # image type of every ADC map (on the archive, all of the Symphony's), so
+  # the word in the name is the protocol's and not this image's (dev-4: two
+  # Symphony `ORIGINAL\PRIMARY\M\ND` stacks at b 1000 read ADC; on the
+  # archive, 206 such stacks, all `M\ND`). The map is its own series.
+  siemens_acquired_diffusion:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - image_type.is_original
+      - {not: image_type.has_adc}
+      - has_positive_b_value
+
+  # --- dev-4, H5: GE's IDEAL writes its outputs as `OutPhase:`, `InPhase:`,
+  # `WATER:` and `FAT:` before the series name; InPhase read `inphase`, and
+  # OutPhase now reads `outphase` (axes/construct.yml).

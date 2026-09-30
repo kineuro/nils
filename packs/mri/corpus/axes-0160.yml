@@ -1,0 +1,334 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.16.0: the rule errors of the development reference dev-4 on
+# pack 0.15.0 (H1 to H5, and dev-2's B2 on a spelling 0.14.0 did not
+# reach), one or more cases for each change, and the cases that keep each
+# change from reaching what it must not. Nima's ruling N12 (record 48,
+# 2026-09-30: a Siemens BLADE with restore is VFA-TSE) is the pack's
+# reading already; its case is here as a guard. Every stack here is
+# invented; the values are the shapes the rules turn on.
+
+cases:
+
+  # --- H1: a Siemens BLADE named only by its sequence name is Radial
+
+  - name: a Siemens BLADE turbo spin echo named only by its sequence stem tseB is Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra'
+      text_protocol_name: 't2_tse_tra'
+      text_sequence_name: '*tseB2d1_17'
+      repetition_time: 5440
+      echo_time: 91
+      flip_angle: 150
+      echo_train_length: 17
+    axes:
+      technique: TSE
+      modifier: Radial
+      base: T2w
+
+  - name: a Siemens turbo spin echo without the B of BLADE takes no Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra'
+      text_protocol_name: 't2_tse_tra'
+      text_sequence_name: '*tse2d1_17'
+      repetition_time: 5440
+      echo_time: 91
+      flip_angle: 150
+      echo_train_length: 17
+    axes:
+      technique: TSE
+      modifier: ''
+
+  # --- N12 (a guard): a Siemens BLADE with restore is VFA-TSE, named or not
+
+  - name: a Siemens BLADE with restore whose words do not say BLADE is VFA-TSE and Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra_3mm'
+      text_sequence_name: '*tseBR2d1_28'
+      repetition_time: 5660
+      echo_time: 106
+      flip_angle: 90
+      echo_train_length: 28
+    axes:
+      technique: RESTORE
+      modifier: Radial
+
+  # --- B2 (dev-2's, on a new spelling): GE's `PROPks` is a PROPELLER
+
+  - name: a GE FLAIR named PROPks is Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: 'EDR_GEMS\SS_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T1 FLAIR PROPks 4mm +C'
+      repetition_time: 2355
+      echo_time: 51
+      flip_angle: 120
+      echo_train_length: 1
+    axes:
+      technique: TIRM
+      modifier: 'FLAIR,Radial'
+
+  - name: a word that only starts with prop takes no Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Ax T2 FSE propofol'
+      repetition_time: 4000
+      echo_time: 90
+      flip_angle: 90
+      echo_train_length: 16
+    axes:
+      technique: TSE
+      modifier: ''
+
+  # --- H2: a reformat named for another plane than its protocol
+
+  - name: a derived MP2RAGE UNI image named Cor from a protocol named Sag is a reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\PARALLEL\DIS3D\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      scan_options: PER
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'Cor T1 MP2RAGE 2mm'
+      text_protocol_name: 'Sag 3D T1 MP2RAGE'
+      repetition_time: 4500
+      echo_time: 1.7
+      echo_train_length: 1
+    axes:
+      provenance: ProjectionDerived
+      technique: MP2RAGE
+      construct: 'MPR,Uniform'
+
+  - name: a derived image named Ax from a protocol named tra is the same plane and no reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\PARALLEL\DIS3D'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax T1 MP2RAGE UNI'
+      text_protocol_name: 't1_mp2rage_tra'
+      repetition_time: 5000
+      echo_time: 2.9
+      echo_train_length: 1
+    axes:
+      provenance: RawRecon
+      construct: Uniform
+
+  - name: the protocol's own derived image in its own plane is no reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\PARALLEL\DIS3D'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Sag 3D T1 MP2RAGE_UNI'
+      text_protocol_name: 'Sag 3D T1 MP2RAGE'
+      repetition_time: 4500
+      echo_time: 1.7
+      echo_train_length: 1
+    axes:
+      provenance: RawRecon
+      construct: Uniform
+
+  - name: an acquired image named for another plane than its protocol is no reformat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Cor T2 SPACE'
+      text_protocol_name: 'Sag T2 SPACE'
+      text_sequence_name: '*spc3d1_120ns'
+      repetition_time: 3200
+      echo_time: 409
+      echo_train_length: 120
+    axes:
+      provenance: RawRecon
+      construct: ND
+
+  # --- H3: a dual-echo spin echo that only its name calls FLAIR
+
+  - name: an old Siemens dual-echo TSE named FLAIR with no inversion is a TSE, its short echo PDw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'FLAIR'
+      text_sequence_name: 'tse2-5'
+      repetition_time: 4761
+      echo_time: 22
+      flip_angle: 180
+      echo_train_length: 1
+      echo_numbers: '1'
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      modifier: ''
+      base: PDw
+
+  - name: its long echo is a TSE, T2w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'FLAIR'
+      text_sequence_name: 'tse2-5'
+      repetition_time: 4761
+      echo_time: 90
+      flip_angle: 180
+      echo_train_length: 1
+      echo_numbers: '2'
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TSE
+      modifier: ''
+      base: T2w
+
+  - name: a FLAIR of one echo whose header states no inversion time is still a FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'FLAIR tra'
+      text_sequence_name: 'tse2d1_15'
+      repetition_time: 9000
+      echo_time: 105
+      flip_angle: 180
+      echo_train_length: 15
+    axes:
+      technique: TIRM
+      modifier: FLAIR
+      base: T2w
+
+  - name: a FLAIR split by echo that states its inversion time stays a FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_tra_dark-fluid'
+      text_sequence_name: '*tir2d1_16'
+      repetition_time: 9000
+      echo_time: 89
+      inversion_time: 2500
+      flip_angle: 150
+      echo_train_length: 16
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: TIRM
+      modifier: FLAIR
+
+  # --- H4: ADC in a Siemens protocol name, on the acquired diffusion image
+
+  - name: a Siemens acquired diffusion image of a protocol named for its ADC takes no ADC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\EP'
+      sequence_variant: 'SK\SP'
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_trace_ADC'
+      text_protocol_name: 'ep2d_diff_trace_ADC'
+      text_sequence_name: 'ep_b1000t'
+      diffusion_b_value: 1000
+      repetition_time: 4600
+      echo_time: 139
+      flip_angle: 90
+    axes:
+      technique: DWI-EPI
+      construct: 'ND,Trace'
+      base: DWI
+
+  - name: the same protocol's ADC map, with ADC in its image type, is an ADC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ADC\ND'
+      scanning_sequence: 'SE\EP'
+      sequence_variant: 'SK\SP'
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_trace_ADC_ADC'
+      text_protocol_name: 'ep2d_diff_trace_ADC'
+      text_sequence_name: 'ep_b0_1000'
+      diffusion_b_value: 1000
+      repetition_time: 4600
+      echo_time: 139
+      flip_angle: 90
+    axes:
+      construct: 'ADC,ND'
+
+  # --- H5: GE IDEAL's out-of-phase output
+
+  - name: a GE IDEAL output named OutPhase is OutPhase
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS\EDR_GEMS\IDEAL_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'OutPhase:IDEAL T1 + C'
+      repetition_time: 876
+      echo_time: 14
+      flip_angle: 90
+      echo_train_length: 4
+    axes:
+      modifier: Dixon
+      construct: OutPhase
+
+  - name: its in-phase output stays InPhase
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS\EDR_GEMS\IDEAL_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'InPhase:IDEAL T1 + C'
+      repetition_time: 876
+      echo_time: 14
+      flip_angle: 90
+      echo_train_length: 4
+    axes:
+      modifier: Dixon
+      construct: InPhase

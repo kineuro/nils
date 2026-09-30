@@ -359,6 +359,10 @@ parsers:
       is_tse:              {any_substring: [tse1, tse2, tse3, tse_, 'tse-', tser, tseb, ts1, ts2, ts3]}
       # MRI pack 0.14.0: and after BLADE's `B` (`*tseBR2d1_28`, dev-2).
       is_tse_body:         {any_substring: [tser, tsebr]}
+      # MRI pack 0.16.0: Siemens' BLADE turbo spin echo by its stem, `*tseB`
+      # (`*tseB2d1_17`, `*tseBR2d1_28`), where the words may not say BLADE
+      # (dev-4: an ESSENZA `t2_tse_tra` without Radial).
+      is_blade_tse:        {matches: '^\*?(wip_?)?tseb'}
       is_ir_tse:           {all: [{substring: tir}, {not: {substring: stir}}]}
       is_haste:            {any_substring: [h2d, h3d, hr2d, haste]}
       # MRI pack 0.10.0: anchored at the start of the name (after `*`, the
