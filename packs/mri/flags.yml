@@ -1282,7 +1282,7 @@ flags:
   # MP2RAGE 2mm` from `Sag 3D T1 MP2RAGE`, written
   # `DERIVED\PRIMARY\T1\UNIFORM`, settled ProjectionDerived with MPR and
   # Uniform). Axial and transverse are one plane. Never a projection or
-  # Siemens' position display. On the archive, 36 derived 3D stacks meet it
+  # Siemens' position display. On the archive, 37 derived 3D stacks meet it
   # that no other reformat rule reached, every one a plane reformat by its
   # name (MP2RAGE, SPACE FLAIR, MPRAGE and `ax reformat`).
   plane_reformat_named:
