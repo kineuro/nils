@@ -141,7 +141,7 @@ def score(
     chunk: int = 4,
     prefetch: bool | None = None,
     stats: dict | None = None,
-    gpu_workers: int = 4,
+    gpu_workers: int = 2,
 ) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
     """Every stack's answer, in the manifest's order."""
     if prefetch is None:

@@ -18,7 +18,7 @@ Everything that reads pixels or runs an encoder is imported lazily, so the
 rules can be tested without torch.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # The preparation's version. It keys an embedding (record 43, S4): a change to
 # anything in ``preprocess.PreprocessConfig`` or to which slices are embedded

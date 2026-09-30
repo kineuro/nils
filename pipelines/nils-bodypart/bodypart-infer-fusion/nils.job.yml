@@ -27,12 +27,18 @@
 # detail beside them (the image's probabilities, the calibration, the
 # geometry, the rules' answer and the three models).
 #
+# A stack's time is reading its files and decoding its frames, not the
+# network: the tool scores stacks in worker processes, one BLAS thread each,
+# and reads the next stack's files ahead, so a run is held by how fast its
+# files can be read. Sixteen workers reach that on a network file system;
+# more add nothing there. The answers are the same whatever the workers.
+#
 # The image runs offline and never reaches the network; the runner runs it
 # with --network none. The image is pinned as bodypart-embed/nils.job.yml
 # says.
 name: bodypart-infer-fusion
 schema-version: "0.5"
-tool-version: "0.2.0"
+tool-version: "0.3.0"
 description: >-
   Propose body_part (fine) and body_region (coarse) per stack with the
   certified body-part model: an image encoder and a LightGBM head over its
@@ -44,15 +50,15 @@ container-image:
 
 inputs:
   - id: threads
-    name: Reading threads
+    name: Workers
     type: Number
     integer: true
     minimum: 1
     maximum: 64
-    description: Stacks read and scored at once.
+    description: Stacks read and scored at once, each in a worker process of its own.
     value-key: "[THREADS]"
     command-line-flag: --threads
-    default-value: 2
+    default-value: 16
     optional: true
 
 command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS]"
@@ -63,8 +69,8 @@ output-files:
     path-template: "bodypart-fusion/{stack}.json"
 
 suggested-resources:
-  cpu-cores: 2
-  ram: 2
+  cpu-cores: 16
+  ram: 8
   walltime-estimate: 0.1
 
 x-nils:
@@ -112,8 +118,8 @@ x-nils:
         - {name: encoder_digest, type: text, description: The image encoder}
   needs:
     gpu: none
-    memory-gb: 2
-    cores: 2
+    memory-gb: 8
+    cores: 16
     cores-input: threads
   proposals:
     - axis: body_part

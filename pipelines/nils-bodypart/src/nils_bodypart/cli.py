@@ -710,10 +710,10 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--inputs", type=Path, default=Path("/inputs"), help="the typed inputs and their manifest.json")
     f.add_argument("--output", type=Path, default=Path("/output"))
     f.add_argument("--threads", type=int, default=2, help="stacks read and scored at once, each in a process of its own")
-    f.add_argument("--device", default=os.environ.get("NILS_BODYPART_DEVICE", "auto"), help="auto, cpu or cuda: where lossless JPEG 2000 is decoded")
+    f.add_argument("--device", default=os.environ.get("NILS_BODYPART_FUSION_DEVICE", "cpu"), help="cpu (the default), cuda, or auto (cuda where a card is found): where lossless JPEG 2000 is decoded")
     f.add_argument("--encoder-device", choices=("cpu", "cuda"), default="cpu", help="cuda runs the image encoder on the card in batches (not bit for bit the CPU's)")
     f.add_argument("--batch", type=int, default=64, help="stacks a batch of the encoder on the card")
-    f.add_argument("--gpu-workers", type=int, default=4, help="of the workers, how many decode on the card; the others decode on the CPU")
+    f.add_argument("--gpu-workers", type=int, default=2, help="of the workers, how many decode on the card; the others decode on the CPU")
     return p
 
 
