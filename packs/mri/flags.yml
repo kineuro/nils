@@ -812,12 +812,18 @@ flags:
   # no T2 contrast, so its name can only mean T2* (a Philips T2-weighted FFE
   # read T2w, sealed-1 A12); never Philips' T2-FFE or a Siemens PSIF, the
   # time-reversed steady state, whose contrast is T2.
+  # MRI pack 0.18.1: never Siemens' position display (`POSDISP`). Its
+  # FLASH draws the plan of another series and carries that series' name
+  # (`PosDisp: [5] t2_tirm_cor`), so the name says nothing of its own
+  # echo; from 8 ms the flag read 12 more of them as T2* beside the TSE
+  # their words name, and each broke `t2star-not-spin-echo`.
   is_t2_named_gre:
     all:
       - has_gre
       - {not: has_se}
       - {not: has_epi}
       - {not: is_psif}
+      - {not: image_type.is_posdisp}
       - {field: echo_time, ge: 8}
       - {text: search_text, matches: '(^|[^a-z0-9])t2w?([^a-z0-9*]|$)'}
       - {not: {text: search_text, matches: 't2\*|t2star|t2 star'}}
