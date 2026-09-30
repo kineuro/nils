@@ -628,6 +628,61 @@ cases:
     axes:
       base: T2*w
 
+  # --- 0.18.1: a position display's name is the name of the series it plans
+
+  - name: a Siemens position display named for a TIRM at an echo time of 14 ms is no T2*
+    stack:
+      image_type: 'DERIVED\SECONDARY\POSDISP\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d1'
+      text_series_description: 'PosDisp: [5] t2_tirm_cor'
+      repetition_time: 3500
+      echo_time: 14
+      echo_train_length: 5
+      flip_angle: 180
+    flags:
+      is_t2_named_gre: false
+    axes:
+      provenance: Localizer
+
+  - name: a Siemens position display named for a TSE at an echo time of 86 ms is no T2*
+    stack:
+      image_type: 'DERIVED\SECONDARY\POSDISP\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d1'
+      text_series_description: 'PosDisp: [11] t2_tse sag'
+      repetition_time: 5000
+      echo_time: 86
+      echo_train_length: 7
+      flip_angle: 180
+    flags:
+      is_t2_named_gre: false
+    axes:
+      provenance: Localizer
+
+  - name: a Siemens FLASH named T2 at an echo time of 14 ms is still T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d1'
+      text_series_description: 't2_fl2d_tra'
+      repetition_time: 500
+      echo_time: 14
+      flip_angle: 20
+    flags:
+      is_t2_named_gre: true
+    axes:
+      base: T2*w
+
   # --- A13, case 26: GE FLEX is Dixon
 
   - name: a GE LAVA-Flex water image with FLEX_GEMS is Dixon
