@@ -1171,6 +1171,200 @@ fn a_bids_run_meets_one_t1w_per_session_and_registers_one_output_per_session() {
     }
 }
 
+/// A reader of what an earlier bids run made, as segcsvd reads SynthSeg's
+/// label map: each session writes the names of the files its derivative
+/// input holds.
+const BIDS_READER: &str = r#"name: bids-reader
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/bids-reader@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+command-line: |
+  python3 -c '
+  import glob, os, sys
+  src, out, prev = sys.argv[1], sys.argv[2], sys.argv[3]
+  seen = sorted(os.path.basename(f) for f in glob.glob(prev + "/**/*_desc-n4_T1w.nii.gz", recursive=True))
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      d = os.path.join(out, os.path.relpath(s, src), "anat"); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "seen.txt"), "w").write("\n".join(seen) + "\n")
+  ' [InputDataset] [OutputLocation] [Inputs]/prev
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  units: apart
+  inputs:
+    - {id: prev, type: "derivative:output"}
+  outputs:
+    - id: seen
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/seen.txt"
+"#;
+
+#[test]
+fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-bids-chain");
+    lab.add_descriptor("bids-reader", BIDS_READER);
+    // nothing made yet: the input it needs is named, and nothing runs
+    let (good, _, err) = lab.run(
+        &["run", "bids-reader", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good, "a run without its derivative input is refused");
+    assert!(err.contains("none is registered"), "{err}");
+    lab.add_descriptor("bids-copy", BIDS_COPY);
+    let first = lab.json(&[
+        "run",
+        "bids-copy",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(first["summary"]["derivatives"], 2, "{first}");
+    let v = lab.json(&[
+        "run",
+        "bids-reader",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "done", "{v}");
+    assert_eq!(v["summary"]["units"]["succeeded"], 2, "{v}");
+    let run = v["id"].as_i64().unwrap();
+    // the manifest names the two session files the first run registered
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run}/inputs/manifest.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let prev = manifest["derivatives"]["prev"].as_array().unwrap();
+    assert_eq!(prev.len(), 2, "{manifest}");
+    for p in prev {
+        assert!(
+            p["stack_id"].is_null(),
+            "a session's file names no stack: {p}"
+        );
+        assert!(
+            p["path"].as_str().unwrap().ends_with("_desc-n4_T1w.nii.gz"),
+            "{p}"
+        );
+    }
+    // and each session's container met both
+    let rows = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+    assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
+    for d in rows.as_array().unwrap() {
+        let text =
+            std::fs::read_to_string(lab.work.path().join(d["path"].as_str().unwrap())).unwrap();
+        assert_eq!(text.lines().count(), 2, "{d}: {text}");
+    }
+
+    // only the selection's own sessions and subjects: a file of another
+    // day of one of its subjects is never taken, a file of the whole
+    // subject is, and a run over one subject's stacks takes nothing of the
+    // other subject's (a run of one stack each: a T1w or a FLAIR of one
+    // session)
+    let subject = prev[0]["subject_id"].as_i64().unwrap();
+    let file = lab.work.path().join("x_desc-n4_T1w.nii.gz");
+    let add = |bytes: &[u8], day: Option<&str>| -> i64 {
+        std::fs::write(&file, bytes).unwrap();
+        let s = subject.to_string();
+        let mut args = vec![
+            "derivative",
+            "add",
+            file.to_str().unwrap(),
+            "--kind",
+            "output",
+            "--subject",
+            &s,
+        ];
+        if let Some(d) = day {
+            args.extend(["--day", d]);
+        }
+        args.push("--json");
+        let v = lab.json(&args);
+        v["id"].as_i64().unwrap_or_else(|| panic!("{v}"))
+    };
+    let other_day = add(b"another occasion", Some("1999-01-01"));
+    let whole = add(b"the whole subject", None);
+    std::fs::remove_file(&file).unwrap();
+    let before: BTreeSet<i64> = lab
+        .json(&["pipeline", "runs", "--limit", "100", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    let (good, _, err) = lab.run(
+        &[
+            "run",
+            "bids-reader",
+            "--select",
+            "selection:every@1",
+            "--chunk",
+            "1",
+            "--json",
+        ],
+        None,
+    );
+    assert!(good, "{err}");
+    let parts: Vec<i64> = lab
+        .json(&["pipeline", "runs", "--limit", "100", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(parts.len(), 4, "{parts:?}");
+    let mut n4 = 0;
+    let mut wholes = 0;
+    for part in parts {
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                lab.work
+                    .path()
+                    .join(format!("runs/{part}/inputs/manifest.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let units: BTreeSet<i64> = manifest["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["subject_id"].as_i64().unwrap())
+            .collect();
+        for p in manifest["derivatives"]["prev"].as_array().unwrap() {
+            let id = p["id"].as_i64().unwrap();
+            assert_ne!(id, other_day, "another day's file was taken: {manifest}");
+            assert!(
+                units.contains(&p["subject_id"].as_i64().unwrap()),
+                "a file of a subject outside the run was taken: {manifest}"
+            );
+            if id == whole {
+                wholes += 1;
+            } else if p["path"].as_str().unwrap().ends_with("_desc-n4_T1w.nii.gz") {
+                n4 += 1;
+            }
+        }
+    }
+    assert_eq!(
+        (n4, wholes),
+        (4, 2),
+        "each run its session's file, and the subject's two runs its file"
+    );
+}
+
 /// A server with the worker beside the doors, on the lab's search path.
 struct Server {
     child: Child,
@@ -4313,6 +4507,7 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
             "mriqc",
             "n4-bias-correction",
             "samseg-lesions",
+            "segcsvd",
             "synthseg",
             "synthstrip"
         ],
@@ -4326,7 +4521,7 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
     // a second start adds nothing
     let server = Server::start(&lab);
     let (_, again) = server.call("GET", "/api/pipelines", None, OPERATOR);
-    assert_eq!(again["pipelines"].as_array().unwrap().len(), 6, "{again}");
+    assert_eq!(again["pipelines"].as_array().unwrap().len(), 7, "{again}");
     drop(server);
     let listed = lab.json(&["pipeline", "starter", "--json"]);
     for s in listed["starters"].as_array().unwrap() {
