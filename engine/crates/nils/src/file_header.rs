@@ -64,6 +64,73 @@ const TEXTS: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     ("angio_flag", "series_mr", "angio_flag", false),
+    // Record 53 S1: which kind of object the file is, and what an enhanced
+    // or spectroscopy object says of its mechanism, from the stack's own
+    // fingerprint. A classic image has none of the mechanism, and nothing
+    // is shown for it.
+    ("sop_class_uid", "fingerprint", "sop_class_uid", false),
+    (
+        "pulse_sequence_name",
+        "fingerprint",
+        "pulse_sequence_name",
+        false,
+    ),
+    (
+        "echo_pulse_sequence",
+        "fingerprint",
+        "echo_pulse_sequence",
+        false,
+    ),
+    (
+        "multiple_spin_echo",
+        "fingerprint",
+        "multiple_spin_echo",
+        false,
+    ),
+    (
+        "echo_planar_pulse_sequence",
+        "fingerprint",
+        "echo_planar_pulse_sequence",
+        false,
+    ),
+    (
+        "steady_state_pulse_sequence",
+        "fingerprint",
+        "steady_state_pulse_sequence",
+        false,
+    ),
+    ("phase_contrast", "fingerprint", "phase_contrast", false),
+    (
+        "time_of_flight_contrast",
+        "fingerprint",
+        "time_of_flight_contrast",
+        false,
+    ),
+    (
+        "arterial_spin_labeling_contrast",
+        "fingerprint",
+        "arterial_spin_labeling_contrast",
+        false,
+    ),
+    (
+        "geometry_of_k_space_traversal",
+        "fingerprint",
+        "geometry_of_k_space_traversal",
+        false,
+    ),
+    (
+        "segmented_k_space_traversal",
+        "fingerprint",
+        "segmented_k_space_traversal",
+        false,
+    ),
+    ("spoiling", "fingerprint", "spoiling", false),
+    (
+        "inversion_recovery",
+        "fingerprint",
+        "inversion_recovery",
+        false,
+    ),
     ("image_comments", "instance", "image_comments", true),
     (
         "derivation_description",

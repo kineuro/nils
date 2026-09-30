@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 76;
+pub const SCHEMA_VERSION: i64 = 77;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,7 +358,63 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 76,
         apply: a_campaign_reads_a_stack_beside_two_anchors,
     },
+    Migration {
+        version: 77,
+        apply: a_series_says_how_it_was_acquired,
+    },
 ];
+
+/// Record 53 S1: an MR series gains the MR Pulse Sequence module's mechanism
+/// attributes (echo pulse sequence, multiple spin echo, echo planar, steady
+/// state, time of flight and arterial spin labelling contrast, the geometry
+/// and segmentation of k-space) and the MR Modifier group's spoiling and
+/// inversion recovery; the fingerprint carries them, the phase contrast the
+/// series already held, and the series' SOP class, for a pack to read. A
+/// registry from before gains every column empty. The fingerprint's revision
+/// moved with them, so the next `nils fingerprint` derives every stack again,
+/// and the SOP class and the phase contrast fill at once from the series. The
+/// other series columns fill when the files are read again, which `nils
+/// digest --reread` does per manufacturer; only an enhanced or spectroscopy
+/// object has them to give.
+fn a_series_says_how_it_was_acquired(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "series_mr",
+        &[
+            "echo_pulse_sequence",
+            "multiple_spin_echo",
+            "echo_planar_pulse_sequence",
+            "steady_state_pulse_sequence",
+            "time_of_flight_contrast",
+            "arterial_spin_labeling_contrast",
+            "geometry_of_k_space_traversal",
+            "segmented_k_space_traversal",
+            "spoiling",
+            "inversion_recovery",
+        ],
+    )?;
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "sop_class_uid",
+            "echo_pulse_sequence",
+            "multiple_spin_echo",
+            "echo_planar_pulse_sequence",
+            "steady_state_pulse_sequence",
+            "phase_contrast",
+            "time_of_flight_contrast",
+            "arterial_spin_labeling_contrast",
+            "geometry_of_k_space_traversal",
+            "segmented_k_space_traversal",
+            "spoiling",
+            "inversion_recovery",
+        ],
+    )
+}
 
 /// Post-contrast gold, anchored reading: an item of an anchored campaign
 /// shows a candidate beside a pre and a post anchor, and which stack is in

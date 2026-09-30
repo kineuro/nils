@@ -63,7 +63,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `contrast_flow_rate` | ContrastFlowRate (0018,1046) | double | technical |  |
 | `contrast_flow_duration` | ContrastFlowDuration (0018,1047) | double | technical |  |
 
-## series_mr (33, MR only)
+## series_mr (43, MR only)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -74,7 +74,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `inversion_time` | InversionTime (0018,0082) | double | technical |  |
 | `inversion_times` | InversionTimes (0018,9079) | text | technical |  |
 | `flip_angle` | FlipAngle, then fg MRTimingAndRelatedParametersSequence.FlipAngle, then private per-frame .FlipAngle | double | technical | as on the stack |
-| `phase_contrast` | PhaseContrast (0018,9014) | text | technical |  |
+| `phase_contrast` | PhaseContrast, then private per-frame .PhaseContrast | text | technical | PhaseContrast (0018,9014); record 53: the private per-frame sequences too |
 | `number_of_averages` | NumberOfAverages, then fg MRAveragesSequence.NumberOfAverages | double | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `imaging_frequency` | ImagingFrequency (0018,0084) | double | technical |  |
 | `imaged_nucleus` | ImagedNucleus (0018,0085) | text | technical |  |
@@ -87,6 +87,16 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `pixel_bandwidth` | PixelBandwidth, then fg MRImagingModifierSequence.PixelBandwidth | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `receive_coil_name` | ReceiveCoilName, then fg MRReceiveCoilSequence.ReceiveCoilName | text | technical | as on the stack |
 | `pulse_sequence_name` | PulseSequenceName, then private per-frame .PulseSequenceName | text | technical | addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28) |
+| `echo_pulse_sequence` | EchoPulseSequence, then private per-frame .EchoPulseSequence | text | technical | addition: EchoPulseSequence (0018,9008), SPIN, GRADIENT or BOTH (record 53) |
+| `multiple_spin_echo` | MultipleSpinEcho, then private per-frame .MultipleSpinEcho | text | technical | addition: MultipleSpinEcho (0018,9011), YES or NO (record 53) |
+| `echo_planar_pulse_sequence` | EchoPlanarPulseSequence, then private per-frame .EchoPlanarPulseSequence | text | technical | addition: EchoPlanarPulseSequence (0018,9018), YES or NO (record 53) |
+| `steady_state_pulse_sequence` | SteadyStatePulseSequence, then private per-frame .SteadyStatePulseSequence | text | technical | addition: SteadyStatePulseSequence (0018,9017), FREE_PRECESSION, TRANSVERSE, TIME_REVERSED, LONGITUDINAL or NONE (record 53) |
+| `time_of_flight_contrast` | TimeOfFlightContrast, then private per-frame .TimeOfFlightContrast | text | technical | addition: TimeOfFlightContrast (0018,9015), YES or NO (record 53) |
+| `arterial_spin_labeling_contrast` | ArterialSpinLabelingContrast, then private per-frame .ArterialSpinLabelingContrast | text | technical | addition: ArterialSpinLabelingContrast (0018,9250), CONTINUOUS, PSEUDOCONTINUOUS or PULSED (record 53) |
+| `geometry_of_k_space_traversal` | GeometryOfKSpaceTraversal, then private per-frame .GeometryOfKSpaceTraversal | text | technical | addition: GeometryOfKSpaceTraversal (0018,9032), RECTILINEAR, RADIAL or SPIRAL (record 53) |
+| `segmented_k_space_traversal` | SegmentedKSpaceTraversal, then private per-frame .SegmentedKSpaceTraversal | text | technical | addition: SegmentedKSpaceTraversal (0018,9033), SINGLE, PARTIAL or FULL (record 53) |
+| `spoiling` | Spoiling, then fg MRModifierSequence.Spoiling, then private per-frame .Spoiling | text | technical | addition: Spoiling (0018,9016), RF, GRADIENT, RF_AND_GRADIENT or NONE, from the MR Modifier group where the top level has none (record 53) |
+| `inversion_recovery` | InversionRecovery, then fg MRModifierSequence.InversionRecovery, then private per-frame .InversionRecovery | text | technical | addition: InversionRecovery (0018,9009), YES or NO, from the MR Modifier group where the top level has none (record 53) |
 | `transmit_coil_name` | TransmitCoilName, then fg MRTransmitCoilSequence.TransmitCoilName | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `acquisition_matrix` | AcquisitionMatrix (0018,1310) | text | technical |  |
 | `phase_encoding_direction` | InPlanePhaseEncodingDirection (0018,1312) | text | technical | addition: InPlanePhaseEncodingDirection; v0's keyword PhaseEncodingDirection is no element and the column was always null |
@@ -222,4 +232,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
-180 columns.
+190 columns.
