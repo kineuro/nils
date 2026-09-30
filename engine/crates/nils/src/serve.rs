@@ -3249,15 +3249,22 @@ fn routed(
             let id = id_at(2)?;
             let doc = json_body(body)?;
             unsealed_item(registry, caller, id)?;
-            crate::review_accept_as(
+            // record 51 R3: an item a campaign holds is not accepted here
+            not_held(registry, id)?;
+            let done = crate::review_accept_as(
                 registry,
                 id,
                 doc["why"].as_str().map(String::from),
                 principal,
-            )?;
-            Ok(Reply::ok(
-                serde_json::json!({ "review_item": id, "accepted_by": principal }),
-            ))
+                author_of(caller).0,
+                doc["pick_id"].as_i64(),
+            )
+            .map_err(|e| match e {
+                crate::AcceptError::Refused(m) => Reply::error(409, m),
+                crate::AcceptError::Forbidden(m) => Reply::error(403, m),
+                crate::AcceptError::Failed(m) => Reply::error(500, m),
+            })?;
+            Ok(Reply::ok(done.to_json()))
         }
         ["api", "decisions", _, "commit"] if post => {
             let id = id_at(2)?;
@@ -3272,7 +3279,7 @@ fn routed(
             .map_err(review_err)?;
             Ok(Reply::ok(serde_json::json!({
                 "committed": done.decisions, "items": done.items,
-                "left_out_sealed": done.left_out_sealed,
+                "left_out_sealed": done.left_out_sealed, "left_held": done.left_held,
             })))
         }
         ["api", "decisions", _, "withdraw"] if post => {
@@ -5486,12 +5493,9 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
 /// Review's apply doors refuse it and name the campaign.
 fn not_held(registry: &mut Registry, id: i64) -> Result<(), Reply> {
     match nils_registry::campaign::holder(registry.store(), id) {
-        Ok(Some((campaign, name))) => Err(Reply::error(
-            409,
-            format!(
-                "review item {id} is asked by campaign {name} ({campaign}), which answers it and closes it; answer it there"
-            ),
-        )),
+        Ok(Some((campaign, name))) => {
+            Err(Reply::error(409, crate::held_words(id, campaign, &name)))
+        }
         Ok(None) => Ok(()),
         Err(e) => Err(Reply::error(500, e.to_string())),
     }

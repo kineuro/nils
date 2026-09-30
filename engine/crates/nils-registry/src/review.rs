@@ -919,6 +919,9 @@ pub struct Committed {
     /// Record 48, D1 of the move: staged decisions left staged because they
     /// reach a stack of a sample sealed now.
     pub left_out_sealed: i64,
+    /// Record 51 R3: staged decisions left staged because an open campaign
+    /// asks the axis on a stack they reach.
+    pub left_held: i64,
 }
 
 /// Commit staged decisions: the one named, or every one. A staged
@@ -1000,12 +1003,32 @@ pub fn commit_as(
     {
         return Err(sealed_refusal(&format!("decision {id}"), &sealed));
     }
+    // record 51 R3: a staged decision on an axis an open campaign asks on
+    // a stack it reaches waits for the campaign: one named is refused, and
+    // commit --all leaves it staged and says how many
+    let held = held_decisions(
+        store,
+        &rows.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+    )?;
+    if let (Some(id), Some((_, name))) = (decision, held.iter().next()) {
+        return Err(refused(format!(
+            "decision {id} is on an axis campaign {name} asks of a stack it reaches; the campaign answers it, and the decision waits until it closes"
+        )));
+    }
+    let left_held = held.len() as i64;
+    let rows: Vec<(i64, Option<i64>, String)> = rows
+        .into_iter()
+        .filter(|(id, _, _)| !held.contains_key(id))
+        .collect();
     let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
     only_a_person_commits(store, &ids, kind)?;
     let staged: Vec<(i64, Option<i64>)> = rows.into_iter().map(|(id, e, _)| (id, e)).collect();
     if staged.is_empty() {
         return Err(refused(match decision {
             Some(id) => format!("decision {id} is not staged"),
+            None if left_held > 0 => format!(
+                "nothing is staged that no open campaign asks; {left_held} decision(s) wait for their campaign to close"
+            ),
             None => "nothing is staged".to_string(),
         }));
     }
@@ -1028,6 +1051,7 @@ pub fn commit_as(
     let now = now_iso();
     let mut out = Committed {
         left_out_sealed,
+        left_held,
         ..Committed::default()
     };
     let ids: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
@@ -1092,6 +1116,54 @@ fn decision_keys(store: &mut Store, ids: &[i64]) -> Result<Vec<(i64, String, Str
         );
         for r in store.query(&sql, &[])? {
             out.push((r.int(0)?, r.text(1)?.to_string(), r.text(2)?.to_string()));
+        }
+    }
+    Ok(out)
+}
+
+/// Record 51 R3: of these staged decisions, the ones on an axis an open
+/// campaign asks of a stack they reach, each with that campaign's name.
+fn held_decisions(store: &mut Store, ids: &[i64]) -> Result<BTreeMap<i64, String>, Error> {
+    let mut out = BTreeMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let pairs = crate::campaign::held_pairs(store).map_err(|e| match e {
+        crate::campaign::Error::Store(s) => Error::Store(s),
+        other => refused(other.to_string()),
+    })?;
+    if pairs.is_empty() {
+        return Ok(out);
+    }
+    let mut keys: Vec<(i64, String, String, String)> = Vec::new();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT id, scope, ref, axis FROM {} WHERE id IN ({})",
+            store.qualified("decision"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            keys.push((
+                r.int(0)?,
+                r.text(1)?.to_string(),
+                r.text(2)?.to_string(),
+                r.text(3)?.to_string(),
+            ));
+        }
+    }
+    let keyed: Vec<(i64, &str, &str)> = keys
+        .iter()
+        .map(|(id, s, r, _)| (*id, s.as_str(), r.as_str()))
+        .collect();
+    let reach = reached_keys(store, &keyed)?;
+    for (id, _, _, axis) in &keys {
+        let by = reach.get(id).and_then(|stacks| {
+            stacks
+                .iter()
+                .find_map(|s| pairs.get(&(*s, axis.clone())).cloned())
+        });
+        if let Some(name) = by {
+            out.insert(*id, name);
         }
     }
     Ok(out)
@@ -1274,6 +1346,9 @@ pub struct CommittedPart {
     /// Record 48, D1 of the move: the stacks of a sample sealed now the
     /// filter reached and left out; nothing is put in force on them.
     pub left_out_sealed: i64,
+    /// Record 51 R3: the staged decisions the filter named and left staged,
+    /// because an open campaign asks the axis on a stack they reach.
+    pub left_held: i64,
 }
 
 /// A value as a set of values: a multi-valued axis is stored joined by
@@ -1752,8 +1827,19 @@ pub fn commit_where(
             parts.push((s, taking));
         }
     }
+    // record 51 R3: of what the filter would take, what an open campaign
+    // asks is left staged until it closes
+    let taken: Vec<i64> = whole
+        .iter()
+        .map(|s| s.id)
+        .chain(parts.iter().map(|(s, _)| s.id))
+        .collect();
+    let held = held_decisions(store, &taken)?;
+    whole.retain(|s| !held.contains_key(&s.id));
+    parts.retain(|(s, _)| !held.contains_key(&s.id));
     let mut out = CommittedPart {
         left_out_sealed: sealed.len() as i64,
+        left_held: held.len() as i64,
         ..CommittedPart::default()
     };
     let touched: Vec<i64> = whole
@@ -1832,7 +1918,7 @@ pub fn commit_where(
             action: Action::Decision,
             scope: serde_json::json!({
                 "committed": out.decisions, "items": out.items, "left": out.left, "split": out.split,
-                "left_out_sealed": out.left_out_sealed,
+                "left_out_sealed": out.left_out_sealed, "left_held": out.left_held,
             }),
             policy: None,
             job_id: None,
@@ -2406,6 +2492,13 @@ pub struct PickBorder<'a> {
     /// Every candidate's stacks and score, best first.
     pub considered: &'a serde_json::Value,
     pub job_id: Option<i64>,
+    /// Record 51 R2: where the run looked, `{name, digest, definition}` of
+    /// the session scheme, and the pack and its version, so that Keep on an
+    /// occasion the run picked nothing on can write a person's pick of no
+    /// stack under the same scheme.
+    pub scheme: &'a serde_json::Value,
+    pub pack: &'a str,
+    pub pack_version: &'a str,
 }
 
 /// Raise or refresh the open `pick.border` item of one occasion. Scope
@@ -2425,7 +2518,8 @@ pub fn raise_pick_border(
     let evidence = serde_json::json!({
         "borders": b.borders, "pick_id": b.pick_id, "score": b.score, "margin": b.margin,
         "runner_up_score": b.runner_up_score, "candidates": candidates,
-        "considered": b.considered,
+        "considered": b.considered, "scheme": b.scheme, "pack": b.pack,
+        "pack_version": b.pack_version,
     });
     if let Some((id, _)) = open_item(store, PICK_BORDER_KIND, &key)? {
         refresh_item(store, id, &evidence, candidates.max(1), b.job_id)?;

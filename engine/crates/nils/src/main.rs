@@ -1561,6 +1561,13 @@ enum ReviewCommand {
         /// A word on what was checked
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
+        /// On a pick.border item, the run's pick you looked at: refused if a
+        /// run has picked again since (record 51 R1)
+        #[arg(long = "pick", value_name = "PICK")]
+        seen: Option<i64>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
     /// A fixture of System 1's question (record 45 R5): a classify.asked
     /// item on a stack from an evidence file, held to the shape the
@@ -5318,6 +5325,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         ReviewCommand::Apply(args) | ReviewCommand::Decide(args) => {
             drop(columns);
             keyboard_item(&mut registry, args.id)?;
+            keyboard_not_held(&mut registry, args.id)?;
             review_decide(&mut registry, args)
         }
         ReviewCommand::Commit {
@@ -5378,6 +5386,12 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                         done.left_out_sealed
                     );
                 }
+                if done.left_held > 0 {
+                    eprintln!(
+                        "nils review commit: {} decision(s) on an axis an open campaign asks left staged until it closes",
+                        done.left_held
+                    );
+                }
                 println!(
                     "committed {} decision(s), {} item(s) accepted; {} left staged{}",
                     done.decisions.len(),
@@ -5412,6 +5426,12 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     done.left_out_sealed
                 );
             }
+            if done.left_held > 0 {
+                eprintln!(
+                    "nils review commit: {} decision(s) on an axis an open campaign asks left staged until it closes",
+                    done.left_held
+                );
+            }
             println!(
                 "committed {} decision(s), {} item(s) accepted",
                 done.decisions.len(),
@@ -5427,10 +5447,16 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             println!("withdrew decision {id}; {reopened} item(s) open again");
             Ok(())
         }
-        ReviewCommand::Accept { id, why } => {
+        ReviewCommand::Accept {
+            id,
+            why,
+            seen,
+            json,
+        } => {
             drop(columns);
             keyboard_item(&mut registry, id)?;
-            review_accept(&mut registry, id, why)
+            keyboard_not_held(&mut registry, id)?;
+            review_accept(&mut registry, id, why, seen, json)
         }
         ReviewCommand::Asked { .. } => unreachable!("answered before the registry opened"),
         ReviewCommand::Show { id, json } => {
@@ -5530,6 +5556,23 @@ fn keyboard_item(registry: &mut Registry, id: i64) -> Result<(), Exit> {
     Ok(())
 }
 
+/// Record 51 R3: a review item an open campaign holds is answered in the
+/// campaign and closed by its close; the keyboard's apply and accept refuse
+/// it in the door's words before anything is written.
+fn keyboard_not_held(registry: &mut Registry, id: i64) -> Result<(), Exit> {
+    match nils_registry::campaign::holder(registry.store(), id).map_err(|e| fail(e.to_string()))? {
+        Some((campaign, name)) => Err(usage(held_words(id, campaign, &name))),
+        None => Ok(()),
+    }
+}
+
+/// How a door and the keyboard refuse an item a campaign holds.
+pub(crate) fn held_words(id: i64, campaign: i64, name: &str) -> String {
+    format!(
+        "review item {id} is asked by campaign {name} ({campaign}), which answers it and closes it; answer it there"
+    )
+}
+
 /// `nils review decide`: a person's answer to one item.
 ///
 /// The answer is written twice on purpose. The `decision` row is what the
@@ -5542,18 +5585,99 @@ fn keyboard_item(registry: &mut Registry, id: i64) -> Result<(), Exit> {
 /// right and I checked" sets `accepted_by` and `accepted_at` on the item
 /// and writes no decision row, because that would inflate the count of
 /// human-authored values. Its own home, its own count.
-fn review_accept(registry: &mut Registry, id: i64, why: Option<String>) -> Result<(), Exit> {
+///
+/// Record 51 R1 and R2: on a `pick.border` item it is a decision all the
+/// same, the person's pick of what the run picked (or of nothing, where the
+/// run picked nothing), written through the one person's-pick writer so it
+/// stands through later runs until a person withdraws it.
+fn review_accept(
+    registry: &mut Registry,
+    id: i64,
+    why: Option<String>,
+    seen: Option<i64>,
+    json: bool,
+) -> Result<(), Exit> {
     let who = actor();
-    review_accept_as(registry, id, why, &who)
+    let done =
+        review_accept_as(registry, id, why, &who, actor_kind(), seen).map_err(|e| e.into_exit())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&done.to_json()).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    match &done.pick {
+        None => println!("review item {id} acknowledged by {who}; no decision was written"),
+        Some(p) if p.stacks.is_empty() => println!(
+            "review item {id} kept by {who}: pick {}, no stack stands for the {} of the occasion on {}, by a person",
+            p.id, p.role, p.session_day
+        ),
+        Some(p) => println!(
+            "review item {id} kept by {who}: pick {}, the run's {} of the occasion on {} ({}), now a person's",
+            p.id,
+            p.role,
+            p.session_day,
+            p.stacks
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+    Ok(())
+}
+
+/// What an accept did: nothing but the acknowledgement, or, on a
+/// `pick.border` item, a person's pick (record 51 R1).
+pub(crate) struct Accepted {
+    pub(crate) id: i64,
+    pub(crate) who: String,
+    pub(crate) pick: Option<nils_classify::picking::PersonPicked>,
+}
+
+impl Accepted {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "review_item": self.id, "accepted_by": self.who,
+            "pick": self.pick.as_ref().map(|p| serde_json::to_value(p).unwrap_or_default()),
+        })
+    }
+}
+
+/// Why an accept was not written: in the caller's words (a refusal) or
+/// not (the store).
+pub(crate) enum AcceptError {
+    Refused(String),
+    /// A pick is a person's: an agent or a model does not keep one.
+    Forbidden(String),
+    Failed(String),
+}
+
+impl AcceptError {
+    fn into_exit(self) -> Exit {
+        match self {
+            AcceptError::Refused(m) | AcceptError::Forbidden(m) => usage(m),
+            AcceptError::Failed(m) => fail(m),
+        }
+    }
+}
+
+impl From<nils_registry::Error> for AcceptError {
+    fn from(e: nils_registry::Error) -> Self {
+        AcceptError::Failed(e.to_string())
+    }
 }
 
 /// The acknowledgement by a named principal, which is how the door does it.
-fn review_accept_as(
+pub(crate) fn review_accept_as(
     registry: &mut Registry,
     id: i64,
     why: Option<String>,
     who: &str,
-) -> Result<(), Exit> {
+    author_kind: &str,
+    seen: Option<i64>,
+) -> Result<Accepted, AcceptError> {
     let who = who.to_string();
     let now = nils_registry::time::now_iso();
     let store = registry.store();
@@ -5564,36 +5688,65 @@ fn review_accept_as(
         d.param(1, Type::Int)
     );
     let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
-        return Err(usage(format!("no review item {id}")));
+        return Err(AcceptError::Refused(format!("no review item {id}")));
     };
     let status = row.text(0)?.to_string();
     let kind = row.text(1)?.to_string();
     if status != "open" {
-        return Err(fail(format!("review item {id} is already {status}")));
+        return Err(AcceptError::Refused(format!(
+            "review item {id} is already {status}"
+        )));
     }
-    let close = format!(
-        "UPDATE {} SET status = 'accepted', accepted_by = {}, accepted_at = {} WHERE id = {}",
-        store.qualified("review_item"),
-        d.param(1, Type::Text),
-        d.param(2, Type::Timestamp),
-        d.param(3, Type::Int),
-    );
-    store.execute(
-        &close,
-        &[
-            Param::from(who.as_str()),
-            Param::from(now.as_str()),
-            Param::Int(id),
-        ],
-    )?;
+    // record 51 R1: keeping the run's pick is a person's pick of it, which
+    // closes the item as accepted and marks who accepted it
+    let pick = if kind == nils_registry::review::PICK_BORDER_KIND {
+        if author_kind != "person" {
+            return Err(AcceptError::Forbidden(format!(
+                "keeping the run's pick on review item {id} writes a person's pick, and a {author_kind} acting for {who} does not write one"
+            )));
+        }
+        Some(
+            nils_classify::picking::keep(registry, id, &who, why.as_deref(), seen).map_err(
+                |e| match e {
+                    nils_classify::picking::PersonError::Refused(m) => AcceptError::Refused(m),
+                    other => AcceptError::Failed(other.to_string()),
+                },
+            )?,
+        )
+    } else {
+        if seen.is_some() {
+            return Err(AcceptError::Refused(format!(
+                "review item {id} is a {kind}; only a pick.border item names the run's pick it keeps"
+            )));
+        }
+        let store = registry.store();
+        let close = format!(
+            "UPDATE {} SET status = 'accepted', accepted_by = {}, accepted_at = {} WHERE id = {}",
+            store.qualified("review_item"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Timestamp),
+            d.param(3, Type::Int),
+        );
+        store.execute(
+            &close,
+            &[
+                Param::from(who.as_str()),
+                Param::from(now.as_str()),
+                Param::Int(id),
+            ],
+        )?;
+        None
+    };
     audit(
         registry,
         nils_registry::audit::Action::ReviewAccept,
-        serde_json::json!({ "review_item": id, "kind": kind }),
+        serde_json::json!({
+            "review_item": id, "kind": kind, "pick": pick.as_ref().map(|p| p.id),
+        }),
         why.as_ref().map(|w| serde_json::json!({ "why": w })),
-    )?;
-    println!("review item {id} acknowledged by {who}; no decision was written");
-    Ok(())
+    )
+    .map_err(|e| AcceptError::Failed(e.message))?;
+    Ok(Accepted { id, who, pick })
 }
 
 fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
@@ -7373,11 +7526,11 @@ fn pick_list(
     }
     let sql = format!(
         "SELECT p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, \
-                p.author_kind, COUNT(ps.stack_id) \
+                p.author_kind, COUNT(ps.stack_id), p.why \
          FROM {} p JOIN {} su ON su.id = p.subject_id \
          LEFT JOIN {} ps ON ps.pick_id = p.id \
          WHERE {} \
-         GROUP BY p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, p.author_kind \
+         GROUP BY p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, p.author_kind, p.why \
          ORDER BY su.code, {}, p.role",
         text_of(store, "pick", "session_day"),
         store.qualified("pick"),
@@ -7428,6 +7581,7 @@ fn pick_list(
                     "actor": r.text(7).unwrap_or_default(),
                     "author_kind": r.text(8).unwrap_or_default(),
                     "stacks": r.int(9).unwrap_or(0),
+                    "why": r.opt_text(10).ok().flatten(),
                 })
             })
             .collect();
@@ -7463,6 +7617,12 @@ fn pick_list(
                 "{note}{}by a {who}",
                 if note.is_empty() { "" } else { ", " }
             )
+        };
+        // record 51 R2: a person's pick of no stack says nothing stands here
+        let note = if r.int(9).unwrap_or(0) == 0 {
+            format!("no stack stands here, {note}")
+        } else {
+            note
         };
         println!(
             "{:>6}  {:<wide$} {:<6} {:<11} {:>6.3} {:>7.3} {:>7}  {}",
@@ -7593,16 +7753,21 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
         row.text(1).unwrap_or_default(),
         row.text(2).unwrap_or_default()
     );
-    println!(
-        "  chosen           {}   scored {:.3}, ahead by {:.1}%",
-        chosen
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        row.double(3).unwrap_or(0.0),
-        row.double(4).unwrap_or(0.0) * 100.0
-    );
+    if chosen.is_empty() {
+        // record 51 R2: a person's pick of no stack
+        println!("  chosen           no stack stands for the role here");
+    } else {
+        println!(
+            "  chosen           {}   scored {:.3}, ahead by {:.1}%",
+            chosen
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            row.double(3).unwrap_or(0.0),
+            row.double(4).unwrap_or(0.0) * 100.0
+        );
+    }
     println!(
         "  by               {} ({})",
         row.text(13).unwrap_or_default(),

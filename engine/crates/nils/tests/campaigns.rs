@@ -1564,6 +1564,17 @@ fn a_lease_is_renewed_rating_is_blind_and_an_axes_answer_is_an_object() {
         assert_eq!(status, 409, "{doc}");
         assert!(doc.to_string().contains("blind"), "{doc}");
     }
+    // record 51 R3: nor is it accepted there
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/review/{held}/accept"),
+        Some(json!({"why": "looked fine"})),
+        CURATOR,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc.to_string().contains("answer it there"), "{doc}");
+    let item = server.ok("GET", &format!("/api/review/{held}"), None, CURATOR);
+    assert_eq!(item["status"], "open", "{item}");
 
     // blind through the export too: a rater may not export the answers of
     // an open campaign, and a set of them another made while it was open

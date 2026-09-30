@@ -408,10 +408,57 @@ fn bids_units(
     let mut out = Vec::new();
     for (key, mut u) in units {
         u.missing = roles_missing(&d.roles, held.get(&key).unwrap_or(&BTreeMap::new()));
+        if let (Some(subject), Some(day)) = (u.subject_id, u.session_day.as_deref())
+            && !u.missing.is_empty()
+        {
+            let said = picked_nothing(registry.store(), subject, day)?;
+            for (role, pick) in said {
+                let not_picked = format!("no {role} is picked");
+                for why in u.missing.iter_mut().filter(|w| w.starts_with(&not_picked)) {
+                    *why = format!("no {role} stands for it: a person's pick {pick} says so");
+                }
+            }
+        }
         out.push(u);
     }
     left.sort();
     Ok((out, left))
+}
+
+/// Record 51 R2: the roles a person said no stack stands for on one
+/// occasion (a person's pick of no stack, which Keep writes on a border
+/// where the run picked nothing), each with that pick's id.
+fn picked_nothing(
+    store: &mut Store,
+    subject: i64,
+    day: &str,
+) -> Result<BTreeMap<String, i64>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT p.id, p.role FROM {} p WHERE p.author_kind = 'person' AND p.withdrawn_at IS NULL \
+         AND p.subject_id = {} AND p.session_day = {} \
+         AND NOT EXISTS (SELECT 1 FROM {} ps WHERE ps.pick_id = p.id) ORDER BY p.id",
+        store.qualified("pick"),
+        d.param(1, nils_registry::schema::Type::Int),
+        d.param(2, nils_registry::schema::Type::Date),
+        store.qualified("pick_stack"),
+    );
+    let day = &day[..day.len().min(10)];
+    let mut out = BTreeMap::new();
+    for r in store
+        .query(
+            &sql,
+            &[
+                nils_registry::store::Param::Int(subject),
+                nils_registry::store::Param::from(day),
+            ],
+        )
+        .map_err(err)?
+    {
+        out.insert(r.text(1).map_err(err)?.to_string(), r.int(0).map_err(err)?);
+    }
+    Ok(out)
 }
 
 /// Seconds a unit took in the pipeline's past runs here (by name, any

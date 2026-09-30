@@ -249,6 +249,15 @@ fn run_one(
     let scheme_json = serde_json::to_string(scheme).unwrap_or_default();
     let scheme_name = short_scheme(scheme);
     let scheme_digest = scheme.digest();
+    // record 51 R2: where the run looked, named on every border it raises
+    let origin = Origin {
+        scheme: serde_json::json!({
+            "name": scheme_name, "digest": scheme_digest,
+            "definition": serde_json::to_value(scheme).unwrap_or(serde_json::Value::Null),
+        }),
+        pack: pack.name.clone(),
+        pack_version: pack.version.to_string(),
+    };
 
     for role in &model.roles {
         let mine: Vec<&Row> = rows
@@ -315,7 +324,7 @@ fn run_one(
                     continue;
                 }
                 if border_item(
-                    store, model, &picked, *subject, *first, pick_id, actor, job_id,
+                    store, model, &picked, *subject, *first, pick_id, actor, job_id, &origin,
                 )? {
                     report.raised += 1;
                 }
@@ -691,6 +700,13 @@ fn standing_person(
         .transpose()
 }
 
+/// Where a run looked: the session scheme and the pack.
+struct Origin {
+    scheme: serde_json::Value,
+    pack: String,
+    pack_version: String,
+}
+
 /// Record 42 S3: raise, refresh or close the `pick.border` item of one
 /// occasion. Answers whether one is open after it.
 #[allow(clippy::too_many_arguments)]
@@ -703,6 +719,7 @@ fn border_item(
     pick_id: Option<i64>,
     actor: &str,
     job_id: Option<i64>,
+    origin: &Origin,
 ) -> Result<bool, StoreError> {
     let day = day.to_string();
     let key = review::pick_border_key(&model.name, &picked.role, subject, &day);
@@ -738,6 +755,9 @@ fn border_item(
             runner_up_score: picked.runner_up.as_ref().map(|_| picked.runner_up_score),
             considered: &considered,
             job_id,
+            scheme: &origin.scheme,
+            pack: &origin.pack,
+            pack_version: &origin.pack_version,
         },
         &now_iso(),
     )?;
@@ -824,9 +844,8 @@ pub fn set_person(
     scheme: &Scheme,
     p: &PersonPick<'_>,
 ) -> Result<PersonPicked, PersonError> {
-    use nils_registry::audit::{self, Action, Entry};
-    use nils_registry::review;
-
+    // Record 51 R2: a pick of no stack is written only by Keep on a border
+    // where the run picked nothing, never by naming stacks.
     if p.stacks.is_empty() {
         return Err(refused("a pick names at least one stack"));
     }
@@ -943,17 +962,66 @@ pub fn set_person(
             "the stacks are on subject {subject}'s occasion of {day_text}, and the pick was asked of subject {want_subject}'s of {want_day}"
         )));
     }
-    let now = now_iso();
-    let scheme_json = serde_json::to_string(scheme).unwrap_or_default();
+    let scheme_json = serde_json::to_value(scheme).unwrap_or(serde_json::Value::Null);
+    write_person(
+        registry,
+        &PersonRow {
+            model: &model.name,
+            role: p.role,
+            subject,
+            day: &day_text,
+            scheme_name: &short_scheme(scheme),
+            scheme_digest: &scheme.digest(),
+            scheme: &scheme_json,
+            pack: &pack.name,
+            pack_version: &pack.version.to_string(),
+            stacks: &stacks,
+            why: p.why,
+            actor: p.actor,
+            campaign: p.campaign,
+            kept: None,
+        },
+    )
+}
 
+/// What a person's pick row is written from: the occasion's key, where the
+/// pick came from, and the person's stacks and words. The one writer of a
+/// person's pick, through which `nils pick set`, a pick campaign's close and
+/// Keep on a `pick.border` item all go (record 51 R1).
+struct PersonRow<'a> {
+    model: &'a str,
+    role: &'a str,
+    subject: i64,
+    day: &'a str,
+    scheme_name: &'a str,
+    scheme_digest: &'a str,
+    /// The scheme's definition, kept in `parts` as a run's pick keeps it.
+    scheme: &'a serde_json::Value,
+    pack: &'a str,
+    pack_version: &'a str,
+    /// Empty only from Keep on a border whose run picked nothing (R2).
+    stacks: &'a [i64],
+    why: &'a str,
+    actor: &'a str,
+    campaign: Option<i64>,
+    /// The `pick.border` item this pick keeps, which is marked accepted by
+    /// the person as well as answered.
+    kept: Option<i64>,
+}
+
+fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPicked, PersonError> {
+    use nils_registry::audit::{self, Action, Entry};
+
+    let now = now_iso();
+    let store = registry.store();
     store.begin()?;
     let written = (|| -> Result<PersonPicked, StoreError> {
         let d = store.dialect();
         let key = [
-            Param::from(model.name.as_str()),
+            Param::from(p.model),
             Param::from(p.role),
-            Param::Int(subject),
-            Param::from(day_text.as_str()),
+            Param::Int(p.subject),
+            Param::from(p.day),
         ];
         let on_key = format!(
             "model = {} AND role = {} AND subject_id = {} AND session_day = {}",
@@ -995,28 +1063,22 @@ pub fn set_person(
             )
             .returning(&["id"]),
             &[vec![
-                Param::from(model.name.as_str()),
+                Param::from(p.model),
                 Param::from(p.role),
-                Param::Int(subject),
-                Param::from(day_text.as_str()),
-                Param::from(short_scheme(scheme)),
-                Param::from(scheme.digest()),
+                Param::Int(p.subject),
+                Param::from(p.day),
+                Param::from(p.scheme_name),
+                Param::from(p.scheme_digest),
                 // A person's pick is scored against nothing: the population
                 // is the run's word, and this one is a judgement.
                 Param::from("person"),
-                Param::from(pack.name.as_str()),
-                Param::from(pack.version.to_string()),
+                Param::from(p.pack),
+                Param::from(p.pack_version),
                 Param::from(p.actor),
                 Param::from("person"),
                 Param::from(now.as_str()),
                 Param::from(p.why),
-                Param::from(
-                    serde_json::json!({
-                        "scheme": serde_json::from_str::<serde_json::Value>(&scheme_json)
-                            .unwrap_or(serde_json::Value::Null),
-                    })
-                    .to_string(),
-                ),
+                Param::from(serde_json::json!({ "scheme": p.scheme }).to_string()),
                 p.campaign.map_or(Param::Null, Param::Int),
             ]],
         )?;
@@ -1025,13 +1087,17 @@ pub fn set_person(
             .map(|r| r.int(0))
             .transpose()?
             .ok_or_else(|| StoreError::Message("the pick was not written back".into()))?;
-        store.insert(
-            &Insert::new(table("pick_stack"), &["pick_id", "stack_id"]),
-            &stacks
-                .iter()
-                .map(|s| vec![Param::Int(id), Param::Int(*s)])
-                .collect::<Vec<_>>(),
-        )?;
+        // Record 51 R2: a person's pick of no stack has no pick_stack rows;
+        // it says that nothing stands for the role on this occasion.
+        if !p.stacks.is_empty() {
+            store.insert(
+                &Insert::new(table("pick_stack"), &["pick_id", "stack_id"]),
+                &p.stacks
+                    .iter()
+                    .map(|s| vec![Param::Int(id), Param::Int(*s)])
+                    .collect::<Vec<_>>(),
+            )?;
+        }
         // An earlier person's pick is withdrawn by this one, and a run's
         // pick it had overruled now points here.
         for old in &replaced {
@@ -1065,20 +1131,32 @@ pub fn set_person(
         }
         let answered = review::close_pick_border(
             store,
-            &review::pick_border_key(&model.name, p.role, subject, &day_text),
+            &review::pick_border_key(p.model, p.role, p.subject, p.day),
             "accepted",
             p.actor,
             &serde_json::json!({
-                "pick_id": id, "stacks": stacks, "author_kind": "person", "actor": p.actor, "why": p.why,
+                "pick_id": id, "stacks": p.stacks, "author_kind": "person", "actor": p.actor,
+                "why": p.why, "kept": p.kept.is_some(),
             }),
         )?;
+        if let Some(item) = p.kept {
+            store.update_by_id(
+                table("review_item"),
+                &[
+                    ("accepted_by", Param::from(p.actor)),
+                    ("accepted_at", Param::from(now.as_str())),
+                ],
+                "id",
+                item,
+            )?;
+        }
         Ok(PersonPicked {
             id,
-            model: model.name.clone(),
+            model: p.model.to_string(),
             role: p.role.to_string(),
-            subject_id: subject,
-            session_day: day_text.clone(),
-            stacks: stacks.clone(),
+            subject_id: p.subject,
+            session_day: p.day.to_string(),
+            stacks: p.stacks.to_vec(),
             overruled,
             replaced,
             answered,
@@ -1101,7 +1179,7 @@ pub fn set_person(
                 "pick": picked.id, "model": picked.model, "role": picked.role,
                 "subject_id": picked.subject_id, "stacks": picked.stacks,
                 "overruled": picked.overruled, "replaced": picked.replaced,
-                "campaign": p.campaign,
+                "campaign": p.campaign, "kept": p.kept,
             }),
             policy: None,
             job_id: None,
@@ -1109,6 +1187,193 @@ pub fn set_person(
         },
     )?;
     Ok(picked)
+}
+
+/// Record 51 R1 and R2: Keep on a `pick.border` item is a decision. It
+/// writes a person's pick of the stacks the run picked on the item's
+/// occasion, through the one person's-pick writer, with the person and a
+/// why (theirs, or "kept the run's pick" naming the borders), and closes the
+/// item as accepted. Like any person's pick it stands through later runs
+/// until a person withdraws it. On a border where the run picked nothing
+/// (`nothing_eligible`), the pick names no stack: nothing stands for the
+/// role here, said by a person.
+///
+/// `seen` is the run's pick the person looked at, when the caller knows it:
+/// if a run has picked again since, the keep is refused and nothing is
+/// written, so a person never keeps a pick they did not see.
+pub fn keep(
+    registry: &mut Registry,
+    item: i64,
+    actor: &str,
+    why: Option<&str>,
+    seen: Option<i64>,
+) -> Result<PersonPicked, PersonError> {
+    let store = registry.store();
+    let it = review::item(store, item)
+        .map_err(|e| match e {
+            review::Error::Store(s) => PersonError::Store(s),
+            other => refused(other.to_string()),
+        })?
+        .ok_or_else(|| refused(format!("no review item {item}")))?;
+    if it.kind != review::PICK_BORDER_KIND {
+        return Err(refused(format!(
+            "review item {item} is a {}, not a {}",
+            it.kind,
+            review::PICK_BORDER_KIND
+        )));
+    }
+    if it.status != "open" {
+        return Err(refused(format!(
+            "review item {item} is already {}",
+            it.status
+        )));
+    }
+    let text = |k: &str| it.reference[k].as_str().map(str::to_string);
+    let (Some(model), Some(role), Some(day), Some(subject)) = (
+        text("model"),
+        text("role"),
+        text("session_day"),
+        it.reference["subject_id"].as_i64(),
+    ) else {
+        return Err(refused(format!(
+            "review item {item} does not name its occasion (model, role, subject and day)"
+        )));
+    };
+    let borders: Vec<String> = it.evidence["borders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b.as_str().map(str::to_string))
+        .collect();
+    let named = it.evidence["pick_id"].as_i64();
+
+    // The run's pick that applies on the occasion now.
+    let d = store.dialect();
+    let t = table("pick");
+    let sql = format!(
+        "SELECT id, scheme, scheme_digest, pack, pack_version, {} FROM {} \
+         WHERE model = {} AND role = {} AND subject_id = {} AND session_day = {} \
+           AND author_kind = 'agent' AND withdrawn_at IS NULL ORDER BY id DESC LIMIT 1",
+        d.text_of(t.column("parts").expect("parts")),
+        store.qualified("pick"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+        d.param(4, Type::Date),
+    );
+    let current = store.query_opt(
+        &sql,
+        &[
+            Param::from(model.as_str()),
+            Param::from(role.as_str()),
+            Param::Int(subject),
+            Param::from(day.as_str()),
+        ],
+    )?;
+    let current_id = current.as_ref().map(|r| r.int(0)).transpose()?;
+    // record 51 R1: a run since the person looked is a pick they did not see
+    let changed =
+        (named.is_some() && current_id != named) || seen.is_some_and(|s| Some(s) != named);
+    if changed {
+        return Err(refused(format!(
+            "the run changed its pick on review item {item}'s occasion since it was read; look again"
+        )));
+    }
+    let origin = &it.evidence["scheme"];
+    let from_border = match (
+        origin["name"].as_str(),
+        origin["digest"].as_str(),
+        it.evidence["pack"].as_str(),
+        it.evidence["pack_version"].as_str(),
+    ) {
+        (Some(name), Some(digest), Some(pack), Some(version)) => Some((
+            name.to_string(),
+            digest.to_string(),
+            origin["definition"].clone(),
+            pack.to_string(),
+            version.to_string(),
+            Vec::new(),
+        )),
+        _ => None,
+    };
+    let (scheme_name, scheme_digest, scheme, pack, pack_version, stacks) = match &current {
+        // R2: the run picked nothing here now, and the border names where
+        // it looked; an earlier run's pick still on the occasion is
+        // overruled by the person's pick of nothing
+        _ if named.is_none() && from_border.is_some() => from_border.expect("checked"),
+        Some(r) => {
+            let id = r.int(0)?;
+            let parts: serde_json::Value = r
+                .opt_text(5)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let sql = format!(
+                "SELECT stack_id FROM {} WHERE pick_id = {} ORDER BY stack_id",
+                store.qualified("pick_stack"),
+                d.param(1, Type::Int)
+            );
+            let stacks: Vec<i64> = store
+                .query(&sql, &[Param::Int(id)])?
+                .iter()
+                .map(|x| x.int(0))
+                .collect::<Result<_, _>>()?;
+            (
+                r.opt_text(1)?.unwrap_or_default().to_string(),
+                r.opt_text(2)?.unwrap_or_default().to_string(),
+                parts["scheme"].clone(),
+                r.opt_text(3)?.unwrap_or_default().to_string(),
+                r.opt_text(4)?.unwrap_or_default().to_string(),
+                if named.is_some() { stacks } else { Vec::new() },
+            )
+        }
+        None => {
+            return Err(refused(format!(
+                "review item {item} was raised before a border named its scheme and pack; run the picks again (nils pick run) and keep it then"
+            )));
+        }
+    };
+    // record 48, D1 of the move: no pick is written on a stack of a sample
+    // sealed now
+    let sealed = nils_registry::labels::sealed_for_writes(registry.store(), &stacks)
+        .map_err(|e| refused(e.to_string()))?;
+    if !sealed.is_empty() {
+        return Err(refused(format!(
+            "stack(s) {} are of a sample sealed for certification; no pick is written on a sealed stack until a certificate unseals it (record 48)",
+            sealed
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let said = why.map(str::trim).filter(|w| !w.is_empty());
+    let why = match (said, stacks.is_empty()) {
+        (Some(w), _) => w.to_string(),
+        (None, false) => format!("kept the run's pick ({})", borders.join(", ")),
+        (None, true) => format!(
+            "kept: no stack stands for the role {role} here ({})",
+            borders.join(", ")
+        ),
+    };
+    write_person(
+        registry,
+        &PersonRow {
+            model: &model,
+            role: &role,
+            subject,
+            day: &day,
+            scheme_name: &scheme_name,
+            scheme_digest: &scheme_digest,
+            scheme: &scheme,
+            pack: &pack,
+            pack_version: &pack_version,
+            stacks: &stacks,
+            why: &why,
+            actor,
+            campaign: None,
+            kept: Some(item),
+        },
+    )
 }
 
 /// What withdrawing a person's pick did.
