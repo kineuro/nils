@@ -826,6 +826,18 @@ series' own header). The guards are the engine's, not the pack's:
 The decision is `nils_pack::session::decide`, which the engine runs over the
 registry (`nils-classify`'s `session` module) and a replay runs over packets.
 
+**Packets (record 53, S3).** A header packet is what a person reading a stack
+is shown: the header's text, sequence, physics and geometry, the private
+elements the pack lists as `shown` (an allowlist of technical elements; a
+value shaped like an identifier is withheld), and the session list, each
+other stack of the study with the fields the session pass names and its
+relations to the stack (the same series, the same frame of reference), never
+a UID. `nils pack replay` decides a pack over such packets offline, the class
+phase, the session passes and the disposition, so a replay over the packets a
+rater read exercises every rule production runs except the physics vote,
+which reads the whole registry. `nils pack show --json` lists what a packet
+must carry for a pack.
+
 ## 8. Evidence, review and decisions (D7, C15)
 
 ### 8.1 Evidence is stored

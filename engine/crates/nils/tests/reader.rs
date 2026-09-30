@@ -1714,3 +1714,180 @@ fn a_campaign_made_to_hide_the_header_shows_the_pictures_alone() {
         assert!(doc.to_string().contains("pictures alone"), "{doc}");
     }
 }
+
+/// Record 53 S3: a registry of one GE stack whose series carries private
+/// elements, digested with the MRI pack's ingest list: two the pack shows,
+/// one it shows whose value is shaped like an identifier, and one it ingests
+/// and does not show.
+fn registry_with_private() -> TempDir {
+    let home = TempDir::new("campaign-private-home");
+    let dir = TempDir::new("campaign-private-src");
+    let (study, sop) = ("1.2.3.G", "1.2.3.G.1.1");
+    let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, "P9"));
+    e.push(synth::text(
+        tags::MANUFACTURER,
+        VR::LO,
+        "GE MEDICAL SYSTEMS",
+    ));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "Ax T2"));
+    e.push(synth::text(
+        tags::IMAGE_TYPE,
+        VR::CS,
+        "ORIGINAL\\PRIMARY\\OTHER",
+    ));
+    e.push(synth::text(tags::SCANNING_SEQUENCE, VR::CS, "EP"));
+    e.push(synth::text(tags::ECHO_TIME, VR::DS, "100"));
+    e.push(synth::text(tags::REPETITION_TIME, VR::DS, "3000"));
+    e.push(synth::text(
+        dicom_core::Tag(0x0019, 0x0010),
+        VR::LO,
+        "GEMS_ACQU_01",
+    ));
+    e.push(synth::text(
+        dicom_core::Tag(0x0019, 0x109C),
+        VR::LO,
+        "ksepimix_2",
+    ));
+    e.push(synth::text(dicom_core::Tag(0x0019, 0x1084), VR::DS, "1.25"));
+    e.push(synth::text(
+        dicom_core::Tag(0x0043, 0x0010),
+        VR::LO,
+        "GEMS_PARM_01",
+    ));
+    e.push(synth::num(dicom_core::Tag(0x0043, 0x102F), VR::SS, 0.0));
+    e.push(synth::text(
+        dicom_core::Tag(0x0043, 0x10A3),
+        VR::CS,
+        "121212-1212",
+    ));
+    dir.file(
+        &format!("{study}/{sop}"),
+        &synth::part10(&MetaFields::mr(sop), &e, true),
+    );
+    let run = |args: &[&str], stdin: Option<&str>| {
+        let mut cmd = nils();
+        cmd.arg("--registry")
+            .arg(home.path())
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        if let Some(text) = stdin {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        } else {
+            drop(child.stdin.take());
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&["key", "add", "k"], Some("a campaign test key\n"));
+    run(&["init", "--key", "k"], None);
+    run(
+        &[
+            "digest",
+            "--name",
+            "a",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    run(&["fingerprint"], None);
+    run(&["classify", "--pack-dir", packs().to_str().unwrap()], None);
+    std::mem::forget(dir);
+    home
+}
+
+#[test]
+fn a_rater_is_shown_the_private_elements_the_pack_lists_and_nothing_else() {
+    let home = registry_with_private();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let body = |name: &str, hide: bool| {
+        json!({
+            "name": name,
+            "question": {"kind": "axis", "axis": "provenance"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["anna@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+            "hide_header": hide,
+        })
+    };
+    let shown = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(body("private", false)),
+        CURATOR,
+    );
+    let item = shown["items"][0]["id"].as_i64().unwrap();
+    // The rater's reading and the header door, blind or not: the two shown
+    // elements, typed; the one shaped like an identifier withheld and
+    // counted; the ingested one the pack does not show absent.
+    for (path, who) in [
+        (format!("/api/campaigns/private/items/{item}/why"), ANNA),
+        (format!("/api/campaigns/private/items/{item}/header"), ANNA),
+        (
+            format!("/api/campaigns/private/items/{item}/header"),
+            CURATOR,
+        ),
+    ] {
+        let doc = server.ok("GET", &path, None, who);
+        assert_eq!(
+            doc["private"],
+            json!({"ge_pulse_sequence_name": "ksepimix_2", "ge_private_image_type": 0}),
+            "{path}: {doc}"
+        );
+        assert_eq!(doc["private_withheld"], 1, "{path}: {doc}");
+        let text = doc.to_string();
+        assert!(!text.contains("121212"), "{path}: {doc}");
+        assert!(!text.contains("ge_peak_sar"), "{path}: {doc}");
+        assert!(!text.contains("ge_asl_contrast_technique"), "{path}: {doc}");
+    }
+    // The rules read it in production: EPIMix by its pulse sequence alone.
+    let stack = shown["items"][0]["stack"].as_i64().unwrap_or(1);
+    let why = server.ok("GET", &format!("/api/stacks/{stack}/why"), None, CURATOR);
+    assert!(why.to_string().contains("EPIMix"), "{why}");
+    assert_eq!(
+        why["private"]["ge_pulse_sequence_name"], "ksepimix_2",
+        "{why}"
+    );
+
+    // A campaign of the pictures alone shows none of it.
+    let pictures = server.ok("POST", "/api/campaigns", Some(body("bare", true)), CURATOR);
+    let item = pictures["items"][0]["id"].as_i64().unwrap();
+    let doc = server.ok(
+        "GET",
+        &format!("/api/campaigns/bare/items/{item}/why"),
+        None,
+        ANNA,
+    );
+    assert!(doc.get("private").is_none(), "{doc}");
+    assert!(doc.get("private_withheld").is_none(), "{doc}");
+    assert!(!doc.to_string().contains("ksepimix"), "{doc}");
+}
