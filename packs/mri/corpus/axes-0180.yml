@@ -56,7 +56,9 @@ cases:
       provenance: PerfusionRecon
       technique: Perfusion
 
-  - name: a derived motion-corrected DSC run without the PERFUSION token is PerfusionRecon
+  # MRI pack 0.20.0: RawRecon with MoCo, as every motion-corrected run is
+  # (record 48, dev-5's case 9, which withdraws the clause this case held).
+  - name: a derived motion-corrected DSC run without the PERFUSION token is RawRecon with MoCo
     stack:
       image_type: 'DERIVED\PRIMARY\M\ND\MOCO\MOSAIC'
       scanning_sequence: EP
@@ -69,7 +71,7 @@ cases:
       echo_time: 30
       n_instances: 50
     axes:
-      provenance: PerfusionRecon
+      provenance: RawRecon
       technique: Perfusion
       modifier: MoCo
 

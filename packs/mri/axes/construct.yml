@@ -239,8 +239,12 @@ values:
     keywords:
       - in phase
       - inphase
+    # MRI pack 0.20.0: or the in-phase echo of a Siemens Dixon or
+    # in/opposed-phase FLASH that states no Dixon token, by its name and its
+    # echo time at its field (flags.yml, dev-5's A2).
     detection:
       exclusive: has_in_phase
+      combination: [siemens_in_phase_echo]
   OutPhase:
     terms: ['opposed phase', 'out of phase', 'out-phase', 'OP']
     keywords:
@@ -249,8 +253,10 @@ values:
       - opp phase
       # MRI pack 0.16.0: GE IDEAL's `OutPhase:` (dev-4, H5).
       - outphase
+    # MRI pack 0.20.0: and its opposed-phase echo (dev-5's A2).
     detection:
       exclusive: has_out_phase
+      combination: [siemens_opposed_phase_echo]
   # The quantitative maps are one exclusion group, and a map that says
   # which quantity it is of beats one that says only that it is a map. Before
   # this the group did not exist and `combination: [is_qmap]` stood under

@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.19.0");
+    assert_eq!(pack.id(), "mri@0.20.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -37,7 +37,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        337,
+        366,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -76,7 +76,20 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          maps by name, Philips' isotropic image, a diffusion SBRef, MRCP, \
          VASCTOF as TOF, FIESTA-C and the CSF null of an inversion, and \
          the 8 of the values the vocabulary lacked: MRS, ZTE, CE-MRA and \
-         its words, NeuroMix's pulse sequence, PBP, K2 and a velocity image, and pack 0.19.0 the 23 of record 53: an enhanced object's mechanism by the MR Pulse Sequence module's table (a spin, gradient or both echo, EPI, a train, single shot, SE-EPI, GRE-EPI, GRASE, SS-TSE, 3D-TSE, TSE, bSSFP, SS-GRE, SSFP, spoiled, TOF, PC, ASL, radial, spiral and inversion recovery) and an MR spectroscopy object by its SOP class"
+         its words, NeuroMix's pulse sequence, PBP, K2 and a velocity image, and pack 0.19.0 the 23 of record 53: an enhanced object's mechanism by the MR Pulse Sequence module's table (a spin, gradient or both echo, EPI, a train, single shot, SE-EPI, GRE-EPI, GRASE, SS-TSE, 3D-TSE, TSE, bSSFP, SS-GRE, SSFP, spoiled, TOF, PC, ASL, radial, spiral and inversion recovery) and an MR spectroscopy object by its SOP class, and pack \
+         0.20.0 the 30 of a development grade's nine disputes and rule \
+         bugs, less the derived MoCo DSC it withdraws: a Philips FFE by its \
+         spoiling, private technique and steady state, a Philips SWIp \
+         output of combined echoes, a Siemens MEAN phase or magnitude over echoes, a \
+         Philips FFE written one echo per stack or with one echo, a Siemens \
+         real inversion recovery, a tensor's source by name, GE's AvDC as a \
+         tensor output, a planning series of few slices and a Swedish \
+         survey, a reversed-phase b=0 run and its own sign, a Siemens \
+         in-phase and opposed-phase echo by name and echo time, a FLAIR \
+         name the physics rule out, GE's research-mode spin echo by its \
+         train and gradient echo by its name, GE's DTI output on a numeric \
+         header, a Siemens gradient-echo stem against letters inside a \
+         word, a minIP in mixed case and GE's Inhance velocity"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

@@ -439,6 +439,10 @@ values:
   TSE:
     terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE', 'double echo TSE', 'DE TSE', 'DTSE', 'PD/T2 FSE', 'dual echo FSE']
     family: SE
+    # MRI pack 0.20.0: never by the letters inside another word where
+    # Siemens' sequence name states a gradient echo (dev-5's A8: a `fl2d`
+    # cine named in Swedish, "hjärtsekvens"; flags.yml).
+    requires: {not: tse_letters_inside_a_word_on_gre_stem}
     keywords:
       - tse
       - fse
@@ -530,7 +534,9 @@ values:
     terms: ['time-of-flight', 'TOF MRA', 'inflow angiography', 'Inhance Inflow']
     label: TOF
     family: GRE
-    requires: {not: {text: search_text, substring: 'inflow inversion-recovery'}}
+    # MRI pack 0.20.0: nor GE's Inhance 3D Velocity, a phase contrast whatever
+    # `IFLOW_GEMS` says (dev-5's A11; flags.yml, `ge_inhance_velocity`).
+    requires: {all: [{not: {text: search_text, substring: 'inflow inversion-recovery'}}, {not: ge_inhance_velocity}]}
     keywords:
       - tof
       - time of flight
@@ -550,8 +556,10 @@ values:
       - phase contrast
       - pc flow
       - velocity
+    # MRI pack 0.20.0: or GE's Inhance 3D Velocity by its name (dev-5's A11).
     detection:
       exclusive: is_pc
+      combination: [ge_inhance_velocity]
   comb-ME-GRE:
     terms: ['MEDIC', 'MERGE', 'mFFE', 'M-FFE', 'combined multi-echo GRE', 'mEcho', 'ADAGE']  # [MQ9, V2, V1]
     label: MEDIC
@@ -563,9 +571,16 @@ values:
       - me2d
     # MRI pack 0.14.0: or Philips' combined multi-echo FFE by its echo
     # train (flags.yml, `philips_mffe`).
+    # MRI pack 0.20.0: never one echo of a Philips multi-echo FFE written on
+    # its own, nor a single-echo FFE, whatever it is named (record 48, "The
+    # nine, after our counts"; flags.yml, `philips_not_combined_ffe`).
+    requires: {not: philips_not_combined_ffe}
+    # MRI pack 0.20.0: or a Siemens MEAN phase or magnitude over the echoes of
+    # a multi-echo gradient echo (record 48, dev-5's case 5; flags.yml,
+    # `combined_echoes_stated`).
     detection:
       exclusive: is_medic
-      combination: [philips_mffe]
+      combination: [combined_echoes_stated]
   ME-GRE:
     terms: ['multi-echo GRE', 'MEGRE', 'multi-echo gradient echo']
     label: MEGRE
@@ -674,10 +689,13 @@ values:
       - flash
       - spgr
       - t1-ffe
-      # MRI pack 0.11.0: Philips' `T1W_FFE` and `T1_FFE`, as the normalizer
-      # spells them (a 2D T1-FFE was plain GRE on the 2026-09-28 re-measure).
-      - t1w ffe
       - t1ffe
+    # MRI pack 0.20.0: never a Philips FFE whose header states the steady
+    # state, whatever it is named, and no longer `T1W_FFE` (nor `T1_FFE`,
+    # which the normalizer spells the same), which pack 0.11.0 read as
+    # spoiled: "T1W" is the contrast, not the technique T1-FFE (record 48,
+    # dev-5's case 1; flags.yml, `philips_ffe_steady_state`).
+    requires: {not: philips_ffe_steady_state}
     detection:
       exclusive: is_flash
       combination: [has_spoiled, has_gre]
@@ -697,9 +715,12 @@ values:
     # MRI pack 0.18.0: or GE's fast `SS\SK` echo with `FAST_GEMS`, not
     # spoiled (record 48, "Rulings after the re-adjudication"; flags.yml,
     # `ge_fast_ss`).
+    # MRI pack 0.20.0: or a Philips FFE in the steady state, by Spoiling,
+    # SequenceVariant and its scanning technique in that order (record 48,
+    # dev-5's case 1; flags.yml, `philips_ffe_steady_state`).
     detection:
       exclusive: is_fisp
-      combination: [ge_steady_state_gre]
+      combination: [ss_gre_by_vendor]
   GRE:
     terms: ['gradient echo', 'gradient recalled echo', 'field echo', 'FE']
     family: GRE

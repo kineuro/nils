@@ -52,6 +52,12 @@ derive:
       # about 1 ms), named EPI or not (flags.yml, `ge_swi_epi_train`). Before
       # the echo train rule below, which would read it as 48 echoes.
       - {when: ge_swi_epi_train, value: EPI}
+      # MRI pack 0.20.0, record 48 (dev-5's case 2): a Philips SWIp output of
+      # a multi-echo acquisition written one image per slice (`SW_M`,
+      # `SW_P`, echo time 0 on all 272 archive stacks) combines its echoes
+      # (flags.yml, `philips_swip_combined`). Before the echo train rule,
+      # which would read its 4 or 6 echoes as kept apart.
+      - {when: philips_swip_combined, value: comb-ME-GRE}
       # MRI pack 0.13.0: nor only by a split. A Siemens `swi3d4r` and a GE
       # SWAN state their echoes in EchoTrainLength (4, 8, 16), and a series
       # split by echo whose file states no ScanningSequence is a gradient
@@ -63,6 +69,26 @@ derive:
       # MRI pack 0.13.0, Nima's ruling (2026-09-29, record 48, group 2): a
       # single-echo SWI is SP-GRE where SequenceVariant says SP, and GRE
       # otherwise, as the technique axis reads any gradient echo.
+      - {when: {all: [has_gre, has_spoiled]}, value: SP-GRE}
+      - {when: has_gre, value: GRE}
+      - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
+      - {value: GRE}
+  # MRI pack 0.20.0, record 48 (dev-5's case 5): the acquisition's own
+  # components (its phase, magnitude and real part) written as the MEAN of
+  # a multi-echo acquisition's echoes combine them: comb-ME-GRE. Otherwise
+  # as `swi_technique`. The SWI image, its projections and maps keep
+  # `swi_technique`.
+  swi_component_technique:
+    axis: technique
+    cases:
+      - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
+      # the rest as swi_technique
+      - {when: is_gre_epi, value: GRE-EPI}
+      - {when: has_epi, value: EPI}
+      - {when: {all: [is_multi_echo, has_gre]}, value: ME-GRE}
+      - {when: ge_swi_epi_train, value: EPI}
+      - {when: philips_swip_combined, value: comb-ME-GRE}
+      - {when: {all: [{any: [is_multi_echo, {field: echo_train_length, ge: 3}]}, {not: {text: search_text, substring: epi}}]}, value: ME-GRE}
       - {when: {all: [has_gre, has_spoiled]}, value: SP-GRE}
       - {when: has_gre, value: GRE}
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
@@ -121,15 +147,18 @@ rules:
       - {when: {all: [{text: search_text, substring: phase}, {not: {text: search_text, substring: magnitude}}, {not: has_qsm}]}, cite: phase, source: text, tier: keywords}
     set:
       # The acquisition's own phase image: RawRecon, and no base contrast
-      # (pack 0.9.0). An echo-combined phase is computed, and keeps SWIRecon.
-      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      # (pack 0.9.0). MRI pack 0.20.0, record 48 (dev-5's case 5): an
+      # echo-combined phase too, a MEAN over echoes of phase data, which no
+      # SWI chain (mask times magnitude) made: RawRecon, Phase, comb-ME-GRE.
+      # SWIRecon's MEAN clause covers only the MEAN of SWI-processed images.
+      provenance: RawRecon
       base: null
       construct:
         - Phase
         - {value: QSM, when: {text: search_text, substring: qsm}}
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
-      technique: {from: swi_technique}
+      technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.9
 
@@ -142,13 +171,15 @@ rules:
     clauses:
       - {when: {all: [has_real, {not: has_swi}, {not: has_phase}]}, cite: 'has_real without a SWI token', source: flags, tier: exclusive}
     set:
-      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      # MRI pack 0.20.0 (dev-5's case 5): an echo-combined real part is the
+      # acquisition's too.
+      provenance: RawRecon
       base: T2starw
       construct:
         - Real
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
-      technique: {from: swi_technique}
+      technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
 
@@ -205,9 +236,10 @@ rules:
       - {keywords: [magnitude], tier: keywords}
     set:
       # The acquisition's own magnitude image: RawRecon and T2*-weighted, a
-      # gradient echo with a long echo time [P8, MQ5] (pack 0.9.0). An
-      # echo-combined magnitude is computed, and keeps SWIRecon.
-      provenance: [{value: RawRecon, when: {not: is_mean}}]
+      # gradient echo with a long echo time [P8, MQ5] (pack 0.9.0). MRI pack
+      # 0.20.0 (dev-5's case 5): an echo-combined magnitude too, which is
+      # no SWI processing's product: RawRecon, comb-ME-GRE.
+      provenance: RawRecon
       base: T2starw
       # MRI pack 0.12.0: a magnitude is not a QSM map because the protocol
       # is named for one (dev-1: a multi-echo magnitude named QSM was
@@ -217,7 +249,7 @@ rules:
         - Magnitude
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
-      technique: {from: swi_technique}
+      technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
 

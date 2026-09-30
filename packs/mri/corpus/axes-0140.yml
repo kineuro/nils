@@ -383,7 +383,9 @@ cases:
 
   # --- a multi-echo gradient echo by its name
 
-  - name: a Siemens fl2d8 is a multi-echo GRE
+  # MRI pack 0.20.0: its MEAN over the echoes is them combined, comb-ME-GRE
+  # (record 48, dev-5's case 5); one echo of it stays ME-GRE (axes-0200.yml).
+  - name: the MEAN of a Siemens fl2d8 is its echoes combined
     stack:
       image_type: 'DERIVED\PRIMARY\P\DIS2D\MEAN\MFSPLIT'
       scanning_sequence: GR
@@ -397,7 +399,7 @@ cases:
       flip_angle: 55
       echo_train_length: 8
     axes:
-      technique: MEGRE
+      technique: MEDIC
 
   - name: a series named for its 8 echoes with no sequence tags is a multi-echo GRE
     stack:
