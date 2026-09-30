@@ -120,10 +120,12 @@ def score(
     encoder_device: str = "cpu",
     batch: int = 64,
     chunk: int = 4,
-    prefetch: bool = True,
+    prefetch: bool | None = None,
     stats: dict | None = None,
 ) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
     """Every stack's answer, in the manifest's order."""
+    if prefetch is None:
+        prefetch = os.environ.get("NILS_BODYPART_PREFETCH", "1") != "0"
     gpu_decode = device == "cuda"
     torch_encoder = None
     if encoder_device == "cuda":
