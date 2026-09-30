@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.62] - 2026-09-30
+
+The MRI pack is 0.15.0: it follows the rulings on 0.14.0's disputes and fixes the rule errors of a third development reference, with a new technique `DWI-TSE` for a diffusion read out by a turbo spin echo. Reclassify with the new pack to apply it. The engine's code is unchanged since 1.0.0-alpha.61, and no desk release comes with it: desk 1.0.0-alpha.59 stays the newest. The registry stays at schema 76; the HTTP API contract stays version 7, the suite contract version 3, the pack contract version 6 and the job contract version 1. The body-part descriptors pin the `nils-bodypart` image that 1.0.0-alpha.61 published, a new build of the same 0.2.0 sources with the same encoder weights. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.61.
+
 ### Changed
 
 - The MRI pack is 0.15.0. It follows the rulings on 0.14.0's disputes and fixes the rule errors of a third development reference. A new technique, `DWI-TSE`, names a diffusion read out by a turbo spin echo (Philips DWI-TSE, a PROPELLER, BLADE or MultiVane diffusion, a HASTE diffusion), with base DWI, family SE and the BIDS token `DWITSE`; a Siemens BLADE diffusion is no longer read as an EPI. A GE spin echo not split by echo with a stated train of 2 is a TSE. A Philips diffusion image with a positive b value written `PROJECTION IMAGE` is the trace. A balanced steady-state scan (TrueFISP, FIESTA, balanced FFE, CISS) has base T2w by convention, standing for its T2/T1 contrast, except a 2D one at a flip of 10 degrees or less (PDw) and a magnetisation-prepared one. A GE SWI in research mode with a train of 32 or more is an EPI. GE's GRASS and MPGR are SS-GRE, a gradient echo at a long repetition time, a low flip and an echo time of 12 ms or more is T2*w, GE's MAGiC acquisition named `Qmap` is an MDME in the SyMRI route, and an old Siemens inflow angiography named `tun_s` is a TOF. Stacks need a reclassify.
