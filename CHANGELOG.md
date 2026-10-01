@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.69 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.69] - 2026-10-01
 
 The MRI pack is 0.21.0: the third round of published vendor conventions as ruled, checked against the archive's counts, three new values (provenance Calibration, constructs Speed and StdDevTime) and the rule bugs of a development grade. A vendor's localizer flag outranks the slice count, stitched composites are projections, GE's gradient-echo pulse sequences and fast recovery decide their technique, phase-contrast outputs and calibration scans have no base, and Philips mDixon TSE parts are TSEs. The engine reads the ImageType Philips writes per frame of an enhanced MR object, splits such an object's frames by the Dixon part they name, and ingests GE's series plane. Registry schema 78 adds the column to the stack and its fingerprint; the fingerprint's revision is 6. Stacks need a reclassify, and GE series a re-read for their series plane (`nils digest <root> --reread-exact <manufacturer>`). `nils pack replay` names the axes a rule decided as nothing. The body-part descriptors pin the `nils-bodypart` image 1.0.0-alpha.67 published; a change after this release pins them to the build it publishes.
