@@ -1083,6 +1083,25 @@ cases:
       repetition_time: 3.7
       echo_time: 1.8
       flip_angle: 55
+      n_slices: 5
+      n_instances: 5
+    axes:
+      provenance: Localizer
+
+  # MRI pack 0.21.0: the same survey of 9 slices in one plane, which no
+  # vendor flag marks, is no localizer (record 48, conventions round 3: the
+  # slice-count rule applies where no vendor flag exists).
+  - name: a Philips survey named ÖSIKT of 9 slices in one plane, with no vendor flag, is no localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: OSP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'ÖSIKT.B-FFE'
+      repetition_time: 3.7
+      echo_time: 1.8
+      flip_angle: 55
       n_slices: 9
       n_instances: 9
     axes:
