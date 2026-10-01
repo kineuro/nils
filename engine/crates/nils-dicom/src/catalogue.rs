@@ -1130,7 +1130,7 @@ pub static CATALOGUE: &[Field] = &[
         Chain(PULSE_SEQUENCE_CHAIN),
         Text,
         Tech,
-        "addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28)",
+        "addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28); a vendor's sequence name, so the reader's documents and the header door show it at detail quasi and above only, as `sequence_name`, though its class stays technical (2026-10-01)",
     ),
     f(
         "echo_pulse_sequence",
