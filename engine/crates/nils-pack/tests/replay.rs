@@ -137,3 +137,39 @@ fn a_packet_s_session_list_exercises_the_session_pass() {
     assert_eq!(r["tiers"]["construct"], "stated", "{r}");
     assert_eq!(r["session"], json!([]), "{r}");
 }
+
+#[test]
+fn a_replay_names_the_axes_a_rule_decided_as_nothing() {
+    // A phase image has no base, which a rule decides; a gradient echo
+    // whose base no rule reached is only empty. A grade scores the first
+    // as none and the second as a gap, so the line says which is which.
+    let pack = mri();
+    let packet = |image_type: &str, stack: u64| {
+        json!({
+            "stack": stack,
+            "header": {
+                "texts": {"series_description": "Ax 3D"},
+                "sequence": {"image_type": image_type, "scanning_sequence": "GR",
+                             "sequence_variant": "SP", "mr_acquisition_type": "3D"},
+                "physics": {"manufacturer": "SIEMENS", "repetition_time": 40,
+                            "echo_time": 20, "flip_angle": 15},
+            },
+        })
+    };
+    let phase = nils_pack::replay::replay(&pack, &packet("ORIGINAL\\PRIMARY\\P\\ND", 21)).unwrap();
+    assert_eq!(phase["values"]["base"], "", "{phase}");
+    assert!(
+        phase["none"].as_array().unwrap().contains(&json!("base")),
+        "{phase}"
+    );
+    let magnitude =
+        nils_pack::replay::replay(&pack, &packet("ORIGINAL\\PRIMARY\\M\\ND", 22)).unwrap();
+    assert_ne!(magnitude["values"]["base"], "", "{magnitude}");
+    assert!(
+        !magnitude["none"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("base")),
+        "{magnitude}"
+    );
+}

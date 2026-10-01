@@ -134,7 +134,8 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
 
     // The rules, as a classification runs them.
     let evaluated = Evaluated::with_private(pack, &stack, private.clone());
-    let class = evaluated.classify();
+    // With its votes, which say where a rule decided an axis as nothing.
+    let class = evaluated.classify_with_votes();
     let mut in_force: Vec<InForce> = pack
         .axes
         .iter()
@@ -226,6 +227,10 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
     let dispose = evaluated.dispose(&seed);
     let mut values = Map::new();
     let mut tiers = Map::new();
+    // The axes a rule decided as nothing, which an empty value alone cannot
+    // tell from an axis no rule reached: a base of none is an answer (a
+    // phase image has no contrast weighting), an empty base is a gap.
+    let mut none = Vec::new();
     for (i, a) in pack.axes.iter().enumerate() {
         let (v, t) = match dispose.axis(&a.name) {
             Some(d) if a.phase == crate::rules::AxisPhase::Disposition => {
@@ -233,6 +238,14 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
             }
             _ => (in_force[i].values.join(","), in_force[i].tier.clone()),
         };
+        if v.is_empty()
+            && class
+                .votes
+                .iter()
+                .any(|x| x.axis == a.name && x.value.is_empty())
+        {
+            none.push(a.name.clone());
+        }
         values.insert(a.name.clone(), json!(v));
         tiers.insert(a.name.clone(), json!(t));
     }
@@ -240,6 +253,7 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
         "stack": packet.get("stack").cloned().unwrap_or(Value::Null),
         "values": values,
         "tiers": tiers,
+        "none": none,
         "session": said,
         "private": read,
         "withheld": withheld,
