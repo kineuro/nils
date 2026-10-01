@@ -37,6 +37,15 @@ derive:
   swi_technique:
     axis: technique
     cases:
+      # MRI pack 0.22.0, record 48 (dev-6's C1 and dev-7's dispute): an
+      # output written MEAN is the pixel mean over a multi-echo
+      # acquisition's echoes, so the SWI image, its minIP and its MIP
+      # written so combine them: comb-ME-GRE, as the components (below,
+      # dev-5's case 5: "a mean over echoes is an echo combination") and
+      # Philips' SWIp (case 2) do. Our counts: Siemens writes each echo's
+      # SWI and minIP as its own series (echo numbers 1 to 4) and one MEAN
+      # SWI and one MEAN minIP beside them (echo number 1).
+      - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
       # MRI pack 0.11.0: a gradient-echo EPI SWI (Siemens `epfid3d`, Philips
       # FEEPI SWIp) is GRE-EPI, as its readout is anywhere else.
       - {when: is_gre_epi, value: GRE-EPI}
@@ -76,8 +85,8 @@ derive:
   # MRI pack 0.20.0, record 48 (dev-5's case 5): the acquisition's own
   # components (its phase, magnitude and real part) written as the MEAN of
   # a multi-echo acquisition's echoes combine them: comb-ME-GRE. Otherwise
-  # as `swi_technique`. The SWI image, its projections and maps keep
-  # `swi_technique`.
+  # as `swi_technique`. Since 0.22.0 the SWI image and its projections
+  # written MEAN are comb-ME-GRE too (above).
   swi_component_technique:
     axis: technique
     cases:

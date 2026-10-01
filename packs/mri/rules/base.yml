@@ -26,6 +26,7 @@ order:
   - 'technique:CE-MRA'
   - 'technique:ZTE-silent-mra'
   - 'construct:in_opposed_gre'
+  - 'stage:named'
   - 'technique:ME-GRE'
   - 'technique:comb-ME-GRE'
   - 'technique:DWI-EPI'
@@ -256,6 +257,16 @@ rules:
     set: {base: 'T1w'}
     confidence: 0.85
     why: 'a two-point Dixon or in/opposed-phase gradient echo is T1-weighted'
+
+  # MRI pack 0.22.0 (dev-7): an acquired STAGE echo takes the weighting its
+  # name states, PD at the low flip and T1 at the high one (flags.yml,
+  # `stage_pd_echo`), before the multi-echo rule below would make it T2*w.
+  'stage:named':
+    clauses:
+      - {flag: stage_pd_echo, tier: keywords}
+      - {flag: stage_t1_echo, tier: keywords}
+    set: {base: [{value: 'PDw', when: stage_pd_echo}, {value: 'T1w', when: stage_t1_echo}]}
+    why: 'a STAGE acquisition is named for the weighting its flip angle gives'
 
   'technique:ME-GRE':
     clauses:

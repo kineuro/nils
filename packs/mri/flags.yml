@@ -630,7 +630,17 @@ flags:
   philips_seepi:    {text: philips_scanning_technique, matches: '^seepi$'}
   philips_t1ffe:    {text: philips_scanning_technique, matches: '^t1ffe$'}
   philips_t2ffe:    {text: philips_scanning_technique, matches: '^t2ffe$'}
-  philips_tfe:      {text: philips_scanning_technique, matches: '^(t1tfe|tfe)$'}
+  # MRI pack 0.22.0: or, where the private technique is absent, the
+  # PulseSequenceName (0018,9005) of the enhanced MR module, which a Philips
+  # object re-exported as a classic one keeps (`T1TFE`; dev-7: two 3D T1
+  # TFEs whose module says InversionRecovery NO stayed MPRAGE, case 17).
+  philips_tfe:
+    any:
+      - {text: philips_scanning_technique, matches: '^(t1tfe|tfe)$'}
+      - all:
+          - {text: manufacturer, prefix: philips}
+          - {not: {text: philips_scanning_technique, matches: '.'}}
+          - {text: pulse_sequence_name, matches: '^\s*(t1tfe|tfe)\s*$'}
   philips_balanced: {text: philips_scanning_technique, matches: '^(b-ffe|b-tfe|bffe|btfe)$'}
   philips_gre_technique:
     any: [philips_feepi, philips_t1ffe, philips_t2ffe, philips_tfe, philips_balanced,
@@ -1326,7 +1336,10 @@ flags:
     matches: '(^|[^a-z])(utan|without|ej|no|non)\s*-?\s*(mtc|magnetization-transfer)|(mtc|magnetization-transfer)\s*-?\s*(off|no|0)([^a-z0-9]|$)'
   # Philips' SmartExam brain survey, `SmartBrain`: a localizer, whatever its
   # 3D TFE says (dev-2: read as a ProjectionDerived MPRAGE).
-  smart_survey: {text: search_text, matches: 'smartbrain|smart brain|smartexam'}
+  # MRI pack 0.22.0: and SmartExam's automatic planning reformat, `Patient
+  # Aligned MPR AWPLAN_SMARTPLAN_TYPE_BRAIN`, its counterpart of AutoAlign's
+  # MPRs (dev-7: read as a ProjectionDerived MPRAGE).
+  smart_survey: {text: search_text, matches: 'smartbrain|smart brain|smartexam|smart ?plan|awplan'}
   # A spectroscopy acquisition (GE `PROBE-SV`, `PROBE-P`, a CSI): no image
   # contrast at all (dev-2: a GE PROBE left with an empty base, settled none).
   # MRI pack 0.20.0: and a series named MRS, MRSI or single voxel (dev-5's
@@ -1897,6 +1910,12 @@ flags:
       - {text: manufacturer, prefix: philips}
       - {text: philips_diffusion_direction, matches: '^\s*i\s*$'}
       - has_positive_b_value
+      # MRI pack 0.22.0: never the raw acquisition of a tensor, a stack of
+      # six or more directions: the series-level element reads `I` from the
+      # one frame that carries it, and the isotropic image is a series of
+      # its own (dev-7: a b=0 and 16 directions named `DTI ... DWI iso` was
+      # Trace).
+      - {not: {field: dwi_directions, ge: 6}}
 
   # --- A7 and case 6: the single-band reference of a diffusion run (a
   # reversed-blip one included), by its name: construct SBRef and base DWI
@@ -2524,6 +2543,18 @@ flags:
   composite_token: {parser: image_type, any_token: [COMPOSED, COMPOSITE, COMP_AD, COMP_SP, COMP_AN, COMP_AD_N, COMP_MIP]}
   stitched_composite: {any: [composite_token, composed_named]}
 
+  # --- MRI pack 0.22.0 (dev-7): an image the scanner typed LOCALIZER or
+  # SCOUT whose ScanningSequence states a plain gradient echo (no EP, no
+  # SE) is read by that readout: a diffusion word in its name, or a Philips
+  # private technique carried from the series it plans, names another
+  # series' technique (a SmartPlan image `dADC iso`, GR, TR 3 ms).
+  typed_localizer_gre:
+    all:
+      - any: [image_type.is_localizer, image_type.is_scout]
+      - scanning_sequence.has_gre
+      - {not: scanning_sequence.has_epi}
+      - {not: scanning_sequence.has_se}
+
   # --- Philips `MAXIMUM` (case 2): a projection only where the geometry
   # shows one, at most 3 slices or a slab of 10 mm or more; the archive's
   # 157 are whole 3D volumes of 30 to 200 contiguous slices, none named MIP,
@@ -2785,3 +2816,18 @@ flags:
       - image_type.is_original
       - has_gre
       - {text: search_text, matches: '(^|[^a-z])stage([^a-z]|$)'}
+  # MRI pack 0.22.0 (dev-7): STAGE acquires two dual-echo gradient echoes
+  # at two flip angles for their weighting, a low one proton-density
+  # weighted and a high one T1-weighted, and names each for it (`STAGE_pd`,
+  # `STAGE_t1`); the name, not the echo train, is the base of an acquired
+  # echo's magnitude (a `STAGE_pd` echo at flip 6 was T2*w).
+  stage_pd_echo:
+    all:
+      - stage_acquired_echo
+      - {not: has_phase}
+      - {text: search_text, matches: '(^|[^a-z])(pdw?|proton-density)([^a-z]|$)'}
+  stage_t1_echo:
+    all:
+      - stage_acquired_echo
+      - {not: has_phase}
+      - {text: search_text, matches: '(^|[^a-z0-9])t1w?([^a-z0-9]|$)'}
