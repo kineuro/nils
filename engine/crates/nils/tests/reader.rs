@@ -346,18 +346,20 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         "{explained}"
     );
     assert_eq!(explained["blind"], false, "{explained}");
-    // the sequence name is quasi-identifying text: never below quasi, never
-    // in a batch's signature
+    // the sequence name is shown at every detail (the ruling of
+    // 2026-10-01), plain and quasi alike, and in a batch's signature
     let seq = "*tir2d1rr99";
+    let mut seen = 0;
     for s in items.iter().filter_map(|i| i["stack_id"].as_i64()) {
         let p = server.ok("GET", &format!("/api/stacks/{s}/why"), None, RITA);
-        assert!(!p.to_string().contains(seq), "{p}");
-        assert!(!p.to_string().contains("\"text_sequence_name\":"), "{p}");
         let q = server.ok("GET", &format!("/api/stacks/{s}/why"), None, CURATOR);
         if q["header"]["echo_time"] == 100.0 {
+            assert_eq!(p["header"]["text_sequence_name"], seq, "{p}");
             assert_eq!(q["header"]["text_sequence_name"], seq, "{q}");
+            seen += 1;
         }
     }
+    assert!(seen > 0, "no stack with the sequence name: {items:?}");
     // a rater reads it through the campaign's item, never the whole archive
     let (status, _) = server.call("GET", &format!("/api/stacks/{stack}/why"), None, ANNA);
     assert_eq!(status, 403);
@@ -420,7 +422,14 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     assert!(pair["signature"]["header"].is_object(), "{pair}");
     let key = pair["key"].as_str().unwrap().to_string();
     let every = server.ok("GET", "/api/campaigns/bases/batches", None, CURATOR);
-    assert!(!every.to_string().contains("*tir2d1rr99"), "{every}");
+    assert!(
+        every["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["signature"]["header"]["text_sequence_name"].is_string()),
+        "{every}"
+    );
     // what is held back is the campaign's: a caller's share or seed is
     // refused, and a maker's share below a tenth too
     for body in [json!({"hold_back": 0}), json!({"seed": "fixed"})] {
@@ -1723,8 +1732,6 @@ fn a_campaign_made_to_hide_the_header_shows_the_pictures_alone() {
 /// one it shows whose value is shaped like an identifier, and one it ingests
 /// and does not show.
 fn registry_with_private() -> TempDir {
-    let home = TempDir::new("campaign-private-home");
-    let dir = TempDir::new("campaign-private-src");
     let (study, sop) = ("1.2.3.G", "1.2.3.G.1.1");
     let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
     e.push(synth::text(tags::PATIENT_ID, VR::LO, "P9"));
@@ -1766,9 +1773,17 @@ fn registry_with_private() -> TempDir {
         VR::CS,
         "121212-1212",
     ));
+    registry_of(study, sop, &e)
+}
+
+/// A registry of the one stack `e` describes, digested with the MRI pack's
+/// ingest list, fingerprinted and classified.
+fn registry_of(study: &str, sop: &str, e: &[synth::Elem]) -> TempDir {
+    let home = TempDir::new("campaign-private-home");
+    let dir = TempDir::new("campaign-private-src");
     dir.file(
         &format!("{study}/{sop}"),
-        &synth::part10(&MetaFields::mr(sop), &e, true),
+        &synth::part10(&MetaFields::mr(sop), e, true),
     );
     let run = |args: &[&str], stdin: Option<&str>| {
         let mut cmd = nils();
@@ -1854,32 +1869,21 @@ fn a_rater_is_shown_the_private_elements_the_pack_lists_and_nothing_else() {
     // The rater's reading and the header door, blind or not: the shown
     // elements, typed; the one shaped like an identifier withheld and
     // counted; the ingested one the pack does not show absent. GE's pulse
-    // sequence name is a vendor's sequence name, shown at detail quasi and
-    // above only (the rater reads at plain).
-    for (path, who, quasi) in [
-        (
-            format!("/api/campaigns/private/items/{item}/why"),
-            ANNA,
-            false,
-        ),
-        (
-            format!("/api/campaigns/private/items/{item}/header"),
-            ANNA,
-            false,
-        ),
+    // sequence name is shown at every detail (the rater reads at plain).
+    for (path, who) in [
+        (format!("/api/campaigns/private/items/{item}/why"), ANNA),
+        (format!("/api/campaigns/private/items/{item}/header"), ANNA),
         (
             format!("/api/campaigns/private/items/{item}/header"),
             CURATOR,
-            true,
         ),
     ] {
         let doc = server.ok("GET", &path, None, who);
-        let want = if quasi {
-            json!({"ge_pulse_sequence_name": "ksepimix_2", "ge_private_image_type": 0})
-        } else {
-            json!({"ge_private_image_type": 0})
-        };
-        assert_eq!(doc["private"], want, "{path}: {doc}");
+        assert_eq!(
+            doc["private"],
+            json!({"ge_pulse_sequence_name": "ksepimix_2", "ge_private_image_type": 0}),
+            "{path}: {doc}"
+        );
         assert_eq!(doc["private_withheld"], 1, "{path}: {doc}");
         let text = doc.to_string();
         assert!(!text.contains("121212"), "{path}: {doc}");
@@ -1909,14 +1913,79 @@ fn a_rater_is_shown_the_private_elements_the_pack_lists_and_nothing_else() {
     assert!(!doc.to_string().contains("ksepimix"), "{doc}");
 }
 
-/// Nima's ruling, 2026-10-01: a vendor's sequence name is shown at detail
-/// quasi and above only, as the standard sequence name is: GE's pulse
-/// sequence name among the private elements and the standard
-/// PulseSequenceName, where Siemens XA writes its sequence name, in the
-/// reader's documents, the header door and so in any packet built from them.
+/// The ruling of 2026-10-01 (decision 48): a sequence name is shown
+/// everywhere, at every detail. A synthetic stack carries every vendor's
+/// sequence name: the standard SequenceName (Siemens) and PulseSequenceName
+/// (Siemens XA), GE's pulse sequence name and internal pulse sequence name,
+/// and Philips' scanning technique. Each is shown at plain, quasi and
+/// sensitive, in the evidence line, a campaign item's reading and the
+/// header door (a batch's signature in the test above), while the
+/// identifiers stay withheld: the
+/// patient's name and id, a private value shaped like a personnummer, and
+/// below detail quasi the study date.
 #[test]
-fn a_vendor_sequence_name_is_shown_at_detail_quasi_and_above_only() {
-    let home = registry_with_private();
+fn sequence_names_are_shown_at_every_detail_and_identifiers_are_not() {
+    let (study, sop) = ("1.2.3.N", "1.2.3.N.1.1");
+    let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, "PID-4711"));
+    e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240517"));
+    e.push(synth::text(
+        tags::MANUFACTURER,
+        VR::LO,
+        "GE MEDICAL SYSTEMS",
+    ));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "Ax T2"));
+    e.push(synth::text(
+        tags::IMAGE_TYPE,
+        VR::CS,
+        "ORIGINAL\\PRIMARY\\OTHER",
+    ));
+    e.push(synth::text(tags::SCANNING_SEQUENCE, VR::CS, "EP"));
+    e.push(synth::text(tags::ECHO_TIME, VR::DS, "100"));
+    e.push(synth::text(tags::REPETITION_TIME, VR::DS, "3000"));
+    // the standard sequence names
+    e.push(synth::text(tags::SEQUENCE_NAME, VR::SH, "seqname_site_3"));
+    e.push(synth::text(tags::PULSE_SEQUENCE_NAME, VR::SH, "psn_site_7"));
+    // GE's two pulse sequence names
+    e.push(synth::text(
+        dicom_core::Tag(0x0019, 0x0010),
+        VR::LO,
+        "GEMS_ACQU_01",
+    ));
+    e.push(synth::text(
+        dicom_core::Tag(0x0019, 0x109C),
+        VR::LO,
+        "gepsd_site_5",
+    ));
+    e.push(synth::text(
+        dicom_core::Tag(0x0019, 0x109E),
+        VR::LO,
+        "geint_site_6",
+    ));
+    // Philips' scanning technique
+    e.push(synth::text(
+        dicom_core::Tag(0x2001, 0x0010),
+        VR::LO,
+        "Philips Imaging DD 001",
+    ));
+    e.push(synth::text(
+        dicom_core::Tag(0x2001, 0x1020),
+        VR::LO,
+        "phtech_site_8",
+    ));
+    // a shown element whose value is shaped like a personnummer
+    e.push(synth::text(
+        dicom_core::Tag(0x0043, 0x0010),
+        VR::LO,
+        "GEMS_PARM_01",
+    ));
+    e.push(synth::text(
+        dicom_core::Tag(0x0043, 0x10A3),
+        VR::CS,
+        "121212-1212",
+    ));
+    let home = registry_of(study, sop, &e);
     let server = Server::start(&home);
     server.ok(
         "PUT",
@@ -1944,15 +2013,27 @@ fn a_vendor_sequence_name_is_shown_at_detail_quasi_and_above_only() {
     );
     let item = made["items"][0]["id"].as_i64().unwrap();
     let stack = made["items"][0]["stack"].as_i64().unwrap_or(1);
+    let names = [
+        "seqname_site_3",
+        "psn_site_7",
+        "gepsd_site_5",
+        "geint_site_6",
+        "phtech_site_8",
+    ];
+    let private = json!({
+        "ge_pulse_sequence_name": "gepsd_site_5",
+        "ge_internal_pulse_sequence_name": "geint_site_6",
+        "philips_scanning_technique": "phtech_site_8",
+    });
     // plain: a rater and a reader of the queue; quasi: a reviewer;
     // sensitive: an operator
     let levels = [
-        ("plain", ANNA, false),
-        ("plain", RITA, false),
-        ("quasi", CURATOR, true),
-        ("sensitive", STEWARD, true),
+        ("plain", ANNA),
+        ("plain", RITA),
+        ("quasi", CURATOR),
+        ("sensitive", STEWARD),
     ];
-    for (detail, who, shown) in levels {
+    for (detail, who) in levels {
         let mut paths = vec![format!("/api/stacks/{stack}/why")];
         if who != RITA {
             paths.push(format!("/api/campaigns/names/items/{item}/why"));
@@ -1968,21 +2049,46 @@ fn a_vendor_sequence_name_is_shown_at_detail_quasi_and_above_only() {
             read += 1;
             assert_eq!(status, 200, "{detail} {path}: {doc}");
             let text = doc.to_string();
-            assert_eq!(
-                doc["private"].get("ge_pulse_sequence_name").is_some(),
-                shown,
-                "{detail} {path}: {doc}"
-            );
-            assert_eq!(text.contains("ksepimix"), shown, "{detail} {path}: {doc}");
-            assert_eq!(text.contains("psn_site_7"), shown, "{detail} {path}: {doc}");
-            // what is no sequence name is shown at every detail
-            assert_eq!(
-                doc["private"]["ge_private_image_type"], 0,
-                "{detail} {path}: {doc}"
-            );
-            if path.ends_with("/header") && !shown {
+            // every sequence name, at every detail
+            for name in names {
                 assert!(
-                    doc["left_out"]["below_detail"].as_u64().unwrap_or(0) > 0,
+                    text.contains(name),
+                    "{detail} {path}: {name} missing: {doc}"
+                );
+            }
+            assert_eq!(doc["private"], private, "{detail} {path}: {doc}");
+            // the identifiers stay withheld
+            assert_eq!(doc["private_withheld"], 1, "{detail} {path}: {doc}");
+            for id in ["PID-4711", "Doe", "Jane", "121212"] {
+                assert!(!text.contains(id), "{detail} {path}: {id} shown: {doc}");
+            }
+            if detail == "plain" {
+                assert!(!text.contains("20240517"), "{detail} {path}: {doc}");
+                assert!(!text.contains("2024-05-17"), "{detail} {path}: {doc}");
+            }
+            if path.ends_with("/header") {
+                let columns: Vec<&str> = doc["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|f| f["column"].as_str())
+                    .collect();
+                assert!(columns.contains(&"sequence_name"), "{detail} {path}: {doc}");
+                assert!(
+                    columns.contains(&"pulse_sequence_name"),
+                    "{detail} {path}: {doc}"
+                );
+                assert!(
+                    doc["left_out"]["identifying"].as_u64().unwrap_or(0) > 0,
+                    "{detail} {path}: {doc}"
+                );
+            } else {
+                assert_eq!(
+                    doc["texts"]["sequence_name"], "seqname_site_3",
+                    "{detail} {path}: {doc}"
+                );
+                assert_eq!(
+                    doc["texts"]["pulse_sequence_name"], "psn_site_7",
                     "{detail} {path}: {doc}"
                 );
             }

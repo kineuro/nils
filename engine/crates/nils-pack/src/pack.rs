@@ -1054,18 +1054,13 @@ fn load_private(
                         .in_file(&f.path, Some(&f.source)),
                 );
             }
-            // a vendor's sequence name: at detail quasi and above only
-            let quasi = match im.get("quasi") {
-                None => false,
-                Some(v) => v.as_bool().ok_or_else(|| {
-                    Error::at(format!("{at}.quasi"), "is true or false")
-                        .in_file(&f.path, Some(&f.source))
-                })?,
-            };
+            // `quasi` (read by 1.0.0-alpha.66 and .67 only) is withdrawn:
+            // every shown element is shown at every detail (Nima's ruling,
+            // 2026-10-01), and a pack that still carries the key loads and
+            // its element is shown at every detail too
             shown.push(crate::private::Shown {
                 name,
                 why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
-                quasi,
             });
         }
     }
