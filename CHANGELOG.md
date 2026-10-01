@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.70 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.70] - 2026-10-01
 
 The MRI pack is 0.22.0: the rule bugs a development grade of 0.21.0 found, and its two disputes settled. A Philips turbo field echo is also read from the MR module's PulseSequenceName that a re-exported object keeps, so a 3D T1 TFE whose module says no inversion is FSP-GRE there too; a raw Philips tensor acquisition takes no Trace from its private direction; an image typed LOCALIZER on a gradient echo takes no diffusion technique from its name; SmartExam's planning reformat is a planning scout; a STAGE echo takes the weighting its name states; and every Siemens MEAN output of a multi-echo SWI is a combined multi-echo gradient echo. Stacks need a reclassify; no re-read. No engine change. The body-part descriptors pin the image 1.0.0-alpha.69 published; a change after this release pins them to the build it publishes. No desk release: installs keep desk 1.0.0-alpha.61. Registry schema 78 (fingerprint revision 6), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as before.
