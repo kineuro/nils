@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - Sequence names are shown everywhere, at every detail. The standard SequenceName and PulseSequenceName, GE's pulse sequence name and internal pulse sequence name, and Philips' scanning technique are no longer held back below detail quasi: not in the reader's documents (`header`, a clause's header, the line, `texts` and `private`, blind or not), the header door, which no longer counts them under `left_out.below_detail`, a campaign batch's `signature`, nor the ask doors, where `series.sequence_name` is now a technical field (federated, as `stack.text_sequence_name` already was). A packet built from these carries them too. The `quasi` mark that 1.0.0-alpha.66 let a pack put on a `private.shown` entry is withdrawn: the engine ignores it, and `nils pack show --json` no longer names it. The MRI pack is 0.20.2, without the marks. Identification blocks and values shaped like an identifier are still withheld, dates are withheld as before, and the other quasi-identifying texts stay at detail quasi and above. The HTTP API contract stays version 7 and pack contract 8, both amended in place.
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.67 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
 
 ## [1.0.0-alpha.67] - 2026-10-01
 
