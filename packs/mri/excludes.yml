@@ -56,7 +56,7 @@ excludes:
   # answers a MIP of an SWI with provenance SWIRecon (its MinIP is
   # ProjectionDerived from pack 0.9.0).
   - id: projection-not-raw
-    when: {any: [{axis: construct, is: MIP}, {axis: construct, is: MinIP}, {axis: construct, is: StdDevProj}]}
+    when: {any: [{axis: construct, is: MIP}, {axis: construct, is: MinIP}, {axis: construct, is: StdDevProj}, {axis: construct, is: StdDevTime}]}
     excludes: {axis: provenance, any: [RawRecon, Localizer]}
     why: 'an intensity projection is computed from a volume, so it is neither a raw reconstruction nor a localizer'
     sources: [RP10, W1]

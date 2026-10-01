@@ -225,6 +225,18 @@ private:
       kind: parameter
       why: "GE's image type: 0 magnitude, 1 phase, 2 real, 3 imaginary (dcm2niix GE README)"
 
+    # MRI pack 0.21.0: GE's series plane, which writes 256 on a three-plane
+    # localizer whatever its slice count; dcm2niix's GE README documents
+    # the value, and record 48's conventions round 3 makes it a vendor
+    # localizer flag that outranks the slice-count rule. Read from the next
+    # digest or re-read of a GE series.
+    - creator: GEMS_ACQU_01
+      group: 0x0019
+      element: 0x17
+      name: ge_series_plane
+      kind: geometry
+      why: "the series plane as GE codes it (2 axial, 4 sagittal, 8 coronal, 16 oblique, 256 a three-plane localizer; dcm2niix GE README); constant within a series"
+
     - creator: GEMS_PARM_01
       group: 0x0043
       element: 0xB6
@@ -359,6 +371,11 @@ private:
       why: "GE's internal pulse sequence name, EPI for a gradient-echo and EPI2 for a spin-echo EPI"
     - name: ge_private_image_type
       why: "GE's image type: 0 magnitude, 1 phase, 2 real, 3 imaginary"
+    # MRI pack 0.21.0: the two elements its rules add a reading of.
+    - name: ge_series_plane
+      why: "GE's series plane: 256 marks a three-plane localizer, whatever its slice count"
+    - name: philips_number_of_echoes
+      why: "how many echoes Philips acquired, which its echo train length does not say on a turbo field echo"
 
   # What a release keeps. These six are the ones Wave 1 reads and Wave 3
   # section 6 derives from: a release that dropped them would export

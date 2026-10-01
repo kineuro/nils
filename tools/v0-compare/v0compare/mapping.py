@@ -93,7 +93,9 @@ LEVELS: dict[str, Level] = {
             "pet_frame_type": "stack_pet_frame_type",
             "orientation": "stack_image_orientation",
         },
-        absent=frozenset({"image_orientation_patient"}),
+        # The ImageType Philips writes per frame in (2005,140F) is v1's
+        # addition: v0 never read it, so there is nothing to compare.
+        absent=frozenset({"image_orientation_patient", "private_frame_image_type"}),
         decimals={
             "echo_time": 2,
             "inversion_time": 1,

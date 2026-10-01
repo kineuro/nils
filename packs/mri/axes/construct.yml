@@ -53,6 +53,7 @@ order:
   - MIP
   - MinIP
   - StdDevProj
+  - StdDevTime
   - MPR
   - Composed
   - EchoCombined
@@ -62,6 +63,7 @@ order:
   - B0map
   - B1map
   - Velocity
+  - Speed
   - Magnitude
   - Real
   - Imaginary
@@ -208,12 +210,15 @@ values:
     keywords:
       - deltam
       - delta m
+    requires: {not: silent_mra_output}
     detection:
       exclusive: is_asl_difference
   M0:
     terms: ['M0 scan', 'm0scan', 'proton density reference', 'ASL PD pass', 'equilibrium magnetisation image']
     description: 'the ASL M0 (equilibrium magnetisation) scan a CBF quantification divides by (BIDS m0scan)'
-    requires: is_asl_m0
+    # MRI pack 0.21.0: never GE's Silent MRA, which writes the ASL token on
+    # its angiogram (case 18).
+    requires: {all: [is_asl_m0, {not: silent_mra_output}]}
     keywords:
       - m0
     detection:
@@ -381,7 +386,9 @@ values:
     terms: ['maximum intensity projection', 'MIP']
     # MRI pack 0.18.0: nor a slice whose protocol, not its own name, says
     # MIP (sealed-1 A11).
-    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}]}
+    # MRI pack 0.21.0: nor a Siemens `CSA MPR` image, a reformat whatever
+    # its series is named (record 48, conventions round 3, case 3).
+    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}, {not: csa_mpr_image}]}
     keywords:
       - mip
       - maximum intensity projection
@@ -390,6 +397,8 @@ values:
       exclusive: is_mip
   MinIP:
     terms: ['minimum intensity projection', 'mIP', 'MinIP']
+    # MRI pack 0.21.0: nor a Siemens `CSA MPR` image (case 3).
+    requires: {not: csa_mpr_image}
     keywords:
       - minip
       - minimum intensity projection
@@ -405,6 +414,15 @@ values:
     description: 'a standard deviation projection through a volume, each pixel the standard deviation of the voxels along the ray'
     detection:
       exclusive: stddev_projection
+  # MRI pack 0.21.0: the voxelwise standard deviation over the measurements
+  # of a series (Siemens Std-Dev-Time, `STDDEV_TIME`), a temporal map and no
+  # spatial projection (record 48, conventions round 3, case 4; a value the
+  # vocabulary lacked).
+  StdDevTime:
+    terms: ['standard deviation over time', 'temporal standard deviation', 'Std-Dev-Time', 'STDDEV_TIME', 'tSD map']
+    description: 'the voxelwise standard deviation over the measurements or time points of a series, a temporal map and no spatial projection'
+    detection:
+      exclusive: stddev_time
   # MRI pack 0.12.0: a projection is a MIP or a MinIP and not a plane as
   # well, though a workstation writes `MPR` on both (Siemens
   # `DERIVED\SECONDARY\MPR` on a MIP; dev-1 settled MIP alone on six stacks
@@ -413,7 +431,11 @@ values:
   MPR:
     terms: ['multiplanar reformat', 'MPR', 'reformat']
     # MRI pack 0.18.0: nor a standard deviation projection.
-    requires: {not: {any: [is_mip, is_minip, projection_named, stddev_projection]}}
+    # MRI pack 0.21.0: a projection's name does not keep a Siemens `CSA MPR`
+    # image from being the reformat its image type says (case 3).
+    # MRI pack 0.21.0: nor a Siemens position display, whose protocol's name
+    # (`t1_mpr`) is another series' (dev-6's A9).
+    requires: {not: {any: [is_mip, is_minip, {all: [projection_named, {not: csa_mpr_image}]}, stddev_projection, stddev_time, image_type.is_posdisp]}}
     keywords:
       - multiplanar reformat
       - reformatted
@@ -518,11 +540,25 @@ values:
     description: 'the velocity image of a phase-contrast acquisition: the phase difference scaled to velocity by the encoding velocity'
     detection:
       exclusive: velocity_image
+  # MRI pack 0.21.0: the angiogram of a phase contrast, the magnitude of the
+  # velocity vector or the complex difference (Philips' `PCA` image that is
+  # neither its magnitude, its velocity nor a projection): neither a signed
+  # velocity component nor a tissue magnitude (record 48, conventions round
+  # 3, case 5; a value the vocabulary lacked).
+  Speed:
+    terms: ['speed image', 'phase contrast angiogram', 'PCA angiogram', 'complex difference', 'flow speed']
+    description: 'the angiogram of a phase-contrast acquisition: the magnitude of the velocity vector or the complex difference, neither a signed velocity component nor a tissue magnitude'
+    detection:
+      exclusive: pc_speed_image
   Magnitude:
     terms: ['magnitude', 'magnitude image']
     keywords:
       - magnitude image
       - magnitude only
+    # MRI pack 0.21.0: and Philips' phase-contrast magnitude, `M_PCA`
+    # (record 48, conventions round 3, case 5).
+    detection:
+      exclusive: pc_magnitude_image
   Real:
     terms: ['real', 'real part']
     keywords:

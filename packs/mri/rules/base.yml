@@ -18,6 +18,7 @@ order:
   - 'construct:phase'
   - 'flag:spectroscopy'
   - 'construct:b1map'
+  - 'r3:no_base'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -63,6 +64,7 @@ order:
   - 'dual_echo:t2'
   - 'dual_echo:short_echo'
   - 'dual_echo:long_echo'
+  - 'r3:se_short_te_t2_named'
   - 'keywords:mrcp'
   - 'keywords:DWI'
   - 'keywords:PWI'
@@ -71,6 +73,7 @@ order:
   - 'keywords:T2rho'
   - 'keywords:T2starw'
   - 'technique:GRE-EPI'
+  - 'gre:mtw_named'
   - 'gre:t2_named'
   - 'keywords:T2w'
   - 'keywords:PDw'
@@ -146,6 +149,32 @@ rules:
     set: {base: null}
     confidence: 0.85
     why: 'a spectroscopy acquisition has no base contrast'
+
+  # MRI pack 0.21.0 (record 48, conventions round 3): no base contrast for
+  # a calibration scan (case 7: coil-sensitivity and receive-field references
+  # are not meant to be read), any output of a phase contrast (case 5: a
+  # flow image, not tissue contrast), a temporal standard deviation (case
+  # 4), and a real or imaginary spin-echo component without PSIR evidence
+  # (case 24: its intensity follows the receiver phase).
+  'r3:no_base':
+    clauses:
+      - {when: {axis: provenance, is: Calibration}, cite: 'a calibration scan', source: provenance}
+      - {when: {axis: technique, is: PC-MRA}, cite: 'a phase contrast', source: technique}
+      - {when: {axis: construct, is: StdDevTime}, cite: 'a temporal standard deviation', source: construct}
+      - {when: {axis: construct, is: Speed}, cite: 'a phase-contrast speed image', source: construct}
+      - when:
+          all:
+            - se_component_no_psir
+            - {not: {axis: modifier, is: PSIR}}
+            - {not: {axis: modifier, is: IR}}
+            - {not: {axis: modifier, is: FLAIR}}
+            - {not: {axis: modifier, is: STIR}}
+            - {not: {axis: modifier, is: DIR}}
+        cite: 'a real or imaginary spin-echo component without PSIR evidence'
+        source: flags
+    set: {base: null}
+    confidence: 0.85
+    why: 'a calibration scan, a phase-contrast output, a temporal map and a spin-echo component without PSIR evidence have no base contrast'
 
   # 3D inversion-prepared rapid gradient echo [MQ6, B1, P11, S8]
   # MRI pack 0.18.0: a B1 (flip angle) map is a map of the transmit field,
@@ -549,6 +578,17 @@ rules:
   # Tier 5. Keywords, in the axis's own priority order.
   # MRI pack 0.18.0: MR cholangiopancreatography is heavily T2-weighted,
   # whatever its repetition time (sealed-1 A7: its base was left empty).
+  # MRI pack 0.21.0 (dev-6's A5): a spin echo at a long TR and an echo time
+  # under 40 ms is proton-density weighted whatever a T2 word says, the
+  # first echo of a dual-echo PD/T2 written as its own series; the dual-echo
+  # ruling (pack 0.9.0) reads the echo on screen.
+  'r3:se_short_te_t2_named':
+    clauses:
+      - {flag: se_short_te_t2_named, tier: physics}
+    set: {base: 'PDw'}
+    confidence: 0.75
+    why: 'a long-TR spin echo at a short echo time is proton-density weighted'
+
   'keywords:mrcp':
     clauses:
       - {flag: mrcp_named, tier: keywords}
@@ -597,6 +637,14 @@ rules:
     set: {base: 'T2starw'}
     confidence: 0.8
     why: 'a gradient-echo EPI is T2*-weighted'
+
+  # MRI pack 0.21.0 (dev-6's A7): on a gradient echo the MTw word outranks
+  # a T2 word (`T2_TE7_MTw_ax`, an echo of an MT-weighted multi-echo FFE).
+  'gre:mtw_named':
+    clauses:
+      - {flag: gre_mtw_named, tier: keywords}
+    set: {base: 'MTw'}
+    why: 'a gradient echo named MT-weighted is MTw whatever else its name says'
 
   'gre:t2_named':
     clauses:

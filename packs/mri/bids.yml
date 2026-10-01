@@ -136,10 +136,12 @@ entities:
       PerfusionRecon: PerfusionRecon
       ASLRecon: ASLRecon
       BOLDRecon: BOLDRecon
+      Calibration: Calibration
     construct:
       MIP: MIP
       MinIP: MinIP
       StdDevProj: StdDev
+      StdDevTime: StdDevTime
       MPR: MPR
       UniformDenoised: Denoised
       Filtered: Filtered
@@ -299,6 +301,8 @@ acq:
       MIP: MIP
       MinIP: MinIP
       StdDevProj: StdDev
+      StdDevTime: StdDevTime
+      Speed: Speed
       MPR: MPR
       UniformDenoised: Denoised
       Filtered: Filtered
@@ -324,6 +328,7 @@ acq:
       PerfusionRecon: PerfusionRecon
       ASLRecon: ASLRecon
       BOLDRecon: BOLDRecon
+      Calibration: Calibration
 
 # What counts as a vendor's synthetic contrast, for the placement choice of
 # section 9.3: an image the scanner computed from a multi-parameter

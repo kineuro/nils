@@ -358,9 +358,11 @@ cases:
       echo_time: 25.5
       flip_angle: 20
       echo_train_length: 48
+    # MRI pack 0.21.0: no Magnitude construct on an echo the scanner
+    # acquired with no magnitude token (dev-6's A1, ruling N7).
     axes:
       provenance: RawRecon
-      construct: Magnitude
+      construct: ''
       base: 'T2*w'
       technique: EPI
 

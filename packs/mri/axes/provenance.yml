@@ -29,6 +29,7 @@ order:
   - PerfusionRecon
   - ASLRecon
   - BOLDRecon
+  - Calibration
   - Localizer
   - ProjectionDerived
   - SubtractionDerived
@@ -75,6 +76,9 @@ values:
       combination: [epimix_psd]
   STAGE:
     terms: ['strategically acquired gradient echo']
+    # MRI pack 0.21.0: only STAGE's computed outputs; an echo it acquired,
+    # written ORIGINAL, is RawRecon (dev-6's A8).
+    requires: {not: image_type.is_original}
     keywords:
       - stage
   # MRI pack 0.18.0: never a DSC EPI, whatever its words say (flags.yml,
@@ -182,12 +186,24 @@ values:
       - functional mri
     detection:
       exclusive: is_bold
+  # MRI pack 0.21.0: a calibration, coil-sensitivity, receive-field or
+  # prescan reference acquired to support the reconstruction, not to be read
+  # (record 48, conventions round 3, case 7; a value the vocabulary lacked).
+  Calibration:
+    terms: ['calibration scan', 'ASSET calibration', 'ARC calibration', 'PURE calibration', 'coil sensitivity reference', 'SENSE reference scan', 'prescan normalize reference']
+    description: 'a coil-sensitivity, receive-field or prescan reference image acquired to support reconstruction or correction, not for reading'
+    detection:
+      exclusive: calibration_scan
   Localizer:
     # MRI pack 0.13.0, Nima's ruling (2026-09-29): never a GE calibration
     # scan, which the words below would otherwise take (flags.yml).
     # MRI pack 0.18.0: nor Philips' MobiView without a survey word, a
     # composed image (sealed-1 A18, the deep research, case 28).
-    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}]}
+    # MRI pack 0.21.0: nor a series named for planning of more than 5
+    # slices a plane that no vendor flag marks, nor a composite of other
+    # than survey stations (record 48, conventions round 3; flags.yml,
+    # section 18). GE's calibration is the value Calibration now.
+    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}, {not: planning_word_too_many_slices}, {not: composite_not_survey}]}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer
@@ -218,14 +234,18 @@ values:
     terms: ['projection', 'MIP', 'MinIP', 'MPR', 'reformat']
     # MRI pack 0.13.0: not Philips' isotropic diffusion image, which it
     # writes as a `PROJECTION IMAGE` (flags.yml, `is_diffusion_projection`).
-    requires: {not: is_diffusion_projection}
     keywords:
       - maximum intensity
       - minimum intensity
       - multiplanar reformat
     # MRI pack 0.18.0: and Siemens' standard deviation projection, a minIP
     # named so, and a radial thick-slab reformat (sealed-1 A14; case 35).
-    alternative_flags: [is_mip, is_minip, is_mpr, is_projection, projection_extra]
+    # MRI pack 0.21.0: and a stitched composite of other than survey
+    # stations, ORIGINAL or DERIVED (record 48, conflict 1).
+    alternative_flags: [is_mip, is_minip, is_mpr, is_projection, projection_extra, composite_not_survey]
+    # MRI pack 0.21.0: never GE's collapse of a 2D phase contrast, the
+    # acquisition's own image (case 5).
+    requires: {all: [{not: is_diffusion_projection}, {not: ge_pc_2d_collapse}]}
   SubtractionDerived:
     terms: ['subtraction', 'SUB', 'post minus pre']
     keywords:

@@ -874,6 +874,10 @@ fn build_registry() -> Vec<Table> {
                 col("segmented_k_space_traversal", Type::Text),
                 col("spoiling", Type::Text),
                 col("inversion_recovery", Type::Text),
+                // The ImageType Philips writes per frame of an enhanced MR
+                // object in (2005,140F), from the stack's own row: its third
+                // and fourth values name a Dixon part (W, F, IP or OP).
+                col("private_frame_image_type", Type::Text),
                 // what made it
                 req("job_id", Type::Int),
                 req("epoch", Type::Int),

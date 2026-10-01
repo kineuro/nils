@@ -106,6 +106,8 @@ const MORE: &[(&str, &str)] = &[
     ("segmented_k_space_traversal", "k-space segments"),
     ("spoiling", "spoiling"),
     ("inversion_recovery", "inversion recovery"),
+    // The ImageType Philips writes per frame, which names a Dixon part.
+    ("private_frame_image_type", "frame image type"),
 ];
 
 /// The fields a batch's signature always holds, beside those the deciding

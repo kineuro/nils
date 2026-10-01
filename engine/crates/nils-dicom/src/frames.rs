@@ -30,7 +30,9 @@ use crate::value::{Value, convert};
 pub const GROUPS_MAX: usize = 64;
 
 /// One run of frames of a multi-frame object that carry the same stack-level
-/// values, and so belong in one stack.
+/// values, and so belong in one stack. Of the ImageType Philips writes per
+/// frame, only the Dixon part it names counts; `values` holds the first
+/// frame's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameGroup {
     /// One slot per stack-level catalogue row, in catalogue order.
@@ -120,10 +122,43 @@ fn per_frame(dataset: &InMemDicomObject) -> Option<&[InMemDicomObject]> {
 /// cannot is the same for every frame, so it is read once.
 fn per_frame_source(source: Source) -> bool {
     match source {
-        Source::Chain(steps) => steps
-            .iter()
-            .any(|s| matches!(s, Step::Fg(_, _) | Step::Private(_))),
+        Source::Chain(steps) => steps.iter().any(|s| {
+            matches!(
+                s,
+                Step::Fg(_, _) | Step::Private(_) | Step::PhilipsPrivate(_)
+            )
+        }),
         _ => false,
+    }
+}
+
+/// The stack-level column that holds the ImageType Philips writes per frame
+/// of an enhanced MR object in (2005,140F).
+pub const FRAME_IMAGE_TYPE: &str = "private_frame_image_type";
+
+/// The Dixon parts an ImageType can name.
+pub const DIXON_PARTS: [&str; 4] = ["W", "F", "IP", "OP"];
+
+/// The Dixon part an ImageType names: the first of its backslash-separated
+/// values that is W, F, IP or OP, in upper case; none when no value is. Only
+/// this, of the ImageType Philips writes per frame, tells frames apart: a
+/// magnitude frame and a phase frame of one object stay together, as they
+/// always have.
+pub fn dixon_part(image_type: &str) -> Option<&'static str> {
+    image_type.split('\\').find_map(|token| {
+        let token = token.trim();
+        DIXON_PARTS
+            .iter()
+            .find(|p| p.eq_ignore_ascii_case(token))
+            .copied()
+    })
+}
+
+/// The Dixon part of a stack-level value, when it is text that names one.
+pub fn dixon_part_of(value: Option<&Value>) -> Option<&'static str> {
+    match value {
+        Some(Value::Text(t)) => dixon_part(t),
+        _ => None,
     }
 }
 
@@ -157,6 +192,18 @@ pub fn frame_groups(
             false => values.get(*i).cloned().flatten(),
         })
         .collect();
+    // The Philips per-frame ImageType tells frames apart by its Dixon part
+    // alone; a group keeps the whole value its first frame wrote.
+    let part_slot = fields_of(Level::Stack).position(|(_, f)| f.column == FRAME_IMAGE_TYPE);
+    let same = |a: &[Option<Value>], b: &[Option<Value>]| {
+        a.iter()
+            .zip(b)
+            .enumerate()
+            .all(|(slot, (x, y))| match Some(slot) == part_slot {
+                true => dixon_part_of(x.as_ref()) == dixon_part_of(y.as_ref()),
+                false => x == y,
+            })
+    };
     let mut groups: Vec<FrameGroup> = Vec::new();
     let mut row: Vec<Option<Value>> = Vec::with_capacity(stack.len());
     for (frame, _) in items.iter().enumerate() {
@@ -186,7 +233,7 @@ pub fn frame_groups(
             row.push(found);
         }
         let number = frame as u32 + 1;
-        match groups.iter_mut().find(|g| g.values == row) {
+        match groups.iter_mut().find(|g| same(&g.values, &row)) {
             Some(g) => g.add(number),
             None => {
                 if groups.len() == GROUPS_MAX {
@@ -299,6 +346,60 @@ mod tests {
                 Some("1\\0\\0\\0\\1\\0".to_string())
             );
         }
+    }
+
+    #[test]
+    fn the_dixon_part_is_the_first_part_token() {
+        assert_eq!(dixon_part("DERIVED\\PRIMARY\\W\\W\\DERIVED"), Some("W"));
+        assert_eq!(dixon_part("DERIVED\\PRIMARY\\IP\\IP\\DERIVED"), Some("IP"));
+        assert_eq!(dixon_part("derived\\primary\\op\\op"), Some("OP"));
+        assert_eq!(dixon_part("ORIGINAL\\PRIMARY\\M_FFE\\M\\FFE"), None);
+        assert_eq!(dixon_part("ORIGINAL\\PRIMARY\\PHASE MAP\\P\\SE"), None);
+        assert_eq!(dixon_part(""), None);
+    }
+
+    /// Frames that differ in the Philips per-frame ImageType but name no
+    /// Dixon part, a magnitude and a phase image say, are one group, as they
+    /// were before the column existed; frames that name two parts are two.
+    #[test]
+    fn only_the_dixon_part_of_the_philips_frame_image_type_groups_frames() {
+        let private = |t: &str| {
+            synth::seq(
+                dicom_core::Tag(0x2005, 0x140F),
+                vec![vec![synth::text(tags::IMAGE_TYPE, VR::CS, t)]],
+            )
+        };
+        let x = enhanced(
+            vec![synth::fg_orientation("1\\0\\0\\0\\1\\0")],
+            (0..4)
+                .map(|i| {
+                    vec![private(match i % 2 {
+                        0 => "ORIGINAL\\PRIMARY\\M_SE\\M\\SE",
+                        _ => "ORIGINAL\\PRIMARY\\PHASE MAP\\P\\SE",
+                    })]
+                })
+                .collect(),
+        );
+        assert_eq!(x.frames.groups.len(), 1);
+        assert_eq!(
+            x.frames.groups[0]
+                .value(FRAME_IMAGE_TYPE)
+                .map(Value::to_string),
+            Some("ORIGINAL\\PRIMARY\\M_SE\\M\\SE".to_string())
+        );
+        let x = enhanced(
+            Vec::new(),
+            (0..4)
+                .map(|i| {
+                    vec![private(match i % 2 {
+                        0 => "DERIVED\\PRIMARY\\W\\W\\DERIVED",
+                        _ => "DERIVED\\PRIMARY\\F\\F\\DERIVED",
+                    })]
+                })
+                .collect(),
+        );
+        assert_eq!(x.frames.groups.len(), 2);
+        assert_eq!(x.frames.groups[0].list(), "1,3");
     }
 
     /// A classic single-frame instance has no frames to group.

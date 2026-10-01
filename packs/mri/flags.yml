@@ -111,25 +111,32 @@ flags:
       # MRI pack 0.19.0: an enhanced object's EchoPulseSequence SPIN (the
       # deep research's case 22, section 16 below).
       - mech_spin
+      # MRI pack 0.21.0: a Philips mDixon TSE part written GR, and GE's MEMP
+      # of one echo (section 18).
+      - philips_dixon_tse
+      - ge_memp_single_echo
 
   # MRI pack 0.18.0: ScanningSequence as stated, except the bare `GE` a
   # third-party toolkit writes on the GE headers whose ScanOptions it
   # rewrote as numbers (below, `ge_numeric_header`), which says no gradient
   # echo: the names there tell a DTI's outputs (sealed-1 checkpoint, A9).
+  # MRI pack 0.21.0: never a Philips mDixon TSE part, whatever ScanningSequence
+  # says (section 18).
   has_gre:
-    any: [ss_gre_stated, image_type.hint_gre, sequence_name.is_gre,
-          sequence_name.is_fgre, sequence_name.is_flash, sequence_name.is_tfl,
-          sequence_name.is_mprage, sequence_name.is_swi, sequence_name.is_ciss,
-          sequence_name.is_tof, sequence_name.is_pc, sequence_name.is_epi_gre,
-          # MRI pack 0.10.0: every Siemens gradient-echo stem, and Philips'
-          # gradient-echo scanning techniques
-          sequence_name.is_gre_stem, philips_gre_technique,
-          # MRI pack 0.19.0: an enhanced object's EchoPulseSequence GRADIENT
-          mech_gradient,
-          # MRI pack 0.20.0: a GE research-mode series named for a gradient
-          # echo (dev-5's A5 and A6; section 17)
-          ge_research_gre_named]
-
+    all:
+      - {not: philips_dixon_tse}
+      - any: [ss_gre_stated, image_type.hint_gre, sequence_name.is_gre,
+              sequence_name.is_fgre, sequence_name.is_flash, sequence_name.is_tfl,
+              sequence_name.is_mprage, sequence_name.is_swi, sequence_name.is_ciss,
+              sequence_name.is_tof, sequence_name.is_pc, sequence_name.is_epi_gre,
+              # MRI pack 0.10.0: every Siemens gradient-echo stem, and Philips'
+              # gradient-echo scanning techniques
+              sequence_name.is_gre_stem, philips_gre_technique,
+              # MRI pack 0.19.0: an enhanced object's EchoPulseSequence GRADIENT
+              mech_gradient,
+              # MRI pack 0.20.0: a GE research-mode series named for a gradient
+              # echo (dev-5's A5 and A6; section 17)
+              ge_research_gre_named]
   has_epi:
     any: [scanning_sequence.has_epi, sequence_name.is_epi_diff,
           sequence_name.is_epi_gre, sequence_name.is_epi_se,
@@ -202,6 +209,8 @@ flags:
       - propeller_fse
       # MRI pack 0.19.0: SPIN with several echoes per excitation, no EPI
       - mech_tse
+      # MRI pack 0.21.0: a Philips mDixon TSE part (section 18)
+      - philips_dixon_tse
   # MRI pack 0.19.0: or the enhanced table's 3D multiple spin echo, and its
   # single-shot one (case 22).
   is_space:   {any: [sequence_name.is_space, sequence_name.is_space_ir, mech_3d_tse]}
@@ -224,7 +233,10 @@ flags:
   # MRI pack 0.18.0: but a calibration scan that states the unspoiled fast
   # steady state (`SS\SK` with FAST_GEMS) is SS-GRE, the later ruling on
   # exactly that stack (record 48, "Rulings after the re-adjudication").
-  is_tfl:     {any: [sequence_name.is_tfl, philips_tfe, {all: [ge_calibration, {not: ge_fast_ss}]}]}
+  # MRI pack 0.21.0: GE's pulse sequence decides a calibration's echo where
+  # it says (section 18): `fgre` without SP is SS-GRE, `efgre3d` without
+  # SP GRE.
+  is_tfl:     {any: [sequence_name.is_tfl, philips_tfe, {all: [ge_calibration, {not: ge_fast_ss}, {not: ge_psd_unspoiled_fgre}, {not: ge_psd_efgre3d_unspoiled}]}]}
   # MRI pack 0.13.0: or a Siemens `t1_mpr` protocol (below).
   is_mprage:  {any: [sequence_name.is_mprage, t1_mpr_named]}
   is_ssfp:    {any: [sequence_name.is_trufisp, philips_balanced, mech_bssfp]}
@@ -240,7 +252,9 @@ flags:
                      ge_vasctof_as_tof, scan_options.has_inflow_gems,
                      philips_inflow_named, mech_tof]}
   # MRI pack 0.18.0: `hint_pca` also reads Philips' `PCA` token (parsers.yml).
-  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca, mech_pc]}
+  # MRI pack 0.21.0: and GE's VASCPC_GEMS and phase-contrast pulse sequences
+  # (section 18; dev-6's A6).
+  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca, mech_pc, ge_phase_contrast]}
   is_flair:   {any: [sequence_name.is_flair_seq, scan_options.has_t1flair_gems,
                      scan_options.has_t2flair_gems, image_type.has_flair_synthetic]}
   is_dir:     {any: [image_type.has_dir, image_type.has_dir_synthetic]}
@@ -414,21 +428,30 @@ flags:
   # MRI pack 0.13.0: and Siemens' position display (`POSDISP`), the
   # planning picture of another series (dev-1: settled Localizer).
   # MRI pack 0.18.0: and GE's `SCOUT` in the image type (sealed-1 A18).
+  # MRI pack 0.21.0: and GE's three-plane series plane and Siemens'
+  # AutoAlign scouts (section 18, record 48's conventions round 3).
   is_localizer: {any: [image_type.is_localizer, sequence_name.is_localizer,
                        scan_options.has_scout_mode, image_type.is_posdisp,
-                       image_type.is_scout]}
+                       image_type.is_scout, ge_three_plane_localizer,
+                       vendor_auto_scout]}
   has_magnitude: image_type.has_magnitude
-  has_phase:     image_type.has_phase
+  # MRI pack 0.21.0: or GE's private image type 1 (section 18).
+  has_phase:     {any: [image_type.has_phase, ge_private_phase]}
   has_real:      image_type.has_real
   has_imaginary: image_type.has_imaginary
   # MRI pack 0.18.0: and GE's FLEX, a two-point Dixon (`FLEX_GEMS`; the
   # deep research, case 26; 116 archive stacks lacked Dixon).
+  # MRI pack 0.21.0: and a Philips mDixon part by its tokens, classic or per
+  # frame (record 48, conventions round 3, case 10: modifier Dixon).
   has_dixon:     {any: [image_type.has_dixon, scan_options.has_dix_fat,
-                        scan_options.has_dix_water, scan_options.has_flex_gems]}
-  has_water:     image_type.has_water
-  has_fat:       image_type.has_fat
-  has_in_phase:  image_type.has_in_phase
-  has_out_phase: image_type.has_out_phase
+                        scan_options.has_dix_water, scan_options.has_flex_gems,
+                        philips_dixon_part]}
+  # MRI pack 0.21.0: and Philips' per-frame part token (2005,140F) of an
+  # enhanced mDixon object (parsers.yml, `frame_image_type`).
+  has_water:     {any: [image_type.has_water, frame_image_type.has_water]}
+  has_fat:       {any: [image_type.has_fat, frame_image_type.has_fat]}
+  has_in_phase:  {any: [image_type.has_in_phase, frame_image_type.has_in_phase]}
+  has_out_phase: {any: [image_type.has_out_phase, frame_image_type.has_out_phase]}
   has_psir:      {any: [image_type.has_psir, image_type.has_psir_synthetic]}
   has_stir:      image_type.has_stir_synthetic
 
@@ -441,10 +464,16 @@ flags:
   # MRI pack 0.18.0: Philips' `MAXIMUM` only beside `DERIVED` or a
   # projection token (the deep research, case 14; all 157 archive stacks
   # carry DERIVED, so none moves).
+  # MRI pack 0.21.0: only where the geometry shows a projection (section
+  # 18, `maximum_projection`): the archive's 157 are whole 3D volumes.
   is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin,
-                        {all: [image_type.has_maximum, {any: [image_type.is_derived, image_type.is_projection]}]},
+                        maximum_projection,
                         {all: [image_type.is_projection, image_type.is_vascular]},
-                        {parser: image_type, token: COLLAPSE}]}
+                        # MRI pack 0.21.0: never GE's collapse of a 2D phase
+                        # contrast, an acquisition; and Philips' phase-contrast
+                        # projection (section 18).
+                        {all: [{parser: image_type, token: COLLAPSE}, {not: ge_pc_2d_collapse}]},
+                        pc_projection_image]}
   # MRI pack 0.20.0: or Siemens' `mIP_Images`, named in mixed case
   # (dev-5's A9; section 17).
   is_minip:      {any: [image_type.is_minip, minip_mixed_case]}
@@ -484,10 +513,12 @@ flags:
   # after the echo train number, `*tse2d1rs15`, are not it); GE names the
   # pulse sequence FRFSE (0019,xx9C) [V1, P48, MQ14]. dev-1 settled VFA-TSE
   # on 14 Siemens, one GE and one Philips 2D TSE that the rules called TSE.
+  # MRI pack 0.21.0: GE's by `FR_GEMS`, not its FRFSE pulse sequence
+  # (record 48, conflict 2; section 18, `ge_fast_recovery`).
   is_restore_tse:
     any:
       - sequence_name.is_tse_body
-      - {text: ge_pulse_sequence_name, matches: 'frfse'}
+      - ge_fast_recovery
   # The words of base MTw (rules/base.yml, `keywords:MTw`), for the rule
   # that must not take such a series first (MRI pack 0.12.0).
   # MRI pack 0.14.0: not where the words switch it off (`MT=OFF`, below).
@@ -835,12 +866,17 @@ flags:
       - {not: has_epi}
       - {not: is_psif}
       - {not: image_type.is_posdisp}
-      - {field: echo_time, ge: 8}
+      # MRI pack 0.21.0: at any echo time (record 48, conventions round 3: a
+      # T2-named gradient echo is T2*w; dev-6's R3c at TE 6.5 ms).
       - any:
           - {text: search_text, matches: '(^|[^a-z0-9])t2w?([^a-z0-9*]|$)'}
           # MRI pack 0.20.0: and Philips' `optT2` (dev-5's A5), read from
           # the series' own words, never GE's exam-level ProtocolName.
           - {text: technique_text, matches: 'optt2w?([^a-z0-9*]|$)'}
+          # MRI pack 0.21.0: and a Philips FFE named T2FFE whose private
+          # technique says FFE (dev-6's R3c); a T2-FFE the scanner states is
+          # the time-reversed steady state, which `is_psif` keeps out.
+          - {text: technique_text, matches: '(^|[^a-z0-9])t2 ?-? ?ffe'}
       - {not: {text: search_text, matches: 't2\*|t2star|t2 star'}}
 
   # --- diffusion: the tensor's outputs against a plain DWI's. Nima's ruling 7
@@ -1076,7 +1112,13 @@ flags:
   # computed isotropic image, not a reformat (dev-1: a `b1000` stack).
   # MRI pack 0.14.0: or its b=0 image, named `b0` (dev-2: a Philips `b0`
   # written `PROJECTION IMAGE\M\SE` was a reformat).
-  is_diffusion_projection: {all: [image_type.is_projection_image, {any: [has_positive_b_value, b0_named]}]}
+  # MRI pack 0.21.0: Philips', or a diffusion EPI's; never a GE angiography
+  # projection with the stray b value GE writes on it (dev-6's A3).
+  is_diffusion_projection:
+    all:
+      - image_type.is_projection_image
+      - {any: [has_positive_b_value, b0_named]}
+      - {any: [{text: manufacturer, prefix: philips}, {all: [has_epi, {not: image_type.is_vascular}]}]}
   # The isotropic (trace) diffusion image by Philips' and GE's names:
   # `isob-1000`, `isoDiff`, GE's `Isotropic Image`.
   trace_named: {text: search_text, matches: '(^|[^a-z0-9])iso\s*-?\s*(b\s*-?\s*[0-9]|diff|dwi)|isotropic image'}
@@ -1553,7 +1595,8 @@ flags:
   # made it PerfusionRecon are withdrawn.
   perfusion_recon_extra: perfusion_map_named
   # --- A14, A15: projections and reformats by what the header says.
-  projection_extra: {any: [stddev_projection, minip_named_projection, radial_reformat_named]}
+  # MRI pack 0.21.0: and a temporal standard deviation (section 18).
+  projection_extra: {any: [stddev_projection, minip_named_projection, radial_reformat_named, stddev_time]}
 
   ge_numeric_header:
     all:
@@ -1957,6 +2000,9 @@ flags:
       - {field: inversion_time, ge: 300}
       - {field: inversion_time, lt: 1400}
       - {not: ti_near_csf_null}
+      # MRI pack 0.21.0: GE's `T1FLAIR_GEMS` overrides the null (record 48,
+      # conflict 3).
+      - {not: scan_options.has_t1flair_gems}
 
   # === MRI pack 0.18.0: the values the vocabulary lacked ====================
   # Nima, 2026-09-30: "if we need to add something just do it. we cannot
@@ -2183,9 +2229,11 @@ flags:
       - {not: is_multi_echo}
       - {not: {text: echo_numbers, matches: '^\s*([2-9]|1[0-9])\s*$'}}
       - {field: n_instances, le: {field: n_slices}}
+      # MRI pack 0.21.0: the echo count from (2001,xx14) where it is written,
+      # the train only where it is not (record 48, conventions round 3).
       - any:
-          - {field: echo_train_length, ge: 2}
-          - {text: philips_number_of_echoes, matches: '^\s*([2-9]|1[0-9])\s*$'}
+          - philips_several_echoes
+          - all: [{not: philips_echoes_stated}, {field: echo_train_length, ge: 2}]
 
   # --- case 3: a Siemens inversion recovery written ORIGINAL whose
   # ImageType states R (the real part) is phase-sensitive: modifier PSIR,
@@ -2219,6 +2267,9 @@ flags:
           - {text: technique_text, matches: '(^|[^a-z])mddw([^a-z]|$)'}
           - {text: technique_text, matches: '(^|[^0-9])([6-9]|[1-9][0-9]{1,2}) ?(dir|dirs|directions|riktningar)([^a-z]|$)'}
           - {field: dwi_directions, ge: 6}
+          # MRI pack 0.21.0: or a bare count of six or more in a Siemens
+          # diffusion name (dev-6's A10, section 18).
+          - siemens_diffusion_count_named
 
   # --- case 6: a planning series of at most 5 slices per plane named for
   # planning (a localizer word, or loc, plan, mid-line, align, 3-plane) is a
@@ -2373,9 +2424,12 @@ flags:
     all:
       - philips_ffe
       - {not: is_multi_echo}
+      # MRI pack 0.21.0: (2001,xx14) counts the echo images a series holds,
+      # and a merged mFFE writes 1 there beside a train of 5 (156 archive
+      # stacks), so one echo acquired is still read from the train here.
       - {field: echo_train_length, present: true}
       - {field: echo_train_length, le: 1}
-      - {not: {text: philips_number_of_echoes, matches: '^\s*([2-9]|1[0-9])\s*$'}}
+      - {not: philips_several_echoes}
   philips_not_combined_ffe: {any: [philips_per_echo_ffe, philips_single_echo_ffe]}
 
   # --- A8: a Siemens gradient-echo sequence name outranks a turbo spin
@@ -2399,8 +2453,335 @@ flags:
   # --- A11: GE Inhance 3D Velocity, named so, is a phase contrast whatever
   # `IFLOW_GEMS` says; Inhance with no velocity word stays inflow (TOF). Its
   # product name is no velocity image.
+  # MRI pack 0.21.0: or by its pulse sequence, `Inh-Vel`, and the encoding
+  # velocity in its name (`Inhance VENC=60`).
   ge_inhance_velocity:
     all:
       - {text: manufacturer, prefix: ge}
-      - {text: technique_text, matches: 'inhance'}
-      - {text: technique_text, matches: '(^|[^a-z])(velocity|vel|pc|phase contrast)([^a-z]|$)'}
+      - any:
+          - all:
+              - {text: technique_text, matches: 'inhance'}
+              - {text: technique_text, matches: '(^|[^a-z])(velocity|vel|venc|pc|phase contrast)([^a-z]|$)'}
+          - {text: ge_pulse_sequence_name, matches: '^inh-?vel'}
+
+  # === 18. MRI pack 0.21.0: conventions round 3 ==============================
+  # Record 48, "Conventions, round 3" and "The four round-3 conflicts"
+  # (Nima, 2026-10-01), from the deep research's 40 cases
+  # (`studies/2026-10-01-conventions-r3/deep-research-r3.md`) and our
+  # archive's counts for them (`empirical.md` there), in the design
+  # repository. Every corpus stack is invented from the pattern those files
+  # name (`corpus/axes-0210.yml`).
+
+  # --- localizers: a vendor's flag outranks the slice count. GE writes
+  # SeriesPlane (0019,xx17) 256 on a three-plane localizer (dcm2niix's GE
+  # README), Siemens names its AutoAlign scouts `AAHead_Scout` (and
+  # `AutoAlign Scout`, `AASpine_Scout`), their MPRs among them (Localizer
+  # with construct MPR); with
+  # ImageType LOCALIZER, SCOUT or POSDISP these are localizers whatever
+  # their slice count (case 6).
+  ge_three_plane_localizer:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_series_plane, matches: '^\s*256(\.0*)?\s*$'}
+  siemens_autoalign_scout:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - any:
+          - {text: text_series_description, matches: '(^|[^a-z])(aa[a-z]*[ _-]?scout|autoalign)'}
+          - {text: text_protocol_name, matches: '(^|[^a-z])(aa[a-z]*[ _-]?scout|autoalign)'}
+  # The other makers' automatic planning scouts are the same product as
+  # AutoAlign under their own names, and the name is the vendor's protocol,
+  # not the site's: Philips' SmartExam survey (`SmartBrain`, 3D, about 100
+  # slices) and GE's READYBrain (`3D Ready Brain localizer`).
+  vendor_auto_scout:
+    any:
+      - siemens_autoalign_scout
+      - all: [{text: manufacturer, prefix: philips}, smart_survey]
+      - all: [{text: manufacturer, prefix: ge}, {text: technique_text, matches: 'ready ?brain'}]
+  # A series the header shows split into planes, each a stack, and named for
+  # planning is a three-plane localizer by the scanner's own geometry, which
+  # is what GE's SeriesPlane 256 states (Siemens' and Philips' localizers of
+  # 6 to 19 slices a plane, GE's of up to 20 before its series plane is read).
+  tri_plane_planning: {field: split_reason, eq: multi_orientation}
+  vendor_localizer_flag: {any: [is_localizer, tri_plane_planning]}
+  # The slice-count rule (record 48, dev-5's case 6, and the research's
+  # order) for a series no vendor flag marks: a planning word makes a
+  # localizer only of at most 5 slices a plane; more is a series named for
+  # planning and read as what it is. A composite of survey stations stays
+  # one whatever its slices (case 1, below).
+  planning_word_too_many_slices:
+    all:
+      - {field: n_slices, gt: 5}
+      - {not: vendor_localizer_flag}
+      - {not: stitched_composite}
+
+  # --- composites (conflict 1): a stitched image of several acquisitions or
+  # stations (Philips MobiView, Siemens Inline Composing `COMPOSED`,
+  # `COMP_AD`, `COMP_SP` and their kin) is computed from other series:
+  # provenance ProjectionDerived with construct Composed, the Siemens
+  # ORIGINAL notwithstanding; a composite of survey stations is a
+  # Localizer. Siemens' `MULTIECHOCOMBINED` is no stitching and stays out.
+  composite_token: {parser: image_type, any_token: [COMPOSED, COMPOSITE, COMP_AD, COMP_SP, COMP_AN, COMP_AD_N, COMP_MIP]}
+  stitched_composite: {any: [composite_token, composed_named]}
+
+  # --- Philips `MAXIMUM` (case 2): a projection only where the geometry
+  # shows one, at most 3 slices or a slab of 10 mm or more; the archive's
+  # 157 are whole 3D volumes of 30 to 200 contiguous slices, none named MIP,
+  # so none. The pack compares numbers and does no arithmetic, so the
+  # research's "three times the source thickness" is the slab's own.
+  maximum_projection:
+    all:
+      - image_type.has_maximum
+      - any: [{field: n_slices, le: 3}, {field: slice_thickness, ge: 10}]
+
+  # --- Siemens 3D-card outputs (case 3): each image by its own ImageType,
+  # whatever its series is named. A `CSA MPR` image in a series named MIP is
+  # a reformat, MPR; a `CSA MIP` one in a series named MPR a MIP (409
+  # archive stacks were MIP by the name).
+  csa_mpr_image:
+    all:
+      - {parser: image_type, substring: 'CSA MPR'}
+      - {not: {parser: image_type, substring: 'CSA MIP'}}
+  # A composite whose stations are no survey, by its words: the survey
+  # words of MobiView's rule (pack 0.18.0) and the localizer words.
+  composite_not_survey:
+    all:
+      - stitched_composite
+      - {not: {text: search_text, matches: 'survey|scout|locali[sz]er|(^|[^a-z])(loc|sikt)([^a-z]|$)|smartbrain'}}
+
+  # --- Siemens `STDDEV_TIME` (case 4): the voxelwise standard deviation over
+  # the measurements, a temporal map and no spatial projection: construct
+  # StdDevTime. `STDDEV_SAG`, `_COR` and `_TRA` stay StdDevProj.
+  stddev_time: {parser: image_type, any_token: [STDDEV_TIME, STDDEV]}
+
+  # --- phase contrast (case 5). GE's `VASCPC_GEMS` and its phase-contrast
+  # pulse sequences (`2dphcon`, `3dphcon`) are a phase contrast, as Philips'
+  # `PCA` token already is (dev-6's A6: a GE 2D PC read as a plain gradient
+  # echo). GE's Inhance 3D Velocity by its pulse sequence (`Inh-Vel`).
+  ge_phase_contrast:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {parser: scan_options, token: VASCPC_GEMS}
+          - {text: ge_pulse_sequence_name, matches: '^[23]d ?phcon|^inh-?vel'}
+  # Philips' outputs, by their tokens: `M_PCA` the magnitude, `VELOCITY MAP`
+  # with `P` the velocity (Velocity, pack 0.18.0), a `PROJECTION` a MIP, and
+  # a `PCA` image that is none of these the phase-contrast angiogram, the
+  # speed image (construct Speed).
+  pc_magnitude_image: {all: [{text: manufacturer, prefix: philips}, {parser: image_type, token: M_PCA}]}
+  pc_projection_image:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - {parser: image_type, token: PCA}
+      - image_type.is_projection_image
+  pc_speed_image:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - {parser: image_type, token: PCA}
+      - {not: {parser: image_type, any_token: [M_PCA, P, PHASE, VELOCITY, VEL, VELOCITY_MAP]}}
+      - {not: image_type.is_projection_image}
+  # GE's `COLLAPSE` of a 2D phase contrast is the thick slab's combined-flow
+  # image as acquired: RawRecon, no construct; a 3D one is a MIP.
+  ge_pc_2d_collapse:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - ge_phase_contrast
+      - {parser: image_type, token: COLLAPSE}
+      - {text: mr_acquisition_type, equals: 2d}
+
+  # --- calibration scans (case 7): a coil-sensitivity, receive-field or
+  # prescan reference, by its name (GE's ASSET, ARC and PURE calibrations,
+  # `ge_calibration` of pack 0.13.0, are all 899 such archive stacks), never
+  # an image computed from others: provenance Calibration, base none. Not
+  # meant for reading.
+  calibration_scan:
+    all:
+      - {not: image_type.is_derived}
+      - any:
+          - ge_calibration
+          - {text: technique_text, matches: '(^|[^a-z])(calibration|kalibrering|cal|coil ?sens(itivity)?|prescan)([^a-z0-9]|$)'}
+
+  # --- the gradient-echo family (cases 8 and 9). GE: `fgre` without SP in
+  # SequenceVariant is the fast GRASS, SS-GRE; `fspgr` the fast spoiled one,
+  # as is an `efgre3d` with SP; an `efgre3d` without SP states no spoiling,
+  # GRE. `FAST_GEMS` and `EDR_GEMS` say nothing of spoiling. Siemens `fl` is
+  # SP-GRE whatever SequenceVariant says (`is_flash`, pack 0.10.0).
+  ge_psd_unspoiled_fgre:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: '^fgre'}
+      - {not: has_spoiled}
+  ge_psd_fast_spoiled:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: 'fspgr'}
+          - all: [{text: ge_pulse_sequence_name, matches: 'efgre3d'}, has_spoiled]
+          - all: [{text: ge_pulse_sequence_name, matches: '^fgre'}, has_spoiled]
+  ge_psd_efgre3d_unspoiled:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: 'efgre3d$|^efgre3d'}
+      - {not: has_spoiled}
+
+  # --- Dixon (case 10). Philips' scanning technique (2001,xx20) says TSE or
+  # FFE, never ScanningSequence `GR` on an mDixon TSE: a Dixon part (W, F,
+  # IP, OP) whose private technique is a spin echo, or which has none and is
+  # named TSE with a train, is a turbo spin echo (14 archive stacks written
+  # GR: the water images were T2*w and the in-phase images T1w at TE 108
+  # ms, a misread no constraint showed).
+  philips_dixon_part:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - any: [has_water, has_fat, has_in_phase, has_out_phase]
+  philips_dixon_tse:
+    all:
+      - philips_dixon_part
+      - any:
+          - {text: philips_scanning_technique, matches: '^(tse|se|irtse|ir-tse|ir)$'}
+          - all:
+              - {not: {text: philips_scanning_technique, matches: '.'}}
+              - {text: technique_text, matches: '(^|[^a-z])(tse|turbo spin)([^a-z]|$)'}
+              - {field: echo_train_length, ge: 2}
+  # Siemens' Dixon parts (`DIXON` with `IN_PHASE`, `OPP_PHASE`, `WATER`,
+  # `FAT`) are a spoiled gradient echo, VI-GRE where the product is VIBE by
+  # its name, never a multi-echo one (the Dixon modifier records the
+  # echoes): 1,077 archive stacks were plain GRE.
+  siemens_dixon_gre:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - image_type.has_dixon
+      - has_gre
+      - {not: has_se}
+      - {not: has_epi}
+
+  # --- Philips' echo count (case 12) is (2001,xx14) where it is written; the
+  # echo train length of a turbo field echo is its shot, not its echoes.
+  philips_echoes_stated: {text: philips_number_of_echoes, matches: '^\s*[0-9]+\s*$'}
+  philips_several_echoes: {text: philips_number_of_echoes, matches: '^\s*([2-9]|1[0-9])\s*$'}
+
+  # --- Philips 3D T1 TFE (case 17): with the enhanced module's
+  # InversionRecovery NO and no inversion time it is a turbo field echo,
+  # FSP-GRE, not an MPRAGE; YES or a TI makes it one. A classic object
+  # states neither and keeps its reading.
+  philips_tfe_no_inversion:
+    all:
+      - philips_tfe
+      - {text: inversion_recovery, equals: 'no'}
+      - {not: {field: inversion_time, gt: 0}}
+
+  # --- GE Silent MRA (case 18): no construct, its ASL token included.
+  silent_mra_output: {all: [{text: manufacturer, prefix: ge}, {text: ge_pulse_sequence_name, matches: '^silen'}]}
+
+  # --- GE's private image type (0043,xx2F): 1 is the phase (dcm2niix's GE
+  # README). Its 2 and 3 are not read: our counts show 2 on every newer
+  # PROPELLER image (case 21: no Real) and on MAGiC and diffusion maps, and
+  # 3 on SWAN's computed outputs.
+  ge_private_phase:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_private_image_type, matches: '^\s*1\s*$'}
+
+  # --- a real or imaginary spin-echo component without PSIR evidence has no
+  # base (case 24): its intensity follows the receiver phase, not a weighting.
+  se_component_no_psir:
+    all:
+      - any: [has_real, has_imaginary]
+      - has_se
+      - {not: has_ir}
+      - {not: has_psir}
+      - {not: {text: search_text, matches: 'psir|true ?ir|phase sensitive'}}
+
+  # --- diffusion (case 26): a Philips "Reg - " copy is the registered
+  # (motion-corrected) diffusion series, RawRecon with MoCo.
+  philips_registered_copy:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - {text: text_series_description, matches: '^\s*reg\s*-'}
+
+  # --- multi-shot diffusion EPI (case 27): GE MUSE by its pulse sequence or
+  # name, Philips IRIS by its name, beside RESOLVE.
+  ms_epi_stated:
+    all:
+      - is_dwi
+      - any:
+          - {text: ge_pulse_sequence_name, matches: 'muse'}
+          - {text: technique_text, matches: '(^|[^a-z])(muse|iris)([^a-z]|$)'}
+
+  # --- GE fast recovery (conflict 2): `FR_GEMS` decides the 90-degree
+  # flip-back TSE, VFA-TSE, a PROPELLER's too (with Radial); an inversion
+  # (`IR_GEMS` or a TI) is IR-TSE first; an FRFSE pulse sequence or name
+  # without `FR_GEMS` is a plain TSE (GE disables fast recovery itself at a
+  # long TR, Edmonson et al. 2012).
+  ge_fast_recovery:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {parser: scan_options, token: FR_GEMS}
+      - {not: scan_options.has_ir_gems}
+      - {not: {field: inversion_time, gt: 0}}
+  ge_no_fast_recovery:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: scan_options, matches: '[a-z]'}
+      - {not: {parser: scan_options, token: FR_GEMS}}
+
+  # --- dev-6's rule bugs (`studies/2026-10-01-dev6-reference/grade.md`,
+  # part 2, groups A1 to A10).
+  # A1: an acquired echo of a susceptibility acquisition carries no
+  # Magnitude construct (ruling N7): Philips' per-echo `M_FFE` images of a
+  # SWIp, and an image GE writes ORIGINAL with no output prefix and no
+  # magnitude token.
+  philips_swi_acquired_echo:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - image_type.is_original
+      - {parser: image_type, token: M_FFE}
+      - {not: has_swi}
+  swi_plain_echo:
+    any:
+      - philips_swi_acquired_echo
+      - all: [ge_swi_unprefixed, {not: has_magnitude}]
+  # A4: GE's MEMP of one echo is a spin echo, whatever research mode and
+  # the flip say (case 31).
+  ge_memp_single_echo:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: 'memp'}
+          - {text: ge_internal_pulse_sequence_name, matches: '^memp$'}
+      - {not: is_multi_echo}
+      - {not: has_epi}
+  # A5: a spin echo at a long TR and an echo time under 40 ms is
+  # proton-density weighted whatever a T2 word says (the dual-echo ruling:
+  # the echo on screen decides).
+  se_short_te_t2_named:
+    all:
+      - has_se
+      - {not: has_ir}
+      - {not: has_epi}
+      - {not: is_flair}
+      - {field: repetition_time, ge: 2000}
+      - {field: echo_time, gt: 0}
+      - {field: echo_time, lt: 40}
+      - {text: search_text, matches: '(^|[^a-z0-9])t2w?([^a-z0-9*]|$)'}
+      - {not: {text: search_text, matches: 'flair|stir|tirm|t2\*|t2star|dwi|diff'}}
+  # A7: on a gradient echo the MTw word outranks a T2 word.
+  gre_mtw_named: {all: [has_gre, {not: has_se}, mtw_named]}
+  # A10: a Siemens diffusion named with a bare direction count of six or
+  # more just before its b value (`ep2d_diff_2mm_hcp_32_b1000`) states a
+  # tensor acquisition; never a three-scan trace, whose name holds other
+  # numbers (a field of view, a scan time).
+  siemens_diffusion_count_named:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: technique_text, matches: 'diff'}
+      - {text: technique_text, matches: '(^|\s)([6-9]|[1-9][0-9]|[1-2][0-9]{2})\s+b ?[0-9]'}
+      - {not: {text: technique_text, matches: 'trace|3 ?scan'}}
+  # A8: an echo Siemens' STAGE acquired (written ORIGINAL) is RawRecon, no
+  # longer its route's, and still the dual-echo gradient echo STAGE runs.
+  stage_acquired_echo:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - image_type.is_original
+      - has_gre
+      - {text: search_text, matches: '(^|[^a-z])stage([^a-z]|$)'}

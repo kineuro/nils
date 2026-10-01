@@ -354,6 +354,23 @@ parsers:
       has_axial_mode:    {substring: 'AXIAL MODE'}
 
   # ==========================================================================
+  # MRI pack 0.21.0: the ImageType Philips writes per frame in its private
+  # sequence (2005,140F), which names the Dixon part of an mDixon frame (W,
+  # F, IP, OP; dcm2niix PR #1038: "the one representation that's stayed
+  # stable across a decade of Philips software"), where the enhanced
+  # object's own ImageType does not. The engine splits an object's frames
+  # by that part (registry schema 78), so each part is a stack carrying it.
+  frame_image_type:
+    field: private_frame_image_type
+    case: upper
+    tokenize: {split: '[\\/\s]+'}
+    predicates:
+      has_water:     {token: W}
+      has_fat:       {token: F}
+      has_in_phase:  {token: IP}
+      has_out_phase: {token: OP}
+
+  # ==========================================================================
   # Siemens-style sequence names: substring matching over the lower-cased raw
   # value, no tokens at all.
   sequence_name:

@@ -23,6 +23,7 @@ order:
   - not_an_image
   - ruled_out
   - scout
+  - calibration
   - secondary_reformat
   - symri_working_scan
   - symri_product
@@ -63,8 +64,15 @@ rules:
   scout:
     clauses:
       - {when: {axis: directory_type, is: localizer}, cite: localizer, source: directory_type}
-      - {flag: ge_calibration, tier: stated}
     set: {disposition: scout, convertible: 'yes'}
+
+  # MRI pack 0.21.0: a calibration scan is an intermediate the scanner
+  # uses for reconstruction, not an image to read (record 48, conventions
+  # round 3, case 7); GE's calibration was a scout here before.
+  calibration:
+    clauses:
+      - {when: {axis: provenance, is: Calibration}, cite: Calibration, source: provenance}
+    set: {disposition: working_scan, convertible: 'no'}
 
   # MRI pack 0.12.0, Nima's ruling (2026-09-28): "we can call them reformat
   # to know we should skip them". A stack tagged SECONDARY and never PRIMARY
@@ -132,6 +140,8 @@ rules:
       - {when: {axis: construct, is: MinIP}, cite: MinIP, source: construct}
       # MRI pack 0.18.0 (vocabulary)
       - {when: {axis: construct, is: StdDevProj}, cite: StdDevProj, source: construct}
+      # MRI pack 0.21.0
+      - {when: {axis: construct, is: StdDevTime}, cite: StdDevTime, source: construct}
     set: {disposition: reformat, convertible: 'yes'}
 
   # A workstation resliced a volume. v0 carries the same list under the name
@@ -162,6 +172,8 @@ rules:
       - {when: {axis: construct, is: PBP}, cite: PBP, source: construct}
       - {when: {axis: construct, is: K2}, cite: K2, source: construct}
       - {when: {axis: construct, is: Velocity}, cite: Velocity, source: construct}
+      # MRI pack 0.21.0
+      - {when: {axis: construct, is: Speed}, cite: Speed, source: construct}
       - {when: {axis: construct, is: T1map}, cite: T1map, source: construct}
       - {when: {axis: construct, is: T2map}, cite: T2map, source: construct}
       - {when: {axis: construct, is: R1map}, cite: R1map, source: construct}

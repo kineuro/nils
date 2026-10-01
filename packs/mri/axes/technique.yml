@@ -131,6 +131,9 @@ values:
     # not: on five scanner protocols that combination called 2,916
     # single-shot diffusion stacks, 462 BOLD stacks and every ASL series
     # RESOLVE, and not one of them was (record 41).
+    # MRI pack 0.21.0: and GE MUSE by its pulse sequence or name, Philips
+    # IRIS by its name (record 48, conventions round 3, case 27).
+    alternative_flags: [ms_epi_stated]
     detection:
       exclusive: is_epi_diff_resolve
   # MRI pack 0.15.0, Nima's ruling N3 (2026-09-30, record 48): a diffusion
@@ -407,7 +410,9 @@ values:
     terms: ['multi-echo spin echo', 'MESE', 'dual echo SE', 'CPMG', 'T2 mapping spin echo']
     label: MESE
     family: SE
-    requires: {not: is_dual_echo_tse}
+    # MRI pack 0.21.0: nor a Philips mDixon TSE, whose echoes are its Dixon
+    # parts (flags.yml, section 18).
+    requires: {all: [{not: is_dual_echo_tse}, {not: philips_dixon_tse}]}
     keywords:
       - mese
       - me-se
@@ -427,6 +432,9 @@ values:
     label: RESTORE
     description: '90-degree flip-back (driven equilibrium) turbo spin echo'
     family: SE
+    # MRI pack 0.21.0: on GE only with `FR_GEMS`; its FRFSE pulse sequence or
+    # name without it is a plain TSE (record 48, conflict 2).
+    requires: {not: ge_no_fast_recovery}
     keywords:
       - restore
       - frfse
@@ -496,7 +504,10 @@ values:
     description: '3D inversion-prepared rapid gradient echo (T1-weighted)'
     family: GRE
     # MRI pack 0.14.0: never Philips' SmartBrain survey, a localizer.
-    requires: {not: smart_survey}
+    # MRI pack 0.21.0: nor a Philips 3D turbo field echo whose enhanced
+    # module says InversionRecovery NO (record 48, conventions round 3, case
+    # 17): FSP-GRE.
+    requires: {all: [{not: smart_survey}, {not: philips_tfe_no_inversion}]}
     keywords:
       - mprage
       # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
@@ -591,6 +602,9 @@ values:
       - multi echo gre
       - multi-echo gre
     # MRI pack 0.14.0: or by the name's echo count (flags.yml, `me_gre_named`).
+    # MRI pack 0.21.0: or an echo STAGE acquired, which is no longer its
+    # route's (dev-6's A8; flags.yml, section 18).
+    alternative_flags: [stage_acquired_echo]
     detection:
       combination: [is_me_gre]
   # DRIVE is Philips' driven equilibrium TSE and Philips has no
@@ -678,6 +692,9 @@ values:
       - tfe
       - fspgr
     # MRI pack 0.14.0: or GE's `FAST_GEMS` on a spoiled gradient echo (flags.yml).
+    # MRI pack 0.21.0: or GE's `fspgr`, and an `efgre3d` or `fgre` with SP
+    # (record 48, conventions round 3, case 8).
+    alternative_flags: [ge_psd_fast_spoiled]
     detection:
       exclusive: is_tfl
       combination: [ge_fspgr]
@@ -696,6 +713,9 @@ values:
     # spoiled: "T1W" is the contrast, not the technique T1-FFE (record 48,
     # dev-5's case 1; flags.yml, `philips_ffe_steady_state`).
     requires: {not: philips_ffe_steady_state}
+    # MRI pack 0.21.0: and Siemens' Dixon parts, a spoiled gradient echo
+    # (record 48, conventions round 3, case 10).
+    alternative_flags: [siemens_dixon_gre]
     detection:
       exclusive: is_flash
       combination: [has_spoiled, has_gre]
@@ -718,6 +738,11 @@ values:
     # MRI pack 0.20.0: or a Philips FFE in the steady state, by Spoiling,
     # SequenceVariant and its scanning technique in that order (record 48,
     # dev-5's case 1; flags.yml, `philips_ffe_steady_state`).
+    # MRI pack 0.21.0: or GE's `fgre` without SP; never an `efgre3d` without
+    # SP, which states no steady state of its own (record 48, conventions
+    # round 3, case 8).
+    requires: {not: ge_psd_efgre3d_unspoiled}
+    alternative_flags: [ge_psd_unspoiled_fgre]
     detection:
       exclusive: is_fisp
       combination: [ss_gre_by_vendor]

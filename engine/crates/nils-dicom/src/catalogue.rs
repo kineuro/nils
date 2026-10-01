@@ -136,6 +136,11 @@ pub enum Step {
     /// PerFrameFunctionalGroupsSequence, then the first item of the Philips
     /// (2005,140F) or the Siemens (0021,1201) private sequence, then its element.
     Private(Tag),
+    /// The Philips (2005,140F) private per-frame sequence alone: the first
+    /// item of PerFrameFunctionalGroupsSequence, then the first item of
+    /// (2005,140F), then its element. A Siemens (0021,1201) item is never
+    /// read by it.
+    PhilipsPrivate(Tag),
 }
 
 /// What a column is computed from, when it is not an element.
@@ -181,7 +186,7 @@ use Converter::{Date, Double, Int, Json, Text, Time};
 use Level::{Instance, Series, SeriesCt, SeriesMr, SeriesPet, Stack, Study, Subject};
 use Sensitivity::{QuasiIdentifying as Quasi, Technical as Tech};
 use Source::{Chain, Tag as T, TagOrMeta};
-use Step::{Fg, Item, Private, Top};
+use Step::{Fg, Item, PhilipsPrivate, Private, Top};
 
 const fn f(
     column: &'static str,
@@ -204,7 +209,10 @@ const fn f(
 const SHARED: Tag = tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE;
 const PER_FRAME: Tag = tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE;
 /// The private per-frame sequences of v0's `_from_enhanced_private`.
-pub const PRIVATE_PER_FRAME: [Tag; 2] = [Tag(0x2005, 0x140F), Tag(0x0021, 0x1201)];
+pub const PRIVATE_PER_FRAME: [Tag; 2] = [PHILIPS_PER_FRAME, Tag(0x0021, 0x1201)];
+/// The Philips private per-frame sequence, which [`Step::PhilipsPrivate`]
+/// reads alone.
+pub const PHILIPS_PER_FRAME: Tag = Tag(0x2005, 0x140F);
 /// The roots of v0's `_from_enhanced_fg`, in order.
 pub const FG_ROOTS: [Tag; 2] = [SHARED, PER_FRAME];
 const RADIOPHARM: Tag = tags::RADIOPHARMACEUTICAL_INFORMATION_SEQUENCE;
@@ -303,6 +311,15 @@ const INVERSION_RECOVERY_CHAIN: &[Step] = &[
     Fg(tags::MR_MODIFIER_SEQUENCE, tags::INVERSION_RECOVERY),
     Private(tags::INVERSION_RECOVERY),
 ];
+/// The ImageType Philips writes per frame of an enhanced MR object, in the
+/// first item of its (2005,140F) private sequence, in the classic form: its
+/// third and fourth values name a Dixon part (W, F, IP or OP) that the
+/// object's top-level ImageType does not. Only the Philips sequence is read,
+/// so a Siemens enhanced object, whose (0021,1201) items carry an ImageType
+/// too, reads nothing here, and neither does a classic image. This is the
+/// one chain that does not start at the top level: the top-level ImageType is
+/// `image_type`'s.
+const PRIVATE_FRAME_IMAGE_TYPE_CHAIN: &[Step] = &[PhilipsPrivate(tags::IMAGE_TYPE)];
 const ORIENTATION_CHAIN: &[Step] = &[
     Top(tags::IMAGE_ORIENTATION_PATIENT),
     Fg(
@@ -871,7 +888,7 @@ pub static CATALOGUE: &[Field] = &[
         Tech,
         "addition: SpecificCharacterSet as written",
     ),
-    // stack (14)
+    // stack (15)
     f(
         "inversion_time",
         Stack,
@@ -962,6 +979,14 @@ pub static CATALOGUE: &[Field] = &[
         Text,
         Tech,
         "SeriesType, v0's name",
+    ),
+    f(
+        "private_frame_image_type",
+        Stack,
+        Chain(PRIVATE_FRAME_IMAGE_TYPE_CHAIN),
+        Text,
+        Tech,
+        "addition: the ImageType Philips writes per frame of an enhanced MR object in (2005,140F), whose third and fourth values name a Dixon part W, F, IP or OP; empty on a classic image and on any other vendor's object",
     ),
     // series_mr (33 + 6)
     f(
@@ -1826,6 +1851,7 @@ fn step_text(step: &Step) -> String {
         Item(seq, tag) => format!("{}[0].{}", keyword(*seq), keyword(*tag)),
         Fg(seq, tag) => format!("fg {}.{}", keyword(*seq), keyword(*tag)),
         Private(tag) => format!("private per-frame .{}", keyword(*tag)),
+        PhilipsPrivate(tag) => format!("Philips private per-frame (2005,140F).{}", keyword(*tag)),
     }
 }
 
@@ -1937,11 +1963,12 @@ mod tests {
         // directionality are per image by design, and keeping one per series
         // records a multi-shell acquisition as its smallest shell.
         assert_eq!(count(Instance), 34);
-        assert_eq!(count(Stack), 14);
+        // the Philips per-frame ImageType, which names a Dixon part
+        assert_eq!(count(Stack), 15);
         assert_eq!(count(SeriesMr), 43);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 190);
+        assert_eq!(CATALOGUE.len(), 191);
     }
 
     #[test]
@@ -1983,8 +2010,19 @@ mod tests {
     fn chains_start_at_the_top_level_and_json_reads_sequences() {
         for f in CATALOGUE {
             if let Chain(steps) = f.source {
+                // the Philips per-frame ImageType is the one exception: the
+                // top-level ImageType is `image_type`'s
+                if f.column == "private_frame_image_type" {
+                    assert_eq!(steps, &[PhilipsPrivate(tags::IMAGE_TYPE)]);
+                    continue;
+                }
                 assert!(matches!(steps[0], Top(_)), "{}", f.column);
                 assert!(steps.len() >= 2, "{}", f.column);
+                assert!(
+                    !steps.iter().any(|s| matches!(s, PhilipsPrivate(_))),
+                    "{}",
+                    f.column
+                );
             }
             if f.converter == Json {
                 assert!(matches!(f.source, Source::Tag(_)), "{}", f.column);
@@ -2030,6 +2068,11 @@ mod tests {
         ));
         let md = render_markdown();
         assert!(md.contains("## series_mr (43, MR only)"));
-        assert!(md.contains("190 columns."));
+        assert!(md.contains("191 columns."));
+        assert!(md.contains("## stack (15)"));
+        assert_eq!(
+            Chain(PRIVATE_FRAME_IMAGE_TYPE_CHAIN).text(),
+            "Philips private per-frame (2005,140F).ImageType"
+        );
     }
 }

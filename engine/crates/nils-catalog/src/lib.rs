@@ -912,6 +912,16 @@ fn fixed_fields() -> Vec<Field> {
         ),
         f(
             "stack",
+            "private_frame_image_type",
+            "text",
+            Technical,
+            false,
+            true,
+            "fingerprint",
+            "the ImageType Philips writes per frame of an enhanced MR object in (2005,140F); its third and fourth values name a Dixon part W, F, IP or OP. Empty on a classic image and on any other vendor's object",
+        ),
+        f(
+            "stack",
             "mr_acquisition_type",
             "text",
             Technical,

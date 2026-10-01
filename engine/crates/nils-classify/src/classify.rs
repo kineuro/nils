@@ -143,6 +143,7 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("segmented_k_space_traversal", "segmented_k_space_traversal"),
     ("spoiling", "spoiling"),
     ("inversion_recovery", "inversion_recovery"),
+    ("private_frame_image_type", "private_frame_image_type"),
 ];
 
 /// The select that reads one window of fingerprints, ordered by stack. With

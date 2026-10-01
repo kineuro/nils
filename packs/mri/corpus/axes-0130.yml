@@ -258,7 +258,9 @@ cases:
     axes:
       modifier: 'BlackBlood,FLAIR'
 
-  - name: GE's prospective motion correction PROMO is MoCo
+  # MRI pack 0.21.0: PROMO is no MoCo (record 48, conventions round 3, case
+  # 37): it corrects the acquisition as it runs and writes no corrected copy.
+  - name: GE's prospective motion correction PROMO is no MoCo
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: 'RM\IR'
@@ -271,7 +273,7 @@ cases:
       echo_time: 2.8
       inversion_time: 1060
     axes:
-      modifier: MoCo
+      modifier: ''
 
   # --- techniques by name
 
@@ -755,12 +757,13 @@ cases:
       text_series_description: 'Asset kalibrering'
       repetition_time: 150
       echo_time: 1.7
+    # MRI pack 0.21.0: provenance Calibration with no base, a working scan
+    # (record 48, conventions round 3, case 7).
     axes:
-      provenance: RawRecon
+      provenance: Calibration
       technique: FISP
-      # no role takes it: it is a scout, as a localizer is, whatever its base
-      base: T1w
-      disposition: scout
+      base: ''
+      disposition: working_scan
       role: ''
 
   - name: a GE 3D calibration is an acquired fast spoiled gradient echo, not a localizer
@@ -774,18 +777,21 @@ cases:
       text_series_description: '3D Calibration'
       repetition_time: 1.5
       echo_time: 0.5
+    # MRI pack 0.21.0: provenance Calibration (case 7).
     axes:
-      provenance: RawRecon
+      provenance: Calibration
       technique: TurboFLASH
 
-  - name: another vendor's calibration word still makes a localizer
+  # MRI pack 0.21.0: a calibration of any vendor is Calibration (record 48,
+  # conventions round 3, case 7), no longer a localizer by the word.
+  - name: another vendor's calibration word makes a calibration scan
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       scanning_sequence: GR
       manufacturer: SIEMENS
       text_series_description: 'calibration'
     axes:
-      provenance: Localizer
+      provenance: Calibration
 
   - name: Philips isoDiff is the trace image and nothing else
     stack:

@@ -126,15 +126,22 @@ fn canonical_of<'a>(v: impl Fn(&str) -> Option<&'a Value>, class: Class) -> Stri
         if i > 0 {
             out.push('|');
         }
-        for c in value.chars() {
-            if c == '|' || c == '\\' {
-                out.push('\\');
-            }
-            out.push(c);
-        }
+        push_escaped(&mut out, value);
     }
     out
 }
+
+/// A value onto a canonical string, a `|` or a `\` escaped with a backslash.
+fn push_escaped(out: &mut String, value: &str) {
+    for c in value.chars() {
+        if c == '|' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+}
+
+use nils_dicom::frames::{FRAME_IMAGE_TYPE, dixon_part_of};
 
 fn iop(x: &Extracted) -> Option<&str> {
     text_of(x.value(Level::Stack, "image_orientation_patient"))
@@ -192,8 +199,11 @@ impl FileStack {
 /// The stacks one file holds (record 37, S8): one, as before, unless the
 /// frames of an enhanced multi-frame object state more than one, in which
 /// case each group of frames that agrees on the fourteen values is a stack of
-/// its own. The first is always the file's own signature, the one an instance
-/// is filed under.
+/// its own. Where the groups disagree on the Dixon part (W, F, IP or OP) the
+/// ImageType Philips writes per frame names, the part is a fifteenth value,
+/// and each part is a stack.
+/// The first is the stack of the file's first frame, the one an instance is
+/// filed under.
 pub fn stacks_of(x: &Extracted) -> Vec<FileStack> {
     if x.frames.groups.len() < 2 {
         return vec![FileStack {
@@ -203,11 +213,26 @@ pub fn stacks_of(x: &Extracted) -> Vec<FileStack> {
             values: None,
         }];
     }
+    // A Philips enhanced Dixon object writes its parts (W, F, IP, OP) only in
+    // the ImageType of each frame's (2005,140F) item, which is not one of the
+    // fourteen values, so its parts would round back to one signature. Only
+    // when the file's groups disagree on the Dixon part that ImageType names
+    // is the part a fifteenth value, so every other file, classic or enhanced
+    // (one whose frames differ there as magnitude and phase do included),
+    // keeps the key it always had.
+    let part = |g: &nils_dicom::FrameGroup| dixon_part_of(g.value(FRAME_IMAGE_TYPE));
+    let first = part(&x.frames.groups[0]);
+    let parts = x.frames.groups[1..].iter().any(|g| part(g) != first);
     let mut out: Vec<FileStack> = Vec::new();
     for g in &x.frames.groups {
         let orientation = orientation(text_of(g.value("image_orientation_patient")));
+        let mut canonical = canonical_of(|c| g.value(c), orientation.class);
+        if parts {
+            canonical.push('|');
+            canonical.push_str(part(g).unwrap_or_default());
+        }
         let signature = Signature {
-            key: key_of(&canonical_of(|c| g.value(c), orientation.class)),
+            key: key_of(&canonical),
             orientation,
         };
         match out.iter_mut().find(|s| s.signature.key == signature.key) {
@@ -472,5 +497,219 @@ mod tests {
         let x = nils_dicom::extract(&path).unwrap();
         assert_eq!(canonical(&x), "||||||||||||Axial|");
         assert_eq!(Signature::of(&x).orientation, Orientation::UNKNOWN);
+    }
+
+    /// An enhanced MR object: the top-level ImageType of a Philips Dixon
+    /// object, which names no part, and one per-frame item per frame, each
+    /// with its orientation and, where given, a private per-frame sequence
+    /// (`private`) whose first item holds an ImageType.
+    fn enhanced(private: dicom_core::Tag, frames: &[(&str, Option<&str>)]) -> Extracted {
+        use dicom_core::VR;
+        use dicom_dictionary_std::tags;
+        use nils_dicom::synth::{TempDir, enhanced_meta, enhanced_mr, fg_orientation, seq, text};
+
+        let per_frame: Vec<Vec<nils_dicom::synth::Elem>> = frames
+            .iter()
+            .map(|(iop, image_type)| {
+                let mut groups = vec![fg_orientation(iop)];
+                if let Some(t) = image_type {
+                    groups.push(seq(private, vec![vec![text(tags::IMAGE_TYPE, VR::CS, t)]]));
+                }
+                groups
+            })
+            .collect();
+        let mut elems = enhanced_mr("1.2.3", "1.2.3.4", "1.2.3.4.5", Vec::new(), per_frame);
+        elems.push(text(
+            tags::IMAGE_TYPE,
+            VR::CS,
+            "DERIVED\\PRIMARY\\DIXON\\NONE",
+        ));
+        let dir = TempDir::new("stack-enhanced");
+        let path = dir.file(
+            "a.dcm",
+            &nils_dicom::synth::part10(&enhanced_meta("1.2.3.4.5"), &elems, true),
+        );
+        nils_dicom::extract(&path).unwrap()
+    }
+
+    const PHILIPS: dicom_core::Tag = dicom_core::Tag(0x2005, 0x140F);
+    const SIEMENS: dicom_core::Tag = dicom_core::Tag(0x0021, 0x1201);
+    const AXIAL: &str = "1\\0\\0\\0\\1\\0";
+    const SAGITTAL: &str = "0\\1\\0\\0\\0\\-1";
+    /// The fourteen values of an axial and a sagittal frame of [`enhanced`],
+    /// as every build before the Philips per-frame ImageType wrote them.
+    const AXIAL_14: &str = "||||||||||||Axial|DERIVED\\\\PRIMARY\\\\DIXON\\\\NONE";
+    const SAGITTAL_14: &str = "||||||||||||Sagittal|DERIVED\\\\PRIMARY\\\\DIXON\\\\NONE";
+
+    /// The keys a classic image and an enhanced object whose groups agree on
+    /// the Philips per-frame ImageType are given are the keys of the fourteen
+    /// values, byte for byte as before.
+    #[test]
+    fn keys_are_unchanged_where_the_frame_image_type_does_not_disagree() {
+        use dicom_core::VR;
+        use dicom_dictionary_std::tags;
+        use nils_dicom::synth::{MetaFields, TempDir, minimal_mr, part10, text};
+
+        // a classic image: the pinned key of `the_canonical_string_of_a_file`
+        let dir = TempDir::new("stack-classic");
+        let mut elems = minimal_mr("1.2.3", "1.2.3.4", "1.2.3.4.5");
+        elems.push(text(tags::ECHO_TIME, VR::DS, "10"));
+        elems.push(text(tags::REPETITION_TIME, VR::DS, "499.96"));
+        elems.push(text(tags::FLIP_ANGLE, VR::DS, "90"));
+        elems.push(text(tags::ECHO_NUMBERS, VR::IS, "1"));
+        elems.push(text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M"));
+        elems.push(text(
+            tags::IMAGE_ORIENTATION_PATIENT,
+            VR::DS,
+            "0\\1\\0\\0\\0\\-1",
+        ));
+        let path = dir.file("a.dcm", &part10(&MetaFields::mr("1.2.3.4.5"), &elems, true));
+        let x = nils_dicom::extract(&path).unwrap();
+        assert_eq!(x.value(Level::Stack, FRAME_IMAGE_TYPE), None);
+        let stacks = stacks_of(&x);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].signature.key, "e77101de3f76b1de");
+
+        // an enhanced object whose frames all name the same part: one stack,
+        // the key of its fourteen values
+        let x = enhanced(
+            PHILIPS,
+            &[(AXIAL, Some("DERIVED\\PRIMARY\\W\\W\\DERIVED")); 4],
+        );
+        assert_eq!(
+            x.value(Level::Stack, FRAME_IMAGE_TYPE),
+            Some(&Value::Text("DERIVED\\PRIMARY\\W\\W\\DERIVED".into()))
+        );
+        let stacks = stacks_of(&x);
+        assert_eq!(stacks.len(), 1);
+        assert!(stacks[0].ranges.is_empty());
+        assert_eq!(canonical(&x), AXIAL_14);
+        assert_eq!(stacks[0].signature.key, key_of(AXIAL_14));
+
+        // two orientations, one part: two stacks, each the key of its
+        // fourteen values, as record 37 S8 split them
+        let x = enhanced(
+            PHILIPS,
+            &[
+                (AXIAL, Some("DERIVED\\PRIMARY\\W\\W\\DERIVED")),
+                (AXIAL, Some("DERIVED\\PRIMARY\\W\\W\\DERIVED")),
+                (SAGITTAL, Some("DERIVED\\PRIMARY\\W\\W\\DERIVED")),
+                (SAGITTAL, Some("DERIVED\\PRIMARY\\W\\W\\DERIVED")),
+            ],
+        );
+        let keys: Vec<String> = stacks_of(&x).into_iter().map(|s| s.signature.key).collect();
+        assert_eq!(keys, [key_of(AXIAL_14), key_of(SAGITTAL_14)]);
+
+        // two orientations and no private ImageType at all: the same
+        let x = enhanced(
+            PHILIPS,
+            &[
+                (AXIAL, None),
+                (AXIAL, None),
+                (SAGITTAL, None),
+                (SAGITTAL, None),
+            ],
+        );
+        let keys: Vec<String> = stacks_of(&x).into_iter().map(|s| s.signature.key).collect();
+        assert_eq!(keys, [key_of(AXIAL_14), key_of(SAGITTAL_14)]);
+    }
+
+    /// A Philips enhanced Dixon object whose frames name four parts in the
+    /// ImageType of their (2005,140F) items is four stacks, each the key of
+    /// its fourteen values and its part.
+    #[test]
+    fn the_parts_of_a_philips_dixon_object_are_stacks_of_their_own() {
+        let parts = ["W", "F", "IP", "OP"];
+        let types: Vec<String> = parts
+            .iter()
+            .map(|p| format!("DERIVED\\PRIMARY\\{p}\\{p}\\DERIVED"))
+            .collect();
+        // interleaved: W, F, IP, OP, W, F, IP, OP
+        let frames: Vec<(&str, Option<&str>)> = (0..8)
+            .map(|i| (AXIAL, Some(types[i % 4].as_str())))
+            .collect();
+        let x = enhanced(PHILIPS, &frames);
+        assert_eq!(x.frames.groups.len(), 4);
+        let stacks = stacks_of(&x);
+        assert_eq!(stacks.len(), 4);
+        for (i, (s, p)) in stacks.iter().zip(parts).enumerate() {
+            let want = format!("{AXIAL_14}|{p}");
+            assert_eq!(s.signature.key, key_of(&want), "{p}");
+            let n = i as u32 + 1;
+            assert_eq!(s.ranges, [(n, n), (n + 4, n + 4)], "{p}");
+            assert_eq!(s.frames, 2);
+            let values = s.values.as_ref().expect("a part's own values");
+            let column = nils_dicom::catalogue::fields_of(Level::Stack)
+                .position(|(_, f)| f.column == FRAME_IMAGE_TYPE)
+                .unwrap();
+            assert_eq!(
+                values[column],
+                Some(Value::Text(format!("DERIVED\\PRIMARY\\{p}\\{p}\\DERIVED")))
+            );
+        }
+        // the first stack is the first frame's, which the file is filed under
+        assert_eq!(stacks[0].first_frame(), 1);
+    }
+
+    /// A Philips enhanced object whose frames differ in their (2005,140F)
+    /// ImageType only as magnitude and phase do (a QMap's M_SE and PHASE MAP)
+    /// names no Dixon part: one stack, with the key of its fourteen values,
+    /// as before; and beside a second orientation, the two stacks it always
+    /// had, with their old keys.
+    #[test]
+    fn magnitude_and_phase_frames_keep_their_key() {
+        let m = "ORIGINAL\\PRIMARY\\M_SE\\M\\SE";
+        let p = "ORIGINAL\\PRIMARY\\PHASE MAP\\P\\SE";
+        let x = enhanced(
+            PHILIPS,
+            &[
+                (AXIAL, Some(m)),
+                (AXIAL, Some(p)),
+                (AXIAL, Some(m)),
+                (AXIAL, Some(p)),
+            ],
+        );
+        let stacks = stacks_of(&x);
+        assert_eq!(stacks.len(), 1);
+        assert!(stacks[0].ranges.is_empty());
+        assert_eq!(stacks[0].frames, 4);
+        assert_eq!(stacks[0].signature.key, key_of(AXIAL_14));
+
+        let x = enhanced(
+            PHILIPS,
+            &[
+                (AXIAL, Some(m)),
+                (AXIAL, Some(p)),
+                (SAGITTAL, Some(m)),
+                (SAGITTAL, Some(p)),
+            ],
+        );
+        let stacks = stacks_of(&x);
+        let keys: Vec<&str> = stacks.iter().map(|s| s.signature.key.as_str()).collect();
+        assert_eq!(keys, [key_of(AXIAL_14), key_of(SAGITTAL_14)]);
+        assert_eq!(stacks[0].ranges, [(1, 2)]);
+        assert_eq!(stacks[1].ranges, [(3, 4)]);
+    }
+
+    /// A Siemens enhanced object's (0021,1201) items carry an ImageType too,
+    /// and it is never read as the Philips one: the frames that differ only
+    /// there are one stack, with the key they always had.
+    #[test]
+    fn a_siemens_enhanced_object_is_not_split_by_its_private_image_type() {
+        let x = enhanced(
+            SIEMENS,
+            &[
+                (AXIAL, Some("ORIGINAL\\PRIMARY\\M\\NORM")),
+                (AXIAL, Some("ORIGINAL\\PRIMARY\\P\\NORM")),
+                (AXIAL, Some("ORIGINAL\\PRIMARY\\M\\NORM")),
+                (AXIAL, Some("ORIGINAL\\PRIMARY\\P\\NORM")),
+            ],
+        );
+        assert_eq!(x.value(Level::Stack, FRAME_IMAGE_TYPE), None);
+        assert!(!x.frames.split());
+        let stacks = stacks_of(&x);
+        assert_eq!(stacks.len(), 1);
+        assert!(stacks[0].ranges.is_empty());
+        assert_eq!(stacks[0].signature.key, key_of(AXIAL_14));
     }
 }

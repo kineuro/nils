@@ -15,16 +15,17 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.20.2");
+    assert_eq!(pack.id(), "mri@0.21.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
-        5,
-        "v0 has five parsers and so does the pack"
+        6,
+        "v0 has five parsers, and MRI pack 0.21.0 adds the Philips per-frame \
+         ImageType"
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        235,
+        239,
         "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
          Siemens stems, the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
@@ -32,12 +33,14 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          without GE's collapse, the one of pack 0.13.0: a workstation's \
          thick-slab average, the one of pack 0.15.0: a Siemens BLADE \
          diffusion, the one of pack 0.16.0: a Siemens BLADE turbo spin \
-         echo by its stem, and the two of pack 0.18.0: GE's SCOUT and \
-         Siemens' standard deviation projections"
+         echo by its stem, the two of pack 0.18.0: GE's SCOUT and \
+         Siemens' standard deviation projections, and the four of pack \
+         0.21.0: the Dixon parts W, F, IP and OP of the Philips per-frame \
+         ImageType"
     );
     assert_eq!(
         pack.flags.len(),
-        366,
+        407,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -89,7 +92,18 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          name the physics rule out, GE's research-mode spin echo by its \
          train and gradient echo by its name, GE's DTI output on a numeric \
          header, a Siemens gradient-echo stem against letters inside a \
-         word, a minIP in mixed case and GE's Inhance velocity"
+         word, a minIP in mixed case and GE's Inhance velocity, and pack \
+         0.21.0 the 41 of record 48's conventions round 3 and a development \
+         grade's rule bugs: the vendors' localizer flags and the slice \
+         count, a stitched composite, a MAXIMUM projection, a CSA MPR image, \
+         a temporal standard deviation, GE's and Philips' phase-contrast \
+         outputs, a calibration scan, GE's gradient-echo pulse sequences, \
+         Philips' mDixon TSE and Dixon part, Siemens' Dixon part, Philips' \
+         echo count, a 3D TFE with no inversion, Silent MRA's output, GE's \
+         private phase, a spin-echo component without PSIR, a registered \
+         copy, MUSE and IRIS, GE's fast recovery, an acquired SWI echo, a \
+         single-echo MEMP, a short-TE spin echo named T2, an MTw gradient \
+         echo, a direction count named, and an echo STAGE acquired"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());
@@ -151,7 +165,10 @@ fn every_image_type_identity_record_37_named_reaches_an_axis() {
         // The projection spellings with no predicate at all, 549 stacks, and
         // the truncated value on 326 more.
         ("DERIVED\\PRIMARY\\MINIMUM", "construct", "MinIP"),
-        ("DERIVED\\PRIMARY\\MAXIMUM", "construct", "MIP"),
+        // MRI pack 0.21.0: Philips' MAXIMUM is a MIP only where the geometry
+        // shows a projection (record 48, conventions round 3, case 2); the token
+        // alone, with no slices stated, is none.
+        ("DERIVED\\PRIMARY\\MAXIMUM", "construct", ""),
         ("DERIVED\\PRIMARY\\HD MIP", "construct", "MIP"),
         ("DERIVED\\PRIMARY\\MAX_IP", "construct", "MIP"),
         ("DERIVED\\PRIMARY\\MIPT", "construct", "MIP"),
