@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.67 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.67] - 2026-10-01
 
 The MRI pack is 0.20.1, a fix to 0.20.0 found by its first reclassify of an archive: a Philips SWIp image of combined echoes, and its MIP and minIP, no longer break the pack's own implication that a combined multi-echo gradient echo is T2*-weighted, so they no longer raise a `classify.implied` item or have their base and technique written below every threshold. No stack's values change; after the update, a reclassify with the new pack clears the items 0.20.0 raised on them. The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.66 published; if this release publishes a new build of the image, a change after it pins them to that one. No desk release comes with it: installs keep desk 1.0.0-alpha.61. The HTTP API contract and the pack contract now say, amended in place, what 1.0.0-alpha.66 already does: a vendor's sequence name is shown at detail quasi and above only. The registry stays at schema 77; the HTTP API contract stays version 7, the review-item contract version 4, the pack contract version 8, the suite contract version 3 and the job contract version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.66. It carries kineuro/nils#330, #331 and #332.
