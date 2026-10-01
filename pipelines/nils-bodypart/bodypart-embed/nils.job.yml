@@ -14,7 +14,7 @@
 # localizer, and not SyMRI, projection- or subtraction-derived.
 #
 # The image is pinned by its registry manifest digest (record 43 R3): the
-# image the release workflow published as v1.0.0-alpha.65, by the digest it
+# image the release workflow published as v1.0.0-alpha.66, by the digest it
 # printed. A release that publishes a new image repins all five descriptors.
 name: bodypart-embed
 schema-version: "0.5"
@@ -26,7 +26,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-bodypart@sha256:3b846e8d75ab729c94787067ed3053a9e647fdb996eba88f39dba82069026381"
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:a0c5c825a62a7b74fde021b25559480afb4d1aba5a37302cebf1d09714fbbdc0"
 
 inputs:
   - id: batch

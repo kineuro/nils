@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.66 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.66] - 2026-10-01
 
 The engine reads what the header could not say before: an enhanced MR object's MR Pulse Sequence module and the SOP class decide its technique, a spectroscopy object is MRS by its SOP class, a session pass decides a stack its own header leaves open from the other stacks of its session, and a person reading a stack is shown the private elements the served pack lists, a vendor's sequence name among them at detail quasi and above only. `nils pack replay` says what a pack decides of each stack from its header packet, offline. The MRI pack is 0.20.0 on pack contract 8, carrying 0.18.1 and 0.19.0: it settles nine questions of a development grade and fixes that grade's rule bugs. After updating, run `nils fingerprint` (the fingerprint's revision moves to 5, so every stack is derived again and the SOP class and phase contrast fill at once), read the enhanced objects' files again with `nils digest <root> --reread <manufacturer>` where a manufacturer has them, fingerprint again, and classify with the new pack. The release publishes a new build of the body-part image; the body-part descriptors in this tag pin the image 1.0.0-alpha.65 published, and a change after it pins them to the new one. No desk release comes with it: installs keep desk 1.0.0-alpha.61, which shows the new header texts and does not yet show `private`. The registry is at schema 77; the HTTP API contract stays version 7 and the review-item contract version 4, each amended in place; the pack contract is version 8, and an engine at 8 loads a contract-7 pack unchanged; the suite contract stays version 3 and the job contract version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.65. It carries kineuro/nils#322, #323, #324, #325, #326, #327 and #328.
