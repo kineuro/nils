@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.68 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.68] - 2026-10-01
 
 Sequence names are shown everywhere, at every detail. The quasi rule of 1.0.0-alpha.66 is withdrawn: the standard SequenceName and PulseSequenceName, GE's two pulse sequence names and Philips' scanning technique are shown at plain as at quasi and sensitive, in the reader's documents, the header door, a campaign batch's signature and the ask doors. The MRI pack is 0.20.2, which drops the `quasi` marks; no stack's values change, and no reclassify is needed. Identifiers, identifier-shaped values and dates stay withheld as before. The body-part descriptors pin the `nils-bodypart` image 1.0.0-alpha.67 published; if this release publishes a new build, a change after it pins them to that one.
