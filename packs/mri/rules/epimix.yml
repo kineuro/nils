@@ -37,7 +37,9 @@ rules:
   t1_flair:
     clauses:
       - {when: {all: [{text: search_text, matches: '\bt1(?:w|flair|\s|$|-)'}, {text: search_text, substring: flair}]}, cite: 't1 and flair', source: text, tier: keywords}
-    set: {base: 'T1w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
+    # MRI pack 0.21.0: EPI, the steady-state readout whose echo type is not
+    # stated (record 48, conventions round 3, case 28; NeuroMix's authors).
+    set: {base: 'T1w', modifier: [FLAIR], technique: EPI, directory_type: anat}
     confidence: 0.9
 
   # A single-shot fast spin echo readout, which NeuroMix uses for its FLAIR
@@ -167,7 +169,8 @@ rules:
   ti_short_t1_flair:
     clauses:
       - {when: {all: [{field: inversion_time, ge: 500}, {field: inversion_time, le: 750}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'a short inversion time', source: physics, tier: physics}
-    set: {base: 'T1w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
+    # MRI pack 0.21.0: EPI, as the named T1 FLAIR above.
+    set: {base: 'T1w', modifier: [FLAIR], technique: EPI, directory_type: anat}
     confidence: 0.8
 
   te_short_t2star:

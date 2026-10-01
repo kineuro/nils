@@ -953,6 +953,7 @@ cases:
     axes:
       provenance: Localizer
 
+  # MRI pack 0.21.0: ProjectionDerived, record 48's conflict 1 (was RawRecon).
   - name: a Philips MobiView without a survey word is a composed image, not a localizer
     stack:
       image_type: 'DERIVED\SECONDARY\M_SE\M\SE'
@@ -966,7 +967,7 @@ cases:
       echo_time: 100
       echo_train_length: 20
     axes:
-      provenance: RawRecon
+      provenance: ProjectionDerived
       construct: Composed
 
   - name: a Philips MobiView survey stays a localizer
@@ -1271,13 +1272,15 @@ cases:
 
   # --- case 14: Philips MAXIMUM
 
-  - name: a Philips MAXIMUM image beside DERIVED is a MIP
+  # MRI pack 0.21.0: a projection only where the geometry shows one (record
+  # 48, conventions round 3, case 2); this one states no slices, so no MIP.
+  - name: a Philips MAXIMUM image beside DERIVED is no MIP by the token alone
     stack:
       image_type: 'DERIVED\PRIMARY\T1\MAXIMUM'
       manufacturer: Philips Medical Systems
       text_series_description: 'T1 max'
     flags:
-      is_mip: true
+      is_mip: false
 
   - name: a MAXIMUM token with neither DERIVED nor a projection is no MIP
     stack:
@@ -1305,7 +1308,9 @@ cases:
       modifier: FLAIR
       base: T1w
 
-  - name: a GE T1 FLAIR at TR 2,800 ms and TI 840 ms is far from the CSF null and is IR
+  # MRI pack 0.21.0: GE's `T1FLAIR_GEMS` overrides the CSF null (record 48,
+  # conflict 3); the case below without the option keeps the rule.
+  - name: a GE T1 FLAIR at TR 2,800 ms and TI 840 ms with T1FLAIR_GEMS is FLAIR whatever the null
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: 'SE\IR'
@@ -1314,6 +1319,24 @@ cases:
       mr_acquisition_type: 2D
       manufacturer: GE MEDICAL SYSTEMS
       text_series_description: 'Sag T1 FLAIR'
+      repetition_time: 2800
+      echo_time: 26
+      inversion_time: 840
+      echo_train_length: 9
+    axes:
+      technique: TIRM
+      modifier: FLAIR
+      base: T1w
+
+  - name: a GE T1 inversion recovery at TR 2,800 ms and TI 840 ms without T1FLAIR_GEMS is far from the CSF null and is IR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FAST_GEMS\IR_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sag T1 IR'
       repetition_time: 2800
       echo_time: 26
       inversion_time: 840

@@ -94,7 +94,7 @@ derive:
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, real, swi, projection, r2star, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
+order: [minip, mip, phase, real, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -230,6 +230,24 @@ rules:
       directory_type: anat
     confidence: 0.9
 
+  # MRI pack 0.21.0 (dev-6's A1, ruling N7): an echo the scanner acquired
+  # carries no Magnitude construct, which only a route that knows the phase
+  # writes: Philips' per-echo `M_FFE` images of a SWIp, and a GE image written
+  # ORIGINAL with no output prefix and no magnitude token (a 3D EPI SWI).
+  # RawRecon and T2*-weighted, as the magnitude below.
+  acquired_echo:
+    clauses:
+      - {flag: swi_plain_echo, tier: exclusive}
+    set:
+      provenance: RawRecon
+      base: T2starw
+      construct:
+        - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
+      technique: {from: swi_component_technique}
+      directory_type: anat
+    confidence: 0.85
+
   magnitude:
     clauses:
       - {when: {all: [has_magnitude, {not: has_swi}]}, cite: 'has_magnitude without a SWI token', source: flags, tier: exclusive}
@@ -258,9 +276,10 @@ rules:
   # `SWIphase:`), is its magnitude, as the rule above says of one that states
   # it (flags.yml, `ge_swi_unprefixed`; dev-2: three `Ax SWI 3D...` stacks
   # read as the SWI image).
+  # MRI pack 0.21.0: GE's only (dev-6's A1: it fired on Philips).
   ge_magnitude:
     clauses:
-      - {flag: ge_swi_unprefixed, tier: exclusive}
+      - {when: {all: [ge_swi_unprefixed, {text: manufacturer, prefix: ge}]}, cite: ge_swi_unprefixed, source: flags, tier: exclusive}
     set:
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
@@ -287,11 +306,11 @@ rules:
         tier: keywords
     set:
       # The echoes as acquired, as the magnitude above (pack 0.9.0).
+      # MRI pack 0.21.0 (dev-6's A2): no QSM and no Magnitude on an echo the
+      # scanner acquired; the QSM word names the protocol, not this image.
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
       construct:
-        - Magnitude
-        - QSM
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
       technique: {from: swi_technique}

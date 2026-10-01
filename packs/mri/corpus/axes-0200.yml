@@ -1086,7 +1086,7 @@ cases:
       n_slices: 9
       n_instances: 9
     axes:
-      provenance: Localizer
+      provenance: RawRecon
 
   - name: a GE series in an exam whose protocol says ÖSIKT is no localizer
     stack:

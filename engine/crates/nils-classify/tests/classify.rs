@@ -1732,14 +1732,24 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             6,
             "{name}"
         );
-        // And the whole series, whose echo time is a measurement, is judged
-        // by the window as before: the guard silences a zero, not a number.
+        // And the whole series, whose echo time is a measurement, has no
+        // base either: since MRI pack 0.21.0 no phase-contrast output has one
+        // (record 48, conventions round 3, case 5), so the window that judged
+        // it before never runs, and nothing the vote could fill is left.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base'"
+            ),
+            0,
+            "{name}: a phase contrast has no base"
+        );
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
             ),
-            2,
+            0,
             "{name}"
         );
     }

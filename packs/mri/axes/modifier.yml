@@ -247,6 +247,9 @@ values:
       - motion correct
       - motioncorrect
     # MRI pack 0.13.0: or GE's prospective motion correction, PROMO.
+    # MRI pack 0.21.0: no longer PROMO, which corrects the acquisition as it
+    # runs and writes no corrected copy; and a Philips "Reg - " diffusion,
+    # the registered copy (record 48, conventions round 3, cases 26 and 37).
     detection:
       exclusive: has_moco
-      combination: [has_promo]
+      combination: [philips_registered_copy]
