@@ -403,12 +403,10 @@ pub(crate) fn why(
     let decisions = crate::explain::decisions_of(store, stack)?;
     let blind = false;
     let asked = asked_of(store, stack)?;
-    let mut head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
-    // the sequence names are quasi-identifying text (catalogue.md): below
-    // detail quasi they are not shown, in the header, a clause's or the line
-    if !quasi {
-        head.retain(|f, _| !HASHED_ONLY.contains(&f.as_str()));
-    }
+    // the sequence names are shown at every detail, in the header, a
+    // clause's and the line (Nima's ruling, 2026-10-01: a sequence name
+    // carries no person's data and is never hidden)
+    let head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
 
     let mut out_axes = Vec::new();
     for (axis, (values, confidence, tier)) in &axes {
@@ -632,8 +630,7 @@ fn id_list(ids: &[i64]) -> String {
 }
 
 /// The header values a blind reader is shown: the physics, the sequence
-/// type tokens and the geometry, raw, with the sequence name only at detail
-/// quasi.
+/// type tokens, the sequence name and the geometry, raw, at every detail.
 const BLIND_HEADER: &[&str] = &[
     "repetition_time",
     "echo_time",
@@ -660,7 +657,6 @@ pub(crate) fn blind_doc(store: &mut Store, stack: i64, quasi: bool) -> Result<Va
     let head = header(store, &[stack])?.remove(&stack).unwrap_or_default();
     let shown: serde_json::Map<String, Value> = BLIND_HEADER
         .iter()
-        .filter(|f| quasi || !HASHED_ONLY.contains(f))
         .filter_map(|f| {
             head.get(*f)
                 .filter(|v| !v.is_null())
@@ -852,20 +848,13 @@ fn rounded(v: &Value) -> Value {
     }
 }
 
-/// The fields a batch's signature is hashed with and never returned, since
-/// they are quasi-identifying text (the sequence name, `catalogue.md`), and
-/// shown below detail quasi nowhere: the sequence name and the pulse
-/// sequence name, where Siemens XA writes it (Nima's ruling, 2026-10-01: a
-/// vendor's sequence name is shown at detail quasi and above only).
-const HASHED_ONLY: &[&str] = &["text_sequence_name", "pulse_sequence_name"];
-
 /// One batch: like stacks suggested one answer.
 #[derive(Debug, Clone)]
 pub(crate) struct Batch {
     pub(crate) key: String,
     pub(crate) suggested: String,
-    /// What is returned of the signature: the rules and the header values,
-    /// without the fields hashed only.
+    /// The signature: the rules and the header values, the sequence names
+    /// among them (Nima's ruling, 2026-10-01: shown everywhere).
     pub(crate) signature: Value,
     pub(crate) items: Vec<i64>,
 }
@@ -1023,26 +1012,19 @@ pub(crate) fn batches(
             .iter()
             .map(|f| (f.clone(), head.get(f).map(rounded).unwrap_or(Value::Null)))
             .collect();
-        let hashed = json!({"rules": decided, "header": hv});
+        let signature = json!({"rules": decided, "header": hv});
         // salted with the campaign's secret seed, so a key names no
         // signature a caller could work out
         let key_text =
-            json!({"seed": seed, "signature": hashed, "suggested": suggested}).to_string();
+            json!({"seed": seed, "signature": signature, "suggested": suggested}).to_string();
         let key = crate::campaigns::sha256(key_text.as_bytes())[..16].to_string();
         groups
             .entry(key.clone())
-            .or_insert_with(|| {
-                let shown: serde_json::Map<String, Value> = hv
-                    .iter()
-                    .filter(|(f, _)| !HASHED_ONLY.contains(&f.as_str()))
-                    .map(|(f, v)| (f.clone(), v.clone()))
-                    .collect();
-                Batch {
-                    key,
-                    suggested: suggested.clone(),
-                    signature: json!({"rules": decided, "header": shown}),
-                    items: Vec::new(),
-                }
+            .or_insert_with(|| Batch {
+                key,
+                suggested: suggested.clone(),
+                signature,
+                items: Vec::new(),
             })
             .items
             .push(*item);

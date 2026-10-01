@@ -212,6 +212,58 @@ fn a_sensitive_kind_is_absent_without_the_class_and_refused_at_validate() {
     }
 }
 
+/// The ruling of 2026-10-01 (decision 48): a sequence name is shown
+/// everywhere, at every detail. Every sequence name the catalog carries is
+/// technical, so the ask doors read it and project it raw at plain, quasi
+/// and sensitive alike, while a quasi-identifying text stays held below
+/// quasi and an identifier has no record.
+#[test]
+fn sequence_names_are_projected_raw_at_every_detail() {
+    let (mut registry, _dir) = registry();
+    let catalog = Catalog::build(&mut registry, &pack()).unwrap();
+    let scope = |classes: &[Class]| Scope {
+        federated: false,
+        classes: classes.iter().copied().collect(),
+        unsealed: false,
+    };
+    let plain = scope(&[]);
+    let quasi = scope(&[Class::QuasiIdentifying]);
+    let sensitive = scope(&[Class::QuasiIdentifying, Class::Sensitive]);
+    for (level, path) in [
+        ("series", "sequence_name"),
+        ("series", "pulse_sequence_name"),
+        ("stack", "text_sequence_name"),
+        ("stack", "pulse_sequence_name"),
+    ] {
+        let f = catalog
+            .fields
+            .get(&(level.to_string(), path.to_string()))
+            .unwrap_or_else(|| panic!("no {level}.{path}"))
+            .clone();
+        assert_eq!(f.class, Class::Technical, "{level}.{path}");
+        for (detail, s) in [
+            ("plain", &plain),
+            ("quasi", &quasi),
+            ("sensitive", &sensitive),
+        ] {
+            assert!(catalog.visible(&f, s), "{level}.{path} at {detail}");
+            assert!(catalog.may_project_raw(&f, s), "{level}.{path} at {detail}");
+        }
+    }
+    let ask = parse(
+        r#"{"ast_version": 1, "sets": {"s": {"grain": "stack"}}, "out": {"set": "s", "level": "record", "columns": [["field", {}, "text_sequence_name"], ["field", {}, "pulse_sequence_name"], ["field", {}, "series.sequence_name"]]}}"#,
+    )
+    .unwrap();
+    prepare(ask, &catalog, &plain).unwrap();
+    // the other quasi-identifying texts are held below quasi as before
+    let f = catalog.fields[&("series".to_string(), "protocol_name".to_string())].clone();
+    assert_eq!(f.class, Class::QuasiIdentifying);
+    assert!(!catalog.may_project_raw(&f, &plain));
+    assert!(catalog.may_project_raw(&f, &quasi));
+    // and an identifier has no record at all
+    assert!(catalog.field("subject", "patient_name").is_none());
+}
+
 #[test]
 fn birth_date_is_usable_by_a_reader_and_projected_raw_only_with_the_class() {
     let (mut registry, _dir) = registry();

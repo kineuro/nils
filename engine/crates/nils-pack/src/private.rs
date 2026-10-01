@@ -107,10 +107,6 @@ pub struct Shown {
     pub name: String,
     /// Why a person may see it: what it says of the acquisition.
     pub why: String,
-    /// A vendor's sequence name, shown at detail quasi and above only, as
-    /// the standard sequence name is: a site's own sequence can carry a name
-    /// its people chose (Nima's ruling, 2026-10-01).
-    pub quasi: bool,
 }
 
 /// The kinds of ingested element that may be shown: what the scanner did,
