@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.69] - 2026-10-01
+
+The MRI pack is 0.21.0: the third round of published vendor conventions as ruled, checked against the archive's counts, three new values (provenance Calibration, constructs Speed and StdDevTime) and the rule bugs of a development grade. A vendor's localizer flag outranks the slice count, stitched composites are projections, GE's gradient-echo pulse sequences and fast recovery decide their technique, phase-contrast outputs and calibration scans have no base, and Philips mDixon TSE parts are TSEs. The engine reads the ImageType Philips writes per frame of an enhanced MR object, splits such an object's frames by the Dixon part they name, and ingests GE's series plane. Registry schema 78 adds the column to the stack and its fingerprint; the fingerprint's revision is 6. Stacks need a reclassify, and GE series a re-read for their series plane (`nils digest <root> --reread-exact <manufacturer>`). `nils pack replay` names the axes a rule decided as nothing. The body-part descriptors pin the `nils-bodypart` image 1.0.0-alpha.67 published; a change after this release pins them to the build it publishes.
+
 ### Added
 
 - A pack may read the ImageType Philips writes per frame of an enhanced MR object in its (2005,140F) private sequence as `private_frame_image_type`, whose third and fourth values name a Dixon part (W, F, IP or OP), and the frames of one such object that name different parts are now a stack per part; frames that differ there otherwise, as a magnitude and a phase image do, stay one stack, and every other file keeps its stack key, a classic image and a Siemens enhanced object read the field empty, and a split by it is `image_type_variation`. Registry schema 78 adds the column to the stack and the fingerprint, empty, and the fingerprint's revision moves to 6.
