@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.68] - 2026-10-01
+
+Sequence names are shown everywhere, at every detail. The quasi rule of 1.0.0-alpha.66 is withdrawn: the standard SequenceName and PulseSequenceName, GE's two pulse sequence names and Philips' scanning technique are shown at plain as at quasi and sensitive, in the reader's documents, the header door, a campaign batch's signature and the ask doors. The MRI pack is 0.20.2, which drops the `quasi` marks; no stack's values change, and no reclassify is needed. Identifiers, identifier-shaped values and dates stay withheld as before. The body-part descriptors pin the `nils-bodypart` image 1.0.0-alpha.67 published; if this release publishes a new build, a change after it pins them to that one.
+
 ### Changed
 
 - Sequence names are shown everywhere, at every detail. The standard SequenceName and PulseSequenceName, GE's pulse sequence name and internal pulse sequence name, and Philips' scanning technique are no longer held back below detail quasi: not in the reader's documents (`header`, a clause's header, the line, `texts` and `private`, blind or not), the header door, which no longer counts them under `left_out.below_detail`, a campaign batch's `signature`, nor the ask doors, where `series.sequence_name` is now a technical field (federated, as `stack.text_sequence_name` already was). A packet built from these carries them too. The `quasi` mark that 1.0.0-alpha.66 let a pack put on a `private.shown` entry is withdrawn: the engine ignores it, and `nils pack show --json` no longer names it. The MRI pack is 0.20.2, without the marks. Identification blocks and values shaped like an identifier are still withheld, dates are withheld as before, and the other quasi-identifying texts stay at detail quasi and above. The HTTP API contract stays version 7 and pack contract 8, both amended in place.
