@@ -242,9 +242,17 @@ rules:
   # were T2*w, settled MTw). The words go to `keywords:MTw`.
 
   # MEDIC, MERGE and M-FFE are T2*-weighted [MQ9, P17, P18]
+  # MRI pack 0.20.1: but not the SWI image of combined echoes, nor its
+  # projections. Pack 0.20.0 made a Philips SWIp output (`SW_M`) of a
+  # multi-echo acquisition comb-ME-GRE (record 48, case 2), and the SWI
+  # route keeps the processed image and its MIP and minIP base SWI (pack
+  # 0.9.0). Read without this guard, the clause is an implication that
+  # every comb-ME-GRE is T2*w, which the ruled answer broke on 299 archive
+  # stacks at the first reclassify with 0.20.0. Construct SWI, MIP or MinIP
+  # is on no other comb-ME-GRE stack of the archive.
   'technique:comb-ME-GRE':
     clauses:
-      - {when: {axis: technique, is: 'comb-ME-GRE'}, cite: 'comb-ME-GRE', source: technique}
+      - {when: {all: [{axis: technique, is: 'comb-ME-GRE'}, {not: {any: [{axis: construct, is: SWI}, {axis: construct, is: MIP}, {axis: construct, is: MinIP}]}}]}, cite: 'comb-ME-GRE', source: technique}
     set: {base: 'T2starw'}
     confidence: 0.9
     why: 'the comb-ME-GRE technique implies a T2*w base contrast'

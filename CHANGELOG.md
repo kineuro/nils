@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- The MRI pack is 0.20.1. A Philips SWIp image of combined echoes, and its MIP and minIP, no longer break the pack's own implication that a combined multi-echo gradient echo (comb-ME-GRE) is T2*-weighted. Pack 0.20.0 made these outputs comb-ME-GRE, as ruled, while the SWI route keeps their base SWI, so the first reclassify of an archive with 0.20.0 raised a `classify.implied` item and wrote the base and technique below every threshold on each of them (299 stacks of one archive). The base rule for comb-ME-GRE now leaves out an image whose construct is SWI, MIP or MinIP; no other comb-ME-GRE stack of that archive carries one, and no stack's values change.
+
 ### Changed
 
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.66 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.

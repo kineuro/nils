@@ -864,6 +864,69 @@ mod tests {
         );
     }
 
+    /// MRI pack 0.20.1: a Philips SWIp image of combined echoes is
+    /// comb-ME-GRE with base SWI, as are its MIP and minIP (record 48, case
+    /// 2; the SWI route since pack 0.9.0). Pack 0.20.0 read the base rule
+    /// for comb-ME-GRE as implying T2*w on every stack, and its first
+    /// reclassify of the archive raised 299 `classify.implied` items on
+    /// exactly these answers. Any other comb-ME-GRE stays T2*w.
+    #[test]
+    fn an_swi_image_of_combined_echoes_breaks_no_implication() {
+        let pack = mri();
+        let c = class_constraints(&pack);
+        let decided = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+            let mut m: BTreeMap<String, Vec<String>> = pack
+                .axes
+                .iter()
+                .filter(|a| a.phase == crate::rules::AxisPhase::Class)
+                .map(|a| (a.name.clone(), Vec::new()))
+                .collect();
+            for (a, vs) in pairs {
+                m.insert(a.to_string(), vs.iter().map(|v| v.to_string()).collect());
+            }
+            m
+        };
+        // the SWI route wrote base, construct and technique
+        let mut by = BTreeMap::new();
+        for axis in ["base", "construct", "technique", "provenance"] {
+            by.insert(axis.to_string(), "swi".to_string());
+        }
+        for (provenance, construct) in [
+            ("SWIRecon", "SWI"),
+            ("SWIRecon", "MIP"),
+            ("ProjectionDerived", "MinIP"),
+        ] {
+            let b = broken(
+                &pack,
+                &c,
+                &decided(&[
+                    ("provenance", &[provenance]),
+                    ("technique", &["comb-ME-GRE"]),
+                    ("construct", &[construct]),
+                    ("base", &["SWI"]),
+                ]),
+                &by,
+            );
+            assert!(b.is_empty(), "{construct}: {b:?}");
+        }
+        // the implication still holds where the image is no SWI output
+        let b = broken(
+            &pack,
+            &c,
+            &decided(&[
+                ("provenance", &["RawRecon"]),
+                ("technique", &["comb-ME-GRE"]),
+                ("base", &["T2w"]),
+            ]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(
+            (b[0].kind, b[0].id.as_str()),
+            ("implied", "base/technique:comb-ME-GRE")
+        );
+    }
+
     /// Nima's read, 2026-09-27: on an MP2RAGE second inversion the reader
     /// greyed INV2 out; the desk was the cause. Pack 0.9.0 then ruled that
     /// both inversions take base none: the whole answer with no base is
