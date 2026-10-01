@@ -415,3 +415,31 @@ fn contract_8_is_refused_where_a_pack_gets_it_wrong() {
         assert!(e.contains(says), "{keep}: {e}");
     }
 }
+
+/// The `quasi` mark 1.0.0-alpha.66 let a `private.shown` entry carry is
+/// withdrawn (the ruling of 2026-10-01: a sequence name is shown at every
+/// detail). A pack that still carries it, as MRI pack 0.20.0 and 0.20.1 do,
+/// loads unchanged, and every element it lists stays shown.
+#[test]
+fn a_shown_entry_marked_quasi_still_loads_and_is_shown() {
+    let dir = edited("private.yml", |t| {
+        t.replace(
+            "    - name: ge_pulse_sequence_name\n",
+            "    - name: ge_pulse_sequence_name\n      quasi: true\n",
+        )
+    });
+    let text = std::fs::read_to_string(dir.join("private.yml")).unwrap();
+    assert!(
+        text.contains("      quasi: true\n"),
+        "the edit did not land"
+    );
+    let pack = nils_pack::load(&dir, None).unwrap();
+    let plain = nils_pack::load(&mri(), None).unwrap();
+    assert_eq!(pack.shown, plain.shown);
+    assert!(
+        pack.shown
+            .iter()
+            .any(|s| s.name == "ge_pulse_sequence_name")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

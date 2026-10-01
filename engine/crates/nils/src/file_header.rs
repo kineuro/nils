@@ -34,7 +34,9 @@ use serde_json::{Map, Value, json};
 const TEXTS: &[(&str, &str, &str, bool)] = &[
     ("series_description", "series", "series_description", true),
     ("protocol_name", "series", "protocol_name", true),
-    ("sequence_name", "series", "sequence_name", true),
+    // the sequence names, at every detail (Nima's ruling, 2026-10-01: a
+    // sequence name carries no person's data and is never hidden)
+    ("sequence_name", "series", "sequence_name", false),
     ("sequence_variant", "fingerprint", "sequence_variant", false),
     (
         "scanning_sequence",
@@ -69,13 +71,12 @@ const TEXTS: &[(&str, &str, &str, bool)] = &[
     // fingerprint. A classic image has none of the mechanism, and nothing
     // is shown for it.
     ("sop_class_uid", "fingerprint", "sop_class_uid", false),
-    // a vendor's sequence name, as the sequence name is (Nima's ruling,
-    // 2026-10-01): Siemens XA writes its sequence name here
+    // where Siemens XA writes its sequence name
     (
         "pulse_sequence_name",
         "fingerprint",
         "pulse_sequence_name",
-        true,
+        false,
     ),
     (
         "echo_pulse_sequence",
@@ -178,12 +179,6 @@ const UIDS_SHOWN: &[&str] = &[
     "transfer_syntax_uid",
     "implementation_class_uid",
 ];
-
-/// The columns the catalogue calls technical that are shown at detail quasi
-/// and above only: a vendor's sequence name, as the sequence name is
-/// (Nima's ruling, 2026-10-01). Siemens XA writes its sequence name into
-/// PulseSequenceName.
-const QUASI_SHOWN: &[&str] = &["pulse_sequence_name"];
 
 /// The keys of one stack's rows: series, study, modality and its
 /// representative instance (the lowest instance number of the stack).
@@ -369,13 +364,12 @@ pub(crate) fn texts_and_physics(
 /// withheld because their value was shaped like an identifier
 /// ([`nils_pack::private::shown_value`]). An allowlist: an element the pack
 /// does not list under `shown` is never read here, and without a pack
-/// nothing is. Below detail quasi an element the pack marks `quasi` (a
-/// vendor's sequence name) is left out, as the sequence name is.
+/// nothing is. Shown at every detail, a vendor's sequence name among them
+/// (Nima's ruling, 2026-10-01).
 pub(crate) fn private_shown(
     store: &mut Store,
     stack: i64,
     pack: Option<&nils_pack::Pack>,
-    quasi: bool,
 ) -> Result<(Map<String, Value>, usize), StoreError> {
     let mut out = Map::new();
     let Some(pack) = pack.filter(|p| !p.shown.is_empty()) else {
@@ -400,7 +394,7 @@ pub(crate) fn private_shown(
         .and_then(|t| serde_json::from_str(t).ok())
         .unwrap_or_default();
     let mut withheld = 0usize;
-    for s in pack.shown.iter().filter(|s| quasi || !s.quasi) {
+    for s in &pack.shown {
         let Some(i) = pack.ingest.iter().find(|i| i.name == s.name) else {
             continue;
         };
@@ -495,9 +489,7 @@ pub(crate) fn whole(
                 identifying += 1;
                 continue;
             }
-            if !quasi
-                && (f.class == Sensitivity::QuasiIdentifying || QUASI_SHOWN.contains(&f.column))
-            {
+            if !quasi && f.class == Sensitivity::QuasiIdentifying {
                 below += 1;
                 continue;
             }

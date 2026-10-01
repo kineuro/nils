@@ -28,7 +28,7 @@ and gets a version; nothing is amended in place.
 | 5 | [`v5/pack.schema.json`](v5/pack.schema.json), [`v5/overlay.schema.json`](v5/overlay.schema.json) | 2026-09-16: no manifest key changes; every axis value's `keywords` list is a site's to amend through an overlay, named `lists.<axis>.<value>` beside the `buckets`, and the overlay document has a schema of its own. The flags, the physics, the thresholds and the order values are tried in stay the pack's. An engine at 5 loads a contract-4 pack unchanged |
 | 6 | [`v6/pack.schema.json`](v6/pack.schema.json), [`v6/overlay.schema.json`](v6/overlay.schema.json) | 2026-09-26, record 48: the optional `excludes` and `hints` keys, files of constraints between axes over axis values alone. An exclusion rules values of one axis out where its condition holds, and an answer holding one is refused; a hint names the value usually found on an axis, with its reason, and is shown and never enforced. Neither decides an axis of a stack. The overlay schema is unchanged. An engine at 6 loads a contract-5 pack unchanged |
 | 7 | [`v7/pack.schema.json`](v7/pack.schema.json), [`v7/overlay.schema.json`](v7/overlay.schema.json) | 2026-09-30, record 51: no manifest key changes. A pick file (`picks:`) gains v0's six other border reasons under `borders` (`retake`, `unknown_dim`, `slice_outlier`, `pre_post_twin`, `fallback`, `dixon_vs_plain`), and `family` may be a list of families, each with a `name`, what a family holding none of its canonical outputs becomes (`without_canonical: drop` or `apart`) and how many kept stacks make a retake (`retake_above`). A role that a component with per-role tables scores must have a table of its own there, and a border the engine does not know is refused. An engine at 7 loads a contract-6 pack unchanged and refuses these keys in a pack that declares less than 7, so an engine at 6, which would ignore them, refuses the pack instead. The overlay schema is unchanged |
-| 8 | [`v8/pack.schema.json`](v8/pack.schema.json), [`v8/overlay.schema.json`](v8/overlay.schema.json) | 2026-09-30, record 53: no manifest key changes. A passes file may declare a pass of kind `session_context`: its target and rules read fields, flags, parsers, ingested private elements and decided axes, as a rule does, and its rules alone may read the other stacks of the session, each seen by its header through the fields the pass names (`session.sibling_fields`) and never by what was decided of it. It never replaces a value a header tier (a flag or a number the scanner wrote), a person or a decision set; a value read from the name, inferred, defaulted or voted it replaces only at or below `session.replaces_at_most`, and it writes tier `session`. A pick's `fallback` border may name a list of values (`is`). A private file may list the ingested elements a reader is shown (`shown`, each a `name`, a `why` and, since 1.0.0-alpha.66, an optional `quasi`); the loader refuses one that is not ingested, not of a technical kind, or at an identification block. An engine at 8 loads a contract-7 pack unchanged, and refuses these keys in a pack that declares less than 8. The overlay schema is unchanged |
+| 8 | [`v8/pack.schema.json`](v8/pack.schema.json), [`v8/overlay.schema.json`](v8/overlay.schema.json) | 2026-09-30, record 53: no manifest key changes. A passes file may declare a pass of kind `session_context`: its target and rules read fields, flags, parsers, ingested private elements and decided axes, as a rule does, and its rules alone may read the other stacks of the session, each seen by its header through the fields the pass names (`session.sibling_fields`) and never by what was decided of it. It never replaces a value a header tier (a flag or a number the scanner wrote), a person or a decision set; a value read from the name, inferred, defaulted or voted it replaces only at or below `session.replaces_at_most`, and it writes tier `session`. A pick's `fallback` border may name a list of values (`is`). A private file may list the ingested elements a reader is shown (`shown`, each a `name` and a `why`; the `quasi` of 1.0.0-alpha.66 and .67 is withdrawn and ignored); the loader refuses one that is not ingested, not of a technical kind, or at an identification block. An engine at 8 loads a contract-7 pack unchanged, and refuses these keys in a pack that declares less than 8. The overlay schema is unchanged |
 
 Added in place to version 6, additively, as the files it names grew keys a
 contract-6 engine reads and an older pack never writes: the BIDS mapping's
@@ -40,15 +40,15 @@ types `control`, `label`, `m0scan`, `deltam`, `cbf` and `noRF`, which a BIDS
 release writes as the `aslcontext.tsv` beside the image, one row per volume
 (MRI pack 0.11.0). The manifest is unchanged by all of them.
 
-Added in place to version 8, additively: a `private.shown` entry may carry
-`quasi: true` (1.0.0-alpha.66). It marks a vendor's sequence name, which a
-reader is shown at detail quasi and above only, as the sequence name is,
-since a site's own sequence can carry a name its people chose; below detail
-quasi the element is left out of the reader's `private`. The MRI pack marks
-GE's pulse sequence name and internal pulse sequence name and Philips'
-scanning technique. `nils pack show --json` names `quasi` for each shown
-element. An engine at 8 before 1.0.0-alpha.66 ignores the key and shows the
-element at every detail. The manifest is unchanged.
+Added in place to version 8, and withdrawn: 1.0.0-alpha.66 let a
+`private.shown` entry carry `quasi: true`, which held a vendor's sequence
+name back below detail quasi. From 1.0.0-alpha.68 sequence names are shown
+everywhere, at every detail, and every element `shown` lists is shown at
+every detail. The engine no longer reads `quasi`, so a pack that still
+carries it (MRI pack 0.20.0 and 0.20.1) loads and shows the element at every
+detail, and `nils pack show --json` no longer names it. MRI pack 0.20.2
+drops the marks. Only 1.0.0-alpha.66 and 1.0.0-alpha.67 read the key. The
+manifest is unchanged.
 
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.

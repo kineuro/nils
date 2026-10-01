@@ -36,7 +36,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `media_storage_sop_instance_uid` | MediaStorageSOPInstanceUID (0002,0003), else meta MediaStorageSOPInstanceUID | text | technical | the file meta when the element is absent (v0) |
 | `sop_class_uid` | SOPClassUID (0008,0016), else meta MediaStorageSOPClassUID | text | technical | the file meta when the element is absent (v0) |
 | `implementation_version_name` | ImplementationVersionName (0002,0013), else meta ImplementationVersionName | text | technical | the file meta when the element is absent (v0) |
-| `sequence_name` | SequenceName (0018,0024) | text | quasi-identifying |  |
+| `sequence_name` | SequenceName (0018,0024) | text | technical | a vendor's sequence name: technical, shown at every detail (2026-10-01; quasi-identifying before) |
 | `protocol_name` | ProtocolName (0018,1030) | text | quasi-identifying |  |
 | `series_date` | SeriesDate (0008,0021) | date | quasi-identifying |  |
 | `series_time` | SeriesTime (0008,0031) | time | quasi-identifying |  |
@@ -86,7 +86,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `percent_phase_field_of_view` | PercentPhaseFieldOfView, then fg MRFOVGeometrySequence.PercentPhaseFieldOfView | double | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `pixel_bandwidth` | PixelBandwidth, then fg MRImagingModifierSequence.PixelBandwidth | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `receive_coil_name` | ReceiveCoilName, then fg MRReceiveCoilSequence.ReceiveCoilName | text | technical | as on the stack |
-| `pulse_sequence_name` | PulseSequenceName, then private per-frame .PulseSequenceName | text | technical | addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28); a vendor's sequence name, so the reader's documents and the header door show it at detail quasi and above only, as `sequence_name`, though its class stays technical (2026-10-01) |
+| `pulse_sequence_name` | PulseSequenceName, then private per-frame .PulseSequenceName | text | technical | addition: PulseSequenceName (0018,9005), which Siemens XA writes where it leaves SequenceName empty (sequence research, 2026-09-28); a vendor's sequence name, shown at every detail as `sequence_name` is (2026-10-01) |
 | `echo_pulse_sequence` | EchoPulseSequence, then private per-frame .EchoPulseSequence | text | technical | addition: EchoPulseSequence (0018,9008), SPIN, GRADIENT or BOTH (record 53) |
 | `multiple_spin_echo` | MultipleSpinEcho, then private per-frame .MultipleSpinEcho | text | technical | addition: MultipleSpinEcho (0018,9011), YES or NO (record 53) |
 | `echo_planar_pulse_sequence` | EchoPlanarPulseSequence, then private per-frame .EchoPlanarPulseSequence | text | technical | addition: EchoPlanarPulseSequence (0018,9018), YES or NO (record 53) |

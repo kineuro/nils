@@ -1300,13 +1300,9 @@ pub(crate) fn route(
                 );
                 // record 53 S3: the private elements the served pack shows
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
-                let (private, withheld) = crate::file_header::private_shown(
-                    registry.store(),
-                    stack,
-                    pack.as_deref(),
-                    !plain(caller),
-                )
-                .map_err(|e| Reply::error(500, e.to_string()))?;
+                let (private, withheld) =
+                    crate::file_header::private_shown(registry.store(), stack, pack.as_deref())
+                        .map_err(|e| Reply::error(500, e.to_string()))?;
                 doc["private"] = Value::Object(private);
                 doc["private_withheld"] = json!(withheld);
                 // record 48, after the first gold campaign: a stored header
@@ -3209,7 +3205,7 @@ fn with_file(
         .map_err(|e| Reply::error(500, e.to_string()))?;
     doc["texts"] = Value::Object(texts);
     doc["physics"] = Value::Object(physics);
-    let (private, withheld) = crate::file_header::private_shown(store, stack, pack, quasi)
+    let (private, withheld) = crate::file_header::private_shown(store, stack, pack)
         .map_err(|e| Reply::error(500, e.to_string()))?;
     doc["private"] = Value::Object(private);
     doc["private_withheld"] = json!(withheld);
