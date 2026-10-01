@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.67] - 2026-10-01
+
+The MRI pack is 0.20.1, a fix to 0.20.0 found by its first reclassify of an archive: a Philips SWIp image of combined echoes, and its MIP and minIP, no longer break the pack's own implication that a combined multi-echo gradient echo is T2*-weighted, so they no longer raise a `classify.implied` item or have their base and technique written below every threshold. No stack's values change; after the update, a reclassify with the new pack clears the items 0.20.0 raised on them. The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.66 published; if this release publishes a new build of the image, a change after it pins them to that one. No desk release comes with it: installs keep desk 1.0.0-alpha.61. The registry stays at schema 77; the HTTP API contract stays version 7, the review-item contract version 4, the pack contract version 8, the suite contract version 3 and the job contract version 1. An install fetches Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as with 1.0.0-alpha.66. It carries kineuro/nils#330 and #331.
+
 ### Fixed
 
 - The MRI pack is 0.20.1. A Philips SWIp image of combined echoes, and its MIP and minIP, no longer break the pack's own implication that a combined multi-echo gradient echo (comb-ME-GRE) is T2*-weighted. Pack 0.20.0 made these outputs comb-ME-GRE, as ruled, while the SWI route keeps their base SWI, so the first reclassify of an archive with 0.20.0 raised a `classify.implied` item and wrote the base and technique below every threshold on each of them (299 stacks of one archive). The base rule for comb-ME-GRE now leaves out an image whose construct is SWI, MIP or MinIP; no other comb-ME-GRE stack of that archive carries one, and no stack's values change.
