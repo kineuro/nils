@@ -141,9 +141,7 @@ fn push_escaped(out: &mut String, value: &str) {
     }
 }
 
-/// The stack-level column that names a Dixon part of a Philips enhanced MR
-/// object: the ImageType Philips writes per frame in (2005,140F).
-const FRAME_IMAGE_TYPE: &str = "private_frame_image_type";
+use nils_dicom::frames::{FRAME_IMAGE_TYPE, dixon_part_of};
 
 fn iop(x: &Extracted) -> Option<&str> {
     text_of(x.value(Level::Stack, "image_orientation_patient"))
@@ -201,8 +199,9 @@ impl FileStack {
 /// The stacks one file holds (record 37, S8): one, as before, unless the
 /// frames of an enhanced multi-frame object state more than one, in which
 /// case each group of frames that agrees on the fourteen values is a stack of
-/// its own. Where the groups disagree on the ImageType Philips writes per
-/// frame (a Dixon part), that value is a fifteenth, and each part is a stack.
+/// its own. Where the groups disagree on the Dixon part (W, F, IP or OP) the
+/// ImageType Philips writes per frame names, the part is a fifteenth value,
+/// and each part is a stack.
 /// The first is the stack of the file's first frame, the one an instance is
 /// filed under.
 pub fn stacks_of(x: &Extracted) -> Vec<FileStack> {
@@ -217,19 +216,20 @@ pub fn stacks_of(x: &Extracted) -> Vec<FileStack> {
     // A Philips enhanced Dixon object writes its parts (W, F, IP, OP) only in
     // the ImageType of each frame's (2005,140F) item, which is not one of the
     // fourteen values, so its parts would round back to one signature. Only
-    // when the file's groups disagree on it is it a fifteenth value, so every
-    // other file, classic or enhanced, keeps the key it always had.
-    let first = as_read(x.frames.groups[0].value(FRAME_IMAGE_TYPE));
-    let parts = x.frames.groups[1..]
-        .iter()
-        .any(|g| as_read(g.value(FRAME_IMAGE_TYPE)) != first);
+    // when the file's groups disagree on the Dixon part that ImageType names
+    // is the part a fifteenth value, so every other file, classic or enhanced
+    // (one whose frames differ there as magnitude and phase do included),
+    // keeps the key it always had.
+    let part = |g: &nils_dicom::FrameGroup| dixon_part_of(g.value(FRAME_IMAGE_TYPE));
+    let first = part(&x.frames.groups[0]);
+    let parts = x.frames.groups[1..].iter().any(|g| part(g) != first);
     let mut out: Vec<FileStack> = Vec::new();
     for g in &x.frames.groups {
         let orientation = orientation(text_of(g.value("image_orientation_patient")));
         let mut canonical = canonical_of(|c| g.value(c), orientation.class);
         if parts {
             canonical.push('|');
-            push_escaped(&mut canonical, &as_read(g.value(FRAME_IMAGE_TYPE)));
+            canonical.push_str(part(g).unwrap_or_default());
         }
         let signature = Signature {
             key: key_of(&canonical),
@@ -633,7 +633,7 @@ mod tests {
         let stacks = stacks_of(&x);
         assert_eq!(stacks.len(), 4);
         for (i, (s, p)) in stacks.iter().zip(parts).enumerate() {
-            let want = format!("{AXIAL_14}|DERIVED\\\\PRIMARY\\\\{p}\\\\{p}\\\\DERIVED");
+            let want = format!("{AXIAL_14}|{p}");
             assert_eq!(s.signature.key, key_of(&want), "{p}");
             let n = i as u32 + 1;
             assert_eq!(s.ranges, [(n, n), (n + 4, n + 4)], "{p}");
@@ -649,6 +649,46 @@ mod tests {
         }
         // the first stack is the first frame's, which the file is filed under
         assert_eq!(stacks[0].first_frame(), 1);
+    }
+
+    /// A Philips enhanced object whose frames differ in their (2005,140F)
+    /// ImageType only as magnitude and phase do (a QMap's M_SE and PHASE MAP)
+    /// names no Dixon part: one stack, with the key of its fourteen values,
+    /// as before; and beside a second orientation, the two stacks it always
+    /// had, with their old keys.
+    #[test]
+    fn magnitude_and_phase_frames_keep_their_key() {
+        let m = "ORIGINAL\\PRIMARY\\M_SE\\M\\SE";
+        let p = "ORIGINAL\\PRIMARY\\PHASE MAP\\P\\SE";
+        let x = enhanced(
+            PHILIPS,
+            &[
+                (AXIAL, Some(m)),
+                (AXIAL, Some(p)),
+                (AXIAL, Some(m)),
+                (AXIAL, Some(p)),
+            ],
+        );
+        let stacks = stacks_of(&x);
+        assert_eq!(stacks.len(), 1);
+        assert!(stacks[0].ranges.is_empty());
+        assert_eq!(stacks[0].frames, 4);
+        assert_eq!(stacks[0].signature.key, key_of(AXIAL_14));
+
+        let x = enhanced(
+            PHILIPS,
+            &[
+                (AXIAL, Some(m)),
+                (AXIAL, Some(p)),
+                (SAGITTAL, Some(m)),
+                (SAGITTAL, Some(p)),
+            ],
+        );
+        let stacks = stacks_of(&x);
+        let keys: Vec<&str> = stacks.iter().map(|s| s.signature.key.as_str()).collect();
+        assert_eq!(keys, [key_of(AXIAL_14), key_of(SAGITTAL_14)]);
+        assert_eq!(stacks[0].ranges, [(1, 2)]);
+        assert_eq!(stacks[1].ranges, [(3, 4)]);
     }
 
     /// A Siemens enhanced object's (0021,1201) items carry an ImageType too,

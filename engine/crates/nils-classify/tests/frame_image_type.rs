@@ -315,9 +315,7 @@ fn the_parts_of_a_philips_dixon_object_are_stacks_a_pack_reads_by_name() {
             assert_eq!(own.as_deref(), Some(want.as_str()), "{name}: {p}");
             assert_eq!(
                 key,
-                &nils_digest::stack::key_of(&format!(
-                    "{AXIAL_14}|DERIVED\\\\PRIMARY\\\\{p}\\\\{p}\\\\DERIVED"
-                )),
+                &nils_digest::stack::key_of(&format!("{AXIAL_14}|{p}")),
                 "{name}: {p}"
             );
             let (fp, reason) = fingerprint_of(&mut reg, *id);

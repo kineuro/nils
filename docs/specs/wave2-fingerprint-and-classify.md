@@ -181,10 +181,12 @@ otherwise do per stack, materialized and typed once**. Per stack, in
   sequence, read from the stack's own row, as written. Its third and fourth
   values name a Dixon part (W, F, IP or OP) that the object's top-level
   ImageType does not, and the frames that name different parts are stacks of
-  their own: where a file's frame groups disagree on it, it is a fifteenth
-  value of their signatures, and only there, so no other stack's key moves.
-  A split by it is `image_type_variation`. A classic image, and any other
-  vendor's enhanced object, reads it empty.
+  their own: where a file's frame groups disagree on the part, the part (the
+  first of the values that is W, F, IP or OP) is a fifteenth value of their
+  signatures, and only there, so no other stack's key moves. Frames that
+  differ in it otherwise, as a magnitude and a phase image do, stay one stack
+  as before. A split by it is `image_type_variation`. A classic image, and
+  any other vendor's enhanced object, reads it empty.
 
 Deliberately **not** in it, and this settles the open question §14 carried:
 

@@ -35,7 +35,7 @@ pub use extract::{
     Extracted, Identity, IdentityFields, UnknownKeyword, charset_of, extract, extract_header,
     extract_with, identity_values, tag_of,
 };
-pub use frames::{FrameGroup, Frames};
+pub use frames::{FrameGroup, Frames, dixon_part};
 pub use read::{Form, Framed, Header, ParseKind, ReadFailure, read, read_framed, read_whole};
 pub use refusal::{
     QuarantineClass, Refusal, refused_sop_class_name, set_aside_kind, sop_class_kind,
