@@ -176,6 +176,15 @@ otherwise do per stack, materialized and typed once**. Per stack, in
   on ScanningSequence and the vendor names where it is not (the deep
   research's case 22). The SOP class is what tells an MR spectroscopy object
   from a planning image named for one (case 16).
+- **The Philips per-frame ImageType**: the ImageType Philips writes per frame
+  of an enhanced MR object in the first item of its (2005,140F) private
+  sequence, read from the stack's own row, as written. Its third and fourth
+  values name a Dixon part (W, F, IP or OP) that the object's top-level
+  ImageType does not, and the frames that name different parts are stacks of
+  their own: where a file's frame groups disagree on it, it is a fifteenth
+  value of their signatures, and only there, so no other stack's key moves.
+  A split by it is `image_type_variation`. A classic image, and any other
+  vendor's enhanced object, reads it empty.
 
 Deliberately **not** in it, and this settles the open question §14 carried:
 

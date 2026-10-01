@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A pack may read the ImageType Philips writes per frame of an enhanced MR object in its (2005,140F) private sequence as `private_frame_image_type`, whose third and fourth values name a Dixon part (W, F, IP or OP), and the frames of one such object that name different parts are now a stack per part; frames that differ there otherwise, as a magnitude and a phase image do, stay one stack, and every other file keeps its stack key, a classic image and a Siemens enhanced object read the field empty, and a split by it is `image_type_variation`. Registry schema 78 adds the column to the stack and the fingerprint, empty, and the fingerprint's revision moves to 6.
+
 ## [1.0.0-alpha.68] - 2026-10-01
 
 Sequence names are shown everywhere, at every detail. The quasi rule of 1.0.0-alpha.66 is withdrawn: the standard SequenceName and PulseSequenceName, GE's two pulse sequence names and Philips' scanning technique are shown at plain as at quasi and sensitive, in the reader's documents, the header door, a campaign batch's signature and the ask doors. The MRI pack is 0.20.2, which drops the `quasi` marks; no stack's values change, and no reclassify is needed. Identifiers, identifier-shaped values and dates stay withheld as before. The body-part descriptors pin the `nils-bodypart` image 1.0.0-alpha.67 published; if this release publishes a new build, a change after it pins them to that one.

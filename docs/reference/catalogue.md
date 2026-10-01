@@ -174,7 +174,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `units_type` | Units (0054,1001) | text | technical | Units once more, the way v0 has it |
 | `counts_included` | CountsIncluded (0054,1400) | text | technical |  |
 
-## stack (14)
+## stack (15)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -192,6 +192,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `tube_current` | XRayTubeCurrent (0018,1151) | double | technical | XRayTubeCurrent |
 | `pet_bed_index` | NumberOfSlices (0054,0081) | int | technical | NumberOfSlices, v0's name |
 | `pet_frame_type` | SeriesType (0054,1000) | text | technical | SeriesType, v0's name |
+| `private_frame_image_type` | Philips private per-frame (2005,140F).ImageType | text | technical | addition: the ImageType Philips writes per frame of an enhanced MR object in (2005,140F), whose third and fourth values name a Dixon part W, F, IP or OP; empty on a classic image and on any other vendor's object |
 
 ## instance (34)
 
@@ -232,4 +233,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
-190 columns.
+191 columns.

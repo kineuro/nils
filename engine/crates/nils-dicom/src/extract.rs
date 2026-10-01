@@ -21,7 +21,8 @@ use dicom_object::InMemDicomObject;
 use dicom_object::mem::InMemElement;
 
 use crate::catalogue::{
-    CATALOGUE, FG_ROOTS, Field, Level, Meta, PRIVATE_PER_FRAME, Source, Special, Step,
+    CATALOGUE, FG_ROOTS, Field, Level, Meta, PHILIPS_PER_FRAME, PRIVATE_PER_FRAME, Source, Special,
+    Step,
 };
 use crate::charset::Charset;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
@@ -588,6 +589,13 @@ pub fn resolve_at<'a>(
                     .filter(|e| !is_empty(e))
             })
         }
+        Step::PhilipsPrivate(tag) => dataset
+            .get(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE)
+            .and_then(|e| nth_item(e, frame))?
+            .get(PHILIPS_PER_FRAME)
+            .and_then(first_item)?
+            .get(tag)
+            .filter(|e| !is_empty(e)),
     }
 }
 

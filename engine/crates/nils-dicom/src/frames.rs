@@ -120,9 +120,12 @@ fn per_frame(dataset: &InMemDicomObject) -> Option<&[InMemDicomObject]> {
 /// cannot is the same for every frame, so it is read once.
 fn per_frame_source(source: Source) -> bool {
     match source {
-        Source::Chain(steps) => steps
-            .iter()
-            .any(|s| matches!(s, Step::Fg(_, _) | Step::Private(_))),
+        Source::Chain(steps) => steps.iter().any(|s| {
+            matches!(
+                s,
+                Step::Fg(_, _) | Step::Private(_) | Step::PhilipsPrivate(_)
+            )
+        }),
         _ => false,
     }
 }

@@ -360,14 +360,13 @@ fn the_mechanism_and_the_sop_class_reach_the_pack_under_their_names() {
         let v = Evaluated::new(&pack, &c);
         assert_eq!(v.classify().stored("kind"), "", "{name}");
 
-        // And the fingerprint stores them, revision 5.
+        // And the fingerprint stores them, at the revision this build writes.
         let store = reg.store();
         let sql = format!(
             "SELECT COUNT(*) FROM {} WHERE fingerprint_revision = {} AND sop_class_uid IS NOT NULL",
             store.qualified("stack_fingerprint"),
             nils_classify::fingerprint::REVISION
         );
-        assert_eq!(nils_classify::fingerprint::REVISION, 5);
         assert_eq!(
             store.query(&sql, &[]).unwrap()[0].int(0).unwrap(),
             3,

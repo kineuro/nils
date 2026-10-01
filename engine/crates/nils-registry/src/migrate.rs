@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 77;
+pub const SCHEMA_VERSION: i64 = 78;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,7 +362,27 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 77,
         apply: a_series_says_how_it_was_acquired,
     },
+    Migration {
+        version: 78,
+        apply: a_stack_keeps_the_philips_frame_image_type,
+    },
 ];
+
+/// A stack, and its fingerprint for a pack to read, gain the ImageType
+/// Philips writes per frame of an enhanced MR object in its (2005,140F)
+/// private sequence, whose third and fourth values name a Dixon part (W, F,
+/// IP or OP) that the object's top-level ImageType does not. A registry from
+/// before gains both columns empty and no row is written; a stack's column
+/// fills when its files are read again, and the fingerprint's when it is
+/// derived again, which its revision moving makes the next `nils fingerprint`
+/// do. Only a Philips enhanced object has the value to give.
+fn a_stack_keeps_the_philips_frame_image_type(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "stack", &["private_frame_image_type"])?;
+    add_columns(store, "stack_fingerprint", &["private_frame_image_type"])
+}
 
 /// Record 53 S1: an MR series gains the MR Pulse Sequence module's mechanism
 /// attributes (echo pulse sequence, multiple spin echo, echo planar, steady

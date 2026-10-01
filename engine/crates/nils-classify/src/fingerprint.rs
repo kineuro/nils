@@ -25,7 +25,9 @@ use crate::{coverage, derived, dwi, fold};
 /// 4: the 2026-09-28 sequence research. PulseSequenceName (0018,9005).
 /// 5: record 53, S1. The SOP class and the MR Pulse Sequence module's
 ///    mechanism attributes.
-pub const REVISION: i64 = 5;
+/// 6: the ImageType Philips writes per frame of an enhanced MR object in
+///    (2005,140F), which names a Dixon part.
+pub const REVISION: i64 = 6;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -48,6 +50,9 @@ const STACK: &[&str] = &[
     // Record 37 S3: the coil the stack was split on, read from the stack's
     // own row, which is the only row that holds this stack's coil.
     "receive_coil_name",
+    // The ImageType Philips writes per frame in (2005,140F), read from the
+    // stack's own row: a Dixon part is a stack of its own.
+    "private_frame_image_type",
 ];
 
 /// The series' columns. `series_comments` is always null (v0 named a keyword
@@ -242,6 +247,7 @@ pub const WRITTEN: &[&str] = &[
     "segmented_k_space_traversal",
     "spoiling",
     "inversion_recovery",
+    "private_frame_image_type",
     "job_id",
     "epoch",
 ];
@@ -736,6 +742,7 @@ pub fn derive(
         opt(text(r, E + 25)?), // segmented_k_space_traversal
         opt(text(r, E + 26)?), // spoiling
         opt(text(r, E + 27)?), // inversion_recovery
+        opt(text(r, 17)?),     // private_frame_image_type
         Param::Int(job_id),
         Param::Int(epoch),
     ])
@@ -839,7 +846,7 @@ pub fn split_reason(varying: &std::collections::BTreeSet<&str>) -> Option<&'stat
     Some(
         if any(&["echo_time", "echo_numbers", "echo_train_length"]) {
             "multi_echo"
-        } else if any(&["image_type"]) {
+        } else if any(&["image_type", "private_frame_image_type"]) {
             "image_type_variation"
         } else if any(&["image_orientation_patient"]) {
             "multi_orientation"
@@ -886,6 +893,12 @@ mod split_tests {
     #[test]
     fn the_order_after_it_is_v0s() {
         assert_eq!(of(&["image_type"]), Some("image_type_variation"));
+        // a Philips enhanced object's Dixon parts, told by the ImageType it
+        // writes per frame
+        assert_eq!(
+            of(&["private_frame_image_type"]),
+            Some("image_type_variation")
+        );
         assert_eq!(
             of(&["image_orientation_patient", "inversion_time"]),
             Some("multi_orientation")

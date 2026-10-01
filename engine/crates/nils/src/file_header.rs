@@ -134,6 +134,15 @@ const TEXTS: &[(&str, &str, &str, bool)] = &[
         "inversion_recovery",
         false,
     ),
+    // The ImageType Philips writes per frame of an enhanced MR object in
+    // (2005,140F), from the stack's own fingerprint: its third and fourth
+    // values name a Dixon part (W, F, IP or OP). Any other file has none.
+    (
+        "private_frame_image_type",
+        "fingerprint",
+        "private_frame_image_type",
+        false,
+    ),
     ("image_comments", "instance", "image_comments", true),
     (
         "derivation_description",
@@ -418,7 +427,9 @@ fn tags_of(source: &Source) -> Vec<Tag> {
         Source::Chain(steps) => steps
             .iter()
             .flat_map(|s| match s {
-                Step::Top(t) | Step::Fg(_, t) | Step::Private(t) => vec![*t],
+                Step::Top(t) | Step::Fg(_, t) | Step::Private(t) | Step::PhilipsPrivate(t) => {
+                    vec![*t]
+                }
                 Step::Item(seq, t) => vec![*seq, *t],
             })
             .collect(),

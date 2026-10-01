@@ -104,6 +104,10 @@ pub const FIELDS: &[&str] = &[
     "segmented_k_space_traversal",
     "spoiling",
     "inversion_recovery",
+    // The ImageType Philips writes per frame of an enhanced MR object in
+    // (2005,140F), whose third and fourth values name a Dixon part (W, F, IP
+    // or OP) that the object's top-level ImageType does not.
+    "private_frame_image_type",
 ];
 
 /// Where the text half begins.
