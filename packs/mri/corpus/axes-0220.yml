@@ -1,0 +1,416 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.22.0: the rule-bug groups of a development grade (a Philips 3D
+# T1 TFE re-exported with its MR module, a raw Philips tensor acquisition
+# given Trace, an image typed LOCALIZER read by a name, SmartExam's planning
+# reformat, a STAGE echo named for its weighting) and its two disputes, the
+# MEAN outputs of a Siemens multi-echo SWI. One or more cases for each rule,
+# and the cases that keep each rule from reaching what it must not. Every
+# stack here is invented from the pattern the design repository's files
+# name; none is a real header.
+
+cases:
+
+  # --- a Philips TFE by the module's PulseSequenceName (case 17 on a
+  # classic object that keeps the module)
+
+  - name: a classic Philips 3D T1 TFE with no private technique, whose module says InversionRecovery NO, is FSP-GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      scan_options: OTHER
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      pulse_sequence_name: T1TFE
+      inversion_recovery: 'NO'
+      echo_pulse_sequence: GRADIENT
+      spoiling: RF
+      text_series_description: 'sT1W_3D_TFE_sag'
+      repetition_time: 7.5
+      echo_time: 3.4
+      flip_angle: 8
+      echo_train_length: 190
+    flags:
+      philips_tfe: true
+      philips_tfe_no_inversion: true
+    axes:
+      technique: TurboFLASH
+
+  - name: the same object whose module says InversionRecovery YES stays an MPRAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      pulse_sequence_name: T1TFE
+      inversion_recovery: 'YES'
+      echo_pulse_sequence: GRADIENT
+      text_series_description: 'T1 3D TFE IR'
+      repetition_time: 8.1
+      echo_time: 3.7
+      inversion_time: 950
+      flip_angle: 8
+    axes:
+      technique: MPRAGE
+
+  - name: a Philips private technique outranks the module's PulseSequenceName
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      pulse_sequence_name: T1TFE
+      text_series_description: 'T1 FFE 3D'
+      repetition_time: 25
+      echo_time: 4.6
+      flip_angle: 30
+    flags:
+      philips_tfe: false
+
+  - name: another maker's PulseSequenceName TFE is no Philips turbo field echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      pulse_sequence_name: TFE
+      text_series_description: 'gre_3d'
+      repetition_time: 20
+      echo_time: 4
+      flip_angle: 15
+    flags:
+      philips_tfe: false
+
+  # --- a raw Philips tensor acquisition is no Trace (its private direction
+  # reads I from one frame; the isotropic image is a series of its own)
+
+  - name: a Philips b=0 and 16 directions named DWI iso, with direction I, has no construct
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'DTI 16dir tra DWI iso'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      dwi_directions: 16
+      n_slices: 60
+      n_instances: 1020
+      repetition_time: 5200
+      echo_time: 82
+      echo_train_length: 51
+    flags:
+      philips_isotropic_private: false
+    axes:
+      technique: DWI-EPI
+      construct: ''
+      disposition: acquisition
+
+  - name: a Philips isotropic image with direction I and no directions of its own is still Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_diffusion_direction: I
+      text_series_description: 'DWI tra'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      repetition_time: 4800
+      echo_time: 78
+      echo_train_length: 49
+    axes:
+      construct: Trace
+
+  - name: a Philips three-direction diffusion with direction I keeps its Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_diffusion_direction: I
+      text_series_description: 'DWI 3 dir'
+      diffusion_b_value: 1000
+      dwi_directions: 3
+      repetition_time: 4800
+      echo_time: 78
+      echo_train_length: 49
+    flags:
+      philips_isotropic_private: true
+
+  # --- an image typed LOCALIZER on a gradient echo is read by its readout
+
+  - name: a Philips planning image typed LOCALIZER, GR, named for an ADC, is no diffusion
+    stack:
+      image_type: 'LOCALIZER'
+      scanning_sequence: GR
+      sequence_variant: MP
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'dADC tra'
+      text_protocol_name: 'Patient Aligned MPR AWPLAN_SMARTPLAN_TYPE_BRAIN'
+      n_slices: 1
+      repetition_time: 3.2
+      echo_time: 1.5
+      flip_angle: 8
+      echo_train_length: 400
+    flags:
+      typed_localizer_gre: true
+    axes:
+      provenance: Localizer
+
+  - name: an image typed LOCALIZER on an EPI readout stays a diffusion
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\LOCALIZER'
+      scanning_sequence: 'SE\EP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_scout'
+      text_sequence_name: '*ep_b0'
+      n_slices: 3
+      repetition_time: 3000
+      echo_time: 70
+    flags:
+      typed_localizer_gre: false
+    axes:
+      technique: DWI-EPI
+
+  - name: a diffusion named DWI and not typed LOCALIZER is DWI-EPI as before
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      text_series_description: 'DWI tra'
+      diffusion_b_value: 1000
+      repetition_time: 4800
+      echo_time: 78
+      echo_train_length: 49
+    flags:
+      typed_localizer_gre: false
+    axes:
+      technique: DWI-EPI
+
+  # --- Philips SmartExam's planning reformat counts with SmartBrain
+
+  - name: SmartExam's patient-aligned planning MPR is a localizer and an MPR
+    stack:
+      image_type: 'ORIGINAL\SECONDARY\MPR\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'Patient Aligned MPR AWPLAN_SMARTPLAN_TYPE_BRAIN'
+      text_protocol_name: 'Patient Aligned MPR AWPLAN_SMARTPLAN_TYPE_BRAIN'
+      n_slices: 16
+      slice_thickness: 10
+      repetition_time: 3.1
+      echo_time: 1.4
+      flip_angle: 8
+    flags:
+      smart_survey: true
+      vendor_auto_scout: true
+    axes:
+      provenance: Localizer
+      disposition: scout
+
+  - name: another maker's series named for a plan is no SmartExam scout
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra smart plan'
+      text_sequence_name: '*tse2d1_15'
+      n_slices: 30
+      repetition_time: 5000
+      echo_time: 98
+      echo_train_length: 15
+    flags:
+      vendor_auto_scout: false
+
+  # --- a STAGE echo named for its weighting
+
+  - name: an acquired STAGE echo named pd at a low flip is PDw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS3D\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'STAGE_pd_fl3d_tra'
+      text_sequence_name: '*fl3d2r'
+      repetition_time: 25
+      echo_time: 7.5
+      flip_angle: 6
+      echo_train_length: 1
+    flags:
+      stage_pd_echo: true
+    axes:
+      provenance: RawRecon
+      base: PDw
+
+  - name: an acquired STAGE echo named t1 at a high flip is T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS3D\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'STAGE_t1_fl3d_tra'
+      text_sequence_name: '*fl3d2r'
+      split_reason: multi_echo
+      echo_numbers: '2'
+      repetition_time: 25
+      echo_time: 18
+      flip_angle: 24
+      echo_train_length: 2
+    flags:
+      stage_t1_echo: true
+    axes:
+      base: T1w
+
+  - name: a STAGE phase named pd has no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'STAGE_pd_fl3d_tra_ND'
+      text_sequence_name: '*fl3d2r'
+      repetition_time: 25
+      echo_time: 7.5
+      flip_angle: 6
+    flags:
+      stage_pd_echo: false
+    axes:
+      base: ''
+
+  - name: a multi-echo gradient echo named pd outside STAGE keeps its reading
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'gre_me_pd'
+      text_sequence_name: '*fl3d6'
+      repetition_time: 30
+      echo_time: 12
+      flip_angle: 6
+      echo_train_length: 6
+    flags:
+      stage_pd_echo: false
+
+  # --- the MEAN outputs of a Siemens multi-echo SWI combine its echoes
+
+  - name: the MEAN SWI image of a Siemens 4-echo SWI is comb-ME-GRE
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\SWI\DIS3D\NORM\MEAN\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Results MEAN_swi_me4_tra_SWI'
+      text_sequence_name: '*swi3d4r'
+      echo_numbers: '1'
+      repetition_time: 30
+      echo_time: 7
+      flip_angle: 12
+      echo_train_length: 4
+    axes:
+      provenance: SWIRecon
+      technique: MEDIC
+      construct: 'EchoCombined,SWI'
+      base: SWI
+
+  - name: the MEAN minIP of a Siemens 4-echo SWI is comb-ME-GRE and a projection
+    stack:
+      image_type: 'DERIVED\PRIMARY\MNIP\DIS3D\NORM\MEAN\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Results MEAN_swi_me4_tra_mIP'
+      text_sequence_name: '*swi3d4r'
+      echo_numbers: '1'
+      repetition_time: 30
+      echo_time: 7
+      flip_angle: 12
+      echo_train_length: 4
+    axes:
+      provenance: ProjectionDerived
+      technique: MEDIC
+      construct: 'EchoCombined,MinIP'
+      base: SWI
+
+  - name: the MEAN magnitude of a Siemens 4-echo SWI is Magnitude with EchoCombined
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\DIS3D\NORM\MEAN\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Results MEAN_swi_me4_tra_Mag'
+      text_sequence_name: '*swi3d4r'
+      echo_numbers: '1'
+      repetition_time: 30
+      echo_time: 7
+      flip_angle: 12
+      echo_train_length: 4
+    axes:
+      provenance: RawRecon
+      technique: MEDIC
+      construct: 'EchoCombined,Magnitude'
+
+  - name: one echo's minIP of a Siemens 4-echo SWI, written without MEAN, stays ME-GRE
+    stack:
+      image_type: 'DERIVED\PRIMARY\MNIP\DIS3D\NORM\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'swi_me4_tra_mIP'
+      text_sequence_name: '*swi3d4r'
+      echo_numbers: '3'
+      repetition_time: 30
+      echo_time: 17
+      flip_angle: 12
+      echo_train_length: 4
+    axes:
+      technique: MEGRE
+
+  - name: one echo's SWI image of a Siemens 4-echo SWI, written without MEAN, stays ME-GRE
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\SWI\DIS3D\NORM\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'swi_me4_tra_SWI'
+      text_sequence_name: '*swi3d4r'
+      echo_numbers: '2'
+      repetition_time: 30
+      echo_time: 12
+      flip_angle: 12
+      echo_train_length: 4
+    axes:
+      technique: MEGRE

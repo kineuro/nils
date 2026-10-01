@@ -6,6 +6,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
+- The MRI pack is 0.22.0. It fixes the rule bugs a development grade of 0.21.0 found and settles its two disputes. A Philips turbo field echo is also read from the PulseSequenceName of the MR module a re-exported classic object keeps, so a 3D T1 TFE whose module says no inversion is FSP-GRE there too. A Philips stack of six or more diffusion directions takes no Trace from its private direction, the isotropic image being a series of its own. An image the scanner typed LOCALIZER or SCOUT on a plain gradient echo takes no diffusion technique from its name or private technique. Philips SmartExam's planning reformat counts with SmartBrain as an automatic planning scout. An acquired STAGE echo named for PD or T1 takes that base. Every Siemens MEAN output of a multi-echo SWI, the SWI image and its projections included, is a combined multi-echo gradient echo. Stacks need a reclassify.
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.69 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
 
 ## [1.0.0-alpha.69] - 2026-10-01
