@@ -564,6 +564,8 @@ def _fusion_table(sid: int, r, model) -> dict:
     doc["models"] = model.refs()
     doc["geometry"] = {k: r.meta[k] for k in ("modality", "K", "n_unique", "thick", "spacing", "nx", "ny", "nz", "oblique_deg", "ext_x", "ext_y", "ext_z", "fov_r", "fov_c", "span")}
     doc["rules"] = r.rules
+    if r.reader:
+        doc["reader"] = r.reader
     return doc
 
 
@@ -590,6 +592,16 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
     device = _fusion_device(a.device)
     encoder_device = "cuda" if device == "cuda" and a.encoder_device == "cuda" else "cpu"
     params = {"threads": a.threads, "models": model.refs(), "preprocessing": volume.PREPROCESSING}
+    if a.reader != "full":
+        from . import reduced
+
+        if not a.reader.startswith("reduced:"):
+            raise RunError(f"--reader is full or reduced:<policy>, not {a.reader!r}")
+        try:
+            reduced.check_policy(a.reader.split(":", 1)[1])
+        except reduced.PolicyError as e:
+            raise RunError(str(e)) from e
+        params.update({"reader": a.reader, "readahead": a.readahead, "chunk": a.chunk})
     if device != "cpu":
         params.update({"decode_device": device, "encoder_device": encoder_device})
         params["gpu_workers"] = min(a.gpu_workers, a.threads)
@@ -599,8 +611,10 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
     stacks = manifest.load(a.stacks, source_root=a.source_root)
     decoded: dict = {}
     done = scoring.score(
-        model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded, gpu_workers=a.gpu_workers
+        model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded, gpu_workers=a.gpu_workers,
+        reader=a.reader, depth=a.readahead, chunk=a.chunk,
     )
+    read_counts: dict[str, int] = {}
     counts = {"answered_fine": 0, "answered_coarse": 0, "no_fingerprint": 0, "no_geometry": 0, "failed": 0, "cohort_calibrated": 0}
     per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
     for st, r, why in done:
@@ -619,6 +633,9 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
             pv = per_value[mode]
             pv[a_["value"]] = pv.get(a_["value"], 0) + 1
         counts["cohort_calibrated"] += int(r.cohort is not None)
+        for k, v in (r.reader or {}).items():
+            if isinstance(v, int):
+                read_counts[k] = read_counts.get(k, 0) + v
         u = Unit(st.unit, metrics=metrics)
         body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
         u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
@@ -638,6 +655,8 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value}
     if decoded:
         run.metrics["decoded_frames"] = decoded
+    if read_counts:
+        run.metrics["reader"] = read_counts
     return run
 
 
@@ -714,6 +733,9 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--encoder-device", choices=("cpu", "cuda"), default="cpu", help="cuda runs the image encoder on the card in batches (not bit for bit the CPU's)")
     f.add_argument("--batch", type=int, default=64, help="stacks a batch of the encoder on the card")
     f.add_argument("--gpu-workers", type=int, default=2, help="of the workers, how many decode on the card; the others decode on the CPU")
+    f.add_argument("--reader", default="full", help="full (every file, as the model was certified) or reduced:<policy> (full, touched or b<N>): only the frames the encoder's planes need, chosen from the manifest's geometry")
+    f.add_argument("--readahead", type=int, default=1, help="with the reduced reader, how many stacks ahead a worker asks the kernel to read")
+    f.add_argument("--chunk", type=int, default=4, help="stacks a worker takes at a time")
     return p
 
 
