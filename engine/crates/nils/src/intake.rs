@@ -696,7 +696,7 @@ mod tests {
     fn the_engine_reaches_itself_on_the_loopback() {
         assert_eq!(self_address("0.0.0.0:8437"), "127.0.0.1:8437");
         assert_eq!(self_address("[::]:8437"), "[::1]:8437");
-        assert_eq!(self_address("10.200.0.10:8437"), "10.200.0.10:8437");
+        assert_eq!(self_address("192.0.2.10:8437"), "192.0.2.10:8437");
     }
 
     #[test]
