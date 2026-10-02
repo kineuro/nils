@@ -564,8 +564,10 @@ values:
     keywords:
       - real image
       - real component
+    # MRI pack 0.24.0: or a GE MAGiC or MDME image GE's private image type
+    # writes real (flags.yml, section 20, `ge_mdme_real`).
     detection:
-      exclusive: has_real
+      exclusive: real_component
   Imaginary:
     terms: ['imaginary', 'imaginary part']
     keywords:

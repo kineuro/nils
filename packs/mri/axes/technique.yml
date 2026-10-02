@@ -769,8 +769,11 @@ values:
       - gre
       - gradient-echo
       - ffe
+    # MRI pack 0.24.0: or GE's research B0 map, written in research mode
+    # (flags.yml, section 20, `ge_b0map_acquisition`).
     detection:
       exclusive: has_gre
+      combination: [ge_b0map_acquisition]
   EPI:
     terms: ['echo planar', 'echo-planar imaging']
     family: EPI

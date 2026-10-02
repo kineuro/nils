@@ -31,6 +31,9 @@ tiers: {exclusive: 0.95, keywords: 0.9, stated: 0.9}
 # 0.11.0: the reading guide takes ND off the image type whatever else the
 # image is, and dev-1 settled ND beside SWI on two stacks the route had
 # written SWI alone.
+# MRI pack 0.24.0: and ORIG where GE's `ORIG` prefix says the stack is the
+# unfiltered original (the final certificate: a GE `ORIG Ax SWAN 3D` lost
+# the ORIG its own rule gave, since the route decides the construct).
 
 # Every output of one acquisition shares its readout.
 derive:
@@ -46,6 +49,14 @@ derive:
       # SWI and minIP as its own series (echo numbers 1 to 4) and one MEAN
       # SWI and one MEAN minIP beside them (echo number 1).
       - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
+      # MRI pack 0.24.0 (the final certificate's A11): GE's multi-echo QSM
+      # writes its SWI image, minIP and maps combined over the echoes, and
+      # its MAG and PHS at one echo (flags.yml, section 20).
+      - {when: ge_qsm_me_combined, value: comb-ME-GRE}
+      - {when: ge_qsm_me_echo_output, value: ME-GRE}
+      # MRI pack 0.24.0: a GE SWI made by EPI is EPI by its pulse sequence
+      # (D12), whatever its train (flags.yml, section 20, `ge_swi_epi_psd`).
+      - {when: ge_swi_epi_psd, value: EPI}
       # MRI pack 0.11.0: a gradient-echo EPI SWI (Siemens `epfid3d`, Philips
       # FEEPI SWIp) is GRE-EPI, as its readout is anywhere else.
       - {when: is_gre_epi, value: GRE-EPI}
@@ -91,6 +102,10 @@ derive:
     axis: technique
     cases:
       - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
+      # MRI pack 0.24.0, as swi_technique
+      - {when: ge_qsm_me_combined, value: comb-ME-GRE}
+      - {when: ge_qsm_me_echo_output, value: ME-GRE}
+      - {when: ge_swi_epi_psd, value: EPI}
       # the rest as swi_technique
       - {when: is_gre_epi, value: GRE-EPI}
       - {when: has_epi, value: EPI}
@@ -124,6 +139,7 @@ rules:
         # images of one, so this is where the identity has to be said.
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -144,6 +160,7 @@ rules:
         - MIP
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -167,6 +184,7 @@ rules:
         - {value: QSM, when: {text: search_text, substring: qsm}}
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.9
@@ -188,6 +206,7 @@ rules:
         - Real
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
@@ -195,12 +214,16 @@ rules:
   swi:
     clauses:
       - {flag: has_swi, tier: exclusive}
+      # MRI pack 0.24.0 (the final certificate's A9): the SWI image of GE's
+      # SWI research sequence, named for it (flags.yml, section 20).
+      - {when: ge_swi_psd_output, cite: ge_swi_psd_output, source: flags, tier: exclusive}
     set:
       base: SWI
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -220,6 +243,7 @@ rules:
         - MinIP
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -235,6 +259,7 @@ rules:
         - R2starmap
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -253,6 +278,7 @@ rules:
       construct:
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
@@ -276,6 +302,7 @@ rules:
         - Magnitude
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
@@ -296,6 +323,7 @@ rules:
         - Magnitude
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -322,6 +350,7 @@ rules:
       construct:
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -336,6 +365,7 @@ rules:
         - QSM
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -356,6 +386,7 @@ rules:
       construct:
         - MPR
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -369,6 +400,7 @@ rules:
         - SWI
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.7

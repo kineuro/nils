@@ -295,3 +295,355 @@ cases:
     axes:
       technique: FLASH
       base: 'T2*w'
+
+  # --- the final certificate's GE groups (A2, A3, A8, A9, A11 and three
+  # single stacks): flags.yml, section 20
+
+  - name: a GE 3D SPGR named after its plane count, with VASCTOF_GEMS and pulse 3dtof, is a spoiled GRE, MT-weighted with MT on (case 2)
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'FC\EDR_GEMS\MT_GEMS\VASCTOF_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 3dtof
+      text_series_description: 'Sag 3DSPGR MT=on'
+      n_slices: 116
+      repetition_time: 22
+      echo_time: 2.3
+      flip_angle: 8
+    flags:
+      ge_spgr_named: true
+      ge_vasctof_as_tof: false
+    axes:
+      technique: FLASH
+      base: MTw
+
+  - name: guard, a GE 3D TOF named so with VASCTOF_GEMS stays TOF-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'FC\EDR_GEMS\VASCTOF_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 3dtof
+      text_series_description: 'Ax 3D TOF'
+      n_slices: 160
+      repetition_time: 22
+      echo_time: 3.4
+      flip_angle: 18
+    flags:
+      ge_spgr_named: false
+      ge_vasctof_as_tof: true
+    axes:
+      technique: TOF
+
+  - name: a GE MAGiC image as acquired, private image type 2, is the real part
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\MAGIC\NONE'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: 'EDR_GEMS\SEQ_GEMS\IR_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: MAGiC
+      ge_internal_pulse_sequence_name: FSE
+      ge_private_image_type: '2'
+      text_series_description: 'Ax MAGiC'
+      split_reason: multi_echo
+      stacks_in_series: 2
+      n_slices: 30
+      repetition_time: 4000
+      echo_time: 18
+      inversion_time: 11
+      flip_angle: 90
+      echo_train_length: 12
+    flags:
+      ge_mdme_real: true
+    axes:
+      provenance: RawRecon
+      technique: MDME
+      construct: Real
+      base: ''
+
+  - name: guard, a GE MAGiC image GE wrote as a magnitude (type 0) is no real part
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\MAGIC\NONE'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: 'EDR_GEMS\SEQ_GEMS\IR_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: MAGiC
+      ge_internal_pulse_sequence_name: FSE
+      ge_private_image_type: '0'
+      text_series_description: 'Ax MAGiC'
+      split_reason: multi_echo
+      stacks_in_series: 2
+      n_slices: 30
+      repetition_time: 4000
+      echo_time: 18
+      inversion_time: 11
+      flip_angle: 90
+      echo_train_length: 12
+    flags:
+      ge_mdme_real: false
+    axes:
+      construct: ''
+
+  - name: the SWI image of GE's SWI research sequence, named for the protocol and then SWI, is SWIRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: 'FC\EDR_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: swi_ks
+      ge_internal_pulse_sequence_name: EFGRE3D
+      ge_private_image_type: '0'
+      text_series_description: 'Sc: Ax SWI 2mm SWI'
+      n_slices: 90
+      repetition_time: 30
+      echo_time: 20
+      flip_angle: 15
+    flags:
+      ge_swi_psd_output: true
+      ge_swi_unprefixed: false
+    axes:
+      provenance: SWIRecon
+      construct: SWI
+      base: SWI
+
+  - name: the same sequence's SWIFilt output is the SWI image too
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: swi
+      text_series_description: 'SWIFilt - SWI 2mm'
+      n_slices: 76
+      repetition_time: 30
+      echo_time: 20
+      flip_angle: 15
+    flags:
+      ge_swi_psd_output: true
+    axes:
+      provenance: SWIRecon
+      construct: SWI
+      base: SWI
+
+  - name: guard, that sequence's phase stays the acquired phase
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: swi_ks
+      text_series_description: 'Ax SWI 2mm phase'
+      n_slices: 90
+      repetition_time: 30
+      echo_time: 20
+      flip_angle: 15
+    flags:
+      ge_swi_psd_output: false
+    axes:
+      provenance: RawRecon
+      construct: Phase
+
+  - name: the SWI minIP of GE's multi-echo QSM combines the echoes
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: psd/QSM/me
+      ge_internal_pulse_sequence_name: EFGRE3D
+      ge_private_image_type: '3'
+      text_series_description: 'SWI mIP | psd/QSM/me | EFGRE3D'
+      echo_numbers: '10'
+      n_slices: 82
+      n_instances: 82
+      repetition_time: 54
+      echo_time: 49
+      flip_angle: 15
+    flags:
+      ge_qsm_me_combined: true
+    axes:
+      provenance: ProjectionDerived
+      technique: MEDIC
+      construct: MinIP
+
+  - name: the MAG output of GE's multi-echo QSM is one echo, a multi-echo GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: psd/QSM/me
+      ge_internal_pulse_sequence_name: EFGRE3D
+      ge_private_image_type: '3'
+      text_series_description: 'MAG | psd/QSM/me | EFGRE3D'
+      echo_numbers: '10'
+      n_slices: 82
+      n_instances: 82
+      repetition_time: 54
+      echo_time: 49
+      flip_angle: 15
+    flags:
+      ge_qsm_me_echo_output: true
+      ge_qsm_me_combined: false
+    axes:
+      technique: MEGRE
+
+  - name: GE's workstation eADC written REFORMATTED in its source's plane is RawRecon, eADC, no reformat (D3)
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED'
+      scanning_sequence: 'EP\SE'
+      sequence_variant: NONE
+      scan_options: 'VB_GEMS\EPI_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2
+      text_series_description: 'Exponential Apparent Diffusion Coefficient'
+      orientation: Axial
+      n_slices: 27
+      repetition_time: 8000
+      echo_time: 86
+      flip_angle: 90
+    flags:
+      ge_workstation_diffusion_map: true
+      is_mpr: false
+    axes:
+      provenance: RawRecon
+      construct: eADC
+
+  - name: GE's workstation ADC named in full is RawRecon with ADC, not a tensor's (D3)
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROCESSED'
+      scanning_sequence: 'EP\SE'
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2
+      text_series_description: 'Apparent Diffusion Coefficient (mm2/s)'
+      n_slices: 27
+      repetition_time: 8000
+      echo_time: 86
+      flip_angle: 90
+    axes:
+      provenance: RawRecon
+      construct: ADC
+
+  - name: GE's motion-corrected FA (MCFA) is a tensor's FA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: '2'
+      scan_options: '1140850688'
+      mr_acquisition_type: '1'
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: depi
+      text_series_description: 'MCFA156/R3'
+      n_slices: 38
+      repetition_time: 4500
+      echo_time: 80
+      flip_angle: 90
+    flags:
+      ge_fa_named: true
+    axes:
+      provenance: DTIRecon
+      construct: FA
+
+  - name: guard, a GE workstation reformat of a 3D T1 stays a reformat
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED\AVERAGE'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'MPR Sag T1 BRAVO'
+      n_slices: 121
+      repetition_time: 8
+      echo_time: 3
+      flip_angle: 12
+    flags:
+      ge_workstation_diffusion_map: false
+      is_mpr: true
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: GE's research B0 map is a gradient echo with no base contrast
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: VB_GEMS
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: B0rf
+      ge_internal_pulse_sequence_name: B0map
+      text_series_description: 'B0map | B0rf'
+      n_slices: 16
+      n_instances: 32
+      repetition_time: 250
+      echo_time: 3.6
+      flip_angle: 35
+    flags:
+      ge_b0map_acquisition: true
+    axes:
+      technique: GRE
+      construct: B0map
+      base: ''
+
+  - name: a GE SWAN copy named ORIG keeps ORIG beside SWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      scan_options: 'FAST_GEMS\FC'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: SWAN
+      ge_internal_pulse_sequence_name: EFGRE3D
+      ge_private_image_type: '0'
+      text_series_description: 'ORIG Ax SWAN 3D'
+      n_slices: 144
+      repetition_time: 40
+      echo_time: 24
+      flip_angle: 15
+      echo_train_length: 6
+    axes:
+      provenance: SWIRecon
+      construct: 'ORIG,SWI'
+      base: SWI
+
+  - name: a GE SWI phase made by ksepi2 is EPI whatever its train (D12)
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EDR_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'ksepi2 [2:33]'
+      ge_internal_pulse_sequence_name: ksepi2
+      text_series_description: 'SWIphase:Ax SWI 3D'
+      n_slices: 74
+      repetition_time: 114
+      echo_time: 46
+      flip_angle: 20
+      echo_train_length: 16
+    flags:
+      ge_swi_epi_psd: true
+    axes:
+      provenance: RawRecon
+      technique: EPI
+      construct: Phase

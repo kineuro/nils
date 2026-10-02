@@ -184,9 +184,12 @@ rules:
   'construct:b1map':
     clauses:
       - {when: {axis: construct, is: B1map}, cite: 'a B1 map', source: construct}
+      # MRI pack 0.24.0: and a B0 field map (the final certificate: a GE
+      # `B0map` left empty and voted T1w; flags.yml, section 20).
+      - {when: {axis: construct, is: B0map}, cite: 'a B0 map', source: construct}
     set: {base: null}
     confidence: 0.9
-    why: 'a B1 (flip angle) map measures the transmit field and has no base contrast'
+    why: 'a B1 (flip angle) or B0 (field) map measures a field and has no base contrast'
 
   'technique:MPRAGE':
     clauses:

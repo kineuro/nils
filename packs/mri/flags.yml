@@ -483,9 +483,14 @@ flags:
   # MRI pack 0.13.0: or a PACS workstation's reformat (below).
   # MRI pack 0.16.0: or a derived image whose name gives another plane than
   # its protocol (below).
-  is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
-                        has_mpr_in_text, is_projection_plane, is_workstation_reformat,
-                        plane_reformat_named, range_reformat]}
+  # MRI pack 0.24.0: never a GE workstation diffusion map, which older
+  # software writes REFORMATTED in the plane of its source (section 20).
+  is_mpr:
+    all:
+      - {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
+               has_mpr_in_text, is_projection_plane, is_workstation_reformat,
+               plane_reformat_named, range_reformat]}
+      - {not: ge_workstation_diffusion_map}
   # MRI pack 0.23.0: a range the Siemens 3D card writes (`Range Parallel`,
   # `Range Radial`): DERIVED, with PARALLEL or RADIAL in its image type
   # (`DERIVED\PRIMARY\M\NONE\PARALLEL\DIS3D`), is a reformat whatever it is
@@ -911,13 +916,16 @@ flags:
   # On the archive 140 Philips named-DTI isotropic images lacked Trace.
   is_plain_dwi_map:
     all:
-      - any: [has_adc, has_eadc, has_trace, image_type.has_exp_diffusion, image_type.has_calc_bval, trace_image]
+      # MRI pack 0.24.0: or a GE workstation map named for its ADC, eADC or
+      # isotropic image (section 20, D3).
+      - any: [has_adc, has_eadc, has_trace, image_type.has_exp_diffusion, image_type.has_calc_bval, trace_image, ge_plain_map_named]
       - {not: has_fa}
       # MRI pack 0.20.0: tensor type by DTI, tensor, `mddw` or six or more
       # directions in the stack's own words (record 48, dev-5's case 4;
       # section 17).
       - any: [{not: tensor_source_named}, has_trace, trace_image]
-  eadc_words: {text: search_text, matches: 'eadc|exp adc|exponential adc'}
+  # MRI pack 0.24.0: and GE's workstation name for it (section 20).
+  eadc_words: {text: search_text, matches: 'eadc|exp adc|exponential adc|exponential apparent diffusion'}
 
   # --- ASL: the difference image (DeltaM), the M0 scan, and GE's two passes
   # from its private ASL element (0043,xxA3): PSEUDOCONTINUOUS on the
@@ -1166,7 +1174,11 @@ flags:
       # MRI pack 0.18.0: the FA of a GE DTI whose header a third-party
       # toolkit rewrote with numbers, named FA (sealed-1 A9).
       - {all: [ge_numeric_header, {text: technique_text, matches: '(^|[^a-z])fa([^a-z]|$)'}]}
-  eadc_named: {text: search_text, matches: 'exp attenuation|^expatt\s*-\s'}
+      # MRI pack 0.24.0: GE's other names for it (section 20).
+      - ge_fa_named
+  # MRI pack 0.24.0: and `Exponential attenuation` or `Exponential Apparent
+  # Diffusion Coefficient` spelt out (section 20).
+  eadc_named: {text: search_text, matches: 'exp(onential)? attenuation|^expatt\s*-\s|exponential apparent diffusion'}
   # GE's eigenvectors of a tensor, `Evec1-<series>` to `Evec3-`: a tensor's
   # output, DTIRecon under ruling 7 (dev-2).
   evec_named: {all: [{text: manufacturer, prefix: ge}, {text: search_text, matches: '^evec[1-3]?\s*-\s'}]}
@@ -1389,6 +1401,9 @@ flags:
       - {text: search_text, substring: swi}
       - {not: {text: search_text, matches: '^(swi|swiphase|swi phase|mip|minip|min ip|pha|phase|qsm)( |$)'}}
       - {not: {text: search_text, substring: swan}}
+      # MRI pack 0.24.0: nor the SWI image of GE's SWI research sequence
+      # (section 20, `ge_swi_psd_output`).
+      - {not: ge_swi_psd_output}
 
   # === MRI pack 0.15.0: Nima's rulings on pack 0.14's disputes, and dev-3's ===
   # rule errors on pack 0.14.0 (record 48, "Rulings on pack 0.14's disputes"
@@ -1825,9 +1840,12 @@ flags:
 
   # --- A16 and cases 7, 32, 33: GE's SPGR by name or pulse sequence, TRICKS,
   # the SPGR-EPI, and the re-adjudication's fast steady-state echo.
+  # MRI pack 0.24.0 (the final certificate's A2): or written after the
+  # plane count GE puts before it (`Sag 3DSPGR MT=on`), which the word
+  # boundary missed, so `VASCTOF_GEMS` made those TOF-MRA (case 2).
   ge_spgr_named:
     any:
-      - {text: technique_text, matches: '(^|[^a-z])f?spgr'}
+      - {text: technique_text, matches: '(^|[^a-z]|[0-9]d)f?spgr'}
       - {text: ge_pulse_sequence_name, matches: 'spgr'}
   tricks_named: {text: technique_text, matches: '(^|[^a-z])tricks([^a-z]|$)'}
   ge_spgr_epi:
@@ -2911,3 +2929,114 @@ flags:
   gre_scout_readout: {any: [typed_localizer_gre, posdisp_gre]}
   ge_fast_gre_psd: {any: [ge_psd_unspoiled_fgre, ge_psd_fast_spoiled, ge_psd_efgre3d_unspoiled]}
   readout_not_spin_echo: {any: [gre_scout_readout, ge_fast_gre_psd]}
+
+  # === 20. MRI pack 0.24.0: the final certificate's GE rule gaps ============
+  #
+  # The final certificate's grade (`studies/2026-10-01-final-certificate-read/
+  # grade.md` in the design repository, part 2, kind a) found GE groups the
+  # development reads had not drawn. Each is widened to its rule.
+
+  # --- A3: a GE MAGiC or MDME acquisition writes its images real-valued, as
+  # GE's private image type (0043,xx2F) says with 2 (dcm2niix's GE README:
+  # 0 to 3 are magnitude, phase, real and imaginary; the deep research, round
+  # 3, case 21, reads the element for components with PROPELLER exempt). Our
+  # counts: every acquired MAGiC and MDME image of the archive (156) writes
+  # 2. PROPELLER, where 2 marks the newer software (case 21), is never read
+  # so.
+  ge_mdme_real:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {any: [{text: ge_pulse_sequence_name, matches: '^(magic|mdme)'}, ge_magic_acquisition]}
+      - {not: image_type.is_derived}
+      - {text: ge_private_image_type, matches: '^\s*2\s*$'}
+      - {not: is_radial}
+      - {not: {text: ge_pulse_sequence_name, matches: 'prop'}}
+  real_component: {any: [has_real, ge_mdme_real]}
+
+  # --- A9: GE's SWI research sequence (pulse sequence `swi`, `swi_ks`,
+  # `swi-stefan`) writes no magnitude series. Beside its phase and minIP it
+  # writes the SWI image, named for the protocol and then `SWI`
+  # (`Sc: Ax SWI 2mm SWI`) or `SWIFilt - <protocol>`, ORIGINAL and without
+  # the prefix GE's SWAN puts on what it computed. It is the SWI image,
+  # SWIRecon (convention 1). Our counts: 136 stacks of these pulse
+  # sequences, none named for a magnitude.
+  ge_swi_psd_output:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: '^swi([_-]|$)'}
+      - {not: has_phase}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: {text: text_series_description, matches: 'phase|min ?ip|(^|[^a-z])mip([^a-z]|$)|magnitude|(^|[^a-z])mag([^a-z]|$)'}}
+      - {text: text_series_description, matches: '(^|[^a-z])swifilt|(^|[^a-z])swi\s*$'}
+
+  # --- A11: GE's multi-echo QSM (`psd/QSM/me`, 10 echoes) writes each echo
+  # as its own stack (ME-GRE) and, from all of them, outputs GE marks with
+  # private image type 3 and the last echo's number: the SWI image, its
+  # minIP, the QSM and R2* maps, combined over the echoes (comb-ME-GRE), and
+  # `MAG` and `PHS` at the last echo's time, which the reference reads as
+  # one echo (ME-GRE). Our counts: 338 stacks, 120 of them outputs.
+  ge_qsm_me_psd:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: 'qsm/me'}
+      - {not: has_epi}
+  ge_qsm_me_echo_output:
+    all:
+      - ge_qsm_me_psd
+      - any:
+          - has_phase
+          - {text: search_text, matches: '^(mag|magnitude|phs|pha|phase)( |$)'}
+  ge_qsm_me_combined:
+    all:
+      - ge_qsm_me_psd
+      - {text: ge_private_image_type, matches: '^\s*3\s*$'}
+      - {not: ge_qsm_me_echo_output}
+
+  # --- A8 (GE): the maps GE's workstation writes under their full names. An
+  # `Apparent Diffusion Coefficient`, an `Exponential Apparent Diffusion
+  # Coefficient` and an `Exponential attenuation` (eADC both) and an
+  # `Isotropic image` (Trace) are GE's diffusion maps, RawRecon by D3 (the
+  # header cannot tell a GE DTI from a plain DWI; GE's tensor writes its
+  # mean diffusivity apart, as AvDC). `Fractional aniso.` and an `MCFA...`
+  # (GE's motion-corrected FA; no MoCo by N11) are FA. Older software writes
+  # these `DERIVED\SECONDARY\REFORMATTED` in the plane of their source (15
+  # archive stacks, all axial): no reformat.
+  ge_plain_map_named:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: search_text, matches: '^(exponential )?apparent diffusion coefficient|^exp(onential)? attenuation|^isotropic image'}
+      - {not: has_fa}
+  ge_fa_named:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: search_text, matches: '^fractional aniso|^mc ?fa[0-9]'}
+  ge_workstation_diffusion_map:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - image_type.is_derived
+      - image_type.is_secondary
+      - {any: [ge_plain_map_named, ge_fa_named, {text: search_text, matches: '^avdc'}]}
+
+  # --- the B0 map of GE's research sequence (`B0map | B0rf`, internal pulse
+  # sequence `B0map`), in research mode: a gradient-echo field map (TE
+  # 3.6 ms), technique GRE, and a map of the field with no base contrast, as
+  # a B1 map has none. The rules left both empty and the physics vote filled
+  # TOF-MRA and T1w. Our counts: 23 archive stacks.
+  ge_b0map_acquisition:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {text: ge_internal_pulse_sequence_name, matches: '^b0map'}
+          - {text: ge_pulse_sequence_name, matches: '^b0(rf|map)'}
+          - {text: search_text, matches: '^b0 ?map( |$)'}
+      - {not: has_epi}
+      - {not: has_se}
+
+  # --- a GE SWI made by EPI is EPI (D12), by its pulse sequence (`ksepi`,
+  # `ksepi2`, `epi2`) where research mode states no EPI and the train is
+  # under R1's 32 (a `ksepi2` of train 16 was read ME-GRE by its train).
+  ge_swi_epi_psd:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: '^(ks)?epi'}
