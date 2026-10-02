@@ -818,3 +818,523 @@ cases:
       echo_numbers: '3'
     flags:
       siemens_qsm_acquired_echo: false
+
+  # --- the final certificate's rule gaps (the design repository's
+  # `studies/2026-10-01-final-certificate-read/grade.md`, part 2, kind a):
+  # A4, A5, A10, a Philips perfusion tool's map (A8) and six single stacks.
+  # flags.yml, section 20.
+
+  # A4: the vendor's sequence identity states the readout; a technique word
+  # in the name does not outrank it.
+  - name: a Philips T1 TFE view named 3D TSE is read by its private scan technique
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROJECTION IMAGE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'Cor_T1_3D_TSE_REK'
+      n_slices: 100
+      repetition_time: 7.5
+      echo_time: 3.4
+      flip_angle: 8
+      echo_train_length: 237
+    flags:
+      vendor_gre_readout_named: true
+      readout_not_spin_echo: true
+    axes:
+      technique: MPRAGE
+      base: T1w
+
+  - name: a GE BRAVO reformat named Cube is read by its pulse sequence
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS\ACC_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: BRAVO
+      text_series_description: 'ref Cor Cube T1+ GD'
+      n_slices: 1
+      repetition_time: 9.8
+      echo_time: 3.6
+      inversion_time: 450
+      flip_angle: 13
+    flags:
+      vendor_gre_readout_named: true
+    axes:
+      provenance: ProjectionDerived
+      technique: MPRAGE
+
+  - name: guard, a GE reformat named Cube T2 FLAIR over a BRAVO header is left to its name
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: BRAVO
+      text_series_description: 'MPR COR CUBE T2 FLAIR'
+      n_slices: 1
+      repetition_time: 8
+      echo_time: 3
+      inversion_time: 450
+      flip_angle: 12
+    flags:
+      vendor_gre_readout_named: false
+    axes:
+      technique: SPACE
+
+  - name: a Siemens TurboFLASH reformat named space is MPRAGE
+    stack:
+      image_type: 'DERIVED\SECONDARY\MPR\CSA MPR THICK'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'ref sag space'
+      text_sequence_name: '*tfl3d1_16'
+      n_slices: 40
+      repetition_time: 1900
+      echo_time: 3
+      inversion_time: 1100
+      flip_angle: 9
+    flags:
+      vendor_gre_readout_named: true
+    axes:
+      technique: MPRAGE
+
+  - name: a Siemens plain spin echo named tse is SE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_tra'
+      text_protocol_name: 't1_tse_tra'
+      text_sequence_name: '*se2d1'
+      n_slices: 21
+      repetition_time: 495
+      echo_time: 15
+      flip_angle: 90
+      echo_train_length: 1
+    flags:
+      siemens_plain_se_named_turbo: true
+    axes:
+      technique: SE
+      base: T1w
+
+  - name: guard, a Siemens turbo spin echo named tse stays TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_tra'
+      text_sequence_name: '*tse2d1_3'
+      n_slices: 21
+      repetition_time: 600
+      echo_time: 10
+      flip_angle: 150
+      echo_train_length: 3
+    flags:
+      siemens_plain_se_named_turbo: false
+      vendor_gre_readout_named: false
+    axes:
+      technique: TSE
+
+  - name: guard, a Philips mDixon TSE part written GR without a private technique stays TSE
+    stack:
+      image_type: 'DERIVED\PRIMARY\W\W\DERIVED'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'cs1.8_T2_mDixon_TSE_cor_2.5mm'
+      n_slices: 24
+      repetition_time: 3000
+      echo_time: 108
+      flip_angle: 90
+      echo_train_length: 20
+    flags:
+      vendor_gre_readout_named: false
+    axes:
+      technique: TSE
+
+  # A5: a keyword that is only letters inside another word or label.
+  - name: a Siemens FLASH named MToff is no time of flight
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_fl3d_trans_MToff'
+      text_sequence_name: '*fl3d1'
+      n_slices: 60
+      repetition_time: 30
+      echo_time: 11
+      flip_angle: 15
+    flags:
+      tof_letters_inside_a_word: true
+    axes:
+      technique: FLASH
+
+  - name: guard, a GE 2D TOF named by its pulse sequence stays a time of flight
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP'
+      scan_options: 'FC\SAT_GEMS\VASCTOF_GEMS\SP'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 2dtof
+      text_series_description: 'Ax 2DTOF'
+      repetition_time: 22
+      echo_time: 4
+      flip_angle: 60
+    flags:
+      tof_letters_inside_a_word: false
+    axes:
+      technique: TOF
+
+  - name: a phase-encoding direction in a name makes no phase image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_sag_phase_h-f_512'
+      text_sequence_name: '*tse2d1_5'
+      n_slices: 13
+      repetition_time: 544
+      echo_time: 13
+      flip_angle: 150
+      echo_train_length: 5
+    flags:
+      phase_not_an_image: true
+    axes:
+      construct: ND
+      base: T1w
+
+  - name: guard, a Siemens phase image keeps Phase
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'swi_phase'
+      text_sequence_name: '*swi3d1r'
+      n_slices: 72
+      repetition_time: 27
+      echo_time: 20
+      flip_angle: 15
+    flags:
+      phase_not_an_image: false
+    axes:
+      construct: 'ND,Phase'
+
+  - name: the acquired b=0 image of a trace protocol is no Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: EP
+      sequence_variant: 'SK\SP'
+      scan_options: 'PFP\WE'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_3scan_trace'
+      text_sequence_name: '*ep_b0'
+      diffusion_b_value: 0
+      n_slices: 25
+      repetition_time: 3800
+      echo_time: 81
+      flip_angle: 90
+    flags:
+      b0_image_trace_named: true
+    axes:
+      technique: DWI-EPI
+      construct: ND
+      base: DWI
+
+  - name: guard, a Siemens trace-weighted image keeps Trace
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIFFUSION\TRACEW\ND\NORM'
+      scanning_sequence: EP
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_3scan_trace_TRACEW'
+      text_sequence_name: '*ep_b1000t'
+      diffusion_b_value: 1000
+      n_slices: 25
+      repetition_time: 3800
+      echo_time: 81
+      flip_angle: 90
+    flags:
+      b0_image_trace_named: false
+    axes:
+      construct: 'ND,Trace'
+
+  # A10: a Philips view of its SWIp.
+  - name: a Philips view of the SWIp is a reformat of the SWI image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROJECTION IMAGE\SW_M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      scan_options: FC
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      philips_number_of_echoes: 4
+      text_series_description: 'VSWIp'
+      n_slices: 80
+      slice_thickness: 10
+      repetition_time: 31
+      echo_time: 0
+      flip_angle: 17
+      echo_train_length: 4
+    flags:
+      philips_swip_view: true
+    axes:
+      provenance: ProjectionDerived
+      construct: 'MPR,SWI'
+      base: SWI
+
+  - name: guard, the SWIp image itself stays SWIRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\SW_M_FFE\SW_M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      philips_number_of_echoes: 4
+      text_series_description: 'SWIp'
+      n_slices: 140
+      repetition_time: 31
+      echo_time: 0
+      flip_angle: 17
+      echo_train_length: 4
+    flags:
+      philips_swip_view: false
+    axes:
+      provenance: SWIRecon
+      construct: SWI
+
+  # A8: a DSC map a perfusion tool named, written with the source's GR.
+  - name: a Philips rMTT a perfusion tool calculated is PerfusionRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY'
+      scanning_sequence: GR
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'rMTT rSVD calculated with Lupe V1.2'
+      text_protocol_name: 'WIP PERFUSION SENSE'
+      n_slices: 33
+      repetition_time: 2122
+      echo_time: 40
+      flip_angle: 75
+      echo_train_length: 41
+    flags:
+      perfusion_tool_map_named: true
+    axes:
+      provenance: PerfusionRecon
+      construct: MTT
+
+  - name: guard, an IR-TSE with a map word and no perfusion tool stays RawRecon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_IR\M\IR'
+      scanning_sequence: IR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: TIR
+      text_series_description: 'cbf level T2 FLAIR'
+      n_slices: 24
+      repetition_time: 11000
+      echo_time: 120
+      inversion_time: 2800
+      flip_angle: 90
+      echo_train_length: 20
+    flags:
+      perfusion_tool_map_named: false
+    axes:
+      provenance: RawRecon
+
+  # The single stacks.
+  - name: a subtraction named in Swedish or German is SubtractionDerived
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\M\DERIVED'
+      scanning_sequence: RM
+      sequence_variant: SK
+      scan_options: FC
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: TSE
+      text_series_description: 'subtraktion T1 sag'
+      n_slices: 15
+      repetition_time: 486
+      echo_time: 8
+      flip_angle: 80
+      echo_train_length: 4
+    flags:
+      sub_named: true
+      philips_private_tse_research_mode: true
+    axes:
+      provenance: SubtractionDerived
+      technique: TSE
+
+  - name: a Philips MAXIMUM thick reformat on the console is ProjectionDerived with MPR
+    stack:
+      image_type: 'DERIVED\SECONDARY\T2\MAXIMUM'
+      scanning_sequence: IR
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: TIR
+      text_series_description: 'SAG_3D_Brain_FLAIR SENSE'
+      n_slices: 32
+      slice_thickness: 4
+      repetition_time: 4800
+      echo_time: 308
+      inversion_time: 1650
+      flip_angle: 90
+      echo_train_length: 182
+    flags:
+      philips_maximum_thick_reformat: true
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: guard, a Philips MAXIMUM whole volume at 1 mm keeps round 3's reading
+    stack:
+      image_type: 'DERIVED\SECONDARY\T1\MAXIMUM'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: '3D_T1_TFE'
+      n_slices: 190
+      slice_thickness: 1
+      repetition_time: 8
+      echo_time: 3.7
+      flip_angle: 8
+    flags:
+      philips_maximum_thick_reformat: false
+    axes:
+      provenance: RawRecon
+      construct: ''
+
+  - name: a Philips Patient Aligned MPR is SmartExam's planning reformat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\MPR\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'Patient Aligned MPR'
+      n_slices: 16
+      stacks_in_series: 3
+      repetition_time: 3.8
+      echo_time: 1.7
+      flip_angle: 8
+    flags:
+      smart_survey: true
+    axes:
+      provenance: Localizer
+      construct: MPR
+
+  - name: Philips' Du-IR is a double inversion recovery
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROJECTION IMAG\M\IR'
+      scanning_sequence: IR
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: Du-IR
+      text_series_description: 'COR'
+      n_slices: 70
+      repetition_time: 5500
+      echo_time: 302
+      inversion_time: 2550
+      flip_angle: 90
+      echo_train_length: 173
+    flags:
+      philips_double_ir: true
+    axes:
+      modifier: 'DIR,FatSat'
+
+  - name: guard, a Philips TIR at a CSF-nulling TI stays FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_IR\M\IR'
+      scanning_sequence: IR
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: TIR
+      text_series_description: '3D_Brain_VIEW_FLAIR'
+      n_slices: 250
+      repetition_time: 4800
+      echo_time: 300
+      inversion_time: 1650
+      flip_angle: 90
+      echo_train_length: 167
+    flags:
+      philips_double_ir: false
+    axes:
+      modifier: 'FLAIR,FatSat'
+
+  - name: a synthetic T1-weighted FLAIR is T1w
+    stack:
+      image_type: 'DERIVED\PRIMARY\T1FLAIR\SYNTHETIC'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SYNTHETIC
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'T1W_FLAIR Synthetic'
+      text_protocol_name: SyMRI
+      n_slices: 32
+      repetition_time: 2500
+      echo_time: 10
+      inversion_time: 1050
+      flip_angle: 150
+    flags:
+      t1_flair_synthetic: true
+    axes:
+      provenance: SyMRI
+      modifier: FLAIR
+      construct: SyntheticFLAIR
+      base: T1w
+
+  - name: guard, a synthetic T2-weighted FLAIR stays T2w
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2FLAIR\SYNTHETIC'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SYNTHETIC
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'T2W_FLAIR Synthetic'
+      text_protocol_name: SyMRI
+      n_slices: 32
+      repetition_time: 15000
+      echo_time: 100
+      inversion_time: 3000
+      flip_angle: 150
+    flags:
+      t1_flair_synthetic: false
+    axes:
+      construct: SyntheticFLAIR
+      base: T2w

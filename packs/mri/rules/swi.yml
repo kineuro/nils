@@ -118,7 +118,7 @@ derive:
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, real, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
+order: [minip, mip, phase, real, philips_swip_view, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -208,6 +208,27 @@ rules:
         - {value: ND, when: has_nd}
         - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
+      directory_type: anat
+    confidence: 0.85
+
+  # MRI pack 0.24.0 (the final certificate's A10): a view Philips made of
+  # its SWIp on the console, `PROJECTION IMAGE\SW_M` (`VSWIp`, or `SWI` at
+  # slabs of 10 mm beside the SWIp itself), is a reformat of the SWI image:
+  # ProjectionDerived with MPR, base SWI, as any reformat a route reaches.
+  # No minimum or maximum is stated, so it is no MinIP (flags.yml, section
+  # 20, `philips_swip_view`). Before `swi`, which took the `SW_M` token.
+  philips_swip_view:
+    clauses:
+      - {flag: philips_swip_view, tier: exclusive}
+    set:
+      provenance: ProjectionDerived
+      base: SWI
+      construct:
+        - MPR
+        - SWI
+        - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
+      technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.85
 

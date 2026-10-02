@@ -360,7 +360,7 @@ values:
     # MRI pack 0.24.0: never where the header states a readout of another
     # family (flags.yml, section 19); the same guard is on every spin-echo
     # value below.
-    requires: {not: readout_not_spin_echo}
+    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
       - space
       - cube
@@ -381,7 +381,7 @@ values:
     terms: ['HASTE', 'SSFSE', 'SSh TSE', 'single shot TSE', 'FASE', 'single-shot FSE']
     label: HASTE
     family: SE
-    requires: {not: readout_not_spin_echo}
+    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
       - haste
       - ssfse
@@ -399,7 +399,7 @@ values:
     family: SE
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
-    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}]}
+    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
       - tirm
       - stir
@@ -449,7 +449,7 @@ values:
     family: SE
     # MRI pack 0.21.0: on GE only with `FR_GEMS`; its FRFSE pulse sequence or
     # name without it is a plain TSE (record 48, conflict 2).
-    requires: {all: [{not: ge_no_fast_recovery}, {not: readout_not_spin_echo}]}
+    requires: {all: [{not: ge_no_fast_recovery}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
       - restore
       - frfse
@@ -459,13 +459,17 @@ values:
       - t2 plus
     detection:
       exclusive: is_restore_tse
+  # MRI pack 0.24.0 (the final certificate's A4): no turbo value on a
+  # Siemens plain spin echo, `*se2d1`, whatever its name says, nor any
+  # spin-echo value where the vendor's sequence identity states a gradient
+  # echo (flags.yml, section 22).
   TSE:
     terms: ['turbo spin echo', 'fast spin echo', 'FSE', 'TSE', 'RARE', 'double echo TSE', 'DE TSE', 'DTSE', 'PD/T2 FSE', 'dual echo FSE']
     family: SE
     # MRI pack 0.20.0: never by the letters inside another word where
     # Siemens' sequence name states a gradient echo (dev-5's A8: a `fl2d`
     # cine named in Swedish, "hjärtsekvens"; flags.yml).
-    requires: {all: [{not: tse_letters_inside_a_word_on_gre_stem}, {not: readout_not_spin_echo}]}
+    requires: {all: [{not: tse_letters_inside_a_word_on_gre_stem}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
       - tse
       - fse
@@ -563,7 +567,9 @@ values:
     family: GRE
     # MRI pack 0.20.0: nor GE's Inhance 3D Velocity, a phase contrast whatever
     # `IFLOW_GEMS` says (dev-5's A11; flags.yml, `ge_inhance_velocity`).
-    requires: {all: [{not: {text: search_text, substring: 'inflow inversion-recovery'}}, {not: ge_inhance_velocity}]}
+    # MRI pack 0.24.0: nor `tof` as letters inside another word (`MToff`;
+    # flags.yml, section 22).
+    requires: {all: [{not: {text: search_text, substring: 'inflow inversion-recovery'}}, {not: ge_inhance_velocity}, {not: tof_letters_inside_a_word}]}
     keywords:
       - tof
       - time of flight

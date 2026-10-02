@@ -112,7 +112,9 @@ values:
   # `3scan_trace` (Siemens `ep2d_diff_3scan_trace_ADC` was ADC and Trace).
   Trace:
     terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b', 'DIFFUSION_ISO']
-    requires: {not: {any: [has_adc, has_eadc, has_fa]}}
+    # MRI pack 0.24.0: nor a b=0 image named for the trace its series makes
+    # (flags.yml, section 22).
+    requires: {all: [{not: {any: [has_adc, has_eadc, has_fa]}}, {not: b0_image_trace_named}]}
     keywords:
       - trace
       - tracew

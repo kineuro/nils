@@ -48,6 +48,7 @@ order:
   - 'flag:mtw'
   - 'flag:synthetic_t1'
   - 'flag:synthetic_t2'
+  - 'flag:synthetic_t1_flair'
   - 'flag:synthetic_flair'
   - 'flag:synthetic_pd'
   - 'flag:synthetic_dir'
@@ -478,6 +479,13 @@ rules:
     clauses:
       - {flag: 'has_t2_synthetic', tier: exclusive}
     set: {base: 'T2w'}
+
+  # MRI pack 0.24.0: a synthetic T1-weighted FLAIR is T1w (flags.yml,
+  # section 22), before the FLAIR rule below.
+  'flag:synthetic_t1_flair':
+    clauses:
+      - {flag: 't1_flair_synthetic', tier: exclusive}
+    set: {base: 'T1w'}
 
   'flag:synthetic_flair':
     clauses:

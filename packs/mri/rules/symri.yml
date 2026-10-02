@@ -37,6 +37,7 @@ order:
   - r2_map
   - b1_map
   - tissue_map
+  - synthetic_t1_flair
   - synthetic_flair
   - synthetic_dir
   - synthetic_psir
@@ -144,6 +145,15 @@ rules:
     clauses:
       - {flag: is_symri_tissue_map, tier: exclusive}
     set: {base: null, construct: [Qmap], technique: {from: symri_technique}, directory_type: anat}
+
+  # MRI pack 0.24.0 (the final certificate's A13): a synthetic T1-weighted
+  # FLAIR (`T1W_FLAIR Synthetic`, `T1FLAIR\SYNTHETIC`; GE `MAGiC T1FLAIR`)
+  # is T1w with FLAIR, as a T1-FLAIR is anywhere else (the reading guide);
+  # the rule below made every synthetic FLAIR T2w (flags.yml, section 22).
+  synthetic_t1_flair:
+    clauses:
+      - {flag: t1_flair_synthetic, tier: exclusive}
+    set: {base: 'T1w', construct: [SyntheticFLAIR], modifier: [FLAIR], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_flair:
     clauses:
