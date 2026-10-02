@@ -302,11 +302,9 @@ fn the_mri_pack_has_a_shape() {
     );
     // The technique-locked base contrasts are the implications the record
     // names first.
-    assert!(
-        shape.implications.iter().any(|i| i.rule_set == "base"
+    assert!(shape.implications.iter().any(|i| i.rule_set == "base"
             && i.rule == "technique:MPRAGE"
             // MRI pack 0.24.0: with the base's basis beside it
-            && i.writes.iter().any(|w| w == "base=T1w"))
-    );
+            && i.writes.iter().any(|w| w == "base=T1w")));
     assert!(shape.implications.iter().all(|i| !i.reads.is_empty()));
 }
