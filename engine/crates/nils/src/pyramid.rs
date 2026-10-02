@@ -3098,10 +3098,23 @@ mod tests {
             "{}",
             TILE_READS.peak()
         );
-        assert!(
-            TILE_READS.peak() > READS_AT_ONCE,
-            "the readers did read at once"
-        );
+        // and the turns are a bound, not a queue of one: many readers that
+        // hold their turns a while are many at once, never more than the cap
+        let now = std::sync::atomic::AtomicUsize::new(0);
+        let most = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..3 * TILE_READS_AT_ONCE {
+                s.spawn(|| {
+                    let _turn = TILE_READS.turn();
+                    let n = now.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    most.fetch_max(n, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    now.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+        });
+        let most = most.into_inner();
+        assert!(most > 1 && most <= TILE_READS_AT_ONCE, "{most}");
 
         assert_eq!(tile_reads_for(1024), 64);
         assert_eq!(tile_reads_for(65536), 256);
