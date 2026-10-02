@@ -647,3 +647,174 @@ cases:
       provenance: RawRecon
       technique: EPI
       construct: Phase
+  # --- the final certificate's disputes, settled under record 48's rule (the
+  # deep research where it is confident, our counts where it is not)
+
+  - name: a GE ksepi 3D EPI at a short TR and TE is a gradient-echo EPI, whatever it is named
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: 'FILTERED_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'ksepi'
+      ge_internal_pulse_sequence_name: ksepi
+      text_series_description: 'Sag T1 3D EPI'
+      n_slices: 140
+      repetition_time: 22
+      echo_time: 4
+      flip_angle: 25
+      echo_train_length: 16
+    flags:
+      ge_ksepi_3d_short: true
+      ge_spgr_epi: true
+    axes:
+      technique: GRE-EPI
+
+  - name: guard, a GE ksepi 3D susceptibility EPI at a long TE stays an EPI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'ksepi'
+      ge_internal_pulse_sequence_name: ksepi
+      text_series_description: 'Ax SWI 3D EPI'
+      n_slices: 60
+      repetition_time: 60
+      echo_time: 25
+      flip_angle: 15
+      echo_train_length: 32
+    flags:
+      ge_ksepi_3d_short: false
+      ge_spgr_epi: false
+
+  - name: a Philips diffusion set of a b=0, three directions and the isotropic image, direction I, is no Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'Reg - DWI'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      dwi_directions: 3
+      n_slices: 30
+      n_instances: 150
+      repetition_time: 4500
+      echo_time: 80
+      echo_train_length: 55
+    flags:
+      philips_directional_set: true
+      philips_isotropic_private: false
+    axes:
+      construct: ''
+      disposition: acquisition
+
+  - name: guard, a Philips stack of a b=0 and the isotropic image, direction I, stays Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'DWI'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      n_slices: 30
+      n_instances: 60
+      repetition_time: 4500
+      echo_time: 80
+      echo_train_length: 55
+    flags:
+      philips_directional_set: false
+      philips_isotropic_private: true
+    axes:
+      construct: Trace
+
+  - name: a Siemens Image Filter copy written DERIVED is Filtered
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND\FM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra_FIL_1'
+      text_protocol_name: 'Image Filter'
+      text_sequence_name: '*tse2d1_15'
+      n_slices: 20
+      repetition_time: 5000
+      echo_time: 100
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      siemens_filter_copy: true
+    axes:
+      construct: 'Filtered,ND'
+
+  - name: guard, a Siemens image filtered in its own reconstruction, written ORIGINAL with FIL, is no Filtered copy
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D\FM\FIL'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_sag_FIL'
+      text_protocol_name: 't2_tse_sag'
+      text_sequence_name: '*tse2d1_15'
+      n_slices: 20
+      repetition_time: 5000
+      echo_time: 100
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      siemens_filter_copy: false
+      is_filtered_named: false
+
+  - name: an acquired echo of a Siemens multi-echo FLASH named for QSM has no Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'QSM_3D'
+      text_protocol_name: 'QSM_3D'
+      text_sequence_name: '*fl3d6r'
+      n_slices: 100
+      repetition_time: 40
+      echo_time: 30
+      flip_angle: 15
+      echo_train_length: 6
+      echo_numbers: '5'
+    flags:
+      siemens_qsm_acquired_echo: true
+      swi_plain_echo: true
+    axes:
+      construct: ''
+
+  - name: guard, a Siemens SWI sequence's per-echo magnitude keeps Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax SWI multi-echo_Mag'
+      text_protocol_name: 'Ax SWI multi-echo'
+      text_sequence_name: '*swi3d4r'
+      n_slices: 100
+      repetition_time: 35
+      echo_time: 20
+      flip_angle: 15
+      echo_train_length: 4
+      echo_numbers: '3'
+    flags:
+      siemens_qsm_acquired_echo: false

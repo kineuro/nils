@@ -1199,7 +1199,12 @@ flags:
   # `FL:` image written DERIVED is the filtered copy, Filtered; one written
   # ORIGINAL has no construct (127 of the archive's 144 are DERIVED, and
   # where the original is exported beside them it is ORIGINAL).
-  is_filtered_named: {all: [is_ge_fl_prefix, is_derived]}
+  # MRI pack 0.24.0 (the final certificate's C4): and a Siemens `Image
+  # Filter` copy written DERIVED (below, `siemens_filter_copy`).
+  is_filtered_named:
+    any:
+      - all: [is_ge_fl_prefix, is_derived]
+      - siemens_filter_copy
   # Nima's ruling (2026-09-29, record 48, group 6): a GE calibration scan
   # (ASSET, `3D Calibration`, `Cal ...`) is no localizer. It is an acquired
   # image and a fast spoiled gradient echo.
@@ -1849,9 +1854,11 @@ flags:
       - {text: ge_pulse_sequence_name, matches: 'spgr'}
   tricks_named: {text: technique_text, matches: '(^|[^a-z])tricks([^a-z]|$)'}
   ge_spgr_epi:
-    all:
-      - {text: manufacturer, prefix: ge}
-      - {text: technique_text, matches: 'spgr\s*-?\s*epi'}
+    any:
+      - all:
+          - {text: manufacturer, prefix: ge}
+          - {text: technique_text, matches: 'spgr\s*-?\s*epi'}
+      - ge_ksepi_3d_short
   # Record 48, "Rulings after the re-adjudication": a GE gradient echo with
   # SequenceVariant `SS\SK` and `FAST_GEMS`, not spoiled, is SS-GRE. Never a
   # balanced FIESTA or one GE names SPGR or TRICKS (FSP-GRE, above), nor an
@@ -1951,6 +1958,11 @@ flags:
       # its own (dev-7: a b=0 and 16 directions named `DTI ... DWI iso` was
       # Trace).
       - {not: {field: dwi_directions, ge: 6}}
+      # MRI pack 0.24.0 (the final certificate's C3): nor a stack that holds
+      # the directional images of fewer directions beside it (a b=0, three
+      # directions and the isotropic image, five images a slice): there the
+      # element names one image of several, not the stack.
+      - {not: philips_directional_set}
 
   # --- A7 and case 6: the single-band reference of a diffusion run (a
   # reversed-blip one included), by its name: construct SBRef and base DWI
@@ -2835,6 +2847,7 @@ flags:
     any:
       - philips_swi_acquired_echo
       - all: [ge_swi_unprefixed, {not: has_magnitude}]
+      - siemens_qsm_acquired_echo
   # A4: GE's MEMP of one echo is a spin echo, whatever research mode and
   # the flip say (case 31).
   ge_memp_single_echo:
@@ -3040,3 +3053,78 @@ flags:
     all:
       - {text: manufacturer, prefix: ge}
       - {text: ge_pulse_sequence_name, matches: '^(ks)?epi'}
+  # === 21. MRI pack 0.24.0: the final certificate's disputes =================
+  #
+  # The final certificate's grade (`studies/2026-10-01-final-certificate-read/
+  # grade.md` in the design repository, part 2, kind c) left five questions no
+  # ruling covered. Four are settled here under record 48's rule (the deep
+  # research where it is confident, our counts where it is not), written up
+  # in `studies/2026-10-02-pack-0240/disputes.md`.
+  #
+  # C2: a GE `ksepi` 3D EPI at a short TR and TE is the EPIMix add-on's
+  # T1-weighted SPGR-EPI, a gradient-echo EPI (the deep research, case 32 and
+  # round 3's case 19; round 3's case 12: EPI stays only where nothing states
+  # the echo), whatever it is named. A TE under 10 ms inside a TR under
+  # 50 ms leaves no time for a spin echo. On the archive every GE `ksepi` 3D
+  # stack is either this (TR 21 to 24 ms, TE 3 to 6.6 ms) or a susceptibility
+  # EPI at a TR of 50 ms or more and a TE of 10 ms or more. Never EPIMix's own
+  # `ksepimix`, which its route reads.
+  ge_ksepi_3d_short:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: '^ksepi'}
+          - {text: ge_internal_pulse_sequence_name, matches: '^ksepi'}
+      - {not: {text: ge_pulse_sequence_name, matches: 'ksepimix|ksneuromix'}}
+      - {not: {text: ge_internal_pulse_sequence_name, matches: 'ksepimix|ksneuromix'}}
+      - {field: mr_acquisition_type, eq: '3D'}
+      - {field: repetition_time, gt: 0}
+      - {field: repetition_time, lt: 50}
+      - {field: echo_time, gt: 0}
+      - {field: echo_time, lt: 10}
+  # C3: Philips writes its private diffusion direction (2001,1004) once a
+  # series, from one of its images. A stack that holds more images a slice
+  # than slices, of an acquisition of two or more directions the gradients
+  # count, holds its directional images: the `I` names the isotropic image
+  # among them, not the stack, which is the diffusion set and no Trace (the
+  # adjudicators of the final read; dev-7 and the final read settled such
+  # stacks without a construct, and every b=0-and-isotropic stack Trace).
+  philips_directional_set:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - {field: dwi_directions, ge: 2}
+      - {field: n_instances, gt: {field: n_slices}}
+  # C4: a Siemens `Image Filter` copy, the post-processing that writes a
+  # filtered copy of a series as a series of its own (ProtocolName `Image
+  # Filter`, the name `<series>_FIL_<n>`), written DERIVED, is Filtered, as
+  # GE's `FL:` copy written DERIVED is (record 48, DR8, decided by our
+  # counts). An image the scanner filtered in its own reconstruction is
+  # written ORIGINAL with `FIL` in its image type and `_FIL` after the
+  # protocol's name, and has no construct (the deep research, case 10:
+  # routine reconstruction filtering changes nothing an image depicts). Never
+  # a position display, which carries the name of the series it plans.
+  siemens_filter_copy:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - is_derived
+      - {not: image_type.is_posdisp}
+      - any:
+          - {text: text_protocol_name, matches: '^\s*image filter\s*$'}
+          - {text: text_series_description, matches: '_fil_[0-9]+\s*$'}
+  # C5: an echo of a Siemens multi-echo FLASH (`*fl3d6r`) named for QSM, as
+  # the scanner acquired it (ORIGINAL, component M), has no Magnitude: the
+  # scanner computed nothing from it, and QSM in the name is the site's
+  # word, not a route that writes the phase's partner (N7). GE's QSM source
+  # echoes (pack 0.21.0, dev-6's A2) and Philips' per-echo `M_FFE` are read
+  # so already; a Siemens SWI sequence's own magnitude (`*swi3d`) keeps it.
+  siemens_qsm_acquired_echo:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - image_type.is_original
+      - has_magnitude
+      - {not: has_swi}
+      - {not: is_mean}
+      - {text: text_sequence_name, matches: '^\*?(wip)?fl[23]d'}
+      - {text: search_text, matches: '(^|[^a-z])qsm'}
+      - {not: {text: search_text, matches: '(^|[^a-z])swi'}}
+
