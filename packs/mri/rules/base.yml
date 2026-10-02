@@ -758,9 +758,16 @@ rules:
     set: {base: 'T2w'}
     confidence: 0.7
 
+  # MRI pack 0.24.0: the gradient-echo windows below are never read on a
+  # stack the pack reads as a spin echo (`has_se`), which a Philips survey
+  # with ScanningSequence GR and its own `M_SE` and private technique SE is
+  # (`Survey_MST`, TE 20 ms at a TR written 1,999.99 ms, missed the
+  # spin-echo windows, met `gre_t2starw` and broke `t2star-not-spin-echo`
+  # beside its spin-echo technique). Such a stack is left to the spin-echo
+  # windows, or to none.
   'physics:gre_t2starw_long_tr':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: repetition_time, ge: 200}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 30}, {field: echo_time, ge: 12}]}, cite: 'a flip of 30 degrees or less at a repetition time of 200 ms or more, and an echo time of 12 ms or more', source: physics, tier: physics}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {not: has_ir}, {field: repetition_time, ge: 200}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 30}, {field: echo_time, ge: 12}]}, cite: 'a flip of 30 degrees or less at a repetition time of 200 ms or more, and an echo time of 12 ms or more', source: physics, tier: physics}
     set: {base: 'T2starw'}
     confidence: 0.7
 
@@ -773,18 +780,18 @@ rules:
   # partner of an MT pair, settled PDw; the rules said T1w by its echo time).
   'physics:gre_pdw':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}, {field: repetition_time, ge: 20}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a flip of 10 degrees or less at a repetition time of 20 ms or more', source: physics, tier: physics}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {not: has_ir}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}, {field: repetition_time, ge: 20}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a flip of 10 degrees or less at a repetition time of 20 ms or more', source: physics, tier: physics}
     set: {base: 'PDw'}
     confidence: 0.65
 
   'physics:gre_t1w':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
     set: {base: 'T1w'}
     confidence: 0.7
 
   'physics:gre_t2starw':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, gt: 15}]}, cite: 'a long echo time on a gradient echo', source: physics, tier: physics}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {field: echo_time, gt: 15}]}, cite: 'a long echo time on a gradient echo', source: physics, tier: physics}
     set: {base: 'T2starw'}
     confidence: 0.7

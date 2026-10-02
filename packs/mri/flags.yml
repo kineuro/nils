@@ -1262,12 +1262,17 @@ flags:
   # Never a diffusion, perfusion, BOLD or SWI series, or a time series
   # (dev-2: eight GE `SAG T2`, `AX T2` and `T1 Variab Flip` stacks, with
   # trains of 22, 14 and 1, settled TSE and SE).
+  # MRI pack 0.24.0: and never one named for a gradient echo, as
+  # `ge_research_se_train` (section 17) and `ge_research_gre_named` already
+  # read it (a GE `3-pl T2* FGRE` at flip 90 was a TSE beside the T2* its
+  # name gave it, and broke `t2star-not-spin-echo`).
   ge_research_se:
     all:
       - {text: manufacturer, prefix: ge}
       - scanning_sequence.has_research
       - {not: scanning_sequence.has_gre}
       - {not: scanning_sequence.has_epi}
+      - {not: ge_research_gre_named}
       - {not: has_positive_b_value}
       - {not: is_time_series}
       - {not: {text: search_text, matches: 'epi|diff|dwi|dti|swi|swan|asl|perf|bold|fmri|probe|spectro'}}
@@ -2871,3 +2876,23 @@ flags:
       - stage_acquired_echo
       - {not: has_phase}
       - {text: search_text, matches: '(^|[^a-z0-9])t1w?([^a-z0-9]|$)'}
+
+  # === 19. MRI pack 0.24.0: the exclusion `t2star-not-spin-echo` ============
+  #
+  # Packs 0.22.0 and 0.23.0 left 7 archive stacks with base T2*w beside a
+  # spin-echo technique (`studies/2026-10-02-t2star-se-broken/` in the design
+  # repository). On 4 of them a spin-echo word decided the technique against
+  # a readout the header states: a Philips image typed LOCALIZER on a plain
+  # gradient echo, named for the mDixon TSE it plans, and a GE `fgre` named
+  # `T2* Ax FSE`. A spin-echo value is not taken where the header says what
+  # the readout is:
+  # - an image typed LOCALIZER or SCOUT on a plain gradient echo, whose name
+  #   may be the series it plans (pack 0.22.0's `typed_localizer_gre`, which
+  #   kept the diffusion values off it; a gradient-echo scout is read GRE,
+  #   record 48, 2026-09-27);
+  # - a GE fast gradient echo by its pulse sequence (round 3, case 8: the
+  #   pulse sequence decides `fgre`, `fspgr` and `efgre3d`).
+  # Siemens' position display (`POSDISP`) is left as pack 0.18.1 left it: its
+  # technique is still read from the words of the series it plans.
+  ge_fast_gre_psd: {any: [ge_psd_unspoiled_fgre, ge_psd_fast_spoiled, ge_psd_efgre3d_unspoiled]}
+  readout_not_spin_echo: {any: [typed_localizer_gre, ge_fast_gre_psd]}

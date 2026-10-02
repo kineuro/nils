@@ -1,0 +1,231 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.24.0: the exclusion `t2star-not-spin-echo`, which packs 0.22.0
+# and 0.23.0 broke on 7 archive stacks (base T2*w beside a spin-echo
+# technique): a spin-echo word against the readout an image typed LOCALIZER
+# or a GE fast gradient echo states, a GE research-mode series named for a
+# gradient echo read as a spin echo by its flip, and a gradient-echo window
+# read on a stack the pack reads as a spin echo. One or more cases for each
+# rule, and the cases that keep each rule from reaching what it must not.
+# Every stack here is invented from the pattern the design repository's
+# files name; none is a real header.
+
+cases:
+
+  # --- a spin-echo word does not decide against a readout the header states
+
+  - name: a Philips image typed LOCALIZER on a plain gradient echo, named for the mDixon TSE it plans, is no TSE
+    stack:
+      image_type: 'LOCALIZER'
+      scanning_sequence: GR
+      sequence_variant: MP
+      scan_options: FC
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2_mDixon_TSE_sag'
+      n_slices: 1
+      repetition_time: 3.1
+      echo_time: 1.4
+      flip_angle: 8
+      echo_train_length: 400
+    flags:
+      typed_localizer_gre: true
+      readout_not_spin_echo: true
+    axes:
+      provenance: Localizer
+      technique: GRE
+
+  - name: a Philips mDixon TSE water image written GR stays a TSE
+    stack:
+      image_type: 'DERIVED\PRIMARY\W\W\DERIVED'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: TSE
+      text_series_description: 'T2_mDixon_TSE_sag'
+      n_slices: 24
+      repetition_time: 3000
+      echo_time: 100
+      flip_angle: 90
+      echo_train_length: 20
+    flags:
+      philips_dixon_tse: true
+      readout_not_spin_echo: false
+    axes:
+      technique: TSE
+      base: T2w
+
+  - name: a Siemens position display keeps the technique its planned series' words give, as pack 0.18.1 left it
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\POSDISP'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PosDisp: [3] t2_tse_tra'
+      text_sequence_name: '*fl2d1'
+      n_slices: 1
+      repetition_time: 8.6
+      echo_time: 4.0
+      flip_angle: 20
+    flags:
+      readout_not_spin_echo: false
+    axes:
+      provenance: Localizer
+      technique: TSE
+      base: T2w
+
+  - name: a GE fgre named T2* and FSE is the fast gradient echo its pulse sequence says, T2*-weighted by its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK\OSP'
+      scan_options: 'FAST_GEMS\SAT_GEMS\EDR_GEMS\SP'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: fgre
+      text_series_description: 'T2* AX FSE'
+      n_slices: 18
+      repetition_time: 300
+      echo_time: 7
+      flip_angle: 25
+      echo_train_length: 0
+    flags:
+      ge_fast_gre_psd: true
+      readout_not_spin_echo: true
+    axes:
+      technique: FISP
+      base: 'T2*w'
+
+  - name: a GE efgre3d reformat named for a cube FIESTA is the FIESTA, not a 3D TSE
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED\AVERAGE'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: efgre3d
+      text_series_description: 'ref cube fiesta cor'
+      n_slices: 60
+      repetition_time: 5.6
+      echo_time: 2.3
+      flip_angle: 55
+      echo_train_length: 1
+    flags:
+      readout_not_spin_echo: true
+    axes:
+      technique: FIESTA
+      base: T2w
+
+  - name: a GE FSE by its pulse sequence and its name stays a TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FAST_GEMS\FC'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: fse-xl
+      text_series_description: 'AX T2 FSE'
+      n_slices: 20
+      repetition_time: 4000
+      echo_time: 100
+      flip_angle: 90
+      echo_train_length: 16
+    flags:
+      readout_not_spin_echo: false
+    axes:
+      technique: TSE
+      base: T2w
+
+  # --- a GE research-mode series named for a gradient echo is no spin echo
+  # by its flip
+
+  - name: a GE research-mode three-plane series named T2* FGRE at flip 90 is a gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 3-Plane
+      text_series_description: '3-pl T2* FGRE'
+      split_reason: multi_echo
+      stacks_in_series: 2
+      n_slices: 9
+      repetition_time: 400
+      echo_time: 9
+      flip_angle: 90
+      echo_train_length: 2
+    flags:
+      ge_research_gre_named: true
+      ge_research_se: false
+      has_se: false
+    axes:
+      technique: MEGRE
+      base: 'T2*w'
+
+  - name: a GE research-mode series named T2 at flip 90 with a train stays a spin echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'SAG T2'
+      n_slices: 20
+      repetition_time: 3500
+      echo_time: 100
+      flip_angle: 90
+      echo_train_length: 22
+    flags:
+      ge_research_se: true
+    axes:
+      technique: TSE
+      base: T2w
+
+  # --- a gradient-echo window is not read on a stack the pack reads as a
+  # spin echo
+
+  - name: a Philips survey written GR whose ImageType and private technique say a spin echo takes no T2* from its echo time
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: SE
+      philips_number_of_echoes: '1'
+      text_series_description: 'Survey_MST'
+      split_reason: multi_echo
+      stacks_in_series: 3
+      n_slices: 9
+      repetition_time: 1999.99975585937
+      echo_time: 20
+      flip_angle: 90
+    flags:
+      has_se: true
+      has_gre: true
+    axes:
+      base: ''
+
+  - name: a Philips FFE at a long echo time stays T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      text_series_description: 'FFE tra'
+      n_slices: 20
+      repetition_time: 600
+      echo_time: 18
+      flip_angle: 18
+    flags:
+      has_se: false
+    axes:
+      technique: FLASH
+      base: 'T2*w'

@@ -355,6 +355,10 @@ values:
     terms: ['SPACE', 'CUBE', 'VISTA', '3D TSE', '3D FSE', 'MVOX', 'isoFSE', '3D FLAIR TSE', 'spc']
     label: SPACE
     family: SE
+    # MRI pack 0.24.0: never where the header states a readout of another
+    # family (flags.yml, section 19); the same guard is on every spin-echo
+    # value below.
+    requires: {not: readout_not_spin_echo}
     keywords:
       - space
       - cube
@@ -375,6 +379,7 @@ values:
     terms: ['HASTE', 'SSFSE', 'SSh TSE', 'single shot TSE', 'FASE', 'single-shot FSE']
     label: HASTE
     family: SE
+    requires: {not: readout_not_spin_echo}
     keywords:
       - haste
       - ssfse
@@ -392,7 +397,7 @@ values:
     family: SE
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
-    requires: {not: flair_named_dual_echo}
+    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}]}
     keywords:
       - tirm
       - stir
@@ -420,7 +425,7 @@ values:
     family: SE
     # MRI pack 0.21.0: nor a Philips mDixon TSE, whose echoes are its Dixon
     # parts (flags.yml, section 18).
-    requires: {all: [{not: is_dual_echo_tse}, {not: philips_dixon_tse}]}
+    requires: {all: [{not: is_dual_echo_tse}, {not: philips_dixon_tse}, {not: readout_not_spin_echo}]}
     keywords:
       - mese
       - me-se
@@ -442,7 +447,7 @@ values:
     family: SE
     # MRI pack 0.21.0: on GE only with `FR_GEMS`; its FRFSE pulse sequence or
     # name without it is a plain TSE (record 48, conflict 2).
-    requires: {not: ge_no_fast_recovery}
+    requires: {all: [{not: ge_no_fast_recovery}, {not: readout_not_spin_echo}]}
     keywords:
       - restore
       - frfse
@@ -458,7 +463,7 @@ values:
     # MRI pack 0.20.0: never by the letters inside another word where
     # Siemens' sequence name states a gradient echo (dev-5's A8: a `fl2d`
     # cine named in Swedish, "hjärtsekvens"; flags.yml).
-    requires: {not: tse_letters_inside_a_word_on_gre_stem}
+    requires: {all: [{not: tse_letters_inside_a_word_on_gre_stem}, {not: readout_not_spin_echo}]}
     keywords:
       - tse
       - fse
@@ -474,6 +479,7 @@ values:
   SE:
     terms: ['spin echo', 'SE', 'conventional spin echo']
     family: SE
+    requires: {not: readout_not_spin_echo}
     keywords:
       - spin-echo
     detection:

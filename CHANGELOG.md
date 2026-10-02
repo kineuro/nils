@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The MRI pack is 0.24.0. The exclusion that T2*-weighting is never a spin echo held on every stack of a production archive but 7, and on each the header's own readout contradicted one side. A spin-echo name no longer decides the technique of an image typed LOCALIZER or SCOUT on a plain gradient echo, whose name may be the series it plans, nor of a GE fast gradient echo by its pulse sequence (`fgre`, `fspgr`, `efgre3d`). A GE research-mode series named for a gradient echo is no longer read as a spin echo by its flip angle. The base's gradient-echo windows are not read on a stack the pack reads as a spin echo. Stacks need a reclassify.
+
 ## [1.0.0-alpha.72] - 2026-10-02
 
 The reader's pictures come at once. The slab door read a slab's tiles one file after another, which on a network share took seconds a slab; it now reads them at once and keeps recent slabs in memory. A claim names the items that come next with the stacks each shows, so the desk warms their pictures while the item claimed is read (desk 1.0.0-alpha.62). No migration.
