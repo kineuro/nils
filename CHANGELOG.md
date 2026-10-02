@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.71 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.71] - 2026-10-02
 
 The MRI pack is 0.23.0: the rule bugs a development grade of 0.22.0 found, and its dispute settled. The ADC or eADC map of a Siemens or Philips tensor acquisition is DTIRecon where only the source series beside it names the tensor, read by a second session pass, and a plain DWI beside it keeps the map RawRecon; the physics vote no longer fills a base the rules decide as nothing; a Siemens 3D-card range (DERIVED with PARALLEL or RADIAL) is a reformat whatever it is named; and a Siemens BLADE written `tseBNR` carries the restore, as `tseBR` does. Stacks need a reclassify; no re-read. No engine code change. The body-part descriptors pin the image 1.0.0-alpha.70 published; a change after this release pins them to the build it publishes. No desk release: installs keep desk 1.0.0-alpha.61. Registry schema 78 (fingerprint revision 6), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as before.
