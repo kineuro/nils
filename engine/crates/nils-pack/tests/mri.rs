@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        427,
+        453,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -118,7 +118,13 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          rules leave IR and MPR, its real and magnitude sources, a reformat \
          with no black-blood word and a black-blood source, MOLLI's inline \
          T1 map, a MEAN magnitude over echoes, and an MPRAGE by its shot \
-         interval"
+         interval, the 11 of its GE rule gaps (an SPGR name on a TOF \
+         option, a MAGiC real image, a SWI output and a multi-echo QSM by \
+         the pulse sequence, GE's own map names, a B0 map and a SWI read out \
+         by EPI), the 4 of its settled disputes (a 3D ksepi gradient echo, \
+         a Philips directional set, a Siemens filter copy and a QSM-named \
+         echo), the 10 of its Philips and keyword rule gaps, and a TWIST-VIBE \
+         dynamic run kept out of CE-MRA"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

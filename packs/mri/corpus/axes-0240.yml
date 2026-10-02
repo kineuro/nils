@@ -1539,6 +1539,8 @@ cases:
     axes:
       technique: VIBE
 
+  # A TWIST-VIBE dynamic run that names no angiography is left out of
+  # CE-MRA (DCE or time-resolved CE-MRA is open); its map keeps base PWI.
   - name: a Siemens TWIST-VIBE's time-to-peak map keeps base PWI
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\WATER\TTP'
@@ -1555,7 +1557,7 @@ cases:
       echo_time: 1.2
       flip_angle: 9
     axes:
-      technique: CE-MRA
+      technique: VIBE
       base: PWI
 
   # --- singles

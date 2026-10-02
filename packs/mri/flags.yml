@@ -2144,7 +2144,10 @@ flags:
       - {not: dce_words}
       # MRI pack 0.24.0: no longer every series that says vibe. A TWIST-VIBE
       # and a named `MRA-CE Vibe` given contrast are CE-MRA (the final
-      # certificate's A12; flags.yml section 23); a DCE run says so.
+      # certificate's A12; flags.yml section 23); a DCE run says so. A
+      # TWIST-VIBE dynamic run that names no angiography stays out, as pack
+      # 0.18.0 held it: whether it is a DCE or a time-resolved CE-MRA is open.
+      - {not: twist_vibe_dynamic}
       # `tof` anywhere, as the TOF value's own keyword reads it (`3DTOF`)
       - {not: {text: technique_text, matches: 'tof|time of flight|inflow'}}
       - any:
@@ -3387,7 +3390,16 @@ flags:
   # Vibe` given contrast is a CE-MRA (the reading guide: TRICKS, TWIST,
   # 4D-TRAK, a named CE-MRA, cases 2 and 33); `is_ce_mra` no longer leaves
   # out every series that says vibe. A series that says DCE stays DCE.
-  # (No flag: the change is in `is_ce_mra` above.)
+  # The change is in `is_ce_mra` above. A TWIST-VIBE dynamic run that names
+  # no angiography (`t1_vibe-twist_dixon_tra_dyn`) is left out: the raters
+  # read one as a DCE, the correction record as a CE-MRA, and pack 0.18.0
+  # held it out of CE-MRA, so the question stays open.
+  twist_vibe_dynamic:
+    all:
+      - {text: technique_text, matches: 'twist'}
+      - {text: technique_text, matches: 'vibe'}
+      - {text: technique_text, matches: '(^|[^a-z])dyn(amic)?([^a-z]|$)|_dyn'}
+      - {not: {text: technique_text, matches: '(^|[^a-z])(mra|angio|angiography)'}}
 
   # --- single: a Siemens MEAN magnitude over the echoes of a multi-echo
   # gradient echo (`DERIVED\PRIMARY\M\...\MEAN`, `*fl2d8`, no SWI token) is
