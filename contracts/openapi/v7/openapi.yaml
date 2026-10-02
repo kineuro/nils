@@ -1380,7 +1380,7 @@ paths:
         - {name: alone, in: query, required: false, schema: {type: string, enum: ["1", "true"]}}
       requestBody: {content: {application/json: {schema: {type: object, properties: {role: {type: string, enum: [rater, adjudicator], default: rater}, order: {type: string, enum: [position, value], default: position}, alone: {type: boolean, default: false}}}}}}
       responses:
-        "200": {description: "{assignment, item, held, next}, or {assignment: null, item: null, why} when nothing is left for the caller"}
+        "200": {description: "{assignment, item, held, next, ahead}, or {assignment: null, item: null, why} when nothing is left for the caller. Added in place by record 48 (the post-contrast reading): a rater's `ahead` lists up to five items, [{item, position, stacks}], that claims in the same order would offer after this one as it stands now, each with the stacks a reader shows for it (the item's stack, an anchored item's panels in their order, a pair's left then right) and nothing else of them, so a page warms their pictures; `next` is its first as {item, stack}; hints, nothing is held for them"}
         "400": {description: An order that is not position or value, or an alone that is not a boolean}
         "403": {description: The campaign names its raters or adjudicators and the caller is not one}
         "409": {description: The campaign is closed}
