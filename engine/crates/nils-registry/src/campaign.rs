@@ -2566,7 +2566,16 @@ pub struct Claimed {
     /// stands now, so a reader fetches its pictures while this one is read.
     /// A hint: nothing is held for it.
     pub next: Option<(i64, Option<i64>)>,
+    /// The items, up to [`AHEAD`], that claims in the same order would
+    /// offer after this one, as it stands now, each with its stack where
+    /// the item names one: `next` is the first (record 48, the
+    /// post-contrast reading). Hints as well.
+    pub ahead: Vec<(i64, Option<i64>)>,
 }
+
+/// How many items a claim names as coming next, so a reader's page warms
+/// their pictures while the item claimed is read.
+pub const AHEAD: usize = 5;
 
 impl Claimed {
     pub fn as_json(&self) -> Value {
@@ -2575,6 +2584,7 @@ impl Claimed {
             "item": self.item.as_json(),
             "held": self.held,
             "next": self.next.map(|(item, stack)| json!({"item": item, "stack": stack})),
+            "ahead": self.ahead.iter().map(|(item, stack)| json!({"item": item, "stack": stack})).collect::<Vec<_>>(),
         })
     }
 }
@@ -3006,6 +3016,118 @@ fn by_value(w: Option<&Worth>, position: i64) -> (u8, i64, i64) {
     }
 }
 
+/// The items a rater's claim takes in the order asked, the first offered
+/// first: open items of the first round that still want raters and that
+/// this principal was never given, in any role or state. By position only
+/// the first `1 + AHEAD` are read.
+fn rater_order(
+    store: &mut Store,
+    c: &Campaign,
+    principal: &str,
+    order: Order,
+    alone: bool,
+) -> Result<Vec<(i64, Option<i64>)>, Error> {
+    let campaign = c.id;
+    let d = store.dialect();
+    let a = store.qualified("campaign_assignment");
+    let i = store.qualified("campaign_item");
+    let sql = format!(
+        "SELECT i.id, i.position, i.stack_id, i.held_back FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
+         AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
+              AND a.state IN ('leased', 'submitted')) < {} \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
+         ORDER BY i.position{}",
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Text),
+        // by position, the one offered and the ones after it
+        if order == Order::Position && !alone {
+            format!(" LIMIT {}", 1 + AHEAD)
+        } else {
+            String::new()
+        }
+    );
+    let mut open: Vec<(i64, i64, Option<i64>)> = Vec::new();
+    let mut flagged: BTreeSet<i64> = BTreeSet::new();
+    for r in store.query(
+        &sql,
+        &[
+            Param::Int(campaign),
+            Param::Int(c.raters_per_item),
+            Param::from(principal),
+        ],
+    )? {
+        let id = r.int(0)?;
+        if r.opt_int(3)?.unwrap_or(0) != 0 {
+            flagged.insert(id);
+        }
+        open.push((id, r.int(1)?, r.opt_int(2)?));
+    }
+    let stacks: Vec<i64> = open.iter().filter_map(|(.., s)| *s).collect();
+    let needs_seals = alone || order == Order::Value;
+    // record 48 R2: a stack of a sample sealed now is never
+    // ranked by what the systems said of it; it takes a place
+    // drawn from the campaign's seed
+    let sealed = if needs_seals {
+        crate::labels::sealed_now(store, &stacks, &[])
+            .map_err(|e| StoreError::Message(e.to_string()))?
+            .0
+    } else {
+        Default::default()
+    };
+    let seed = if needs_seals {
+        Some(hold_back_seed(store, c.id)?)
+    } else {
+        None
+    };
+    if alone {
+        let seed = seed.as_deref().unwrap_or_default();
+        open.retain(|(id, _, stack)| {
+            flagged.contains(id)
+                || drawn_back(seed, *id, c.hold_back)
+                || stack.is_some_and(|s| sealed.contains(&s))
+        });
+    }
+    let ranked: Vec<(i64, Option<i64>)> = match order {
+        Order::Position => open.iter().map(|(id, _, s)| (*id, *s)).collect(),
+        Order::Value => {
+            let worth = worth(store, &stacks, &axes_of(&c.question()?))?;
+            let seed = seed.as_deref().unwrap_or_default();
+            // record 50 R7: where the campaign carries outside
+            // suggestions, their confidence says how sure the
+            // item is, the least certain first
+            let ids: Vec<i64> = open.iter().map(|(id, ..)| *id).collect();
+            let told = crate::suggestion::worth_of_items(store, c.id, &ids)?;
+            type Keyed = ((u8, i64, i64), i64, Option<i64>);
+            let mut keyed: Vec<Keyed> = open
+                .iter()
+                .map(|(id, position, stack)| {
+                    let key = match stack {
+                        Some(s) if sealed.contains(s) => (1, drawn(seed, *id), *position),
+                        // a campaign that shows nothing is never
+                        // ranked by what a system said either
+                        _ if c.suggest == Suggest::None => (1, drawn(seed, *id), *position),
+                        _ => {
+                            // what the campaign shows is what ranks it
+                            let mine = stack
+                                .filter(|_| c.suggest.shows_rules())
+                                .and_then(|s| worth.get(&s))
+                                .cloned();
+                            let theirs = told.get(id).filter(|_| c.suggest.shows_imported());
+                            let w = crate::suggestion::merged(mine, theirs);
+                            by_value(w.as_ref(), *position)
+                        }
+                    };
+                    (key, *id, *stack)
+                })
+                .collect();
+            keyed.sort();
+            keyed.into_iter().map(|(_, id, s)| (id, s)).collect()
+        }
+    };
+    Ok(ranked)
+}
+
 /// [`claim`], taking a rater's next item in the order given. An
 /// adjudicator's order is always the position.
 pub fn claim_in(
@@ -3050,7 +3172,7 @@ pub fn claim_with(
     let store = registry.store();
     let d = store.dialect();
     store.begin()?;
-    let mut next: Option<(i64, Option<i64>)> = None;
+    let mut ahead: Vec<(i64, Option<i64>)> = Vec::new();
     let done = (|| -> Result<Option<(i64, bool)>, Error> {
         lock(store, campaign)?;
         expire_in(store, campaign, now)?;
@@ -3070,6 +3192,12 @@ pub fn claim_with(
                 Param::from(role.name()),
             ],
         )? {
+            // what comes after the item held: the same order, which never
+            // offers an item the principal was given, this one included
+            if role == Role::Rater {
+                ahead = rater_order(store, &c, principal, order, alone)?;
+                ahead.truncate(AHEAD);
+            }
             return Ok(Some((r.int(0)?, true)));
         }
         let until = plus_seconds(now, c.lease_seconds);
@@ -3078,111 +3206,13 @@ pub fn claim_with(
         let i = store.qualified("campaign_item");
         match role {
             Role::Rater => {
-                let sql = format!(
-                    "SELECT i.id, i.position, i.stack_id, i.held_back FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
-                     AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
-                          AND a.state IN ('leased', 'submitted')) < {} \
-                     AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
-                     ORDER BY i.position{}",
-                    d.param(1, Type::Int),
-                    d.param(2, Type::Int),
-                    d.param(3, Type::Text),
-                    // the first two by position: the one offered and the
-                    // one after it
-                    if order == Order::Position && !alone {
-                        " LIMIT 2"
-                    } else {
-                        ""
-                    }
-                );
-                let mut open: Vec<(i64, i64, Option<i64>)> = Vec::new();
-                let mut flagged: BTreeSet<i64> = BTreeSet::new();
-                for r in store.query(
-                    &sql,
-                    &[
-                        Param::Int(campaign),
-                        Param::Int(c.raters_per_item),
-                        Param::from(principal),
-                    ],
-                )? {
-                    let id = r.int(0)?;
-                    if r.opt_int(3)?.unwrap_or(0) != 0 {
-                        flagged.insert(id);
-                    }
-                    open.push((id, r.int(1)?, r.opt_int(2)?));
-                }
-                let stacks: Vec<i64> = open.iter().filter_map(|(.., s)| *s).collect();
-                let needs_seals = alone || order == Order::Value;
-                // record 48 R2: a stack of a sample sealed now is never
-                // ranked by what the systems said of it; it takes a place
-                // drawn from the campaign's seed
-                let sealed = if needs_seals {
-                    crate::labels::sealed_now(store, &stacks, &[])
-                        .map_err(|e| StoreError::Message(e.to_string()))?
-                        .0
-                } else {
-                    Default::default()
-                };
-                let seed = if needs_seals {
-                    Some(hold_back_seed(store, c.id)?)
-                } else {
-                    None
-                };
-                if alone {
-                    let seed = seed.as_deref().unwrap_or_default();
-                    open.retain(|(id, _, stack)| {
-                        flagged.contains(id)
-                            || drawn_back(seed, *id, c.hold_back)
-                            || stack.is_some_and(|s| sealed.contains(&s))
-                    });
-                }
-                let mut ranked: Vec<(i64, Option<i64>)> = match order {
-                    Order::Position => open.iter().map(|(id, _, s)| (*id, *s)).collect(),
-                    Order::Value => {
-                        let worth = worth(store, &stacks, &axes_of(&c.question()?))?;
-                        let seed = seed.as_deref().unwrap_or_default();
-                        // record 50 R7: where the campaign carries outside
-                        // suggestions, their confidence says how sure the
-                        // item is, the least certain first
-                        let ids: Vec<i64> = open.iter().map(|(id, ..)| *id).collect();
-                        let told = crate::suggestion::worth_of_items(store, c.id, &ids)?;
-                        type Keyed = ((u8, i64, i64), i64, Option<i64>);
-                        let mut keyed: Vec<Keyed> = open
-                            .iter()
-                            .map(|(id, position, stack)| {
-                                let key = match stack {
-                                    Some(s) if sealed.contains(s) => {
-                                        (1, drawn(seed, *id), *position)
-                                    }
-                                    // a campaign that shows nothing is never
-                                    // ranked by what a system said either
-                                    _ if c.suggest == Suggest::None => {
-                                        (1, drawn(seed, *id), *position)
-                                    }
-                                    _ => {
-                                        // what the campaign shows is what ranks it
-                                        let mine = stack
-                                            .filter(|_| c.suggest.shows_rules())
-                                            .and_then(|s| worth.get(&s))
-                                            .cloned();
-                                        let theirs =
-                                            told.get(id).filter(|_| c.suggest.shows_imported());
-                                        let w = crate::suggestion::merged(mine, theirs);
-                                        by_value(w.as_ref(), *position)
-                                    }
-                                };
-                                (key, *id, *stack)
-                            })
-                            .collect();
-                        keyed.sort();
-                        keyed.into_iter().map(|(_, id, s)| (id, s)).collect()
-                    }
-                };
+                let mut ranked = rater_order(store, &c, principal, order, alone)?;
                 if ranked.is_empty() {
                     return Ok(None);
                 }
                 let (item, _) = ranked.remove(0);
-                next = ranked.first().copied();
+                ranked.truncate(AHEAD);
+                ahead = ranked;
                 let id = store
                     .insert(
                         &Insert::new(
@@ -3297,7 +3327,8 @@ pub fn claim_with(
         assignment: a,
         item: it,
         held,
-        next,
+        next: ahead.first().copied(),
+        ahead,
     }))
 }
 

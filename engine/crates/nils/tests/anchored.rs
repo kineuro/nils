@@ -628,6 +628,8 @@ fn read(dsn: Option<&str>) {
 
     let mut read: Vec<(i64, &str)> = Vec::new();
     let mut candidate_places = Vec::new();
+    // what the claim before said comes next: the item and its panels' stacks
+    let mut promised: Option<(i64, Vec<i64>)> = None;
     loop {
         let cl = server.ok(
             "POST",
@@ -693,6 +695,36 @@ fn read(dsn: Option<&str>) {
             ["candidate", "reference post", "reference pre"],
             "{sheet}"
         );
+        // the claim names what comes next, the stacks in the panels' order
+        // and nothing else of them; the claim before named this one
+        let shown: Vec<i64> = panels
+            .iter()
+            .map(|p| p["stack"].as_i64().unwrap())
+            .collect();
+        if let Some((was, stacks)) = promised.take() {
+            assert_eq!(was, item, "{cl}");
+            assert_eq!(stacks, shown, "{cl}");
+        }
+        let ahead = cl["ahead"].as_array().unwrap();
+        assert_eq!(ahead.len(), 2 - read.len(), "{cl}");
+        for a in ahead {
+            let mut keys: Vec<&String> = a.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(keys, ["item", "position", "stacks"], "{a}");
+            assert_eq!(a["stacks"].as_array().unwrap().len(), 3, "{a}");
+        }
+        assert_eq!(cl["next"]["item"], cl["ahead"][0]["item"], "{cl}");
+        if let Some(a) = ahead.first() {
+            promised = Some((
+                a["item"].as_i64().unwrap(),
+                a["stacks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.as_i64().unwrap())
+                    .collect(),
+            ));
+        }
         let cand = by_role["candidate"].0;
         let (pre_anchor, pre_other) = by_role["reference_pre"];
         let (post_anchor, post_other) = by_role["reference_post"];

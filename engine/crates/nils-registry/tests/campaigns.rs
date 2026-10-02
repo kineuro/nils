@@ -4017,3 +4017,81 @@ fn a_claim_asks_for_the_held_back_and_names_the_next() {
         assert_eq!(seen, want, "{name}");
     }
 }
+
+/// Record 48, the post-contrast reading: a claim names the items that
+/// come after it, up to five, in the order claims take them, each with its
+/// stack, skipping what others hold and what the rater was given before;
+/// a lease held already names them as well.
+#[test]
+fn a_claim_names_the_items_that_come_next() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 4);
+        let q = body_part();
+        let adj = json!({"when": "never", "metric": "exact"});
+        let c =
+            campaign::create(reg, &new("ahead", &q, &adj, Items::Stacks(ids), 1, "none")).unwrap();
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(items.len(), 8, "{name}");
+        let named = |cl: &campaign::Claimed| cl.ahead.iter().map(|(i, _)| *i).collect::<Vec<_>>();
+        let first = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.item.id, items[0].id, "{name}");
+        assert_eq!(
+            named(&first),
+            items[1..6].iter().map(|i| i.id).collect::<Vec<_>>(),
+            "{name}: five, in position order"
+        );
+        assert_eq!(first.next, first.ahead.first().copied(), "{name}");
+        assert_eq!(
+            first.ahead[0].1, items[1].stack_id,
+            "{name}: with its stack"
+        );
+        // bo takes the second; anna's lease held again names what follows it, without bo's
+        let theirs = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(theirs.item.id, items[1].id, "{name}");
+        campaign::answer(reg, &give(theirs.assignment.id, "bo@lab", "spine"), &at(1)).unwrap();
+        let again = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(2))
+            .unwrap()
+            .unwrap();
+        assert!(again.held, "{name}");
+        assert_eq!(
+            named(&again),
+            items[2..7].iter().map(|i| i.id).collect::<Vec<_>>(),
+            "{name}: bo's is not anna's to come"
+        );
+        // answered, the next claim is the first named, and the ones after it follow
+        campaign::answer(reg, &give(first.assignment.id, "anna@lab", "brain"), &at(3)).unwrap();
+        let second = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(4))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.item.id, items[2].id, "{name}");
+        assert_eq!(
+            named(&second),
+            items[3..8].iter().map(|i| i.id).collect::<Vec<_>>(),
+            "{name}"
+        );
+        // near the end fewer are named, and the last names none
+        for (m, it) in items[2..7].iter().enumerate() {
+            let cl = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(10 + m as u32))
+                .unwrap()
+                .unwrap();
+            assert_eq!(cl.item.id, it.id, "{name}");
+            campaign::answer(
+                reg,
+                &give(cl.assignment.id, "anna@lab", "brain"),
+                &at(10 + m as u32),
+            )
+            .unwrap();
+        }
+        let last = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(20))
+            .unwrap()
+            .unwrap();
+        assert_eq!(last.item.id, items[7].id, "{name}");
+        assert!(last.ahead.is_empty() && last.next.is_none(), "{name}");
+    }
+}

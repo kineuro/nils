@@ -513,6 +513,60 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
     ),
 ];
 
+/// The items a claim names as coming next (record 48, the post-contrast
+/// reading), each with its place and the stacks a reader shows for it, so
+/// the page warms their pictures while the item claimed is read: the
+/// item's stack, or an anchored item's panels in their order, or a pair's
+/// left then right. Nothing else of them: no role, no side, no value, and
+/// a rater may open those pictures already through the campaign.
+pub(crate) fn ahead_of(store: &mut Store, ahead: &[(i64, Option<i64>)]) -> Result<Value, Reply> {
+    if ahead.is_empty() {
+        return Ok(json!([]));
+    }
+    let ids = ahead
+        .iter()
+        .map(|(i, _)| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut position: HashMap<i64, i64> = HashMap::new();
+    let sql = format!(
+        "SELECT id, position FROM {} WHERE id IN ({ids})",
+        store.qualified("campaign_item")
+    );
+    for r in store.query(&sql, &[])? {
+        position.insert(r.int(0)?, r.int(1)?);
+    }
+    let mut shown: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let sql = format!(
+        "SELECT item_id, stack_id FROM {} WHERE item_id IN ({ids}) ORDER BY item_id, panel",
+        store.qualified("campaign_anchor_panel")
+    );
+    for r in store.query(&sql, &[])? {
+        shown.entry(r.int(0)?).or_default().push(r.int(1)?);
+    }
+    // left sorts before right
+    let sql = format!(
+        "SELECT item_id, stack_id FROM {} WHERE item_id IN ({ids}) ORDER BY item_id, side",
+        store.qualified("campaign_pair_side")
+    );
+    for r in store.query(&sql, &[])? {
+        shown.entry(r.int(0)?).or_default().push(r.int(1)?);
+    }
+    Ok(Value::Array(
+        ahead
+            .iter()
+            .map(|(item, stack)| {
+                let stacks = match (stack, shown.get(item)) {
+                    (Some(s), _) => vec![*s],
+                    (None, Some(panels)) => panels.clone(),
+                    (None, None) => Vec::new(),
+                };
+                json!({"item": item, "position": position.get(item), "stacks": stacks})
+            })
+            .collect(),
+    ))
+}
+
 pub(crate) fn campaign_err(e: campaign::Error) -> Reply {
     match e {
         campaign::Error::Store(s) => Reply::error(500, s.to_string()),
@@ -730,7 +784,11 @@ pub(crate) fn route(
                     campaign::claim_with(registry, c.id, principal, role, order, alone, &now)
                         .map_err(campaign_err)?;
                 Ok(Reply::ok(match claimed {
-                    Some(cl) => cl.as_json(),
+                    Some(cl) => {
+                        let mut doc = cl.as_json();
+                        doc["ahead"] = ahead_of(registry.store(), &cl.ahead)?;
+                        doc
+                    }
                     None => json!({"assignment": null, "item": null, "why": format!(
                         "nothing in campaign {} is left for {principal} as a {}", c.name, role.name()
                     )}),

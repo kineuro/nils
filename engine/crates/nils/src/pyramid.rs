@@ -1473,10 +1473,15 @@ pub fn manifest(root: &Path) -> Result<Option<Manifest>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// One plane's tiles in one container: `[u32 count][u32 offset...][tiles]`,
-/// little endian; the offsets are from the start of the container, tiles
-/// in row-major order of the plane's grid.
-pub fn plane_container(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<u8>, String> {
+/// How many tile files one answer of the tiles or the slab door reads at
+/// once. Each tile is a file of its own, and where the pyramids sit on a
+/// network share a slab of 32 planes at the finest level is over a hundred
+/// round trips; read one after another they took seconds (record 48, the
+/// post-contrast reading).
+pub const READS_AT_ONCE: usize = 16;
+
+/// The tile files of one plane, in row-major order of its grid.
+fn plane_tiles(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<PathBuf>, String> {
     let lv = m
         .level_shapes
         .get(level as usize)
@@ -1485,13 +1490,56 @@ pub fn plane_container(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<
         return Err(format!("plane {z} is past the stack's {}", lv.shape[0]));
     }
     let [ty, tx] = lv.tiles;
-    let mut tiles = Vec::with_capacity((ty * tx) as usize);
+    let mut out = Vec::with_capacity((ty * tx) as usize);
     for j in 0..ty {
         for i in 0..tx {
-            tiles.push(std::fs::read(tile_path(root, level, z, j, i)).map_err(|e| e.to_string())?);
+            out.push(tile_path(root, level, z, j, i));
         }
     }
-    Ok(container(&tiles))
+    Ok(out)
+}
+
+/// Read files in their order, up to [`READS_AT_ONCE`] at a time.
+fn read_files_at_once(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>, String> {
+    let threads = READS_AT_ONCE.min(paths.len());
+    if threads <= 1 {
+        return paths
+            .iter()
+            .map(|p| std::fs::read(p).map_err(|e| e.to_string()))
+            .collect();
+    }
+    type Read = (usize, Result<Vec<u8>, String>);
+    let read: Vec<Vec<Read>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                s.spawn(move || {
+                    (t..paths.len())
+                        .step_by(threads)
+                        .map(|i| (i, std::fs::read(&paths[i]).map_err(|e| e.to_string())))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let mut out: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
+    for (i, r) in read.into_iter().flatten() {
+        out[i] = Some(r?);
+    }
+    out.into_iter()
+        .map(|t| t.ok_or_else(|| "a tile was not read".to_string()))
+        .collect()
+}
+
+/// One plane's tiles in one container: `[u32 count][u32 offset...][tiles]`,
+/// little endian; the offsets are from the start of the container, tiles
+/// in row-major order of the plane's grid.
+pub fn plane_container(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<u8>, String> {
+    let paths = plane_tiles(root, m, level, z)?;
+    Ok(container(&read_files_at_once(&paths)?))
 }
 
 pub fn container(tiles: &[Vec<u8>]) -> Vec<u8> {
@@ -1510,7 +1558,8 @@ pub fn container(tiles: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// A slab: the planes `z0..z1` each as a container, concatenated behind a
-/// count and offsets of their own (the same shape one level up).
+/// count and offsets of their own (the same shape one level up). Every
+/// tile of every plane is read at once, [`READS_AT_ONCE`] at a time.
 pub fn slab_container(
     root: &Path,
     m: &Manifest,
@@ -1518,9 +1567,18 @@ pub fn slab_container(
     z0: u32,
     z1: u32,
 ) -> Result<Vec<u8>, String> {
-    let planes: Vec<Vec<u8>> = (z0..z1)
-        .map(|z| plane_container(root, m, level, z))
-        .collect::<Result<_, _>>()?;
+    let mut paths = Vec::new();
+    let mut counts = Vec::new();
+    for z in z0..z1 {
+        let p = plane_tiles(root, m, level, z)?;
+        counts.push(p.len());
+        paths.extend(p);
+    }
+    let mut tiles = read_files_at_once(&paths)?.into_iter();
+    let planes: Vec<Vec<u8>> = counts
+        .into_iter()
+        .map(|n| container(&tiles.by_ref().take(n).collect::<Vec<_>>()))
+        .collect();
     Ok(container(&planes))
 }
 
@@ -2298,16 +2356,20 @@ pub struct RenderKey {
 /// plane of the level to draw, which is tens of milliseconds and a worker
 /// taken each time. The access checks and the audit row come before the
 /// cache, so a kept plane is never served to a caller the door would refuse.
-pub struct RenderCache {
+pub type RenderCache = KeptBytes<RenderKey>;
+
+/// Answers kept by what they depend on up to a number of bytes, the oldest
+/// dropped first: the render door's planes and the slab door's slabs.
+pub struct KeptBytes<K> {
     cap: usize,
     bytes: usize,
-    kept: std::collections::HashMap<RenderKey, std::sync::Arc<Vec<u8>>>,
-    order: std::collections::VecDeque<RenderKey>,
+    kept: std::collections::HashMap<K, std::sync::Arc<Vec<u8>>>,
+    order: std::collections::VecDeque<K>,
 }
 
-impl RenderCache {
+impl<K: Clone + Eq + std::hash::Hash> KeptBytes<K> {
     pub fn new(cap: usize) -> Self {
-        RenderCache {
+        KeptBytes {
             cap,
             bytes: 0,
             kept: std::collections::HashMap::new(),
@@ -2315,12 +2377,12 @@ impl RenderCache {
         }
     }
 
-    pub fn get(&self, key: &RenderKey) -> Option<std::sync::Arc<Vec<u8>>> {
+    pub fn get(&self, key: &K) -> Option<std::sync::Arc<Vec<u8>>> {
         self.kept.get(key).cloned()
     }
 
-    /// Keep a plane; one larger than the whole cap is not kept.
-    pub fn put(&mut self, key: RenderKey, image: std::sync::Arc<Vec<u8>>) {
+    /// Keep an answer; one larger than the whole cap is not kept.
+    pub fn put(&mut self, key: K, image: std::sync::Arc<Vec<u8>>) {
         if image.len() > self.cap || self.kept.contains_key(&key) {
             return;
         }
@@ -2348,6 +2410,68 @@ impl RenderCache {
     }
 }
 
+/// What a slab depends on: the pyramid as built (its directory and its
+/// manifest's modification time and length), the level and the planes.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct SlabKey {
+    pub root: PathBuf,
+    pub built: (std::time::SystemTime, u64),
+    pub level: u32,
+    pub z0: u32,
+    pub z1: u32,
+}
+
+/// The slab door's cache: 256 MB, a few hundred slabs at the finest level.
+/// A reader's page asks a stack's slabs for the picture it shows, again
+/// for the planes' volume and once more when it reads ahead, and the
+/// desk's next rater or a page loaded afresh asks the same ones (record 48,
+/// the post-contrast reading). The access checks and the audit row come
+/// before it, as with the render door's, and a held stack never reaches
+/// the slab door.
+pub const SLAB_CACHE_BYTES: usize = 256 << 20;
+
+static SLABS: std::sync::LazyLock<std::sync::Mutex<KeptBytes<SlabKey>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(KeptBytes::new(SLAB_CACHE_BYTES)));
+
+/// The build stamp a cached answer is keyed by: the manifest's modification
+/// time and length, so a rebuilt pyramid is a new key.
+fn built_stamp(root: &Path) -> Result<(std::time::SystemTime, u64), Reply> {
+    let meta = std::fs::metadata(root.join("manifest.json"))
+        .map_err(|e| Reply::error(404, e.to_string()))?;
+    Ok((
+        meta.modified()
+            .map_err(|e| Reply::error(500, e.to_string()))?,
+        meta.len(),
+    ))
+}
+
+/// A slab, from the cache when it holds it.
+fn slab_cached(
+    root: &Path,
+    m: &Manifest,
+    level: u32,
+    z0: u32,
+    z1: u32,
+) -> Result<std::sync::Arc<Vec<u8>>, Reply> {
+    let key = SlabKey {
+        root: root.to_path_buf(),
+        built: built_stamp(root)?,
+        level,
+        z0,
+        z1,
+    };
+    if let Some(slab) = SLABS.lock().ok().and_then(|c| c.get(&key)) {
+        return Ok(slab);
+    }
+    let slab = std::sync::Arc::new(
+        slab_container(root, m, level, z0, z1).map_err(|e| Reply::error(404, e))?,
+    );
+    if let Ok(mut c) = SLABS.lock() {
+        c.put(key, std::sync::Arc::clone(&slab));
+    }
+    Ok(slab)
+}
+
 /// The render door's cache: 64 MB, some thousands of planes at the server's level.
 pub const RENDER_CACHE_BYTES: usize = 64 << 20;
 
@@ -2366,15 +2490,9 @@ fn render_cached(
     width: f64,
     held: bool,
 ) -> Result<std::sync::Arc<Vec<u8>>, Reply> {
-    let meta = std::fs::metadata(root.join("manifest.json"))
-        .map_err(|e| Reply::error(404, e.to_string()))?;
     let key = RenderKey {
         root: root.to_path_buf(),
-        built: (
-            meta.modified()
-                .map_err(|e| Reply::error(500, e.to_string()))?,
-            meta.len(),
-        ),
+        built: built_stamp(root)?,
         level,
         axis,
         index,
@@ -2544,11 +2662,10 @@ pub fn door(
             }
             note_open(registry, caller, stack, through, level, "slab")
                 .map_err(|e| Reply::error(500, e))?;
-            let bytes =
-                slab_container(&root, &m, level, z0, z1).map_err(|e| Reply::error(404, e))?;
+            let bytes = slab_cached(&root, &m, level, z0, z1)?;
             Ok(Reply::raw(
                 CONTENT_TYPE,
-                bytes,
+                bytes.as_ref().clone(),
                 headers(vec![("X-Nils-Planes".to_string(), (z1 - z0).to_string())]),
             ))
         }
@@ -2674,6 +2791,96 @@ mod tests {
         // the same key twice is kept once
         c.put(key(24, false), std::sync::Arc::new(vec![0; 100]));
         assert_eq!(c.bytes(), 1000);
+    }
+
+    fn slab_key(z0: u32) -> SlabKey {
+        SlabKey {
+            root: PathBuf::from("/pyramids/7"),
+            built: (std::time::UNIX_EPOCH, 100),
+            level: 0,
+            z0,
+            z1: z0 + 32,
+        }
+    }
+
+    #[test]
+    fn the_slab_cache_keeps_a_slab_by_its_build_and_planes_within_its_bytes() {
+        let mut c: KeptBytes<SlabKey> = KeptBytes::new(1000);
+        c.put(slab_key(0), std::sync::Arc::new(vec![1; 400]));
+        assert_eq!(c.get(&slab_key(0)).unwrap().len(), 400);
+        // other planes, another level or a rebuilt pyramid are other slabs
+        assert!(c.get(&slab_key(32)).is_none());
+        assert!(
+            c.get(&SlabKey {
+                level: 1,
+                ..slab_key(0)
+            })
+            .is_none()
+        );
+        let rebuilt = SlabKey {
+            built: (std::time::UNIX_EPOCH, 101),
+            ..slab_key(0)
+        };
+        assert!(c.get(&rebuilt).is_none());
+        // the oldest goes first, and one larger than the cap is never kept
+        c.put(slab_key(32), std::sync::Arc::new(vec![1; 400]));
+        c.put(slab_key(64), std::sync::Arc::new(vec![1; 400]));
+        assert!(c.bytes() <= 1000);
+        assert!(c.get(&slab_key(0)).is_none());
+        assert!(c.get(&slab_key(64)).is_some());
+        c.put(slab_key(96), std::sync::Arc::new(vec![1; 1001]));
+        assert!(c.get(&slab_key(96)).is_none());
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn a_slab_read_at_once_is_the_slab_read_one_tile_after_another() {
+        // three tiles across and two down at the finest level
+        let (nz, ny, nx) = (5u32, 300u32, 520u32);
+        let vol = Volume {
+            shape: [nz, ny, nx],
+            spacing: [2.0, 1.0, 1.0],
+            intercept: 0,
+            rescale: (1.0, 0.0),
+            rescale_varies: false,
+            burned_in: None,
+            data: (0..nz * ny * nx).map(|i| (i % 3001) as u16).collect(),
+            geometry: None,
+            lossy: false,
+            syntaxes: Vec::new(),
+            order: ORDER_POSITION,
+            multiframe_files: 0,
+        };
+        let dir = nils_dicom::synth::TempDir::new("pyramid-slab-at-once");
+        let root = dir.path().join("pyramid");
+        let m = build(&vol, 3, &root, 2, None).unwrap();
+        assert_eq!(m.level_shapes[0].tiles, [2, 3]);
+        let one_by_one = |level: u32, z0: u32, z1: u32| {
+            let planes: Vec<Vec<u8>> = (z0..z1)
+                .map(|z| {
+                    let tiles: Vec<Vec<u8>> = plane_tiles(&root, &m, level, z)
+                        .unwrap()
+                        .iter()
+                        .map(|p| std::fs::read(p).unwrap())
+                        .collect();
+                    container(&tiles)
+                })
+                .collect();
+            container(&planes)
+        };
+        for (level, z0, z1) in [(0, 0, 5), (0, 2, 4), (1, 0, 5), (2, 4, 5)] {
+            assert_eq!(
+                slab_container(&root, &m, level, z0, z1).unwrap(),
+                one_by_one(level, z0, z1),
+                "level {level} planes {z0} to {z1}"
+            );
+        }
+        // a plane on its own as well, and the slab's planes unpack to it
+        let plane = plane_container(&root, &m, 0, 3).unwrap();
+        assert_eq!(plane, one_by_one(0, 3, 4)[8..]);
+        // a missing tile is an error, not a short slab
+        std::fs::remove_file(tile_path(&root, 0, 1, 1, 2)).unwrap();
+        assert!(slab_container(&root, &m, 0, 0, 5).is_err());
     }
 
     #[test]
