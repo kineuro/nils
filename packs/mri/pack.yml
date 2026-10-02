@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.22.0
+version: 0.23.0
 contract: 8
 modality: MR
 
@@ -100,6 +100,9 @@ passes:
   # MRI pack 0.19.0 (record 53): the session pass, before the vote, so a
   # stack it decides is not voted on as well.
   - passes/session.yml
+  # MRI pack 0.23.0: record 48's DR4 by the session (dev-8), before the
+  # vote as the first.
+  - passes/session_dti.yml
   - passes/physics_vote.yml
 
 # Which stack stands for a session's role (Wave 3 section 10). A pack that

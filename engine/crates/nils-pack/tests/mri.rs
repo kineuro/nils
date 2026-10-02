@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.22.0");
+    assert_eq!(pack.id(), "mri@0.23.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -40,7 +40,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        410,
+        414,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -105,7 +105,10 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          single-echo MEMP, a short-TE spin echo named T2, an MTw gradient \
          echo, a direction count named, and an echo STAGE acquired, and pack \
          0.22.0 the 3 of a development grade's rule bugs: an image typed \
-         LOCALIZER on a gradient echo, and a STAGE echo named PD or T1"
+         LOCALIZER on a gradient echo, and a STAGE echo named PD or T1, and \
+         pack 0.23.0 the 4 of the next: a tensor source and a plain DWI as a \
+         session sees them, a diffusion named for fewer than six directions, \
+         and a Siemens range reformat"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

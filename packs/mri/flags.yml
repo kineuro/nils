@@ -485,7 +485,19 @@ flags:
   # its protocol (below).
   is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
                         has_mpr_in_text, is_projection_plane, is_workstation_reformat,
-                        plane_reformat_named]}
+                        plane_reformat_named, range_reformat]}
+  # MRI pack 0.23.0: a range the Siemens 3D card writes (`Range Parallel`,
+  # `Range Radial`): DERIVED, with PARALLEL or RADIAL in its image type
+  # (`DERIVED\PRIMARY\M\NONE\PARALLEL\DIS3D`), is a reformat whatever it is
+  # named. dev-8: a 7 T DIR SPACE named `..._MP` from a protocol of the same
+  # plane was read as an acquisition. On the archive 14,160 stacks carry the
+  # token, every one DERIVED; 14,089 were reformats already by a name or a
+  # plane, and the 71 left are the same ranges (named `noseries`, `aa_sag`,
+  # `..._MP`, `Sag T1 MP2RAGE`, two MIP ranges named so).
+  range_reformat:
+    all:
+      - image_type.is_derived
+      - {parser: image_type, any_token: [PARALLEL, RADIAL]}
   # MRI pack 0.12.0: Philips writes a reformat as `PROJECTION IMAGE`
   # (`ORIGINAL\PRIMARY\PROJECTION IMAGE\M\FFE`, or DERIVED or SECONDARY),
   # a plane and a maximum projection alike, and only the words or a MIP
@@ -2289,6 +2301,34 @@ flags:
           # MRI pack 0.21.0: or a bare count of six or more in a Siemens
           # diffusion name (dev-6's A10, section 18).
           - siemens_diffusion_count_named
+
+  # MRI pack 0.23.0: case 4 by the session (`passes/session_dti.yml`; dev-8:
+  # a Philips `dADC iso` beside its source `MB2Sense2 DTI opt16 tra DWI
+  # iso`). What a sibling shows of a tensor acquisition, by its header
+  # alone: an FA (the FA sibling of DR4), or a name for a tensor, mddw or six
+  # or more directions.
+  tensor_source_sibling:
+    any:
+      - image_type.has_fa
+      - dti_words
+      - {text: technique_text, matches: '(^|[^a-z])mddw([^a-z]|$)'}
+      - {text: technique_text, matches: '(^|[^0-9])([6-9]|[1-9][0-9]{1,2}) ?(dir|dirs|directions|riktningar)([^a-z]|$)'}
+  # A plain DWI acquisition beside a map: an original diffusion image or a
+  # series named for a diffusion, which is no tensor, no map and not the
+  # isotropic image (Philips writes that as a series of its own, `isoDWI`).
+  plain_dwi_source_sibling:
+    all:
+      - {not: tensor_source_sibling}
+      - {not: image_type.has_adc}
+      - {not: image_type.has_eadc}
+      - {not: image_type.has_trace}
+      - {not: {text: search_text, matches: '(^|[^a-z])(adc|eadc|dadc|fa|trace|tracew|iso|isotropic|exp)([^a-z]|$)'}}
+      - any:
+          - all: [image_type.is_original, image_type.has_diffusion]
+          - {text: search_text, matches: '(^|[^a-z])(dwi|diff|diffusion)'}
+  # A diffusion named for fewer than six directions: Siemens' three-scan
+  # trace, or a count of one to five.
+  few_directions_named: {text: technique_text, matches: '(^|[^a-z0-9])3 ?scan|(^|[^0-9])[1-5] ?(dir|dirs|directions|riktningar)([^a-z]|$)'}
 
   # --- case 6: a planning series of at most 5 slices per plane named for
   # planning (a localizer word, or loc, plan, mid-line, align, 3-plane) is a

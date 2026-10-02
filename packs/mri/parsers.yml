@@ -390,7 +390,12 @@ parsers:
       is_se:               {all: [{any_substring: ['*se1', '*se2d', se2d]}, {not: {substring: tse}}]}
       is_tse:              {any_substring: [tse1, tse2, tse3, tse_, 'tse-', tser, tseb, ts1, ts2, ts3]}
       # MRI pack 0.14.0: and after BLADE's `B` (`*tseBR2d1_28`, dev-2).
-      is_tse_body:         {any_substring: [tser, tsebr]}
+      # MRI pack 0.23.0: and after BLADE's `BN`, which newer Siemens software
+      # writes with or without the restore (`*tseBNR2d1_12`, `*tseBN2d1_15`),
+      # and before an inversion as `IR` (`*tseBNIR2d1_3`); dev-8's dispute,
+      # settled by our counts (the design repository's
+      # `studies/2026-10-02-pack-0230/`).
+      is_tse_body:         {any_substring: [tser, tsebr, tsebnr]}
       # MRI pack 0.16.0: Siemens' BLADE turbo spin echo by its stem, `*tseB`
       # (`*tseB2d1_17`, `*tseBR2d1_28`), where the words may not say BLADE
       # (dev-4: an ESSENZA `t2_tse_tra` without Radial).

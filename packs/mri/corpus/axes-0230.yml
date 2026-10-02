@@ -1,0 +1,173 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.23.0: the rules of a development grade's rule bugs that one
+# stack shows (a Siemens 3D-card range read as an acquisition) and its
+# dispute (a Siemens BLADE written `tseBNR`), with the cases that keep each
+# rule from reaching what it must not. The session's DR4 and the physics
+# vote's target read other stacks, so their cases are engine tests
+# (`nils-pack/tests/session.rs` and `passes.rs`). Every stack here is
+# invented from the pattern the design repository's files name; none is a
+# real header.
+
+cases:
+
+  # --- a Siemens 3D-card range (`Range Parallel`, `Range Radial`) is a
+  # reformat whatever it is named
+
+  - name: a derived range of a 3D DIR SPACE in its protocol's own plane, named _MP, is an MPR
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\PARALLEL\DIS3D\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      scan_options: 'PFP\FS\PER'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'dir_space_sag_p4_iso_MP'
+      text_protocol_name: 'dir_space_sag_p4_iso'
+      text_sequence_name: '*spcir3d1_200'
+      repetition_time: 7000
+      echo_time: 290
+      inversion_time: 3000
+      echo_train_length: 200
+    flags:
+      range_reformat: true
+      is_mpr: true
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: an unnamed derived range written in 2D is an MPR
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\PARALLEL\DIS2D\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: 'SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'noseries'
+      repetition_time: 2300
+      echo_time: 2.3
+      inversion_time: 900
+      flip_angle: 8
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: a radial range is a reformat too
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\RADIAL\DIS2D\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: '3'
+      repetition_time: 21
+      echo_time: 3.4
+      flip_angle: 18
+    flags:
+      range_reformat: true
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: a range named for a MIP is a projection and no MPR
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\PARALLEL\DIS2D\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'MIP 5mm range spinal cord'
+      repetition_time: 1500
+      echo_time: 130
+      echo_train_length: 80
+    axes:
+      provenance: ProjectionDerived
+      construct: MIP
+
+  - name: a derived image without a range token in its protocol's own plane stays no reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\DIS3D\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'dir_space_sag_p4_iso_ND'
+      text_protocol_name: 'dir_space_sag_p4_iso'
+      repetition_time: 7000
+      echo_time: 290
+      inversion_time: 3000
+      echo_train_length: 200
+    flags:
+      range_reformat: false
+    axes:
+      provenance: RawRecon
+
+  - name: an original image never takes a range from its tokens
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE\PARALLEL\DIS3D'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 't2_space_sag_p2_iso'
+      repetition_time: 3200
+      echo_time: 410
+      echo_train_length: 280
+    flags:
+      range_reformat: false
+
+  # --- a Siemens BLADE written `tseBNR` carries the restore as `tseBR` does
+  # (the dispute, settled by our counts)
+
+  - name: a BLADE written tseBNR is VFA-TSE with Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D\NORM\FIL\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      scan_options: PER
+      mr_acquisition_type: 2D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'Ax T2 BLADE 2 mm'
+      text_sequence_name: '*tseBNR2d1_14'
+      repetition_time: 5000
+      echo_time: 70
+      flip_angle: 110
+      echo_train_length: 14
+    axes:
+      technique: RESTORE
+      modifier: Radial
+
+  - name: a BLADE written tseBN without the R stays a TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      scan_options: PER
+      mr_acquisition_type: 2D
+      manufacturer: Siemens Healthineers
+      text_series_description: 't2_blade_sag'
+      text_sequence_name: '*tseBN2d1_15'
+      repetition_time: 4000
+      echo_time: 80
+      flip_angle: 150
+      echo_train_length: 15
+    axes:
+      technique: TSE
+      modifier: Radial
+
+  - name: a BLADE written tseBNIR is an inversion and no restore
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D\NORM\FIL\MFSPLIT'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SP\SK'
+      scan_options: 'SP\FS\PER'
+      mr_acquisition_type: 2D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'Ax T2 FLAIR BLADE 2 mm'
+      text_sequence_name: '*tseBNIR2d1_3'
+      repetition_time: 11000
+      echo_time: 140
+      inversion_time: 2700
+      echo_train_length: 31
+    axes:
+      technique: TIRM
