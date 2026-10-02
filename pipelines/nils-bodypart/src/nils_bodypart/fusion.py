@@ -265,6 +265,7 @@ class StackResult:
     matched_from: str | None
     meta: dict
     rules: dict | None
+    reader: dict | None = None  # the reduced reader's counts, when it read the stack
 
 
 class NoFingerprint(Exception):
@@ -290,6 +291,21 @@ def prepare(files: list[tuple[str, list[int] | None]], header: dict | None, deco
     return Prepared(volume.build(files, fp.get("orientation"), decode=decode), header)
 
 
+def prepare_reduced(stack, policy: str, decode=None) -> Prepared:
+    """One stack's six planes and geometry by the reduced reader
+    (``reduced.build``), from the manifest's geometry of its files. Raises
+    as :func:`prepare`."""
+    from . import reduced
+
+    header = stack.extra.get("header")
+    header = header if isinstance(header, dict) else {}
+    fp = header.get("fingerprint")
+    if not isinstance(fp, dict):
+        raise NoFingerprint("the stack has no fingerprint row")
+    built = reduced.build(stack.files, stack.file_geo, stack.extra.get("geometry"), fp.get("orientation"), policy, decode=decode)
+    return Prepared(built, header)
+
+
 def finish(model: Model, prep: Prepared, P: np.ndarray) -> StackResult:
     """The head and both modes from the encoder's six probabilities ``P``."""
     header, built = prep.header, prep.built
@@ -297,7 +313,7 @@ def finish(model: Model, prep: Prepared, P: np.ndarray) -> StackResult:
     h44 = header_features.features(header["fingerprint"], cls, built.meta)
     LP = head_logp(model, P, h44)
     cohort, where = resolve_cohort(header, model)
-    return StackResult(P, h44, LP, calibrate(model, LP, cohort), cohort, where, built.meta, header_features.rules_row(cls))
+    return StackResult(P, h44, LP, calibrate(model, LP, cohort), cohort, where, built.meta, header_features.rules_row(cls), getattr(built, "stats", None))
 
 
 def predict(model: Model, files: list[tuple[str, list[int] | None]], header: dict | None, decode=None) -> StackResult:

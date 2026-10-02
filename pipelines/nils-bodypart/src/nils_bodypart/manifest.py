@@ -57,6 +57,11 @@ class Stack:
     # The files as the manifest lists them, each with the frames that are
     # the stack's (from 0), or None for every frame the file holds.
     files: list[tuple[str, list[int] | None]] = field(default_factory=list)
+    # Each file's geometry as the registry holds it, where the manifest
+    # gives it (``geometry`` on a file: ``ipp``, ``ps``, ``rows``, ``cols``,
+    # ``inum``, ``frames``), else None; the reduced reader chooses frames
+    # from it without reading headers.
+    file_geo: list[dict | None] = field(default_factory=list)
 
     @property
     def num_slices(self) -> int:
@@ -137,12 +142,15 @@ def parse(
         counted = counted if isinstance(counted, int) and not isinstance(counted, bool) and counted > 0 else None
         slices: list[Slice] = []
         listed: list[tuple[str, list[int] | None]] = []
+        geos: list[dict | None] = []
         for f in files:
             src = int(f.get("source", 0))
             if src not in mounts:
                 raise ManifestError(f"stack {sid}: a file names source {src}, which the manifest does not mount")
             path = _safe_join(mounts[src], f["path"])
             frames = f.get("frames")
+            g = f.get("geometry")
+            geos.append(g if isinstance(g, dict) else None)
             if frames is None:
                 n = (counted or frames_of(path)) if len(files) == 1 else 1
                 slices.extend(Slice(path, i) for i in range(n))
@@ -161,6 +169,7 @@ def parse(
                 technique=s.get("technique"),
                 extra={k: v for k, v in s.items() if k not in KNOWN},
                 files=listed,
+                file_geo=geos,
             )
         )
     return out
