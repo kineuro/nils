@@ -318,20 +318,61 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
     elsewhere, and its geometry, as ``volume.build`` gives them for the
     planes the encoder reads."""
     check_policy(policy)
-    decode = decode or volume.decode_each
     stats: dict = {"policy": policy}
     errors: dict = {}
     frames = stack_frames(files, file_geo, stack_geo, stats)
+    from_headers = False
+    cache: dict[str, dict | Exception] = {}  # the frames decoded so far, by file
+    heads: dict[str, tuple] = {}  # each decoded file's own orientation and thickness
+    opened: set[str] = set()
     bad: set[str] = set()
     while True:
         p = plan(frames, orientation, policy, bad)
         need = p.need()
-        decoded = decode(need)
+        todo = {path: [i for i in idx if not (isinstance(cache.get(path), dict) and i in cache[path])] for path, idx in need.items()}
+        todo = {k: v for k, v in todo.items() if v}
+        if todo:
+            got_now = decode(todo) if decode is not None else _decode_with_headers(todo, heads)
+            opened |= set(todo)
+            for path, got in got_now.items():
+                if isinstance(got, dict) and isinstance(cache.get(path), dict):
+                    cache[path].update(got)
+                else:
+                    cache[path] = got
+        # The registry holds one orientation per stack and no thickness per
+        # file: the files decoded say what theirs are. A file of another
+        # orientation (a three-plane localiser) sends the stack to the
+        # headers of every file, as the full reader reads it; another
+        # thickness is taken as the first kept file's, as the full reader takes it.
+        if not from_headers and heads:
+            key = tuple(np.round(p.geo[0].iop, 2))
+            if any(h[0] is not None and tuple(np.round(h[0], 2)) != key for h in heads.values()):
+                from_headers = True
+                frames = []
+                for path, which in files:
+                    try:
+                        frames.extend(volume.read_header_frames(path, which))
+                        opened.add(path)
+                        stats["header_reads"] = stats.get("header_reads", 0) + 1
+                    except Exception:  # noqa: BLE001 - counted, never named
+                        stats["header_errors"] = stats.get("header_errors", 0) + 1
+                if not frames:
+                    raise Unreadable("no file of the stack could be read")
+                continue
+            first = heads.get(p.geo[0].path)
+            if first is None:
+                first = next((heads[p.geo[p.uniq[t]].path] for t in p.read if p.geo[p.uniq[t]].path in heads), None)
+            if first is not None and first[1] != p.geo[0].thick:
+                th = first[1]
+                for f in frames:
+                    f.thick = th
+                stats["thick_from_file"] = 1
+                continue
         pixels: dict[int, np.ndarray] = {}
         failed = False
         for t in p.read:
             f = p.geo[p.uniq[t]]
-            got = decoded.get(f.path)
+            got = cache.get(f.path)
             if isinstance(got, Exception) or got is None or f.index not in got:
                 kind = "decode:" + (type(got).__name__ if isinstance(got, Exception) else "frames")
                 errors[kind] = errors.get(kind, 0) + 1
@@ -348,6 +389,7 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
             pixels[t] = im
         if not failed:
             break
+    need = opened
     stats.update(files_read=len(need), frames_decoded=len(p.read), kept=len(p.uniq), touched=len(p.touched))
     read = sorted(pixels)
     Vr = np.stack([pixels[t] for t in read]).astype(np.float32)
@@ -424,6 +466,35 @@ def _meta(p: Plan, meta0: dict) -> dict:
         span=round(K * spacing if K > 1 else (thick or 0), 1),
     )
     return {k: (v.item() if isinstance(v, np.generic) else v) for k, v in meta.items()}
+
+
+def _decode_with_headers(need: dict[str, list[int]], heads: dict) -> dict:
+    """``volume.decode_each``, reading each file once and keeping its own
+    orientation and slice thickness (the first frame's, as the full reader
+    reads a header)."""
+    import pydicom
+
+    out: dict = {}
+    for path, idx in need.items():
+        try:
+            ds = pydicom.dcmread(path, force=True)
+            iop = volume._floats(getattr(ds, "ImageOrientationPatient", None) or [], 6)
+            thick = getattr(ds, "SliceThickness", None)
+            nf = int(getattr(ds, "NumberOfFrames", 1) or 1)
+            if nf > 1:
+                sh = getattr(ds, "SharedFunctionalGroupsSequence", None)
+                pf = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
+                iop = volume._floats(volume._fg_get(pf, sh, 0, "PlaneOrientationSequence", "ImageOrientationPatient") or [], 6) or iop
+                thick = volume._fg_get(pf, sh, 0, "PixelMeasuresSequence", "SliceThickness") or thick
+            try:
+                thick = float(thick)
+            except Exception:  # noqa: BLE001
+                thick = None
+            heads[path] = (iop, thick)
+            out[path] = volume.decode_frames(path, idx, ds=ds)
+        except Exception as e:  # noqa: BLE001 - counted by kind by the caller
+            out[path] = e
+    return out
 
 
 def file_bytes(paths) -> int:
