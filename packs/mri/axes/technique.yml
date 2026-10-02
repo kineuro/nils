@@ -537,6 +537,9 @@ values:
       - '3d tfe'
       - ir-fspgr
       - ir spgr
+    # MRI pack 0.24.0: or a Siemens 3D gradient echo whose repetition time is
+    # a shot interval (flags.yml section 23).
+    alternative_flags: [siemens_mprage_by_shot_tr]
     detection:
       exclusive: is_mprage
       combination: [has_ir, has_gre, is_3d]

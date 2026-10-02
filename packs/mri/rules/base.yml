@@ -18,6 +18,7 @@ order:
   - 'construct:phase'
   - 'flag:spectroscopy'
   - 'construct:b1map'
+  - 'flag:inline_t1_map'
   - 'r3:no_base'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
@@ -192,6 +193,16 @@ rules:
     confidence: 0.9
     why: 'a B1 (flip angle) or B0 (field) map measures a field and has no base contrast'
 
+  # MRI pack 0.24.0: MOLLI's inline T1 map is a fitted map in milliseconds,
+  # no image weighted by a contrast (flags.yml section 23; the final
+  # certificate's A8, settled none).
+  'flag:inline_t1_map':
+    clauses:
+      - {flag: siemens_inline_t1_map, tier: exclusive}
+    set: {base: null}
+    confidence: 0.9
+    why: 'an inline T1 map is a fitted relaxation time with no base contrast'
+
   'technique:MPRAGE':
     clauses:
       - {when: {axis: technique, is: 'MPRAGE'}, cite: 'MPRAGE', source: technique}
@@ -233,9 +244,11 @@ rules:
   # which keeps it a reading of the stack rather than a law of the schema.
   # MRI pack 0.18.0 (vocabulary): a contrast-enhanced angiography is a
   # T1-weighted spoiled gradient echo timed to the bolus.
+  # MRI pack 0.24.0: not on a perfusion map computed from a time-resolved
+  # run (a TWIST-VIBE's TTP), which stays PWI below.
   'technique:CE-MRA':
     clauses:
-      - {when: {axis: technique, is: 'CE-MRA'}, cite: 'CE-MRA', source: technique}
+      - {when: {all: [{axis: technique, is: 'CE-MRA'}, {not: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}, {axis: construct, is: PBP}, {axis: construct, is: K2}]}}]}, cite: 'CE-MRA', source: technique}
     set: {base: 'T1w'}
     confidence: 0.9
     why: 'a contrast-enhanced angiography is a T1-weighted spoiled gradient echo'

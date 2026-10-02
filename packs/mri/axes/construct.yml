@@ -280,6 +280,8 @@ values:
       - t1map
       - t1 relaxation
       - t1 mapping
+    # MRI pack 0.24.0: or MOLLI's inline T1 map (flags.yml section 23).
+    alternative_flags: [siemens_inline_t1_map]
     detection:
       exclusive: has_t1_map
       combination: [qmap_t1_stated]
@@ -559,6 +561,9 @@ values:
       - magnitude only
     # MRI pack 0.21.0: and Philips' phase-contrast magnitude, `M_PCA`
     # (record 48, conventions round 3, case 5).
+    # MRI pack 0.24.0: or a Siemens MEAN magnitude over a multi-echo gradient
+    # echo's echoes, with EchoCombined (flags.yml section 23).
+    alternative_flags: [siemens_mean_magnitude]
     detection:
       exclusive: pc_magnitude_image
   Real:

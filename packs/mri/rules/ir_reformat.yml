@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.24.0: a Siemens reformat of a spin-echo inversion recovery whose
+# own ImageType names no component (`t1_space_ir_..._MPR_cor`, `*spcir_257ns`,
+# `DERIVED\PRIMARY\MPR\NORM\DIS2D`). Siemens' MPR drops the component token,
+# so the stack alone cannot tell a reformat of the real (R) reconstruction,
+# which is PSIR with construct Real (record 48, DR3: "a Siemens real (R)
+# inversion recovery is PSIR, construct Real"; a reformat keeps its source's
+# reading), from a reformat of the magnitude, which keeps IR by its TI.
+#
+# The final certificate's grade (`studies/2026-10-01-final-certificate-read/
+# grade.md` in the design repository, part 2, A1): six such MPRs of a real
+# IR at 3 T were IR with MPR alone. On the archive about a thousand Siemens
+# `*spcir` reformats with no component of their own sit beside a source of
+# the same sequence name written R.
+#
+# This set says what the rules alone can: IR and MPR, at a confidence the
+# session pass may refine (`passes/session_ir_reformat.yml`), which reads the
+# source. It runs before the modifier and construct axes and decides them
+# only where nothing else would be said of either: a short inversion time
+# far from the CSF null (IR, neither FLAIR nor STIR), no other modifier's
+# flag or word, and an image type that says MPR and nothing more
+# (`siemens_ir_reformat_alone`, flags.yml section 23). Everything else is
+# left to the axes as before. On the archive's replay the set changes no
+# stack's modifier or construct, only the tier they are written at.
+
+rule_set: ir_reformat
+decides: [modifier, construct]
+
+order: ['siemens_ir_reformat_alone']
+
+rules:
+
+  'siemens_ir_reformat_alone':
+    clauses:
+      - {flag: siemens_ir_reformat_alone}
+    set: {modifier: [IR], construct: [MPR]}
+    confidence: 0.8
+    why: 'a reformat of an inversion recovery whose component the image type does not state: IR by its inversion time, until its source says real or magnitude'

@@ -1280,7 +1280,10 @@ flags:
   # MRI pack 0.16.0: or a Siemens BLADE by its sequence name (parsers.yml,
   # `is_blade_tse`).
   # MRI pack 0.18.0: or a zero echo time 3D radial readout (below, `is_zte`).
-  radial_named: {any: [multivane_named, propeller_named, sequence_name.is_blade_tse, is_zte]}
+  # MRI pack 0.24.0: or Siemens' BLADE inversion-recovery TSE by its stem,
+  # `tirB` (`tirB2d1_15`; the final certificate's grade, a single stack),
+  # as `tseB` is.
+  radial_named: {any: [multivane_named, propeller_named, sequence_name.is_blade_tse, sequence_name.is_blade_tir, is_zte]}
   # A GE spin echo written in research mode: ScanningSequence RM, so no
   # readout is stated, but a flip of 80 degrees or more and an echo time of
   # 8 ms or more, which a gradient echo does not have outside an EPI.
@@ -2139,7 +2142,9 @@ flags:
       - {not: is_asl}
       - {not: asl_words}
       - {not: dce_words}
-      - {not: {text: technique_text, matches: 'vibe'}}
+      # MRI pack 0.24.0: no longer every series that says vibe. A TWIST-VIBE
+      # and a named `MRA-CE Vibe` given contrast are CE-MRA (the final
+      # certificate's A12; flags.yml section 23); a DCE run says so.
       # `tof` anywhere, as the TOF value's own keyword reads it (`3DTOF`)
       - {not: {text: technique_text, matches: 'tof|time of flight|inflow'}}
       - any:
@@ -3274,3 +3279,139 @@ flags:
       - {text: philips_scanning_technique, matches: '^\s*tse\s*$'}
       - scanning_sequence.has_research
       - {field: echo_train_length, ge: 2}
+
+  # === 23. MRI pack 0.24.0: the final certificate's Siemens rule gaps =======
+  #
+  # The final header certificate's grade (record 48; `studies/2026-10-01-
+  # final-certificate-read/grade.md` in the design repository, part 2, kind
+  # a, groups A1, A7, A8, A12 and three single stacks), each widened from
+  # the stacks to the rule. Its sample is development evidence from now on;
+  # these are graded on a later fresh read.
+
+  # --- A1: a Siemens reformat of a spin-echo inversion recovery whose own
+  # ImageType names no component (`DERIVED\PRIMARY\MPR\NORM\DIS2D`). Siemens'
+  # MPR drops the component token, so the stack alone cannot tell a reformat
+  # of the real (R) reconstruction, PSIR with construct Real by record 48's
+  # DR3, from one of the magnitude, which keeps IR or FLAIR by its TI. The
+  # session can: the source of the same sequence name and frame of reference
+  # states it (`passes/session_ir_reformat.yml`). The rules leave such a
+  # reformat's IR and MPR at a confidence the session pass may refine.
+  siemens_ir_reformat_part_unstated:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - is_derived
+      - has_ir_se
+      - is_mpr
+      - {not: has_epi}
+      - {not: has_magnitude}
+      - {not: has_real}
+      - {not: has_phase}
+      - {not: has_imaginary}
+      - {not: has_psir}
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: image_type.is_posdisp}
+  # Where the modifier and construct axes would say IR and MPR and nothing
+  # else, which `rules/ir_reformat.yml` decides before them: an inversion
+  # time far from the CSF null (neither FLAIR nor STIR by it), no
+  # inversion-contrast name or flag, and no flag or word of another modifier
+  # or construct.
+  siemens_ir_reformat_alone:
+    all:
+      - siemens_ir_reformat_part_unstated
+      - ir_far_from_csf_null
+      - {not: is_flair}
+      - {not: has_stir}
+      - {not: is_mdme}
+      - {not: has_fat_sat}
+      - {not: has_water_excitation}
+      - {not: wats_named}
+      - {not: has_dixon}
+      - {not: has_mtc}
+      - {not: has_flow_comp}
+      - {not: has_moco}
+      - {not: is_radial}
+      - {not: radial_named}
+      - {not: is_spiral}
+      - {not: black_blood_named}
+      - {not: has_nd}
+      - {not: is_mean}
+      - {not: is_ge_filtered}
+      - {not: is_filtered_named}
+      - {not: composed_named}
+      - {not: projection_named}
+      - {not: stddev_projection}
+      - {not: stddev_time}
+      - {not: {text: search_text, matches: 'flair|dark|fluid|da fl|da-fl|stir|short|tirm|fett|fat|dir|double|dual|psir|phase|sensitive|sat|spair|spir|water|proset|wex|dixon|ideal|wfop|flex|magnetization|mtc|blood|bright|moco|motion|propeller|blade|multivane|radial|spiral|real|magnitude|imaginary|filter|composed|mip|echo|subtract'}}
+  # The source the session pass reads: an acquired Siemens image whose
+  # component is the real part, or the magnitude.
+  siemens_real_source: {all: [image_type.is_original, has_real, {not: image_type.has_phase}, {not: has_magnitude}]}
+  siemens_magnitude_source: {all: [image_type.is_original, has_magnitude, {not: has_real}, {not: image_type.has_phase}]}
+
+  # --- A7: a Siemens reformat with no black-blood word of its own whose
+  # acquired source, of the same protocol name and frame of reference, is
+  # named for a DANTE or black-blood preparation (`wip-spc-t2p+ir-dante`).
+  # The 7 T ranges carry no sequence name, so only the session says it
+  # (`passes/session_black_blood.yml`; round 3, case 37: black blood only
+  # from a name).
+  siemens_reformat_unnamed_black_blood:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - is_derived
+      - is_mpr
+      - {not: black_blood_named}
+      - {not: is_mip}
+      - {not: is_minip}
+  black_blood_source: {all: [image_type.is_original, black_blood_named]}
+
+  # --- A8, Siemens: MOLLI's inline T1 map. MOLLI (a `tfi2d` TrueFISP read
+  # after inversions at several delays) writes the map the scanner fitted as
+  # an ORIGINAL image with the token `T1` after its motion correction
+  # (`ORIGINAL\PRIMARY\R\DIS2D\MOCO\T1`), with image comments `T1 MAP (ms)`.
+  # It is a map: construct T1map and no base contrast of its own. The
+  # acquired MOLLI images (`...\M\DIS2D\MOCO`) are no map.
+  siemens_inline_t1_map:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - any:
+          - {text: search_text, matches: '(^|[^a-z])molli([^a-z]|$)'}
+          - sequence_name.is_trufisp
+      - any:
+          - {parser: image_type, any_token: [T1]}
+          - {text: search_text, matches: '(^|[^a-z])t1w? map([^a-z]|$)'}
+      - {not: has_magnitude}
+      - {not: has_phase}
+
+  # --- A12: a contrast-enhanced angiography named VIBE. A Siemens TWIST-VIBE
+  # (`t1_vibe-twist_..._dyn`, `MRA-CE ... vibe twist`) or a named `MRA-CE
+  # Vibe` given contrast is a CE-MRA (the reading guide: TRICKS, TWIST,
+  # 4D-TRAK, a named CE-MRA, cases 2 and 33); `is_ce_mra` no longer leaves
+  # out every series that says vibe. A series that says DCE stays DCE.
+  # (No flag: the change is in `is_ce_mra` above.)
+
+  # --- single: a Siemens MEAN magnitude over the echoes of a multi-echo
+  # gradient echo (`DERIVED\PRIMARY\M\...\MEAN`, `*fl2d8`, no SWI token) is
+  # Magnitude with EchoCombined, as the SWI route's MEAN magnitude is (the
+  # research's header rule for case 5, M with MEAN; N1; record 48 after
+  # dev-7; the reading guide's MEAN magnitude "of a multi-echo SWI or
+  # gradient echo").
+  siemens_mean_magnitude: {all: [siemens_mean_echoes, has_magnitude, {not: has_phase}]}
+
+  # --- single: a Siemens 3D gradient echo whose repetition time is a shot
+  # interval (1,000 to 3,500 ms at a flip of 15 degrees or less and a TE
+  # under 8 ms) is magnetisation prepared: MPRAGE. A plain 3D gradient echo
+  # repeats in milliseconds; on the archive every Siemens stack of this shape
+  # is MPRAGE or MP2RAGE but 25 nameless ranges of an XA MPRAGE
+  # (`noseries`, de-identified), which were GRE with base PDw. MP2RAGE's
+  # longer repetition time (4,000 ms and more) stays its own.
+  siemens_mprage_by_shot_tr:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - is_3d
+      - has_gre
+      - {not: has_se}
+      - {not: has_epi}
+      - {field: repetition_time, ge: 1000}
+      - {field: repetition_time, lt: 3500}
+      - {field: echo_time, lt: 8}
+      - {field: flip_angle, le: 15}

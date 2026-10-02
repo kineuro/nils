@@ -1338,3 +1338,355 @@ cases:
     axes:
       construct: SyntheticFLAIR
       base: T2w
+
+  # === The final certificate's Siemens rule gaps (A1, A7, A8, A12 and three
+  # single stacks; flags.yml section 23). The session passes' cases, which
+  # read a stack beside another, are the engine's tests
+  # (`nils-pack/tests/session.rs`).
+
+  # --- A1: a Siemens reformat of an inversion recovery whose component only
+  # its source states is left IR and MPR at 0.8 for the session pass
+
+  - name: a Siemens MPR of a short-TI SPACE inversion recovery with no component token is IR and MPR, for the session to refine
+    stack:
+      image_type: 'DERIVED\PRIMARY\MPR\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: 'IR\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_space_ir_sag_iso_MPR_cor'
+      text_sequence_name: '*spcir_257ns'
+      n_slices: 110
+      repetition_time: 4000
+      echo_time: 380
+      inversion_time: 380
+      flip_angle: 120
+      echo_train_length: 241
+    flags:
+      siemens_ir_reformat_part_unstated: true
+      siemens_ir_reformat_alone: true
+    axes:
+      modifier: IR
+      construct: MPR
+
+  - name: guard, a Siemens MPR of a dark-fluid SPACE is FLAIR by its own reading and left to its axes
+    stack:
+      image_type: 'DERIVED\PRIMARY\MPR\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: 'IR\PFP\FS'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_space_dark-fluid_sag_MPR_tra'
+      text_sequence_name: '*spcir_278ns'
+      n_slices: 176
+      repetition_time: 5000
+      echo_time: 387
+      inversion_time: 1800
+      flip_angle: 120
+      echo_train_length: 278
+    flags:
+      siemens_ir_reformat_part_unstated: true
+      siemens_ir_reformat_alone: false
+    axes:
+      modifier: 'FLAIR,FatSat'
+      construct: MPR
+
+  - name: guard, a Siemens acquired real inversion recovery is PSIR and Real by its own image type
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\R\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: 'IR\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_space_ir_sag_iso'
+      text_sequence_name: '*spcir_257ns'
+      n_slices: 176
+      repetition_time: 4000
+      echo_time: 380
+      inversion_time: 380
+      flip_angle: 120
+      echo_train_length: 241
+    flags:
+      siemens_ir_reformat_part_unstated: false
+      siemens_real_source: true
+    axes:
+      modifier: PSIR
+      construct: Real
+
+  # --- A7: a black-blood-named source (the reformat's own case is the
+  # engine's test)
+
+  - name: a Siemens 7 T DANTE SPACE acquisition named in its sequence name is a black-blood source
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D\NORM\FIL\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'Sag 3D T2 FLAIR SPACE'
+      text_protocol_name: 'Sag 3D T2 FLAIR SPACE'
+      text_sequence_name: 'wip-spc-t2p+ir-dante-260ns'
+      n_slices: 320
+      repetition_time: 7500
+      echo_time: 451
+      flip_angle: 120
+      echo_train_length: 260
+    flags:
+      black_blood_named: true
+      black_blood_source: true
+    axes:
+      modifier: 'BlackBlood,FLAIR'
+
+  - name: a Siemens 7 T range of that SPACE has no sequence name and is FLAIR by its words alone
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\PARALLEL\DIS2D\MFSPLIT'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'Sag 3D T2 FLAIR SPACE_MPR_cor'
+      text_protocol_name: 'Sag 3D T2 FLAIR SPACE'
+      n_slices: 200
+      repetition_time: 7500
+      echo_time: 451
+      flip_angle: 120
+      echo_train_length: 260
+    flags:
+      siemens_reformat_unnamed_black_blood: true
+    axes:
+      modifier: FLAIR
+      construct: MPR
+
+  # --- A8, Siemens: MOLLI's inline T1 map
+
+  - name: a Siemens MOLLI inline T1 map is a T1 map with no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\R\DIS2D\MOCO\T1'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SS\MP\OSP'
+      scan_options: IPG
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'MOLLI_5+3_MOCO_T1'
+      text_protocol_name: 'MOLLI_5+3'
+      text_sequence_name: 'tfi2d1_62'
+      text_image_comments: 'T1 MAP (ms)'
+      n_slices: 1
+      inversion_time: 120
+      flip_angle: 35
+    flags:
+      siemens_inline_t1_map: true
+    axes:
+      base: ''
+
+  - name: guard, a Siemens MOLLI acquired image is no map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D\MOCO'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SS\MP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'MOLLI_5+3_MOCO'
+      text_sequence_name: 'tfi2d1_62'
+      n_slices: 1
+      inversion_time: 120
+      flip_angle: 35
+    flags:
+      siemens_inline_t1_map: false
+
+  # --- A12: CE-MRA named VIBE
+
+  - name: a Siemens MRA-CE VIBE given contrast is a CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      scan_options: 'PFP\SFS'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'MRA-CE Vibe 3ml'
+      text_sequence_name: '*fl3d1'
+      text_contrast: Clariscan
+      n_slices: 80
+      repetition_time: 3.7
+      echo_time: 1.4
+      flip_angle: 9
+    flags:
+      is_ce_mra: true
+    axes:
+      technique: CE-MRA
+      base: T1w
+
+  - name: guard, a Siemens VIBE given contrast and named for nothing more stays a VIBE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_vibe_tra +K'
+      text_sequence_name: '*fl3d1'
+      text_contrast: Clariscan
+      n_slices: 80
+      repetition_time: 5
+      echo_time: 2
+      flip_angle: 10
+    flags:
+      is_ce_mra: false
+    axes:
+      technique: VIBE
+
+  - name: a Siemens TWIST-VIBE's time-to-peak map keeps base PWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\WATER\TTP'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      scan_options: DIXF
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_vibe-twist_dixon_tra_dyn_TTC=6.7s_W_TTP'
+      text_sequence_name: '*fldyn3d2'
+      text_contrast: Clariscan
+      n_slices: 32
+      repetition_time: 4
+      echo_time: 1.2
+      flip_angle: 9
+    axes:
+      technique: CE-MRA
+      base: PWI
+
+  # --- singles
+
+  - name: a Siemens MEAN magnitude over the echoes of a multi-echo FLASH is Magnitude with EchoCombined
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\DIS2D\NORM\MEAN\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'Results MEAN_gre_8echoes'
+      text_sequence_name: '*fl2d8'
+      n_slices: 90
+      repetition_time: 2800
+      echo_time: 5.5
+      flip_angle: 55
+      echo_train_length: 8
+    flags:
+      siemens_mean_magnitude: true
+    axes:
+      construct: 'EchoCombined,Magnitude'
+
+  - name: guard, a Siemens MEAN phase over the echoes takes no Magnitude
+    stack:
+      image_type: 'DERIVED\PRIMARY\P\DIS2D\MEAN\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'Results MEAN_gre_8echoes_Pha'
+      text_sequence_name: '*fl2d8'
+      n_slices: 90
+      repetition_time: 2800
+      echo_time: 5.5
+      flip_angle: 55
+      echo_train_length: 8
+    flags:
+      siemens_mean_magnitude: false
+
+  - name: a Siemens BLADE inversion-recovery TSE written tirB is Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP\OSP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_sag'
+      text_sequence_name: 'tirB2d1_15'
+      n_slices: 17
+      repetition_time: 5840
+      echo_time: 84
+      inversion_time: 160
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      radial_named: true
+    axes:
+      modifier: 'Radial,STIR'
+
+  - name: guard, a Siemens TIRM written tir is no BLADE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP\OSP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_sag'
+      text_sequence_name: '*tir2d1_15'
+      n_slices: 17
+      repetition_time: 5840
+      echo_time: 84
+      inversion_time: 160
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      radial_named: false
+    axes:
+      modifier: STIR
+
+  - name: a Siemens nameless range of a 3D gradient echo at a shot interval of 2,300 ms is an MPRAGE
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NONE\PARALLEL\DIS2D\MFSPLIT'
+      scanning_sequence: GR
+      sequence_variant: SK
+      scan_options: PER
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'noseries'
+      n_instances: 60
+      repetition_time: 2300
+      echo_time: 2.27
+      flip_angle: 8
+      echo_train_length: 1
+    flags:
+      siemens_mprage_by_shot_tr: true
+    axes:
+      technique: MPRAGE
+      base: T1w
+
+  - name: guard, a Siemens 3D FLASH repeating in milliseconds is no MPRAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_fl3d_sag'
+      text_sequence_name: '*fl3d1'
+      n_slices: 176
+      repetition_time: 11
+      echo_time: 4.9
+      flip_angle: 15
+    flags:
+      siemens_mprage_by_shot_tr: false
+
+  - name: guard, a Siemens MP2RAGE at its longer repetition time is no shot-interval MPRAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'mp2rage_sag_INV2'
+      text_sequence_name: '*tfl3d1_16'
+      n_slices: 176
+      repetition_time: 5000
+      echo_time: 2.9
+      inversion_time: 2500
+      flip_angle: 5
+    flags:
+      siemens_mprage_by_shot_tr: false

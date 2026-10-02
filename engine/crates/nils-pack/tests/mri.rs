@@ -25,7 +25,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        239,
+        240,
         "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
          Siemens stems, the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
@@ -36,11 +36,12 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          echo by its stem, the two of pack 0.18.0: GE's SCOUT and \
          Siemens' standard deviation projections, and the four of pack \
          0.21.0: the Dixon parts W, F, IP and OP of the Philips per-frame \
-         ImageType"
+         ImageType, and the one of pack 0.24.0: a Siemens BLADE \
+         inversion-recovery TSE by its stem"
     );
     assert_eq!(
         pack.flags.len(),
-        418,
+        427,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -111,7 +112,13 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          and a Siemens range reformat, and pack 0.24.0 the 4 of the broken \
          T2* exclusion: a position display on a gradient echo, a \
          gradient-echo scout, a GE fast gradient echo by its pulse sequence, \
-         and a readout that keeps a spin-echo word off"
+         and a readout that keeps a spin-echo word off, and the 9 of the \
+         final certificate's Siemens rule gaps: a reformat of an inversion \
+         recovery whose component only its source states and the one the \
+         rules leave IR and MPR, its real and magnitude sources, a reformat \
+         with no black-blood word and a black-blood source, MOLLI's inline \
+         T1 map, a MEAN magnitude over echoes, and an MPRAGE by its shot \
+         interval"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

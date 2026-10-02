@@ -243,7 +243,12 @@ cases:
     axes:
       construct: ND
 
-  - name: a Siemens TWIST-VIBE dynamic run is no CE-MRA
+  # MRI pack 0.24.0: a TWIST-VIBE given contrast is a time-resolved CE-MRA,
+  # as the reading guide and the final record's W-CEMRA read TWIST (cases 2
+  # and 33; the final certificate's A12). Until 0.24.0 this case held it out
+  # as a DCE run, which no DCE rule took either (TWIST is an angiography
+  # word there), so it fell to VI-GRE.
+  - name: a Siemens TWIST-VIBE dynamic run given contrast is CE-MRA
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       scanning_sequence: GR
@@ -258,7 +263,7 @@ cases:
       echo_time: 1.5
       flip_angle: 12
     flags:
-      is_ce_mra: false
+      is_ce_mra: true
 
   - name: a GE series in an exam whose protocol names spectroscopy is no MRS
     stack:
