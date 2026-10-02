@@ -6,6 +6,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
+- The MRI pack is 0.23.0. It fixes the rule bugs a development grade of 0.22.0 found and settles its dispute. The ADC or eADC map of a Siemens or Philips tensor acquisition is DTIRecon where only the session names the tensor: a second session pass reads the source series beside the map (named for a tensor, mddw or six or more directions, or an FA made from it), of the same geometry and frame of reference, and leaves the map RawRecon where a plain DWI is beside it as well. The physics vote no longer fills a base the rules decide as nothing (a calibration, a phase contrast, a real or imaginary spin-echo component without an inversion, a spectroscopy, an excluded object and the other base-none rules). A Siemens 3D-card range (DERIVED with PARALLEL or RADIAL in its image type) is a reformat whatever it is named. A Siemens BLADE written `tseBNR` carries the restore as `tseBR` does. Stacks need a reclassify.
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.70 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
 
 ## [1.0.0-alpha.70] - 2026-10-01

@@ -298,7 +298,9 @@ fn without_contract_8(dir: &Path) {
     };
     edit("pack.yml", &|t| {
         t.lines()
-            .filter(|l| l.trim() != "- passes/session.yml")
+            .filter(|l| {
+                l.trim() != "- passes/session.yml" && l.trim() != "- passes/session_dti.yml"
+            })
             .collect::<Vec<_>>()
             .join("\n")
     });

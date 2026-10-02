@@ -250,6 +250,194 @@ fn the_mri_session_pass_decides_only_from_a_related_computed_output() {
     }
 }
 
+/// A Philips diffusion map or source, as a session holds them.
+fn philips(number: &str, name: &str, image_type: &str) -> Stack {
+    stack(&[
+        ("modality", "MR"),
+        ("manufacturer", "Philips Medical Systems"),
+        ("image_type", image_type),
+        ("scanning_sequence", "SE"),
+        ("mr_acquisition_type", "2D"),
+        ("text_series_description", name),
+        ("text_protocol_name", name),
+        ("orientation", "Axial"),
+        ("rows", "112"),
+        ("columns", "112"),
+        ("n_slices", "72"),
+        ("series_number", number),
+    ])
+}
+
+const ADC: &str = "ORIGINAL\\PRIMARY\\ADC_UNSPECIFIED\\ADC\\UNSPECIFIED";
+const SOURCE: &str = "ORIGINAL\\PRIMARY\\M_SE\\M\\SE";
+
+/// MRI pack 0.23.0, record 48's DR4 by the session (dev-8): a Philips ADC
+/// named for itself (`dADC iso`) is the tensor's output, DTIRecon, where
+/// the source beside it is named for a tensor or an FA was made from it;
+/// ruling 7's RawRecon stays where a plain DWI of the same geometry is
+/// beside it as well, or nothing names a tensor.
+#[test]
+fn the_mri_dti_session_pass_reads_dr4_from_the_source_beside() {
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.name == "session_dti_source")
+        .expect("the DTI session pass");
+    let session = pass.session().unwrap();
+    let target = pass.target.as_ref();
+    let axis = |n: &str| pack.axes.iter().position(|a| a.name == n).unwrap();
+    let in_force: Vec<InForce> = pack
+        .axes
+        .iter()
+        .map(|a| match a.name.as_str() {
+            "provenance" => InForce {
+                values: vec!["RawRecon".into()],
+                tier: "default".into(),
+                confidence: 0.8,
+            },
+            "construct" => InForce {
+                values: vec!["ADC".into()],
+                tier: "exclusive".into(),
+                confidence: 0.9,
+            },
+            "directory_type" => InForce {
+                values: vec!["dwi".into()],
+                tier: "exclusive".into(),
+                confidence: 0.9,
+            },
+            _ => InForce::default(),
+        })
+        .collect();
+    let me = philips("704", "dADC iso", ADC);
+    let run =
+        |me: &Stack, f: &[InForce], sibs: &[Sib]| decide(&pack, target, session, me, &[], f, sibs);
+    let source = philips("701", "MB2Sense2 DTI opt16 tra DWI iso", SOURCE);
+    let iso = philips("703", "isoDWI iso", SOURCE);
+
+    // Beside its source named DTI, and its isotropic image: DTIRecon.
+    let a = run(
+        &me,
+        &in_force,
+        &[
+            sib(1, source.clone(), false, Some(true)),
+            sib(2, iso.clone(), false, Some(true)),
+        ],
+    )
+    .expect("the rule holds");
+    assert_eq!(a.rule, "dti_source_or_fa_beside");
+    assert_eq!(a.cited, [1]);
+    assert_eq!(
+        a.writes,
+        [(axis("provenance"), vec!["DTIRecon".to_string()])]
+    );
+
+    // Beside an FA of the acquisition (DR4's FA sibling), and an eADC too.
+    let fa = philips(
+        "705",
+        "faFA",
+        "ORIGINAL\\PRIMARY\\FA_UNSPECIFIED\\FA\\UNSPECIFIED",
+    );
+    assert_eq!(
+        run(&me, &in_force, &[sib(3, fa.clone(), false, Some(true))]).map(|a| a.writes),
+        Some(vec![(axis("provenance"), vec!["DTIRecon".to_string()])])
+    );
+    let mut eadc_force = in_force.clone();
+    eadc_force[axis("construct")].values = vec!["eADC".into()];
+    assert!(
+        run(
+            &philips(
+                "706",
+                "eADC",
+                "ORIGINAL\\PRIMARY\\EADC_UNSPECIFIED\\EADC\\UNSPECIFIED"
+            ),
+            &eadc_force,
+            &[sib(1, source.clone(), false, Some(true))]
+        )
+        .is_some_and(|a| !a.writes.is_empty())
+    );
+
+    // A plain DWI of the same geometry beside it as well: ruling 7 keeps
+    // RawRecon, and nothing is written.
+    let plain = philips("801", "DWI b1000 SENSE", SOURCE);
+    let kept = run(
+        &philips("804", "dADC", ADC),
+        &in_force,
+        &[
+            sib(1, philips("802", "DTI 15 dir", SOURCE), false, Some(true)),
+            sib(4, plain, false, Some(true)),
+        ],
+    )
+    .expect("the guard holds");
+    assert_eq!(kept.rule, "a_plain_dwi_beside_keeps_ruling_7");
+    assert!(kept.writes.is_empty());
+
+    // Nothing holds: alone, beside the isotropic image only, a source of
+    // another geometry, frame or reach.
+    let mut other_geometry = source.clone();
+    other_geometry
+        .set("n_slices", Value::Text(Some("60")))
+        .unwrap();
+    for (why, sibs) in [
+        ("alone", vec![]),
+        (
+            "the isotropic image",
+            vec![sib(2, iso.clone(), false, Some(true))],
+        ),
+        (
+            "another geometry",
+            vec![sib(1, other_geometry, false, Some(true))],
+        ),
+        (
+            "another frame",
+            vec![sib(1, source.clone(), false, Some(false))],
+        ),
+        (
+            "out of reach",
+            vec![sib(
+                1,
+                philips("601", "DTI opt16", SOURCE),
+                false,
+                Some(true),
+            )],
+        ),
+    ] {
+        assert_eq!(run(&me, &in_force, &sibs), None, "{why}");
+    }
+
+    // Not a target: a GE ADC (ruling 7 and DR4's GE reading), a map the
+    // header already made DTIRecon, and a map named for fewer than six
+    // directions holds no rule.
+    let ge = {
+        let mut s = me.clone();
+        s.set("manufacturer", Value::Text(Some("GE MEDICAL SYSTEMS")))
+            .unwrap();
+        s
+    };
+    assert_eq!(
+        run(&ge, &in_force, &[sib(1, source.clone(), false, Some(true))]),
+        None
+    );
+    let mut decided = in_force.clone();
+    decided[axis("provenance")] = InForce {
+        values: vec!["DTIRecon".into()],
+        tier: "keywords".into(),
+        confidence: 0.85,
+    };
+    assert_eq!(
+        run(&me, &decided, &[sib(1, source.clone(), false, Some(true))]),
+        None
+    );
+    assert_eq!(
+        run(
+            &philips("704", "ep2d_diff_3scan_trace_ADC", ADC),
+            &in_force,
+            &[sib(3, fa, false, Some(true))]
+        ),
+        None
+    );
+}
+
 /// The MRI pack, copied, with `edit` applied to one of its files.
 fn edited(file: &str, edit: impl Fn(&str) -> String) -> PathBuf {
     fn copy(from: &Path, to: &Path) {
@@ -386,7 +574,10 @@ fn contract_8_is_refused_where_a_pack_gets_it_wrong() {
             std::fs::write(&p, f(&text)).unwrap();
         };
         if keep != "session" {
-            edit("pack.yml", &|t| t.replace("  - passes/session.yml\n", ""));
+            edit("pack.yml", &|t| {
+                t.replace("  - passes/session.yml\n", "")
+                    .replace("  - passes/session_dti.yml\n", "")
+            });
         }
         if keep != "fallback" {
             edit("picks/main.yml", &|t| {

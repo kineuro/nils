@@ -50,6 +50,33 @@ target:
             # 33 of them). The vote wrote T2w, PDw or T1w on six of dev-1's.
             - {axis: technique, is: MDME}
             - {axis: technique, is: QALAS}
+            # MRI pack 0.23.0: every other stack whose base the rules decide
+            # as nothing, which a vote's empty-or-Unknown test cannot tell
+            # from a gap (dev-8: a Philips real spin-echo component, round
+            # 3's case 24, and a GE calibration, R3-CAL, both voted T2w).
+            # Each line is a base rule's own condition as the axes state it:
+            # `r3:no_base` (a calibration, any phase-contrast output, a
+            # temporal standard deviation, a real or imaginary component
+            # without an inversion), a velocity image, a B1 map, a
+            # spectroscopy, a zero echo time Silent MRA and an excluded
+            # object. On the archive these are 2,578 stacks the vote could
+            # fill, and no stack whose base is a gap leaves the target.
+            - {axis: provenance, is: Calibration}
+            - {axis: technique, is: PC-MRA}
+            - {axis: technique, is: MRS}
+            - {axis: technique, is: ZTE}
+            - {axis: construct, is: StdDevTime}
+            - {axis: construct, is: Speed}
+            - {axis: construct, is: Velocity}
+            - {axis: construct, is: B1map}
+            - {axis: directory_type, is: excluded}
+            - all:
+                - any: [{axis: construct, is: Real}, {axis: construct, is: Imaginary}]
+                - {not: {axis: modifier, is: PSIR}}
+                - {not: {axis: modifier, is: IR}}
+                - {not: {axis: modifier, is: FLAIR}}
+                - {not: {axis: modifier, is: STIR}}
+                - {not: {axis: modifier, is: DIR}}
 
 reference:
   # Named, and recorded on every row the pass writes. It holds what a rule or a

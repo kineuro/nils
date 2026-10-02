@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The session pass for record 48's DR4 (MRI pack 0.23.0): the ADC or eADC
+# of a Siemens or Philips tensor acquisition is DTIRecon, by the
+# acquisition, "six or more directions, mddw, DTI, or an FA sibling". The
+# stack's own words and numbers decide it where they name the tensor
+# (`flags.yml`, `tensor_source_named`). Philips names its maps for what they
+# are and not for the acquisition (`dADC iso`, `eADC`, `faFA`), so the
+# tensor is named only by the source series beside them, which one stack
+# does not see. The session does.
+#
+# dev-8 (`studies/2026-10-02-dev8-reference/grade.md` in the design
+# repository, part 2): three `dADC iso` maps of one protocol, typed
+# ORIGINAL\PRIMARY\ADC_UNSPECIFIED\ADC, whose source in the session is
+# `MB2Sense2 DTI opt16 tra DWI iso` (16 directions), were RawRecon; all four
+# raters read DR4 as DTIRecon. On the archive, a Philips map and its source
+# share the geometry and the frame of reference, and the map's series number
+# is the source's plus 1 to 5 (the source at X01, the maps at X02 to X06).
+#
+# The same engine guards as `session.yml`: a sibling is seen by its header
+# alone, a value the header decided is never replaced, and every value
+# written has tier `session`. RawRecon on such a map is the provenance
+# axis's default, which is replaceable.
+
+pass: session_dti_source
+kind: session_context
+phase: after
+
+# A Siemens or Philips ADC or eADC map the rules left RawRecon by ruling 7,
+# and no FA itself. The two axis values narrow what the pass reads.
+target:
+  when:
+    all:
+      - {axis: provenance, is: RawRecon}
+      - {axis: directory_type, is: dwi}
+      - any: [{text: manufacturer, prefix: siemens}, {text: manufacturer, prefix: philips}]
+      - any: [{axis: construct, is: ADC}, {axis: construct, is: eADC}]
+      - {not: has_fa}
+
+session:
+  sibling_fields:
+    - manufacturer
+    - image_type
+    - text_series_description
+    - text_protocol_name
+    - text_sequence_name
+    - text_body_part
+    - text_series_comments
+    - text_image_comments
+    - orientation
+    - rows
+    - columns
+    - n_slices
+    - series_number
+  # The provenance default is written at 0.8; a header rule is never
+  # replaced, whatever its confidence.
+  replaces_at_most: 0.85
+
+rules:
+  # First, and conservative: where the session also holds a plain DWI of the
+  # same geometry within the same reach, the map may be that DWI's, and
+  # ruling 7 keeps it RawRecon. On the archive this holds on 13 of the 295
+  # maps beside a tensor or an FA, each a Philips map; 282 become DTIRecon.
+  - rule: a_plain_dwi_beside_keeps_ruling_7
+    sibling:
+      series_number: {within: 5}
+      same: [orientation, rows, columns, n_slices]
+      same_frame_of_reference: true
+      when: plain_dwi_source_sibling
+    require: some
+    set:
+      provenance: RawRecon
+    confidence: 0.8
+    why: 'a plain DWI of the same geometry is beside it, so the map may be that DWI''s: an ADC of a plain DWI is RawRecon (ruling 7)'
+    sources:
+      - 'Nima''s ruling 7 (2026-09-27): an ADC the scanner made from a plain DWI is RawRecon'
+
+  - rule: dti_source_or_fa_beside
+    # Never a map whose own name states fewer than six directions (a
+    # Siemens `3scan` trace whose scanner also wrote an FA).
+    when: {not: few_directions_named}
+    sibling:
+      series_number: {within: 5}
+      same: [orientation, rows, columns, n_slices]
+      same_frame_of_reference: true
+      when: tensor_source_sibling
+    require: some
+    set:
+      provenance: DTIRecon
+    confidence: 0.8
+    why: 'the acquisition beside it is a tensor (named DTI or tensor, mddw, six or more directions, or an FA was made from it), so its ADC is the tensor''s output'
+    sources:
+      - 'record 48, the nine dev-5 disputes, case 4 (DR4): the ADC or eADC of a named DTI (six or more directions, mddw, DTI, or an FA sibling) is DTIRecon'
+      - 'dev-8''s grade, part 2: a Philips DTI''s ADC named by its source series only'
+
+emit:
+  review_item_below: 0.70

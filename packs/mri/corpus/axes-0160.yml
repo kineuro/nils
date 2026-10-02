@@ -123,9 +123,11 @@ cases:
       technique: MP2RAGE
       construct: 'MPR,Uniform'
 
+  # MRI pack 0.23.0: without the PARALLEL token, which marks a Siemens
+  # range and so a reformat whatever it is named (`range_reformat`).
   - name: a derived image named Ax from a protocol named tra is the same plane and no reformat
     stack:
-      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\PARALLEL\DIS3D'
+      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\DIS3D'
       scanning_sequence: GR
       sequence_variant: SK
       mr_acquisition_type: 3D
@@ -139,9 +141,11 @@ cases:
       provenance: RawRecon
       construct: Uniform
 
+  # MRI pack 0.23.0: without the PARALLEL token, which marks a Siemens
+  # range and so a reformat whatever it is named (`range_reformat`).
   - name: the protocol's own derived image in its own plane is no reformat
     stack:
-      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\PARALLEL\DIS3D'
+      image_type: 'DERIVED\PRIMARY\T1\UNIFORM\DIS3D'
       scanning_sequence: GR
       sequence_variant: SK
       mr_acquisition_type: 3D

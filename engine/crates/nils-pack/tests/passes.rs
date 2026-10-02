@@ -199,10 +199,13 @@ fn a_zero_echo_time_is_not_a_short_one_to_the_vote_either() {
     for _ in 0..20 {
         rows.push((stack(30.0, 3.0, "GR"), "T1w", "FLASH", "anat"));
     }
-    // one fragment of a flow study, whose scanner wrote no echo time,
-    rows.push((stack(30.0, 0.0, "GR"), "", "PC", "misc"));
+    // one fragment whose scanner wrote no echo time,
+    rows.push((stack(30.0, 0.0, "GR"), "", "GRE", "misc"));
     // and one whose echo time is a measurement, so the bin still works.
-    rows.push((stack(30.0, 3.0, "GR"), "", "PC", "misc"));
+    // (Since MRI pack 0.23.0 a phase contrast, the flow study above, has no
+    // base by rule and is no gap to the vote at all, so the two fragments
+    // here are plain gradient echoes.)
+    rows.push((stack(30.0, 3.0, "GR"), "", "GRE", "misc"));
 
     let c = corpus(&pack, &rows);
     let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
@@ -327,4 +330,75 @@ fn an_mdme_image_is_no_gap_and_a_reformat_no_voter() {
         "{:?}",
         answers[0].writes
     );
+}
+
+/// MRI pack 0.23.0: every stack whose base the rules decide as nothing is no
+/// gap to the vote, which an empty base alone cannot tell from one (dev-8: a
+/// Philips real spin-echo component, round 3's case 24, and a GE calibration
+/// were voted T2w). A real component of an inversion recovery keeps its
+/// base from the rules and an empty one is still a gap.
+#[test]
+fn a_base_the_rules_decide_as_nothing_is_no_gap() {
+    let pack = mri();
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
+    let vote = pass.vote().expect("the physics vote");
+
+    let mut c = Corpus::new(&pack);
+    let push = |c: &mut Corpus, id: i64, base: &str, axes: &[(&str, &str)]| {
+        let s = stack(4000.0, 100.0, "SE");
+        c.push(
+            id,
+            |f| s.as_text(f).into_owned(),
+            |a| {
+                let name = pack.axes[a].name.as_str();
+                if name == "base" {
+                    return base.to_string();
+                }
+                axes.iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_else(|| match name {
+                        "technique" => "TSE".to_string(),
+                        "directory_type" => "anat".to_string(),
+                        "provenance" => "RawRecon".to_string(),
+                        _ => String::new(),
+                    })
+            },
+        );
+    };
+    for i in 0..10 {
+        push(&mut c, i + 1, "T2w", &[]);
+    }
+    let nothing: [&[(&str, &str)]; 11] = [
+        &[("construct", "Real")],
+        &[("construct", "Imaginary"), ("modifier", "FlowComp")],
+        &[("provenance", "Calibration"), ("technique", "FISP")],
+        &[("technique", "PC")],
+        &[("technique", "MRS")],
+        &[("technique", "ZTE")],
+        &[("construct", "StdDevTime")],
+        &[("construct", "Speed")],
+        &[("construct", "Velocity")],
+        &[("construct", "B1map")],
+        &[("directory_type", "excluded")],
+    ];
+    for (i, axes) in nothing.iter().enumerate() {
+        push(&mut c, 11 + i as i64, "", axes);
+    }
+    // A gap still: a real component of an inversion recovery, and a plain
+    // magnitude.
+    push(
+        &mut c,
+        22,
+        "",
+        &[("construct", "Real"), ("modifier", "PSIR")],
+    );
+    push(&mut c, 23, "", &[("construct", "Magnitude")]);
+    let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
+    let at: Vec<usize> = answers.iter().map(|a| a.at).collect();
+    assert_eq!(at, vec![21, 22], "only the two gaps: {at:?}");
 }
