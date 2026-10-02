@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.23.0");
+    assert_eq!(pack.id(), "mri@0.24.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -25,7 +25,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
-        239,
+        240,
         "v0's 220 predicates, all of them, the two record 37 added, the \
          five of pack 0.10.0: the time reversed steady state and the anchored \
          Siemens stems, the two of pack 0.11.0: GE's MT_GEMS and Siemens' \
@@ -36,11 +36,12 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          echo by its stem, the two of pack 0.18.0: GE's SCOUT and \
          Siemens' standard deviation projections, and the four of pack \
          0.21.0: the Dixon parts W, F, IP and OP of the Philips per-frame \
-         ImageType"
+         ImageType, and the one of pack 0.24.0: a Siemens BLADE \
+         inversion-recovery TSE by its stem"
     );
     assert_eq!(
         pack.flags.len(),
-        414,
+        477,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -108,7 +109,25 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          LOCALIZER on a gradient echo, and a STAGE echo named PD or T1, and \
          pack 0.23.0 the 4 of the next: a tensor source and a plain DWI as a \
          session sees them, a diffusion named for fewer than six directions, \
-         and a Siemens range reformat"
+         and a Siemens range reformat, and pack 0.24.0 the 4 of the broken \
+         T2* exclusion: a position display on a gradient echo, a \
+         gradient-echo scout, a GE fast gradient echo by its pulse sequence, \
+         and a readout that keeps a spin-echo word off, and the 9 of the \
+         final certificate's Siemens rule gaps: a reformat of an inversion \
+         recovery whose component only its source states and the one the \
+         rules leave IR and MPR, its real and magnitude sources, a reformat \
+         with no black-blood word and a black-blood source, MOLLI's inline \
+         T1 map, a MEAN magnitude over echoes, and an MPRAGE by its shot \
+         interval, the 11 of its GE rule gaps (an SPGR name on a TOF \
+         option, a MAGiC real image, a SWI output and a multi-echo QSM by \
+         the pulse sequence, GE's own map names, a B0 map and a SWI read out \
+         by EPI), the 4 of its settled disputes (a 3D ksepi gradient echo, \
+         a Philips directional set, a Siemens filter copy and a QSM-named \
+         echo), the 10 of its Philips and keyword rule gaps, and a TWIST-VIBE \
+         dynamic run kept out of CE-MRA, and the 24 of round 4, the name \
+         against the physics: the field bins, the inversion and its STIR, \
+         T1-IR and FLAIR windows, the weighting words, the readouts, R1 to R8 \
+         and their qualifiers"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

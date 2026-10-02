@@ -299,7 +299,10 @@ mod tests {
 
     /// Phase 0's seven asked axes leave six the pack computes from them:
     /// directory type, disposition, convertible, role and (MRI pack 0.13.0)
-    /// body region from the answer, and quality from ImageType.
+    /// body region from the answer, and quality from ImageType. MRI pack
+    /// 0.24.0: and the base's qualifier and basis, which the base rules
+    /// decide with the base, so they go with a rater's base answer (as
+    /// nothing: the answer is the basis, and no rule of the file is read).
     #[test]
     fn the_seven_asked_axes_derive_the_other_six() {
         let pack = mri();
@@ -308,7 +311,9 @@ mod tests {
         assert_eq!(
             got,
             words(&[
+                "base_basis",
                 "body_region",
+                "contrast_mix",
                 "convertible",
                 "directory_type",
                 "disposition",

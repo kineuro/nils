@@ -438,6 +438,197 @@ fn the_mri_dti_session_pass_reads_dr4_from_the_source_beside() {
     );
 }
 
+/// A Siemens reformat as the 3D card writes it, of the given image type and
+/// sequence name, at the given series number.
+fn siemens(number: &str, name: &str, image_type: &str, sequence: &str, protocol: &str) -> Stack {
+    let mut s = stack(&[
+        ("modality", "MR"),
+        ("manufacturer", "SIEMENS"),
+        ("image_type", image_type),
+        ("scanning_sequence", "SE\\IR"),
+        ("mr_acquisition_type", "3D"),
+        ("text_series_description", name),
+        ("text_protocol_name", protocol),
+        ("repetition_time", "4000"),
+        ("echo_time", "380"),
+        ("inversion_time", "380"),
+        ("series_number", number),
+    ]);
+    if !sequence.is_empty() {
+        s.set("text_sequence_name", Value::Text(Some(sequence)))
+            .unwrap();
+    }
+    s
+}
+
+#[test]
+fn the_mri_reformat_passes_read_the_source_beside() {
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let axis = |n: &str| pack.axes.iter().position(|a| a.name == n).unwrap();
+    let pass = |n: &str| {
+        pack.passes
+            .iter()
+            .find(|p| p.name == n)
+            .unwrap_or_else(|| panic!("the pass {n}"))
+    };
+    let force = |modifier: &[&str], tier: &str, confidence: f64| -> Vec<InForce> {
+        pack.axes
+            .iter()
+            .map(|a| match a.name.as_str() {
+                "modifier" => InForce {
+                    values: modifier.iter().map(|v| v.to_string()).collect(),
+                    tier: tier.into(),
+                    confidence,
+                },
+                "construct" => InForce {
+                    values: vec!["MPR".into()],
+                    tier: tier.into(),
+                    confidence,
+                },
+                _ => InForce::default(),
+            })
+            .collect()
+    };
+
+    // A1, record 48's DR3 by the source: an MPR of `*spcir` whose own image
+    // type drops the component, beside its source written R.
+    let ir = pass("session_ir_reformat");
+    let (session, target) = (ir.session().unwrap(), ir.target.as_ref());
+    let mpr = siemens(
+        "19",
+        "t1_space_ir_sag_MPR_cor",
+        "DERIVED\\PRIMARY\\MPR\\NORM\\DIS2D",
+        "*spcir_257ns",
+        "t1_space_ir_sag",
+    );
+    let real = siemens(
+        "18",
+        "t1_space_ir_sag",
+        "ORIGINAL\\PRIMARY\\R\\NORM\\DIS2D",
+        "*spcir_257ns",
+        "t1_space_ir_sag",
+    );
+    let magnitude = siemens(
+        "17",
+        "t1_space_ir_sag",
+        "ORIGINAL\\PRIMARY\\M\\NORM\\DIS2D",
+        "*spcir_257ns",
+        "t1_space_ir_sag",
+    );
+    let stated = force(&["IR"], "stated", 0.8);
+    let run =
+        |me: &Stack, f: &[InForce], sibs: &[Sib]| decide(&pack, target, session, me, &[], f, sibs);
+    let a = run(&mpr, &stated, &[sib(1, real.clone(), false, Some(true))]).expect("the rule holds");
+    assert_eq!(a.rule, "a_real_source_beside_is_psir");
+    assert_eq!(a.cited, [1]);
+    assert_eq!(
+        a.writes,
+        [
+            (axis("modifier"), vec!["PSIR".to_string()]),
+            (
+                axis("construct"),
+                vec!["MPR".to_string(), "Real".to_string()]
+            )
+        ]
+    );
+    // Beside a magnitude of the same sequence as well: it may be of that
+    // magnitude, and IR stays.
+    let kept = run(
+        &mpr,
+        &stated,
+        &[
+            sib(1, real.clone(), false, Some(true)),
+            sib(2, magnitude, false, Some(true)),
+        ],
+    )
+    .expect("the guard holds");
+    assert_eq!(kept.rule, "a_magnitude_source_beside_keeps_ir");
+    assert!(kept.writes.is_empty());
+    // Nothing holds: alone, another frame, another sequence name.
+    let mut other = real.clone();
+    other
+        .set("text_sequence_name", Value::Text(Some("*spcir_278ns")))
+        .unwrap();
+    for (why, sibs) in [
+        ("alone", vec![]),
+        (
+            "another frame",
+            vec![sib(1, real.clone(), false, Some(false))],
+        ),
+        ("another sequence", vec![sib(1, other, false, Some(true))]),
+    ] {
+        assert_eq!(run(&mpr, &stated, &sibs), None, "{why}");
+    }
+    // The IR a header flag decided is never replaced: the rule holds back.
+    let held = run(
+        &mpr,
+        &force(&["IR"], "exclusive", 0.95),
+        &[sib(1, real.clone(), false, Some(true))],
+    )
+    .expect("the rule holds");
+    assert!(held.writes.is_empty() && held.held.is_some());
+
+    // A7: a nameless 7 T range of a DANTE SPACE, FLAIR by its words.
+    let bb = pass("session_black_blood");
+    let (session, target) = (bb.session().unwrap(), bb.target.as_ref());
+    let run =
+        |me: &Stack, f: &[InForce], sibs: &[Sib]| decide(&pack, target, session, me, &[], f, sibs);
+    let range = siemens(
+        "16",
+        "Sag 3D T2 FLAIR SPACE_MPR_cor",
+        "DERIVED\\PRIMARY\\M\\NONE\\PARALLEL\\DIS2D",
+        "",
+        "Sag 3D T2 FLAIR SPACE",
+    );
+    let dante = siemens(
+        "15",
+        "Sag 3D T2 FLAIR SPACE",
+        "ORIGINAL\\PRIMARY\\M\\DIS2D\\NORM",
+        "wip-spc-t2p+ir-dante-260ns",
+        "Sag 3D T2 FLAIR SPACE",
+    );
+    let plain = siemens(
+        "15",
+        "Sag 3D T2 FLAIR SPACE",
+        "ORIGINAL\\PRIMARY\\M\\DIS2D\\NORM",
+        "*spcir_278ns",
+        "Sag 3D T2 FLAIR SPACE",
+    );
+    let flair = force(&["FLAIR"], "keywords", 0.85);
+    let a =
+        run(&range, &flair, &[sib(1, dante.clone(), false, Some(true))]).expect("the rule holds");
+    assert_eq!(a.rule, "a_flair_reformat_of_a_black_blood_source");
+    assert_eq!(
+        a.writes,
+        [(
+            axis("modifier"),
+            vec!["BlackBlood".to_string(), "FLAIR".to_string()]
+        )]
+    );
+    for (why, sibs) in [
+        ("alone", vec![]),
+        (
+            "a source not named DANTE",
+            vec![sib(1, plain, false, Some(true))],
+        ),
+        (
+            "another frame",
+            vec![sib(1, dante.clone(), false, Some(false))],
+        ),
+    ] {
+        assert_eq!(run(&range, &flair, &sibs), None, "{why}");
+    }
+    // FatSat beside FLAIR is not this pass's to rewrite.
+    assert_eq!(
+        run(
+            &range,
+            &force(&["FLAIR", "FatSat"], "keywords", 0.85),
+            &[sib(1, dante, false, Some(true))]
+        ),
+        None
+    );
+}
+
 /// The MRI pack, copied, with `edit` applied to one of its files.
 fn edited(file: &str, edit: impl Fn(&str) -> String) -> PathBuf {
     fn copy(from: &Path, to: &Path) {
@@ -577,6 +768,8 @@ fn contract_8_is_refused_where_a_pack_gets_it_wrong() {
             edit("pack.yml", &|t| {
                 t.replace("  - passes/session.yml\n", "")
                     .replace("  - passes/session_dti.yml\n", "")
+                    .replace("  - passes/session_ir_reformat.yml\n", "")
+                    .replace("  - passes/session_black_blood.yml\n", "")
             });
         }
         if keep != "fallback" {

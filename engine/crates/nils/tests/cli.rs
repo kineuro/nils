@@ -1678,7 +1678,7 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(out.status.success(), "{}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("mri@"), "{said}");
-    assert!(said.contains("239 predicates"), "{said}");
+    assert!(said.contains("240 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
     // and what its rules can reach (record 41)
     assert!(said.contains("values reached by a rule"), "{said}");
@@ -1770,7 +1770,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.23.0"),
+            .any(|p| p["pack"] == "mri@0.24.0"),
         "{listed}"
     );
 
@@ -1782,7 +1782,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 414);
+    assert_eq!(shown["flags"], 477);
     assert_eq!(
         shown["contract"], 8,
         "record 53: a session pass, a fallback border over several values and the private \
@@ -5980,7 +5980,7 @@ fn a_pack_is_replayed_over_header_packets() {
         assert_eq!(got[0]["stack"], 1);
         assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
         assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
-        assert!(stderr(&out).contains("2 packets replayed through mri@0.23.0"));
+        assert!(stderr(&out).contains("2 packets replayed through mri@0.24.0"));
     }
     let bad = dir.file("bad.jsonl", b"{not json\n");
     let out = nils()

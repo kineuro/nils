@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.24.0: black blood on a Siemens reformat by its source. A
+# black-blood preparation is read only from a name that says so (record 48,
+# conventions round 3, case 37), and a DANTE-prepared SPACE names it in its
+# sequence name (`wip-spc-t2p+ir-dante-260ns`). The 7 T ranges the 3D card
+# writes of it carry no sequence name (`Sag 3D T2 FLAIR SPACE_MPR_cor`,
+# `DERIVED\PRIMARY\M\NONE\PARALLEL`), so their own words say FLAIR and not
+# DANTE. The acquisition beside them, of the same protocol name and frame of
+# reference, says it, and a reformat keeps its source's preparation.
+#
+# The final certificate's grade (`studies/2026-10-01-final-certificate-read/
+# grade.md` in the design repository, part 2, A7): three such ranges at 7 T,
+# settled BlackBlood with FLAIR, were FLAIR alone. Their FLAIR comes from the
+# name (keywords, 0.85), which this pass may add to; a stack with another
+# modifier is left as it is.
+
+pass: session_black_blood
+kind: session_context
+phase: after
+
+target:
+  when:
+    all:
+      - siemens_reformat_unnamed_black_blood
+      - {not: {axis: modifier, is: BlackBlood}}
+      - {not: {axis: modifier, is: FatSat}}
+      - {not: {axis: modifier, is: WaterExcitation}}
+      - {not: {axis: modifier, is: Dixon}}
+      - {not: {axis: modifier, is: MT}}
+      - {not: {axis: modifier, is: FlowComp}}
+      - {not: {axis: modifier, is: BrightBlood}}
+      - {not: {axis: modifier, is: MoCo}}
+      - {not: {axis: modifier, is: Radial}}
+      - {not: {axis: modifier, is: Spiral}}
+
+session:
+  sibling_fields:
+    - manufacturer
+    - image_type
+    - text_series_description
+    - text_protocol_name
+    - text_sequence_name
+    - text_body_part
+    - text_series_comments
+    - text_image_comments
+    - series_number
+  replaces_at_most: 0.85
+
+rules:
+  - rule: a_flair_reformat_of_a_black_blood_source
+    when: {axis: modifier, is: FLAIR}
+    sibling:
+      same: [text_protocol_name]
+      same_frame_of_reference: true
+      when: black_blood_source
+    require: some
+    set:
+      modifier: [BlackBlood, FLAIR]
+    confidence: 0.8
+    why: 'its source, the acquisition of the same protocol and frame of reference, is named for a DANTE or black-blood preparation, which a reformat keeps'
+    sources:
+      - 'record 48, conventions round 3, case 37: black blood only from a name'
+      - 'the final certificate''s grade, part 2, A7: 7 T ranges of a DANTE SPACE settled BlackBlood'
+
+  - rule: an_ir_reformat_of_a_black_blood_source
+    when: {axis: modifier, is: IR}
+    sibling:
+      same: [text_protocol_name]
+      same_frame_of_reference: true
+      when: black_blood_source
+    require: some
+    set:
+      modifier: [BlackBlood, IR]
+    confidence: 0.8
+    why: 'its source, the acquisition of the same protocol and frame of reference, is named for a DANTE or black-blood preparation, which a reformat keeps'
+    sources:
+      - 'record 48, conventions round 3, case 37: black blood only from a name'
+
+  - rule: a_plain_reformat_of_a_black_blood_source
+    when:
+      all:
+        - {not: {axis: modifier, is: FLAIR}}
+        - {not: {axis: modifier, is: IR}}
+        - {not: {axis: modifier, is: STIR}}
+        - {not: {axis: modifier, is: DIR}}
+        - {not: {axis: modifier, is: PSIR}}
+    sibling:
+      same: [text_protocol_name]
+      same_frame_of_reference: true
+      when: black_blood_source
+    require: some
+    set:
+      modifier: [BlackBlood]
+    confidence: 0.8
+    why: 'its source, the acquisition of the same protocol and frame of reference, is named for a DANTE or black-blood preparation, which a reformat keeps'
+    sources:
+      - 'record 48, conventions round 3, case 37: black blood only from a name'
+
+emit:
+  review_item_below: 0.70
