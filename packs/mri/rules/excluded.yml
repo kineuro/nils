@@ -9,7 +9,7 @@
 # out is what is not an image of a person: a screen capture and an error map.
 
 rule_set: excluded
-decides: [directory_type, base, technique, modifier, construct, quality, provenance, body_part, post_contrast]
+decides: [directory_type, base, technique, modifier, construct, quality, provenance, body_part, post_contrast, base_basis, contrast_mix]
 
 # MRI pack 0.12.0, Nima's ruling (2026-09-28): a workstation reformat, tagged
 # SECONDARY and never PRIMARY, is no longer ruled out here. It is classified
@@ -29,6 +29,8 @@ rules:
     set: &blank
       directory_type: excluded
       base: null
+      base_basis: null
+      contrast_mix: null
       technique: null
       modifier: null
       construct: null

@@ -400,6 +400,8 @@ parsers:
       # (`*tseB2d1_17`, `*tseBR2d1_28`), where the words may not say BLADE
       # (dev-4: an ESSENZA `t2_tse_tra` without Radial).
       is_blade_tse:        {matches: '^\*?(wip_?)?tseb'}
+      # MRI pack 0.24.0: and its inversion-recovery TSE, `tirB` (`tirB2d1_15`).
+      is_blade_tir:        {matches: '^\*?(wip_?)?tirb'}
       is_ir_tse:           {all: [{substring: tir}, {not: {substring: stir}}]}
       is_haste:            {any_substring: [h2d, h3d, hr2d, haste]}
       # MRI pack 0.10.0: anchored at the start of the name (after `*`, the

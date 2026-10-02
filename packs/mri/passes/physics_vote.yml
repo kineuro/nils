@@ -69,6 +69,8 @@ target:
             - {axis: construct, is: Speed}
             - {axis: construct, is: Velocity}
             - {axis: construct, is: B1map}
+            # MRI pack 0.24.0: a B0 map, as the base rules decide it.
+            - {axis: construct, is: B0map}
             - {axis: directory_type, is: excluded}
             - all:
                 - any: [{axis: construct, is: Real}, {axis: construct, is: Imaginary}]

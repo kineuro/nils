@@ -243,6 +243,8 @@ cases:
     axes:
       construct: ND
 
+  # MRI pack 0.24.0: still no CE-MRA. Whether a TWIST-VIBE dynamic run that
+  # names no angiography is a DCE or a time-resolved CE-MRA is open.
   - name: a Siemens TWIST-VIBE dynamic run is no CE-MRA
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
@@ -259,6 +261,7 @@ cases:
       flip_angle: 12
     flags:
       is_ce_mra: false
+      twist_vibe_dynamic: true
 
   - name: a GE series in an exam whose protocol names spectroscopy is no MRS
     stack:

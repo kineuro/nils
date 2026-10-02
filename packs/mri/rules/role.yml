@@ -33,6 +33,10 @@
 # so a T1-FLAIR stands for no role, and a session whose only T1 is one has no
 # T1w for the release and the pre-flight to name.
 
+# MRI pack 0.24.0 (round 4): no stack whose base is mixed (`contrast_mix`
+# has a value: a STIR named T1, a T1 inversion at a long echo time, a STIR
+# named T2 at a short one, a short-TE gradient echo named T2) is a candidate
+# for any role: a FreeSurfer or lesion input wants the clean contrast.
 rule_set: role
 decides: [role]
 collect: true
@@ -49,6 +53,7 @@ rules:
             - {axis: disposition, missing_or: acquisition}
             - {axis: directory_type, is: anat}
             - {axis: base, is: T1w}
+            - not: {any: [{axis: contrast_mix, is: intermediate_PD_T2}, {axis: contrast_mix, is: T2like_T1}, {axis: contrast_mix, is: T1like_IR_longTE}, {axis: contrast_mix, is: PD_T2star}]}
             - not: {axis: modifier, is: FLAIR}
         cite: 'an anatomical T1w acquisition that is not a T1-FLAIR'
         source: axes
@@ -61,6 +66,7 @@ rules:
             - {axis: disposition, missing_or: acquisition}
             - {axis: directory_type, is: anat}
             - {axis: base, is: T2w}
+            - not: {any: [{axis: contrast_mix, is: intermediate_PD_T2}, {axis: contrast_mix, is: T2like_T1}, {axis: contrast_mix, is: T1like_IR_longTE}, {axis: contrast_mix, is: PD_T2star}]}
             - {axis: modifier, is: FLAIR}
         cite: 'an anatomical T2w acquisition with a FLAIR modifier'
         source: axes
@@ -77,6 +83,7 @@ rules:
             - {axis: disposition, missing_or: acquisition}
             - {axis: directory_type, is: anat}
             - {axis: base, is: T2w}
+            - not: {any: [{axis: contrast_mix, is: intermediate_PD_T2}, {axis: contrast_mix, is: T2like_T1}, {axis: contrast_mix, is: T1like_IR_longTE}, {axis: contrast_mix, is: PD_T2star}]}
             - not: {axis: modifier, is: FLAIR}
         cite: 'an anatomical T2w acquisition that is not a FLAIR'
         source: axes

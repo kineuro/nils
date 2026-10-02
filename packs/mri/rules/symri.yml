@@ -9,7 +9,7 @@
 
 rule_set: symri
 enter_when: {axis: provenance, is: SyMRI}
-decides: [base, construct, modifier, technique, directory_type, provenance]
+decides: [base, construct, modifier, technique, directory_type, provenance, base_basis, contrast_mix]
 # Pack 0.9.0, Nima's ruling (2026-09-28): the MDME or QALAS images as the
 # scanner acquired them are RawRecon; the maps and the synthetic contrasts it
 # computed from them keep SyMRI. The route was entered on SyMRI, so it decides
@@ -37,6 +37,7 @@ order:
   - r2_map
   - b1_map
   - tissue_map
+  - synthetic_t1_flair
   - synthetic_flair
   - synthetic_dir
   - synthetic_psir
@@ -45,6 +46,7 @@ order:
   - synthetic_t2
   - synthetic_pd
   - phase
+  - ge_real
   - magnitude
   - fallback
 
@@ -54,13 +56,13 @@ rules:
     clauses:
       - {flag: has_myelin, tier: exclusive}
       - {keywords: [myelin, myc], tier: keywords}
-    set: {base: null, construct: [MyelinMap], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [MyelinMap], technique: {from: symri_technique}, directory_type: anat}
 
   multi_qmap:
     clauses:
       - {flag: has_multi_qmap, tier: exclusive}
       - {keywords: [multi_qmap, qmaps], tier: keywords}
-    set: {base: null, construct: [MultiQmap], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [MultiQmap], technique: {from: symri_technique}, directory_type: anat}
     why: 'one series carrying the T1, T2 and PD maps together, as GE MAGiC writes them'
 
   t1_map:
@@ -79,7 +81,7 @@ rules:
         tier: exclusive
       - {flag: has_t1_map, tier: exclusive}
       - {keywords: ['t1 map', t1map], tier: keywords}
-    set: {base: null, construct: [T1map], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [T1map], technique: {from: symri_technique}, directory_type: anat}
 
   t2_map:
     clauses:
@@ -97,7 +99,7 @@ rules:
         tier: exclusive
       - {flag: has_t2_map, tier: exclusive}
       - {keywords: ['t2 map', t2map], tier: keywords}
-    set: {base: null, construct: [T2map], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [T2map], technique: {from: symri_technique}, directory_type: anat}
 
   pd_map:
     clauses:
@@ -115,25 +117,25 @@ rules:
         tier: exclusive
       - {flag: has_pd_map, tier: exclusive}
       - {keywords: ['pd map', pdmap, 'proton density map'], tier: keywords}
-    set: {base: null, construct: [PDmap], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [PDmap], technique: {from: symri_technique}, directory_type: anat}
 
   r1_map:
     clauses:
       - {flag: has_r1, tier: exclusive}
       - {keywords: ['r1 map', r1map], tier: keywords}
-    set: {base: null, construct: [R1map], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [R1map], technique: {from: symri_technique}, directory_type: anat}
 
   r2_map:
     clauses:
       - {flag: has_r2, tier: exclusive}
       - {keywords: ['r2 map', r2map], tier: keywords}
-    set: {base: null, construct: [R2map], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [R2map], technique: {from: symri_technique}, directory_type: anat}
 
   b1_map:
     clauses:
       - {flag: has_b1_map, tier: exclusive}
       - {keywords: ['b1 map', b1map], tier: keywords}
-    set: {base: null, construct: [B1map], technique: {from: symri_technique}, directory_type: fmap}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [B1map], technique: {from: symri_technique}, directory_type: fmap}
     why: 'a transmit field map is a field map, not an anatomy'
 
   # MRI pack 0.13.0: the tissue maps SyMRI writes (`DERIVED\PRIMARY\CSF`,
@@ -142,31 +144,40 @@ rules:
   tissue_map:
     clauses:
       - {flag: is_symri_tissue_map, tier: exclusive}
-    set: {base: null, construct: [Qmap], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: null, base_basis: null, contrast_mix: null, construct: [Qmap], technique: {from: symri_technique}, directory_type: anat}
+
+  # MRI pack 0.24.0 (the final certificate's A13): a synthetic T1-weighted
+  # FLAIR (`T1W_FLAIR Synthetic`, `T1FLAIR\SYNTHETIC`; GE `MAGiC T1FLAIR`)
+  # is T1w with FLAIR, as a T1-FLAIR is anywhere else (the reading guide);
+  # the rule below made every synthetic FLAIR T2w (flags.yml, section 22).
+  synthetic_t1_flair:
+    clauses:
+      - {flag: t1_flair_synthetic, tier: exclusive}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null, construct: [SyntheticFLAIR], modifier: [FLAIR], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_flair:
     clauses:
       - {flag: has_flair_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: flair}, {text: search_text, substring: synthetic}]}, cite: 'synthetic flair', source: text, tier: keywords}
-    set: {base: 'T2w', construct: [SyntheticFLAIR], modifier: [FLAIR], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null, construct: [SyntheticFLAIR], modifier: [FLAIR], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_dir:
     clauses:
       - {flag: has_dir_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: dir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic dir', source: text, tier: keywords}
-    set: {base: 'T2w', construct: [SyntheticDIR], modifier: [DIR], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null, construct: [SyntheticDIR], modifier: [DIR], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_psir:
     clauses:
       - {flag: has_psir_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: psir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic psir', source: text, tier: keywords}
-    set: {base: 'T1w', construct: [SyntheticPSIR], modifier: [PSIR], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null, construct: [SyntheticPSIR], modifier: [PSIR], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_stir:
     clauses:
       - {flag: has_stir_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: stir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic stir', source: text, tier: keywords}
-    set: {base: 'T2w', construct: [SyntheticSTIR], modifier: [STIR], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null, construct: [SyntheticSTIR], modifier: [STIR], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_t1:
     clauses:
@@ -181,7 +192,7 @@ rules:
         cite: 'synthetic t1'
         source: text
         tier: keywords
-    set: {base: 'T1w', construct: [SyntheticT1w], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null, construct: [SyntheticT1w], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_t2:
     clauses:
@@ -195,20 +206,30 @@ rules:
         cite: 'synthetic t2'
         source: text
         tier: keywords
-    set: {base: 'T2w', construct: [SyntheticT2w], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null, construct: [SyntheticT2w], technique: {from: symri_technique}, directory_type: anat}
 
   synthetic_pd:
     clauses:
       - {flag: has_pd_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: pd}, {text: search_text, substring: synthetic}]}, cite: 'synthetic pd', source: text, tier: keywords}
-    set: {base: 'PDw', construct: [SyntheticPDw], technique: {from: symri_technique}, directory_type: anat}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null, construct: [SyntheticPDw], technique: {from: symri_technique}, directory_type: anat}
 
   phase:
     clauses:
       - {flag: has_phase, tier: exclusive}
       - {keywords: [phase], tier: keywords}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [Phase, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [Phase, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
+
+  # MRI pack 0.24.0 (the final certificate's A3): a GE MAGiC or MDME image
+  # as acquired, which GE's private image type writes real (2), is the real
+  # part: construct Real, RawRecon, no base (flags.yml, section 20,
+  # `ge_mdme_real`; round 3, case 21, exempts PROPELLER only).
+  ge_real:
+    clauses:
+      - {flag: ge_mdme_real, tier: exclusive}
+    set: {provenance: RawRecon, base: null, base_basis: null, contrast_mix: null, construct: [Real, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    confidence: 0.85
 
   # MRI pack 0.12.0: an MDME or QALAS image as acquired is an ordinary
   # acquired image, and its construct is none (or ND where its ImageType
@@ -219,12 +240,12 @@ rules:
     clauses:
       - {flag: has_magnitude, tier: exclusive}
       - {keywords: [magnitude], tier: keywords}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   fallback:
     clauses:
       - {when: true, cite: SyMRI, source: provenance}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.7
     why: 'a SyMRI acquisition whose output is unclear is the raw source data'

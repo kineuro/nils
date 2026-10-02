@@ -9,7 +9,9 @@
 # the rules and their order is v0's.
 
 rule_set: base
-decides: [base]
+# MRI pack 0.24.0 (round 4): and what the base mixes and what it was read
+# from, decided with it (axes/contrast_mix.yml, axes/base_basis.yml).
+decides: [base, contrast_mix, base_basis]
 
 tiers: {exclusive: 0.9, keywords: 0.85, physics: 0.7}
 
@@ -18,6 +20,7 @@ order:
   - 'construct:phase'
   - 'flag:spectroscopy'
   - 'construct:b1map'
+  - 'flag:inline_t1_map'
   - 'r3:no_base'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
@@ -48,6 +51,7 @@ order:
   - 'flag:mtw'
   - 'flag:synthetic_t1'
   - 'flag:synthetic_t2'
+  - 'flag:synthetic_t1_flair'
   - 'flag:synthetic_flair'
   - 'flag:synthetic_pd'
   - 'flag:synthetic_dir'
@@ -56,6 +60,15 @@ order:
   - 'flag:t2_map'
   - 'flag:mp2rage_inversion'
   - 'flag:mp2rage_uniform'
+  - 'r4:R1_stir_named_t1'
+  - 'r4:R3_flair_named_t1'
+  - 'r4:R5_long_tr_te_named_t1'
+  - 'r4:R7_short_tr_te_named_t2'
+  - 'r4:R8_spoiled_t1_gre_named_t2'
+  - 'r4:keep_R2_stir_named_t2'
+  - 'r4:keep_R2_stir_named_pd'
+  - 'r4:keep_R4_t1_ir_long_te'
+  - 'r4:keep_R8_t2_named_gre_short_te'
   - 'flair:t1_text'
   - 'flair:t2_text'
   - 'flair:short_te'
@@ -120,7 +133,7 @@ rules:
   'construct:inversion':
     clauses:
       - {when: {any: [{axis: construct, is: INV1}, {axis: construct, is: INV2}]}, cite: 'an MP2RAGE inversion', source: construct}
-    set: {base: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.9
     why: 'an MP2RAGE inversion is named by its construct and has no base contrast'
 
@@ -135,7 +148,7 @@ rules:
       - {when: {axis: construct, is: Phase}, cite: 'a phase image', source: construct}
       # MRI pack 0.18.0: and a phase contrast's velocity image.
       - {when: {axis: construct, is: Velocity}, cite: 'a velocity image', source: construct}
-    set: {base: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.9
     why: 'a phase image has no base contrast'
 
@@ -147,7 +160,7 @@ rules:
     clauses:
       - {flag: is_spectroscopy, tier: keywords}
       - {when: {axis: technique, is: MRS}, cite: 'MRS', source: technique}
-    set: {base: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.85
     why: 'a spectroscopy acquisition has no base contrast'
 
@@ -173,7 +186,7 @@ rules:
             - {not: {axis: modifier, is: DIR}}
         cite: 'a real or imaginary spin-echo component without PSIR evidence'
         source: flags
-    set: {base: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.85
     why: 'a calibration scan, a phase-contrast output, a temporal map and a spin-echo component without PSIR evidence have no base contrast'
 
@@ -184,14 +197,27 @@ rules:
   'construct:b1map':
     clauses:
       - {when: {axis: construct, is: B1map}, cite: 'a B1 map', source: construct}
-    set: {base: null}
+      # MRI pack 0.24.0: and a B0 field map (the final certificate: a GE
+      # `B0map` left empty and voted T1w; flags.yml, section 20).
+      - {when: {axis: construct, is: B0map}, cite: 'a B0 map', source: construct}
+    set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.9
-    why: 'a B1 (flip angle) map measures the transmit field and has no base contrast'
+    why: 'a B1 (flip angle) or B0 (field) map measures a field and has no base contrast'
+
+  # MRI pack 0.24.0: MOLLI's inline T1 map is a fitted map in milliseconds,
+  # no image weighted by a contrast (flags.yml section 23; the final
+  # certificate's A8, settled none).
+  'flag:inline_t1_map':
+    clauses:
+      - {flag: siemens_inline_t1_map, tier: exclusive}
+    set: {base: null, base_basis: null, contrast_mix: null}
+    confidence: 0.9
+    why: 'an inline T1 map is a fitted relaxation time with no base contrast'
 
   'technique:MPRAGE':
     clauses:
       - {when: {axis: technique, is: 'MPRAGE'}, cite: 'MPRAGE', source: technique}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'the MPRAGE technique implies a T1w base contrast'
 
@@ -199,7 +225,7 @@ rules:
   'technique:MEMPRAGE':
     clauses:
       - {when: {axis: technique, is: 'MEMPRAGE'}, cite: 'MEMPRAGE', source: technique}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'the MEMPRAGE technique implies a T1w base contrast'
 
@@ -208,7 +234,7 @@ rules:
   'technique:MP2RAGE':
     clauses:
       - {when: {all: [{axis: technique, is: 'MP2RAGE'}, {not: {axis: construct, is: INV1}}, {not: {axis: construct, is: INV2}}]}, cite: 'MP2RAGE', source: technique}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'the MP2RAGE uniform image and T1 map are T1-weighted; its inversions have no base'
 
@@ -219,7 +245,7 @@ rules:
   'technique:TOF-MRA':
     clauses:
       - {when: {axis: technique, is: 'TOF-MRA'}, cite: 'TOF-MRA', source: technique}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.9
     why: 'the TOF-MRA technique implies a T1w base contrast'
 
@@ -229,10 +255,12 @@ rules:
   # which keeps it a reading of the stack rather than a law of the schema.
   # MRI pack 0.18.0 (vocabulary): a contrast-enhanced angiography is a
   # T1-weighted spoiled gradient echo timed to the bolus.
+  # MRI pack 0.24.0: not on a perfusion map computed from a time-resolved
+  # run (a TWIST-VIBE's TTP), which stays PWI below.
   'technique:CE-MRA':
     clauses:
-      - {when: {axis: technique, is: 'CE-MRA'}, cite: 'CE-MRA', source: technique}
-    set: {base: 'T1w'}
+      - {when: {all: [{axis: technique, is: 'CE-MRA'}, {not: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}, {axis: construct, is: PBP}, {axis: construct, is: K2}]}}]}, cite: 'CE-MRA', source: technique}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.9
     why: 'a contrast-enhanced angiography is a T1-weighted spoiled gradient echo'
 
@@ -242,7 +270,7 @@ rules:
   'technique:ZTE-silent-mra':
     clauses:
       - {when: {all: [{axis: technique, is: 'ZTE'}, silent_mra_named]}, cite: 'a Silent MRA', source: technique}
-    set: {base: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.85
     why: 'a Silent MRA is a label-minus-control angiogram with no tissue weighting'
 
@@ -254,7 +282,7 @@ rules:
   'construct:in_opposed_gre':
     clauses:
       - {when: {all: [{any: [{axis: construct, is: InPhase}, {axis: construct, is: OutPhase}]}, has_gre, {not: has_se}, {not: has_epi}]}, cite: 'an in-phase or opposed-phase gradient echo', source: construct}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.85
     why: 'a two-point Dixon or in/opposed-phase gradient echo is T1-weighted'
 
@@ -265,13 +293,13 @@ rules:
     clauses:
       - {flag: stage_pd_echo, tier: keywords}
       - {flag: stage_t1_echo, tier: keywords}
-    set: {base: [{value: 'PDw', when: stage_pd_echo}, {value: 'T1w', when: stage_t1_echo}]}
+    set: {base: [{value: 'PDw', when: stage_pd_echo}, {value: 'T1w', when: stage_t1_echo}], base_basis: name, contrast_mix: null}
     why: 'a STAGE acquisition is named for the weighting its flip angle gives'
 
   'technique:ME-GRE':
     clauses:
       - {when: {all: [{axis: technique, is: 'ME-GRE'}, {not: {any: [has_dixon, has_water, has_fat, has_in_phase, has_out_phase, mtw_named]}}]}, cite: 'ME-GRE', source: technique}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.85
     why: 'a multi-echo GRE that is not a Dixon, an in and opposed phase or a magnetisation transfer weighting is taken as T2*-weighted'
 
@@ -293,7 +321,7 @@ rules:
   'technique:comb-ME-GRE':
     clauses:
       - {when: {all: [{axis: technique, is: 'comb-ME-GRE'}, {not: {any: [{axis: construct, is: SWI}, {axis: construct, is: MIP}, {axis: construct, is: MinIP}]}}]}, cite: 'comb-ME-GRE', source: technique}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.9
     why: 'the comb-ME-GRE technique implies a T2*w base contrast'
 
@@ -301,7 +329,7 @@ rules:
   'technique:DWI-EPI':
     clauses:
       - {when: {axis: technique, is: 'DWI-EPI'}, cite: 'DWI-EPI', source: technique}
-    set: {base: 'DWI'}
+    set: {base: 'DWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'the DWI-EPI technique implies a DWI base contrast'
 
@@ -311,7 +339,7 @@ rules:
   'technique:DWI-TSE':
     clauses:
       - {when: {axis: technique, is: 'DWI-TSE'}, cite: 'DWI-TSE', source: technique}
-    set: {base: 'DWI'}
+    set: {base: 'DWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'the DWI-TSE technique implies a DWI base contrast'
 
@@ -329,7 +357,7 @@ rules:
     clauses:
       - {when: {all: [{axis: technique, is: 'BOLD-EPI'}, is_gre_epi]}, cite: 'BOLD-EPI on a gradient-echo EPI', source: technique}
       - {when: {all: [{axis: technique, is: 'BOLD-EPI'}, {not: is_se_epi}, {not: has_se}, {field: echo_time, gt: 0}, {field: echo_time, lt: 50}]}, cite: 'BOLD-EPI with no spin echo stated, TE under 50 ms', source: technique}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.85
     why: 'a gradient-echo BOLD time series is T2*-weighted'
 
@@ -340,7 +368,7 @@ rules:
   'construct:m0':
     clauses:
       - {when: {axis: construct, is: M0}, cite: 'an ASL M0 scan', source: construct}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'the M0 scan of an ASL is its proton-density reference'
 
@@ -348,7 +376,7 @@ rules:
   'technique:ASL':
     clauses:
       - {when: {axis: technique, is: 'ASL'}, cite: 'ASL', source: technique}
-    set: {base: 'PWI'}
+    set: {base: 'PWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'arterial spin labelling is perfusion-weighted imaging'
 
@@ -360,21 +388,21 @@ rules:
   'perfusion:single_volume':
     clauses:
       - {when: {all: [{axis: technique, is: 'Perfusion-EPI'}, single_volume_dsc]}, cite: 'one volume of a DSC EPI', source: technique}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.8
     why: 'one volume of a gradient-echo EPI carries no bolus: it is T2*-weighted'
 
   'technique:Perfusion-EPI':
     clauses:
       - {when: {axis: technique, is: 'Perfusion-EPI'}, cite: 'Perfusion-EPI', source: technique}
-    set: {base: 'PWI'}
+    set: {base: 'PWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'a dynamic susceptibility contrast series is perfusion-weighted imaging'
 
   'technique:DCE':
     clauses:
       - {when: {axis: technique, is: 'DCE'}, cite: 'DCE', source: technique}
-    set: {base: 'PWI'}
+    set: {base: 'PWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'a dynamic contrast enhanced series is perfusion-weighted imaging'
 
@@ -396,14 +424,14 @@ rules:
   'balanced:low_flip_2d':
     clauses:
       - {when: {all: [{any: [{axis: technique, is: bSSFP}, {axis: technique, is: CISS}]}, is_2d, {not: has_ir}, {not: has_mag_prepared}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}]}, cite: 'a 2D balanced steady state at a flip of 10 degrees or less', source: technique}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
     confidence: 0.7
     why: 'a 2D balanced steady-state scan at a very low flip angle is proton-density-like (Huang et al. 2002)'
 
   'balanced:t2_over_t1':
     clauses:
       - {when: {all: [{any: [{axis: technique, is: bSSFP}, {axis: technique, is: CISS}]}, {not: has_ir}, {not: has_mag_prepared}]}, cite: 'a balanced steady state', source: technique}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
     confidence: 0.85
     why: 'a balanced steady-state scan is T2w by convention: T2w stands for its T2/T1 contrast (Scheffler and Lehnhardt 2003), which no base value names'
 
@@ -413,7 +441,7 @@ rules:
   'construct:diffusion':
     clauses:
       - {when: {any: [{axis: construct, is: ADC}, {axis: construct, is: eADC}, {axis: construct, is: FA}, {axis: construct, is: MD}, {axis: construct, is: Trace}, {axis: construct, is: isoDWI}]}, cite: 'a diffusion map', source: construct}
-    set: {base: 'DWI'}
+    set: {base: 'DWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'ADC, eADC, FA, MD and trace images are computed from diffusion-weighted acquisitions'
 
@@ -422,7 +450,7 @@ rules:
   'construct:perfusion':
     clauses:
       - {when: {any: [{axis: construct, is: CBF}, {axis: construct, is: CBV}, {axis: construct, is: MTT}, {axis: construct, is: Tmax}, {axis: construct, is: TTP}, {axis: construct, is: PBP}, {axis: construct, is: K2}, {axis: construct, is: DeltaM}]}, cite: 'a perfusion map', source: construct}
-    set: {base: 'PWI'}
+    set: {base: 'PWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'CBF, CBV, MTT, Tmax and TTP are perfusion parameters, from DSC, DCE or ASL, and an ASL difference image is perfusion-weighted'
 
@@ -431,7 +459,7 @@ rules:
   'construct:swi':
     clauses:
       - {when: {axis: construct, is: SWI}, cite: 'SWI', source: construct}
-    set: {base: 'SWI'}
+    set: {base: 'SWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'a susceptibility-weighted image is base SWI'
 
@@ -442,7 +470,7 @@ rules:
       - {flag: 'has_adc', tier: exclusive}
       - {flag: 'has_fa', tier: exclusive}
       - {flag: 'has_trace', tier: exclusive}
-    set: {base: 'DWI'}
+    set: {base: 'DWI', base_basis: physics, contrast_mix: null}
 
   'flag:pwi':
     clauses:
@@ -453,60 +481,67 @@ rules:
       - {flag: 'has_mtt', tier: exclusive}
       - {flag: 'has_tmax', tier: exclusive}
       - {flag: 'has_ttp', tier: exclusive}
-    set: {base: 'PWI'}
+    set: {base: 'PWI', base_basis: physics, contrast_mix: null}
 
   'flag:swi':
     clauses:
       - {flag: 'is_swi', tier: exclusive}
       - {flag: 'has_swi', tier: exclusive}
-    set: {base: 'SWI'}
+    set: {base: 'SWI', base_basis: physics, contrast_mix: null}
 
   'flag:mtw':
     clauses:
       - {flag: 'has_mtc', tier: exclusive}
-    set: {base: 'MTw'}
+    set: {base: 'MTw', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_t1':
     clauses:
       - {flag: 'has_t1_synthetic', tier: exclusive}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_t2':
     clauses:
       - {flag: 'has_t2_synthetic', tier: exclusive}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
+
+  # MRI pack 0.24.0: a synthetic T1-weighted FLAIR is T1w (flags.yml,
+  # section 22), before the FLAIR rule below.
+  'flag:synthetic_t1_flair':
+    clauses:
+      - {flag: 't1_flair_synthetic', tier: exclusive}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_flair':
     clauses:
       - {flag: 'has_flair_synthetic', tier: exclusive}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_pd':
     clauses:
       - {flag: 'has_pd_synthetic', tier: exclusive}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_dir':
     clauses:
       - {when: {all: [is_dir, is_synthetic]}, cite: 'is_dir and is_synthetic', source: flags, tier: exclusive}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_psir':
     clauses:
       - {when: {all: [has_psir, is_synthetic]}, cite: 'has_psir and is_synthetic', source: flags, tier: exclusive}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
 
   'flag:t1_map':
     clauses:
       - {flag: has_t1_map, tier: exclusive}
       - {flag: has_r1, tier: exclusive}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
 
   'flag:t2_map':
     clauses:
       - {flag: has_t2_map, tier: exclusive}
       - {flag: has_r2, tier: exclusive}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
 
   # Pack 0.9.0: an inversion the construct did not name still has no base
   # [B1, P9]
@@ -514,44 +549,117 @@ rules:
     clauses:
       - {flag: is_mp2rage_inv1, tier: exclusive}
       - {flag: is_mp2rage_inv2, tier: exclusive}
-    set: {base: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
     why: 'an MP2RAGE inversion has no base contrast'
 
   'flag:mp2rage_uniform':
     clauses:
       - {flag: has_uniform, tier: exclusive}
       - {flag: is_uniform_denoised, tier: exclusive}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
 
   # Tier 3. FLAIR can be T1 or T2 weighted; the text decides, then the echo time.
   # MRI pack 0.16.0: never on a dual-echo spin echo that only its name calls
   # FLAIR (flags.yml, `flair_named_dual_echo`, dev-4 H3).
+  # MRI pack 0.24.0, ruled by Nima on 2026-10-02 (round 4, the deep
+  # research on the name against the physics, section 5): the name stays
+  # the default, and the physics overrides a stated weighting only where it
+  # contradicts it outright (flags.yml, section 24). Before every rule that
+  # reads a weighting word. R4 (a T1-IR window protects a T1 name:
+  # `t1_space_ir` at TI 380 ms, the T1-FLAIR BLADE and PROPELLER,
+  # `T1FLAIR_GEMS`), R2 (a STIR named T2 or PD), R6 (the PDw rule below)
+  # and R12 keep the name, which these rules leave to the keywords. Never
+  # on a localizer, whose base is not asked and whose name is a vendor's
+  # template (GE's `3-pl T2* FGRE S`, 473 archive stacks R8 would reach).
+  'r4:R1_stir_named_t1':
+    clauses:
+      - {when: {all: [r1_stir_named_t1, {not: {axis: provenance, is: Localizer}}]}, cite: r1_stir_named_t1, source: physics, tier: physics}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: T2like_T1}
+    confidence: 0.75
+    why: 'R1: an inversion time in the STIR window nulls fat and leaves fluid bright, never T1-weighted, whatever a T1 word says'
+
+  'r4:R3_flair_named_t1':
+    clauses:
+      - {when: {all: [r3_flair_named_t1, {not: {axis: provenance, is: Localizer}}]}, cite: r3_flair_named_t1, source: physics, tier: physics}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
+    confidence: 0.75
+    why: 'R3: an inversion time in the FLAIR window at a long echo time (or a 3D TSE) is a T2-weighted FLAIR, whatever a T1 word says'
+
+  'r4:R5_long_tr_te_named_t1':
+    clauses:
+      - {when: {all: [r5_long_tr_te_named_t1, {not: {axis: provenance, is: Localizer}}]}, cite: r5_long_tr_te_named_t1, source: physics, tier: physics}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
+    confidence: 0.75
+    why: 'R5: a 2D spin echo at a TR of 2,500 ms or more and TE of 80 ms or more with no inversion is T2-weighted, whatever a T1 word says'
+
+  'r4:R7_short_tr_te_named_t2':
+    clauses:
+      - {when: {all: [r7_short_tr_te_named_t2, {not: {axis: provenance, is: Localizer}}]}, cite: r7_short_tr_te_named_t2, source: physics, tier: physics}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
+    confidence: 0.75
+    why: 'R7: a spin echo at a TR of 1,000 ms or less and TE of 30 ms or less with no inversion is T1-weighted, whatever a T2 word says'
+
+  'r4:R8_spoiled_t1_gre_named_t2':
+    clauses:
+      - {when: {all: [r8_spoiled_t1_gre_named_t2, {not: {axis: provenance, is: Localizer}}]}, cite: r8_spoiled_t1_gre_named_t2, source: physics, tier: physics}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
+    confidence: 0.75
+    why: 'R8: a gradient echo at TR under 50 ms, flip 15 degrees or more and TE under 5 ms is a spoiled T1 gradient echo, whatever a T2 word says'
+
+  'r4:keep_R2_stir_named_t2':
+    clauses:
+      - {when: {all: [r2_stir_named_t2, {not: {axis: provenance, is: Localizer}}]}, cite: r2_stir_named_t2, source: physics, tier: physics}
+    set: {base: 'T2w', base_basis: 'name+physics', contrast_mix: intermediate_PD_T2}
+    confidence: 0.85
+    why: 'R2: a STIR named T2 keeps its name; at an echo time under 40 ms it lies between PD and T2'
+
+  'r4:keep_R2_stir_named_pd':
+    clauses:
+      - {when: {all: [r2_stir_named_pd, {not: {axis: provenance, is: Localizer}}]}, cite: r2_stir_named_pd, source: physics, tier: physics}
+    set: {base: 'PDw', base_basis: 'name+physics', contrast_mix: intermediate_PD_T2}
+    confidence: 0.85
+    why: 'R2: a STIR named PD keeps its name; at an echo time under 40 ms it lies between PD and T2'
+
+  'r4:keep_R4_t1_ir_long_te':
+    clauses:
+      - {when: {all: [r4_t1_ir_named_t1_long_te, {not: {axis: provenance, is: Localizer}}]}, cite: r4_t1_ir_named_t1_long_te, source: physics, tier: physics}
+    set: {base: 'T1w', base_basis: 'name+physics', contrast_mix: T1like_IR_longTE}
+    confidence: 0.85
+    why: 'R4: an inversion in the T1-IR window keeps a T1 name, whatever its echo time; a 2D one at 40 ms or more carries some T2'
+
+  'r4:keep_R8_t2_named_gre_short_te':
+    clauses:
+      - {when: {all: [r8_t2_named_gre_short_te, {not: {axis: provenance, is: Localizer}}]}, cite: r8_t2_named_gre_short_te, source: physics, tier: physics}
+    set: {base: 'T2starw', base_basis: 'name+physics', contrast_mix: PD_T2star}
+    confidence: 0.85
+    why: 'R8: a gradient echo named T2 or T2* keeps its name; under the fields T2* echo time it is proton-density dominant'
+
   'flair:t1_text':
     clauses:
       - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: search_text, substring: t1}]}, cite: t1, source: text, tier: keywords}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: name, contrast_mix: null}
 
   'flair:t2_text':
     clauses:
       - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: search_text, substring: t2}]}, cite: t2, source: text, tier: keywords}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: name, contrast_mix: null}
 
   'flair:short_te':
     clauses:
       - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'a measured echo time under 40 ms', source: physics, tier: physics}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: 'name+physics', contrast_mix: null}
     confidence: 0.85
 
   'flair:long_te':
     clauses:
       - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {field: echo_time, ge: 40}]}, cite: 'echo time 40 ms or more', source: physics, tier: physics}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: 'name+physics', contrast_mix: null}
     confidence: 0.85
 
   'flair:default':
     clauses:
       - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}]}, cite: flair, source: text, tier: keywords}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: name, contrast_mix: null}
     confidence: 0.7
     why: 'a FLAIR with no echo time is taken as T2-weighted'
 
@@ -559,13 +667,13 @@ rules:
   'dual_echo:pd':
     clauses:
       - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'PD echo', source: physics, tier: physics}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: 'name+physics', contrast_mix: null}
     confidence: 0.85
 
   'dual_echo:t2':
     clauses:
       - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, ge: 40}]}, cite: 'T2 echo', source: physics, tier: physics}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: 'name+physics', contrast_mix: null}
     confidence: 0.85
 
   # Pack 0.9.0, Nima's ruling (2026-09-27): a dual-echo spin echo is base by
@@ -577,13 +685,13 @@ rules:
   'dual_echo:short_echo':
     clauses:
       - {when: {all: [is_multi_echo, has_se, {not: has_epi}, {field: stacks_in_series, eq: 2}, {field: repetition_time, ge: 2000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'the short echo of a dual-echo spin echo', source: physics, tier: physics}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
     confidence: 0.8
 
   'dual_echo:long_echo':
     clauses:
       - {when: {all: [is_multi_echo, has_se, {not: has_epi}, {field: stacks_in_series, eq: 2}, {field: repetition_time, ge: 2000}, {field: echo_time, ge: 40}]}, cite: 'the long echo of a dual-echo spin echo', source: physics, tier: physics}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
     confidence: 0.8
 
   # Tier 5. Keywords, in the axis's own priority order.
@@ -596,45 +704,45 @@ rules:
   'r3:se_short_te_t2_named':
     clauses:
       - {flag: se_short_te_t2_named, tier: physics}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
     confidence: 0.75
     why: 'a long-TR spin echo at a short echo time is proton-density weighted'
 
   'keywords:mrcp':
     clauses:
       - {flag: mrcp_named, tier: keywords}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: name, contrast_mix: null}
     why: 'MRCP is a heavily T2-weighted fluid image'
 
   'keywords:DWI':
     clauses:
       - {keywords: ['dwi', 'diffusion', 'dti', 'diff ', 'hardi'], tier: keywords}
-    set: {base: 'DWI'}
+    set: {base: 'DWI', base_basis: name, contrast_mix: null}
 
   'keywords:PWI':
     clauses:
       - {keywords: ['pwi', 'perfusion', 'dsc', 'dce', 'perf '], tier: keywords}
-    set: {base: 'PWI'}
+    set: {base: 'PWI', base_basis: name, contrast_mix: null}
 
   'keywords:SWI':
     clauses:
       - {keywords: ['swi', 'swan', 'susceptibility weighted', 'venobold'], tier: keywords}
-    set: {base: 'SWI'}
+    set: {base: 'SWI', base_basis: name, contrast_mix: null}
 
   'keywords:T1rho':
     clauses:
       - {keywords: ['t1rho', 't1 rho', 't1ρ', 'spin lock', 'spinlock'], tier: keywords}
-    set: {base: 'T1rho'}
+    set: {base: 'T1rho', base_basis: name, contrast_mix: null}
 
   'keywords:T2rho':
     clauses:
       - {keywords: ['t2rho', 't2 rho', 't2ρ'], tier: keywords}
-    set: {base: 'T2rho'}
+    set: {base: 'T2rho', base_basis: name, contrast_mix: null}
 
   'keywords:T2starw':
     clauses:
       - {keywords: ['t2*', 't2star', 't2 star', 't2*w', 't2*-w'], tier: keywords}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: name, contrast_mix: null}
 
   # MRI pack 0.11.0: a gradient echo named T2 is T2*-weighted [P8, MQ8]:
   # `t2_fl2d_tra_hemo`, a FLASH of TE 26 ms, was T2w by its word on the
@@ -645,7 +753,7 @@ rules:
   'technique:GRE-EPI':
     clauses:
       - {when: {all: [{axis: technique, is: 'GRE-EPI'}, {not: {text: search_text, matches: '(^|[^a-z0-9])t1'}}]}, cite: 'GRE-EPI', source: technique}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.8
     why: 'a gradient-echo EPI is T2*-weighted'
 
@@ -654,36 +762,36 @@ rules:
   'gre:mtw_named':
     clauses:
       - {flag: gre_mtw_named, tier: keywords}
-    set: {base: 'MTw'}
+    set: {base: 'MTw', base_basis: name, contrast_mix: null}
     why: 'a gradient echo named MT-weighted is MTw whatever else its name says'
 
   'gre:t2_named':
     clauses:
       - {flag: is_t2_named_gre, tier: keywords}
-    set: {base: 'T2starw'}
+    set: {base: 'T2starw', base_basis: name, contrast_mix: null}
     why: 'a gradient echo with a long echo time named T2 is T2*-weighted'
 
   'keywords:T2w':
     clauses:
       - {keywords: ['t2w', 't2 w', 't2-w', 't2 weighted', 't2-weighted', 't2'], tier: keywords}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: name, contrast_mix: null}
 
   'keywords:PDw':
     clauses:
       - {keywords: ['pdw', 'pd w', 'pd-w', 'pd weighted', 'proton density', 'proton-density', 'qmap pd', 'pd map'], tier: keywords}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: name, contrast_mix: null}
 
   'keywords:T1w':
     clauses:
       - {keywords: ['t1w', 't1 w', 't1-w', 't1 weighted', 't1-weighted', 't1'], tier: keywords}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: name, contrast_mix: null}
 
   # MRI pack 0.14.0: the same words, as `mtw_named` reads them, and not
   # where they switch it off (`MT=OFF`; dev-2: a 3D SPGR was MTw).
   'keywords:MTw':
     clauses:
       - {flag: mtw_named, tier: keywords}
-    set: {base: 'MTw'}
+    set: {base: 'MTw', base_basis: name, contrast_mix: null}
 
   # MRI pack 0.14.0: a STIR the modifier axis found by its words, where no
   # word and no inversion time said a base, is T2-weighted as the window
@@ -692,7 +800,7 @@ rules:
   'modifier:stir':
     clauses:
       - {when: {axis: modifier, is: STIR}, cite: 'a STIR', source: modifier}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
     confidence: 0.75
     why: 'a short tau inversion recovery reads as T2-weighted'
 
@@ -713,32 +821,32 @@ rules:
   'physics:ir_stir_like':
     clauses:
       - {when: {all: [has_ir, {field: inversion_time, gt: 0}, {field: inversion_time, lt: 300}]}, cite: 'an inversion time under 300 ms', source: physics, tier: physics}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
     confidence: 0.75
     why: 'a short inversion time suppresses fat, which is a STIR and reads as T2-weighted'
 
   'physics:ir_standard':
     clauses:
       - {when: {all: [has_ir, {field: inversion_time, ge: 300}, {field: inversion_time, le: 1500}]}, cite: 'inversion time between 300 and 1500 ms', source: physics, tier: physics}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.7
 
   'physics:se_t1w':
     clauses:
       - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 0}, {field: repetition_time, lt: 1000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 30}]}, cite: 'a short repetition and echo time', source: physics, tier: physics}
-    set: {base: 'T1w'}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.7
 
   'physics:se_t2w':
     clauses:
       - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 50}]}, cite: 'a long repetition and echo time', source: physics, tier: physics}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
     confidence: 0.7
 
   'physics:se_pdw':
     clauses:
       - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 30}]}, cite: 'a long repetition and a short echo time', source: physics, tier: physics}
-    set: {base: 'PDw'}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
     confidence: 0.65
 
   # MRI pack 0.15.0: a gradient echo at a long repetition time, a low flip
@@ -755,13 +863,20 @@ rules:
   'physics:se_long_te':
     clauses:
       - {when: {all: [has_se, {not: has_epi}, {field: echo_time, ge: 80}]}, cite: 'an echo time of 80 ms or more', source: physics, tier: physics}
-    set: {base: 'T2w'}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
     confidence: 0.7
 
+  # MRI pack 0.24.0: the gradient-echo windows below are never read on a
+  # stack the pack reads as a spin echo (`has_se`), which a Philips survey
+  # with ScanningSequence GR and its own `M_SE` and private technique SE is
+  # (`Survey_MST`, TE 20 ms at a TR written 1,999.99 ms, missed the
+  # spin-echo windows, met `gre_t2starw` and broke `t2star-not-spin-echo`
+  # beside its spin-echo technique). Such a stack is left to the spin-echo
+  # windows, or to none.
   'physics:gre_t2starw_long_tr':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: repetition_time, ge: 200}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 30}, {field: echo_time, ge: 12}]}, cite: 'a flip of 30 degrees or less at a repetition time of 200 ms or more, and an echo time of 12 ms or more', source: physics, tier: physics}
-    set: {base: 'T2starw'}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {not: has_ir}, {field: repetition_time, ge: 200}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 30}, {field: echo_time, ge: 12}]}, cite: 'a flip of 30 degrees or less at a repetition time of 200 ms or more, and an echo time of 12 ms or more', source: physics, tier: physics}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.7
 
   # MRI pack 0.14.0: a spoiled gradient echo flipped 10 degrees or less at a
@@ -773,18 +888,18 @@ rules:
   # partner of an MT pair, settled PDw; the rules said T1w by its echo time).
   'physics:gre_pdw':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {not: has_ir}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}, {field: repetition_time, ge: 20}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a flip of 10 degrees or less at a repetition time of 20 ms or more', source: physics, tier: physics}
-    set: {base: 'PDw'}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {not: has_ir}, {field: flip_angle, gt: 0}, {field: flip_angle, le: 10}, {field: repetition_time, ge: 20}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a flip of 10 degrees or less at a repetition time of 20 ms or more', source: physics, tier: physics}
+    set: {base: 'PDw', base_basis: physics, contrast_mix: null}
     confidence: 0.65
 
   'physics:gre_t1w':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
-    set: {base: 'T1w'}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.7
 
   'physics:gre_t2starw':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, gt: 15}]}, cite: 'a long echo time on a gradient echo', source: physics, tier: physics}
-    set: {base: 'T2starw'}
+      - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {field: echo_time, gt: 15}]}, cite: 'a long echo time on a gradient echo', source: physics, tier: physics}
+    set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.7

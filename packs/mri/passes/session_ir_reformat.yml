@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.24.0: record 48's DR3 for a Siemens reformat by its source. A
+# Siemens inversion recovery reconstructed as the real part (ImageType
+# component R) is PSIR with construct Real; its magnitude keeps IR by its TI.
+# Siemens' MPR drops the component token (`DERIVED\PRIMARY\MPR\NORM\DIS2D`),
+# so a reformat's own header cannot tell which it was made from. The source
+# beside it in the session, of the same sequence name and frame of reference
+# (`*spcir_257ns`, written `ORIGINAL\PRIMARY\R\...`), can, and a reformat
+# keeps its source's reading.
+#
+# The final certificate's grade (`studies/2026-10-01-final-certificate-read/
+# grade.md` in the design repository, part 2, A1): six MPRs of
+# `t1_space_ir` at 3 T, settled PSIR (and Real on five), were IR with MPR.
+# The rules leave such a reformat's IR and MPR at 0.8, stated
+# (`rules/ir_reformat.yml`), so this pass may refine them; a value a header
+# flag decided is never replaced.
+#
+# Conservative first: where an acquired magnitude of the same sequence name
+# is beside it as well, the reformat may be of that magnitude, and IR stays.
+
+pass: session_ir_reformat
+kind: session_context
+phase: after
+
+target:
+  when:
+    all:
+      - siemens_ir_reformat_part_unstated
+      - {axis: modifier, is: IR}
+      - {axis: construct, is: MPR}
+
+session:
+  sibling_fields:
+    - manufacturer
+    - image_type
+    - text_sequence_name
+    - series_number
+  replaces_at_most: 0.85
+
+rules:
+  - rule: a_magnitude_source_beside_keeps_ir
+    sibling:
+      same: [text_sequence_name]
+      same_frame_of_reference: true
+      when: siemens_magnitude_source
+    require: some
+    set:
+      modifier: [IR]
+      construct: [MPR]
+    confidence: 0.8
+    why: 'an acquired magnitude of the same sequence name is beside it, so the reformat may be of that magnitude, which keeps IR by its inversion time'
+    sources:
+      - 'record 48, the nine dev-5 disputes, case 3 (DR3): the magnitude image of the same acquisition keeps IR or FLAIR by its TI'
+
+  - rule: a_real_source_beside_is_psir
+    sibling:
+      same: [text_sequence_name]
+      same_frame_of_reference: true
+      when: siemens_real_source
+    require: some
+    set:
+      modifier: [PSIR]
+      construct: [MPR, Real]
+    confidence: 0.8
+    why: 'its source, the acquisition of the same sequence name and frame of reference, is written as the real part: a reformat of a real inversion recovery is PSIR with construct Real'
+    sources:
+      - 'record 48, the nine dev-5 disputes, case 3 (DR3): a Siemens inversion recovery whose ImageType component is R is PSIR, construct Real'
+      - 'the final certificate''s grade, part 2, A1: Siemens MPRs of a real IR settled PSIR'
+
+emit:
+  review_item_below: 0.70

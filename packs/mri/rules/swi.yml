@@ -16,7 +16,7 @@
 
 rule_set: swi
 enter_when: {axis: provenance, is: SWIRecon}
-decides: [base, construct, technique, directory_type, provenance]
+decides: [base, construct, technique, directory_type, provenance, base_basis, contrast_mix]
 # Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images, its
 # magnitude and its phase, are RawRecon, and its minimum intensity projection
 # is ProjectionDerived; what the scanner computed from them (the SWI image,
@@ -31,6 +31,9 @@ tiers: {exclusive: 0.95, keywords: 0.9, stated: 0.9}
 # 0.11.0: the reading guide takes ND off the image type whatever else the
 # image is, and dev-1 settled ND beside SWI on two stacks the route had
 # written SWI alone.
+# MRI pack 0.24.0: and ORIG where GE's `ORIG` prefix says the stack is the
+# unfiltered original (the final certificate: a GE `ORIG Ax SWAN 3D` lost
+# the ORIG its own rule gave, since the route decides the construct).
 
 # Every output of one acquisition shares its readout.
 derive:
@@ -46,6 +49,14 @@ derive:
       # SWI and minIP as its own series (echo numbers 1 to 4) and one MEAN
       # SWI and one MEAN minIP beside them (echo number 1).
       - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
+      # MRI pack 0.24.0 (the final certificate's A11): GE's multi-echo QSM
+      # writes its SWI image, minIP and maps combined over the echoes, and
+      # its MAG and PHS at one echo (flags.yml, section 20).
+      - {when: ge_qsm_me_combined, value: comb-ME-GRE}
+      - {when: ge_qsm_me_echo_output, value: ME-GRE}
+      # MRI pack 0.24.0: a GE SWI made by EPI is EPI by its pulse sequence
+      # (D12), whatever its train (flags.yml, section 20, `ge_swi_epi_psd`).
+      - {when: ge_swi_epi_psd, value: EPI}
       # MRI pack 0.11.0: a gradient-echo EPI SWI (Siemens `epfid3d`, Philips
       # FEEPI SWIp) is GRE-EPI, as its readout is anywhere else.
       - {when: is_gre_epi, value: GRE-EPI}
@@ -91,6 +102,10 @@ derive:
     axis: technique
     cases:
       - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
+      # MRI pack 0.24.0, as swi_technique
+      - {when: ge_qsm_me_combined, value: comb-ME-GRE}
+      - {when: ge_qsm_me_echo_output, value: ME-GRE}
+      - {when: ge_swi_epi_psd, value: EPI}
       # the rest as swi_technique
       - {when: is_gre_epi, value: GRE-EPI}
       - {when: has_epi, value: EPI}
@@ -103,7 +118,7 @@ derive:
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, real, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
+order: [minip, mip, phase, real, philips_swip_view, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -116,6 +131,8 @@ rules:
       # its base is still SWI.
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MinIP
         # The echo-combined output of a multi-echo susceptibility
@@ -124,6 +141,7 @@ rules:
         # images of one, so this is where the identity has to be said.
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -140,10 +158,13 @@ rules:
       # The scanner's own MIP keeps SWIRecon.
       provenance: [{value: ProjectionDerived, when: {all: [is_secondary, {not: is_primary}]}}]
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MIP
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -162,11 +183,14 @@ rules:
       # SWIRecon's MEAN clause covers only the MEAN of SWI-processed images.
       provenance: RawRecon
       base: null
+      base_basis: null
+      contrast_mix: null
       construct:
         - Phase
         - {value: QSM, when: {text: search_text, substring: qsm}}
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.9
@@ -184,23 +208,55 @@ rules:
       # acquisition's too.
       provenance: RawRecon
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - Real
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
+      directory_type: anat
+    confidence: 0.85
+
+  # MRI pack 0.24.0 (the final certificate's A10): a view Philips made of
+  # its SWIp on the console, `PROJECTION IMAGE\SW_M` (`VSWIp`, or `SWI` at
+  # slabs of 10 mm beside the SWIp itself), is a reformat of the SWI image:
+  # ProjectionDerived with MPR, base SWI, as any reformat a route reaches.
+  # No minimum or maximum is stated, so it is no MinIP (flags.yml, section
+  # 20, `philips_swip_view`). Before `swi`, which took the `SW_M` token.
+  philips_swip_view:
+    clauses:
+      - {flag: philips_swip_view, tier: exclusive}
+    set:
+      provenance: ProjectionDerived
+      base: SWI
+      base_basis: physics
+      contrast_mix: null
+      construct:
+        - MPR
+        - SWI
+        - {value: EchoCombined, when: is_mean}
+        - {value: ND, when: has_nd}
+      technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.85
 
   swi:
     clauses:
       - {flag: has_swi, tier: exclusive}
+      # MRI pack 0.24.0 (the final certificate's A9): the SWI image of GE's
+      # SWI research sequence, named for it (flags.yml, section 20).
+      - {when: ge_swi_psd_output, cite: ge_swi_psd_output, source: flags, tier: exclusive}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -216,10 +272,13 @@ rules:
     set:
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MinIP
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -230,11 +289,14 @@ rules:
       - {keywords: [r2star], tier: keywords}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - {value: QSM, when: {any: [has_qsm, {text: search_text, substring: qsm}]}}
         - R2starmap
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -250,9 +312,12 @@ rules:
     set:
       provenance: RawRecon
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
@@ -268,6 +333,8 @@ rules:
       # no SWI processing's product: RawRecon, comb-ME-GRE.
       provenance: RawRecon
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       # MRI pack 0.12.0: a magnitude is not a QSM map because the protocol
       # is named for one (dev-1: a multi-echo magnitude named QSM was
       # Magnitude and QSM); a source echo of a QSM acquisition is the rule
@@ -276,6 +343,7 @@ rules:
         - Magnitude
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_component_technique}
       directory_type: anat
     confidence: 0.85
@@ -292,10 +360,13 @@ rules:
     set:
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - Magnitude
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -319,9 +390,12 @@ rules:
       # scanner acquired; the QSM word names the protocol, not this image.
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -332,10 +406,13 @@ rules:
       - {keywords: [qsm], tier: keywords}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - QSM
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -353,9 +430,12 @@ rules:
     set:
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MPR
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -365,10 +445,13 @@ rules:
       - {when: true, cite: SWIRecon, source: provenance}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.7

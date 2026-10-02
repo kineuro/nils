@@ -10312,7 +10312,9 @@ mod tests {
         assert_eq!(
             d,
             [
+                "base_basis",
                 "body_region",
+                "contrast_mix",
                 "convertible",
                 "directory_type",
                 "disposition",
