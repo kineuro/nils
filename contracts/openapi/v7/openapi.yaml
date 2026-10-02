@@ -165,6 +165,14 @@ paths:
       summary: The registry, the running jobs, the last batches (nils status --json)
       responses:
         "200": {description: The status document}
+  /api/health:
+    get:
+      summary: Whether the engine takes requests, and its counts (no token, numbers only)
+      description: "Answered by the thread that takes requests from the socket, so it answers while every request handler is busy. live is false when requests have waited 60 s while no handler took or finished one; ready is false when the engine is not live or nine tenths of its open files are in use; why says which. Under systemd's watchdog the engine asks this door over its own socket and feeds the watchdog only on a live answer. The counts: the handlers (busy, waiting, the picture slots, the pictures running and waiting, the clients asking pictures, the pictures turned away), the open files and their limit, the tile reads (open, the engine's cap on them, peak, total, failed), the slab and render caches' bytes, and the accept errors, panics and failed health probes since the engine started. Nothing of the registry and no person."
+      security: []
+      responses:
+        "200": {description: "Ready: {live, ready, why, version, up_seconds, served, handlers, files, tile_reads, slabs, renders, trouble}"}
+        "503": {description: "Not ready: the same document, why saying why"}
   /api/custody:
     get:
       summary: Every store the registry keeps (nils custody --json)

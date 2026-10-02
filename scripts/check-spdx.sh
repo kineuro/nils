@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 # Every source file opens with an SPDX header: AGPL-3.0-only for the engine, Apache-2.0
-# under contracts/ and sdk/ (docs/decisions/10 and 15, R6).
+# under contracts/ and sdk/ (docs/decisions/10 and 15, R6), and the upstream licence of
+# a third-party crate kept under engine/vendor/<crate>/.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 fail=0
@@ -12,6 +13,7 @@ while IFS= read -r f; do
   esac
   case "$f" in
     contracts/* | sdk/*) want=Apache-2.0 ;;
+    engine/vendor/tiny_http/*) want="MIT OR Apache-2.0" ;;
     *) want=AGPL-3.0-only ;;
   esac
   if ! head -n 5 "$f" | grep -q "SPDX-License-Identifier: $want\$"; then

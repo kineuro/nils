@@ -5,6 +5,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# vendor/ holds third-party crates kept with a change of ours, taken through
+# [patch.crates-io] below; they are not members, so the workspace's lints and
+# format are not theirs.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "1.0.0-alpha.72"
@@ -82,3 +86,9 @@ unsafe_code = "warn"
 lto = "thin"
 codegen-units = 1
 debug = 1
+
+# tiny_http with its accept loop made to survive accept errors (vendor/tiny_http/Cargo.toml
+# says what changed and why): upstream 0.12.0 ends the loop on the first error and drops
+# the listening socket, which left the engine alive with no port on 2026-10-02.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }

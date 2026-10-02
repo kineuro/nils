@@ -24,6 +24,7 @@ use nils_registry::{Registry, Store};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::grants::{Access, Detail, Need, Step};
+use crate::intake::{self, Intake};
 use crate::{Exit, ServeArgs, fail, usage};
 
 /// The contract versions this binary speaks, read from the checked-in
@@ -1047,6 +1048,10 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             ));
         }
     }
+    // 2026-10-02: the watchdog is fed from here while the engine starts,
+    // and the soft limit on open files is raised to the hard one
+    let watchdog = Watchdog::start();
+    let files = intake::raise_file_limit();
     let auth = Auth::parse(&args)?;
     // §12: a fresh install has no --pack-dir, so the packs are looked for
     // where an installer leaves them; without any, the engine still serves
@@ -1069,6 +1074,18 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             .map(|d| d.display().to_string())
             .unwrap_or_else(|| "none".to_string())
     );
+    if let Some(files) = files {
+        crate::pyramid::TILE_READS.set_at_once(crate::pyramid::tile_reads_for(files));
+    }
+    if let Some(files) = files
+        && files < intake::files_wanted(args.workers.max(1))
+    {
+        eprintln!(
+            "nils serve: open files are limited to {files}, and {} handlers may want {}; raise LimitNOFILE in the engine's unit",
+            args.workers.max(1),
+            intake::files_wanted(args.workers.max(1))
+        );
+    }
     // record 49 A4: the starter catalog, seeded where the setting allows;
     // a failure is said and the engine serves on
     // (never a panic: a caller that read the listening line and closed
@@ -1126,7 +1143,6 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         },
         backup_dir: args.backup_dir.clone(),
     });
-    let server = Arc::new(server);
     let limit = args.requests;
     // A job a door queues runs without anyone starting a worker by hand. A
     // registry's queue has one worker, so where another already holds it,
@@ -1161,10 +1177,29 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let stop = Arc::clone(&stop_queue);
         std::thread::spawn(move || crate::schedule::run(&home, &dir, &stop))
     });
+    // 2026-10-02: one thread takes every request from the socket and queues
+    // it, the handlers take from the queue (crate::intake says why), and a
+    // handler that panics answers 500 and takes the next.
+    let intake: Arc<Intake<Request>> = Arc::new(Intake::new(args.workers.max(1)));
+    let trouble = Arc::new(intake::Trouble::default());
+    let health = Arc::new(Health {
+        doors: Arc::clone(&doors),
+        intake: Arc::clone(&intake),
+        trouble: Arc::clone(&trouble),
+    });
+    let taker = {
+        let health = Arc::clone(&health);
+        std::thread::Builder::new()
+            .name("nils-intake".to_string())
+            .spawn(move || take_requests(&server, &health))
+            .map_err(|e| fail(format!("cannot start the intake: {e}")))?
+    };
+    watchdog.serving(&bound, Arc::clone(&trouble));
     let mut handles = Vec::new();
     for _ in 0..args.workers.max(1) {
-        let server = Arc::clone(&server);
         let doors = Arc::clone(&doors);
+        let intake = Arc::clone(&intake);
+        let trouble = Arc::clone(&trouble);
         handles.push(std::thread::spawn(move || {
             // One registry per handler thread: the pool of §13.6, and the
             // ask doors' reader, pack and catalog beside it.
@@ -1172,44 +1207,66 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             let mut used = Instant::now();
             let mut ask_state = crate::ask_doors::AskState::default();
             loop {
-                let Ok(request) = server.recv_timeout(Duration::from_millis(250)) else {
-                    return;
-                };
-                let Some(request) = request else {
-                    if limit.is_some_and(|n| doors.served.load(Ordering::SeqCst) >= n) {
+                let Some(mut taken) = intake.take(Duration::from_millis(250)) else {
+                    if intake.stopped()
+                        || limit.is_some_and(|n| doors.served.load(Ordering::SeqCst) >= n)
+                    {
                         return;
                     }
                     continue;
                 };
-                let n = doors.served.fetch_add(1, Ordering::SeqCst) + 1;
-                // a connection the database closed (a restart of Postgres)
-                // is opened again, never kept: kept, it failed every
-                // request its thread took with a 500 until the engine
-                // restarted. One idle for a while is asked first, since a
-                // closed connection looks open until a call meets it.
-                if registry.as_mut().is_some_and(|r| {
-                    r.store().is_closed()
-                        || (used.elapsed() >= IDLE_CHECK && !r.store().answers(ANSWER_WITHIN))
-                }) {
-                    registry = None;
-                }
-                used = Instant::now();
-                if registry.is_none() {
-                    registry = doors.home.open().ok();
-                }
-                let Some(reg) = registry.as_mut() else {
-                    let _ = respond(
-                        request,
-                        Reply::error(500, "the registry could not be opened"),
-                    );
+                let Some(request) = taken.job.take() else {
                     continue;
                 };
-                handle(&doors, reg, &mut ask_state, request);
-                if reg.store().is_closed() {
+                let n = doors.served.fetch_add(1, Ordering::SeqCst) + 1;
+                let door = format!("{} {}", request.method(), door_of(request.url()));
+                let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if PANIC_ON.as_deref() == Some(door_of(request.url())) {
+                        panic!("asked to panic on {}", door_of(request.url()));
+                    }
+                    // a connection the database closed (a restart of Postgres)
+                    // is opened again, never kept: kept, it failed every
+                    // request its thread took with a 500 until the engine
+                    // restarted. One idle for a while is asked first, since a
+                    // closed connection looks open until a call meets it.
+                    if registry.as_mut().is_some_and(|r| {
+                        r.store().is_closed()
+                            || (used.elapsed() >= IDLE_CHECK && !r.store().answers(ANSWER_WITHIN))
+                    }) {
+                        registry = None;
+                    }
+                    used = Instant::now();
+                    if registry.is_none() {
+                        registry = doors.home.open().ok();
+                    }
+                    let Some(reg) = registry.as_mut() else {
+                        let _ = respond(
+                            request,
+                            Reply::error(500, "the registry could not be opened"),
+                        );
+                        return;
+                    };
+                    handle(&doors, reg, &mut ask_state, request);
+                    if reg.store().is_closed() {
+                        registry = None;
+                    }
+                }));
+                if handled.is_err() {
+                    // The request was answered 500 as it was dropped. What
+                    // this thread held may be half done, so it is let go: the
+                    // registry connection and the ask doors' state are opened
+                    // afresh by the next request.
                     registry = None;
+                    ask_state = crate::ask_doors::AskState::default();
+                    nils_registry::actor::clear();
+                    trouble.panics.fetch_add(1, Ordering::Relaxed);
+                    PANICKED.say(|| {
+                        format!("a request handler panicked on {door}; it was answered 500 and the engine serves on")
+                    });
                 }
+                drop(taken);
                 if limit.is_some_and(|max| n >= max) {
-                    server.unblock();
+                    intake.stop();
                     return;
                 }
             }
@@ -1218,6 +1275,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     for h in handles {
         let _ = h.join();
     }
+    intake.stop();
+    watchdog.stopping();
+    let _ = taker.join();
     stop_queue.store(true, Ordering::SeqCst);
     for q in queue {
         let _ = q.join();
@@ -1226,6 +1286,273 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let _ = schedule.join();
     }
     Ok(())
+}
+
+/// A door as the journal may name it: the path without its query, and
+/// numbers kept, so an id is said but nothing a caller wrote in a query.
+fn door_of(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(p, _)| p)
+}
+
+/// A door that panics, for the test that a handler's panic is answered 500
+/// and the engine serves on: the path in `NILS_SERVE_TEST_PANIC_ON`, which
+/// nothing but that test sets.
+static PANIC_ON: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| std::env::var("NILS_SERVE_TEST_PANIC_ON").ok());
+
+static PANICKED: intake::Said = intake::Said::new();
+static NOT_ACCEPTED: intake::Said = intake::Said::new();
+static TURNED_AWAY: intake::Said = intake::Said::new();
+static FILES_SHORT: intake::Said = intake::Said::new();
+static NOT_LIVE: intake::Said = intake::Said::new();
+static INTAKE_PANICKED: intake::Said = intake::Said::new();
+
+/// What the health door reads.
+struct Health {
+    doors: Arc<Doors>,
+    intake: Arc<Intake<Request>>,
+    trouble: Arc<intake::Trouble>,
+}
+
+/// The intake: every request from the socket into the queue, the health
+/// door answered here, an accept error counted and said. It ends when the
+/// handlers stop the intake; nothing else ends it, a panic included.
+fn take_requests(server: &tiny_http::Server, health: &Health) {
+    while !health.intake.stopped() {
+        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match server.recv_timeout(Duration::from_millis(250)) {
+                Ok(Some(request)) => queue_request(request, health),
+                Ok(None) => {}
+                Err(e) => {
+                    // the accept loop goes on by itself (vendor/tiny_http);
+                    // the error is counted and said here
+                    health.trouble.accept_errors.fetch_add(1, Ordering::Relaxed);
+                    let files = files_said();
+                    NOT_ACCEPTED.say(|| {
+                        format!("a connection was not accepted: {e}{files}; the engine accepts again after a pause")
+                    });
+                }
+            }
+        }));
+        if step.is_err() {
+            health.trouble.panics.fetch_add(1, Ordering::Relaxed);
+            INTAKE_PANICKED
+                .say(|| "the intake panicked on a request and takes the next".to_string());
+        }
+    }
+}
+
+/// How many descriptors are open against the limit, for a line that says a
+/// shortage: ", 1024 of 1024 open files".
+fn files_said() -> String {
+    match (intake::open_files(), intake::file_limit()) {
+        (Some(open), Some((soft, _))) => format!(", {open} of {soft} open files"),
+        _ => String::new(),
+    }
+}
+
+fn queue_request(request: Request, health: &Health) {
+    let url = request.url().to_string();
+    if *request.method() == Method::Get && door_of(&url) == "/api/health" {
+        let reply = health_reply(health);
+        // answered on a thread of its own: a connection that waits on an
+        // earlier answer must not hold up the intake
+        let _ = std::thread::Builder::new()
+            .name("nils-health".to_string())
+            .spawn(move || {
+                let _ = respond(request, reply);
+            });
+        return;
+    }
+    let bearer = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .map(|h| h.value.as_str().to_string());
+    let remote = request.remote_addr().map(|a| a.ip().to_string());
+    let kind = intake::kind_of(
+        request.method().as_str(),
+        &url,
+        bearer.as_deref(),
+        remote.as_deref(),
+    );
+    if let Err(request) = health.intake.push(kind, request) {
+        TURNED_AWAY.say(|| {
+            format!(
+                "a client had {} pictures waiting; the next was answered 503",
+                intake::PICTURES_WAITING_PER_CLIENT
+            )
+        });
+        let mut reply = Reply::error(
+            503,
+            "too many of this client's pictures are waiting; ask again in a moment",
+        );
+        reply
+            .headers
+            .push(("Retry-After".to_string(), "1".to_string()));
+        let _ = respond(request, reply);
+    }
+}
+
+/// The health door: no token, numbers only. `live` is whether requests are
+/// being taken; `ready` adds whether the engine has descriptors to spare.
+/// 200 when ready, 503 when not, so a container's health check reads it too.
+fn health_reply(health: &Health) -> Reply {
+    let doc = health_doc(health);
+    let status = if doc["ready"] == true { 200 } else { 503 };
+    let mut reply = Reply::ok(doc);
+    reply.status = status;
+    reply
+        .headers
+        .push(("Cache-Control".to_string(), "no-store".to_string()));
+    reply
+}
+
+fn health_doc(health: &Health) -> serde_json::Value {
+    let q = health.intake.snapshot();
+    let open = intake::open_files();
+    let limit = intake::file_limit().map(|(soft, _)| soft);
+    let mut why = Vec::new();
+    if let Some(stalled) = q.stalled_for {
+        why.push(format!(
+            "{} requests have waited {} s while no handler took or finished one",
+            q.waiting,
+            stalled.as_secs()
+        ));
+    }
+    let live = why.is_empty();
+    if let (Some(open), Some(limit)) = (open, limit)
+        && (open as u64) * 10 >= limit * 9
+    {
+        why.push(format!("{open} of {limit} open files are in use"));
+        FILES_SHORT.say(|| format!("{open} of {limit} open files are in use"));
+    }
+    if !live {
+        NOT_LIVE.say(|| format!("not live: {}", why.join("; ")));
+    }
+    let (tiles_total, tiles_failed) = crate::pyramid::TILE_READS.total();
+    let [(slab_bytes, slab_cap), (render_bytes, render_cap)] = crate::pyramid::caches_held();
+    let t = &health.trouble;
+    serde_json::json!({
+        "live": live,
+        "ready": why.is_empty(),
+        "why": why,
+        "version": env!("CARGO_PKG_VERSION"),
+        "up_seconds": health.doors.started.elapsed().as_secs(),
+        "served": health.doors.served.load(Ordering::Relaxed),
+        "handlers": {
+            "count": q.workers,
+            "busy": q.busy,
+            "waiting": q.waiting,
+            "picture_slots": q.picture_slots,
+            "pictures_running": q.pictures_running,
+            "pictures_waiting": q.pictures_waiting,
+            "picture_clients": q.clients,
+            "pictures_turned_away": q.refused,
+        },
+        "files": { "open": open, "limit": limit },
+        "tile_reads": {
+            "open": crate::pyramid::TILE_READS.open(),
+            "at_once": crate::pyramid::TILE_READS.at_once(),
+            "peak": crate::pyramid::TILE_READS.peak(),
+            "total": tiles_total,
+            "failed": tiles_failed,
+        },
+        "slabs": {
+            "reading": crate::pyramid::TILE_READS.slabs_reading(),
+            "cache_bytes": slab_bytes,
+            "cache_cap": slab_cap,
+        },
+        "renders": { "cache_bytes": render_bytes, "cache_cap": render_cap },
+        "trouble": {
+            "accept_errors": t.accept_errors.load(Ordering::Relaxed),
+            "panics": t.panics.load(Ordering::Relaxed),
+            "health_probes_failed": t.health_probes_failed.load(Ordering::Relaxed),
+        },
+    })
+}
+
+/// systemd's notifications and watchdog, where the engine runs under them.
+/// While the engine starts (opening the registry, binding), the watchdog is
+/// fed as it is; once it serves, it is fed only when the engine's own health
+/// door, asked over the engine's own socket, says it is live.
+struct Watchdog {
+    notify: Option<intake::Notify>,
+    serving: Arc<std::sync::atomic::AtomicU8>,
+    probe: Probe,
+}
+
+/// Where the watchdog asks once the engine serves, and where it counts a
+/// failed answer.
+type Probe = Arc<std::sync::Mutex<Option<(String, Arc<intake::Trouble>)>>>;
+
+const STARTING: u8 = 0;
+const SERVING: u8 = 1;
+const STOPPING: u8 = 2;
+
+impl Watchdog {
+    fn start() -> Watchdog {
+        let notify = intake::Notify::from_env();
+        let serving = Arc::new(std::sync::atomic::AtomicU8::new(STARTING));
+        let probe: Probe = Arc::new(std::sync::Mutex::new(None));
+        if let (Some(every), Some(n)) = (intake::watchdog_every(), notify.as_ref()) {
+            let n = n.clone();
+            let serving = Arc::clone(&serving);
+            let probe = Arc::clone(&probe);
+            let tick = (every / 3).max(Duration::from_millis(100));
+            let _ = std::thread::Builder::new()
+                .name("nils-watchdog".to_string())
+                .spawn(move || {
+                    loop {
+                        match serving.load(Ordering::SeqCst) {
+                            STOPPING => return,
+                            STARTING => {
+                                let _ = n.send("WATCHDOG=1");
+                            }
+                            _ => {
+                                let target = probe.lock().ok().and_then(|p| p.clone());
+                                if let Some((addr, trouble)) = target {
+                                    match intake::probe(&addr, tick.min(Duration::from_secs(10))) {
+                                    Ok(()) => {
+                                        let _ = n.send("WATCHDOG=1");
+                                    }
+                                    Err(why) => {
+                                        trouble.health_probes_failed.fetch_add(1, Ordering::Relaxed);
+                                        NOT_LIVE.say(|| {
+                                            format!("the engine's own health door at {addr} failed: {why}; the watchdog is not fed, so systemd restarts the engine if this goes on")
+                                        });
+                                    }
+                                    }
+                                }
+                            }
+                        }
+                        std::thread::sleep(tick);
+                    }
+                });
+        }
+        Watchdog {
+            notify,
+            serving,
+            probe,
+        }
+    }
+
+    fn serving(&self, bound: &str, trouble: Arc<intake::Trouble>) {
+        if let Ok(mut p) = self.probe.lock() {
+            *p = Some((intake::self_address(bound), trouble));
+        }
+        self.serving.store(SERVING, Ordering::SeqCst);
+        if let Some(n) = &self.notify {
+            let _ = n.send(&format!("READY=1\nSTATUS=serving {bound}"));
+        }
+    }
+
+    fn stopping(&self) {
+        self.serving.store(STOPPING, Ordering::SeqCst);
+        if let Some(n) = &self.notify {
+            let _ = n.send("STOPPING=1");
+        }
+    }
 }
 
 /// How long a handler's registry connection may sit idle before the next

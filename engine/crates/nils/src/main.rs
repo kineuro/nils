@@ -42,6 +42,7 @@ mod file_header;
 mod folders;
 mod gate;
 mod grants;
+mod intake;
 mod linkage_doors;
 mod login;
 mod mcp;
