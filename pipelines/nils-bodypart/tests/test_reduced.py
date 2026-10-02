@@ -123,3 +123,36 @@ def test_the_reduced_readers_run_answers_as_the_full_one_with_full_policy(world,
 def test_a_policy_that_is_not_one_is_refused(world, tmp_path):
     code = cli.main(["infer-fusion", "--stacks", str(world["stacks_geo"]), "--inputs", str(world["inputs"]), "--output", str(tmp_path / "o"), "--reader", "reduced:b1"])
     assert code == 1
+
+
+def test_the_files_own_thickness_wins_over_the_manifests(world):
+    """The registry has no thickness per file; the reader takes the decoded
+    files' own, as the full reader takes the first file's."""
+    import copy
+
+    st = next(s for s in stacks(world) if s.stack_id == 12)
+    sg = copy.deepcopy(st.extra.get("geometry"))
+    sg["thick"] = 9.5
+    red = reduced.build(st.files, st.file_geo, sg, "sagittal", "b8")
+    assert red.meta == volume.build(st.files, "sagittal").meta
+    assert red.stats.get("thick_from_file") == 1
+
+
+def test_a_stack_of_mixed_orientations_is_read_from_its_headers(world, tmp_path):
+    """A three-plane localiser holds files of more than one orientation
+    where the registry holds one: the decoded files show it, and the reader
+    falls back to every file's header, as the full reader reads it."""
+    src = tmp_path / "loc"
+    files, geo = [], []
+    for k, (iop, ipp) in enumerate([(fd.AXIAL, [-128.0, -128.0, 0.0]), (fd.AXIAL, [-128.0, -128.0, 6.0]), (fd.SAGITTAL, [0.0, -128.0, 128.0]),
+                                    (fd.AXIAL, [-128.0, -128.0, 12.0])]):
+        p = src / f"{k}.dcm"
+        fd.write_slice(p, ipp=ipp, iop=iop, ps=[4.0, 4.0], rows=64, cols=64, thick=6.0, inum=k + 1)
+        files.append((str(p), None))
+        geo.append({"ipp": _ds(ipp), "ps": "4.0\\4.0", "rows": 64, "cols": 64, "inum": k + 1, "frames": 1})
+    sg = {"iop": _ds(fd.SAGITTAL), "thick": 6.0, "modality": "MR"}
+    full = volume.build(files, "axial")
+    red = reduced.build(files, geo, sg, "axial", "full")
+    assert red.stats.get("header_reads") == 4
+    assert red.meta == full.meta
+    assert np.array_equal(red.vol[reduced._MASK], full.vol[reduced._MASK])
