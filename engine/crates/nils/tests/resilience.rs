@@ -319,18 +319,20 @@ fn under_a_watchdog_the_engine_says_ready_and_feeds_it() {
             ("WATCHDOG_USEC", "300000"),
         ],
     );
-    let mut heard = Vec::new();
+    // while it starts the watchdog is fed as it is; once it listens it says
+    // READY=1 and goes on feeding it on its health door's live answer
+    let mut heard: Vec<String> = Vec::new();
+    let mut fed_since_ready = 0;
     let mut buf = [0u8; 256];
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10)
-        && heard
-            .iter()
-            .filter(|m: &&String| m.as_str() == "WATCHDOG=1")
-            .count()
-            < 5
-    {
+    while started.elapsed() < Duration::from_secs(30) && fed_since_ready < 3 {
         let n = listen.recv(&mut buf).unwrap();
-        heard.push(String::from_utf8_lossy(&buf[..n]).to_string());
+        let said = String::from_utf8_lossy(&buf[..n]).to_string();
+        let ready = heard.iter().any(|m| m.starts_with("READY=1"));
+        if ready && said == "WATCHDOG=1" {
+            fed_since_ready += 1;
+        }
+        heard.push(said);
     }
     assert!(
         heard
@@ -338,10 +340,7 @@ fn under_a_watchdog_the_engine_says_ready_and_feeds_it() {
             .any(|m| m.starts_with("READY=1\nSTATUS=serving 127.0.0.1:")),
         "{heard:?}"
     );
-    assert!(
-        heard.iter().filter(|m| m.as_str() == "WATCHDOG=1").count() >= 5,
-        "{heard:?}"
-    );
+    assert_eq!(fed_since_ready, 3, "{heard:?}");
 }
 
 const NZ: u32 = 64;
