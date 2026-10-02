@@ -134,7 +134,7 @@ values:
     # MRI pack 0.21.0: and GE MUSE by its pulse sequence or name, Philips
     # IRIS by its name (record 48, conventions round 3, case 27).
     alternative_flags: [ms_epi_stated]
-    requires: {not: typed_localizer_gre}
+    requires: {not: gre_scout_readout}
     detection:
       exclusive: is_epi_diff_resolve
   # MRI pack 0.15.0, Nima's ruling N3 (2026-09-30, record 48): a diffusion
@@ -147,7 +147,7 @@ values:
     terms: ['TSE diffusion', 'turbo spin echo diffusion', 'DWI TSE', 'PROPELLER DWI', 'BLADE diffusion', 'MultiVane DWI', 'HASTE diffusion', 'non-EPI DWI']
     description: 'diffusion-weighted imaging read out by a turbo spin echo (PROPELLER, BLADE, MultiVane, HASTE, Philips DWI-TSE), not an EPI'
     family: SE
-    requires: {not: typed_localizer_gre}
+    requires: {not: gre_scout_readout}
     detection:
       combination: [dwi_tse]
   DWI-EPI:
@@ -157,7 +157,9 @@ values:
     # on a plain gradient-echo readout, whose name and private technique may
     # be those of the series it plans (flags.yml, `typed_localizer_gre`;
     # dev-7: a Philips SmartPlan image described `dADC iso` was DWI-EPI).
-    requires: {not: typed_localizer_gre}
+    # MRI pack 0.24.0: nor a Siemens position display on a gradient echo
+    # (Nima, 2026-10-02; flags.yml, `gre_scout_readout`).
+    requires: {not: gre_scout_readout}
     keywords:
       - dwi
       - dti
@@ -168,7 +170,7 @@ values:
       exclusive: is_dwi
   DWI-STEAM:
     family: MIXED
-    requires: {not: typed_localizer_gre}
+    requires: {not: gre_scout_readout}
     keywords:
       - steam
       - dwi-steam

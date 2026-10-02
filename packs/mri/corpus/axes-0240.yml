@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# MRI pack 0.24.0: the exclusion `t2star-not-spin-echo`, which packs 0.22.0
-# and 0.23.0 broke on 7 archive stacks (base T2*w beside a spin-echo
-# technique): a spin-echo word against the readout an image typed LOCALIZER
-# or a GE fast gradient echo states, a GE research-mode series named for a
+# MRI pack 0.24.0: the exclusion `t2star-not-spin-echo`, which packs 0.21.0
+# to 0.23.0 broke on 7 archive stacks (base T2*w beside a spin-echo
+# technique): a spin-echo word against the readout an image typed LOCALIZER,
+# a Siemens position display (Nima, 2026-10-02) or a GE fast gradient echo
+# states, a GE research-mode series named for a
 # gradient echo read as a spin echo by its flip, and a gradient-echo window
 # read on a stack the pack reads as a spin echo. One or more cases for each
 # rule, and the cases that keep each rule from reaching what it must not.
@@ -56,7 +57,11 @@ cases:
       technique: TSE
       base: T2w
 
-  - name: a Siemens position display keeps the technique its planned series' words give, as pack 0.18.1 left it
+  # --- Nima, 2026-10-02: a Siemens position display is a gradient-echo
+  # scout, read GRE by the readout it used (ruling 4), never by the words of
+  # the series it plans; pack 0.18.1 had left it to the words
+
+  - name: a Siemens position display named for the TSE it plans is read by its FLASH readout
     stack:
       image_type: 'ORIGINAL\PRIMARY\POSDISP'
       scanning_sequence: GR
@@ -70,9 +75,70 @@ cases:
       echo_time: 4.0
       flip_angle: 20
     flags:
-      readout_not_spin_echo: false
+      posdisp_gre: true
+      gre_scout_readout: true
+      readout_not_spin_echo: true
     axes:
       provenance: Localizer
+      technique: FLASH
+      base: T2w
+
+  - name: a position display written SE and IR, whose sequence name is a FLASH, is read by the FLASH
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\POSDISP'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PosDisp: [4] t2_tirm_cor_dark-fluid'
+      text_sequence_name: '*fl2d1'
+      n_slices: 1
+      repetition_time: 8.6
+      echo_time: 4.0
+      flip_angle: 20
+    flags:
+      posdisp_gre: true
+    axes:
+      provenance: Localizer
+      technique: FLASH
+
+  - name: a position display named for the diffusion it plans takes no diffusion technique
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\POSDISP'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PosDisp: [6] ep2d_diff_3scan_trace'
+      text_sequence_name: '*fl2d1'
+      n_slices: 1
+      repetition_time: 8.6
+      echo_time: 4.0
+      flip_angle: 20
+    flags:
+      gre_scout_readout: true
+    axes:
+      provenance: Localizer
+      technique: FLASH
+
+  - name: a Siemens TSE that is no position display keeps its TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra'
+      text_sequence_name: '*tse2d1_15'
+      n_slices: 25
+      repetition_time: 5000
+      echo_time: 98
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      posdisp_gre: false
+      readout_not_spin_echo: false
+    axes:
       technique: TSE
       base: T2w
 

@@ -6,7 +6,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
-- The MRI pack is 0.24.0. The exclusion that T2*-weighting is never a spin echo held on every stack of a production archive but 7, and on each the header's own readout contradicted one side. A spin-echo name no longer decides the technique of an image typed LOCALIZER or SCOUT on a plain gradient echo, whose name may be the series it plans, nor of a GE fast gradient echo by its pulse sequence (`fgre`, `fspgr`, `efgre3d`). A GE research-mode series named for a gradient echo is no longer read as a spin echo by its flip angle. The base's gradient-echo windows are not read on a stack the pack reads as a spin echo. Stacks need a reclassify.
+- The MRI pack is 0.24.0. The exclusion that T2*-weighting is never a spin echo held on every stack of a production archive but 7, and on each the header's own readout contradicted one side. A gradient-echo scout is read by its readout and never by the words of the series it plans: an image typed LOCALIZER or SCOUT on a plain gradient echo, and now a Siemens position display (`POSDISP`) whose readout is a gradient echo, takes neither a diffusion nor a spin-echo technique from its name (a position display derived from a spin-echo image keeps its spin echo). A GE fast gradient echo by its pulse sequence (`fgre`, `fspgr`, `efgre3d`) takes no spin-echo technique from its name. A GE research-mode series named for a gradient echo is no longer read as a spin echo by its flip angle. The base's gradient-echo windows are not read on a stack the pack reads as a spin echo. Stacks need a reclassify.
 
 ## [1.0.0-alpha.72] - 2026-10-02
 

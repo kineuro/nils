@@ -2879,20 +2879,35 @@ flags:
 
   # === 19. MRI pack 0.24.0: the exclusion `t2star-not-spin-echo` ============
   #
-  # Packs 0.22.0 and 0.23.0 left 7 archive stacks with base T2*w beside a
+  # Packs 0.21.0 to 0.23.0 left 7 archive stacks with base T2*w beside a
   # spin-echo technique (`studies/2026-10-02-t2star-se-broken/` in the design
   # repository). On 4 of them a spin-echo word decided the technique against
   # a readout the header states: a Philips image typed LOCALIZER on a plain
   # gradient echo, named for the mDixon TSE it plans, and a GE `fgre` named
   # `T2* Ax FSE`. A spin-echo value is not taken where the header says what
   # the readout is:
-  # - an image typed LOCALIZER or SCOUT on a plain gradient echo, whose name
-  #   may be the series it plans (pack 0.22.0's `typed_localizer_gre`, which
-  #   kept the diffusion values off it; a gradient-echo scout is read GRE,
-  #   record 48, 2026-09-27);
+  # - a gradient-echo scout, whose name may be the series it plans (below,
+  #   `gre_scout_readout`);
   # - a GE fast gradient echo by its pulse sequence (round 3, case 8: the
   #   pulse sequence decides `fgre`, `fspgr` and `efgre3d`).
-  # Siemens' position display (`POSDISP`) is left as pack 0.18.1 left it: its
-  # technique is still read from the words of the series it plans.
+  #
+  # Nima's ruling of 2026-10-02 (record 48, "Position displays follow ruling
+  # 4"): Siemens' position display (`POSDISP`) is a gradient-echo scout and
+  # is read GRE, by the readout it used, as ruling 4 of 2026-09-27 reads
+  # every gradient-echo scout. Its FLASH draws the plan of another series and
+  # carries that series' name (`PosDisp: [5] t2_tse_tra`), so the name says
+  # nothing of its own readout. This reverses pack 0.18.1, which left its
+  # technique to the words. The readout is the sequence name's (`*fl2d1`,
+  # `*tfl`, `*tfi`), which `has_gre` reads whatever ScanningSequence says.
+  posdisp_gre:
+    all:
+      - image_type.is_posdisp
+      - has_gre
+      - {not: has_se}
+      - {not: has_epi}
+  # An image typed LOCALIZER or SCOUT on a plain gradient echo (pack 0.22.0)
+  # or a position display on one: read by its readout, never by the words of
+  # the series it plans (no diffusion value, no spin-echo value).
+  gre_scout_readout: {any: [typed_localizer_gre, posdisp_gre]}
   ge_fast_gre_psd: {any: [ge_psd_unspoiled_fgre, ge_psd_fast_spoiled, ge_psd_efgre3d_unspoiled]}
-  readout_not_spin_echo: {any: [typed_localizer_gre, ge_fast_gre_psd]}
+  readout_not_spin_echo: {any: [gre_scout_readout, ge_fast_gre_psd]}
