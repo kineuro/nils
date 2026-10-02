@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.24.0 (round 4, the name against the physics; Nima's approval of
+# 2026-10-02): what is mixed in a base contrast that the base axis records
+# as its nearest value. The base keeps one of its values, so a search for
+# T1w or T2w still finds the stack, and this axis says where the physics
+# and the stated weighting are not one clean contrast (the deep research,
+# section 4: no BIDS or DICOM value means "intermediate", so a qualifier and
+# not a new base value). No value means none: the base is clean.
+#
+# Described, not graded: no read asks it yet, and no certificate covers it.
+# The base rule set decides it (rules/base.yml, round 4), and the roles take
+# no stack that has a value (rules/role.yml).
+
+axis: contrast_mix
+kind: single
+stores: label
+
+values:
+  intermediate_PD_T2:
+    terms: ['intermediate weighted', 'PD/T2 intermediate']
+    description: 'between proton density and T2 weighting: a STIR named T2 or PD at an echo time under 40 ms (R2)'
+  T2like_T1:
+    terms: ['STIR named T1', 'inverted T1']
+    description: 'a short-TI inversion (the STIR window) whose fat is nulled and whose fluid is bright, T2-like though named T1 (R1)'
+  T1like_IR_longTE:
+    terms: ['T1 inversion at a long echo time']
+    description: 'a T1 inversion recovery (the T1-IR window) read at an echo time of 40 ms or more on a 2D readout: T1-dominant with some T2 admixture (R4)'
+  PD_T2star:
+    terms: ['PD/T2* intermediate']
+    description: 'a gradient echo named T2 or T2* at an echo time under the field''s T2* threshold (15, 10, 6 ms at 1.5, 3, 7 T): proton-density dominant with mild T2* sensitivity (R8)'

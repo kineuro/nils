@@ -43,6 +43,10 @@ axes:
   # after the axes that answer that, so a rule may cite them.
   - axes/quality.yml
   - axes/base.yml
+  # MRI pack 0.24.0, round 4: what the base mixes and what it was read from,
+  # decided with it by the base rules. Described, not graded.
+  - axes/contrast_mix.yml
+  - axes/base_basis.yml
   - axes/body_part.yml
   # Record 50: the body part's coarse mode, folded from it, so declared and
   # ordered after it.

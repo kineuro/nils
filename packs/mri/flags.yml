@@ -3427,3 +3427,140 @@ flags:
       - {field: repetition_time, lt: 3500}
       - {field: echo_time, lt: 8}
       - {field: flip_angle, le: 15}
+  # === 24. MRI pack 0.24.0: the name against the physics (round 4, ruled
+  # by Nima on 2026-10-02; the deep research of 2026-10-02, section
+  # 5, rules R0 to R12; the design repository's
+  # `studies/2026-10-02-name-vs-physics/`). The name stays the default. The
+  # physics overrides a stated weighting only where it contradicts it
+  # outright (R1, R3, R5, R7 and R8's exception, in rules/base.yml); R2, R4,
+  # R6 and R12 keep the name, which the order already does. DIR is left out
+  # of every TI rule (two inversions, one TI written), and a 3D TSE's
+  # written echo time is never read as its contrast (variable refocusing
+  # flip angles make it the k-space centre's, not the contrast's).
+  #
+  # The field bins of the research's section 2: up to 1.5 T (and lower
+  # fields), 3 T, 7 T.
+  field_le_15t: {all: [{field: field_strength_normalized, gt: 0}, {field: field_strength_normalized, lt: 2.2}]}
+  field_3t:     {all: [{field: field_strength_normalized, ge: 2.2}, {field: field_strength_normalized, lt: 5}]}
+  field_7t:     {field: field_strength_normalized, ge: 5}
+  # An inversion is present: ScanningSequence IR or an inversion time.
+  inversion_present: {any: [scanning_sequence.has_ir, {field: inversion_time, gt: 0}]}
+  # The section 2 windows (TI in ms).
+  ti_stir_window:
+    any:
+      - all: [field_le_15t, {field: inversion_time, ge: 100}, {field: inversion_time, le: 220}]
+      - all: [field_3t, {field: inversion_time, ge: 140}, {field: inversion_time, le: 280}]
+      - all: [field_7t, {field: inversion_time, ge: 180}, {field: inversion_time, le: 350}]
+  ti_t1_ir_window:
+    any:
+      - all: [field_le_15t, {field: inversion_time, ge: 300}, {field: inversion_time, le: 1300}]
+      - all: [field_3t, {field: inversion_time, ge: 300}, {field: inversion_time, le: 1400}]
+      - all: [field_7t, {field: inversion_time, ge: 350}, {field: inversion_time, le: 1800}]
+  ti_flair_window:
+    any:
+      - all: [field_le_15t, {field: inversion_time, ge: 1700}]
+      - all: [field_3t, {field: inversion_time, ge: 1500}]
+      - all: [field_7t, {field: inversion_time, ge: 2000}]
+  # Named T1, T2 or PD as the base keywords read it, alone (no other
+  # weighting word beside it), in the stack's own name: never a position
+  # display, which carries the name of the series it plans.
+  t1_word_alone:
+    all:
+      - {not: image_type.is_posdisp}
+      - {text: search_text, matches: '(^|[^a-z0-9])t1'}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(t2|pd)'}}
+  t2_word_alone:
+    all:
+      - {not: image_type.is_posdisp}
+      - {text: search_text, matches: '(^|[^a-z0-9])t2([^*a-z0-9]|w|$)'}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(t1|pd)|t2 ?\*|t2star'}}
+  t2_or_t2star_word_alone:
+    all:
+      - {not: image_type.is_posdisp}
+      - {text: search_text, matches: '(^|[^a-z0-9])t2'}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(t1|pd)'}}
+  se_readout_plain: {all: [has_se, {not: has_epi}, {not: has_gre}, {not: is_mdme}, {not: synthetic_or_map}]}
+  three_d_tse_readout: {all: [se_readout_plain, is_3d]}
+  # R1: a STIR named T1 (`t1_tirm_cor` at TI 150 ms, 1.5 T).
+  r1_stir_named_t1:
+    all: [t1_word_alone, se_readout_plain, inversion_present, {not: is_dir}, ti_stir_window]
+  # R3: a FLAIR named T1, at an echo time of 80 ms or more, or a 3D TSE
+  # whatever its written echo time (`SC:Ref Cor Cube T1 +Gd`, CubeT2flair,
+  # TI 2177 ms; a Philips 3D TIR view `MPR T1 cor Gd`, TI 1650 ms).
+  r3_flair_named_t1:
+    all:
+      - t1_word_alone
+      - se_readout_plain
+      - inversion_present
+      - {not: is_dir}
+      - ti_flair_window
+      - any: [{field: echo_time, ge: 80}, is_3d]
+  # R5, 2D: no inversion, a TR of 2,500 ms or more and an echo time of 80 ms
+  # or more, named T1. The 3D TSE branch (no inversion, TR 2,000 ms or
+  # more) is counted for review and not flipped (Nima's middle ground).
+  r5_long_tr_te_named_t1:
+    all:
+      - t1_word_alone
+      - se_readout_plain
+      - {not: inversion_present}
+      - {not: is_3d}
+      - {field: repetition_time, ge: 2500}
+      - {field: echo_time, ge: 80}
+  # R7: an SE or TSE at TR 1,000 ms or less and TE 30 ms or less, no
+  # inversion, named T2.
+  r7_short_tr_te_named_t2:
+    all:
+      - t2_word_alone
+      - se_readout_plain
+      - {not: inversion_present}
+      - {field: repetition_time, gt: 0}
+      - {field: repetition_time, le: 1000}
+      - {field: echo_time, gt: 0}
+      - {field: echo_time, le: 30}
+  # R8's exception: a gradient echo named T2 or T2* that is plainly a
+  # spoiled T1 gradient echo (TR under 50 ms, flip 15 degrees or more, TE
+  # under 5 ms).
+  r8_spoiled_t1_gre_named_t2:
+    all:
+      - t2_or_t2star_word_alone
+      - has_gre
+      - {not: has_se}
+      - {not: has_epi}
+      - {not: inversion_present}
+      - {field: repetition_time, gt: 0}
+      - {field: repetition_time, lt: 50}
+      - {field: flip_angle, ge: 15}
+      - {field: echo_time, gt: 0}
+      - {field: echo_time, lt: 5}
+  # The rules where the name stands and the physics adds a qualifier
+  # (contrast_mix). R2: a STIR named T2 or PD at an echo time under 40 ms.
+  pd_word_alone:
+    all:
+      - {not: image_type.is_posdisp}
+      - {text: search_text, matches: '(^|[^a-z0-9])pd'}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(t1|t2)'}}
+  r2_stir_short_te:
+    all: [se_readout_plain, inversion_present, {not: is_dir}, ti_stir_window, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]
+  r2_stir_named_t2: {all: [t2_word_alone, r2_stir_short_te]}
+  r2_stir_named_pd: {all: [pd_word_alone, r2_stir_short_te]}
+  # R4: a T1 inversion recovery (the T1-IR window) named T1, on a 2D readout
+  # at an echo time of 40 ms or more (a 3D TSE's written echo time is not
+  # its contrast's): T1w, with some T2 in it.
+  r4_t1_ir_named_t1_long_te:
+    all: [t1_word_alone, se_readout_plain, inversion_present, {not: is_dir}, ti_t1_ir_window, {not: is_3d}, {field: echo_time, ge: 40}]
+  # R8: a gradient echo named T2 or T2*, under the field's T2* echo time
+  # (15, 10, 6 ms at 1.5, 3, 7 T), and not the spoiled T1 gradient echo of
+  # R8's exception: the name's T2*w, proton-density dominant.
+  te_under_t2star_threshold:
+    any:
+      - all: [field_le_15t, {field: echo_time, gt: 0}, {field: echo_time, lt: 15}]
+      - all: [field_3t, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]
+      - all: [field_7t, {field: echo_time, gt: 0}, {field: echo_time, lt: 6}]
+  r8_t2_named_gre_short_te:
+    all:
+      - {any: [is_t2_named_gre, {all: [has_gre, {not: has_se}, {not: has_epi}, {text: search_text, matches: 't2 ?\*|t2star'}]}]}
+      - t2_or_t2star_word_alone
+      - {not: gre_mtw_named}
+      - {not: inversion_present}
+      - te_under_t2star_threshold
+      - {not: r8_spoiled_t1_gre_named_t2}

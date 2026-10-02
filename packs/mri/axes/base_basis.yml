@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.24.0 (round 4, the name against the physics; Nima's approval of
+# 2026-10-02): what the base contrast was read from. The base rules record
+# it beside the base they decide (rules/base.yml), and the routes that
+# decide a base record theirs (rules/swi.yml, symri.yml, epimix.yml).
+#
+# Described, not graded: no read asks it yet, and no certificate covers it.
+# A base a person answered, a decision or the physics vote set has no value
+# here: the verdict's own tier says what decided it.
+
+axis: base_basis
+kind: single
+stores: label
+
+values:
+  name:
+    terms: ['stated weighting', 'series name']
+    description: 'a weighting word in the series or protocol name decided the base'
+  physics:
+    terms: ['acquisition physics', 'header']
+    description: 'the acquisition header decided the base: its numbers (TR, TE, TI, flip), its tokens or the technique and construct they gave; where the name said otherwise, the physics contradicted it outright (R1, R3, R5, R7, R8)'
+  name+physics:
+    terms: ['name checked against physics']
+    description: 'the name decided the base and the physics was read beside it: a name that the physics confirms or does not contradict outright (R2, R4, R8), a FLAIR word read with its echo time, a dual-echo word read with its echo'
+  acq_contrast:
+    terms: ['Acquisition Contrast', '(0008,9209)']
+    description: 'the enhanced MR object''s Acquisition Contrast (0008,9209), read as a name where no word states a weighting (R9); not yet in the fingerprint, so no rule writes it'

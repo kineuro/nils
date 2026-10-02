@@ -29,8 +29,9 @@ const INSTITUTION: &str = "Nowhere Test Hospital";
 const STATION: &str = "STATION-QX9";
 const ACCESSION: &str = "ACC-55123";
 
-/// The axes Phase 0 asks, and the six the pack derives beside them (the
-/// body region since MRI pack 0.13.0).
+/// The axes Phase 0 asks, and the ones the pack derives beside them (the
+/// body region since MRI pack 0.13.0; the base's qualifier and basis since
+/// MRI pack 0.24.0, which go with the base answered).
 const ASKED: &[&str] = &[
     "provenance",
     "technique",
@@ -42,6 +43,8 @@ const ASKED: &[&str] = &[
 ];
 const DERIVED: &[&str] = &[
     "quality",
+    "contrast_mix",
+    "base_basis",
     "body_region",
     "directory_type",
     "disposition",
@@ -701,12 +704,13 @@ fn an_open_campaign_moves_to_the_seven_asked_axes_keeping_its_answer() {
         &cleo,
     );
     // made the way Phase 0's first campaigns were: all twelve axes of the
-    // pack then asked, the body region (MRI pack 0.13.0) not among them
+    // pack then asked, the body region (MRI pack 0.13.0) and the base's
+    // qualifier and basis (MRI pack 0.24.0) not among them
     let twelve: Vec<&str> = ASKED
         .iter()
         .chain(DERIVED)
         .copied()
-        .filter(|a| *a != "body_region")
+        .filter(|a| !["body_region", "contrast_mix", "base_basis"].contains(a))
         .collect();
     let made = server.ok(
         "POST",

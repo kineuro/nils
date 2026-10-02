@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        453,
+        477,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -124,7 +124,10 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          by EPI), the 4 of its settled disputes (a 3D ksepi gradient echo, \
          a Philips directional set, a Siemens filter copy and a QSM-named \
          echo), the 10 of its Philips and keyword rule gaps, and a TWIST-VIBE \
-         dynamic run kept out of CE-MRA"
+         dynamic run kept out of CE-MRA, and the 24 of round 4, the name \
+         against the physics: the field bins, the inversion and its STIR, \
+         T1-IR and FLAIR windows, the weighting words, the readouts, R1 to R8 \
+         and their qualifiers"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

@@ -16,7 +16,7 @@
 
 rule_set: swi
 enter_when: {axis: provenance, is: SWIRecon}
-decides: [base, construct, technique, directory_type, provenance]
+decides: [base, construct, technique, directory_type, provenance, base_basis, contrast_mix]
 # Pack 0.9.0, Nima's ruling (2026-09-28): the acquisition's own images, its
 # magnitude and its phase, are RawRecon, and its minimum intensity projection
 # is ProjectionDerived; what the scanner computed from them (the SWI image,
@@ -131,6 +131,8 @@ rules:
       # its base is still SWI.
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MinIP
         # The echo-combined output of a multi-echo susceptibility
@@ -156,6 +158,8 @@ rules:
       # The scanner's own MIP keeps SWIRecon.
       provenance: [{value: ProjectionDerived, when: {all: [is_secondary, {not: is_primary}]}}]
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MIP
         - {value: EchoCombined, when: is_mean}
@@ -179,6 +183,8 @@ rules:
       # SWIRecon's MEAN clause covers only the MEAN of SWI-processed images.
       provenance: RawRecon
       base: null
+      base_basis: null
+      contrast_mix: null
       construct:
         - Phase
         - {value: QSM, when: {text: search_text, substring: qsm}}
@@ -202,6 +208,8 @@ rules:
       # acquisition's too.
       provenance: RawRecon
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - Real
         - {value: EchoCombined, when: is_mean}
@@ -223,6 +231,8 @@ rules:
     set:
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MPR
         - SWI
@@ -240,6 +250,8 @@ rules:
       - {when: ge_swi_psd_output, cite: ge_swi_psd_output, source: flags, tier: exclusive}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}
@@ -260,6 +272,8 @@ rules:
     set:
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MinIP
         - {value: EchoCombined, when: is_mean}
@@ -275,6 +289,8 @@ rules:
       - {keywords: [r2star], tier: keywords}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - {value: QSM, when: {any: [has_qsm, {text: search_text, substring: qsm}]}}
         - R2starmap
@@ -296,6 +312,8 @@ rules:
     set:
       provenance: RawRecon
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
@@ -315,6 +333,8 @@ rules:
       # no SWI processing's product: RawRecon, comb-ME-GRE.
       provenance: RawRecon
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       # MRI pack 0.12.0: a magnitude is not a QSM map because the protocol
       # is named for one (dev-1: a multi-echo magnitude named QSM was
       # Magnitude and QSM); a source echo of a QSM acquisition is the rule
@@ -340,6 +360,8 @@ rules:
     set:
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - Magnitude
         - {value: EchoCombined, when: is_mean}
@@ -368,6 +390,8 @@ rules:
       # scanner acquired; the QSM word names the protocol, not this image.
       provenance: [{value: RawRecon, when: {not: is_mean}}]
       base: T2starw
+      base_basis: physics
+      contrast_mix: null
       construct:
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}
@@ -382,6 +406,8 @@ rules:
       - {keywords: [qsm], tier: keywords}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - QSM
         - {value: EchoCombined, when: is_mean}
@@ -404,6 +430,8 @@ rules:
     set:
       provenance: ProjectionDerived
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - MPR
         - {value: ND, when: has_nd}
@@ -417,6 +445,8 @@ rules:
       - {when: true, cite: SWIRecon, source: provenance}
     set:
       base: SWI
+      base_basis: physics
+      contrast_mix: null
       construct:
         - SWI
         - {value: EchoCombined, when: is_mean}

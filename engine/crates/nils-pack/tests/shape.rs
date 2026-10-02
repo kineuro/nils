@@ -305,7 +305,8 @@ fn the_mri_pack_has_a_shape() {
     assert!(
         shape.implications.iter().any(|i| i.rule_set == "base"
             && i.rule == "technique:MPRAGE"
-            && i.writes == ["base=T1w"])
+            // MRI pack 0.24.0: with the base's basis beside it
+            && i.writes.iter().any(|w| w == "base=T1w"))
     );
     assert!(shape.implications.iter().all(|i| !i.reads.is_empty()));
 }

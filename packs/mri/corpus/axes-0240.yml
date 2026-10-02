@@ -1339,6 +1339,311 @@ cases:
       construct: SyntheticFLAIR
       base: T2w
 
+  # --- held for a ruling (round 4, the name against the physics): a stated
+  # weighting yields only to an outright contradiction (flags.yml, section
+  # 21; R1, R3, R5, R7 and R8's exception), and R4's T1-IR window keeps a
+  # T1 name.
+  - name: a Cube FLAIR reformat named T1 at TE 120 ms is T2-weighted
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: 'SAT_GEMS\EDR_GEMS\FS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: CubeT2flair
+      text_series_description: 'SC:Ref Cor Cube T1 +Gd'
+      field_strength_normalized: 1.5
+      n_slices: 1
+      repetition_time: 7600
+      echo_time: 125
+      inversion_time: 2177
+      flip_angle: 90
+      echo_train_length: 165
+    flags:
+      r3_flair_named_t1: true
+    axes:
+      base: T2w
+      contrast_mix: ''
+      base_basis: physics
+
+  - name: a STIR named T1 is T2-weighted, as an unnamed STIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tirm_cor'
+      field_strength_normalized: 1.5
+      text_sequence_name: '*tir2d1_15'
+      n_slices: 20
+      repetition_time: 6840
+      echo_time: 17
+      inversion_time: 150
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      r1_stir_named_t1: true
+    axes:
+      modifier: STIR
+      base: T2w
+      contrast_mix: T2like_T1
+      base_basis: physics
+      role: ''
+
+  - name: guard, a T1-prepared SPACE inversion at TE 380 ms keeps T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: 'IR\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_space_ir_sag_p2_iso'
+      field_strength_normalized: 3
+      text_sequence_name: '*spcir_257ns'
+      n_slices: 176
+      repetition_time: 4000
+      echo_time: 380
+      inversion_time: 380
+      flip_angle: 120
+      echo_train_length: 241
+    flags:
+      r3_flair_named_t1: false
+      r1_stir_named_t1: false
+    axes:
+      base: T1w
+
+  - name: guard, a T1 FLAIR PROPELLER at TE 55 ms keeps T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: 'T1FLAIR_GEMS\FAST_GEMS\PROP_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'T1FLAIR/Prop'
+      text_series_description: 'Ax T1 FLAIR PROPELLER'
+      field_strength_normalized: 1.5
+      n_slices: 24
+      repetition_time: 2400
+      echo_time: 55
+      inversion_time: 860
+      flip_angle: 111
+      echo_train_length: 24
+    flags:
+      r3_flair_named_t1: false
+    axes:
+      base: T1w
+
+  - name: R5, a 2D spin echo at TR 4000 ms and TE 100 ms named T1 is T2-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_tra'
+      text_sequence_name: '*tse2d1_15'
+      field_strength_normalized: 1.5
+      n_slices: 25
+      repetition_time: 4000
+      echo_time: 100
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      r5_long_tr_te_named_t1: true
+    axes:
+      base: T2w
+
+  - name: guard, a 2D T1 spin echo at TE 60 ms (the zone between) keeps T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_tra'
+      text_sequence_name: '*tse2d1_7'
+      field_strength_normalized: 1.5
+      n_slices: 25
+      repetition_time: 2600
+      echo_time: 60
+      flip_angle: 150
+      echo_train_length: 7
+    flags:
+      r5_long_tr_te_named_t1: false
+    axes:
+      base: T1w
+
+  - name: R7, a spin echo at TR 500 ms and TE 15 ms named T2 is T1-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_se_sag'
+      text_sequence_name: '*se2d1'
+      field_strength_normalized: 1.5
+      n_slices: 19
+      repetition_time: 500
+      echo_time: 15
+      flip_angle: 90
+    flags:
+      r7_short_tr_te_named_t2: true
+    axes:
+      base: T1w
+
+  - name: R8, a spoiled gradient echo at TR 20 ms, flip 25 and TE 4 ms named T2 is T1-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_fl3d_tra'
+      text_sequence_name: '*fl3d1'
+      field_strength_normalized: 1.5
+      n_slices: 60
+      repetition_time: 20
+      echo_time: 4
+      flip_angle: 25
+    flags:
+      r8_spoiled_t1_gre_named_t2: true
+    axes:
+      base: T1w
+
+  - name: guard, a gradient echo named T2 at TE 20 ms stays T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_fl2d_tra_hemo'
+      text_sequence_name: '*fl2d1'
+      field_strength_normalized: 1.5
+      n_slices: 20
+      repetition_time: 600
+      echo_time: 20
+      flip_angle: 20
+    flags:
+      r8_spoiled_t1_gre_named_t2: false
+    axes:
+      base: 'T2*w'
+
+  - name: R2, a STIR named T2 at TE 30 ms keeps T2w, between PD and T2, and stands for no role
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_cor'
+      text_sequence_name: '*tir2d1_15'
+      field_strength_normalized: 1.5
+      n_slices: 20
+      repetition_time: 5000
+      echo_time: 30
+      inversion_time: 160
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      r2_stir_named_t2: true
+    axes:
+      base: T2w
+      contrast_mix: intermediate_PD_T2
+      base_basis: name+physics
+      role: ''
+
+  - name: R4, a 2D T1 inversion recovery at TE 55 ms named T1 keeps T1w with some T2
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tirm_tra_dark-fluid BLADE'
+      text_sequence_name: '*tirB2d1_14'
+      field_strength_normalized: 3
+      n_slices: 30
+      repetition_time: 2000
+      echo_time: 55
+      inversion_time: 860
+      flip_angle: 150
+      echo_train_length: 14
+    flags:
+      r4_t1_ir_named_t1_long_te: true
+    axes:
+      base: T1w
+      contrast_mix: T1like_IR_longTE
+      base_basis: name+physics
+
+  - name: R8, a gradient echo named T2* at TE 9 ms at 1.5 T keeps T2*w, proton-density dominant
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      text_series_description: 'T2* FFE tra'
+      field_strength_normalized: 1.5
+      n_slices: 20
+      repetition_time: 600
+      echo_time: 9
+      flip_angle: 18
+    flags:
+      r8_t2_named_gre_short_te: true
+    axes:
+      base: 'T2*w'
+      contrast_mix: PD_T2star
+      base_basis: name+physics
+
+  - name: a base from a weighting word records its basis as the name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tse_tra'
+      text_sequence_name: '*tse2d1_15'
+      field_strength_normalized: 1.5
+      n_slices: 25
+      repetition_time: 5000
+      echo_time: 98
+      flip_angle: 150
+      echo_train_length: 15
+    axes:
+      base: T2w
+      contrast_mix: ''
+      base_basis: name
+
+  - name: a base from the physics windows alone records its basis as the physics
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ax tse'
+      text_sequence_name: '*tse2d1_15'
+      field_strength_normalized: 1.5
+      n_slices: 25
+      repetition_time: 5000
+      echo_time: 98
+      flip_angle: 150
+      echo_train_length: 15
+    axes:
+      base: T2w
+      base_basis: physics
+
   # === The final certificate's Siemens rule gaps (A1, A7, A8, A12 and three
   # single stacks; flags.yml section 23). The session passes' cases, which
   # read a stack beside another, are the engine's tests
