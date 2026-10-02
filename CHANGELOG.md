@@ -4,8 +4,18 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.72] - 2026-10-02
+
+The reader's pictures come at once. The slab door read a slab's tiles one file after another, which on a network share took seconds a slab; it now reads them at once and keeps recent slabs in memory. A claim names the items that come next with the stacks each shows, so the desk warms their pictures while the item claimed is read (desk 1.0.0-alpha.62). No migration.
+
+### Added
+
+- A claim names the items that come next: `ahead`, up to five items the same claim would offer after this one as it stands now, each `{item, position, stacks}` with the stacks a reader shows for it (the item's own, an anchored item's panels in their order, a pair's left then right) and nothing else of them. `next` stays and is the first of them. A held lease names them too. The v7 contract's claim says so, in place.
+
 ### Changed
 
+- The slab door reads a slab's tile files up to 16 at a time, and plane by plane the tiles door does the same; the bytes are as before.
+- The slab door keeps recent slabs in memory, 256 MB, the oldest let go first, keyed by the pyramid's build like the render door's planes; the access checks and the audit row come first as before.
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.71 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
 
 ## [1.0.0-alpha.71] - 2026-10-02
