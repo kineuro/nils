@@ -278,7 +278,13 @@ fn a_handler_that_panics_answers_500_and_the_engine_serves_on() {
     }
     let (status, _) = engine.get("/api/status", Some(READERS[0])).unwrap();
     assert_eq!(status, 200);
-    let health = engine.health();
+    // the answer reaches the caller just before its handler says it is done
+    let asked = Instant::now();
+    let mut health = engine.health();
+    while health["handlers"]["busy"] != 0 && asked.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+        health = engine.health();
+    }
     assert_eq!(health["live"], true, "{health}");
     assert_eq!(health["trouble"]["panics"], 5, "{health}");
     assert_eq!(health["handlers"]["busy"], 0, "{health}");
