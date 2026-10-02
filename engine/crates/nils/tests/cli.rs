@@ -1678,7 +1678,7 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(out.status.success(), "{}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("mri@"), "{said}");
-    assert!(said.contains("239 predicates"), "{said}");
+    assert!(said.contains("240 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
     // and what its rules can reach (record 41)
     assert!(said.contains("values reached by a rule"), "{said}");
