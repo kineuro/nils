@@ -581,6 +581,9 @@ values:
       - real component
     # MRI pack 0.24.0: or a GE MAGiC or MDME image GE's private image type
     # writes real (flags.yml, section 20, `ge_mdme_real`).
+    # MRI pack 0.25.0: or a Siemens reformat named PSIR or TrueIR of an
+    # inversion recovery (DR3 pairs PSIR with Real; flags.yml, section 26d).
+    alternative_flags: [psir_named_ir_reformat]
     detection:
       exclusive: real_component
   Imaginary:

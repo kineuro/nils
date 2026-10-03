@@ -364,7 +364,9 @@ values:
     # MRI pack 0.24.0: never where the header states a readout of another
     # family (flags.yml, section 19); the same guard is on every spin-echo
     # value below.
-    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
+    # MRI pack 0.25.0 (the protocol sweep): nor a GE 2D fast spin echo by its
+    # pulse sequence named Cube (flags.yml, section 26d).
+    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}, {not: ge_2d_fse_psd}]}
     keywords:
       - space
       - cube
@@ -403,7 +405,9 @@ values:
     family: SE
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
-    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
+    # MRI pack 0.25.0 (the protocol sweep): nor a Siemens spin echo named
+    # STIR whose header states no inversion (flags.yml, section 26d).
+    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}, {not: siemens_stir_named_without_inversion}]}
     keywords:
       - tirm
       - stir
@@ -438,6 +442,9 @@ values:
       - multi echo se
       - multi-echo se
       - dual echo se
+    # MRI pack 0.25.0: or a Siemens pre-turbo dual echo split by echo whose
+    # file says research mode (flags.yml, section 26d).
+    alternative_flags: [siemens_pre_turbo_dual_echo_se]
     detection:
       exclusive: is_me_se
       combination: [is_multi_echo, has_se]

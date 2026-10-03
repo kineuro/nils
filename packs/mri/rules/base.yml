@@ -523,9 +523,12 @@ rules:
       - {flag: 'has_swi', tier: exclusive}
     set: {base: 'SWI', base_basis: physics, contrast_mix: null}
 
+  # MRI pack 0.25.0 (the protocol sweep): from the MT token on a gradient
+  # echo only; a spin echo with an MT pulse keeps its own weighting
+  # (flags.yml, section 26d, `mt_token_on_gre`).
   'flag:mtw':
     clauses:
-      - {flag: 'has_mtc', tier: exclusive}
+      - {flag: 'mt_token_on_gre', tier: exclusive}
     set: {base: 'MTw', base_basis: physics, contrast_mix: null}
 
   'flag:synthetic_t1':
@@ -674,12 +677,12 @@ rules:
 
   'flair:t1_text':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: search_text, substring: t1}]}, cite: t1, source: text, tier: keywords}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: technique_text, substring: t1}]}, cite: t1, source: text, tier: keywords}
     set: {base: 'T1w', base_basis: name, contrast_mix: null}
 
   'flair:t2_text':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: search_text, substring: t2}]}, cite: t2, source: text, tier: keywords}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {not: flair_named_dual_echo}, {text: technique_text, substring: t2}]}, cite: t2, source: text, tier: keywords}
     set: {base: 'T2w', base_basis: name, contrast_mix: null}
 
   'flair:short_te':

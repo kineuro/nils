@@ -570,6 +570,9 @@ flags:
     any:
       - sequence_name.is_tse_body
       - ge_fast_recovery
+      # MRI pack 0.25.0: or a Siemens enhanced object's PulseSequenceName
+      # (section 26d).
+      - siemens_pulse_tse_restore
   # The words of base MTw (rules/base.yml, `keywords:MTw`), for the rule
   # that must not take such a series first (MRI pack 0.12.0).
   # MRI pack 0.14.0: not where the words switch it off (`MT=OFF`, below).
@@ -1153,6 +1156,9 @@ flags:
       - scan_options.has_ir_gems
       - sequence_name.is_ir_tse
       - sequence_name.is_ir_fse
+      # MRI pack 0.25.0: and a SPACE inversion recovery by its stem (a
+      # range that keeps `*spcir` and drops ScanningSequence IR).
+      - sequence_name.is_space_ir
       - {text: search_text, matches: '(^|[^a-z])(stir|tirm|irfse|ir-fse|ir fse)'}
   # Black blood by name: a DANTE preparation (Siemens `dante` in the
   # sequence name) or Philips' `BB` (`3D T1 BB`, the black-blood VISTA).
@@ -4017,3 +4023,117 @@ flags:
       - {text: ge_pulse_sequence_name, matches: '[a-z]'}
       - {not: {text: ge_pulse_sequence_name, matches: 'magic|mdme|qmap|qalas|syn'}}
       - {not: image_type.is_derived}
+  # === 26d. MRI pack 0.25.0: the protocol sweep, names, MT and inversion recovery
+  #
+  # The protocol sweep's grade (record 48; the design repository's
+  # `studies/2026-10-02-protocol-sweep/grade.md`, part 2, kind a): rule gaps
+  # in how a name, an MT token and an inversion recovery are read, each
+  # widened from the stacks to the rule.
+
+  # --- a GE 2D fast spin echo by its pulse sequence (`fse`, `fse-xl`,
+  # `frfse`) takes no 3D-TSE from a `Cube` word in its name (a reformat
+  # named `MPR Ax T1 CUBE` of a 2D `fse-xl`): the vendor's sequence identity
+  # outranks a technique word (pack 0.24.0's A4).
+  ge_2d_fse_psd:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: '^\s*(fse|frfse)'}
+      - is_2d
+
+  # --- base MTw from the header's MT token on a gradient echo only (the
+  # reading guide: on a gradient echo MTw outranks a T2 word; pack 0.21.0's
+  # A7). An MT pulse on a spin echo (a T1 spin echo with MTC after contrast,
+  # a SPACE) suppresses background; the weighting stays the spin echo's.
+  # A spin echo with the token and no weighting word in its name keeps
+  # MTw: the token is then all its header says of its contrast (a
+  # `tse_med_MTC`, settled MTw by every reader).
+  mt_token_on_gre:
+    any:
+      - all:
+          - has_mtc
+          - has_gre
+          - {not: has_se}
+          - {not: has_epi}
+      - all:
+          - has_mtc
+          - {not: has_epi}
+          - {not: {text: search_text, matches: '(^|[^a-z0-9])(t1|t2|pd|flair|stir|tirm|dark ?-?fluid|t1w|t2w|pdw)'}}
+
+  # --- STIR or a TIRM from the word `STIR` where the header states no
+  # inversion and states fat saturation instead: a Siemens plain or turbo
+  # spin echo (`*se2d1`, `*tse2d1`) with no IR in ScanningSequence or
+  # ScanOptions, no inversion time, and ScanOptions FS (`t2_STIR_cor`
+  # written `*tse2d1_15` with FS): a fat-saturated spin echo, its fat
+  # suppressed by the saturation the header states. A FLAIR with no
+  # inversion stated stays a FLAIR (pack 0.16.0).
+  siemens_stir_named_without_inversion:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: search_text, matches: '(^|[^a-z])stir'}
+      - has_fat_sat
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?t?se[0-9]'}
+      - {not: has_ir}
+      - {not: ir_stated_by_header}
+      - {not: {field: inversion_time, gt: 0}}
+  ir_stated_by_header:
+    any:
+      - scanning_sequence.has_ir
+      - scanning_sequence.has_irfse
+      - scan_options.has_ir
+      - scan_options.has_ir_gems
+      - sequence_name.is_ir_tse
+      - sequence_name.is_ir_fse
+      - sequence_name.is_space_ir
+
+  # --- fat saturation a name switches off (`no fatsat`, `utan fettsat`)
+  # gives no FatSat from the words; a header token still decides.
+  fat_sat_negated:
+    text: search_text
+    matches: '(^|[^a-z])(utan|without|ej|no|non|w/o)\s*-?\s*(fat\s*-?\s*sat|fatsat|fettsat|fs)([^a-z]|$)'
+
+  # --- DR3 where the header lost the inversion: a Siemens 3D card range
+  # written with component R (`DERIVED\PRIMARY\R\NONE\PARALLEL`), whose
+  # ScanningSequence and inversion time the range drops, of a protocol
+  # named for an inversion recovery (`t1_space_ir`, `spc_ir`): the real part
+  # of an inversion recovery, PSIR.
+  siemens_real_ir_named:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - has_real
+      - {not: has_phase}
+      - {not: has_magnitude}
+      - {not: has_ir}
+      - any:
+          - {text: text_series_description, matches: '(?i)(^|[^a-z])(spc|space|tse|tir)[ _-]*ir([^a-z]|$)|(^|[^a-z])(psir|trueir|true ir)([^a-z]|$)'}
+          - {text: text_protocol_name, matches: '(?i)(^|[^a-z])(spc|space|tse|tir)[ _-]*ir([^a-z]|$)|(^|[^a-z])(psir|trueir|true ir)([^a-z]|$)'}
+
+  # --- a Siemens reformat named PSIR or TrueIR of an inversion recovery,
+  # whose image type keeps no component (`DERIVED\PRIMARY\MPR`), is of the
+  # real reconstruction: Real beside its PSIR (DR3 pairs them).
+  psir_named_ir_reformat:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - has_ir
+      - is_mpr
+      - {not: has_real}
+      - {not: has_magnitude}
+      - {not: has_phase}
+      - {text: search_text, matches: '(^|[^a-z])(psir|trueir|true ir)([^a-z]|$)'}
+
+  # --- a Siemens enhanced object writes its sequence in PulseSequenceName
+  # (0018,9005) and none in SequenceName: `*tseR2d1_15` is the restore,
+  # VFA-TSE, as N12 reads the stem.
+  siemens_pulse_tse_restore:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: pulse_sequence_name, matches: '^\s*\*?(wip_?)?tse(r|br|bnr)[0-9]'}
+
+  # --- a Siemens pre-turbo dual-echo spin echo (VISION `se2`, `*se2d2`),
+  # split by echo, with no echo train and ScanningSequence written RM: the
+  # guide's ME-SE (a pre-turbo dual echo with no echo train).
+  siemens_pre_turbo_dual_echo_se:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - is_multi_echo
+      - {text: text_sequence_name, matches: '^\s*\*?se[0-9]'}
+      - {not: {field: echo_train_length, gt: 1}}

@@ -51,7 +51,12 @@ values:
     # reused name says FLAIR (flags.yml, dev-5's A4).
     # MRI pack 0.25.0: nor an ASL, whose inversion labels the blood (a GE
     # pCASL CBF map; flags.yml, section 26c).
-    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}]}
+    # MRI pack 0.25.0 (the protocol sweep): nor a FLAIR word on a
+    # magnetisation-prepared gradient echo (MPRAGE, a TFE), whose inversion
+    # belongs to its technique (a BRAVO reformat named `T1 FLAIR CUBE`, a
+    # `*tfl3d1` view named `Ax Flair`); nor the magnitude of nothing: a
+    # Siemens real (R) inversion recovery is PSIR by DR3, whatever its name.
+    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}, {not: {all: [{not: is_flair}, {any: [{axis: technique, is: MPRAGE}, {axis: technique, is: MEMPRAGE}, {axis: technique, is: MP2RAGE}, {axis: technique, is: FSP-GRE}]}]}}, {not: siemens_real_ir}]}
     keywords:
       - flair
       - t2 flair
@@ -76,7 +81,10 @@ values:
     priority: 2
     # MRI pack 0.12.0: as IR below, never on an MDME acquisition, whose
     # saturation delay reads as a short TI.
-    requires: {not: {axis: technique, is: MDME}}
+    # MRI pack 0.25.0 (the protocol sweep): nor a Siemens spin echo whose
+    # header states no inversion (flags.yml, section 26d), nor a Siemens
+    # real (R) inversion recovery, which DR3 makes PSIR whatever its name.
+    requires: {all: [{not: {axis: technique, is: MDME}}, {not: siemens_stir_named_without_inversion}, {not: siemens_real_ir}]}
     keywords:
       - stir
       - short tau
@@ -117,6 +125,9 @@ values:
     detection:
       exclusive: has_psir
       combination: [siemens_real_ir]
+    # MRI pack 0.25.0: or a Siemens range that kept the real component and
+    # lost the inversion its protocol names (flags.yml, section 26d).
+    alternative_flags: [siemens_real_ir_named]
   # MRI pack 0.12.0: not on an MDME acquisition. Its short saturation delay,
   # which the header writes as an inversion time beside ScanningSequence
   # SE\IR, is part of the technique and no inversion-recovery contrast
@@ -127,7 +138,8 @@ values:
     terms: ['inversion recovery', 'inversion prepared', 'IR prepared']
     group: IR_CONTRAST
     priority: 99
-    requires: {not: {axis: technique, is: MDME}}
+    # MRI pack 0.25.0: nor a Siemens real (R) inversion recovery (DR3: PSIR).
+    requires: {all: [{not: {axis: technique, is: MDME}}, {not: siemens_real_ir}]}
     keywords:
       - inversion recovery
     # MRI pack 0.18.0: or an inversion recovery whose short inversion time
@@ -184,6 +196,9 @@ values:
       - spair
       - fettsat
       - fat supp
+    # MRI pack 0.25.0 (the protocol sweep): never from words that switch it
+    # off (`no fatsat`); the header's token still decides.
+    requires: {not: {all: [fat_sat_negated, {not: has_fat_sat}]}}
     detection:
       exclusive: has_fat_sat
   WaterExcitation:
