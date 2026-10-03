@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.73 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+
 ## [1.0.0-alpha.73] - 2026-10-03
 
 The engine keeps its port, and the MRI pack is 0.24.0. Out of open files, an engine failed an accept, its HTTP library ended the accept loop and dropped the listening socket, and the engine lived on answering nobody and logging nothing. An accept error is now never the end of the server, the engine bounds the files it opens, keeps a share of its handlers for every reader and for the doors that are not pictures, says what goes wrong on stderr, answers a health door, and under systemd's watchdog is restarted when it stops taking requests. `nils setup` and `nils update` write the engine's unit with `LimitNOFILE=65536`, `WatchdogSec=120` and `NotifyAccess=main`. MRI pack 0.24.0 fixes the T2* exclusion, the rule gaps a final grade of 0.23.0 found and reads a weighting the name states against the physics; stacks need a reclassify, and classify takes about 28 % longer with its larger flag set and two new session passes. No migration and no desk release: installs keep desk 1.0.0-alpha.62. Registry schema 78 (fingerprint revision 6), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as before.
