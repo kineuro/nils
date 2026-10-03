@@ -422,15 +422,20 @@ pub fn select_acquired(store: &Store) -> String {
     )
 }
 
-/// How often each slice position of the stacks in the window was acquired
-/// again (the 2026-10-03 fields): one row per stack and position whose
-/// images carry more than one acquisition time, with the earliest and the
-/// latest time, how many distinct times and how many distinct dates. A
-/// position is the image's ImagePositionPatient, or its SliceLocation where
-/// it has none. Grouped and filtered in the query, so a stack of one image
-/// per position, which is nearly every stack, returns nothing, and a dynamic
-/// of a thousand images returns its slices.
-pub fn select_frames(store: &Store) -> String {
+/// How often each slice position of the stacks named was acquired again
+/// (the 2026-10-03 fields): one row per stack and position whose images
+/// carry more than one acquisition time, with the earliest and the latest
+/// time, how many distinct times and how many distinct dates. A position is
+/// the image's ImagePositionPatient, or its SliceLocation where it has none.
+///
+/// Its parameters are `n` stack ids, and the caller names only the stacks
+/// that can have a repeated position: those with more images than distinct
+/// positions ([`repeats_a_position`]), which the positions query has already
+/// counted. Nearly every stack has one image per position, so a window of
+/// them costs no query at all, and the rows of a stack that is named are
+/// found through the index on `instance.stack_id`, grouped and filtered in
+/// one pass, so a dynamic of a thousand images returns its slices.
+pub fn select_frames(store: &Store, n: usize) -> String {
     let at = "COALESCE(image_position_patient, CAST(slice_location AS TEXT))";
     let (lo, hi) = match store.dialect() {
         nils_registry::dialect::Dialect::Postgres => (
@@ -442,16 +447,29 @@ pub fn select_frames(store: &Store) -> String {
             "MAX(acquisition_time)".to_string(),
         ),
     };
+    let list = (1..=n)
+        .map(|i| store.dialect().param(i, Type::Int))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "SELECT stack_id, {lo}, {hi}, COUNT(DISTINCT acquisition_time), \
                 COUNT(DISTINCT acquisition_date) FROM {} \
-         WHERE stack_id > {} AND stack_id <= {} AND acquisition_time IS NOT NULL \
+         WHERE stack_id IN ({list}) AND acquisition_time IS NOT NULL \
          GROUP BY stack_id, {at} HAVING COUNT(DISTINCT acquisition_time) > 1 \
          ORDER BY stack_id",
         store.qualified("instance"),
-        store.dialect().param(1, Type::Int),
-        store.dialect().param(2, Type::Int),
     )
+}
+
+/// How many stacks one [`select_frames`] names at most.
+pub const FRAMES_CHUNK: usize = 500;
+
+/// Whether a stack can have a slice position acquired more than once: more
+/// images than distinct positions (each a distinct pair of SliceLocation and
+/// ImagePositionPatient, as the positions query returns them), or more than
+/// one image and no position at all.
+pub fn repeats_a_position(n_instances: i64, positions: usize) -> bool {
+    n_instances > (positions as i64).max(1)
 }
 
 /// One row of [`select_frames`]: the earliest and the latest time at one
@@ -1063,6 +1081,17 @@ mod split_tests {
         assert_eq!(of(&["kvp", "tube_current"]), Some("multi_parameter"));
         assert_eq!(of(&["repetition_time"]), Some("multi_stack"));
         assert_eq!(of(&[]), Some("multi_stack"));
+    }
+
+    #[test]
+    fn only_a_stack_with_more_images_than_positions_is_asked_for_its_frames() {
+        use super::repeats_a_position;
+        assert!(!repeats_a_position(1, 1));
+        assert!(!repeats_a_position(1, 0));
+        assert!(!repeats_a_position(176, 176));
+        assert!(repeats_a_position(12, 3));
+        assert!(repeats_a_position(40, 1), "a mosaic run at one position");
+        assert!(repeats_a_position(2, 0), "no position written at all");
     }
 
     #[test]
