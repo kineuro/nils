@@ -1,0 +1,298 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: conventions round 5, the deep research's six questions
+# checked against our archive's counts (record 48, "Conventions, round 5").
+# One or more cases for each rule, and the cases that keep each rule from
+# reaching what it must not. Every stack here is invented from the pattern
+# the design repository's files name; none is a real header.
+
+cases:
+
+  # --- case 1: a TWIST-VIBE dynamic run that names no angiography is DCE
+
+  - name: a Siemens TWIST-VIBE Dixon dynamic run that names no angiography is DCE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\WATER'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_vibe-twist_dixon_tra_dyn_p2_TTC=6.7s_W'
+      text_sequence_name: '*fldyn3d2'
+      text_contrast: Gadovist
+      temporal_positions: 30
+      n_slices: 32
+      repetition_time: 4.5
+      echo_time: 1.3
+      flip_angle: 9
+    flags:
+      twist_vibe_dynamic: true
+      is_ce_mra: false
+    axes:
+      technique: DCE
+      base: PWI
+
+  - name: guard, a TWIST-VIBE named for an angiography stays a CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'MRA-CE sag vibe twist 1.1x1mm'
+      text_sequence_name: '*fl3d1'
+      text_contrast: Clariscan
+      n_slices: 88
+      repetition_time: 3
+      echo_time: 1.2
+      flip_angle: 20
+    flags:
+      twist_vibe_dynamic: false
+    axes:
+      technique: CE-MRA
+
+  # --- case 2: a GE SWAN output combines its echoes
+
+  - name: a GE SWAN written one image per slice is the echoes combined
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: SWAN
+      text_series_description: 'Ax SWAN 3D'
+      n_slices: 144
+      repetition_time: 40
+      echo_time: 24
+      flip_angle: 15
+      echo_train_length: 6
+    flags:
+      ge_swan_combined: true
+    axes:
+      technique: MEDIC
+
+  - name: guard, a GE SWAN exported split by echo keeps its echoes apart
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: SWAN
+      text_series_description: 'Ax SWAN 3D'
+      split_reason: multi_echo
+      n_slices: 144
+      repetition_time: 40
+      echo_time: 12
+      flip_angle: 15
+      echo_train_length: 6
+    flags:
+      ge_swan_combined: false
+
+  - name: a GE SWAN minIP written MIN IP is no in-phase image
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED\MIN IP'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: SWAN
+      text_series_description: 'min IP 10mm'
+      n_slices: 30
+      repetition_time: 51
+      echo_time: 38
+      flip_angle: 20
+      echo_train_length: 5
+    flags:
+      in_phase_token_of_a_minip: true
+      has_in_phase: false
+      ge_swan_combined: true
+    axes:
+      construct: MinIP
+      technique: MEDIC
+
+  - name: guard, a Siemens Dixon in-phase image keeps InPhase
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIXON\IN_PHASE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_vibe_dixon_tra_in'
+      text_sequence_name: '*fl3d2'
+      n_slices: 72
+      repetition_time: 4
+      echo_time: 2.4
+      flip_angle: 9
+    flags:
+      has_in_phase: true
+
+  # --- case 6: a quantitative T1 map has no base
+
+  - name: an MP2RAGE T1 map is a quantity with no base
+    stack:
+      image_type: 'DERIVED\PRIMARY\T1 MAP\DIS3D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'sag 3D T1 MP2RAGE_T1_Images'
+      text_sequence_name: '*tfl3d1_16'
+      n_slices: 176
+      repetition_time: 5000
+      echo_time: 2.9
+      inversion_time: 700
+      flip_angle: 4
+    flags:
+      quantitative_t1_map: true
+    axes:
+      construct: T1map
+      base: ''
+
+  - name: guard, an MP2RAGE uniform image stays T1-weighted
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\UNI\DIS3D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'sag 3D T1 MP2RAGE_UNI_Images'
+      text_sequence_name: '*tfl3d1_16'
+      n_slices: 176
+      repetition_time: 5000
+      echo_time: 2.9
+      inversion_time: 700
+      flip_angle: 4
+    flags:
+      quantitative_t1_map: false
+    axes:
+      base: T1w
+
+  - name: guard, an old Philips T1 FFE written T1 MAP is a weighted acquisition, no map
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\T1 MAP'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      manufacturer_model_name: Gyroscan Intera
+      text_series_description: '3D T1VOL+GD'
+      n_slices: 120
+      repetition_time: 15
+      echo_time: 5.2
+      flip_angle: 20
+    flags:
+      philips_t1_map_token_on_acquisition: true
+      quantitative_t1_map: false
+      is_qmap: false
+
+  # --- case 3: MTC in a name is MT, unless the words switch it off
+
+  - name: a Philips spin echo named MTC with no header token takes MT from the name
+    stack:
+      image_type: 'ORIGINAL\SECONDARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SS
+      scan_options: OTHER
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T1W_SE_MTC_MDC'
+      n_slices: 24
+      repetition_time: 525
+      echo_time: 15
+      flip_angle: 69
+    axes:
+      modifier: MT
+
+  - name: guard, a TSE named without MTC (utan MTC) takes no MT
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'tse_utan_MTC'
+      text_sequence_name: '*tse2d1_5'
+      n_slices: 20
+      repetition_time: 600
+      echo_time: 12
+      flip_angle: 150
+    flags:
+      mt_negated: true
+
+  - name: guard, a bare MT in a Philips survey name is no magnetisation transfer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      scan_options: OTHER
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SURV_MT_sag'
+      n_slices: 3
+      repetition_time: 10
+      echo_time: 4.6
+      flip_angle: 15
+    flags:
+      has_mtc: false
+
+  # --- case 5: a subtraction of a composite keeps both
+
+  - name: a subtraction of a named composite is SubtractionDerived with Composed
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\M\DERIVED'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'subtraktion MobiView T1 sag'
+      n_slices: 15
+      rows: 1460
+      columns: 512
+      repetition_time: 486
+      echo_time: 8
+      flip_angle: 90
+    flags:
+      subtraction_of_a_composite: true
+    axes:
+      provenance: SubtractionDerived
+      construct: Composed
+
+  - name: guard, a stitched composite that is no subtraction stays ProjectionDerived
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\M\DERIVED'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'MobiView T1 sag'
+      n_slices: 15
+      rows: 1460
+      columns: 512
+      repetition_time: 486
+      echo_time: 8
+      flip_angle: 90
+    flags:
+      subtraction_of_a_composite: false
+    axes:
+      provenance: ProjectionDerived
+      construct: Composed
+
+  # --- Nima, 2026-10-03: a quantitative T2 or R2 map has no base either
+
+  - name: a T2 map is a quantity with no base
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2 MAP'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'T2Map_mapit'
+      n_slices: 20
+      repetition_time: 2000
+      echo_time: 13
+      flip_angle: 180
+    axes:
+      construct: T2map
+      base: ''

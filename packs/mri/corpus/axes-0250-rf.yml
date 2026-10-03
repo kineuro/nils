@@ -1,0 +1,317 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: the protocol sweep's reformats, session readings and
+# planning series (flags.yml, section 26a). One or more cases for each rule,
+# and the cases that keep each rule from reaching what it must not. Every
+# stack here is invented from the pattern the design repository's files
+# name; none is a real header.
+
+cases:
+
+  # --- a reformat a PACS exported of a 3D acquisition
+
+  - name: an exported reformat of a 3D MPRAGE written only with its plane and no series number is an MPR
+    stack:
+      image_type: 'DERIVED\SECONDARY\AXIAL'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*tfl3d1_16'
+      series_number: -1
+      n_instances: 160
+      repetition_time: 2200
+      echo_time: 3
+      inversion_time: 900
+    flags:
+      external_3d_reformat: true
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: a Sectra reformat of a 3D SPACE with no series number is an MPR
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'Sectra Axial Ingen slab'
+      text_sequence_name: '*spcR_36ns'
+      n_instances: 300
+      repetition_time: 500
+      echo_time: 7
+      echo_train_length: 36
+    flags:
+      external_3d_reformat: true
+    axes:
+      provenance: ProjectionDerived
+      construct: MPR
+
+  - name: guard, an exported subtraction written the same way stays a subtraction
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Siemens Healthineers
+      text_series_description: 'subtraction 5 - 3'
+      text_sequence_name: '*fl3d1'
+      n_instances: 120
+      repetition_time: 5
+      echo_time: 2
+    flags:
+      external_3d_reformat: false
+    axes:
+      provenance: SubtractionDerived
+
+  - name: guard, a scanner's own secondary image of a 3D with its series number is no exported reformat
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_fl3d_sag'
+      text_sequence_name: '*fl3d1'
+      series_number: 7
+      n_instances: 120
+      repetition_time: 12
+      echo_time: 2
+    flags:
+      external_3d_reformat: false
+
+  # --- GE efgre3d at a high flip angle: FIESTA
+
+  - name: an unnamed GE reformat of an efgre3d at flip 65 without SP is a balanced steady state
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED\AVERAGE'
+      scanning_sequence: GR
+      sequence_variant: 'SS\OSP'
+      scan_options: 'FAST_GEMS\EDR_GEMS\FILTERED_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: efgre3d
+      text_series_description: 'Processed Images'
+      n_slices: 82
+      repetition_time: 5.5
+      echo_time: 1.9
+      flip_angle: 65
+    flags:
+      ge_efgre3d_steady_state: true
+    axes:
+      technique: FIESTA
+      base: T2w
+
+  - name: guard, a GE efgre3d at flip 15 stays a plain gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: efgre3d
+      text_series_description: 'Ax 3D GRE'
+      n_slices: 120
+      repetition_time: 7
+      echo_time: 3
+      flip_angle: 15
+    flags:
+      ge_efgre3d_steady_state: false
+
+  # --- an MP2RAGE reformat made outside the 3D card
+
+  - name: a Siemens PACS reformat of a turbo FLASH at TR 4500 that names no MP2RAGE is left MPRAGE for the session
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER\AVERAGE'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax T1 MPR 2mm'
+      text_sequence_name: '*tfl3d1_192ns'
+      n_instances: 112
+      repetition_time: 4500
+      echo_time: 2.2
+    flags:
+      siemens_tfl_reformat_long_tr: true
+    axes:
+      technique: MPRAGE
+
+  - name: guard, an MP2RAGE UNI image named so is no such reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\UNI\DIS3D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Sag 3D T1 MP2RAGE_UNI_Images'
+      text_sequence_name: '*tfl3d1_192ns'
+      n_slices: 192
+      repetition_time: 4500
+      echo_time: 2.2
+    flags:
+      siemens_tfl_reformat_long_tr: false
+
+  # --- planning series the vendor marks
+
+  - name: a Siemens FastView survey is a localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: RM
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'FastView'
+      text_sequence_name: '*fl2d_ct'
+      n_slices: 74
+      repetition_time: 2.6
+      echo_time: 1.4
+    flags:
+      siemens_fastview: true
+    axes:
+      provenance: Localizer
+
+  - name: a GE 3-Plane series split by echo is a localizer by its pulse sequence
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 3-Plane
+      text_series_description: '3-pl T2* FGRE S'
+      split_reason: multi_echo
+      n_slices: 8
+      repetition_time: 400
+      echo_time: 9.6
+      flip_angle: 90
+    flags:
+      ge_three_plane_psd: true
+    axes:
+      provenance: Localizer
+
+  - name: a Siemens position display named for an SWI series is a localizer, not an SWI output
+    stack:
+      image_type: 'DERIVED\SECONDARY\POSDISP\M\NORM\DIS2D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PosDisp: [14] Sag SWI EPI 0,65 mm iso'
+      text_sequence_name: '*h2d1_205'
+      n_slices: 1
+      repetition_time: 1000
+      echo_time: 80
+    axes:
+      provenance: Localizer
+
+  # --- projections
+
+  - name: an older Siemens projection with no 3D-card token is a MIP
+    stack:
+      image_type: 'ORIGINAL\SECONDARY\PROJECTION IMAGE'
+      scanning_sequence: RM
+      sequence_variant: OSP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'ANGIO/MRA_FAST_FLOW_256'
+      text_sequence_name: 'fi3d1tun'
+      n_slices: 1
+      repetition_time: 29
+      echo_time: 6
+      flip_angle: 20
+    flags:
+      siemens_legacy_projection: true
+    axes:
+      construct: MIP
+
+  - name: guard, a Siemens 3D-card reformat written PROJECTION IMAGE with CSA MPR stays an MPR
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROJECTION IMAGE\CSA MPR'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_fl3d_tra_MPR'
+      text_sequence_name: '*fl3d1'
+      n_slices: 60
+      repetition_time: 12
+      echo_time: 2
+    flags:
+      siemens_legacy_projection: false
+    axes:
+      construct: MPR
+
+  - name: a Philips MAX_IP over a volume of thin slices is a reformat, no MIP
+    stack:
+      image_type: 'DERIVED\PRIMARY\MAX_IP\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'GD MPR T1 COR 2MM'
+      n_slices: 95
+      slice_thickness: 2
+      repetition_time: 400
+      echo_time: 21
+      echo_train_length: 20
+    flags:
+      philips_max_ip_volume: true
+      is_mip: false
+    axes:
+      construct: MPR
+
+  - name: guard, a Philips MAX_IP of three slices stays a MIP
+    stack:
+      image_type: 'DERIVED\PRIMARY\MAX_IP\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'MIP'
+      n_slices: 3
+      slice_thickness: 30
+      repetition_time: 20
+      echo_time: 4
+    flags:
+      philips_max_ip_volume: false
+      is_mip: true
+
+  - name: a GE PJN MIP named minip is a MIP by its image type
+    stack:
+      image_type: 'DERIVED\SECONDARY\PJN\MIP'
+      scanning_sequence: GR
+      sequence_variant: SS
+      scan_options: 'IFLOW_GEMS\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: Inh-Vel
+      text_series_description: 'minip venc 20'
+      n_slices: 1
+      repetition_time: 10
+      echo_time: 5
+      flip_angle: 8
+    axes:
+      construct: MIP
+
+  - name: a GE subtraction named (exam/series/1)-(exam/series/1) is a subtraction
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROC'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SP\SK'
+      scan_options: 'FAST_GEMS\VASCTOF_GEMS\MP_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: efgre3d
+      text_series_description: '(1234/901/1)-(1234/900/1)'
+      n_slices: 97
+      repetition_time: 4.4
+      echo_time: 1.6
+      flip_angle: 30
+    flags:
+      ge_subtraction_named: true
+    axes:
+      provenance: SubtractionDerived

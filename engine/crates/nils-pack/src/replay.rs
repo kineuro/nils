@@ -115,6 +115,13 @@ fn stack_of(
 
 /// What the pack decides of the stack of one packet.
 pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
+    replay_with(pack, packet, &crate::legal::class_constraints(pack))
+}
+
+/// [`replay`] with the pack's class constraints built by the caller
+/// ([`crate::legal::class_constraints`]), once for a run of many packets
+/// through the same pack.
+pub fn replay_with(pack: &Pack, packet: &Value, constraints: &Value) -> Result<Value, String> {
     let empty = Map::new();
     let header = packet.get("header").and_then(Value::as_object);
     let mut groups: Vec<&Map<String, Value>> = Vec::new();
@@ -222,6 +229,43 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
         }));
     }
 
+    // The pack's constraints the answer breaks, as a classification reads
+    // them (record 48): the class-phase axes in identities, and which rule
+    // set decided each, a session pass's write counted as the pass's.
+    let mut decided = std::collections::BTreeMap::new();
+    for (i, a) in pack.axes.iter().enumerate() {
+        if a.phase != crate::rules::AxisPhase::Class {
+            continue;
+        }
+        let v: Vec<String> = in_force[i]
+            .values
+            .iter()
+            .filter(|v| !v.is_empty() && a.default.as_deref() != Some(v.as_str()))
+            .map(|v| {
+                a.id_of_stored(v)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.clone())
+            })
+            .collect();
+        decided.insert(a.name.clone(), v);
+    }
+    let mut decided_by: std::collections::BTreeMap<String, String> = class
+        .evidence
+        .iter()
+        .map(|e| (e.axis.clone(), e.rule_set.clone()))
+        .collect();
+    for s in &said {
+        for w in s["writes"].as_array().into_iter().flatten() {
+            if let (Some(axis), Some(pass)) = (w.as_str(), s["pass"].as_str()) {
+                decided_by.insert(axis.to_string(), pass.to_string());
+            }
+        }
+    }
+    let broken: Vec<Value> = crate::legal::broken(pack, constraints, &decided, &decided_by)
+        .into_iter()
+        .map(|b| json!({"kind": b.kind, "id": b.id}))
+        .collect();
+
     // And what to do with the stack, from what was decided.
     let seed: Vec<Vec<String>> = in_force.iter().map(|a| a.values.clone()).collect();
     let dispose = evaluated.dispose(&seed);
@@ -257,5 +301,6 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
         "session": said,
         "private": read,
         "withheld": withheld,
+        "broken": broken,
     }))
 }

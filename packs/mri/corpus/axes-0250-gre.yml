@@ -1,0 +1,383 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: the protocol sweep's gradient-echo groups (flags.yml,
+# section 26b). One or more cases for each rule, and the guards that keep it
+# from reaching what it must not. Every stack here is invented from the
+# pattern the design repository's files name; none is a real header.
+
+cases:
+
+  - name: a Siemens unprepared tfl3d1 named without IR is a turbo FLASH
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      scan_options: PFP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_mpr_tra_iso gd UTAN IR'
+      text_sequence_name: '*tfl3d1'
+      n_slices: 176
+      repetition_time: 1910
+      echo_time: 3.5
+      flip_angle: 15
+    flags:
+      siemens_tfl_unprepared: true
+    axes:
+      technique: TurboFLASH
+
+  - name: a Philips SWIp mini-mip is a minimum projection
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROJECTION IMAGE\SW_M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      text_series_description: 'mini-mip'
+      n_slices: 100
+      repetition_time: 51
+      echo_time: 0
+      flip_angle: 20
+      echo_train_length: 4
+    axes:
+      provenance: ProjectionDerived
+      construct: MinIP
+      base: SWI
+
+  - name: a multi-parameter mapping echo named PDw is PDw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      scan_options: PFP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'PDw_fa4_cs6'
+      split_reason: multi_echo
+      n_slices: 176
+      repetition_time: 18
+      echo_time: 2.4
+      flip_angle: 4
+      echo_train_length: 6
+    flags:
+      mpm_pd_named: true
+    axes:
+      base: PDw
+
+  - name: guard, a Siemens TFL with a magnetisation preparation stays MPRAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_mprage_sag'
+      text_sequence_name: '*tfl3d1_16ns'
+      n_slices: 176
+      repetition_time: 2300
+      echo_time: 2.3
+      inversion_time: 900
+      flip_angle: 8
+    flags:
+      siemens_tfl_unprepared: false
+    axes:
+      technique: MPRAGE
+
+  - name: a Siemens two-echo FLASH magnitude keeps its echoes apart
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Mag_Images'
+      text_protocol_name: 'gre_r3x3_1p5mm'
+      text_sequence_name: 'fl3d2r'
+      n_slices: 96
+      repetition_time: 41
+      echo_time: 22
+      flip_angle: 15
+      echo_train_length: 2
+    flags:
+      siemens_two_echo_fl: true
+    axes:
+      technique: MEGRE
+
+  - name: guard, a Siemens two-point Dixon part stays a spoiled FLASH
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS3D'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'sag T1 3D GRE Dixon_W'
+      text_sequence_name: 'fl3d2_ns'
+      n_slices: 176
+      repetition_time: 7
+      echo_time: 2.4
+      flip_angle: 9
+      echo_train_length: 2
+    flags:
+      siemens_two_echo_fl: false
+
+  - name: a Siemens multi-echo FLASH output named Combined is the echoes combined
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\SWI\DIS3D\NORM'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax SWI GRE iso_SWI_Combined'
+      text_sequence_name: 'WIPfl3d3'
+      n_slices: 380
+      repetition_time: 22
+      echo_time: 19
+      flip_angle: 10
+      echo_train_length: 3
+    flags:
+      siemens_echoes_combined_named: true
+    axes:
+      technique: MEDIC
+
+  - name: guard, one echo of a Siemens three-echo FLASH stays ME-GRE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS3D\NORM'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax SWI GRE iso_Mag'
+      text_sequence_name: 'WIPfl3d3'
+      split_reason: multi_echo
+      n_slices: 380
+      repetition_time: 22
+      echo_time: 12
+      flip_angle: 10
+      echo_train_length: 3
+    flags:
+      siemens_echoes_combined_named: false
+    axes:
+      technique: MEGRE
+
+  - name: a Siemens two-echo field map's phase difference combines its echoes
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'gre_field_mapping'
+      text_sequence_name: '*fm2d2r'
+      n_slices: 50
+      repetition_time: 495
+      echo_time: 7.4
+      flip_angle: 60
+    flags:
+      siemens_fieldmap_phase_difference: true
+    axes:
+      technique: MEDIC
+
+  - name: a Siemens fast 3D FLASH subtraction given contrast is a CE-MRA
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND\SUB'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'SUB_S18-S15_1'
+      text_protocol_name: 'Subtraction'
+      text_sequence_name: '*fl3d1'
+      text_contrast: Dotarem
+      n_slices: 44
+      repetition_time: 3.3
+      echo_time: 1.2
+      flip_angle: 25
+    flags:
+      siemens_fast_fl3d_ce: true
+    axes:
+      technique: CE-MRA
+
+  - name: guard, a post-contrast VIBE is no CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_vibe_tra +CE'
+      text_sequence_name: '*fl3d1'
+      text_contrast: Dotarem
+      n_slices: 80
+      repetition_time: 4.5
+      echo_time: 1.9
+      flip_angle: 10
+    flags:
+      siemens_fast_fl3d_ce: false
+
+  - name: a Siemens velocity-encoded FLASH phase is a phase-contrast velocity image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\RETRO\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax Cine aqueduct_P'
+      text_sequence_name: '*fl2d1_v020in'
+      n_slices: 1
+      repetition_time: 60
+      echo_time: 9
+      flip_angle: 15
+    flags:
+      siemens_velocity_encoded: true
+    axes:
+      technique: PC
+      construct: Velocity
+
+  - name: a Siemens FLASH named for SWI and written as the acquisition has no Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_swi3d_tra_p2'
+      text_sequence_name: '*fl3d1r'
+      n_slices: 88
+      repetition_time: 49
+      echo_time: 40
+      flip_angle: 15
+    flags:
+      siemens_flash_swi_acquired: true
+
+  - name: guard, a Siemens FLASH SWI output named Mag_Images keeps Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Mag_Images'
+      text_protocol_name: 't2_swi3d_tra'
+      text_sequence_name: '*fl3d1r'
+      n_slices: 88
+      repetition_time: 49
+      echo_time: 40
+      flip_angle: 15
+    flags:
+      siemens_flash_swi_acquired: false
+
+  - name: a Siemens SWI minIP written ORIGINAL MNIP has base SWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\MNIP\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'mIP_Images(SW)'
+      text_sequence_name: 'fl3d2r'
+      n_slices: 89
+      repetition_time: 41
+      echo_time: 22
+      flip_angle: 15
+      echo_train_length: 2
+    flags:
+      susceptibility_minip: true
+    axes:
+      base: SWI
+
+  - name: the imaginary part of a Philips SWIp echo is Imaginary with no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\I_FFE\I\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1FFE
+      text_series_description: 'SWIp_4echo'
+      n_slices: 120
+      repetition_time: 26
+      echo_time: 18
+      flip_angle: 12
+      echo_train_length: 4
+    flags:
+      gre_component_no_psir: true
+    axes:
+      construct: Imaginary
+      base: ''
+
+  - name: a Philips enhanced FFE named eT2W is T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: OSP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: FFE
+      text_series_description: 'eT2W_FFE SENSE'
+      n_slices: 30
+      repetition_time: 985
+      echo_time: 6.9
+      flip_angle: 25
+    axes:
+      base: 'T2*w'
+
+  - name: GE multi-echo QSM's SWI output is SWI, not QSM
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: psd/QSM/me
+      ge_internal_pulse_sequence_name: EFGRE3D
+      ge_private_image_type: '3'
+      text_series_description: 'SWI | psd/QSM/me | EFGRE3D'
+      n_slices: 78
+      repetition_time: 54
+      echo_time: 49
+      flip_angle: 15
+    flags:
+      ge_qsm_me_swi_output: true
+    axes:
+      construct: SWI
+
+  - name: a Siemens TSE Dixon part written DIXW is the water image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      scan_options: DIXW
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_dixon_sag_W'
+      text_sequence_name: '*tse2d1_3'
+      n_slices: 17
+      repetition_time: 758
+      echo_time: 12
+      flip_angle: 150
+      echo_train_length: 3
+    flags:
+      has_water: true
+    axes:
+      construct: Water
+
+  - name: a GE IDEAL part prefixed WATER is the water image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: 'FAST_GEMS\EDR_GEMS\IDEAL_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: fse-xl
+      text_series_description: 'WATER:CorT1 IDEAL'
+      n_slices: 20
+      repetition_time: 1376
+      echo_time: 14
+      flip_angle: 90
+      echo_train_length: 4
+    flags:
+      has_water: true
+    axes:
+      construct: Water

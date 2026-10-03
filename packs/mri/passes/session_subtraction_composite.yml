@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0, round 5's case 5 (record 48, "Conventions, round 5"): a
+# subtraction made from a stitched composite carries both, the
+# subtraction (in our vocabulary the provenance SubtractionDerived) and the
+# stitching (the construct Composed). The research takes Composed where it
+# is stated, by an image type, a name, or source images from two or more
+# stations, never from a large field of view alone. A Philips subtraction
+# written `DERIVED\PRIMARY\M\M\DERIVED` and named for the subtraction only
+# states neither; the session shows its source: a MobiView composite of
+# the same orientation, matrix and size beside it, a series number or two
+# before it.
+#
+# The final certificate's grade: a Philips `subtraktion T1 sag` of 1,460
+# rows beside its `MobiView Composing T1 sag KM`, settled Composed by the
+# adjudicator from that sibling. On the archive one more subtraction sits
+# beside a composite of its geometry.
+#
+# The same engine guards as `session.yml`: a sibling is seen by its header
+# alone, a value the header decided is never replaced, and every value
+# written has tier `session`.
+
+pass: session_subtraction_composite
+kind: session_context
+phase: after
+
+target:
+  when:
+    all:
+      - {axis: provenance, is: SubtractionDerived}
+      - {not: {axis: construct, is: Composed}}
+
+session:
+  sibling_fields:
+    - manufacturer
+    - image_type
+    - text_series_description
+    - text_protocol_name
+    - text_sequence_name
+    - text_body_part
+    - text_series_comments
+    - text_image_comments
+    - orientation
+    - rows
+    - columns
+    - n_slices
+    - series_number
+  replaces_at_most: 0.85
+
+rules:
+  - rule: a_composite_of_its_geometry_beside
+    sibling:
+      series_number: {within: 5}
+      same: [orientation, rows, columns]
+      when: {any: [is_composite, composed_named]}
+    require: some
+    set:
+      construct: [Composed]
+    confidence: 0.8
+    why: 'a composite of the same orientation, matrix and size sits beside it, so this subtraction was made from that stitched composite'
+    sources:
+      - 'record 48, conventions round 5, case 5: a subtraction of a composed image is Subtraction and Composed'
+      - 'the final certificate''s grade, part 2: a Philips subtraktion settled Composed from its MobiView sibling'
+
+emit:
+  review_item_below: 0.70

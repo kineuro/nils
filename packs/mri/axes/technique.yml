@@ -259,10 +259,14 @@ values:
     terms: ['dynamic contrast enhanced', 'DCE-MRI', 'DCE perfusion', 'permeability']
     description: 'dynamic contrast enhanced perfusion: a T1-weighted 3D spoiled gradient echo repeated through a bolus'
     family: GRE
-    requires: {any: [is_dce_series, dce_words]}
+    # MRI pack 0.25.0 (round 5, case 1): or a Siemens TWIST-VIBE dynamic run
+    # that names no angiography (flags.yml, `twist_vibe_dynamic`): DCE by
+    # default; an angiography name keeps it CE-MRA.
+    requires: {any: [is_dce_series, dce_words, twist_vibe_dynamic]}
     keywords:
       - dce
       - dynamic contrast enhanced
+    alternative_flags: [twist_vibe_dynamic]
     detection:
       combination: [is_dce_series]
   Perfusion-EPI:
@@ -360,7 +364,10 @@ values:
     # MRI pack 0.24.0: never where the header states a readout of another
     # family (flags.yml, section 19); the same guard is on every spin-echo
     # value below.
-    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
+    # MRI pack 0.25.0 (the protocol sweep): nor a GE 2D fast spin echo by its
+    # pulse sequence named Cube (flags.yml, section 26d), nor a Siemens 3D
+    # HASTE, single-shot (section 26e).
+    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}, {not: ge_2d_fse_psd}, {not: siemens_haste_3d}]}
     keywords:
       - space
       - cube
@@ -399,7 +406,9 @@ values:
     family: SE
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
-    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
+    # MRI pack 0.25.0 (the protocol sweep): nor a Siemens spin echo named
+    # STIR whose header states no inversion (flags.yml, section 26d).
+    requires: {all: [{not: flair_named_dual_echo}, {not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}, {not: siemens_stir_named_without_inversion}]}
     keywords:
       - tirm
       - stir
@@ -434,6 +443,9 @@ values:
       - multi echo se
       - multi-echo se
       - dual echo se
+    # MRI pack 0.25.0: or a Siemens pre-turbo dual echo split by echo whose
+    # file says research mode (flags.yml, section 26d).
+    alternative_flags: [siemens_pre_turbo_dual_echo_se]
     detection:
       exclusive: is_me_se
       combination: [is_multi_echo, has_se]
@@ -513,6 +525,9 @@ values:
       - me-mprage
       - multi echo mprage
       - multi-echo mprage
+    # The fingerprint's 2026-10-03 fields: never a Philips 3D TFE with no
+    # inversion prepulse (flags.yml, section 26g).
+    requires: {not: philips_tfe_no_prepulse}
     detection:
       combination: [is_multi_echo, has_ir, has_gre, is_3d]
   # Siemens `tfl` is TurboFLASH in 2D and 3D, so bare TFL is FSP-GRE's and
@@ -527,7 +542,16 @@ values:
     # MRI pack 0.21.0: nor a Philips 3D turbo field echo whose enhanced
     # module says InversionRecovery NO (record 48, conventions round 3, case
     # 17): FSP-GRE.
-    requires: {all: [{not: smart_survey}, {not: philips_tfe_no_inversion}]}
+    # MRI pack 0.25.0: nor a Siemens `tfl3d1` that states no preparation
+    # (flags.yml, section 26b). And case 17's clause is withdrawn: a Philips
+    # 3D TFE written InversionRecovery NO is an MPRAGE where its `MP` or an
+    # inversion time says so, since every such stack read carries an
+    # inversion prepulse; with neither, its technique cannot be told
+    # (flags.yml, section 26f; rules/cant_tell.yml).
+    # The fingerprint's 2026-10-03 fields: never a Philips 3D TFE whose
+    # Prepulse Type is NO, SAT or ECHO, and one whose type is INV or BBI is
+    # an MPRAGE whatever else it states (flags.yml, section 26g).
+    requires: {all: [{not: smart_survey}, {not: siemens_tfl_unprepared}, {not: philips_tfe_no_prepulse}]}
     keywords:
       - mprage
       # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
@@ -539,7 +563,7 @@ values:
       - ir spgr
     # MRI pack 0.24.0: or a Siemens 3D gradient echo whose repetition time is
     # a shot interval (flags.yml section 23).
-    alternative_flags: [siemens_mprage_by_shot_tr]
+    alternative_flags: [siemens_mprage_by_shot_tr, philips_tfe_inversion_prepulse]
     detection:
       exclusive: is_mprage
       combination: [has_ir, has_gre, is_3d]
@@ -580,6 +604,9 @@ values:
       - inhance inflow
     # MRI pack 0.14.0: or a 3D gradient echo named for angiography, of a
     # time-of-flight's repetition time (flags.yml, `tof_by_words`).
+    # The fingerprint's 2026-10-03 fields: or a Siemens 3D FLASH acquisition
+    # named for nothing whose AngioFlag is Y (flags.yml, section 26g).
+    alternative_flags: [angio_flag_flash]
     detection:
       exclusive: is_tof
       combination: [tof_by_words]
@@ -614,6 +641,15 @@ values:
     # MRI pack 0.20.0: or a Siemens MEAN phase or magnitude over the echoes of
     # a multi-echo gradient echo (record 48, dev-5's case 5; flags.yml,
     # `combined_echoes_stated`).
+    # MRI pack 0.25.0 (round 5, case 2): or a GE SWAN output, its echoes
+    # combined as a weighted average (flags.yml, `ge_swan_combined`).
+    # MRI pack 0.25.0 (the protocol sweep): and a Siemens multi-echo FLASH
+    # output named Combined, and a Siemens two-echo field map's phase
+    # difference (flags.yml, section 26b).
+    # MRI pack 0.25.0 (Nima, 2026-10-03): and the SWI image and minIP a
+    # two-echo Siemens FLASH computes, inside the SWI route or not (flags.yml,
+    # section 26f).
+    alternative_flags: [ge_swan_combined, siemens_echoes_combined_named, siemens_fieldmap_phase_difference, siemens_two_echo_fl_swi_output]
     detection:
       exclusive: is_medic
       combination: [combined_echoes_stated]
@@ -661,6 +697,9 @@ values:
       - b-ffe
       - bffe
       - trufi
+    # MRI pack 0.25.0: or GE's `efgre3d` without SP at a flip angle of 40
+    # degrees or more, FIESTA by its physics (flags.yml, section 26a).
+    alternative_flags: [ge_efgre3d_steady_state]
     detection:
       exclusive: is_ssfp
   DESS:

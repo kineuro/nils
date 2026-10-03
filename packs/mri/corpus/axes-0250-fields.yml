@@ -1,0 +1,249 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: the rules that read the fingerprint's fields of 2026-10-03
+# (flags.yml, section 26g): the Philips TFE prepulse, AngioFlag, the temporal
+# resolution, Acquisition Contrast, DiffusionDirectionality and
+# PhotometricInterpretation. Every stack here is invented from the pattern
+# the design repository's files name; none is a real header.
+
+cases:
+
+  # --- the Philips 3D TFE by its Prepulse Type
+
+  - name: a Philips 3D TFE written MP whose Prepulse Type is NO is a turbo field echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      philips_prepulse_type: 'NO'
+      philips_prepulse_delay: '0'
+      text_series_description: 'T1 3D TFE'
+      repetition_time: 8
+      echo_time: 3.7
+      flip_angle: 8
+    flags:
+      philips_tfe_no_prepulse: true
+    axes:
+      technique: TurboFLASH
+
+  - name: a Philips 3D TFE without MP whose Prepulse Type is INV is an MPRAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      inversion_recovery: 'NO'
+      philips_prepulse_type: INV
+      philips_prepulse_delay: '1000'
+      text_series_description: 'cst1w_3d_tfe/Gd'
+      repetition_time: 8.1
+      echo_time: 3.7
+      flip_angle: 8
+    flags:
+      philips_tfe_inversion_prepulse: true
+      philips_tfe_cant_tell: false
+    axes:
+      technique: MPRAGE
+
+  - name: a Philips 3D TFE mDixon without MP whose Prepulse Type is NO is a turbo field echo, no longer undecided
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\W\W\DIXON'
+      scanning_sequence: RM
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      philips_prepulse_type: 'NO'
+      text_series_description: 'T1_3D_TFE_mDixon KM CS'
+      repetition_time: 6.5
+      echo_time: 2.1
+      flip_angle: 10
+    flags:
+      philips_tfe_cant_tell: false
+    axes:
+      technique: TurboFLASH
+
+  # --- AngioFlag
+
+  - name: an unnamed Siemens 3D FLASH acquisition whose AngioFlag is Y is a time of flight
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      angio_flag: 'Y'
+      text_series_description: 'Series 7'
+      text_sequence_name: '*fl3d1r'
+      n_slices: 120
+      repetition_time: 22
+      echo_time: 3.6
+      flip_angle: 18
+    flags:
+      angio_flag_flash: true
+    axes:
+      technique: TOF
+
+  - name: guard, the same FLASH with AngioFlag N stays a FLASH
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      angio_flag: 'N'
+      text_series_description: 'Series 7'
+      text_sequence_name: '*fl3d1r'
+      n_slices: 120
+      repetition_time: 22
+      echo_time: 3.6
+      flip_angle: 18
+    flags:
+      angio_flag_flash: false
+
+  - name: a TWIST-VIBE dynamic run named for no angiography whose AngioFlag is Y is a CE-MRA
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      angio_flag: 'Y'
+      text_series_description: 't1_vibe-twist_tra_dyn_p2'
+      text_sequence_name: '*fldyn3d1'
+      n_slices: 40
+      temporal_positions: 20
+      repetition_time: 4
+      echo_time: 1.5
+      flip_angle: 12
+    flags:
+      twist_angio_evidence: true
+      twist_vibe_dynamic: false
+
+  - name: guard, a TWIST-VIBE Dixon dynamic run with AngioFlag N and frames 3 s apart stays DCE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\DIXON\WATER'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      angio_flag: 'N'
+      temporal_resolution: 3000
+      text_series_description: 't1_vibe-twist_dixon_tra_dyn_p2_TTC=6.7s_W'
+      text_sequence_name: '*fldyn3d2'
+      n_slices: 36
+      temporal_positions: 30
+      repetition_time: 4
+      echo_time: 1.3
+      flip_angle: 12
+    flags:
+      twist_angio_evidence: false
+    axes:
+      technique: DCE
+
+  # --- Acquisition Contrast (round 4, R9)
+
+  - name: a gradient echo that names no weighting and states Acquisition Contrast T2_STAR is T2*-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      acquisition_contrast: T2_STAR
+      text_series_description: 'gre_3d_tra'
+      text_sequence_name: '*fl3d1r'
+      repetition_time: 30
+      echo_time: 8
+      flip_angle: 15
+    axes:
+      base: T2*w
+
+  - name: guard, an inversion in the STIR window stating Acquisition Contrast T1 stays T2-weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      acquisition_contrast: T1
+      text_series_description: 'cor_tirm'
+      text_sequence_name: '*tir2d1_7'
+      repetition_time: 5000
+      echo_time: 40
+      inversion_time: 160
+    axes:
+      base: T2w
+
+  # --- DiffusionDirectionality ISOTROPIC
+
+  - name: an enhanced diffusion stack whose images are all written ISOTROPIC is Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      sop_class_uid: '1.2.840.10008.5.1.4.1.1.4.1'
+      philips_scanning_technique: DwiSE
+      diffusion_directionality: ISOTROPIC
+      diffusion_b_value: 1000
+      dwi_b_values: '1000'
+      text_series_description: 'DWI'
+      n_slices: 30
+      n_instances: 1
+      repetition_time: 4500
+      echo_time: 80
+    flags:
+      isotropic_stated: true
+    axes:
+      construct: Trace
+
+  - name: guard, a stack of directional images beside its b=0 and the isotropic one takes no Trace from the directionality
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      sop_class_uid: '1.2.840.10008.5.1.4.1.1.4.1'
+      diffusion_directionality: 'DIRECTIONAL,ISOTROPIC,NONE'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      text_series_description: 'ep2d_diff'
+      n_slices: 30
+      n_instances: 1
+      repetition_time: 4500
+      echo_time: 80
+    flags:
+      isotropic_stated: false
+
+  # --- PhotometricInterpretation
+
+  - name: a SyMRI map saved in colour is a display composite, read as its screenshot is
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T1'
+      manufacturer: SyntheticMR
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_series_description: 'SyMRI T1 map'
+    flags:
+      symri_colour_display: true
+    axes:
+      directory_type: excluded
+      construct: ''
+
+  - name: guard, the same map in grey levels is a T1 map
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T1'
+      manufacturer: SyntheticMR
+      photometric_interpretation: MONOCHROME2
+      samples_per_pixel: 1
+      text_series_description: 'SyMRI T1 map'
+    flags:
+      symri_colour_display: false

@@ -868,7 +868,9 @@ cases:
       provenance: ProjectionDerived
       technique: MPRAGE
 
-  - name: guard, a GE reformat named Cube T2 FLAIR over a BRAVO header is left to its name
+  # MRI pack 0.25.0 (Nima, 2026-10-03): neither the name nor the header; the
+  # axes they disagree on cannot be told (rules/cant_tell.yml).
+  - name: guard, a GE reformat named Cube T2 FLAIR over a BRAVO header is left undecided where they disagree
     stack:
       image_type: 'DERIVED\SECONDARY\REFORMATTED'
       scanning_sequence: GR
@@ -885,7 +887,9 @@ cases:
     flags:
       vendor_gre_readout_named: false
     axes:
-      technique: SPACE
+      technique: ''
+      modifier: ''
+      base: ''
 
   - name: a Siemens TurboFLASH reformat named space is MPRAGE
     stack:
@@ -1845,7 +1849,8 @@ cases:
       technique: VIBE
 
   # A TWIST-VIBE dynamic run that names no angiography is left out of
-  # CE-MRA (DCE or time-resolved CE-MRA is open); its map keeps base PWI.
+  # CE-MRA; since pack 0.25.0 (round 5, case 1) it is DCE, and its map
+  # keeps base PWI.
   - name: a Siemens TWIST-VIBE's time-to-peak map keeps base PWI
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\WATER\TTP'
@@ -1862,7 +1867,7 @@ cases:
       echo_time: 1.2
       flip_angle: 9
     axes:
-      technique: VIBE
+      technique: DCE
       base: PWI
 
   # --- singles

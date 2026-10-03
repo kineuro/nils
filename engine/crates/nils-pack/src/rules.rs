@@ -436,7 +436,17 @@ pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
             }
         }
     }
-    for set in rule_sets {
+    // An axis's own rule set first, then the routes and helpers in their
+    // order: the first flag that reaches a value is its exclusive one, and
+    // that is the axis's own, not a narrow helper's that happens to run
+    // before the axis (MRI pack 0.25.0's `mp2rage_reformat` took MPRAGE's).
+    let is_axis = |set: &RuleSet| axes.iter().any(|a| a.name == set.name);
+    let ordered: Vec<&RuleSet> = rule_sets
+        .iter()
+        .filter(|s| is_axis(s))
+        .chain(rule_sets.iter().filter(|s| !is_axis(s)))
+        .collect();
+    for set in ordered {
         for rule in &set.rules {
             for s in &rule.sets {
                 let own = set.name == axes[s.axis].name;

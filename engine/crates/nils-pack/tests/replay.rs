@@ -173,3 +173,24 @@ fn a_replay_names_the_axes_a_rule_decided_as_nothing() {
         "{magnitude}"
     );
 }
+
+#[test]
+fn a_replay_names_the_constraints_its_answer_breaks() {
+    // As a classification does (record 48): the pack's constraints read on
+    // the answer, the rule set that decided each axis left out of its own
+    // implication. A plain T2 TSE breaks none, and the line says so.
+    let pack = mri();
+    let tse = json!({
+        "stack": 31,
+        "header": {
+            "texts": {"series_description": "t2_tse_tra", "sequence_name": "*tse2d1_15"},
+            "sequence": {"image_type": "ORIGINAL\\PRIMARY\\M\\ND", "scanning_sequence": "SE",
+                         "sequence_variant": "SK\\SP", "mr_acquisition_type": "2D"},
+            "physics": {"manufacturer": "SIEMENS", "repetition_time": 4000,
+                        "echo_time": 100, "flip_angle": 150, "echo_train_length": 15},
+        },
+    });
+    let r = nils_pack::replay::replay(&pack, &tse).unwrap();
+    assert_eq!(r["values"]["technique"], "TSE", "{r}");
+    assert_eq!(r["broken"], json!([]), "{r}");
+}

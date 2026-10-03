@@ -14,7 +14,9 @@ cases:
   # --- a Philips TFE by the module's PulseSequenceName (case 17 on a
   # classic object that keeps the module)
 
-  - name: a classic Philips 3D T1 TFE with no private technique, whose module says InversionRecovery NO, is FSP-GRE
+  # MRI pack 0.25.0: InversionRecovery NO no longer decides (Nima, 2026-10-03,
+  # after research round 6): with `MP` and no Prepulse Type read, an MPRAGE.
+  - name: a classic Philips 3D T1 TFE with no private technique, whose module says InversionRecovery NO, is an MPRAGE by its MP
     stack:
       image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
       scanning_sequence: GR
@@ -33,9 +35,10 @@ cases:
       echo_train_length: 190
     flags:
       philips_tfe: true
-      philips_tfe_no_inversion: true
+      philips_3d_tfe: true
+      philips_tfe_cant_tell: false
     axes:
-      technique: TurboFLASH
+      technique: MPRAGE
 
   - name: the same object whose module says InversionRecovery YES stays an MPRAGE
     stack:

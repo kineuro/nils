@@ -630,6 +630,53 @@ fn the_mri_reformat_passes_read_the_source_beside() {
 }
 
 /// The MRI pack, copied, with `edit` applied to one of its files.
+/// MRI pack 0.25.0, round 5's case 5: a subtraction keeps its composite's
+/// Composed where a composite of its geometry sits beside it.
+#[test]
+fn the_mri_subtraction_pass_reads_the_composite_beside() {
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let axis = |n: &str| pack.axes.iter().position(|a| a.name == n).unwrap();
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.name == "session_subtraction_composite")
+        .expect("the pass");
+    let (session, target) = (pass.session().unwrap(), pass.target.as_ref());
+    let force: Vec<InForce> = pack
+        .axes
+        .iter()
+        .map(|a| match a.name.as_str() {
+            "provenance" => InForce {
+                values: vec!["SubtractionDerived".into()],
+                tier: "keywords".into(),
+                confidence: 0.9,
+            },
+            _ => InForce::default(),
+        })
+        .collect();
+    const STITCHED: &str = "DERIVED\\PRIMARY\\M\\M\\DERIVED";
+    let sub = philips("905", "subtraktion T1 sag", STITCHED);
+    let composite = philips("904", "MobiView Composing T1 sag KM", STITCHED);
+    let run = |sibs: &[Sib]| decide(&pack, target, session, &sub, &[], &force, sibs);
+    let a = run(&[sib(1, composite.clone(), false, None)]).expect("the rule holds");
+    assert_eq!(a.rule, "a_composite_of_its_geometry_beside");
+    assert_eq!(
+        a.writes,
+        [(axis("construct"), vec!["Composed".to_string()])]
+    );
+    // Not beside a composite of another geometry, nor beside a plain series.
+    let mut other = composite.clone();
+    other.set("rows", Value::Text(Some("1460"))).unwrap();
+    let plain = philips("904", "T1 sag", "ORIGINAL\\PRIMARY\\M_SE\\M\\SE");
+    for (why, sibs) in [
+        ("alone", vec![]),
+        ("another geometry", vec![sib(1, other, false, None)]),
+        ("no composite", vec![sib(1, plain, false, None)]),
+    ] {
+        assert_eq!(run(&sibs), None, "{why}");
+    }
+}
+
 fn edited(file: &str, edit: impl Fn(&str) -> String) -> PathBuf {
     fn copy(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();

@@ -1,0 +1,426 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: the protocol sweep's rule gaps in how a name, an MT token
+# and an inversion recovery are read (flags.yml, section 26d). One or more
+# cases for each rule, and the cases that keep each rule from reaching what
+# it must not. Every stack here is invented from the pattern the design
+# repository's files name; none is a real header.
+
+cases:
+
+  # --- a FLAIR word on a magnetisation-prepared gradient echo
+
+  - name: a GE BRAVO reformat named T1 FLAIR CUBE is an MPRAGE with no FLAIR
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS\FILTERED_GEMS\ACC_GEMS\FSP_GEMS\IR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: BRAVO
+      text_series_description: 'MPR COR T1 FLAIR CUBE'
+      n_slices: 100
+      repetition_time: 7
+      echo_time: 2.8
+      inversion_time: 450
+      flip_angle: 12
+    axes:
+      technique: MPRAGE
+      modifier: ''
+      base: T1w
+
+  - name: a Siemens MPRAGE view named Ax Flair takes no FLAIR
+    stack:
+      image_type: 'DERIVED\SECONDARY\MPR\CSA MPR THICK'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SP\MP\OSP'
+      scan_options: 'IR\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Ax Flair'
+      text_protocol_name: 't1_mpr_sag_iso'
+      text_sequence_name: '*tfl3d1'
+      n_slices: 60
+      repetition_time: 1800
+      echo_time: 3.5
+      inversion_time: 1100
+      flip_angle: 15
+    axes:
+      technique: MPRAGE
+      modifier: ''
+
+  - name: guard, a Siemens dark-fluid TIRM keeps its FLAIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_tra_dark-fluid'
+      text_sequence_name: '*tir2d1_13'
+      n_slices: 25
+      repetition_time: 9000
+      echo_time: 85
+      inversion_time: 2500
+      flip_angle: 150
+      echo_train_length: 13
+    axes:
+      modifier: FLAIR
+
+  # --- a GE 2D fast spin echo named Cube
+
+  - name: a GE 2D fse-xl reformat named T1 CUBE is a TSE
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED\AVERAGE'
+      scanning_sequence: SE
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FAST_GEMS\SAT_GEMS\EDR_GEMS\FILTERED_GEMS\SP'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: fse-xl
+      text_series_description: 'MPR Ax T1 CUBE'
+      n_slices: 120
+      repetition_time: 460
+      echo_time: 8.7
+      flip_angle: 160
+      echo_train_length: 3
+    flags:
+      ge_2d_fse_psd: true
+    axes:
+      technique: TSE
+
+  - name: guard, a GE 3D Cube stays 3D-TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: 'SK\MP'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: Cube
+      text_series_description: 'Sag T1 CUBE'
+      n_slices: 180
+      repetition_time: 600
+      echo_time: 12
+      flip_angle: 90
+      echo_train_length: 24
+    flags:
+      ge_2d_fse_psd: false
+    axes:
+      technique: SPACE
+
+  # --- a GE exam's ProtocolName is no FLAIR's weighting
+
+  - name: a GE Cube T2 FLAIR in an exam whose protocol says T1 is T2w
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED\AVERAGE'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: 'SAT_GEMS\EDR_GEMS\FILTERED_GEMS\FS\IR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: CubeT2flair
+      text_series_description: 'MPR Ax T2 CUBE FLAIR'
+      text_protocol_name: '(T1) Neuronavigation'
+      n_slices: 100
+      repetition_time: 7600
+      echo_time: 118
+      inversion_time: 2050
+      flip_angle: 90
+      echo_train_length: 180
+      field_strength_normalized: 1.5
+    axes:
+      base: T2w
+
+  # --- base MTw from the MT token
+
+  - name: a Siemens T1 spin echo with an MT pulse stays T1w, MT its modifier
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'MTC\SP'
+      scan_options: MT
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_se_tra-MTC'
+      text_sequence_name: '*se2d1'
+      n_slices: 20
+      repetition_time: 550
+      echo_time: 8
+      flip_angle: 90
+    flags:
+      mt_token_on_gre: false
+    axes:
+      modifier: MT
+      base: T1w
+
+  - name: guard, a Siemens FLASH with an MT pulse is MTw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'MTC\SP'
+      scan_options: MT
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'gre_3d_mtw'
+      text_sequence_name: '*fl3d1'
+      n_slices: 60
+      repetition_time: 30
+      echo_time: 4
+      flip_angle: 10
+    flags:
+      mt_token_on_gre: true
+    axes:
+      base: MTw
+
+  - name: guard, a Siemens TSE with an MT pulse and no weighting word stays MTw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\MTC\SP\OSP'
+      scan_options: MT
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'tse_med_MTC'
+      text_sequence_name: '*tse2d1_7'
+      n_slices: 20
+      repetition_time: 5000
+      echo_time: 12
+      flip_angle: 180
+      echo_train_length: 7
+    flags:
+      mt_token_on_gre: true
+    axes:
+      base: MTw
+
+  # --- STIR, fat saturation and the words
+
+  - name: a Siemens TSE named STIR with FS and no inversion is a fat-saturated TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_STIR_cor'
+      text_sequence_name: '*tse2d1_15'
+      n_slices: 27
+      repetition_time: 3500
+      echo_time: 103
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      siemens_stir_named_without_inversion: true
+    axes:
+      technique: TSE
+      modifier: FatSat
+
+  - name: guard, a Siemens TIRM named STIR with its inversion keeps STIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_stir_cor'
+      text_sequence_name: '*tir2d1_10'
+      n_slices: 23
+      repetition_time: 6000
+      echo_time: 70
+      inversion_time: 160
+      flip_angle: 150
+      echo_train_length: 10
+    flags:
+      siemens_stir_named_without_inversion: false
+    axes:
+      technique: TIRM
+      modifier: STIR
+
+  - name: a SPACE inversion recovery reformat at a short TI is STIR by its stem
+    stack:
+      image_type: 'DERIVED\SECONDARY\AXIAL\AVERAGE'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      scan_options: 'SP\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Sectra Reconstruction'
+      text_sequence_name: '*spcir_134'
+      n_slices: 99
+      repetition_time: 3000
+      echo_time: 188
+      inversion_time: 220
+      echo_train_length: 110
+    flags:
+      ir_stated: true
+    axes:
+      modifier: STIR
+
+  - name: a name that says no fatsat gives no FatSat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: GR
+      sequence_variant: SK
+      scan_options: 'PFP\PFF'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'MRA-CE sag vibe twist 5s no fatsat'
+      text_sequence_name: '*fldyn3d1_ns'
+      text_contrast: Clariscan
+      n_slices: 160
+      repetition_time: 3.3
+      echo_time: 1.5
+      flip_angle: 9
+    flags:
+      fat_sat_negated: true
+    axes:
+      modifier: ''
+
+  - name: guard, a name that says fatsat still gives FatSat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ax t1 fatsat +k'
+      text_sequence_name: '*tse2d1_3'
+      n_slices: 20
+      repetition_time: 600
+      echo_time: 10
+      flip_angle: 150
+      echo_train_length: 3
+    flags:
+      fat_sat_negated: false
+    axes:
+      modifier: FatSat
+
+  # --- DR3: the real part of a Siemens inversion recovery
+
+  - name: a Siemens range that kept the real component of a t1_space_ir is PSIR, T1w
+    stack:
+      image_type: 'DERIVED\PRIMARY\R\NONE\PARALLEL\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      scan_options: 'PFP\PER'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't1_space_ir_sag_p2_MPR_tra'
+      text_protocol_name: 't1_space_ir_sag_p2'
+      n_slices: 95
+      repetition_time: 4000
+      echo_time: 380
+      flip_angle: 120
+      echo_train_length: 242
+    flags:
+      siemens_real_ir_named: true
+    axes:
+      modifier: PSIR
+      base: T1w
+
+  - name: a Siemens real inversion recovery named STIR is PSIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\R\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'Cor Stir 3mm'
+      text_sequence_name: '*tir2d1_10'
+      n_slices: 23
+      repetition_time: 6000
+      echo_time: 72
+      inversion_time: 165
+      flip_angle: 150
+      echo_train_length: 10
+      field_strength_normalized: 1.5
+    axes:
+      modifier: PSIR
+      construct: Real
+
+  - name: a Siemens reformat named PSIR of an inversion recovery is Real
+    stack:
+      image_type: 'DERIVED\PRIMARY\MPR\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: 'IR\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'Cor T1 3D PSIR TrueIR_MPR_sag'
+      text_sequence_name: '*spcir_257ns'
+      n_slices: 80
+      repetition_time: 4000
+      echo_time: 381
+      inversion_time: 380
+      flip_angle: 120
+      echo_train_length: 242
+    flags:
+      psir_named_ir_reformat: true
+    axes:
+      modifier: PSIR
+      construct: 'MPR,Real'
+
+  # --- sequence identities
+
+  - name: a Siemens enhanced object whose PulseSequenceName is tseR is RESTORE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NONE'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      sop_class_uid: '1.2.840.10008.5.1.4.1.1.4.1'
+      pulse_sequence_name: '*tseR2d1_15'
+      echo_pulse_sequence: SPIN
+      multiple_spin_echo: 'YES'
+      text_series_description: 't2_tse_tra_384'
+      n_slices: 25
+      repetition_time: 6000
+      echo_time: 97
+      flip_angle: 150
+      echo_train_length: 15
+    flags:
+      siemens_pulse_tse_restore: true
+    axes:
+      technique: RESTORE
+
+  - name: a Siemens pre-turbo dual-echo spin echo split by echo is ME-SE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: OSP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'PD_T2_SE_TR'
+      text_sequence_name: 'se2'
+      split_reason: multi_echo
+      n_slices: 19
+      repetition_time: 2000
+      echo_time: 80
+      flip_angle: 90
+      echo_train_length: 1
+    flags:
+      siemens_pre_turbo_dual_echo_se: true
+    axes:
+      technique: MESE
+
+  - name: guard, a Siemens plain spin echo of one echo stays SE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_se_tra'
+      text_sequence_name: '*se2d1'
+      n_slices: 20
+      repetition_time: 550
+      echo_time: 10
+      flip_angle: 90
+      echo_train_length: 1
+    flags:
+      siemens_pre_turbo_dual_echo_se: false
+    axes:
+      technique: SE

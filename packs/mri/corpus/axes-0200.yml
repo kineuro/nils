@@ -1146,7 +1146,11 @@ cases:
       technique: PC
       construct: MIP
 
-  - name: a GE Inhance named for no velocity stays inflow
+  # MRI pack 0.25.0: IFLOW_GEMS rides on Inhance 3D Velocity on every
+  # archive stack that shows its pulse sequence, and every reference read
+  # such a stack a phase contrast: PC-MRA, not inflow (the protocol sweep's
+  # disputes).
+  - name: a GE Inhance with IFLOW_GEMS named for no velocity is a phase contrast
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: GR
@@ -1159,4 +1163,4 @@ cases:
       echo_time: 4.7
       flip_angle: 10
     axes:
-      technique: TOF
+      technique: PC

@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.24.0");
+    assert_eq!(pack.id(), "mri@0.25.0");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        477,
+        563,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -127,7 +127,26 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          dynamic run kept out of CE-MRA, and the 24 of round 4, the name \
          against the physics: the field bins, the inversion and its STIR, \
          T1-IR and FLAIR windows, the weighting words, the readouts, R1 to R8 \
-         and their qualifiers"
+         and their qualifiers, and the 5 of pack 0.25.0, conventions round \
+         5: a GE SWAN's echoes combined, the IP of a GE MIN IP, an old \
+         Philips acquisition written T1 MAP, a quantitative T1 map, and a \
+         subtraction of a composite, and the 55 of a protocol sweep's rule gaps \
+         (exported and session reformats, planning series, two-echo and \
+         combined gradient echoes, a fast FLASH CE-MRA, velocity-encoded \
+         FLASH, gradient-echo components, Dixon part prefixes, GE's map \
+         families, SyMRI's synthetic contrasts and split maps, diffusion \
+         references, names against the sequence, MT weighting, STIR and PSIR \
+         edges) and its settled disputes, and the 8 of the study's questions \
+         as Nima answered them after research round 6, less case 17's 3D TFE \
+         with no inversion it withdraws: a Philips 3D TFE and one whose \
+         prepulse cannot be told, a GE BRAVO reformat named a Cube FLAIR, a \
+         Siemens name with fs, a two-echo FLASH's \
+         SWI outputs, and a GE reversed run, its nominal b=0 values and its \
+         review band, and the 18 that read the fingerprint's fields of \
+         2026-10-03: the TFE prepulse (five), AngioFlag (three: the flag, a TWIST's \
+         angio signal and an unnamed FLASH angiogram), Acquisition \
+         Contrast (seven), an isotropic directionality, and a SyMRI stack \
+         saved in colour (two)"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

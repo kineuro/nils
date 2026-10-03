@@ -61,7 +61,9 @@ rules:
   multi_qmap:
     clauses:
       - {flag: has_multi_qmap, tier: exclusive}
-      - {keywords: [multi_qmap, qmaps], tier: keywords}
+      # MRI pack 0.25.0: the name names the set; a split map's image type
+      # (`QMAP\T1`) says which map it is (flags.yml, section 26c).
+      - {when: {all: [{text: search_text, any_substring: [multi_qmap, qmaps]}, {not: qmap_split_stated}]}, cite: 'qmaps', source: text, tier: keywords}
     set: {base: null, base_basis: null, contrast_mix: null, construct: [MultiQmap], technique: {from: symri_technique}, directory_type: anat}
     why: 'one series carrying the T1, T2 and PD maps together, as GE MAGiC writes them'
 
@@ -157,6 +159,9 @@ rules:
 
   synthetic_flair:
     clauses:
+      # MRI pack 0.25.0: or Philips' `(Synthetic)` contrast by its parameters
+      # (flags.yml, section 26c).
+      - {flag: synthetic_flair_by_params, tier: exclusive}
       - {flag: has_flair_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: flair}, {text: search_text, substring: synthetic}]}, cite: 'synthetic flair', source: text, tier: keywords}
     set: {base: 'T2w', base_basis: physics, contrast_mix: null, construct: [SyntheticFLAIR], modifier: [FLAIR], technique: {from: symri_technique}, directory_type: anat}
@@ -169,6 +174,9 @@ rules:
 
   synthetic_psir:
     clauses:
+      # MRI pack 0.25.0: or Philips' `(Synthetic)` contrast by its parameters
+      # (flags.yml, section 26c).
+      - {flag: synthetic_psir_by_params, tier: exclusive}
       - {flag: has_psir_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: psir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic psir', source: text, tier: keywords}
     set: {base: 'T1w', base_basis: physics, contrast_mix: null, construct: [SyntheticPSIR], modifier: [PSIR], technique: {from: symri_technique}, directory_type: anat}
@@ -181,6 +189,9 @@ rules:
 
   synthetic_t1:
     clauses:
+      # MRI pack 0.25.0: or Philips' `(Synthetic)` contrast by its parameters
+      # (flags.yml, section 26c).
+      - {flag: synthetic_t1w_by_params, tier: exclusive}
       - {flag: has_t1_synthetic, tier: exclusive}
       - when:
           all:
@@ -196,6 +207,9 @@ rules:
 
   synthetic_t2:
     clauses:
+      # MRI pack 0.25.0: or Philips' `(Synthetic)` contrast by its parameters
+      # (flags.yml, section 26c).
+      - {flag: synthetic_t2w_by_params, tier: exclusive}
       - {flag: has_t2_synthetic, tier: exclusive}
       - when:
           all:
@@ -210,6 +224,9 @@ rules:
 
   synthetic_pd:
     clauses:
+      # MRI pack 0.25.0: or Philips' `(Synthetic)` contrast by its parameters
+      # (flags.yml, section 26c).
+      - {flag: synthetic_pdw_by_params, tier: exclusive}
       - {flag: has_pd_synthetic, tier: exclusive}
       - {when: {all: [{text: search_text, substring: pd}, {text: search_text, substring: synthetic}]}, cite: 'synthetic pd', source: text, tier: keywords}
     set: {base: 'PDw', base_basis: physics, contrast_mix: null, construct: [SyntheticPDw], technique: {from: symri_technique}, directory_type: anat}

@@ -2470,9 +2470,10 @@ enum PackCommand {
     /// object, with the private elements the pack shows and the session
     /// list, so the rules that read a private element and the session pass
     /// act as they do in production. JSON lines out: `{stack, values,
-    /// tiers, none, session, private, withheld}`, where `none` names the
-    /// axes a rule decided as nothing. The physics vote reads the
-    /// whole registry and is not replayed
+    /// tiers, none, session, private, withheld, broken}`, where `none`
+    /// names the axes a rule decided as nothing and `broken` the pack's
+    /// constraints the answer breaks, as a classification reports them. The
+    /// physics vote reads the whole registry and is not replayed
     Replay {
         /// The pack directory
         dir: PathBuf,
@@ -3570,10 +3571,12 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
             let ov = load_overlay(overlay.as_ref())?;
             let pack = nils_pack::load(&dir, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
             let packets = read_packets(input.as_deref()).map_err(fail)?;
+            // The constraints once for the run, not once a packet.
+            let constraints = nils_pack::legal::class_constraints(&pack);
             let mut n = 0usize;
             for (at, p) in &packets {
-                let out =
-                    nils_pack::replay::replay(&pack, p).map_err(|e| fail(format!("{at}: {e}")))?;
+                let out = nils_pack::replay::replay_with(&pack, p, &constraints)
+                    .map_err(|e| fail(format!("{at}: {e}")))?;
                 println!("{out}");
                 n += 1;
             }

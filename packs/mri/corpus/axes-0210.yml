@@ -815,7 +815,9 @@ cases:
 
   # --- Philips 3D T1 TFE (case 17)
 
-  - name: a Philips 3D T1 TFE whose module says InversionRecovery NO is FSP-GRE, not MPRAGE
+  # MRI pack 0.25.0 (Nima, 2026-10-03, after research round 6): InversionRecovery
+  # NO no longer decides; with `MP` and no Prepulse Type read, an MPRAGE.
+  - name: a Philips 3D T1 TFE whose module says InversionRecovery NO is an MPRAGE by its MP
     stack:
       image_type: 'ORIGINAL\PRIMARY\T1\NONE'
       scanning_sequence: GR
@@ -831,7 +833,7 @@ cases:
       flip_angle: 8
       echo_train_length: 238
     axes:
-      technique: TurboFLASH
+      technique: MPRAGE
 
   - name: a Philips 3D T1 TFE whose module says InversionRecovery YES is an MPRAGE
     stack:
@@ -864,7 +866,9 @@ cases:
       echo_time: 3.7
       flip_angle: 8
     flags:
-      philips_tfe_no_inversion: false
+      philips_tfe_cant_tell: false
+    axes:
+      technique: MPRAGE
 
   # --- GE Silent MRA (case 18)
 

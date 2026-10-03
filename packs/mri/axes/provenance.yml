@@ -47,6 +47,10 @@ values:
       - synt
       - qrapmaster
     alternative_flags: [has_t1_synthetic, has_t2_synthetic, has_pd_synthetic, has_flair_synthetic, is_mdme, is_qalas, has_multi_qmap]
+    # MRI pack 0.25.0: never a GE series whose pulse sequence is stated and
+    # is none of SyMRI's, in an exam GE's ProtocolName names MAGiC
+    # (flags.yml, section 26c).
+    requires: {not: ge_pulse_not_symri}
     detection:
       combination: [is_synthetic, is_derived]
   # MRI pack 0.18.0: GE's NeuroMix, EPIMix's successor, whose blocks are
@@ -85,7 +89,9 @@ values:
   # `dsc_not_swi`; sealed-1 A2, the deep research, case 18).
   SWIRecon:
     terms: ['SWI reconstruction', 'SWAN', 'SWI']
-    requires: {not: dsc_not_swi}
+    # MRI pack 0.25.0: never a position display, the planning picture of the
+    # SWI series it names (flags.yml, section 26a).
+    requires: {all: [{not: dsc_not_swi}, {not: image_type.is_posdisp}]}
     keywords:
       - swi
       - swan
@@ -203,7 +209,9 @@ values:
     # slices a plane that no vendor flag marks, nor a composite of other
     # than survey stations (record 48, conventions round 3; flags.yml,
     # section 18). GE's calibration is the value Calibration now.
-    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}, {not: planning_word_too_many_slices}, {not: composite_not_survey}]}
+    # MRI pack 0.25.0: nor a series of more than 5 slices a plane whose only
+    # planning word is the sequence name `scout` (flags.yml, section 26e).
+    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}, {not: planning_word_too_many_slices}, {not: composite_not_survey}, {not: scout_sequence_name_only}]}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer
@@ -245,7 +253,9 @@ values:
     alternative_flags: [is_mip, is_minip, is_mpr, is_projection, projection_extra, composite_not_survey]
     # MRI pack 0.21.0: never GE's collapse of a 2D phase contrast, the
     # acquisition's own image (case 5).
-    requires: {all: [{not: is_diffusion_projection}, {not: ge_pc_2d_collapse}]}
+    # MRI pack 0.25.0: nor a stated subtraction of a composite, which is
+    # SubtractionDerived with Composed (round 5, case 5; flags.yml, section 25).
+    requires: {all: [{not: is_diffusion_projection}, {not: ge_pc_2d_collapse}, {not: subtraction_of_a_composite}]}
   SubtractionDerived:
     terms: ['subtraction', 'SUB', 'post minus pre']
     keywords:

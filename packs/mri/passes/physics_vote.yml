@@ -71,6 +71,32 @@ target:
             - {axis: construct, is: B1map}
             # MRI pack 0.24.0: a B0 map, as the base rules decide it.
             - {axis: construct, is: B0map}
+            # MRI pack 0.25.0: a quantitative map, whose base the rules
+            # decide as nothing since round 5 (on the archive 60 Siemens
+            # MP2RAGE T1 maps would otherwise be voted a base),
+            - {axis: construct, is: T1map}
+            - {axis: construct, is: R1map}
+            - {axis: construct, is: T2map}
+            - {axis: construct, is: R2map}
+            - {axis: construct, is: PDmap}
+            - {axis: construct, is: Qmap}
+            # an R2* map, as the SWI route decides it, and
+            # the stacks rules/cant_tell.yml leaves for a person (Nima,
+            # 2026-10-03): a Philips 3D gradient echo with no technique,
+            # no `MP` and no inversion time (a TFE whose prepulse is not
+            # read), and a GE gradient-echo reformat named a Cube.
+            - {axis: construct, is: R2starmap}
+            - all:
+                - {text: manufacturer, prefix: philips}
+                - {field: mr_acquisition_type, eq: '3D'}
+                - {axis: technique, missing_or: Unknown}
+                - {not: {text: sequence_variant, matches: '(^|\\)mp(\\|$)'}}
+                - {not: {field: inversion_time, gt: 0}}
+            - all:
+                - {text: manufacturer, prefix: ge}
+                - {text: image_type, prefix: derived}
+                - {text: scanning_sequence, matches: 'gr'}
+                - {text: text_series_description, matches: '(^|[^a-z])cube'}
             - {axis: directory_type, is: excluded}
             - all:
                 - any: [{axis: construct, is: Real}, {axis: construct, is: Imaginary}]
