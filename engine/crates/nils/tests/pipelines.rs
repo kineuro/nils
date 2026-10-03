@@ -1390,6 +1390,12 @@ impl Server {
     }
 
     fn start_with(lab: &Lab, extra: &[&str]) -> Server {
+        Server::start_env(lab, extra, &[])
+    }
+
+    /// [`Server::start_with`], with variables for the server and the runs
+    /// it starts.
+    fn start_env(lab: &Lab, extra: &[&str], env: &[(&str, &Path)]) -> Server {
         let tokens = [
             format!("{OPERATOR}=ops@lab:operator"),
             format!("{PLAIN}=pat@lab:pipelines:work,pipelines:see"),
@@ -1411,6 +1417,7 @@ impl Server {
             ])
             .args(["--pack-dir", packs().to_str().unwrap()])
             .args(extra)
+            .envs(env.iter().copied())
             .env("NILS_TOKENS", tokens)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -2727,7 +2734,8 @@ exit 1
 
 /// A pipeline of the stacks layout whose units run apart (record 49 A1):
 /// each unit sees its own stack alone, notes when it starts and ends in the
-/// file `LANE_TRACE` names, sleeps, and writes one file.
+/// file `LANE_TRACE` names, waits while the file `SLOW_HOLD` names is there,
+/// sleeps, and writes one file.
 fn stack_slow(name: &str, needs: &str, extra: &str) -> String {
     format!(
         r#"name: {name}
@@ -2755,6 +2763,9 @@ command-line: |
       with open(os.environ["LANE_TRACE"], "a") as f:
           f.write("%s %.6f %s %s %s\n" % (w, time.time(), os.environ["NILS_UNIT"], os.environ.get("CUDA_VISIBLE_DEVICES", "-"), os.environ["NILS_CORES"]))
   mark("start")
+  hold = os.environ.get("SLOW_HOLD")
+  while hold and os.path.exists(hold):
+      time.sleep(0.05)
   time.sleep(float(sys.argv[3]))
   s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
   open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
@@ -3100,14 +3111,18 @@ fn a_long_run_and_a_digest_go_on_together() {
     }
     let lab = Lab::new("pipelines-lane-digest");
     lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
-    // one unit at a time: four units of three seconds each
+    // one unit at a time, and the first held while the hold file is there:
+    // the run is still going when the digest is done because the test says
+    // so, not because the digest was quick enough to beat a timer
     lab.ok(&["pipeline", "lane", "--cores", "1"], None);
+    let hold = lab.bin.path().join("hold");
+    std::fs::write(&hold, b"").unwrap();
     let src = format!("src={}", lab._src.path().display());
-    let server = Server::start_with(&lab, &["--ingest-root", &src]);
+    let server = Server::start_env(&lab, &["--ingest-root", &src], &[("SLOW_HOLD", &hold)]);
     let (status, doc) = server.call(
         "POST",
         "/api/jobs",
-        Some(json!({"command": ["run", "slow", "--select", "selection:every@1", "--param", "sleep=3"]})),
+        Some(json!({"command": ["run", "slow", "--select", "selection:every@1", "--param", "sleep=0.2"]})),
         OPERATOR,
     );
     assert_eq!(status, 202, "{doc}");
@@ -3146,6 +3161,7 @@ fn a_long_run_and_a_digest_go_on_together() {
     let during = job(run_job);
     assert_eq!(during["state"], "running", "{during}");
     assert!(during["progress"]["over"].as_u64().unwrap() < 4, "{during}");
+    std::fs::remove_file(&hold).unwrap();
     let mut state = Value::Null;
     for _ in 0..900 {
         state = job(run_job);
