@@ -57,6 +57,11 @@ derive:
       # MRI pack 0.25.0 (round 5, case 2): a GE SWAN output written one image
       # per slice combines its echoes as a weighted average.
       - {when: ge_swan_combined, value: comb-ME-GRE}
+      # MRI pack 0.25.0 (the protocol sweep): a Siemens multi-echo FLASH
+      # output named Combined combines its echoes; a two-echo `fl3d2r` keeps
+      # them apart (flags.yml, section 26b).
+      - {when: siemens_echoes_combined_named, value: comb-ME-GRE}
+      - {when: siemens_two_echo_fl, value: ME-GRE}
       # MRI pack 0.24.0: a GE SWI made by EPI is EPI by its pulse sequence
       # (D12), whatever its train (flags.yml, section 20, `ge_swi_epi_psd`).
       - {when: ge_swi_epi_psd, value: EPI}
@@ -111,6 +116,11 @@ derive:
       # MRI pack 0.25.0 (round 5, case 2): a GE SWAN output written one image
       # per slice combines its echoes as a weighted average.
       - {when: ge_swan_combined, value: comb-ME-GRE}
+      # MRI pack 0.25.0 (the protocol sweep): a Siemens multi-echo FLASH
+      # output named Combined combines its echoes; a two-echo `fl3d2r` keeps
+      # them apart (flags.yml, section 26b).
+      - {when: siemens_echoes_combined_named, value: comb-ME-GRE}
+      - {when: siemens_two_echo_fl, value: ME-GRE}
       - {when: ge_swi_epi_psd, value: EPI}
       # the rest as swi_technique
       - {when: is_gre_epi, value: GRE-EPI}
@@ -124,7 +134,7 @@ derive:
       - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
       - {value: GRE}
 
-order: [minip, mip, phase, real, philips_swip_view, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
+order: [minip, mip, phase, gre_component, real, philips_swip_view, swi, projection, r2star, acquired_echo, magnitude, ge_magnitude, qsm_source_echo, qsm, mpr, fallback]
 
 rules:
 
@@ -132,6 +142,9 @@ rules:
     clauses:
       - {flag: is_minip, tier: exclusive}
       - {keywords: [minip, 'min ip'], tier: keywords}
+      # MRI pack 0.25.0: and a `mini-mip`, a Philips SWIp's minimum projection
+      # (the protocol sweep), before the MIP its image type states.
+      - {when: {any: [{text: text_series_description, matches: '(?i)mini.?mip'}, {text: text_protocol_name, matches: '(?i)mini.?mip'}]}, cite: 'mini-mip', source: text, tier: exclusive}
     set:
       # A projection through the volume, as any other minIP is (pack 0.9.0);
       # its base is still SWI.
@@ -206,6 +219,27 @@ rules:
   # image of the acquisition as the magnitude is, RawRecon and T2*w, with
   # construct Real, where the route called it the SWI image (dev-1, one
   # stack, three cells).
+  # MRI pack 0.25.0 (the protocol sweep): the real or imaginary component of
+  # a gradient echo without PSIR evidence (Philips' per-echo `R_FFE` and
+  # `I_FFE` of a SWIp acquisition) has no base, as a spin echo's has (case
+  # 24); the imaginary one takes construct Imaginary (flags.yml, section 26b).
+  gre_component:
+    clauses:
+      - {when: {all: [gre_component_no_psir, {not: has_swi}, {not: has_phase}]}, cite: 'a real or imaginary gradient-echo component without PSIR', source: flags, tier: exclusive}
+    set:
+      provenance: RawRecon
+      base: null
+      base_basis: null
+      contrast_mix: null
+      construct:
+        - {value: Real, when: has_real}
+        - {value: Imaginary, when: has_imaginary}
+        - {value: ND, when: has_nd}
+        - {value: ORIG, when: is_ge_orig}
+      technique: {from: swi_component_technique}
+      directory_type: misc
+    confidence: 0.85
+
   real:
     clauses:
       - {when: {all: [has_real, {not: has_swi}, {not: has_phase}]}, cite: 'has_real without a SWI token', source: flags, tier: exclusive}
@@ -254,6 +288,9 @@ rules:
       # MRI pack 0.24.0 (the final certificate's A9): the SWI image of GE's
       # SWI research sequence, named for it (flags.yml, section 20).
       - {when: ge_swi_psd_output, cite: ge_swi_psd_output, source: flags, tier: exclusive}
+      # MRI pack 0.25.0 (the protocol sweep): GE multi-echo QSM's output named
+      # SWI (flags.yml, section 26b).
+      - {when: ge_qsm_me_swi_output, cite: ge_qsm_me_swi_output, source: flags, tier: exclusive}
     set:
       base: SWI
       base_basis: physics
@@ -298,7 +335,9 @@ rules:
       base_basis: physics
       contrast_mix: null
       construct:
-        - {value: QSM, when: {any: [has_qsm, {text: search_text, substring: qsm}]}}
+        # MRI pack 0.25.0: never the `QSM` of GE's `psd/QSM/me` sequence name
+        # on its other outputs (the protocol sweep).
+        - {value: QSM, when: {any: [has_qsm, {all: [{text: search_text, substring: qsm}, {not: ge_qsm_me_psd}]}]}}
         - R2starmap
         - {value: EchoCombined, when: is_mean}
         - {value: ND, when: has_nd}

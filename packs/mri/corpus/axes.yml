@@ -2297,7 +2297,10 @@ cases:
 
   # The SWI route: the real part, a magnitude named for QSM, a reformat,
   # and a multi-echo readout.
-  - name: the real part of a Philips SWIp is an acquired T2*-weighted image
+  # MRI pack 0.25.0 (the protocol sweep): with no base, as round 3's case 24
+  # reads a component without PSIR evidence, whose intensity follows the
+  # receiver phase.
+  - name: the real part of a Philips SWIp is an acquired component with no base
     stack:
       image_type: 'ORIGINAL\PRIMARY\R_FFE\R\FFE'
       scanning_sequence: GR
@@ -2307,7 +2310,7 @@ cases:
     axes:
       provenance: RawRecon
       construct: Real
-      base: 'T2*w'
+      base: ''
 
   - name: a magnitude of a multi-echo series named QSM is no QSM map
     stack:

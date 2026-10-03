@@ -22,6 +22,8 @@ order:
   - 'construct:b1map'
   - 'flag:inline_t1_map'
   - 'r3:no_base'
+  - 'flag:susceptibility_minip'
+  - 'flag:mpm_pd_named'
   - 'technique:MPRAGE'
   - 'technique:MEMPRAGE'
   - 'technique:MP2RAGE'
@@ -178,7 +180,7 @@ rules:
       - {when: {axis: construct, is: Speed}, cite: 'a phase-contrast speed image', source: construct}
       - when:
           all:
-            - se_component_no_psir
+            - {any: [se_component_no_psir, gre_component_no_psir]}
             - {not: {axis: modifier, is: PSIR}}
             - {not: {axis: modifier, is: IR}}
             - {not: {axis: modifier, is: FLAIR}}
@@ -213,6 +215,25 @@ rules:
     set: {base: null, base_basis: null, contrast_mix: null}
     confidence: 0.9
     why: 'an inline T1 map is a fitted relaxation time with no base contrast'
+
+  # MRI pack 0.25.0 (the protocol sweep): a minimum projection of a
+  # susceptibility acquisition has base SWI whichever route reached it (Nima's
+  # convention 3 of 2026-09-28; flags.yml, section 26b), and a multi-echo
+  # gradient echo named for PD in the multi-parameter mapping protocol is PDw
+  # by its name, as its MTw sibling is MTw.
+  'flag:susceptibility_minip':
+    clauses:
+      - {flag: susceptibility_minip, tier: exclusive}
+    set: {base: 'SWI', base_basis: physics, contrast_mix: null}
+    confidence: 0.9
+    why: 'a minimum intensity projection of a susceptibility acquisition is SWI'
+
+  'flag:mpm_pd_named':
+    clauses:
+      - {flag: mpm_pd_named, tier: keywords}
+    set: {base: 'PDw', base_basis: name+physics, contrast_mix: null}
+    confidence: 0.85
+    why: 'a multi-parameter mapping echo named for proton density at a low flip is PDw'
 
   'technique:MPRAGE':
     clauses:

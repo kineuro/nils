@@ -531,7 +531,9 @@ values:
     # MRI pack 0.21.0: nor a Philips 3D turbo field echo whose enhanced
     # module says InversionRecovery NO (record 48, conventions round 3, case
     # 17): FSP-GRE.
-    requires: {all: [{not: smart_survey}, {not: philips_tfe_no_inversion}]}
+    # MRI pack 0.25.0: nor a Siemens `tfl3d1` that states no preparation
+    # (flags.yml, section 26b).
+    requires: {all: [{not: smart_survey}, {not: philips_tfe_no_inversion}, {not: siemens_tfl_unprepared}]}
     keywords:
       - mprage
       # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
@@ -620,7 +622,10 @@ values:
     # `combined_echoes_stated`).
     # MRI pack 0.25.0 (round 5, case 2): or a GE SWAN output, its echoes
     # combined as a weighted average (flags.yml, `ge_swan_combined`).
-    alternative_flags: [ge_swan_combined]
+    # MRI pack 0.25.0 (the protocol sweep): and a Siemens multi-echo FLASH
+    # output named Combined, and a Siemens two-echo field map's phase
+    # difference (flags.yml, section 26b).
+    alternative_flags: [ge_swan_combined, siemens_echoes_combined_named, siemens_fieldmap_phase_difference]
     detection:
       exclusive: is_medic
       combination: [combined_echoes_stated]

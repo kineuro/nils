@@ -257,7 +257,8 @@ flags:
   # MRI pack 0.18.0: `hint_pca` also reads Philips' `PCA` token (parsers.yml).
   # MRI pack 0.21.0: and GE's VASCPC_GEMS and phase-contrast pulse sequences
   # (section 18; dev-6's A6).
-  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca, mech_pc, ge_phase_contrast]}
+  # MRI pack 0.25.0: and a Siemens velocity-encoded FLASH (section 26b).
+  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca, mech_pc, ge_phase_contrast, siemens_velocity_encoded]}
   is_flair:   {any: [sequence_name.is_flair_seq, scan_options.has_t1flair_gems,
                      scan_options.has_t2flair_gems, image_type.has_flair_synthetic]}
   # MRI pack 0.24.0: and Philips' private scan technique `Du-IR` (section 22).
@@ -460,8 +461,12 @@ flags:
                         philips_dixon_part]}
   # MRI pack 0.21.0: and Philips' per-frame part token (2005,140F) of an
   # enhanced mDixon object (parsers.yml, `frame_image_type`).
-  has_water:     {any: [image_type.has_water, frame_image_type.has_water]}
-  has_fat:       {any: [image_type.has_fat, frame_image_type.has_fat]}
+  # MRI pack 0.25.0: and Siemens' Dixon part in ScanOptions (`DIXW`,
+  # `DIXF`), and GE IDEAL's part prefix (`WATER:`, `FAT:`) (section 26b).
+  has_water:     {any: [image_type.has_water, frame_image_type.has_water, scan_options.has_dix_water,
+                        {all: [{text: manufacturer, prefix: ge}, {text: text_series_description, matches: '(?i)^\s*water\s*:'}]}]}
+  has_fat:       {any: [image_type.has_fat, frame_image_type.has_fat, scan_options.has_dix_fat,
+                        {all: [{text: manufacturer, prefix: ge}, {text: text_series_description, matches: '(?i)^\s*fat\s*:'}]}]}
   # MRI pack 0.25.0: never the `IP` of a GE `MIN IP` (section 25).
   has_in_phase:  {all: [{any: [image_type.has_in_phase, frame_image_type.has_in_phase]}, {not: in_phase_token_of_a_minip}]}
   has_out_phase: {any: [image_type.has_out_phase, frame_image_type.has_out_phase]}
@@ -925,6 +930,8 @@ flags:
       # T2-named gradient echo is T2*w; dev-6's R3c at TE 6.5 ms).
       - any:
           - {text: search_text, matches: '(^|[^a-z0-9])t2w?([^a-z0-9*]|$)'}
+          # MRI pack 0.25.0: and Philips' `eT2W_FFE` (the protocol sweep)
+          - {text: search_text, matches: '(^|[^a-z0-9])et2w?[ _]?ffe'}
           # MRI pack 0.20.0: and Philips' `optT2` (dev-5's A5), read from
           # the series' own words, never GE's exam-level ProtocolName.
           - {text: technique_text, matches: 'optt2w?([^a-z0-9*]|$)'}
@@ -1340,6 +1347,8 @@ flags:
       - any:
           - {text: text_sequence_name, matches: '^\*?(wip_?)?fl[23]d([3-9]|[1-9][0-9])'}
           - {text: technique_text, matches: '(^|[^0-9])([3-9]|[1-9][0-9]) ?echoes'}
+          # MRI pack 0.25.0: and a two-echo `fl3d2r` (section 26b)
+          - siemens_two_echo_fl
   # MRI pack 0.20.0: or a Philips FFE written one echo per stack (section 17).
   is_me_gre: {any: [{all: [is_multi_echo, has_gre]}, me_gre_named, philips_per_echo_ffe]}
   # Philips' multi-echo FFE combined into one image (mFFE, the sum over its
@@ -2182,6 +2191,8 @@ flags:
               - {text: technique_text, matches: '(^|[^a-z])(mra|angio|angiography)'}
               - any: [contrast_said, {text: technique_text, matches: '(^|[^a-z])ce([^a-z]|$)'}]
           - all: [scan_options.has_tof_gems, {not: ge_vasctof_as_tof}, {not: ge_spgr_named}]
+          # MRI pack 0.25.0: a Siemens CE-MRA written as a fast FLASH (section 26b)
+          - siemens_fast_fl3d_ce
 
   # --- construct PBP and K2 (case 17): by Siemens' tokens or the name.
   pbp_stated:
@@ -2214,6 +2225,9 @@ flags:
       - any:
           - {parser: image_type, any_token: [VELOCITY, VEL, VELOCITY_MAP]}
           - {text: technique_text, matches: '(^|[^a-z])(velocity|vel|venc)([^a-z]|$)'}
+          # MRI pack 0.25.0: the phase of a Siemens velocity-encoded FLASH
+          # (section 26b)
+          - {all: [siemens_velocity_encoded, has_phase]}
 
   # === 16. MRI pack 0.19.0 (record 53): the enhanced object's mechanism =====
   # The deep research's case 22 (PS3.3 C.8.13.4, the MR Pulse Sequence
@@ -2897,6 +2911,8 @@ flags:
       - philips_swi_acquired_echo
       - all: [ge_swi_unprefixed, {not: has_magnitude}]
       - siemens_qsm_acquired_echo
+      # MRI pack 0.25.0 (section 26b)
+      - siemens_flash_swi_acquired
   # A4: GE's MEMP of one echo is a spin echo, whatever research mode and
   # the flip say (case 31).
   ge_memp_single_echo:
@@ -3751,3 +3767,149 @@ flags:
 
   # --- GE names its subtraction of two series `(exam/series/1)-(exam/series/1)`.
   ge_subtraction_named: {text: text_series_description, matches: '\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)\s*-\s*\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)'}
+  # === 26b. MRI pack 0.25.0: the protocol sweep, gradient echoes ============
+  #
+  # The protocol sweep's error list outside its held-out go sample (the
+  # design repository's `studies/2026-10-02-protocol-sweep/grade.md`, part
+  # 2), the gradient-echo groups, each widened to its rule.
+
+  # --- a Siemens FLASH that states two echoes in its stem (`fl3d2r`, the
+  # two-echo susceptibility protocol) is a multi-echo gradient echo, its
+  # echoes kept apart unless it says they are combined (case 13); case 9's
+  # single-echo FLASH reading is for `fl…1` only. Never a Dixon, whose two
+  # echoes make one part (case 10).
+  siemens_two_echo_fl:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl[23]d2r'}
+      # its per-echo components (Mag_Images, Pha_Images); what it computed
+      # (SWI, its minIP) is left as it was: the references read its SWI image
+      # both SP-GRE and comb-ME-GRE
+      - {not: has_swi}
+      - {not: is_minip}
+      - {not: has_dixon}
+      - {not: {text: search_text, matches: 'dixon'}}
+  # --- a Siemens multi-echo FLASH output named Combined (`..._SWI_Combined`,
+  # `..._mIP_Combined`): its echoes combined into one image, comb-ME-GRE.
+  siemens_echoes_combined_named:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl[23]d([2-9]|[1-9][0-9])'}
+      - {text: search_text, matches: '(^|[^a-z])combined([^a-z]|$)'}
+      - {not: is_multi_echo}
+  # --- a Siemens two-echo field map's phase (`fm2d2`, written once per
+  # slice at the second echo): the phase difference of its two echoes, an
+  # echo combination. Its magnitudes, one per echo, stay ME-GRE.
+  siemens_fieldmap_phase_difference:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fm2d2'}
+      - has_phase
+      - {not: is_multi_echo}
+
+  # --- a Siemens contrast-enhanced angiography written as a plain fast 3D
+  # FLASH (`*fl3d1`, TR under 5 ms, TE under 2.2 ms, flip 20° or more): with
+  # a contrast agent or a subtraction, and a subtraction token, a bolus
+  # timing (`TT=`, `TTC`, care bolus), `_CE` or a subtraction protocol.
+  # AngioFlag (0018,0025), which these files set, is not in the fingerprint.
+  siemens_fast_fl3d_ce:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl3d1(_|$)'}
+      - is_3d
+      - {field: repetition_time, gt: 0}
+      - {field: repetition_time, lt: 5}
+      - {field: echo_time, lt: 2.2}
+      - {field: flip_angle, ge: 20}
+      - {not: {text: technique_text, matches: 'vibe|dixon'}}
+      - any: [contrast_said, is_subtraction]
+      - any:
+          - is_subtraction
+          - {text: technique_text, matches: '(^|[^a-z])(ce|subtraction|tt|ttc)([^a-z]|$)|care ?bolus'}
+          - {text: text_image_comments, matches: '(?i)(^|[^a-z])ttc([^a-z]|$)'}
+
+  # --- a Siemens `tfl3d1` that states no preparation (no MP, no IR, no
+  # inversion time) and is ORIGINAL or named without IR (`utan IR`): a
+  # turbo FLASH, FSP-GRE, not MPRAGE. A reformat drops MP from its own
+  # header, so a DERIVED one stays MPRAGE unless its name says so.
+  siemens_tfl_unprepared:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?tfl3d1'}
+      - {not: sequence_variant.has_mag_prepared}
+      - {not: scanning_sequence.has_ir}
+      - {not: mech_ir}
+      - {not: {field: inversion_time, gt: 0}}
+      - any:
+          - image_type.is_original
+          - {text: search_text, matches: '(utan|without|ohne|no|w/o) ?ir([^a-z]|$)'}
+
+  # --- a Siemens velocity-encoded FLASH (`*fl2d1_v020in`, `_v50rl`): a phase
+  # contrast, PC-MRA, whose phase is the velocity image.
+  siemens_velocity_encoded:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl[23]d\d+_v\d+'}
+
+  # --- a Siemens FLASH (`fl3d1r`) named for SWI and written as the
+  # acquisition (ORIGINAL, component M, named for its protocol and not as an
+  # output `Mag_Images`): an acquired echo, with no Magnitude (N7); the SWI
+  # route's own magnitude is a `swi3d` sequence's or an output so named.
+  siemens_flash_swi_acquired:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl[23]d1r'}
+      - image_type.is_original
+      - has_magnitude
+      - {not: has_swi}
+      - {not: is_mean}
+      - {not: {text: text_series_description, matches: '(?i)(^|[^a-z])mag(_| )?images|(^|[^a-z])mag([^a-z]|$)'}}
+
+  # --- a minimum intensity projection of a susceptibility acquisition has
+  # base SWI (Nima's ruling of 2026-09-28, convention 3), whichever route
+  # reached it: a Siemens `MNIP` of `mIP_Images(SW)`, a GE SWAN `MIN IP`.
+  susceptibility_minip:
+    all:
+      - is_minip
+      - has_gre
+      - any:
+          - has_swi
+          - ge_swan_combined
+          - {text: search_text, matches: '(^|[^a-z])(swi|swan|sw)([^a-z]|$)|swi_|_sw'}
+
+  # --- the real and imaginary components of a gradient echo (Philips'
+  # per-echo `R_FFE`, `I_FFE` of a SWIp acquisition), without PSIR
+  # evidence, have no base, as a spin echo's have (case 24): their
+  # intensity follows the receiver phase.
+  gre_component_no_psir:
+    all:
+      - any: [has_real, has_imaginary]
+      - has_gre
+      - {not: has_se}
+      - {not: has_ir}
+      - {not: has_psir}
+      - {not: is_mean}
+      - {not: {any: [is_projection, is_minip, is_mip, is_mpr]}}
+
+  # --- a multi-echo gradient echo named for proton density in the
+  # multi-parameter mapping protocol (`PDw_fa4`): PDw by its name, as its
+  # `MTw_fa` sibling is MTw (the name stays the default, round 4).
+  mpm_pd_named:
+    all:
+      - has_gre
+      - {not: has_se}
+      - any:
+          - {text: text_series_description, matches: '(?i)(^|[^a-z])pdw?[ _-]?fa ?\d'}
+          - {text: text_protocol_name, matches: '(?i)(^|[^a-z])pdw?[ _-]?fa ?\d'}
+
+  # --- GE's multi-echo QSM (`psd/QSM/me`) writes its SWI output under the
+  # output word `SWI` before the pulse sequence's name; the `QSM` inside
+  # `psd/QSM/me` is the sequence's, not the output's.
+  ge_qsm_me_swi_output:
+    all:
+      - ge_qsm_me_psd
+      - {text: text_series_description, matches: '(?i)^\s*swi\b'}
+  ge_qsm_me_qsm_output:
+    all:
+      - ge_qsm_me_psd
+      - {text: text_series_description, matches: '(?i)^\s*qsm\b'}
