@@ -2456,9 +2456,10 @@ enum PackCommand {
     /// object, with the private elements the pack shows and the session
     /// list, so the rules that read a private element and the session pass
     /// act as they do in production. JSON lines out: `{stack, values,
-    /// tiers, none, session, private, withheld}`, where `none` names the
-    /// axes a rule decided as nothing. The physics vote reads the
-    /// whole registry and is not replayed
+    /// tiers, none, session, private, withheld, broken}`, where `none`
+    /// names the axes a rule decided as nothing and `broken` the pack's
+    /// constraints the answer breaks, as a classification reports them. The
+    /// physics vote reads the whole registry and is not replayed
     Replay {
         /// The pack directory
         dir: PathBuf,

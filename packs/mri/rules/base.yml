@@ -354,7 +354,11 @@ rules:
   # is on no other comb-ME-GRE stack of the archive.
   'technique:comb-ME-GRE':
     clauses:
-      - {when: {all: [{axis: technique, is: 'comb-ME-GRE'}, {not: {any: [{axis: construct, is: SWI}, {axis: construct, is: MIP}, {axis: construct, is: MinIP}]}}]}, cite: 'comb-ME-GRE', source: technique}
+      # MRI pack 0.25.0: and never a map or an output a susceptibility route
+      # decides itself (a GE multi-echo QSM's QSM and R2* maps, base SWI by
+      # the route): the implication says what an acquired echo combination
+      # is, and 0.24.0 broke it on 63 such stacks.
+      - {when: {all: [{axis: technique, is: 'comb-ME-GRE'}, {not: {any: [{axis: construct, is: SWI}, {axis: construct, is: MIP}, {axis: construct, is: MinIP}, {axis: construct, is: QSM}, {axis: construct, is: R2starmap}, {axis: construct, is: B0map}, {axis: provenance, is: SWIRecon}]}}]}, cite: 'comb-ME-GRE', source: technique}
     set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.9
     why: 'the comb-ME-GRE technique implies a T2*w base contrast'
@@ -767,9 +771,12 @@ rules:
       - {keywords: ['pwi', 'perfusion', 'dsc', 'dce', 'perf '], tier: keywords}
     set: {base: 'PWI', base_basis: name, contrast_mix: null}
 
+  # MRI pack 0.25.0: never on a position display, which carries the name of
+  # the series it plans (a `PosDisp: [n] sag SWI EPI` on a HASTE; the
+  # exclusion `swi-base-not-spin-echo` broke on three).
   'keywords:SWI':
     clauses:
-      - {keywords: ['swi', 'swan', 'susceptibility weighted', 'venobold'], tier: keywords}
+      - {when: {all: [{text: search_text, any_substring: ['swi', 'swan', 'susceptibility weighted', 'venobold']}, {not: image_type.is_posdisp}]}, cite: 'a susceptibility name', source: name, tier: keywords}
     set: {base: 'SWI', base_basis: name, contrast_mix: null}
 
   'keywords:T1rho':

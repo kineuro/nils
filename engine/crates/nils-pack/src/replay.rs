@@ -222,6 +222,44 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
         }));
     }
 
+    // The pack's constraints the answer breaks, as a classification reads
+    // them (record 48): the class-phase axes in identities, and which rule
+    // set decided each, a session pass's write counted as the pass's.
+    let mut decided = std::collections::BTreeMap::new();
+    for (i, a) in pack.axes.iter().enumerate() {
+        if a.phase != crate::rules::AxisPhase::Class {
+            continue;
+        }
+        let v: Vec<String> = in_force[i]
+            .values
+            .iter()
+            .filter(|v| !v.is_empty() && a.default.as_deref() != Some(v.as_str()))
+            .map(|v| {
+                a.id_of_stored(v)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.clone())
+            })
+            .collect();
+        decided.insert(a.name.clone(), v);
+    }
+    let mut decided_by: std::collections::BTreeMap<String, String> = class
+        .evidence
+        .iter()
+        .map(|e| (e.axis.clone(), e.rule_set.clone()))
+        .collect();
+    for s in &said {
+        for w in s["writes"].as_array().into_iter().flatten() {
+            if let (Some(axis), Some(pass)) = (w.as_str(), s["pass"].as_str()) {
+                decided_by.insert(axis.to_string(), pass.to_string());
+            }
+        }
+    }
+    let constraints = class_constraints(pack);
+    let broken: Vec<Value> = crate::legal::broken(pack, &constraints, &decided, &decided_by)
+        .into_iter()
+        .map(|b| json!({"kind": b.kind, "id": b.id}))
+        .collect();
+
     // And what to do with the stack, from what was decided.
     let seed: Vec<Vec<String>> = in_force.iter().map(|a| a.values.clone()).collect();
     let dispose = evaluated.dispose(&seed);
@@ -257,5 +295,21 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
         "session": said,
         "private": read,
         "withheld": withheld,
+        "broken": broken,
     }))
+}
+
+/// The pack's class constraints, built once per pack and kept: a replay of
+/// the archive asks for them on every packet.
+fn class_constraints(pack: &Pack) -> std::sync::Arc<Value> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Value>>>> = OnceLock::new();
+    let key = format!("{}@{:p}", pack.id(), pack as *const Pack);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry(key)
+        .or_insert_with(|| Arc::new(crate::legal::class_constraints(pack)))
+        .clone()
 }
