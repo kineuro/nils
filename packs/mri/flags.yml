@@ -305,14 +305,18 @@ flags:
       # header (dev-5's A7; section 17).
       - ge_numeric_dti_output
   is_bold:    {all: [image_type.has_fmri, {not: image_type.has_phase}]}
-  is_asl:     {any: [image_type.has_asl, mech_asl]}
+  # MRI pack 0.25.0: and GE's ASL pulse sequence, whose CBF map is written
+  # `DERIVED\SECONDARY\PROCESSED` with no ASL token (section 26c).
+  is_asl:     {any: [image_type.has_asl, mech_asl, ge_asl_psd]}
   is_perfusion: image_type.has_perfusion
   # MRI pack 0.18.0: GE's `MRF_GEMS` alone is no fingerprinting. On the
   # archive its 11 stacks are FSE, FRFSE, Cube and PROPELLER by their pulse
   # sequence, with no fingerprinting word (the deep research, case 23;
   # `empirical-conventions.md`, case 23). The value's words still say it.
   is_mrf:     {all: [scan_options.has_mrf_gems, {text: technique_text, matches: 'fingerprint|(^|[^a-z])mrf([^a-z]|$)'}]}
-  is_radial:  {any: [scan_options.has_propeller_gems, image_type.layout_radial, mech_radial]}
+  # MRI pack 0.25.0: and GE's PROPELLER by its pulse sequence (`ksprop`,
+  # `t1prop`), named or not (section 26c).
+  is_radial:  {any: [scan_options.has_propeller_gems, image_type.layout_radial, mech_radial, ge_propeller_psd]}
   is_spiral:  {any: [scan_options.has_spiral_gems, mech_spiral]}
   is_mavric:  image_type.has_mavric
   is_ideal:   scan_options.has_ideal_gems
@@ -600,7 +604,9 @@ flags:
   has_nd:        image_type.has_nd
   # These two read the blob as stored, not case-folded, and after a left strip.
   is_ge_orig:     {text_raw: search_text, prefix: 'orig '}
-  is_ge_filtered: {text_raw: search_text, prefix: 'filtered '}
+  # MRI pack 0.25.0: written DERIVED only, as DR8 reads GE's `FL:`: every
+  # archive series named `Filtered ...` is written ORIGINAL (section 26c).
+  is_ge_filtered: {all: [{text_raw: search_text, prefix: 'filtered '}, image_type.is_derived]}
 
   # === 8. exclusion / QA ====================================================
 
@@ -955,6 +961,9 @@ flags:
       # isotropic image (section 20, D3).
       - any: [has_adc, has_eadc, has_trace, image_type.has_exp_diffusion, image_type.has_calc_bval, trace_image, ge_plain_map_named]
       - {not: has_fa}
+      # MRI pack 0.25.0: never GE's AvDC, the tensor's mean diffusivity,
+      # which older software writes with an ADC image type (section 26c).
+      - {not: ge_average_dc_named}
       # MRI pack 0.20.0: tensor type by DTI, tensor, `mddw` or six or more
       # directions in the stack's own words (record 48, dev-5's case 4;
       # section 17).
@@ -1018,7 +1027,7 @@ flags:
   # 0.10.0 and EPI after it; this names what it is.
   fieldmap_ref_words:
     text: search_text
-    matches: 'pepolar|topup|blip|(^|[^a-z])(fmap|field ?map|reverse|rev ?pe|revpe|opposite ?pe|ap|pa)([^a-z]|$)'
+    matches: 'pepolar|topup|blip|(^|[^a-z])(fmap|field ?map|reverse|rev ?pe|revpe|rev[ _]?pol|opposite ?pe|ap|pa)([^a-z]|$)'
   # MRI pack 0.20.0: or a b=0 run named by its phase-encoding direction
   # (record 48, dev-5's case 7; section 17).
   is_epi_fieldmap_ref:
@@ -1076,6 +1085,9 @@ flags:
   propeller_fse:
     all:
       - {any: [is_radial, propeller_named]}
+      # MRI pack 0.25.0: never GE's MEMP of one echo, a spin echo (case 31),
+      # whose PROPELLER is its trajectory (section 26c).
+      - {not: ge_memp_single_echo}
       - {not: has_epi}
       - {not: has_gre}
       - {not: is_dwi}
@@ -1201,7 +1213,8 @@ flags:
   # GE's DTI outputs by their names: `AvDC` (the average diffusion
   # coefficient, the mean diffusivity), `FA`, and `Exp attenuation` (the
   # exponential ADC).
-  md_named: {text: search_text, matches: '(^|[^a-z0-9])avdc([^a-z0-9]|$)'}
+  # MRI pack 0.25.0: and its spelling `Average DC` (section 26c).
+  md_named: {any: [{text: search_text, matches: '(^|[^a-z0-9])avdc([^a-z0-9]|$)'}, ge_average_dc_named]}
   # MRI pack 0.14.0: and GE's prefixes on the same outputs of a DTI,
   # `FA-<series>`, `ExpAtt-<series>` (written ORIGINAL\PRIMARY\OTHER with the
   # b value of their source; dev-2: nine stacks).
@@ -1209,6 +1222,9 @@ flags:
     any:
       - {all: [image_type.is_derived, {text: search_text, matches: '^fa( |$)'}]}
       - {all: [{text: manufacturer, prefix: ge}, {text: search_text, matches: '^fa\s*-\s'}]}
+      # MRI pack 0.25.0: and GE's colour FA, `cFA:`, and `FA:` with a colon
+      # (section 26c).
+      - {all: [{text: manufacturer, prefix: ge}, {text: text_series_description, matches: '^\s*c?fa\s*:'}]}
       # MRI pack 0.18.0: the FA of a GE DTI whose header a third-party
       # toolkit rewrote with numbers, named FA (sealed-1 A9).
       - {all: [ge_numeric_header, {text: technique_text, matches: '(^|[^a-z])fa([^a-z]|$)'}]}
@@ -1216,7 +1232,8 @@ flags:
       - ge_fa_named
   # MRI pack 0.24.0: and `Exponential attenuation` or `Exponential Apparent
   # Diffusion Coefficient` spelt out (section 20).
-  eadc_named: {text: search_text, matches: 'exp(onential)? attenuation|^expatt\s*-\s|exponential apparent diffusion'}
+  # MRI pack 0.25.0: and GE's `ExpAtt:` prefix with a colon (section 26c).
+  eadc_named: {text: search_text, matches: 'exp(onential)? attenuation|^expatt\s*-\s|exponential apparent diffusion|^expatt [a-z0-9]'}
   # GE's eigenvectors of a tensor, `Evec1-<series>` to `Evec3-`: a tensor's
   # output, DTIRecon under ruling 7 (dev-2).
   evec_named: {all: [{text: manufacturer, prefix: ge}, {text: search_text, matches: '^evec[1-3]?\s*-\s'}]}
@@ -1643,7 +1660,9 @@ flags:
       - {text: manufacturer, prefix: siemens}
       - image_type.is_original
       - {not: image_type.has_adc}
-      - has_positive_b_value
+      # MRI pack 0.25.0: or its b=0 image, by the sequence name (`*ep_b0`;
+      # section 26c).
+      - {any: [has_positive_b_value, {text: text_sequence_name, matches: '_b[0-9]'}]}
 
   # --- dev-4, H5: GE's IDEAL writes its outputs as `OutPhase:`, `InPhase:`,
   # `WATER:` and `FAT:` before the series name; InPhase read `inphase`, and
@@ -1691,7 +1710,8 @@ flags:
   # RawRecon with MoCo (record 48, dev-5's case 9), so the two clauses that
   # made it PerfusionRecon are withdrawn.
   # MRI pack 0.24.0: or a map a perfusion tool named (section 22).
-  perfusion_recon_extra: {any: [perfusion_map_named, perfusion_tool_map_named]}
+  # MRI pack 0.25.0: and GE's DSC maps, `rCBV:` with a date (section 26c).
+  perfusion_recon_extra: {any: [perfusion_map_named, perfusion_tool_map_named, ge_dsc_map_prefixed]}
   # --- A14, A15: projections and reformats by what the header says.
   # MRI pack 0.21.0: and a temporal standard deviation (section 18).
   projection_extra: {any: [stddev_projection, minip_named_projection, radial_reformat_named, stddev_time]}
@@ -2452,7 +2472,7 @@ flags:
   b0_reversed_pe_reference:
     all:
       - has_epi
-      - {not: has_positive_b_value}
+      - {any: [{not: has_positive_b_value}, {text: dwi_b_values, matches: '^\s*[0-4]?[0-9](\.[0-9]+)?(\s*[,\\]\s*[0-4]?[0-9](\.[0-9]+)?)*\s*$'}]}
       - {field: stacks_in_series, eq: 1}
       - {not: is_derived}
       - {not: is_asl}
@@ -2462,6 +2482,9 @@ flags:
       - any:
           - {text: dwi_b_values, matches: '^[\s0.,\\]+$'}
           - {field: diffusion_b_value, eq: 0}
+          # MRI pack 0.25.0: or b values of 50 or less, which a reverse b=0
+          # run of a research sequence writes (`0,10`; section 26c)
+          - {text: dwi_b_values, matches: '^\s*[0-4]?[0-9](\.[0-9]+)?(\s*[,\\]\s*[0-4]?[0-9](\.[0-9]+)?)*\s*$'}
       - any: [is_dwi, {text: technique_text, matches: '(^|[^a-z])(b0|b ?= ?0|diff|dwi|dti)([^a-z]|$)'}]
       - fieldmap_ref_words
       - any: [{not: pe_sign_stated}, pe_name_agrees_with_sign]
@@ -2872,7 +2895,10 @@ flags:
   # name, Philips IRIS by its name, beside RESOLVE.
   ms_epi_stated:
     all:
-      - is_dwi
+      # MRI pack 0.25.0: or any output of GE's MUSE pulse sequence, a
+      # diffusion whatever the output (a `Trace` written DERIVED with no b
+      # value; section 26c).
+      - {any: [is_dwi, {text: ge_pulse_sequence_name, matches: 'muse'}]}
       - any:
           - {text: ge_pulse_sequence_name, matches: 'muse'}
           - {text: technique_text, matches: '(^|[^a-z])(muse|iris)([^a-z]|$)'}
@@ -3083,7 +3109,7 @@ flags:
   ge_plain_map_named:
     all:
       - {text: manufacturer, prefix: ge}
-      - {text: search_text, matches: '^(exponential )?apparent diffusion coefficient|^exp(onential)? attenuation|^isotropic image'}
+      - {text: search_text, matches: '^(exponential )?apparent diffusion coefficient|^diffusion coefficient|^exp(onential)? attenuation|^isotropic image'}
       - {not: has_fa}
   ge_fa_named:
     all:
@@ -3094,7 +3120,7 @@ flags:
       - {text: manufacturer, prefix: ge}
       - image_type.is_derived
       - image_type.is_secondary
-      - {any: [ge_plain_map_named, ge_fa_named, {text: search_text, matches: '^avdc'}]}
+      - {any: [ge_plain_map_named, ge_fa_named, {text: search_text, matches: '^avdc'}, ge_average_dc_named]}
 
   # --- the B0 map of GE's research sequence (`B0map | B0rf`, internal pulse
   # sequence `B0map`), in research mode: a gradient-echo field map (TE
@@ -3250,7 +3276,11 @@ flags:
       - {field: diffusion_b_value, eq: 0}
       # the acquired image only: GE's processed outputs and Siemens' derived
       # trace series write a b value of 0 on their trace images too
-      - image_type.is_original
+      # MRI pack 0.25.0: or a Siemens b=0 stack its sequence name states
+      # (`WIP_b0`), split from a series named for the trace (section 26c).
+      - any:
+          - image_type.is_original
+          - all: [{text: manufacturer, prefix: siemens}, {text: text_sequence_name, matches: '_b0$'}]
       - {text: technique_text, matches: 'trace'}
       - {not: has_trace}
       - {not: trace_image}
@@ -3913,3 +3943,77 @@ flags:
     all:
       - ge_qsm_me_psd
       - {text: text_series_description, matches: '(?i)^\s*qsm\b'}
+  # === 26c. MRI pack 0.25.0: the protocol sweep, maps, SyMRI and diffusion ==
+  #
+  # The protocol sweep's grade (record 48; the design repository's
+  # `studies/2026-10-02-protocol-sweep/grade.md`, part 2, kind a), the groups
+  # of GE's diffusion and perfusion maps, SyMRI and diffusion, each widened
+  # from the stacks to the rule.
+
+  # GE's AvDC spelt out, `Average DC`: the tensor's mean diffusivity (D3:
+  # DTIRecon with MD), which older software writes with an ADC image type
+  # (`DERIVED\PRIMARY\ADC\ADC`) or as a reformat of its source.
+  ge_average_dc_named:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: search_text, matches: '^average dc([^a-z]|$)'}
+  # GE's Genesis map `Diffusion Coefficient`: its ADC (D3, RawRecon).
+  ge_plain_adc_named:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: search_text, matches: '^diffusion coefficient([^a-z]|$)'}
+  # GE's DSC maps written `rCBV:<date>` or `rCBV[No-Q]:<date>`,
+  # `DERIVED\SECONDARY\PROCESSED`, which keep the time positions of the
+  # run they were computed from: PerfusionRecon (case 17).
+  ge_dsc_map_prefixed:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - image_type.is_derived
+      - {text: text_series_description, matches: '^\s*r?(cbv|cbf|mtt|ttp|tmax|k2|leakage)(\s*\[[^\]]*\])?\s*:'}
+  # GE's ASL by its pulse sequence (`ASL`, internal `3dpcasl`).
+  ge_asl_psd:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: '^\s*(3d)?p?asl\s*$'}
+          - {text: ge_internal_pulse_sequence_name, matches: '(3d)?p?casl|3dasl'}
+  # GE's PROPELLER by its pulse sequence.
+  ge_propeller_psd:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {any: [{text: ge_pulse_sequence_name, matches: 'prop'}, {text: ge_internal_pulse_sequence_name, matches: 'prop'}]}
+      - {not: has_epi}
+  # A DIR word that is the directions of a diffusion (`DTI15dirs`,
+  # `directions`): no double inversion recovery.
+  dir_word_is_directions:
+    all:
+      - {text: search_text, matches: 'dirs|direction|[0-9]dir'}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(dir|double ir|dual ir|double inversion)([^a-z0-9]|$)'}}
+  # Philips SyMRI's synthetic contrasts written with `(Synthetic)` in the
+  # ScanningSequence and no contrast token (`DERIVED\SECONDARY\OTHER`): the
+  # contrast by the synthetic TR, TE and TI they state, the parameters the
+  # tokened outputs carry (case 23 of round 3: a synthetic image with a
+  # finite synthetic TR and TE is a synthetic contrast).
+  philips_synthetic_scan: {all: [{text: scanning_sequence, matches: '\(\s*synthetic\s*\)'}, image_type.is_derived]}
+  philips_synthetic_se: {all: [philips_synthetic_scan, {text: scanning_sequence, matches: '^\s*se'}]}
+  philips_synthetic_ir: {all: [philips_synthetic_scan, {text: scanning_sequence, matches: '^\s*ir'}]}
+  synthetic_t1w_by_params: {all: [philips_synthetic_se, {field: repetition_time, le: 1000}, {field: echo_time, le: 30}]}
+  synthetic_t2w_by_params: {all: [philips_synthetic_se, {field: repetition_time, ge: 2000}, {field: echo_time, ge: 80}]}
+  synthetic_pdw_by_params: {all: [philips_synthetic_se, {field: repetition_time, ge: 2000}, {field: echo_time, lt: 40}]}
+  synthetic_flair_by_params: {all: [philips_synthetic_ir, {field: inversion_time, ge: 1500}, {field: echo_time, ge: 80}]}
+  synthetic_psir_by_params: {all: [philips_synthetic_ir, {field: inversion_time, ge: 300}, {field: inversion_time, le: 800}, {field: echo_time, lt: 30}]}
+  # SyMRI's split maps, `QMAP\T1`, `QMAP\T2`, `QMAP\PD`, named for the set
+  # (`QMaps (T1T2PD)`): the image type states which map, the name the set.
+  qmap_split_stated: {any: [image_type.has_qmap_t1, image_type.has_qmap_t2, image_type.has_qmap_pd]}
+  # An MDME acquisition's own echo, named for it (Philips `MDME_TSE`),
+  # written ORIGINAL: no base (D10).
+  mdme_acquired_echo: {all: [image_type.is_original, {not: is_synthetic}, {any: [is_mdme, {text: technique_text, matches: '(^|[^a-z])mdme([^a-z]|$)'}]}]}
+  # A GE series whose pulse sequence is stated and is no MDME or synthetic
+  # one: `MAGiC` in GE's exam-level ProtocolName names the exam, not the
+  # series (a BRAVO and SSFSE of an exam named MAGIC).
+  ge_pulse_not_symri:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: '[a-z]'}
+      - {not: {text: ge_pulse_sequence_name, matches: 'magic|mdme|qmap|qalas|syn'}}
+      - {not: image_type.is_derived}

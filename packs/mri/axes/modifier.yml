@@ -49,7 +49,9 @@ values:
     # MRI pack 0.20.0: nor a series whose physics rule an inversion out: no
     # inversion stated at a repetition time under 1,000 ms, where only a
     # reused name says FLAIR (flags.yml, dev-5's A4).
-    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}]}
+    # MRI pack 0.25.0: nor an ASL, whose inversion labels the blood (a GE
+    # pCASL CBF map; flags.yml, section 26c).
+    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}]}
     keywords:
       - flair
       - t2 flair
@@ -88,6 +90,9 @@ values:
     terms: ['double inversion recovery', 'double IR']
     group: IR_CONTRAST
     priority: 3
+    # MRI pack 0.25.0: never the `dirs` of a diffusion's directions
+    # (`DTI15dirs`; flags.yml, section 26c).
+    requires: {any: [is_dir, {not: dir_word_is_directions}]}
     keywords:
       - dir
       - double ir

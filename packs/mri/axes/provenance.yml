@@ -47,6 +47,10 @@ values:
       - synt
       - qrapmaster
     alternative_flags: [has_t1_synthetic, has_t2_synthetic, has_pd_synthetic, has_flair_synthetic, is_mdme, is_qalas, has_multi_qmap]
+    # MRI pack 0.25.0: never a GE series whose pulse sequence is stated and
+    # is none of SyMRI's, in an exam GE's ProtocolName names MAGiC
+    # (flags.yml, section 26c).
+    requires: {not: ge_pulse_not_symri}
     detection:
       combination: [is_synthetic, is_derived]
   # MRI pack 0.18.0: GE's NeuroMix, EPIMix's successor, whose blocks are

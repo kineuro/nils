@@ -1,0 +1,459 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: the protocol sweep's rule gaps among GE's diffusion and
+# perfusion maps, SyMRI and diffusion (flags.yml, section 26c). One or more
+# cases for each rule, and the cases that keep each rule from reaching what
+# it must not. Every stack here is invented from the pattern the design
+# repository's files name; none is a real header.
+
+cases:
+
+  # --- GE's AvDC spelt out, the tensor's mean diffusivity (D3)
+
+  - name: a GE Average DC written with an ADC image type is the tensor's MD
+    stack:
+      image_type: 'DERIVED\PRIMARY\ADC\ADC'
+      scanning_sequence: 'EP\SE'
+      sequence_variant: NONE
+      scan_options: 'EPI_GEMS\PFF'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2
+      text_series_description: 'Average DC'
+      n_slices: 35
+      repetition_time: 10200
+      echo_time: 96
+    flags:
+      ge_average_dc_named: true
+      is_plain_dwi_map: false
+    axes:
+      provenance: DTIRecon
+      construct: MD
+
+  - name: guard, a GE ADC map keeps ADC and RawRecon (D3)
+    stack:
+      image_type: 'DERIVED\PRIMARY\ADC\ADC'
+      scanning_sequence: 'EP\SE'
+      sequence_variant: NONE
+      scan_options: 'EPI_GEMS\PFF'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2
+      text_series_description: 'ADC (10^-6 mm2/s)'
+      n_slices: 35
+      repetition_time: 10200
+      echo_time: 96
+    flags:
+      ge_average_dc_named: false
+    axes:
+      provenance: RawRecon
+      construct: ADC
+
+  # --- GE's KS prefixes and Genesis names
+
+  - name: a GE ExpAtt with a colon is the exponential ADC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: EPI_GEMS
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'ksepi [1:34]'
+      text_series_description: 'ExpAtt: Ax Diff ksepi'
+      n_slices: 38
+      diffusion_b_value: 1000
+      repetition_time: 4280
+      echo_time: 79
+    axes:
+      construct: eADC
+
+  - name: a GE cFA with a colon is the colour FA, a tensor's output
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: EPI_GEMS
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'ksepi [2:49]'
+      text_series_description: 'cFA: KS_DTI_25_Ax'
+      n_slices: 46
+      diffusion_b_value: 1000
+      repetition_time: 5278
+      echo_time: 80
+    axes:
+      provenance: DTIRecon
+      construct: FA
+
+  - name: a GE Genesis Diffusion Coefficient is its ADC
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROCESSED'
+      scanning_sequence: 'EP\SE'
+      sequence_variant: NONE
+      scan_options: 'EPI_GEMS\PFF'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2
+      text_series_description: 'Diffusion Coefficient'
+      n_slices: 22
+      repetition_time: 10000
+      echo_time: 89
+    flags:
+      ge_plain_adc_named: true
+    axes:
+      provenance: RawRecon
+      construct: ADC
+
+  # --- GE's DSC maps with a date
+
+  - name: a GE rCBV with a date is a perfusion map
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROCESSED'
+      scanning_sequence: 'EP\GR'
+      sequence_variant: SS
+      scan_options: 'MP_GEMS\EPI_GEMS\ACC_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi
+      text_series_description: 'rCBV[No-Q]:Aug 17 2020 09-13-26'
+      temporal_positions: 60
+      n_slices: 40
+      repetition_time: 1500
+      echo_time: 22
+      flip_angle: 60
+    flags:
+      ge_dsc_map_prefixed: true
+    axes:
+      provenance: PerfusionRecon
+      construct: CBV
+
+  # --- a DIR word that is a diffusion's directions
+
+  - name: a GE FA named for 15 directions takes no DIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: '2'
+      scan_options: '1140850688'
+      mr_acquisition_type: '1'
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: depi
+      text_series_description: 'FA-MC-DTI15dirs156X156'
+      n_slices: 34
+      repetition_time: 4500
+      echo_time: 78
+    flags:
+      dir_word_is_directions: true
+    axes:
+      construct: FA
+
+  - name: guard, a 3D DIR keeps DIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_space_dir_sag_p3'
+      text_sequence_name: '*spcir_220ns'
+      n_slices: 176
+      repetition_time: 7500
+      echo_time: 300
+      inversion_time: 3000
+    flags:
+      dir_word_is_directions: false
+
+  # --- Philips SyMRI contrasts written (Synthetic) and split QMAP maps
+
+  - name: a Philips synthetic IR at a CSF-nulling TI and a long TE is a synthetic FLAIR
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER'
+      scanning_sequence: 'IR (Synthetic)'
+      sequence_variant: SK
+      scan_options: OTHER
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_protocol_name: 'SyMRI Qmap Head SENSE'
+      n_slices: 30
+      repetition_time: 9000
+      echo_time: 100
+      inversion_time: 2300
+    flags:
+      synthetic_flair_by_params: true
+    axes:
+      provenance: SyMRI
+      construct: SyntheticFLAIR
+      modifier: FLAIR
+      base: T2w
+
+  - name: a Philips synthetic SE at a short TR and TE is a synthetic T1-weighted image
+    stack:
+      image_type: 'DERIVED\SECONDARY\OTHER'
+      scanning_sequence: 'SE (Synthetic)'
+      sequence_variant: SK
+      scan_options: OTHER
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_protocol_name: 'SyMRI Qmap Head SENSE'
+      n_slices: 30
+      repetition_time: 500
+      echo_time: 10
+      inversion_time: 0
+    flags:
+      synthetic_t1w_by_params: true
+    axes:
+      construct: SyntheticT1w
+      base: T1w
+
+  - name: a SyMRI split map named for the set is the map its image type states
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T2'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'QMaps (T1T2PD)'
+      text_protocol_name: 'Synthetic MR SE'
+      n_slices: 10
+      repetition_time: 4500
+      echo_time: 100
+    flags:
+      qmap_split_stated: true
+    axes:
+      construct: T2map
+
+  - name: guard, a SyMRI map set in one series stays MultiQmap
+    stack:
+      image_type: 'DERIVED\PRIMARY\MULTI_QMAP\T1\T2\PD'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SyMaps (T1T2PD)'
+      n_slices: 30
+      repetition_time: 4500
+      echo_time: 100
+    flags:
+      qmap_split_stated: false
+    axes:
+      construct: MultiQmap
+
+  # --- MDME's acquired echo and an exam named MAGiC
+
+  - name: a Philips MDME_TSE echo as acquired has no base (D10)
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: OTHER
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'MDME_TSE'
+      n_slices: 31
+      repetition_time: 4673
+      echo_time: 12.5
+      echo_train_length: 10
+    flags:
+      mdme_acquired_echo: true
+    axes:
+      technique: MDME
+      base: ''
+
+  - name: a GE BRAVO in an exam named MAGIC is no MAGiC acquisition
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: GR
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS\ACC_GEMS\IR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: BRAVO
+      text_series_description: 'T1_BRAVO_Ax'
+      text_protocol_name: MAGIC
+      n_slices: 158
+      repetition_time: 8.5
+      echo_time: 3.2
+      inversion_time: 450
+      flip_angle: 12
+    flags:
+      ge_pulse_not_symri: true
+    axes:
+      technique: MPRAGE
+
+  - name: guard, a GE MAGiC series stays SyMRI's
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2W_SYNTHETIC'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: MAGiC
+      text_series_description: 'MAGiC T2'
+      text_protocol_name: MAGIC
+      n_slices: 30
+      repetition_time: 4500
+      echo_time: 100
+    flags:
+      ge_pulse_not_symri: false
+    axes:
+      provenance: SyMRI
+
+  # --- diffusion
+
+  - name: a Siemens b=0 image of a protocol named for its ADC takes no ADC
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\EP'
+      sequence_variant: 'SK\SP'
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_trace_ADC'
+      text_protocol_name: 'ep2d_diff_trace_ADC'
+      text_sequence_name: '*ep_b0'
+      diffusion_b_value: 0
+      n_slices: 23
+      repetition_time: 5900
+      echo_time: 176
+    flags:
+      siemens_acquired_diffusion: true
+    axes:
+      construct: ND
+
+  - name: a GE REV_POL b=0 run is the reverse phase-encoding reference
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'EPI_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'research/ABCD/muxepi2'
+      text_series_description: 'REV_POL: DTI_abcd_mod'
+      diffusion_b_value: 0
+      dwi_b_values: '0'
+      stacks_in_series: 1
+      n_slices: 82
+      n_instances: 82
+      repetition_time: 4475
+      echo_time: 83
+    axes:
+      construct: FieldmapRef
+
+  - name: guard, a diffusion with b 0 and 1000 named for its direction is no reference
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'EPI_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2
+      text_series_description: 'DTI_PA'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      stacks_in_series: 1
+      n_slices: 60
+      n_instances: 1200
+      repetition_time: 8000
+      echo_time: 83
+    flags:
+      b0_reversed_pe_reference: false
+
+  # --- GE singles
+
+  - name: a GE MUSE trace written DERIVED with no b value is MS-EPI
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROCESSED'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'EPI_GEMS\ACC_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: epi2muse
+      text_series_description: 'Trace'
+      n_slices: 37
+      repetition_time: 3951
+      echo_time: 63
+      echo_train_length: 4
+    axes:
+      technique: RESOLVE
+
+  - name: a GE pCASL CBF map is ASL's, with no FLAIR from its labelling inversion
+    stack:
+      image_type: 'DERIVED\SECONDARY\PROCESSED'
+      scanning_sequence: 'RM\IR'
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EDR_GEMS\SPIRAL_GEMS\FILTERED_GEMS\FS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: ASL
+      ge_internal_pulse_sequence_name: 3dpcasl
+      text_series_description: 'CBF'
+      n_slices: 36
+      repetition_time: 4940
+      echo_time: 63
+      inversion_time: 2025
+      flip_angle: 111
+    flags:
+      ge_asl_psd: true
+    axes:
+      provenance: ASLRecon
+      technique: ASL
+      modifier: 'FatSat,Spiral'
+
+  - name: a GE ksprop PROPELLER not named for it is Radial
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: 'NPW\EDR_GEMS\TRF_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: ksprop
+      text_series_description: 'Ax T2 SMS'
+      n_slices: 82
+      repetition_time: 8646
+      echo_time: 107
+      echo_train_length: 24
+    flags:
+      ge_propeller_psd: true
+    axes:
+      modifier: Radial
+
+  - name: a GE one-echo MEMP PROPELLER is a spin echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: '2'
+      scan_options: '1073743904'
+      mr_acquisition_type: '1'
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: t1prop-magmar
+      ge_internal_pulse_sequence_name: MEMP
+      text_series_description: 'Ax T1PROP SE move'
+      n_slices: 19
+      repetition_time: 500
+      echo_time: 10.7
+      echo_train_length: 1
+    flags:
+      propeller_fse: false
+    axes:
+      technique: SE
+
+  - name: a GE series named Filtered written ORIGINAL takes no Filtered (DR8)
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'RM\IR'
+      sequence_variant: NONE
+      scan_options: 'EDR_GEMS\FILTERED_GEMS\ACC_GEMS\IR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: 'research/MCWConnHub/mprage_pr2'
+      text_series_description: 'Filtered T1_MPRAGE_08iso'
+      n_slices: 236
+      repetition_time: 2356
+      echo_time: 3.1
+      inversion_time: 950
+      flip_angle: 8
+    flags:
+      is_ge_filtered: false

@@ -80,13 +80,17 @@ values:
     terms: ['apparent diffusion coefficient', 'ADC map']
     # MRI pack 0.18.0: nor any acquired diffusion image whose protocol, not
     # its own name, says ADC (sealed-1 A11).
-    requires: {all: [{not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}, {not: adc_only_in_protocol}]}
+    # MRI pack 0.25.0: nor GE's AvDC written with an ADC image type, its
+    # tensor's mean diffusivity (flags.yml, section 26c).
+    requires: {all: [{not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}, {not: adc_only_in_protocol}, {not: ge_average_dc_named}]}
     keywords:
       - adc
       - apparent diffusion coefficient
       - adc map
+    # MRI pack 0.25.0: or GE's Genesis `Diffusion Coefficient` (section 26c).
     detection:
       exclusive: has_adc
+      combination: [ge_plain_adc_named]
   eADC:
     terms: ['exponential ADC', 'eADC']
     keywords:

@@ -21,6 +21,7 @@ order:
   - 'flag:spectroscopy'
   - 'construct:b1map'
   - 'flag:inline_t1_map'
+  - 'flag:mdme_acquired_echo'
   - 'r3:no_base'
   - 'flag:susceptibility_minip'
   - 'flag:mpm_pd_named'
@@ -209,6 +210,16 @@ rules:
   # MRI pack 0.24.0: MOLLI's inline T1 map is a fitted map in milliseconds,
   # no image weighted by a contrast (flags.yml section 23; the final
   # certificate's A8, settled none).
+  # MRI pack 0.25.0: an MDME acquisition's own echo has no base (D10), named
+  # for MDME outside the SyMRI route (Philips `MDME_TSE`; flags.yml, section
+  # 26c).
+  'flag:mdme_acquired_echo':
+    clauses:
+      - {flag: mdme_acquired_echo, tier: exclusive}
+    set: {base: null, base_basis: null, contrast_mix: null}
+    confidence: 0.9
+    why: 'an MDME echo as acquired is one point of a quantitative fit, with no base contrast (D10)'
+
   'flag:inline_t1_map':
     clauses:
       - {flag: siemens_inline_t1_map, tier: exclusive}
