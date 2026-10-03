@@ -205,6 +205,10 @@ values:
     # MRI pack 0.25.0 (the protocol sweep): never from words that switch it
     # off (`no fatsat`); the header's token still decides.
     requires: {not: {all: [fat_sat_negated, {not: has_fat_sat}]}}
+    # MRI pack 0.25.0: or a Siemens name with `fs` as a word of its own, the
+    # name over the physics as `SFS` is (Nima, 2026-10-03; flags.yml, section
+    # 26f).
+    alternative_flags: [siemens_fs_named]
     detection:
       exclusive: has_fat_sat
   WaterExcitation:

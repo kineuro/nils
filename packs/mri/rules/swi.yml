@@ -61,6 +61,10 @@ derive:
       # output named Combined combines its echoes; a two-echo `fl3d2r` keeps
       # them apart (flags.yml, section 26b).
       - {when: siemens_echoes_combined_named, value: comb-ME-GRE}
+      # MRI pack 0.25.0 (Nima, 2026-10-03): the SWI image and minIP a
+      # two-echo `fl3d2r` computes combine its echoes, as GE's SWAN
+      # (flags.yml, section 26f).
+      - {when: siemens_two_echo_fl_swi_output, value: comb-ME-GRE}
       - {when: siemens_two_echo_fl, value: ME-GRE}
       # MRI pack 0.24.0: a GE SWI made by EPI is EPI by its pulse sequence
       # (D12), whatever its train (flags.yml, section 20, `ge_swi_epi_psd`).
@@ -120,6 +124,10 @@ derive:
       # output named Combined combines its echoes; a two-echo `fl3d2r` keeps
       # them apart (flags.yml, section 26b).
       - {when: siemens_echoes_combined_named, value: comb-ME-GRE}
+      # MRI pack 0.25.0 (Nima, 2026-10-03): the SWI image and minIP a
+      # two-echo `fl3d2r` computes combine its echoes, as GE's SWAN
+      # (flags.yml, section 26f).
+      - {when: siemens_two_echo_fl_swi_output, value: comb-ME-GRE}
       - {when: siemens_two_echo_fl, value: ME-GRE}
       - {when: ge_swi_epi_psd, value: EPI}
       # the rest as swi_technique
@@ -326,13 +334,17 @@ rules:
       directory_type: anat
     confidence: 0.8
 
+  # MRI pack 0.25.0 (Nima, 2026-10-03): an R2* map is a quantitative map, a
+  # rate in 1/s, with no base, as a T1, T2 or R2 map (round 5); it keeps
+  # SWIRecon as an output the scanner computed (on the archive, 23 maps of
+  # GE's multi-echo QSM, base SWI before).
   r2star:
     clauses:
       - {flag: has_r2star, tier: exclusive}
       - {keywords: [r2star], tier: keywords}
     set:
-      base: SWI
-      base_basis: physics
+      base: null
+      base_basis: null
       contrast_mix: null
       construct:
         # MRI pack 0.25.0: never the `QSM` of GE's `psd/QSM/me` sequence name

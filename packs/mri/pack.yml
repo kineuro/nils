@@ -78,6 +78,10 @@ rules:
   # MRI pack 0.25.0: a Siemens MP2RAGE reformat made outside the 3D card,
   # left for the session pass to refine.
   - rules/mp2rage_reformat.yml
+  # MRI pack 0.25.0: what the file cannot tell, decided as nothing and asked
+  # (Nima, 2026-10-03: a Philips 3D TFE with no prepulse stated, a GE BRAVO
+  # reformat named a Cube FLAIR, a GE reference between b 50 and 100).
+  - rules/cant_tell.yml
   - rules/base.yml
   - rules/post_contrast.yml
   - rules/body_part.yml
@@ -92,7 +96,7 @@ rules:
 # no modifier or construct rule
 # reads the base. The two `implied_` sets fill the technique and add to the
 # modifiers from the construct, for the same reason after it.
-order: [excluded, provenance, swi, symri, epimix, stage, mp2rage_reformat, technique, ir_reformat, modifier, construct, implied_technique, implied_modifier, base, quality, body_part, body_region, post_contrast, intent, disposition, role]
+order: [excluded, provenance, swi, symri, epimix, stage, mp2rage_reformat, cant_tell, technique, ir_reformat, modifier, construct, implied_technique, implied_modifier, base, quality, body_part, body_region, post_contrast, intent, disposition, role]
 
 # Record 48 (pack contract 6): what one axis rules out on another, and what
 # is usual without being always so. Both read axis values alone; neither

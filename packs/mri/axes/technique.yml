@@ -540,8 +540,12 @@ values:
     # module says InversionRecovery NO (record 48, conventions round 3, case
     # 17): FSP-GRE.
     # MRI pack 0.25.0: nor a Siemens `tfl3d1` that states no preparation
-    # (flags.yml, section 26b).
-    requires: {all: [{not: smart_survey}, {not: philips_tfe_no_inversion}, {not: siemens_tfl_unprepared}]}
+    # (flags.yml, section 26b). And case 17's clause is withdrawn: a Philips
+    # 3D TFE written InversionRecovery NO is an MPRAGE where its `MP` or an
+    # inversion time says so, since every such stack read carries an
+    # inversion prepulse; with neither, its technique cannot be told
+    # (flags.yml, section 26f; rules/cant_tell.yml).
+    requires: {all: [{not: smart_survey}, {not: siemens_tfl_unprepared}]}
     keywords:
       - mprage
       # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
@@ -633,7 +637,10 @@ values:
     # MRI pack 0.25.0 (the protocol sweep): and a Siemens multi-echo FLASH
     # output named Combined, and a Siemens two-echo field map's phase
     # difference (flags.yml, section 26b).
-    alternative_flags: [ge_swan_combined, siemens_echoes_combined_named, siemens_fieldmap_phase_difference]
+    # MRI pack 0.25.0 (Nima, 2026-10-03): and the SWI image and minIP a
+    # two-echo Siemens FLASH computes, inside the SWI route or not (flags.yml,
+    # section 26f).
+    alternative_flags: [ge_swan_combined, siemens_echoes_combined_named, siemens_fieldmap_phase_difference, siemens_two_echo_fl_swi_output]
     detection:
       exclusive: is_medic
       combination: [combined_echoes_stated]

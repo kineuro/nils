@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: what the file cannot tell, decided as nothing so that no
+# axis rule, keyword or vote fills it, and asked of a person instead (Nima,
+# 2026-10-03, the design repository's `studies/2026-10-03-pack-0250/
+# README.md`, "For Nima", items 1, 3 and 11). An empty technique is a
+# question by itself (pack.yml, `review.missing`); the physics vote leaves
+# these stacks alone (passes/physics_vote.yml).
+#
+#   * A Philips 3D TFE whose Prepulse Type is not read, with neither an
+#     inversion time nor `MP` (item 1): an MPRAGE or a turbo field echo, and
+#     the file says neither. On the archive the 31 named `3D TFE` and read
+#     MPRAGE carry no prepulse, and the 31 read TurboFLASH carry an
+#     inversion, so neither reading is safe.
+#   * A GE reformat whose header is a BRAVO and whose name is a Cube FLAIR
+#     not named T1 (item 3): the technique, the modifier and the base the
+#     name and the header disagree on. Neither side is followed.
+#   * A GE reversed-phase run whose highest b value lies between 50 and 100
+#     (item 11, research round 6): a nominal b=0 for some and a diffusion for
+#     others, so FieldmapRef is offered below the review threshold.
+#
+# It runs after the routes and before the technique axis (pack.yml `order`).
+
+rule_set: cant_tell
+decides: [technique, modifier, construct, base, base_basis, contrast_mix]
+
+order: ['philips_tfe_prepulse_unread', 'ge_bravo_named_cube_flair', 'ge_reversed_reference_review']
+
+rules:
+
+  'philips_tfe_prepulse_unread':
+    clauses:
+      - when: {all: [philips_tfe_cant_tell, {not: {axis: provenance, is: Localizer}}]}
+        cite: 'a Philips 3D TFE with no Prepulse Type, no inversion time and no MP'
+        source: flags
+    set: {technique: null}
+    confidence: 0.5
+    why: 'a Philips 3D TFE that states no prepulse may be an MPRAGE or a turbo field echo: the technique cannot be told'
+
+  'ge_bravo_named_cube_flair':
+    clauses:
+      - {flag: ge_gre_header_named_cube_flair}
+    set: {technique: null, modifier: null, base: null, base_basis: null, contrast_mix: null}
+    confidence: 0.5
+    why: 'a GE reformat whose header is a BRAVO (a T1-weighted inversion-prepared gradient echo) and whose name is a Cube FLAIR (a T2-weighted 3D TSE FLAIR): the technique, the modifier and the base cannot be told'
+
+  'ge_reversed_reference_review':
+    clauses:
+      - {flag: ge_reversed_reference_review}
+    set: {construct: [FieldmapRef]}
+    confidence: 0.6
+    why: 'a GE reversed-phase run whose highest b value is between 50 and 100: a field-map reference or a diffusion, for a person to say'

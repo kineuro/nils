@@ -2041,7 +2041,9 @@ flags:
       # one frame that carries it, and the isotropic image is a series of
       # its own (dev-7: a b=0 and 16 directions named `DTI ... DWI iso` was
       # Trace).
-      - {not: {field: dwi_directions, ge: 6}}
+      # MRI pack 0.25.0 (item 7 of the study's questions): a registered
+      # diffusion copy (`Reg - DWI`) is Trace whatever it holds (section 26f).
+      - {any: [{not: {field: dwi_directions, ge: 6}}, philips_registered_dwi]}
       # MRI pack 0.24.0 (the final certificate's C3): nor a stack that holds
       # the directional images of fewer directions beside it (a b=0, three
       # directions and the isotropic image, five images a slice): there the
@@ -2863,15 +2865,10 @@ flags:
   philips_echoes_stated: {text: philips_number_of_echoes, matches: '^\s*[0-9]+\s*$'}
   philips_several_echoes: {text: philips_number_of_echoes, matches: '^\s*([2-9]|1[0-9])\s*$'}
 
-  # --- Philips 3D T1 TFE (case 17): with the enhanced module's
-  # InversionRecovery NO and no inversion time it is a turbo field echo,
-  # FSP-GRE, not an MPRAGE; YES or a TI makes it one. A classic object
-  # states neither and keeps its reading.
-  philips_tfe_no_inversion:
-    all:
-      - philips_tfe
-      - {text: inversion_recovery, equals: 'no'}
-      - {not: {field: inversion_time, gt: 0}}
+  # --- Philips 3D T1 TFE (case 17): MRI pack 0.21.0 read InversionRecovery
+  # NO with no inversion time as a turbo field echo. MRI pack 0.25.0
+  # withdraws it: the private Prepulse Type decides, and InversionRecovery
+  # NO does not (section 26f, `philips_3d_tfe`).
 
   # --- GE Silent MRA (case 18): no construct, its ASL token included.
   silent_mra_output: {all: [{text: manufacturer, prefix: ge}, {text: ge_pulse_sequence_name, matches: '^silen'}]}
@@ -3091,10 +3088,15 @@ flags:
   # minIP, the QSM and R2* maps, combined over the echoes (comb-ME-GRE), and
   # `MAG` and `PHS` at the last echo's time, which the reference reads as
   # one echo (ME-GRE). Our counts: 338 stacks, 120 of them outputs.
+  # MRI pack 0.25.0: or, where the private pulse sequence was not read, the
+  # `psd/QSM/me` GE stamps into the description of every output (4 R2* maps
+  # on the archive read a QSM by the word).
   ge_qsm_me_psd:
     all:
       - {text: manufacturer, prefix: ge}
-      - {text: ge_pulse_sequence_name, matches: 'qsm/me'}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: 'qsm/me'}
+          - {text: text_series_description, matches: 'psd/qsm/me'}
       - {not: has_epi}
   ge_qsm_me_echo_output:
     all:
@@ -3196,6 +3198,9 @@ flags:
       - {text: manufacturer, prefix: philips}
       - {field: dwi_directions, ge: 2}
       - {field: n_instances, gt: {field: n_slices}}
+      # MRI pack 0.25.0: never a registered diffusion copy (`Reg - DWI`),
+      # Trace by Nima's ruling (item 7; section 26f)
+      - {not: philips_registered_dwi}
   # C4: a Siemens `Image Filter` copy, the post-processing that writes a
   # filtered copy of a series as a series of its own (ProtocolName `Image
   # Filter`, the name `<series>_FIL_<n>`), written DERIVED, is Filtered, as
@@ -3812,7 +3817,8 @@ flags:
 
   # --- GE names its subtraction of two series `(exam/series/1)-(exam/series/1)`.
   ge_subtraction_named: {text: text_series_description, matches: '\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)\s*-\s*\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)'}
-  # === 26b. MRI pack 0.25.0: the protocol sweep, gradient echoes =====  #
+  # === 26b. MRI pack 0.25.0: the protocol sweep, gradient echoes ============
+  #
   # The protocol sweep's error list outside its held-out go sample (the
   # design repository's `studies/2026-10-02-protocol-sweep/grade.md`, part
   # 2), the gradient-echo groups, each widened to its rule.
@@ -4190,14 +4196,7 @@ flags:
   # (a nominal b=0: GE's minimum b with directions), a few volumes named
   # PA, is FieldmapRef (record 48, DR7). On the archive 56 such runs (7 or
   # 8 volumes), each named for the reversed direction.
-  ge_nominal_b0_reversed:
-    all:
-      - {text: manufacturer, prefix: ge}
-      - has_epi
-      - {field: stacks_in_series, eq: 1}
-      - {not: is_derived}
-      - {text: dwi_b_values, matches: '^\s*0(\.0*)?\s*[,\\]\s*(5|10)(\.0*)?\s*$'}
-      - {text: technique_text, matches: '(^|[^a-z])pa([^a-z]|$)'}
+  # (generalised in section 26f: `ge_nominal_b0_reversed`)
 
   # --- a Philips `PROJECTION IMAGE` named mip whose geometry is a stack of
   # contiguous thin slices (more than 3, under 10 mm) is a reformat, MPR,
@@ -4239,3 +4238,135 @@ flags:
     all:
       - {text: manufacturer, prefix: ge}
       - scan_options.has_inflow_gems
+
+  # === 26f. MRI pack 0.25.0: research round 6 and Nima's answers ============
+  #
+  # The questions pack 0.25.0's study left to Nima (the design repository's
+  # `studies/2026-10-03-pack-0250/README.md`, "For Nima", items 1 to 11),
+  # settled on 2026-10-03 with the deep research's round 6
+  # (`deep-research-r6.md` there) and our archive's checks of the same day
+  # (`research-r6-checks.md`). Counts are of the archive outside the sealed
+  # samples.
+
+  # --- Philips 3D T1 TFE (item 1). The private Prepulse Type (2001,xx1C)
+  # names the TFE prepulse: INV or BBI is an inversion, an MPRAGE; NO, SAT or
+  # ECHO is none, a turbo field echo (FSP-GRE). It outranks InversionRecovery
+  # and SequenceVariant `MP` where they disagree: 83 of 83 classic stacks
+  # written InversionRecovery NO carry INV, and 617 of 617 `MP` stacks read
+  # carry INV. Where the type is not read, an inversion time (or the
+  # Prepulse Delay) makes an MPRAGE, then `MP` does; with neither, the
+  # technique cannot be told (rules/cant_tell.yml), never TurboFLASH from
+  # InversionRecovery NO or a missing `MP` alone. Case 17's clause, which made
+  # InversionRecovery NO a turbo field echo, is withdrawn: on the archive 794
+  # 3D TFE stacks written so carry `MP` (708 of them classic objects with
+  # the private block stripped), and every one read has an inversion.
+  philips_3d_tfe:
+    all:
+      - philips_tfe
+      - is_3d
+  philips_tfe_cant_tell:
+    all:
+      - philips_3d_tfe
+      - {not: smart_survey}
+      - {not: {field: inversion_time, gt: 0}}
+      - {not: has_mag_prepared}
+      # a name for the spoiled interpolated product (e-THRIVE) says it
+      - {not: {text: technique_text, matches: 'thrive|vibe|lava'}}
+
+  # --- GE reformats whose header is a BRAVO (GR with IR) and whose name is
+  # a Cube FLAIR, not T1 (item 3): the name says a T2-weighted 3D TSE FLAIR,
+  # the header a T1-weighted inversion-prepared gradient echo. The technique,
+  # the modifier and the base they disagree on cannot be told and go to
+  # review (rules/cant_tell.yml); neither side is followed. On the archive
+  # ten are named Cube T2 FLAIR and two Cube FLAIR. A BRAVO reformat named
+  # Cube T1 (MRI pack 0.24.0) or T1 FLAIR Cube (section 26d) is read by its
+  # header, as before: its name and header agree on the weighting.
+  ge_gre_header_named_cube_flair:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - has_gre
+      - has_ir
+      - {not: has_se}
+      - {not: has_epi}
+      - is_derived
+      - {text: technique_text, matches: '(^|[^a-z])cube'}
+      - {text: technique_text, matches: 'flair'}
+      - {not: {text: technique_text, matches: '(^|[^a-z0-9])t1'}}
+
+  # --- a Siemens name with `fs` as a word of its own and no fat-saturation
+  # token in ScanOptions (item 5): FatSat, the name over the physics as
+  # `SFS` is (round 5). Never where the words switch it off (`no fs`, `utan
+  # fs`, `fat_sat_negated`), a Dixon named `fs-dixon` (its fat is separated,
+  # not saturated), an inversion recovery (a STIR or TIRM suppresses fat by
+  # its inversion), a water excitation, or a position display (which carries
+  # the name of the series it plans).
+  siemens_fs_named:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: technique_text, matches: '(^|[^a-z0-9])fs([^a-z0-9]|$)'}
+      - {not: {text: technique_text, matches: '(^|[^a-z0-9])fs\s*-?\s*dixon'}}
+      - {not: fat_sat_negated}
+      - {not: has_fat_sat}
+      - {not: has_dixon}
+      - {not: has_ir}
+      - {not: has_water_excitation}
+      - {not: image_type.is_posdisp}
+
+  # --- a Philips registered diffusion copy (`Reg - DWI ...`) whose private
+  # direction is `I` is Trace (item 7), though it holds its b=0 and
+  # directional images beside the isotropic one: the references settled it
+  # so by consensus, and Nima ruled it. C3 (`philips_directional_set`) and
+  # the tensor guard of `philips_isotropic_private` no longer reach it. A
+  # registered tensor (`Reg - DTI ...`) stays a diffusion set.
+  philips_registered_dwi:
+    all:
+      - philips_registered_copy
+      - {not: {text: technique_text, matches: '(^|[^a-z])dti'}}
+
+  # --- the images a two-echo Siemens FLASH SWI (`fl3d2r`) computes, the SWI
+  # image and its minimum projection, combine its two echoes (item 8):
+  # comb-ME-GRE, base SWI, as GE's SWAN (Nima's ruling, round 5). Its
+  # per-echo magnitude and phase stay ME-GRE (`siemens_two_echo_fl`).
+  siemens_two_echo_fl_swi_output:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl[23]d2r'}
+      - {any: [has_swi, is_minip]}
+      - {not: has_dixon}
+      - {not: {text: search_text, matches: 'dixon'}}
+
+  # --- a GE reversed-phase reference by its b values (item 11, research
+  # round 6, question 4): every b value 50 or less is a nominal b=0
+  # (QSIPrep reads any b under 100 as b=0), so a short reversed run named
+  # for the reversed direction (PA) or the reversal is FieldmapRef whatever its
+  # nominal b; any b value of 100 or more is a diffusion; between 50 and
+  # 100 it is sent to review (rules/cant_tell.yml). The volume ceiling is
+  # 10 where the file states its time points; the paired run's count is the
+  # session's.
+  ge_b_values_nominal_b0: {text: dwi_b_values, matches: '^\s*(50(\.0+)?|[0-4]?[0-9](\.[0-9]+)?)(\s*[,\\]\s*(50(\.0+)?|[0-4]?[0-9](\.[0-9]+)?))*\s*$'}
+  ge_b_values_review_band:
+    all:
+      - {text: dwi_b_values, matches: '(^|[,\\]\s*)(5[0-9]\.[0-9]*[1-9]|5[1-9]|[6-9][0-9])(\.[0-9]+)?\s*([,\\]|$)'}
+      - {not: {text: dwi_b_values, matches: '(^|[,\\]\s*)([1-9][0-9]{2,})(\.[0-9]+)?\s*([,\\]|$)'}}
+  ge_reversed_run:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - has_epi
+      - {field: stacks_in_series, eq: 1}
+      - {not: is_derived}
+      - {not: is_asl}
+      - {not: is_perfusion}
+      - {not: is_sbref}
+      - {not: is_swi}
+      - {not: {field: temporal_positions, gt: 10}}
+      # named for the reversed direction or the reversal (the forward run
+      # is named AP; the polarity against the paired run is the session's)
+      - {text: technique_text, matches: '(^|[^a-z])(pa|rev|reverse|rev ?pe|revpe|rev[ _]?pol|pepolar|blip|topup|opposite ?pe)([^a-z]|$)'}
+  ge_nominal_b0_reversed:
+    all:
+      - ge_reversed_run
+      - ge_b_values_nominal_b0
+  ge_reversed_reference_review:
+    all:
+      - ge_reversed_run
+      - ge_b_values_review_band

@@ -1,0 +1,443 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: research round 6 and Nima's answers of 2026-10-03 (the
+# design repository's `studies/2026-10-03-pack-0250/README.md`, "For Nima";
+# flags.yml, section 26f; rules/cant_tell.yml). One or more cases for each
+# rule, and the cases that keep each rule from reaching what it must not.
+# Every stack here is invented from the pattern the design repository's
+# files name; none is a real header.
+
+cases:
+
+  # --- a Philips 3D TFE whose prepulse the file does not state (item 1)
+
+  - name: a Philips 3D T1 TFE with no MP, no inversion time and no prepulse read cannot be told
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      inversion_recovery: 'NO'
+      text_series_description: 'tra_T1W_3D_TFE/Gd'
+      n_slices: 180
+      repetition_time: 8.1
+      echo_time: 3.7
+      flip_angle: 8
+      echo_train_length: 120
+    flags:
+      philips_3d_tfe: true
+      philips_tfe_cant_tell: true
+    axes:
+      technique: ''
+
+  - name: the same TFE named for nothing but an mDixon cannot be told either, though 3D TFE is in its name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\W\W\DIXON'
+      scanning_sequence: RM
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'T1_3D_TFE_mDixon KM CS'
+      n_slices: 200
+      repetition_time: 6.5
+      echo_time: 2.1
+      flip_angle: 10
+    flags:
+      philips_tfe_cant_tell: true
+    axes:
+      technique: ''
+
+  - name: guard, a Philips 3D TFE with an inversion time is an MPRAGE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'sag 3D T1'
+      n_slices: 180
+      repetition_time: 8.1
+      echo_time: 3.7
+      inversion_time: 950
+      flip_angle: 8
+    flags:
+      philips_tfe_cant_tell: false
+    axes:
+      technique: MPRAGE
+
+  - name: guard, a Philips 3D TFE named e-THRIVE stays the interpolated spoiled gradient echo
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      scan_options: FS
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'Gd tra e-THRIVE SENSE'
+      n_slices: 120
+      repetition_time: 4.4
+      echo_time: 2.1
+      flip_angle: 10
+    flags:
+      philips_tfe_cant_tell: false
+    axes:
+      technique: VIBE
+
+  - name: guard, a Philips SmartBrain survey is a localizer whatever its prepulse
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_FFE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: T1TFE
+      text_series_description: 'SmartBrain'
+      n_slices: 60
+      repetition_time: 6
+      echo_time: 2.6
+      flip_angle: 8
+    flags:
+      philips_tfe_cant_tell: false
+
+  # --- a GE BRAVO reformat named a Cube FLAIR (item 3)
+
+  - name: a GE BRAVO reformat named Cube FLAIR with contrast, no weighting word, cannot be told on technique, modifier or base
+    stack:
+      image_type: 'DERIVED\SECONDARY\REFORMATTED'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SS\SK'
+      scan_options: 'FAST_GEMS\EDR_GEMS\ACC_GEMS\FSP_GEMS\IR_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: BRAVO
+      text_series_description: 'MPR ax Cube FLAIR + Gd'
+      n_slices: 120
+      repetition_time: 8
+      echo_time: 3.1
+      inversion_time: 450
+      flip_angle: 12
+    flags:
+      ge_gre_header_named_cube_flair: true
+    axes:
+      technique: ''
+      modifier: ''
+      base: ''
+
+  # --- a Siemens name with fs as a word of its own (item 5)
+
+  - name: a Siemens TSE named fs with no FS token is FatSat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_fs_cor_3mm'
+      text_protocol_name: 't1_tse_fs_cor_3mm'
+      text_sequence_name: '*tse2d1_3'
+      n_slices: 20
+      repetition_time: 600
+      echo_time: 11
+      echo_train_length: 3
+    flags:
+      siemens_fs_named: true
+    axes:
+      modifier: FatSat
+
+  - name: guard, a Siemens FLAIR named utan fs takes no FatSat
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      scan_options: PER
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ax t2 flair 2d 3mm utan fs'
+      text_sequence_name: '*tir2d1_16'
+      n_slices: 40
+      repetition_time: 9000
+      echo_time: 81
+      inversion_time: 2500
+    flags:
+      siemens_fs_named: false
+
+  - name: guard, a Siemens TSE named fs-Dixon is a Dixon, not a fat saturation
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIXON\W'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      scan_options: DIXW
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_fs-dixon_sag_320_W'
+      text_sequence_name: '*tse2d1_3'
+      n_slices: 15
+      repetition_time: 650
+      echo_time: 10
+    flags:
+      siemens_fs_named: false
+
+  - name: guard, a Siemens TIRM named fs keeps its inversion and takes no FatSat from the name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: 'IR\SE'
+      sequence_variant: 'SK\SP\MP'
+      scan_options: IR
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tirm_cor_fs'
+      text_sequence_name: '*tir2d1_7'
+      n_slices: 20
+      repetition_time: 5000
+      echo_time: 40
+      inversion_time: 150
+    flags:
+      siemens_fs_named: false
+
+  # --- a Philips registered diffusion copy with direction I (item 7)
+
+  - name: a Philips Reg - DWI copy of a b=0, six directions and the isotropic image, direction I, is Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'Reg - DWI 15 R 5/0 S'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      dwi_directions: 6
+      n_slices: 35
+      n_instances: 280
+      repetition_time: 4500
+      echo_time: 80
+      echo_train_length: 55
+    flags:
+      philips_registered_dwi: true
+      philips_directional_set: false
+      philips_isotropic_private: true
+    axes:
+      construct: Trace
+
+  - name: guard, the same diffusion set not registered stays a diffusion set, no Trace (C3)
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'DWI_og SENSE'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      dwi_directions: 3
+      n_slices: 30
+      n_instances: 150
+      repetition_time: 4500
+      echo_time: 80
+      echo_train_length: 55
+    flags:
+      philips_registered_dwi: false
+      philips_directional_set: true
+    axes:
+      construct: ''
+
+  - name: guard, a registered tensor (Reg - DTI) stays a diffusion set, no Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      philips_scanning_technique: DwiSE
+      philips_diffusion_direction: I
+      text_series_description: 'Reg - DTI_low SENSE'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      dwi_directions: 15
+      n_slices: 40
+      n_instances: 680
+      repetition_time: 6000
+      echo_time: 80
+    flags:
+      philips_registered_dwi: false
+    axes:
+      construct: ''
+
+  # --- what a two-echo Siemens FLASH SWI computes (item 8)
+
+  - name: the SWI image of a two-echo Siemens fl3d2r combines its echoes, base SWI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\SWI\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'SWI_Images'
+      text_protocol_name: 'gre_r3x3_1p5mm'
+      text_sequence_name: 'fl3d2r'
+      n_slices: 96
+      repetition_time: 41
+      echo_time: 22
+      flip_angle: 15
+      echo_train_length: 2
+    flags:
+      siemens_two_echo_fl_swi_output: true
+    axes:
+      technique: MEDIC
+      base: SWI
+
+  - name: its minIP combines them too
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\MNIP\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 'mIP_Images(SW)'
+      text_protocol_name: 'gre_r3x3_1p5mm'
+      text_sequence_name: 'fl3d2r'
+      n_slices: 89
+      repetition_time: 41
+      echo_time: 22
+      flip_angle: 15
+      echo_train_length: 2
+    flags:
+      siemens_two_echo_fl_swi_output: true
+    axes:
+      technique: MEDIC
+      base: SWI
+
+  # --- GE's multi-echo QSM outputs (item 9)
+
+  - name: GE's multi-echo QSM R2* map has no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: psd/QSM/me
+      ge_internal_pulse_sequence_name: EFGRE3D
+      ge_private_image_type: '3'
+      text_series_description: 'R2* | psd/QSM/me | EFGRE3D'
+      echo_numbers: '10'
+      n_slices: 82
+      n_instances: 82
+      repetition_time: 54
+      echo_time: 49
+      flip_angle: 15
+    axes:
+      provenance: SWIRecon
+      construct: R2starmap
+      base: ''
+
+  - name: the same R2* map whose private pulse sequence was not read is no QSM by its stamped name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'R2* | psd/QSM/me | EFGRE3D'
+      echo_numbers: '10'
+      n_slices: 82
+      n_instances: 82
+      repetition_time: 54
+      echo_time: 49
+      flip_angle: 15
+    flags:
+      ge_qsm_me_psd: true
+    axes:
+      construct: R2starmap
+      base: ''
+
+  - name: GE's multi-echo QSM SWI output whose private pulse sequence was not read is SWI, no QSM
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'SWI | psd/QSM/me | EFGRE3D'
+      echo_numbers: '10'
+      n_slices: 82
+      n_instances: 82
+      repetition_time: 54
+      echo_time: 49
+      flip_angle: 15
+    flags:
+      ge_qsm_me_swi_output: true
+    axes:
+      construct: SWI
+      base: SWI
+
+  # --- a GE reversed-phase reference by its b values (item 11)
+
+  - name: a GE reversed run named PA whose b values are 0 and 50 is FieldmapRef
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EPI_GEMS\ACC_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'DTI_PA'
+      dwi_b_values: '0,50'
+      stacks_in_series: 1
+      n_slices: 67
+      n_instances: 469
+      repetition_time: 8150
+      echo_time: 83
+    flags:
+      ge_nominal_b0_reversed: true
+    axes:
+      construct: FieldmapRef
+
+  - name: guard, a GE reversed run named PA with a b value of 1000 is a diffusion
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EPI_GEMS\ACC_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'DTI_PA'
+      dwi_b_values: '0,1000'
+      stacks_in_series: 1
+      n_slices: 67
+      n_instances: 469
+      repetition_time: 8150
+      echo_time: 83
+    flags:
+      ge_nominal_b0_reversed: false
+      ge_reversed_reference_review: false
+
+  - name: a GE reversed run named PA whose highest b value is 80 is offered as FieldmapRef for review
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EPI_GEMS\ACC_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'DTI_PA'
+      dwi_b_values: '0,80'
+      stacks_in_series: 1
+      n_slices: 67
+      n_instances: 469
+      repetition_time: 8150
+      echo_time: 83
+    flags:
+      ge_nominal_b0_reversed: false
+      ge_reversed_reference_review: true
+    axes:
+      construct: FieldmapRef

@@ -691,7 +691,9 @@ cases:
       ge_ksepi_3d_short: false
       ge_spgr_epi: false
 
-  - name: a Philips diffusion set of a b=0, three directions and the isotropic image, direction I, is no Trace
+  # MRI pack 0.25.0 (Nima, 2026-10-03): a registered copy (`Reg - DWI`) is
+  # Trace, C3 narrowed; the unregistered set stays no Trace (axes-0250-r6.yml).
+  - name: a Philips registered diffusion set of a b=0, three directions and the isotropic image, direction I, is Trace
     stack:
       image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
       scanning_sequence: SE
@@ -710,11 +712,11 @@ cases:
       echo_time: 80
       echo_train_length: 55
     flags:
-      philips_directional_set: true
-      philips_isotropic_private: false
+      philips_registered_dwi: true
+      philips_directional_set: false
+      philips_isotropic_private: true
     axes:
-      construct: ''
-      disposition: acquisition
+      construct: Trace
 
   - name: guard, a Philips stack of a b=0 and the isotropic image, direction I, stays Trace
     stack:
@@ -868,7 +870,9 @@ cases:
       provenance: ProjectionDerived
       technique: MPRAGE
 
-  - name: guard, a GE reformat named Cube T2 FLAIR over a BRAVO header is left to its name
+  # MRI pack 0.25.0 (Nima, 2026-10-03): neither the name nor the header; the
+  # axes they disagree on cannot be told (rules/cant_tell.yml).
+  - name: guard, a GE reformat named Cube T2 FLAIR over a BRAVO header is left undecided where they disagree
     stack:
       image_type: 'DERIVED\SECONDARY\REFORMATTED'
       scanning_sequence: GR
@@ -885,7 +889,9 @@ cases:
     flags:
       vendor_gre_readout_named: false
     axes:
-      technique: SPACE
+      technique: ''
+      modifier: ''
+      base: ''
 
   - name: a Siemens TurboFLASH reformat named space is MPRAGE
     stack:
