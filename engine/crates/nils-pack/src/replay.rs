@@ -115,6 +115,13 @@ fn stack_of(
 
 /// What the pack decides of the stack of one packet.
 pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
+    replay_with(pack, packet, &crate::legal::class_constraints(pack))
+}
+
+/// [`replay`] with the pack's class constraints built by the caller
+/// ([`crate::legal::class_constraints`]), once for a run of many packets
+/// through the same pack.
+pub fn replay_with(pack: &Pack, packet: &Value, constraints: &Value) -> Result<Value, String> {
     let empty = Map::new();
     let header = packet.get("header").and_then(Value::as_object);
     let mut groups: Vec<&Map<String, Value>> = Vec::new();
@@ -254,8 +261,7 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
             }
         }
     }
-    let constraints = class_constraints(pack);
-    let broken: Vec<Value> = crate::legal::broken(pack, &constraints, &decided, &decided_by)
+    let broken: Vec<Value> = crate::legal::broken(pack, constraints, &decided, &decided_by)
         .into_iter()
         .map(|b| json!({"kind": b.kind, "id": b.id}))
         .collect();
@@ -297,19 +303,4 @@ pub fn replay(pack: &Pack, packet: &Value) -> Result<Value, String> {
         "withheld": withheld,
         "broken": broken,
     }))
-}
-
-/// The pack's class constraints, built once per pack and kept: a replay of
-/// the archive asks for them on every packet.
-fn class_constraints(pack: &Pack) -> std::sync::Arc<Value> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Value>>>> = OnceLock::new();
-    let key = format!("{}@{:p}", pack.id(), pack as *const Pack);
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-    cache
-        .entry(key)
-        .or_insert_with(|| Arc::new(crate::legal::class_constraints(pack)))
-        .clone()
 }
