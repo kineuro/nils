@@ -82,6 +82,7 @@ impl Visibility {
     }
 }
 
+#[derive(Clone)]
 pub struct ParserDef {
     pub name: String,
     pub field: usize,
@@ -93,6 +94,7 @@ pub struct ParserDef {
 }
 
 /// A loaded pack.
+#[derive(Clone)]
 pub struct Pack {
     pub name: String,
     pub version: Version,
@@ -125,6 +127,9 @@ pub struct Pack {
     pub mcp: Option<crate::mcp::Model>,
     /// The rule sets, in the order they run.
     pub rule_sets: Vec<RuleSet>,
+    /// The keyword clauses' words, one automaton per text they search, so a
+    /// stack's text is read once for all of them.
+    pub keywords: crate::keywords::Index,
     /// §10: how one stack per session and role is chosen. A pack that
     /// declares none picks nothing, which is what every pack before Wave 3
     /// does.
@@ -286,7 +291,7 @@ pub fn load(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
 /// amended pack and the pass or fail of the cases, both, writing nothing.
 /// Without an overlay the failures are `None`.
 pub fn load_judged(dir: &Path, overlay: Option<&Overlay>) -> R<(Pack, Option<Error>)> {
-    let bare = build(dir, None)?;
+    let bare = crate::cache::load(dir, || build(dir, None))?;
     let Some(o) = overlay else {
         return Ok((bare, None));
     };
@@ -403,7 +408,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     if let Some(v) = m.get("dictionary") {
         for name in manifest.blame(yaml::texts(v, "dictionary"))? {
             let path = dir.join(&name);
-            let text = std::fs::read_to_string(&path).map_err(|e| {
+            let text = crate::cache::read_to_string(&path).map_err(|e| {
                 Error::at("dictionary", format!("{}: {e}", path.display()))
                     .in_file(&manifest.path, Some(&manifest.source))
             })?;
@@ -867,7 +872,12 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         passes.push(pass);
     }
 
+    // Every keyword clause's words, now that no overlay will change them, in
+    // one automaton per text they search.
+    let keywords = crate::keywords::Index::build(&mut rule_sets);
+
     let mut pack = Pack {
+        keywords,
         derived,
         axes,
         levels,
@@ -2265,6 +2275,7 @@ fn load_axis(
                 confidence: tier_of(Tier::Keywords),
                 field: search,
                 list,
+                ids: Vec::new(),
                 bucket,
             });
         }
@@ -2869,6 +2880,7 @@ fn load_rule_set(
                     confidence,
                     field,
                     list,
+                    ids: Vec::new(),
                     bucket,
                 }
             } else {

@@ -13,11 +13,13 @@
 //! someone who has never seen our schema.
 
 pub mod bids;
+mod cache;
 pub mod corpus;
 pub mod derive;
 pub mod error;
 pub mod eval;
 pub mod expr;
+pub mod keywords;
 pub mod legal;
 pub mod level;
 pub mod mcp;

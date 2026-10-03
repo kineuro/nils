@@ -4335,7 +4335,11 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         ],
         None,
     );
-    const LIMIT: usize = 320;
+    // The requests the door answers before the server stops. Waiting on a
+    // job reads the registry from the command line and asks the door once,
+    // when the job is over, so the test asks the same 25 however slow the
+    // runner is; the rest are capabilities at the end.
+    const LIMIT: usize = 32;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -4362,20 +4366,27 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         used.set(used.get() + 1);
         server.request(method, path, body, token)
     };
+    // a job as the registry has it, read beside the server
+    let look = |job: i64| -> serde_json::Value {
+        serde_json::from_str(&run(
+            &home,
+            &["jobs", "show", &job.to_string(), "--json"],
+            None,
+        ))
+        .unwrap()
+    };
+    // until a job is over, two minutes at most, then the door's word on it
     let wait = |job: i64| -> serde_json::Value {
-        let mut shown = serde_json::Value::Null;
-        for _ in 0..150 {
-            let (status, now) = ask("GET", &format!("/api/jobs/{job}"), None, ops);
-            assert_eq!(status, 200, "{now}");
-            shown = now;
-            if matches!(
-                shown["state"].as_str(),
-                Some("done" | "failed" | "cancelled")
-            ) {
-                break;
-            }
+        let since = std::time::Instant::now();
+        while !matches!(
+            look(job)["state"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) && since.elapsed().as_secs() < 120
+        {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        let (status, shown) = ask("GET", &format!("/api/jobs/{job}"), None, ops);
+        assert_eq!(status, 200, "{shown}");
         shown
     };
 
@@ -4461,18 +4472,12 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     // the chain, step by step, each job naming the one before
     for expected in ["digest", "fingerprint", "classify"] {
         let mut next = job["chain"]["after"].as_i64();
-        for _ in 0..50 {
+        for _ in 0..300 {
             if next.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
-            let (_, again) = ask(
-                "GET",
-                &format!("/api/jobs/{}", ids.last().unwrap()),
-                None,
-                ops,
-            );
-            next = again["chain"]["after"].as_i64();
+            next = look(*ids.last().unwrap())["chain"]["after"].as_i64();
         }
         let next = next.unwrap_or_else(|| panic!("no job after {expected}: {job}"));
         job = wait(next);
@@ -4674,13 +4679,12 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let job = wait(second);
     assert_eq!(job["state"], "done", "{job}");
     let mut stopped = job["result"]["chain_stopped"].clone();
-    for _ in 0..50 {
+    for _ in 0..300 {
         if !stopped.is_null() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
-        stopped = again["result"]["chain_stopped"].clone();
+        stopped = look(second)["result"]["chain_stopped"].clone();
     }
     assert_eq!(stopped["step"], serde_json::json!(["fingerprint"]), "{job}");
     assert!(

@@ -199,6 +199,12 @@ pub trait Ctx {
     fn present(&self, field: usize) -> bool;
     fn text(&self, field: usize) -> &str;
     fn re(&self, idx: usize) -> &Regex;
+    /// A text field folded as a text atom asks. An evaluator that reads one
+    /// stack many times may keep the folded text rather than fold it again;
+    /// whatever it keeps must equal this.
+    fn text_cased(&self, field: usize, case: Case) -> std::borrow::Cow<'_, str> {
+        case.apply(self.text(field))
+    }
     /// Whether an axis decided so far carries this value. False before
     /// anything is decided, which is why an axis atom may only name an axis
     /// declared before it.
@@ -346,7 +352,7 @@ impl Expr {
             },
 
             Expr::Text { field, case, inner } => {
-                let t = case.apply(c.text(*field));
+                let t = c.text_cased(*field, *case);
                 inner.eval(Some(&Subject::text(t.as_ref())), c)
             }
 

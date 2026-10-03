@@ -1823,6 +1823,7 @@ dependencies = [
 name = "nils-pack"
 version = "1.0.0-alpha.73"
 dependencies = [
+ "aho-corasick",
  "csv",
  "regex",
  "serde",
