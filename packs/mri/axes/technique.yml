@@ -668,6 +668,9 @@ values:
       - b-ffe
       - bffe
       - trufi
+    # MRI pack 0.25.0: or GE's `efgre3d` without SP at a flip angle of 40
+    # degrees or more, FIESTA by its physics (flags.yml, section 26a).
+    alternative_flags: [ge_efgre3d_steady_state]
     detection:
       exclusive: is_ssfp
   DESS:

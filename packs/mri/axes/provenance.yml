@@ -85,7 +85,9 @@ values:
   # `dsc_not_swi`; sealed-1 A2, the deep research, case 18).
   SWIRecon:
     terms: ['SWI reconstruction', 'SWAN', 'SWI']
-    requires: {not: dsc_not_swi}
+    # MRI pack 0.25.0: never a position display, the planning picture of the
+    # SWI series it names (flags.yml, section 26a).
+    requires: {all: [{not: dsc_not_swi}, {not: image_type.is_posdisp}]}
     keywords:
       - swi
       - swan

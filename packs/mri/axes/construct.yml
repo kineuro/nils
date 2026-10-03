@@ -392,7 +392,9 @@ values:
     # MIP (sealed-1 A11).
     # MRI pack 0.21.0: nor a Siemens `CSA MPR` image, a reformat whatever
     # its series is named (record 48, conventions round 3, case 3).
-    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}, {not: csa_mpr_image}]}
+    # MRI pack 0.25.0: nor a Philips `MAX_IP` over a volume of thin slices,
+    # a reformat (flags.yml, section 26a).
+    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}, {not: csa_mpr_image}, {not: philips_max_ip_volume}]}
     keywords:
       - mip
       - maximum intensity projection
@@ -402,7 +404,9 @@ values:
   MinIP:
     terms: ['minimum intensity projection', 'mIP', 'MinIP']
     # MRI pack 0.21.0: nor a Siemens `CSA MPR` image (case 3).
-    requires: {not: csa_mpr_image}
+    # MRI pack 0.25.0: nor a name's minIP where the image type states a MIP
+    # (GE's ImageType first: `PJN\MIP`, round 3).
+    requires: {all: [{not: csa_mpr_image}, {not: {all: [image_type.is_mip, {not: image_type.is_minip}]}}]}
     keywords:
       - minip
       - minimum intensity projection

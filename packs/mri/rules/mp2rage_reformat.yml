@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: a Siemens reformat of an MP2RAGE written outside the 3D
+# card (a PACS or workstation average, `DERIVED\SECONDARY\...\AVERAGE`, the
+# sequence `*tfl3d1_...`, TR 4,000 ms or more) carries no MP2RAGE word and
+# no UNI token: the stack alone reads an MPRAGE. The protocol sweep (the
+# design repository's `studies/2026-10-02-protocol-sweep/grade.md`, part 2):
+# four such reformats beside a `Sag 3D T1 GRE IR MP2RAGE` series of the same
+# sequence name, settled MP2RAGE as their source.
+#
+# This set says what the rules alone can, MPRAGE, at a confidence the
+# session pass may refine (`passes/session_mp2rage_reformat.yml`), which
+# reads the source of the same sequence name. It runs before the technique
+# axis and decides it only for those reformats (`siemens_tfl_reformat_long_tr`,
+# flags.yml section 26a).
+
+rule_set: mp2rage_reformat
+decides: [technique]
+
+order: ['siemens_tfl_reformat_long_tr']
+
+rules:
+
+  'siemens_tfl_reformat_long_tr':
+    clauses:
+      - {flag: siemens_tfl_reformat_long_tr}
+    set: {technique: MPRAGE}
+    confidence: 0.8
+    why: 'a reformat of a turbo FLASH at a long repetition time that names no MP2RAGE: MPRAGE, until its source says MP2RAGE'

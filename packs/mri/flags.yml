@@ -442,7 +442,10 @@ flags:
   is_localizer: {any: [image_type.is_localizer, sequence_name.is_localizer,
                        scan_options.has_scout_mode, image_type.is_posdisp,
                        image_type.is_scout, ge_three_plane_localizer,
-                       vendor_auto_scout]}
+                       vendor_auto_scout,
+                       # MRI pack 0.25.0: Siemens FastView and GE's
+                       # `3-Plane` pulse sequence (section 26a)
+                       siemens_fastview, ge_three_plane_psd]}
   has_magnitude: image_type.has_magnitude
   # MRI pack 0.21.0: or GE's private image type 1 (section 18).
   has_phase:     {any: [image_type.has_phase, ge_private_phase]}
@@ -476,14 +479,22 @@ flags:
   # carry DERIVED, so none moves).
   # MRI pack 0.21.0: only where the geometry shows a projection (section
   # 18, `maximum_projection`): the archive's 157 are whole 3D volumes.
-  is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin,
+  # MRI pack 0.25.0: never a Philips `MAX_IP` over a volume of thin slices
+  # (section 26a).
+  is_mip:
+    all:
+      - {not: philips_max_ip_volume}
+      - any: [image_type.is_mip, image_type.is_mip_thin,
                         maximum_projection,
                         {all: [image_type.is_projection, image_type.is_vascular]},
                         # MRI pack 0.21.0: never GE's collapse of a 2D phase
                         # contrast, an acquisition; and Philips' phase-contrast
                         # projection (section 18).
                         {all: [{parser: image_type, token: COLLAPSE}, {not: ge_pc_2d_collapse}]},
-                        pc_projection_image]}
+                        pc_projection_image,
+                        # MRI pack 0.25.0: an older Siemens projection with
+                        # no 3D-card token (section 26a)
+                        siemens_legacy_projection]
   # MRI pack 0.20.0: or Siemens' `mIP_Images`, named in mixed case
   # (dev-5's A9; section 17).
   is_minip:      {any: [image_type.is_minip, minip_mixed_case]}
@@ -500,8 +511,11 @@ flags:
     all:
       - {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
                has_mpr_in_text, is_projection_plane, is_workstation_reformat,
-               plane_reformat_named, range_reformat, philips_maximum_thick_reformat]}
+               plane_reformat_named, range_reformat, philips_maximum_thick_reformat,
+               philips_max_ip_volume]}
       - {not: ge_workstation_diffusion_map}
+      # MRI pack 0.25.0: never an older Siemens projection, a MIP (section 26a)
+      - {not: siemens_legacy_projection}
   # MRI pack 0.23.0: a range the Siemens 3D card writes (`Range Parallel`,
   # `Range Radial`): DERIVED, with PARALLEL or RADIAL in its image type
   # (`DERIVED\PRIMARY\M\NONE\PARALLEL\DIS3D`), is a reformat whatever it is
@@ -1152,6 +1166,9 @@ flags:
       - any:
           - image_type.has_average
           - {text: search_text, substring: sectra reconstruction}
+          # MRI pack 0.25.0: or an exported reformat of a 3D that writes only
+          # its plane (section 26a, `external_3d_reformat`).
+          - external_3d_reformat
   # Philips' `PROJECTION IMAGE` on a diffusion image with a b value is its
   # computed isotropic image, not a reformat (dev-1: a `b1000` stack).
   # MRI pack 0.14.0: or its b=0 image, named `b0` (dev-2: a Philips `b0`
@@ -1965,7 +1982,10 @@ flags:
     all:
       # MRI pack 0.24.0: and the Swedish and German `subtraktion` (a
       # Philips `subtraktion T1 sag`, the final certificate's A13).
-      - {text: technique_text, matches: '(^|[^a-z])sub([^a-z]|$)|subtra[ck]t'}
+      # MRI pack 0.25.0: and GE's `(n/901/1)-(n/900/1)` (section 26a).
+      - any:
+          - {text: technique_text, matches: '(^|[^a-z])sub([^a-z]|$)|subtra[ck]t'}
+          - ge_subtraction_named
       - {not: is_asl}
       - {not: asl_words}
   qmap_t2_named: {all: [image_type.is_derived, {text: search_text, matches: '(^|[^a-z])(qmap\s*-?\s*t2w?|t2w?\s*-?\s*qmap)([^a-z]|$)'}]}
@@ -3630,3 +3650,104 @@ flags:
       - {any: [is_subtraction, sub_named]}
       - {any: [is_composite, composed_named, composite_not_survey]}
       - {not: {any: [is_mip, is_minip, is_mpr, is_projection]}}
+
+  # === 26a. MRI pack 0.25.0: the protocol sweep, reformats and the session ===
+  #
+  # The protocol sweep's error list (the design repository's
+  # `studies/2026-10-02-protocol-sweep/grade.md`, part 2, kind a): reformats
+  # made outside the scanner, reformats that take their source's technique
+  # from the session, and planning series the vendor marks.
+
+  # --- a reformat a PACS or workstation exported of a 3D acquisition:
+  # DERIVED\SECONDARY with nothing after the plane it was cut in (`AXIAL`,
+  # `OTHER`, or no third value), no series number of the scanner's (-1 or
+  # none) or a Sectra name. The scanner's own reformats write MPR or
+  # REFORMATTED; these write only the plane. ProjectionDerived with MPR, as
+  # the workstation's thick-slab average already is.
+  external_3d_reformat:
+    all:
+      - image_type.is_derived
+      - image_type.is_secondary
+      - {not: image_type.is_primary}
+      - {not: image_type.is_localizer}
+      - {not: image_type.is_posdisp}
+      - is_3d
+      - {not: is_mip}
+      - {not: is_minip}
+      - {not: {any: [image_type.has_diffusion, image_type.has_adc, image_type.has_fa, image_type.has_perfusion,
+                     image_type.has_cbf, image_type.has_cbv, image_type.has_asl, image_type.has_maximum]}}
+      # never a subtraction exported the same way (`subtraction 5 - 3`)
+      - {not: {any: [is_subtraction, sub_named]}}
+      - any:
+          - {field: series_number, lt: 0}
+          - {field: series_number, present: false}
+          - {text: search_text, substring: sectra}
+
+  # --- GE's `efgre3d` without SP in SequenceVariant at a flip angle of 40
+  # degrees or more: a balanced steady state (FIESTA). Round 3's case 8 reads
+  # an `efgre3d` without SP as GRE where spoiling is not stated; on the
+  # archive every such stack at 40 degrees or more that is named is named
+  # FIESTA (FIESTA-C, CISS, by its name), and the unnamed are its reformats.
+  ge_efgre3d_steady_state:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: 'efgre3d'}
+      - {not: has_spoiled}
+      - {field: flip_angle, ge: 40}
+      - {field: repetition_time, lt: 10}
+      - {not: has_epi}
+
+  # --- a Siemens reformat of an MP2RAGE written outside the 3D card (a
+  # PACS average, `*tfl3d1_...`, TR 4,000 ms or more) names no MP2RAGE: the
+  # rules alone say MPRAGE, at a confidence the session pass may refine from
+  # the source of the same sequence name (`passes/session_mp2rage_reformat.yml`).
+  siemens_tfl_reformat_long_tr:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - image_type.is_derived
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?tfl3d1'}
+      - {field: repetition_time, ge: 4000}
+      - {not: {text: search_text, matches: 'mp2rage|(^|[^a-z])(uni|inv1|inv2)([^a-z]|$)'}}
+      - {not: image_type.is_localizer}
+  mp2rage_named: {text: search_text, matches: 'mp2rage'}
+
+  # --- Siemens FastView, the table-moving survey (`*fl2d_ct`, `FastView`),
+  # is a planning scan as AutoAlign is (round 3, case 6: the vendors'
+  # automatic planning scouts are localizers whatever their slices).
+  siemens_fastview:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - any:
+          - {text: search_text, matches: 'fastview|fast view'}
+          - {text: text_sequence_name, matches: '^\*?fl2d_ct'}
+
+  # --- GE's three-plane localizer by its pulse sequence (`3-Plane`), where
+  # the series plane is not 256: a series split by echo states 16 (the
+  # vendor flag the pulse sequence is, round 3's "vendor flags win").
+  ge_three_plane_psd:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: ge_pulse_sequence_name, matches: '^\s*3[-_ ]?plane'}
+
+  # --- an older Siemens projection: ORIGINAL or DERIVED `PROJECTION IMAGE`
+  # with no 3D-card token (`CSA MPR`, `CSA MIP`), which Siemens' conformance
+  # statement defines as "3D MIP and SSD images": a MIP, never a reformat.
+  siemens_legacy_projection:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - image_type.is_projection_image
+      - {not: {parser: image_type, substring: 'CSA'}}
+      - {not: {parser: image_type, token: MPR}}
+
+  # --- Philips `MAX_IP` over a whole volume of thin slices, read as R3-MAX
+  # reads `MAXIMUM`: a projection only at 3 slices or fewer or a slab of 10
+  # mm or more; otherwise a reformat.
+  philips_max_ip_volume:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - {parser: image_type, token: MAX_IP}
+      - {field: n_slices, gt: 3}
+      - {field: slice_thickness, lt: 10}
+
+  # --- GE names its subtraction of two series `(exam/series/1)-(exam/series/1)`.
+  ge_subtraction_named: {text: text_series_description, matches: '\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)\s*-\s*\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)'}

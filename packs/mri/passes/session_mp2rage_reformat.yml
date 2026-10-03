@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: a Siemens reformat of an MP2RAGE made outside the 3D card
+# takes its source's technique from the session: the series beside it of
+# the same sequence name (`*tfl3d1_192ns`) is named MP2RAGE (its INV1, INV2
+# or UNI). A reformat keeps its source's reading (record 48; the protocol
+# sweep's grade, part 2). The rules alone left it MPRAGE at 0.8
+# (`rules/mp2rage_reformat.yml`).
+#
+# The same engine guards as `session.yml`: a sibling is seen by its header
+# alone, a value the header decided is never replaced, and every value
+# written has tier `session`.
+
+pass: session_mp2rage_reformat
+kind: session_context
+phase: after
+
+target:
+  when:
+    all:
+      - siemens_tfl_reformat_long_tr
+      - {axis: technique, is: MPRAGE}
+
+session:
+  sibling_fields:
+    - manufacturer
+    - image_type
+    - text_series_description
+    - text_protocol_name
+    - text_sequence_name
+    - text_body_part
+    - text_series_comments
+    - text_image_comments
+    - orientation
+    - rows
+    - columns
+    - n_slices
+    - series_number
+  replaces_at_most: 0.85
+
+rules:
+  - rule: an_mp2rage_source_of_its_sequence
+    sibling:
+      same: [text_sequence_name]
+      when: mp2rage_named
+    require: some
+    set:
+      technique: MP2RAGE
+    confidence: 0.8
+    why: 'the series beside it of the same sequence name is an MP2RAGE, so this reformat is of an MP2RAGE'
+    sources:
+      - 'record 48: a reformat keeps its source''s reading'
+      - 'the protocol sweep''s grade, part 2: MP2RAGE reformats settled MP2RAGE from their source'
+
+emit:
+  review_item_below: 0.70
