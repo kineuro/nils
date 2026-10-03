@@ -108,6 +108,11 @@ pub enum Clause {
         field: usize,
         /// The words, after any overlay.
         list: Vec<String>,
+        /// Each word's number in the pack's keyword index for `field`, one
+        /// for one with `list`, given when the pack is built
+        /// ([`crate::keywords::Index::build`]). Empty until then, and a clause
+        /// whose numbers do not match its list is searched word by word.
+        ids: Vec<usize>,
         /// The bucket the list was taken from, when the pack named one.
         bucket: Option<String>,
     },
