@@ -116,7 +116,7 @@ cases:
       mr_acquisition_type: 2D
       manufacturer: GE MEDICAL SYSTEMS
       ge_pulse_sequence_name: epi
-      text_series_description: 'rCBV[No-Q]:Aug 17 2020 09-13-26'
+      text_series_description: 'rCBV[No-Q]:Jan 01 2001 00-00-00'
       temporal_positions: 60
       n_slices: 40
       repetition_time: 1500

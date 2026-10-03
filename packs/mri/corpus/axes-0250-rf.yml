@@ -306,7 +306,7 @@ cases:
       mr_acquisition_type: 3D
       manufacturer: GE MEDICAL SYSTEMS
       ge_pulse_sequence_name: efgre3d
-      text_series_description: '(1906/901/1)-(1906/900/1)'
+      text_series_description: '(1234/901/1)-(1234/900/1)'
       n_slices: 97
       repetition_time: 4.4
       echo_time: 1.6
