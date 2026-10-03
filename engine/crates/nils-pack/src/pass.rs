@@ -641,6 +641,11 @@ pub struct Corpus {
     axis_seen: Vec<HashMap<Box<str>, u16>>,
     axis_cells: Vec<u16>,
     pub ids: Vec<i64>,
+    /// The pack's patterns, which a pass's `matches` names by number: the
+    /// loader compiles a pass's patterns into the pack's list as it does a
+    /// rule's (MRI pack 0.25.0's physics vote reads a sequence variant and a
+    /// series name by pattern).
+    regexes: Vec<regex::Regex>,
 }
 
 impl Corpus {
@@ -689,6 +694,7 @@ impl Corpus {
             axis_seen: (0..pack.axes.len()).map(|_| HashMap::new()).collect(),
             axis_cells: Vec::new(),
             ids: Vec::new(),
+            regexes: pack.regexes.clone(),
         }
     }
 
@@ -811,8 +817,8 @@ impl Ctx for Row<'_> {
     fn text(&self, field: usize) -> &str {
         self.cell(field)
     }
-    fn re(&self, _idx: usize) -> &regex::Regex {
-        unreachable!("a pass's expressions carry no patterns of their own")
+    fn re(&self, idx: usize) -> &regex::Regex {
+        &self.corpus.regexes[idx]
     }
     fn axis_is(&self, axis: usize, value: &str) -> bool {
         // A multi-valued axis is stored comma-joined, and holding one of its
