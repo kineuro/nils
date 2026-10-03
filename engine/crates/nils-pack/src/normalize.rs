@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+#[derive(Clone)]
 pub struct Normalizer {
     /// The field the result is published as.
     pub into: String,
@@ -44,6 +45,7 @@ pub struct Normalizer {
     pub conditional: Vec<Conditional>,
 }
 
+#[derive(Clone)]
 pub struct Conditional {
     pub canonical: String,
     pub replace: String,

@@ -11,6 +11,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+aho-corasick.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true

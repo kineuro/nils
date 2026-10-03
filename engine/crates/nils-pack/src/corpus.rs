@@ -149,17 +149,16 @@ pub fn read(dir: &Path) -> R<Vec<(std::path::PathBuf, Case)>> {
     if !corpus.is_dir() {
         return Ok(Vec::new());
     }
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus)
+    let files: Vec<std::path::PathBuf> = crate::cache::read_dir(&corpus)
         .map_err(|e| Error {
             file: Some(corpus.clone()),
             line: None,
             path: String::new(),
             message: format!("cannot be read: {e}"),
         })?
-        .filter_map(|e| e.ok().map(|e| e.path()))
+        .into_iter()
         .filter(|p| p.extension().is_some_and(|x| x == "yml" || x == "yaml"))
         .collect();
-    files.sort();
 
     let mut out = Vec::new();
     for path in files {

@@ -6,11 +6,13 @@
 //! live corpus costs 5.5 seconds on one core (`spikes/pack/README.md`), which
 //! is why a flag lives in a pack and not in a column.
 
+use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::HashSet;
 
 use regex::Regex;
 
-use crate::expr::{Ctx, Subject};
+use crate::expr::{Case, Ctx, Subject};
 use crate::pack::Pack;
 use crate::stack::Stack;
 
@@ -31,6 +33,35 @@ pub struct Evaluated<'a> {
     /// empty where the series has none (Wave 4a §5.2). Handed in by whoever
     /// has the row, because they sit beside the fingerprint and not in it.
     private: Vec<String>,
+    /// Each field's text lowercased, made the first time a keyword clause or
+    /// a lowercasing text atom reads it and kept for the rest of the stack:
+    /// a pack reads the same few texts hundreds of times, and folding one
+    /// afresh each time was most of what classifying a stack cost. One cell
+    /// per field the pack can name, fingerprint, derived and private.
+    lower: Vec<OnceCell<String>>,
+    /// Which words of the pack's keyword index each indexed text holds, by
+    /// slot, found the first time a keyword clause reads that text.
+    words: Vec<OnceCell<Vec<bool>>>,
+}
+
+/// What a keyword clause finds in a stack's text: its words by position in
+/// its list, through the pack's index or, for a clause the index does not
+/// number, by searching for each word.
+enum Held<'a> {
+    /// The text is empty, and an empty text holds no keyword.
+    Nothing,
+    Indexed(&'a [bool], &'a [usize]),
+    Direct(Cow<'a, str>, &'a [String]),
+}
+
+impl Held<'_> {
+    fn holds(&self, k: usize) -> bool {
+        match self {
+            Held::Nothing => false,
+            Held::Indexed(hit, ids) => hit[ids[k]],
+            Held::Direct(text, list) => text.contains(&list[k].to_lowercase()),
+        }
+    }
 }
 
 impl<'a> Evaluated<'a> {
@@ -95,6 +126,12 @@ impl<'a> Evaluated<'a> {
             flags: vec![false; pack.flags.len()],
             decided: std::cell::RefCell::new((0..pack.axes.len()).map(|_| Vec::new()).collect()),
             private,
+            lower: (0..crate::stack::FIELDS.len() + pack.derived.len() + pack.ingest.len())
+                .map(|_| OnceCell::new())
+                .collect(),
+            words: (0..pack.keywords.slots())
+                .map(|_| OnceCell::new())
+                .collect(),
         };
         // Predicates, parser by parser, in file order. `preds` grows as it
         // goes, so a predicate may name an earlier one; a forward reference
@@ -159,6 +196,34 @@ impl<'a> Evaluated<'a> {
 }
 
 impl Evaluated<'_> {
+    /// A field's text lowercased, as `str::to_lowercase` folds it, from the
+    /// stack's cache where the field has a cell.
+    fn lowered(&self, field: usize) -> Cow<'_, str> {
+        match self.lower.get(field) {
+            Some(cell) => Cow::Borrowed(
+                cell.get_or_init(|| <Self as Ctx>::text(self, field).to_lowercase())
+                    .as_str(),
+            ),
+            None => Cow::Owned(<Self as Ctx>::text(self, field).to_lowercase()),
+        }
+    }
+
+    /// The words of a keyword clause on `field` that the stack's text holds,
+    /// both lowercased.
+    fn words_held<'s>(&'s self, field: usize, list: &'s [String], ids: &'s [usize]) -> Held<'s> {
+        let text = self.lowered(field);
+        if text.is_empty() {
+            return Held::Nothing;
+        }
+        match self.pack.keywords.slot(field) {
+            Some(slot) if ids.len() == list.len() => {
+                let hit = self.words[slot].get_or_init(|| self.pack.keywords.scan(slot, &text));
+                Held::Indexed(hit, ids)
+            }
+            _ => Held::Direct(text, list),
+        }
+    }
+
     /// A field past the fingerprint's own: the pack's derived text first,
     /// then its ingested private elements, in the order the loader numbered
     /// them. `None` for a field of the fingerprint itself.
@@ -208,6 +273,12 @@ impl Ctx for Evaluated<'_> {
     }
     fn re(&self, idx: usize) -> &Regex {
         &self.pack.regexes[idx]
+    }
+    fn text_cased(&self, field: usize, case: Case) -> Cow<'_, str> {
+        match case {
+            Case::Lower => self.lowered(field),
+            _ => case.apply(<Self as Ctx>::text(self, field)),
+        }
     }
     fn axis_is(&self, axis: usize, value: &str) -> bool {
         self.decided
@@ -835,13 +906,13 @@ impl Evaluated<'_> {
     fn keyword_hits(&self, rule: &Rule) -> Vec<String> {
         let mut out = Vec::new();
         for c in &rule.clauses {
-            if let Clause::Keywords { field, list, .. } = c {
-                let text = <Self as Ctx>::text(self, *field).to_lowercase();
-                if text.is_empty() {
-                    continue;
-                }
-                for kw in list {
-                    if text.contains(&kw.to_lowercase()) {
+            if let Clause::Keywords {
+                field, list, ids, ..
+            } = c
+            {
+                let held = self.words_held(*field, list, ids);
+                for (k, kw) in list.iter().enumerate() {
+                    if held.holds(k) {
                         out.push(kw.clone());
                     }
                 }
@@ -946,19 +1017,18 @@ impl Evaluated<'_> {
                     confidence,
                     field,
                     list,
+                    ids,
                     ..
                 } => {
                     // v0 matches a keyword as a case-insensitive substring and
                     // cites the first in the list that hits, not the longest.
-                    let text = <Self as Ctx>::text(self, *field).to_lowercase();
-                    if !text.is_empty()
-                        && let Some(kw) = list.iter().find(|k| text.contains(&k.to_lowercase()))
-                    {
+                    let held = self.words_held(*field, list, ids);
+                    if let Some(k) = (0..list.len()).find(|k| held.holds(*k)) {
                         return Some(Fired {
                             tier: *tier,
                             confidence: *confidence,
                             source: "text".into(),
-                            matched: kw.clone(),
+                            matched: list[k].clone(),
                             text: Some(*field),
                             clause,
                         });
@@ -1028,9 +1098,11 @@ impl Evaluated<'_> {
     fn holds(&self, c: &Clause) -> bool {
         match c {
             Clause::Flag { flag, .. } => self.flags[*flag],
-            Clause::Keywords { field, list, .. } => {
-                let text = <Self as Ctx>::text(self, *field).to_lowercase();
-                !text.is_empty() && list.iter().any(|k| text.contains(&k.to_lowercase()))
+            Clause::Keywords {
+                field, list, ids, ..
+            } => {
+                let held = self.words_held(*field, list, ids);
+                (0..list.len()).any(|k| held.holds(k))
             }
             Clause::AnyFlag { flags, .. } => flags.iter().any(|f| self.flags[*f]),
             Clause::Combination { flags, .. } => {
