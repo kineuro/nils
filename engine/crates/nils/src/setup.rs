@@ -15410,6 +15410,15 @@ fn unit_calls(plan: &Plan, names: &[String]) -> Vec<String> {
     out
 }
 
+/// What the engine's unit adds to its service (2026-10-02, the engine that
+/// lost its port at 1,024 open files): room for the descriptors 64 request
+/// handlers, their registry connections, the tile reads and the desk's
+/// connections take, and systemd's watchdog, which the engine feeds only
+/// while its own health door answers that it takes requests, so a hung
+/// engine is restarted rather than left alive with nobody answering.
+pub(crate) const ENGINE_SERVICE_LIMITS: &str =
+    "LimitNOFILE=65536\nWatchdogSec=120\nNotifyAccess=main\n";
+
 /// One unit per part, for the parts that run on the machine.
 pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)> {
     let system = plan.system.is_some();
@@ -15430,7 +15439,7 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
         "nils-engine.service".to_string(),
         format!(
             "[Unit]\nDescription=NILS engine\nAfter=network-online.target\n{postgres_after}\n[Service]\n{}\
-             ExecStart={engine} {}\nRestart=on-failure\n\n[Install]\nWantedBy={wanted}\n",
+             ExecStart={engine} {}\nRestart=on-failure\n{ENGINE_SERVICE_LIMITS}\n[Install]\nWantedBy={wanted}\n",
             service_of_machine(plan, "engine"),
             engine_args(
                 plan,
@@ -27662,6 +27671,35 @@ mod tests {
                 .iter()
                 .all(|(_, t)| t.contains("WantedBy=default.target"))
         );
+    }
+
+    /// 2026-10-02: the engine's unit gives it room for its descriptors and
+    /// puts it under systemd's watchdog, on a laptop and on a machine whose
+    /// services are its own; the other parts' units are left as they were.
+    #[test]
+    fn the_engines_unit_raises_its_open_files_and_has_a_watchdog() {
+        for plan in [plan(Runtime::Machine), deployment()] {
+            let state = state_of(&plan, &deployed_parts());
+            let units = systemd_units(&plan, &state);
+            let engine = &units
+                .iter()
+                .find(|(n, _)| n == "nils-engine.service")
+                .expect("the engine's unit")
+                .1;
+            let service =
+                &engine[engine.find("[Service]").unwrap()..engine.find("[Install]").unwrap()];
+            for line in [
+                "LimitNOFILE=65536",
+                "WatchdogSec=120",
+                "NotifyAccess=main",
+                "Restart=on-failure",
+            ] {
+                assert!(service.lines().any(|l| l == line), "{line} in {engine}");
+            }
+            for (name, text) in units.iter().filter(|(n, _)| n != "nils-engine.service") {
+                assert!(!text.contains("WatchdogSec"), "{name}: {text}");
+            }
+        }
     }
 
     /// Every unit an install writes names what it runs by an absolute path,

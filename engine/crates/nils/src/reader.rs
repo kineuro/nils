@@ -108,6 +108,14 @@ const MORE: &[(&str, &str)] = &[
     ("inversion_recovery", "inversion recovery"),
     // The ImageType Philips writes per frame, which names a Dixon part.
     ("private_frame_image_type", "frame image type"),
+    // The 2026-10-03 fields.
+    ("angio_flag", "angio"),
+    ("acquisition_contrast", "acquisition contrast"),
+    ("temporal_resolution", "temporal resolution"),
+    ("temporal_resolution_source", "temporal resolution from"),
+    ("diffusion_directionality", "directionality"),
+    ("photometric_interpretation", "photometric"),
+    ("samples_per_pixel", "samples per pixel"),
 ];
 
 /// The fields a batch's signature always holds, beside those the deciding

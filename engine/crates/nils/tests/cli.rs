@@ -1809,7 +1809,10 @@ fn pack_list_and_show_read_the_pack_directory() {
             "ge_private_image_type",
             // MRI pack 0.21.0
             "ge_series_plane",
-            "philips_number_of_echoes"
+            "philips_number_of_echoes",
+            // the 2026-10-03 fingerprint fields
+            "philips_prepulse_type",
+            "philips_prepulse_delay"
         ]
     );
     assert_eq!(shown["shown"][0]["address"], "0019xx9C GEMS_ACQU_01");

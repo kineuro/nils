@@ -47,6 +47,20 @@
 //! the series it names are marked for the fingerprint to derive again, since
 //! their row counts did not move and the fingerprint would otherwise take
 //! them for fresh.
+//!
+//! Three choices narrow or widen it (the 2026-10-03 fingerprint fields).
+//! `--reread-every` takes every MR series whatever its manufacturer, for a
+//! field every vendor writes. `--reread-one` reads one file of each series
+//! instead of all of them: enough for a value the series holds once (a
+//! series column, a private element that holds still inside the series), at
+//! a cost of one file a series rather than every image, and the files are
+//! found a chunk of series at a time rather than a query per series. It
+//! cannot see that two files of a series disagree, so it is not for a value
+//! that varies inside one. `--reread-missing` takes only the series whose row
+//! has no SamplesPerPixel (0028,0002), which every image writes: the series a
+//! binary before registry schema 79 read, so a re-read run again, or over a
+//! registry that has since digested new series, reads only what still lacks
+//! the new columns.
 
 use std::path::Path;
 
@@ -92,11 +106,16 @@ pub fn exact(manufacturers: &[String]) -> Vec<String> {
 }
 
 /// Which studies' manufacturers a re-read takes: some compared without
-/// case, some with.
+/// case, some with, or every one; and whether only the series that still
+/// lack the columns a binary before registry schema 79 did not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selection {
     pub folded: Vec<String>,
     pub exact: Vec<String>,
+    /// Every MR series, whatever its study's manufacturer says.
+    pub every: bool,
+    /// Only the series whose row has no SamplesPerPixel.
+    pub missing: bool,
 }
 
 impl Selection {
@@ -104,20 +123,39 @@ impl Selection {
         Selection {
             folded: folded(any_case),
             exact: exact(exact_case),
+            every: false,
+            missing: false,
         }
+    }
+
+    /// Every MR series, or not.
+    pub fn every(mut self, every: bool) -> Selection {
+        self.every = every;
+        self
+    }
+
+    /// Only the series still missing what schema 79 added, or not.
+    pub fn missing(mut self, missing: bool) -> Selection {
+        self.missing = missing;
+        self
     }
 
     pub fn of(settings: &Settings) -> Selection {
         Selection::new(&settings.reread, &settings.reread_exact)
+            .every(settings.reread_every)
+            .missing(settings.reread_missing)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.folded.is_empty() && self.exact.is_empty()
+        !self.every && self.folded.is_empty() && self.exact.is_empty()
     }
 
     /// The condition on `sy.manufacturer`, its parameters numbered from
     /// `first`, and the parameters in the order they stand.
     fn condition(&self, store: &Store, first: usize) -> (String, Vec<Param>) {
+        if self.every {
+            return ("(1 = 1)".to_string(), Vec::new());
+        }
         let d = store.dialect();
         let mut n = first;
         let mut list = |k: usize| -> Vec<String> {
@@ -151,13 +189,25 @@ impl Selection {
 }
 
 /// The series a re-read reads, as a subquery over `series` and `study`,
-/// with its parameters numbered from `first`.
-fn series_of(store: &Store, selection: &Selection, first: usize) -> (String, Vec<Param>) {
+/// with its parameters numbered from `first`. `missing` narrows it to the
+/// series whose row has no SamplesPerPixel, where the selection asks; the
+/// fingerprints a run marks stale are those of the whole selection, since by
+/// then the series it read have the value.
+fn series_of(
+    store: &Store,
+    selection: &Selection,
+    first: usize,
+    missing: bool,
+) -> (String, Vec<Param>) {
     let (cond, params) = selection.condition(store, first);
+    let missing = match missing && selection.missing {
+        true => " AND se.samples_per_pixel IS NULL",
+        false => "",
+    };
     (
         format!(
             "SELECT se.id FROM {} AS se JOIN {} AS sy ON sy.id = se.study_id \
-             WHERE se.modality = 'MR' AND {cond}",
+             WHERE se.modality = 'MR' AND {cond}{missing}",
             store.qualified("series"),
             store.qualified("study"),
         ),
@@ -171,7 +221,7 @@ pub fn targets(store: &mut Store, selection: &Selection) -> Result<Vec<i64>, Err
     if selection.is_empty() {
         return Ok(Vec::new());
     }
-    let (sql, params) = series_of(store, selection, 1);
+    let (sql, params) = series_of(store, selection, 1, true);
     let rows = store.query(&format!("{sql} ORDER BY se.id"), &params)?;
     rows.iter().map(|r| r.int(0)).collect()
 }
@@ -202,6 +252,39 @@ pub fn page_sql(store: &Store) -> String {
     )
 }
 
+/// How many series one query of a one-file re-read covers.
+pub const CHUNK: usize = 500;
+
+/// One query of a one-file re-read: for each series of a chunk, the lowest
+/// file id any of its instances names as its own, with that file's row. Its
+/// parameters are the chunk's series ids, `n` of them. One aggregate over the
+/// series' instances through the index on `instance.series_id`, then a
+/// primary-key join, so a chunk costs what its series hold and no query is
+/// made per series. The file's source and status come back unfiltered: the
+/// caller reads a file of its own source that is ingested, asks the series'
+/// first page for one whose lowest file is of its source and not ingested,
+/// and leaves a series whose lowest file is another source's to that
+/// source's run.
+pub fn first_sql(store: &Store, n: usize) -> String {
+    let d = store.dialect();
+    let list = (1..=n)
+        .map(|i| d.param(i, Type::Int))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "WITH own AS MATERIALIZED (\
+           SELECT i.series_id, MIN(i.source_file_id) AS file_id FROM {instance} AS i \
+           WHERE i.series_id IN ({list}) AND i.source_file_id IS NOT NULL \
+           GROUP BY i.series_id) \
+         SELECT f.id, f.path, f.dir, f.size, f.mtime_ns, f.instance_id, f.batch_id, \
+                own.series_id, f.source_id, f.status \
+         FROM own JOIN {files} AS f ON f.id = own.file_id \
+         WHERE f.instance_id IS NOT NULL ORDER BY f.id",
+        files = store.qualified("source_file"),
+        instance = store.qualified("instance"),
+    )
+}
+
 /// A file a page names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
@@ -229,7 +312,8 @@ impl File {
 }
 
 /// The target series' files, page by page: each series from its first file
-/// on, then the next series.
+/// on, then the next series; or, for a one-file re-read, the first file of
+/// each series of a chunk, a chunk a page.
 pub struct Pages {
     series: Vec<i64>,
     at: usize,
@@ -237,6 +321,7 @@ pub struct Pages {
     source_id: i64,
     page: usize,
     sql: String,
+    one: bool,
 }
 
 impl Pages {
@@ -248,11 +333,24 @@ impl Pages {
             source_id,
             page: page.max(1),
             sql: page_sql(store),
+            one: false,
+        }
+    }
+
+    /// One file of each series rather than every file, `chunk` series a
+    /// page.
+    pub fn one_each(store: &Store, source_id: i64, series: Vec<i64>, chunk: usize) -> Pages {
+        Pages {
+            one: true,
+            ..Pages::new(store, source_id, series, chunk)
         }
     }
 
     /// The next page with a file in it, or `None` when every series is done.
     pub fn next(&mut self, store: &mut Store) -> Result<Option<Vec<File>>, Error> {
+        if self.one {
+            return self.next_chunk(store);
+        }
         while let Some(&series) = self.series.get(self.at) {
             let rows = store.query(
                 &self.sql,
@@ -270,6 +368,51 @@ impl Pages {
             } else if let Some(last) = files.last() {
                 self.after = last.id;
             }
+            if !files.is_empty() {
+                return Ok(Some(files));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The next chunk's first files, or `None` when every series is done.
+    fn next_chunk(&mut self, store: &mut Store) -> Result<Option<Vec<File>>, Error> {
+        while self.at < self.series.len() {
+            let end = (self.at + self.page).min(self.series.len());
+            let chunk = &self.series[self.at..end];
+            self.at = end;
+            let params: Vec<Param> = chunk.iter().map(|&s| Param::Int(s)).collect();
+            let rows = store.query(&first_sql(store, chunk.len()), &params)?;
+            let mut files = Vec::with_capacity(rows.len());
+            let mut elsewhere: Vec<i64> = Vec::new();
+            for r in &rows {
+                if r.int(8)? != self.source_id {
+                    continue;
+                }
+                if r.text(9)? == status::INGESTED {
+                    files.push(File::of(r)?);
+                } else {
+                    elsewhere.push(r.int(7)?);
+                }
+            }
+            // A series whose lowest file is no longer read as ingested: its
+            // first page, which looks past such a file, gives the first one
+            // that is.
+            for series in elsewhere {
+                let rows = store.query(
+                    &self.sql,
+                    &[
+                        Param::Int(series),
+                        Param::Int(self.source_id),
+                        Param::Int(0),
+                        Param::Int(1),
+                    ],
+                )?;
+                for r in &rows {
+                    files.push(File::of(r)?);
+                }
+            }
+            files.sort_by_key(|f| f.id);
             if !files.is_empty() {
                 return Ok(Some(files));
             }
@@ -306,9 +449,13 @@ pub fn continues(
         let config: serde_json::Value =
             serde_json::from_str(r.text(2).unwrap_or("{}")).unwrap_or_default();
         let named = |k: &str| config[k].as_array().is_some_and(|a| !a.is_empty());
-        let reread = named("reread") || named("reread_exact");
+        let flag = |k: &str| config[k].as_bool().unwrap_or(false);
+        let reread = named("reread") || named("reread_exact") || flag("reread_every");
         let open = r.text(1).map(|s| s != "done").unwrap_or(false);
-        if reread && open && &config["private"] == private {
+        // a re-read of one file a series is not one of every file, and the
+        // other way round: what one read, the other did not
+        let same_reach = flag("reread_one") == settings.reread_one;
+        if reread && open && same_reach && &config["private"] == private {
             floor = Some(r.int(0)?);
             Ok(true)
         } else {
@@ -338,7 +485,10 @@ pub fn feed(
     let selection = Selection::of(settings);
     let series = targets(&mut store, &selection)?;
     let floor = continues(&mut store, source_id, batch_id, settings)?;
-    let mut pages = Pages::new(&store, source_id, series, PAGE);
+    let mut pages = match settings.reread_one {
+        true => Pages::one_each(&store, source_id, series, CHUNK),
+        false => Pages::new(&store, source_id, series, PAGE),
+    };
     while !cancel.stop() {
         let Some(files) = pages.next(&mut store)? else {
             break;
@@ -387,7 +537,7 @@ pub fn stale_fingerprints(store: &mut Store, selection: &Selection) -> Result<u6
     if selection.is_empty() {
         return Ok(0);
     }
-    let (series, params) = series_of(store, selection, 1);
+    let (series, params) = series_of(store, selection, 1, false);
     let sql = format!(
         "UPDATE {} SET fingerprint_revision = 0 WHERE series_id IN ({series})",
         store.qualified("stack_fingerprint"),

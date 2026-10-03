@@ -42,6 +42,7 @@ mod file_header;
 mod folders;
 mod gate;
 mod grants;
+mod intake;
 mod linkage_doors;
 mod login;
 mod mcp;
@@ -1735,6 +1736,19 @@ struct DigestArgs {
     /// older `SIEMENS` ones; repeat for more than one
     #[arg(long, value_name = "MANUFACTURER", conflicts_with_all = ["dry_run", "retry_quarantine"])]
     reread_exact: Vec<String>,
+    /// As --reread, every MR series whatever its manufacturer
+    #[arg(long, conflicts_with_all = ["dry_run", "retry_quarantine"])]
+    reread_every: bool,
+    /// With a re-read: read one file of each series instead of every file,
+    /// which is enough for a value the series holds once (a series column, a
+    /// private element that holds still inside the series)
+    #[arg(long)]
+    reread_one: bool,
+    /// With a re-read: take only the series whose row has no
+    /// SamplesPerPixel, which every image writes: the series a binary before
+    /// registry schema 79 read
+    #[arg(long)]
+    reread_missing: bool,
     /// Walk and read everything, print the report, write nothing
     #[arg(long)]
     dry_run: bool,
@@ -3829,6 +3843,14 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
     settings.restart = args.restart;
     settings.reread = args.reread.clone();
     settings.reread_exact = args.reread_exact.clone();
+    settings.reread_every = args.reread_every;
+    settings.reread_one = args.reread_one;
+    settings.reread_missing = args.reread_missing;
+    if (settings.reread_one || settings.reread_missing) && !settings.rereads() {
+        return Err(usage(
+            "--reread-one and --reread-missing narrow a re-read: name one with --reread, --reread-exact or --reread-every".to_string(),
+        ));
+    }
     if settings.reread.iter().any(|m| m.trim().is_empty()) {
         return Err(usage("--reread names a manufacturer".to_string()));
     }

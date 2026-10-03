@@ -374,11 +374,12 @@ fn the_parts_of_a_philips_dixon_object_are_stacks_a_pack_reads_by_name() {
             "{name}"
         );
 
-        // And the fingerprint is the revision that writes it.
-        assert_eq!(nils_classify::fingerprint::REVISION, 6);
+        // And the fingerprint is a revision that writes it (6 or later).
+        let revision = nils_classify::fingerprint::REVISION;
+        assert!(revision >= 6);
         let store = reg.store();
         let sql = format!(
-            "SELECT COUNT(*) FROM {} WHERE fingerprint_revision = 6",
+            "SELECT COUNT(*) FROM {} WHERE fingerprint_revision = {revision}",
             store.qualified("stack_fingerprint"),
         );
         assert_eq!(

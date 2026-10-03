@@ -198,9 +198,16 @@ fn ingest_text(e: &InMemElement, vr: Option<&str>, charset: &Charset) -> Option<
         }
     };
     let text = text?;
-    let text = text.trim_matches([' ', '\0']).to_string();
+    let mut text = text.trim_matches([' ', '\0']).to_string();
     if text.is_empty() || !text.chars().all(|c| !c.is_control()) {
         return None;
+    }
+    // A code string is upper case by definition (PS3.5 6.2), and a vendor
+    // that writes one in mixed case means the same code: Philips' Prepulse
+    // Type is `INV` in one file and `Inv` in the next. The dictionary's VR
+    // decides it where the file gives none.
+    if vr.is_some_and(|v| v.eq_ignore_ascii_case("CS")) || e.vr() == VR::CS {
+        text = text.to_uppercase();
     }
     Some(text)
 }
@@ -412,6 +419,77 @@ mod tests {
         assert_eq!(
             read_ingest(&obj, &list, &Charset::resolve(None)),
             vec![None, None]
+        );
+    }
+
+    #[test]
+    fn the_philips_prepulse_is_read_under_its_creator_in_a_shifted_block() {
+        // The 2026-10-03 fingerprint fields: a Philips classic object whose
+        // Imaging DD 001 block sits at 11 rather than 10, behind another
+        // creator, with the Prepulse Type (2001,xx1C) and Prepulse Delay
+        // (2001,xx1B) in it. The block at 10 holds decoys that must not be
+        // read.
+        let list = [
+            ingest("Philips Imaging DD 001", 0x2001, 0x1C, Some("CS")),
+            ingest("Philips Imaging DD 001", 0x2001, 0x1B, Some("FL")),
+        ];
+        let charset = Charset::resolve(None);
+        // explicit VR, the code written in mixed case as the conformance
+        // statement spells it
+        let explicit = object(vec![
+            text(0x2001, 0x0010, VR::LO, "Philips MR Imaging DD 001"),
+            text(0x2001, 0x0011, VR::LO, "Philips Imaging DD 001"),
+            text(0x2001, 0x101C, VR::CS, "NO"),
+            DataElement::new(Tag(0x2001, 0x101B), VR::FL, PrimitiveValue::from(0.0f32)),
+            text(0x2001, 0x111C, VR::CS, "Inv"),
+            DataElement::new(Tag(0x2001, 0x111B), VR::FL, PrimitiveValue::from(1100.5f32)),
+        ]);
+        assert_eq!(
+            read_ingest(&explicit, &list, &charset),
+            vec![Some("INV".to_string()), Some("1100.5".to_string())]
+        );
+        // implicit VR: the bytes as they lie on disk, the code padded to an
+        // even length with a space and the delay little-endian
+        let implicit = object(vec![
+            text(0x2001, 0x0010, VR::LO, "SOMEBODY ELSE"),
+            text(0x2001, 0x0011, VR::LO, "Philips Imaging DD 001 "),
+            raw(0x2001, 0x101C, b"NO".to_vec()),
+            raw(0x2001, 0x111C, b"INV ".to_vec()),
+            raw(0x2001, 0x111B, 950.0f32.to_le_bytes().to_vec()),
+        ]);
+        assert_eq!(
+            read_ingest(&implicit, &list, &charset),
+            vec![Some("INV".to_string()), Some("950".to_string())]
+        );
+        // no prepulse: NO and a delay of nought, read as written
+        let none = object(vec![
+            text(0x2001, 0x0010, VR::LO, "Philips Imaging DD 001"),
+            raw(0x2001, 0x101C, b"NO".to_vec()),
+            raw(0x2001, 0x101B, 0.0f32.to_le_bytes().to_vec()),
+        ]);
+        assert_eq!(
+            read_ingest(&none, &list, &charset),
+            vec![Some("NO".to_string()), Some("0".to_string())]
+        );
+        // a classic object whose private tags were stripped says nothing
+        let stripped = object(vec![text(0x0008, 0x0070, VR::LO, "Philips")]);
+        assert_eq!(read_ingest(&stripped, &list, &charset), vec![None, None]);
+    }
+
+    #[test]
+    fn a_code_string_is_read_in_upper_case_and_any_other_text_as_written() {
+        let obj = object(vec![
+            text(0x0019, 0x0010, VR::LO, "GEMS_ACQU_01"),
+            raw(0x0019, 0x109C, b"epi2 ".to_vec()),
+            raw(0x0019, 0x109D, b"sat ".to_vec()),
+        ]);
+        let list = [
+            ingest("GEMS_ACQU_01", 0x0019, 0x9C, Some("LO")),
+            ingest("GEMS_ACQU_01", 0x0019, 0x9D, Some("CS")),
+        ];
+        assert_eq!(
+            read_ingest(&obj, &list, &Charset::resolve(None)),
+            vec![Some("epi2".to_string()), Some("SAT".to_string())]
         );
     }
 

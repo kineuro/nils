@@ -22,7 +22,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-bodypart@sha256:24ad986a0c6b0d6c6ae8b063f2d2d4d6b2d668c4b3d9e28eb09f73126a5e7b62"
+  image: "ghcr.io/kineuro/nils-bodypart@sha256:25ac9021b98a16ba06a98f206e97c3ee339d0059201f4bd722862651b5ff185c"
 
 inputs:
   - id: threshold
