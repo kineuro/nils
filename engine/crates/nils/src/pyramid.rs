@@ -1499,30 +1499,172 @@ fn plane_tiles(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<Path
     Ok(out)
 }
 
-/// Read files in their order, up to [`READS_AT_ONCE`] at a time.
+/// How many tile files the whole engine holds open at once, over every door
+/// and every request, unless `nils serve` sets it from its limit on open
+/// files ([`tile_reads_for`]). Each read opens a file, reads it whole and
+/// closes it while it holds its turn, so the engine's descriptors for tiles
+/// stay at this many however many readers ask: on 2026-10-02 the slab door's
+/// sixteen reads per request, under 64 request handlers and a desk warming
+/// the next items, took the engine to its limit of 1,024 descriptors, and
+/// the listening socket was lost.
+pub const TILE_READS_AT_ONCE: usize = 64;
+
+/// The engine's turns at tile files for a limit on open files: a sixteenth
+/// of it, from 16 to 256. A network share answers many reads at once better
+/// than few, and a sixteenth leaves the rest of the limit to the handlers'
+/// registry connections and the callers' connections.
+pub fn tile_reads_for(open_files: u64) -> usize {
+    (open_files / 16).clamp(16, 256) as usize
+}
+
+/// What a tile read that failed for a reason other than a missing file
+/// starts with: the storage or the process is short of something, which a
+/// door answers with 503 and a retry, not with 404.
+pub const UNREADABLE: &str = "the storage did not give a tile: ";
+
+/// The engine's tile reads: the turns, and the counts the health door shows.
+pub struct TileReads {
+    at_once: std::sync::atomic::AtomicUsize,
+    open: std::sync::Mutex<usize>,
+    turn: std::sync::Condvar,
+    peak: std::sync::atomic::AtomicUsize,
+    total: std::sync::atomic::AtomicU64,
+    failed: std::sync::atomic::AtomicU64,
+    slabs_reading: std::sync::atomic::AtomicUsize,
+}
+
+pub static TILE_READS: TileReads = TileReads {
+    at_once: std::sync::atomic::AtomicUsize::new(TILE_READS_AT_ONCE),
+    open: std::sync::Mutex::new(0),
+    turn: std::sync::Condvar::new(),
+    peak: std::sync::atomic::AtomicUsize::new(0),
+    total: std::sync::atomic::AtomicU64::new(0),
+    failed: std::sync::atomic::AtomicU64::new(0),
+    slabs_reading: std::sync::atomic::AtomicUsize::new(0),
+};
+
+/// A turn at reading a tile, given back when dropped (a panic included).
+struct Turn;
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut open = TILE_READS
+            .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *open = open.saturating_sub(1);
+        drop(open);
+        TILE_READS.turn.notify_one();
+    }
+}
+
+impl TileReads {
+    fn turn(&self) -> Turn {
+        let mut open = self
+            .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *open >= self.at_once() {
+            open = self
+                .turn
+                .wait(open)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *open += 1;
+        self.peak
+            .fetch_max(*open, std::sync::atomic::Ordering::Relaxed);
+        Turn
+    }
+
+    /// How many tile files may be open at once.
+    pub fn at_once(&self) -> usize {
+        self.at_once.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set how many tile files may be open at once (at least one).
+    pub fn set_at_once(&self, n: usize) {
+        self.at_once
+            .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
+        self.turn.notify_all();
+    }
+
+    /// Tile files open now.
+    pub fn open(&self) -> usize {
+        *self
+            .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The most tile files open at once since the engine started.
+    pub fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Tile files read since the engine started, and how many of those
+    /// reads failed for a reason other than a missing file.
+    pub fn total(&self) -> (u64, u64) {
+        (
+            self.total.load(std::sync::atomic::Ordering::Relaxed),
+            self.failed.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Slabs being read from storage now (a slab the cache holds is not).
+    pub fn slabs_reading(&self) -> usize {
+        self.slabs_reading
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Read one tile file whole in one of the engine's turns ([`TileReads`]):
+/// open, read and close before the turn is given back.
+fn read_tile(path: &Path) -> Result<Vec<u8>, String> {
+    let _turn = TILE_READS.turn();
+    TILE_READS
+        .total
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            e.to_string()
+        } else {
+            TILE_READS
+                .failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("{UNREADABLE}{e}")
+        }
+    })
+}
+
+/// Read files in their order, up to [`READS_AT_ONCE`] at a time, each in one
+/// of the engine's turns.
 fn read_files_at_once(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>, String> {
     let threads = READS_AT_ONCE.min(paths.len());
     if threads <= 1 {
-        return paths
-            .iter()
-            .map(|p| std::fs::read(p).map_err(|e| e.to_string()))
-            .collect();
+        return paths.iter().map(|p| read_tile(p)).collect();
     }
     type Read = (usize, Result<Vec<u8>, String>);
+    let read_every = |t: usize| -> Vec<Read> {
+        (t..paths.len())
+            .step_by(threads)
+            .map(|i| (i, read_tile(&paths[i])))
+            .collect()
+    };
     let read: Vec<Vec<Read>> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..threads)
+        // a thread the system will not start reads its share here instead
+        let handles: Vec<Result<_, usize>> = (0..threads)
             .map(|t| {
-                s.spawn(move || {
-                    (t..paths.len())
-                        .step_by(threads)
-                        .map(|i| (i, std::fs::read(&paths[i]).map_err(|e| e.to_string())))
-                        .collect::<Vec<_>>()
-                })
+                std::thread::Builder::new()
+                    .spawn_scoped(s, move || read_every(t))
+                    .map_err(|_| t)
             })
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_default())
+            .map(|h| match h {
+                Ok(h) => h.join().unwrap_or_default(),
+                Err(t) => read_every(t),
+            })
             .collect()
     });
     let mut out: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
@@ -1532,6 +1674,19 @@ fn read_files_at_once(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>, String> {
     out.into_iter()
         .map(|t| t.ok_or_else(|| "a tile was not read".to_string()))
         .collect()
+}
+
+/// The answer a door gives for a picture it could not read: 404 where a
+/// tile is missing, 503 with a retry where the storage or the process was
+/// short of something (a descriptor, a thread, the share), which passes.
+pub fn unread_reply(why: String) -> Reply {
+    if why.starts_with(UNREADABLE) {
+        let mut r = Reply::error(503, why);
+        r.headers.push(("Retry-After".to_string(), "1".to_string()));
+        r
+    } else {
+        Reply::error(404, why)
+    }
 }
 
 /// One plane's tiles in one container: `[u32 count][u32 offset...][tiles]`,
@@ -1598,8 +1753,7 @@ pub fn decode_plane(
     let mut plane = vec![0u16; (ny * nx) as usize];
     for j in 0..ty {
         for i in 0..tx {
-            let bytes =
-                std::fs::read(tile_path(root, level, z, j, i)).map_err(|e| e.to_string())?;
+            let bytes = read_tile(&tile_path(root, level, z, j, i))?;
             let (w, h, px) = decode_tile(&bytes)?;
             for y in 0..h {
                 let src = &px[(y * w) as usize..((y + 1) * w) as usize];
@@ -2404,7 +2558,6 @@ impl<K: Clone + Eq + std::hash::Hash> KeptBytes<K> {
         self.kept.len()
     }
 
-    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -2460,15 +2613,18 @@ fn slab_cached(
         z0,
         z1,
     };
-    if let Some(slab) = SLABS.lock().ok().and_then(|c| c.get(&key)) {
+    if let Some(slab) = kept(&SLABS).get(&key) {
         return Ok(slab);
     }
-    let slab = std::sync::Arc::new(
-        slab_container(root, m, level, z0, z1).map_err(|e| Reply::error(404, e))?,
-    );
-    if let Ok(mut c) = SLABS.lock() {
-        c.put(key, std::sync::Arc::clone(&slab));
-    }
+    TILE_READS
+        .slabs_reading
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let read = slab_container(root, m, level, z0, z1);
+    TILE_READS
+        .slabs_reading
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let slab = std::sync::Arc::new(read.map_err(unread_reply)?);
+    kept(&SLABS).put(key, std::sync::Arc::clone(&slab));
     Ok(slab)
 }
 
@@ -2477,6 +2633,25 @@ pub const RENDER_CACHE_BYTES: usize = 64 << 20;
 
 static RENDERED: std::sync::LazyLock<std::sync::Mutex<RenderCache>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(RenderCache::new(RENDER_CACHE_BYTES)));
+
+/// A cache's lock, also after a panic elsewhere left it poisoned: what it
+/// keeps is whole answers, never half of one, so it is still good, and a
+/// poisoned lock read as "no cache" would have left every later request to
+/// read its tiles from storage again.
+fn kept<K>(cache: &std::sync::Mutex<KeptBytes<K>>) -> std::sync::MutexGuard<'_, KeptBytes<K>> {
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The bytes the slab cache and the render cache hold now, and their caps,
+/// for the health door.
+pub fn caches_held() -> [(usize, usize); 2] {
+    [
+        (kept(&SLABS).bytes(), SLAB_CACHE_BYTES),
+        (kept(&RENDERED).bytes(), RENDER_CACHE_BYTES),
+    ]
+}
 
 /// A plane rendered as a JPEG, from the cache when it holds it.
 #[allow(clippy::too_many_arguments)]
@@ -2500,17 +2675,15 @@ fn render_cached(
         width: width.to_bits(),
         held,
     };
-    if let Some(image) = RENDERED.lock().ok().and_then(|c| c.get(&key)) {
+    if let Some(image) = kept(&RENDERED).get(&key) {
         return Ok(image);
     }
-    let (w, h, px) = plane_along(root, m, level, axis, index).map_err(|e| Reply::error(404, e))?;
+    let (w, h, px) = plane_along(root, m, level, axis, index).map_err(unread_reply)?;
     // the band is held on every axis when the annotation is burned in and the caller is below the class
     let jpeg = render_jpeg(w, h, &px, m.slope, m.intercept, center, width, held)
         .map_err(|e| Reply::error(500, e))?;
     let image = std::sync::Arc::new(jpeg);
-    if let Ok(mut c) = RENDERED.lock() {
-        c.put(key, std::sync::Arc::clone(&image));
-    }
+    kept(&RENDERED).put(key, std::sync::Arc::clone(&image));
     Ok(image)
 }
 
@@ -2623,7 +2796,7 @@ pub fn door(
             }
             note_open(registry, caller, stack, through, level, "tiles")
                 .map_err(|e| Reply::error(500, e))?;
-            let bytes = plane_container(&root, &m, level, z).map_err(|e| Reply::error(404, e))?;
+            let bytes = plane_container(&root, &m, level, z).map_err(unread_reply)?;
             Ok(Reply::raw(
                 CONTENT_TYPE,
                 bytes,
@@ -2715,8 +2888,7 @@ pub fn door(
                 "thumb",
             )
             .map_err(|e| Reply::error(500, e))?;
-            let jpeg =
-                thumb_cached(&root, &m, size, planes, held).map_err(|e| Reply::error(404, e))?;
+            let jpeg = thumb_cached(&root, &m, size, planes, held).map_err(unread_reply)?;
             Ok(Reply::raw(
                 "image/jpeg",
                 jpeg,
@@ -2881,6 +3053,83 @@ mod tests {
         // a missing tile is an error, not a short slab
         std::fs::remove_file(tile_path(&root, 0, 1, 1, 2)).unwrap();
         assert!(slab_container(&root, &m, 0, 0, 5).is_err());
+    }
+
+    /// 2026-10-02: however many slabs are read at once, the engine holds
+    /// at most TILE_READS_AT_ONCE tile files open; a missing tile is 404 and
+    /// a storage that is short of something (EMFILE) is 503 with a retry.
+    #[test]
+    fn many_slabs_at_once_hold_at_most_the_engines_tile_files_open() {
+        let (nz, ny, nx) = (6u32, 300u32, 520u32);
+        let vol = Volume {
+            shape: [nz, ny, nx],
+            spacing: [2.0, 1.0, 1.0],
+            intercept: 0,
+            rescale: (1.0, 0.0),
+            rescale_varies: false,
+            burned_in: None,
+            data: (0..nz * ny * nx).map(|i| (i % 2999) as u16).collect(),
+            geometry: None,
+            lossy: false,
+            syntaxes: Vec::new(),
+            order: ORDER_POSITION,
+            multiframe_files: 0,
+        };
+        let dir = nils_dicom::synth::TempDir::new("pyramid-tile-turns");
+        let root = dir.path().join("pyramid");
+        let m = build(&vol, 4, &root, 2, None).unwrap();
+        let want = slab_container(&root, &m, 0, 0, nz).unwrap();
+        let (before, _) = TILE_READS.total();
+        std::thread::scope(|s| {
+            for _ in 0..24 {
+                s.spawn(|| {
+                    for _ in 0..4 {
+                        assert_eq!(slab_container(&root, &m, 0, 0, nz).unwrap(), want);
+                    }
+                });
+            }
+        });
+        let (after, _) = TILE_READS.total();
+        // 24 readers of 96 tiles each, sixteen at a time: 1,536 reads wanted
+        // up to 384 files open at once, and had at most the engine's turns
+        assert!(after - before >= 24 * 4 * 36, "{before} {after}");
+        assert!(
+            TILE_READS.peak() <= TILE_READS_AT_ONCE,
+            "{}",
+            TILE_READS.peak()
+        );
+        // and the turns are a bound, not a queue of one: many readers that
+        // hold their turns a while are many at once, never more than the cap
+        let now = std::sync::atomic::AtomicUsize::new(0);
+        let most = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..3 * TILE_READS_AT_ONCE {
+                s.spawn(|| {
+                    let _turn = TILE_READS.turn();
+                    let n = now.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    most.fetch_max(n, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    now.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+        });
+        let most = most.into_inner();
+        assert!(most > 1 && most <= TILE_READS_AT_ONCE, "{most}");
+
+        assert_eq!(tile_reads_for(1024), 64);
+        assert_eq!(tile_reads_for(65536), 256);
+        assert_eq!(tile_reads_for(64), 16);
+
+        let missing = unread_reply("No such file or directory (os error 2)".to_string());
+        assert_eq!(missing.status, 404);
+        let short = unread_reply(format!("{UNREADABLE}Too many open files (os error 24)"));
+        assert_eq!(short.status, 503);
+        assert!(
+            short
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Retry-After" && v == "1")
+        );
     }
 
     #[test]

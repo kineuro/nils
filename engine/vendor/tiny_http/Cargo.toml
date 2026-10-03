@@ -1,0 +1,50 @@
+# tiny_http 0.12.0 (https://github.com/tiny-http/tiny-http, MIT OR Apache-2.0, the
+# licences beside this file), kept here with three changes to how a connection is
+# accepted, in src/lib.rs, src/util/refined_tcp_stream.rs and src/util/task_pool.rs,
+# each marked "nils:":
+#
+# - an error from accept() (EMFILE when the process is out of file descriptors,
+#   ENFILE, ENOBUFS, ECONNABORTED and the rest) no longer ends the accept loop. It is
+#   handed to the receiver as before, the loop waits a moment that grows while the
+#   errors go on, and it accepts again. Upstream breaks out of the loop, which drops
+#   the listening socket: the engine then lived on with no port.
+# - a connection whose descriptor cannot be duplicated is closed and the loop goes
+#   on, where upstream panicked in the accept thread, with the same result (this is
+#   the failure the bed reproduced: the last descriptor went to accept(), and the
+#   duplicate of it failed).
+# - a connection whose thread the system will not start is closed, where
+#   thread::spawn panicked in the accept thread.
+#
+# The engine's workspace takes this copy through [patch.crates-io].
+[package]
+name = "tiny_http"
+version = "0.12.0"
+authors = ["pierre.krieger1708@gmail.com", "Corey Farwell <coreyf@rwell.org>"]
+description = "Low level HTTP server library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tiny-http/tiny-http"
+edition = "2018"
+publish = false
+
+[features]
+default = []
+ssl = ["ssl-openssl"]
+ssl-openssl = ["openssl", "zeroize"]
+ssl-rustls = ["rustls", "rustls-pemfile", "zeroize"]
+
+[dependencies]
+ascii = "1.0"
+chunked_transfer = "1"
+log = "0.4.4"
+httpdate = "1.0.2"
+
+openssl = { version = "0.10", optional = true }
+rustls = { version = "0.20", optional = true }
+rustls-pemfile = { version = "0.2.1", optional = true }
+zeroize = { version = "1", optional = true }
+
+# Upstream builds with warnings under a newer compiler (an unused import, a dead
+# trait); they are upstream's, left as they are.
+[lints.rust]
+unused_imports = "allow"
+dead_code = "allow"
