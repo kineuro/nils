@@ -204,6 +204,25 @@ cases:
     axes:
       construct: Trace
 
+  - name: guard, a stack of directional images beside its b=0 and the isotropic one takes no Trace from the directionality
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      sop_class_uid: '1.2.840.10008.5.1.4.1.1.4.1'
+      diffusion_directionality: 'DIRECTIONAL,ISOTROPIC,NONE'
+      diffusion_b_value: 1000
+      dwi_b_values: '0,1000'
+      text_series_description: 'ep2d_diff'
+      n_slices: 30
+      n_instances: 1
+      repetition_time: 4500
+      echo_time: 80
+    flags:
+      isotropic_stated: false
+
   # --- PhotometricInterpretation
 
   - name: a SyMRI map saved in colour is a display composite, read as its screenshot is

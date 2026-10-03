@@ -2042,9 +2042,7 @@ flags:
       # one frame that carries it, and the isotropic image is a series of
       # its own (dev-7: a b=0 and 16 directions named `DTI ... DWI iso` was
       # Trace).
-      # MRI pack 0.25.0 (item 7 of the study's questions): a registered
-      # diffusion copy (`Reg - DWI`) is Trace whatever it holds (section 26f).
-      - {any: [{not: {field: dwi_directions, ge: 6}}, philips_registered_dwi]}
+      - {not: {field: dwi_directions, ge: 6}}
       # MRI pack 0.24.0 (the final certificate's C3): nor a stack that holds
       # the directional images of fewer directions beside it (a b=0, three
       # directions and the isotropic image, five images a slice): there the
@@ -3199,9 +3197,11 @@ flags:
       - {text: manufacturer, prefix: philips}
       - {field: dwi_directions, ge: 2}
       - {field: n_instances, gt: {field: n_slices}}
-      # MRI pack 0.25.0: never a registered diffusion copy (`Reg - DWI`),
-      # Trace by Nima's ruling (item 7; section 26f)
-      - {not: philips_registered_dwi}
+      # MRI pack 0.25.0 (item 7 of the study's questions, checked on every
+      # image of 30 registered copies and 30 sources): a registered copy
+      # (`Reg - DWI`) holds the same b=0, M, P and S directional images and
+      # the isotropic one as its source, at three gradient orientations, so
+      # it is a diffusion set as its source is, no Trace.
   # C4: a Siemens `Image Filter` copy, the post-processing that writes a
   # filtered copy of a series as a series of its own (ProtocolName `Image
   # Filter`, the name `<series>_FIL_<n>`), written DERIVED, is Filtered, as
@@ -4318,17 +4318,6 @@ flags:
       - {not: has_water_excitation}
       - {not: image_type.is_posdisp}
 
-  # --- a Philips registered diffusion copy (`Reg - DWI ...`) whose private
-  # direction is `I` is Trace (item 7), though it holds its b=0 and
-  # directional images beside the isotropic one: the references settled it
-  # so by consensus, and Nima ruled it. C3 (`philips_directional_set`) and
-  # the tensor guard of `philips_isotropic_private` no longer reach it. A
-  # registered tensor (`Reg - DTI ...`) stays a diffusion set.
-  philips_registered_dwi:
-    all:
-      - philips_registered_copy
-      - {not: {text: technique_text, matches: '(^|[^a-z])dti'}}
-
   # --- the images a two-echo Siemens FLASH SWI (`fl3d2r`) computes, the SWI
   # image and its minimum projection, combine its two echoes (item 8):
   # comb-ME-GRE, base SWI, as GE's SWAN (Nima's ruling, round 5). Its
@@ -4471,9 +4460,12 @@ flags:
   acq_contrast_ir: {all: [has_ir, {field: inversion_time, gt: 0}]}
   acq_contrast_t1_on_t2star_echo: {all: [has_gre, {not: has_se}, {field: echo_time, ge: 15}]}
 
-  # --- DiffusionDirectionality ISOTROPIC on every image of the stack: the
-  # isotropic (trace) image an enhanced object writes.
-  isotropic_stated: {text: diffusion_directionality, matches: '^\s*isotropic\s*$'}
+  # --- DiffusionDirectionality ISOTROPIC on every diffusion-weighted image
+  # of the stack, with or without its b=0 (NONE): the isotropic (trace)
+  # image, as a b=0-and-isotropic stack is read (C3). Never beside a
+  # DIRECTIONAL image. On the archive 11 classic stacks write ISOTROPIC alone
+  # and 14 enhanced ones ISOTROPIC and NONE.
+  isotropic_stated: {text: diffusion_directionality, matches: '^\s*isotropic\s*(,\s*none\s*)?$'}
 
   # --- a SyMRI stack saved in colour (PhotometricInterpretation RGB or a
   # YBR form, or three samples a pixel): a display composite of the viewer's

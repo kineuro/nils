@@ -1782,7 +1782,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 564);
+    assert_eq!(shown["flags"], 563);
     assert_eq!(
         shown["contract"], 8,
         "record 53: a session pass, a fallback border over several values and the private \

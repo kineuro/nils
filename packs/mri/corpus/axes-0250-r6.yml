@@ -199,9 +199,11 @@ cases:
     flags:
       siemens_fs_named: false
 
-  # --- a Philips registered diffusion copy with direction I (item 7)
+  # --- a Philips registered diffusion copy with direction I (item 7): every
+  # image read holds the b=0, the M, P and S directions and the isotropic
+  # image, as its source does, so it stays a diffusion set (C3)
 
-  - name: a Philips Reg - DWI copy of a b=0, six directions and the isotropic image, direction I, is Trace
+  - name: a Philips Reg - DWI copy of a b=0, three directions and the isotropic image, direction I, is no Trace, as its source
     stack:
       image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
       scanning_sequence: SE
@@ -210,32 +212,7 @@ cases:
       manufacturer: Philips Medical Systems
       philips_scanning_technique: DwiSE
       philips_diffusion_direction: I
-      text_series_description: 'Reg - DWI 15 R 5/0 S'
-      diffusion_b_value: 1000
-      dwi_b_values: '0,1000'
-      dwi_directions: 6
-      n_slices: 35
-      n_instances: 280
-      repetition_time: 4500
-      echo_time: 80
-      echo_train_length: 55
-    flags:
-      philips_registered_dwi: true
-      philips_directional_set: false
-      philips_isotropic_private: true
-    axes:
-      construct: Trace
-
-  - name: guard, the same diffusion set not registered stays a diffusion set, no Trace (C3)
-    stack:
-      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
-      scanning_sequence: SE
-      sequence_variant: SK
-      mr_acquisition_type: 2D
-      manufacturer: Philips Medical Systems
-      philips_scanning_technique: DwiSE
-      philips_diffusion_direction: I
-      text_series_description: 'DWI_og SENSE'
+      text_series_description: 'Reg - DWI_og SENSE'
       diffusion_b_value: 1000
       dwi_b_values: '0,1000'
       dwi_directions: 3
@@ -245,12 +222,12 @@ cases:
       echo_time: 80
       echo_train_length: 55
     flags:
-      philips_registered_dwi: false
       philips_directional_set: true
+      philips_isotropic_private: false
     axes:
       construct: ''
 
-  - name: guard, a registered tensor (Reg - DTI) stays a diffusion set, no Trace
+  - name: guard, a Philips Reg - DWI copy of a b=0 and the isotropic image alone stays Trace
     stack:
       image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
       scanning_sequence: SE
@@ -259,18 +236,19 @@ cases:
       manufacturer: Philips Medical Systems
       philips_scanning_technique: DwiSE
       philips_diffusion_direction: I
-      text_series_description: 'Reg - DTI_low SENSE'
+      text_series_description: 'Reg - DWI_og SENSE'
       diffusion_b_value: 1000
       dwi_b_values: '0,1000'
-      dwi_directions: 15
-      n_slices: 40
-      n_instances: 680
-      repetition_time: 6000
+      n_slices: 30
+      n_instances: 60
+      repetition_time: 4500
       echo_time: 80
+      echo_train_length: 55
     flags:
-      philips_registered_dwi: false
+      philips_directional_set: false
+      philips_isotropic_private: true
     axes:
-      construct: ''
+      construct: Trace
 
   # --- what a two-echo Siemens FLASH SWI computes (item 8)
 

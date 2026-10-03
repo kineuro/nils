@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        564,
+        563,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -136,11 +136,11 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          FLASH, gradient-echo components, Dixon part prefixes, GE's map \
          families, SyMRI's synthetic contrasts and split maps, diffusion \
          references, names against the sequence, MT weighting, STIR and PSIR \
-         edges) and its settled disputes, and the 9 of the study's questions \
+         edges) and its settled disputes, and the 8 of the study's questions \
          as Nima answered them after research round 6, less case 17's 3D TFE \
          with no inversion it withdraws: a Philips 3D TFE and one whose \
          prepulse cannot be told, a GE BRAVO reformat named a Cube FLAIR, a \
-         Siemens name with fs, a Philips registered DWI, a two-echo FLASH's \
+         Siemens name with fs, a two-echo FLASH's \
          SWI outputs, and a GE reversed run, its nominal b=0 values and its \
          review band, and the 18 that read the fingerprint's fields of \
          2026-10-03: the TFE prepulse (five), AngioFlag (three: the flag, a TWIST's \
