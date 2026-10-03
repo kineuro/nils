@@ -221,6 +221,7 @@ fn run(
     let select_diffusion = fingerprint::select_diffusion(store);
     let select_positions = fingerprint::select_positions(store);
     let select_acquired = fingerprint::select_acquired(store);
+    let select_frames = fingerprint::select_frames(store);
     let select_fresh = fingerprint::select_fresh(store);
     let table = fingerprint::fingerprint_table();
     let overwritten = fingerprint::overwritten();
@@ -325,6 +326,22 @@ fn run(
             }
         }
 
+        // How often each slice position was acquired again (the 2026-10-03
+        // fields), one row per stack and repeated position; a stack of one
+        // image per position has none.
+        let mut repeats: Vec<(i64, Vec<fingerprint::Repeats>)> = Vec::new();
+        for r in store.query(&select_frames, &[Param::Int(after), Param::Int(last)])? {
+            let stack_id = r.int(0)?;
+            let (Some(lo), Some(hi)) = (r.opt_text(1)?, r.opt_text(2)?) else {
+                continue;
+            };
+            let row = (lo.to_string(), hi.to_string(), r.int(3)?, r.int(4)?);
+            match repeats.last_mut() {
+                Some((id, rows)) if *id == stack_id => rows.push(row),
+                _ => repeats.push((stack_id, vec![row])),
+            }
+        }
+
         // Why each multi-stack series in this window split. v0 stores this on
         // the stack and then never reads it (spikes/pack, finding 1); it is a
         // fact about the series, so it is derived here and a pack reads it.
@@ -369,6 +386,10 @@ fn run(
                         .map(|i| acquired[i].1.as_slice())
                         .unwrap_or(&[]),
                 ),
+                frame_ms: repeats
+                    .binary_search_by_key(&stack_id, |(id, _)| *id)
+                    .ok()
+                    .and_then(|i| fingerprint::frame_interval(&repeats[i].1)),
             };
             params.push(fingerprint::derive(
                 r, first, reason, images, &seen, job_id, epoch,

@@ -43,8 +43,18 @@ LEVELS: dict[str, Level] = {
     # about text in its own pixels. v0 never reads it, so there is nothing to
     # compare against.
     "series": Level(
-        # record 38 S2: v0 never kept the series number
-        "series", "series", absent=frozenset({"burned_in_annotation", "series_number"})
+        # record 38 S2: v0 never kept the series number; nor did it read how
+        # a series stores its pixels (the 2026-10-03 fingerprint fields)
+        "series",
+        "series",
+        absent=frozenset(
+            {
+                "burned_in_annotation",
+                "series_number",
+                "photometric_interpretation",
+                "samples_per_pixel",
+            }
+        ),
     ),
     # PulseSequenceName (0018,9005) is v1's addition (the 2026-09-28
     # sequence research), and so are the MR Pulse Sequence module's
@@ -66,6 +76,8 @@ LEVELS: dict[str, Level] = {
                 "segmented_k_space_traversal",
                 "spoiling",
                 "inversion_recovery",
+                # the 2026-10-03 fingerprint fields
+                "acquisition_contrast",
             }
         ),
     ),

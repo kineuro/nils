@@ -124,6 +124,27 @@ pub static KNOBS: &[Knob] = &[
         note: "as reread, compared with case: `Siemens` (XA11, XA20) and not `SIEMENS`",
         settable_since: 4,
     },
+    Knob {
+        name: "reread_every",
+        kind: "bool",
+        default: "false",
+        note: "as reread, every MR series whatever its manufacturer",
+        settable_since: 4,
+    },
+    Knob {
+        name: "reread_one",
+        kind: "bool",
+        default: "false",
+        note: "a re-read reads one file of each series, for values a series holds once",
+        settable_since: 4,
+    },
+    Knob {
+        name: "reread_missing",
+        kind: "bool",
+        default: "false",
+        note: "a re-read takes only the series with no SamplesPerPixel, read before registry schema 79",
+        settable_since: 4,
+    },
 ];
 
 /// The slice this build implements; knobs with a later `settable_since` hold
@@ -196,6 +217,17 @@ pub struct Settings {
     /// Siemens spells its XA11 and XA20 scanners `Siemens` and the older
     /// ones `SIEMENS`.
     pub reread_exact: Vec<String>,
+    /// The 2026-10-03 fingerprint fields: a re-read of every MR series,
+    /// whatever its manufacturer (`reread_every`).
+    pub reread_every: bool,
+    /// A re-read reads one file of each series rather than every file
+    /// (`reread_one`): enough for a series column or a private element that
+    /// holds still inside the series.
+    pub reread_one: bool,
+    /// A re-read takes only the series whose row has no SamplesPerPixel,
+    /// which every image writes and no binary before registry schema 79 read
+    /// (`reread_missing`).
+    pub reread_missing: bool,
 }
 
 impl Settings {
@@ -221,12 +253,16 @@ impl Settings {
             ingest_from: None,
             reread: Vec::new(),
             reread_exact: Vec::new(),
+            reread_every: false,
+            reread_one: false,
+            reread_missing: false,
         }
     }
 
-    /// Whether this run is a re-read (`reread` or `reread_exact`).
+    /// Whether this run is a re-read (`reread`, `reread_exact` or
+    /// `reread_every`).
     pub fn rereads(&self) -> bool {
-        !self.reread.is_empty() || !self.reread_exact.is_empty()
+        self.reread_every || !self.reread.is_empty() || !self.reread_exact.is_empty()
     }
 
     /// The effective value of a knob, as `--describe` prints it.
@@ -254,6 +290,9 @@ impl Settings {
                 true => "none".to_string(),
                 false => self.reread_exact.join(", "),
             },
+            "reread_every" => self.reread_every.to_string(),
+            "reread_one" => self.reread_one.to_string(),
+            "reread_missing" => self.reread_missing.to_string(),
             _ => String::new(),
         }
     }
@@ -277,6 +316,9 @@ impl Settings {
             "restart": self.restart,
             "reread": self.reread,
             "reread_exact": self.reread_exact,
+            "reread_every": self.reread_every,
+            "reread_one": self.reread_one,
+            "reread_missing": self.reread_missing,
             "private": {
                 "pack": self.ingest_from,
                 "elements": self.ingest.iter().map(|i| i.address()).collect::<Vec<_>>(),
@@ -369,6 +411,9 @@ mod tests {
         assert_eq!(config["reread"], serde_json::json!([]));
         assert_eq!(s.value_of("reread_exact"), "none");
         assert_eq!(config["reread_exact"], serde_json::json!([]));
+        assert_eq!(s.value_of("reread_every"), "false");
+        assert_eq!(config["reread_one"], false);
+        assert_eq!(config["reread_missing"], false);
         assert_eq!(config["identity"]["id_type"], "patient-id");
         assert_eq!(config["identity"]["from"][0]["field"], "PatientID");
         assert_eq!(config["identity"]["fallback"], "StudyInstanceUID");

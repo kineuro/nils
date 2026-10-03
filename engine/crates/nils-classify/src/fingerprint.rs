@@ -27,7 +27,10 @@ use crate::{coverage, derived, dwi, fold};
 ///    mechanism attributes.
 /// 6: the ImageType Philips writes per frame of an enhanced MR object in
 ///    (2005,140F), which names a Dixon part.
-pub const REVISION: i64 = 6;
+/// 7: the 2026-10-03 fields. AngioFlag, AcquisitionContrast, the temporal
+///    resolution, the diffusion directionality, PhotometricInterpretation
+///    and SamplesPerPixel.
+pub const REVISION: i64 = 7;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -88,6 +91,10 @@ const SERIES: &[&str] = &[
     // Record 53 S1: which kind of object the file is, so a pack tells an MR
     // spectroscopy object from an image (the deep research's case 16).
     "sop_class_uid",
+    // The 2026-10-03 fields: how the series stores its pixels, which tells
+    // a colour display composite from the map it shows.
+    "photometric_interpretation",
+    "samples_per_pixel",
 ];
 
 /// The MR detail columns, absent for a CT or PET stack.
@@ -134,6 +141,12 @@ const MR: &[&str] = &[
     "segmented_k_space_traversal",
     "spoiling",
     "inversion_recovery",
+    // The 2026-10-03 fields: the angiography flag, the contrast an enhanced
+    // object says it was acquired for, and the temporal resolution the
+    // series writes.
+    "angio_flag",
+    "acquisition_contrast",
+    "temporal_resolution",
 ];
 
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
@@ -248,6 +261,13 @@ pub const WRITTEN: &[&str] = &[
     "spoiling",
     "inversion_recovery",
     "private_frame_image_type",
+    "angio_flag",
+    "acquisition_contrast",
+    "temporal_resolution",
+    "temporal_resolution_source",
+    "diffusion_directionality",
+    "photometric_interpretation",
+    "samples_per_pixel",
     "job_id",
     "epoch",
 ];
@@ -402,6 +422,125 @@ pub fn select_acquired(store: &Store) -> String {
     )
 }
 
+/// How often each slice position of the stacks in the window was acquired
+/// again (the 2026-10-03 fields): one row per stack and position whose
+/// images carry more than one acquisition time, with the earliest and the
+/// latest time, how many distinct times and how many distinct dates. A
+/// position is the image's ImagePositionPatient, or its SliceLocation where
+/// it has none. Grouped and filtered in the query, so a stack of one image
+/// per position, which is nearly every stack, returns nothing, and a dynamic
+/// of a thousand images returns its slices.
+pub fn select_frames(store: &Store) -> String {
+    let at = "COALESCE(image_position_patient, CAST(slice_location AS TEXT))";
+    let (lo, hi) = match store.dialect() {
+        nils_registry::dialect::Dialect::Postgres => (
+            "to_char(MIN(acquisition_time), 'HH24:MI:SS.US')".to_string(),
+            "to_char(MAX(acquisition_time), 'HH24:MI:SS.US')".to_string(),
+        ),
+        nils_registry::dialect::Dialect::Sqlite => (
+            "MIN(acquisition_time)".to_string(),
+            "MAX(acquisition_time)".to_string(),
+        ),
+    };
+    format!(
+        "SELECT stack_id, {lo}, {hi}, COUNT(DISTINCT acquisition_time), \
+                COUNT(DISTINCT acquisition_date) FROM {} \
+         WHERE stack_id > {} AND stack_id <= {} AND acquisition_time IS NOT NULL \
+         GROUP BY stack_id, {at} HAVING COUNT(DISTINCT acquisition_time) > 1 \
+         ORDER BY stack_id",
+        store.qualified("instance"),
+        store.dialect().param(1, Type::Int),
+        store.dialect().param(2, Type::Int),
+    )
+}
+
+/// One row of [`select_frames`]: the earliest and the latest time at one
+/// position, how many distinct times, and how many distinct dates.
+pub type Repeats = (String, String, i64, i64);
+
+/// A time of day as seconds after midnight: `HH:MM:SS` with any fraction,
+/// or DICOM's `HHMMSS.ffffff`.
+fn seconds(time: &str) -> Option<f64> {
+    let t = time.trim();
+    let (hms, fraction) = match t.split_once('.') {
+        Some((a, b)) => (a, b),
+        None => (t, ""),
+    };
+    let digits: String = hms.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() != 6 || !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let h: f64 = digits[0..2].parse().ok()?;
+    let m: f64 = digits[2..4].parse().ok()?;
+    let s: f64 = digits[4..6].parse().ok()?;
+    let f: f64 = match fraction.is_empty() {
+        true => 0.0,
+        false => format!("0.{fraction}").parse().ok()?,
+    };
+    Some(h * 3600.0 + m * 60.0 + s + f)
+}
+
+/// The frame interval of a stack, in milliseconds: at each slice position
+/// acquired more than once on one day, the mean time between its
+/// acquisitions, (latest - earliest) / (times - 1); then the median over the
+/// positions, rounded to a tenth of a millisecond. None where no position was
+/// acquired twice at distinct times. A position's images all made at one
+/// moment (the echoes of one acquisition) give no row; a position whose
+/// times cross midnight is left out.
+pub fn frame_interval(rows: &[Repeats]) -> Option<f64> {
+    let mut each: Vec<f64> = rows
+        .iter()
+        .filter(|(_, _, n, days)| *n > 1 && *days <= 1)
+        .filter_map(|(lo, hi, n, _)| {
+            let span = seconds(hi)? - seconds(lo)?;
+            (span > 0.0).then(|| span * 1000.0 / (*n - 1) as f64)
+        })
+        .collect();
+    if each.is_empty() {
+        return None;
+    }
+    each.sort_by(f64::total_cmp);
+    let mid = each.len() / 2;
+    let median = match each.len() % 2 {
+        1 => each[mid],
+        _ => (each[mid - 1] + each[mid]) / 2.0,
+    };
+    Some((median * 10.0).round() / 10.0)
+}
+
+/// The temporal resolution of a stack, in milliseconds, and where it came
+/// from: TemporalResolution (0020,0110) where the series writes a value above
+/// nought (`header`; GE writes 0 on most series, which says nothing), else
+/// the frame interval of its images (`acquisition_times`).
+pub fn temporal_resolution(
+    written: Option<&str>,
+    frames: Option<f64>,
+) -> Option<(f64, &'static str)> {
+    let header = written
+        .and_then(|t| t.split('\\').next())
+        .and_then(|t| t.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    match (header, frames) {
+        (Some(v), _) => Some((v, "header")),
+        (None, Some(v)) => Some((v, "acquisition_times")),
+        (None, None) => None,
+    }
+}
+
+/// Every distinct DiffusionDirectionality (0018,9075) the stack's images
+/// write, trimmed, in upper case, sorted and joined by commas: `ISOTROPIC`
+/// for the trace image an enhanced object writes, `DIRECTIONAL,NONE` for a
+/// series of weighted images and their b0. None where no image writes one.
+pub fn directionality(images: &[dwi::Image]) -> Option<String> {
+    let set: std::collections::BTreeSet<String> = images
+        .iter()
+        .filter_map(|i| i.directionality.as_deref())
+        .map(|d| d.trim().to_uppercase())
+        .filter(|d| !d.is_empty())
+        .collect();
+    (!set.is_empty()).then(|| set.into_iter().collect::<Vec<_>>().join(","))
+}
+
 /// One row of [`select_acquired`]: an acquisition date, if the images had
 /// one, and the earliest time on it.
 pub type AcquiredOn = (Option<String>, String);
@@ -450,6 +589,9 @@ fn pad(time: &str) -> String {
 pub struct Seen {
     pub cover: coverage::Coverage,
     pub acquired: Acquired,
+    /// The frame interval of the stack's images, in milliseconds
+    /// ([`frame_interval`]).
+    pub frame_ms: Option<f64>,
 }
 
 /// The stack ids in the window that already have a fingerprint agreeing with
@@ -618,6 +760,7 @@ pub fn derive(
 
     let orientation = text_of(r, 9, S + 12)?;
     let in_plane = text(r, E + 4)?;
+    let temporal = temporal_resolution(text(r, E + 30)?.as_deref(), seen.frame_ms);
     let diffusion = dwi::derive(
         images,
         &dwi::Stack {
@@ -743,6 +886,13 @@ pub fn derive(
         opt(text(r, E + 26)?), // spoiling
         opt(text(r, E + 27)?), // inversion_recovery
         opt(text(r, 17)?),     // private_frame_image_type
+        opt(text(r, E + 28)?), // angio_flag
+        opt(text(r, E + 29)?), // acquisition_contrast
+        num(temporal.map(|(v, _)| v)),
+        opt(temporal.map(|(_, how)| how.to_string())),
+        opt(directionality(images)),
+        opt(text(r, S + 26)?),    // photometric_interpretation
+        int(opt_int(r, S + 27)?), // samples_per_pixel
         Param::Int(job_id),
         Param::Int(epoch),
     ])
@@ -913,6 +1063,76 @@ mod split_tests {
         assert_eq!(of(&["kvp", "tube_current"]), Some("multi_parameter"));
         assert_eq!(of(&["repetition_time"]), Some("multi_stack"));
         assert_eq!(of(&[]), Some("multi_stack"));
+    }
+
+    #[test]
+    fn a_frame_interval_is_the_median_time_between_acquisitions_of_one_position() {
+        use super::{Repeats, frame_interval, temporal_resolution};
+        let r = |lo: &str, hi: &str, n: i64, days: i64| -> Repeats {
+            (lo.to_string(), hi.to_string(), n, days)
+        };
+        // three slices of a dynamic, each acquired five times, 2.5 s apart
+        let rows = vec![
+            r("10:00:00", "10:00:10", 5, 1),
+            r("10:00:00.1", "10:00:10.1", 5, 1),
+            r("10:00:00.200000", "10:00:10.200000", 5, 1),
+        ];
+        assert_eq!(frame_interval(&rows), Some(2500.0));
+        // DICOM's own spelling reads the same
+        assert_eq!(
+            frame_interval(&[r("100000.5", "100001.5", 2, 1)]),
+            Some(1000.0)
+        );
+        // the median over positions, not the mean
+        let rows = vec![
+            r("10:00:00", "10:00:02", 3, 1),
+            r("10:00:00", "10:00:02", 3, 1),
+            r("10:00:00", "10:01:00", 2, 1),
+        ];
+        assert_eq!(frame_interval(&rows), Some(1000.0));
+        // a position that crosses midnight, or a time that is not one, says
+        // nothing; nor does a stack with no repeated position
+        assert_eq!(frame_interval(&[r("23:59:59", "00:00:01", 2, 2)]), None);
+        assert_eq!(frame_interval(&[r("nonsense", "10:00:01", 2, 1)]), None);
+        assert_eq!(frame_interval(&[]), None);
+
+        // the header outranks the images where it says anything
+        assert_eq!(
+            temporal_resolution(Some("59192"), Some(2500.0)),
+            Some((59192.0, "header"))
+        );
+        // GE's nought says nothing, so the images answer
+        assert_eq!(
+            temporal_resolution(Some("0"), Some(2500.0)),
+            Some((2500.0, "acquisition_times"))
+        );
+        assert_eq!(temporal_resolution(None, None), None);
+    }
+
+    #[test]
+    fn a_stack_s_directionality_is_every_value_its_images_write() {
+        use super::directionality;
+        use crate::dwi::Image;
+        let image = |d: Option<&str>| Image {
+            directionality: d.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(
+            directionality(&[image(Some("isotropic "))]).as_deref(),
+            Some("ISOTROPIC")
+        );
+        assert_eq!(
+            directionality(&[
+                image(Some("DIRECTIONAL")),
+                image(Some("NONE")),
+                image(None),
+                image(Some("DIRECTIONAL")),
+            ])
+            .as_deref(),
+            Some("DIRECTIONAL,NONE")
+        );
+        assert_eq!(directionality(&[image(None)]), None);
+        assert_eq!(directionality(&[]), None);
     }
 
     #[test]

@@ -878,6 +878,22 @@ fn build_registry() -> Vec<Table> {
                 // object in (2005,140F), from the stack's own row: its third
                 // and fourth values name a Dixon part (W, F, IP or OP).
                 col("private_frame_image_type", Type::Text),
+                // The 2026-10-03 fingerprint fields. AngioFlag (0018,0025)
+                // and AcquisitionContrast (0008,9209) from the MR series;
+                // how fast a dynamic series samples, from TemporalResolution
+                // (0020,0110) where the series writes one above nought and
+                // otherwise from when the images at one slice position were
+                // acquired, in milliseconds, and which of the two answered;
+                // the directionality the stack's images write in
+                // DiffusionDirectionality (0018,9075), every distinct value;
+                // and how the series stores its pixels.
+                col("angio_flag", Type::Text),
+                col("acquisition_contrast", Type::Text),
+                col("temporal_resolution", Type::Double),
+                col("temporal_resolution_source", Type::Text),
+                col("diffusion_directionality", Type::Text),
+                col("photometric_interpretation", Type::Text),
+                col("samples_per_pixel", Type::Int),
                 // what made it
                 req("job_id", Type::Int),
                 req("epoch", Type::Int),

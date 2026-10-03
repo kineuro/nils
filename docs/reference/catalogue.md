@@ -26,7 +26,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `station_name` | StationName (0008,1010) | text | quasi-identifying |  |
 | `institution_name` | InstitutionName (0008,0080) | text | quasi-identifying |  |
 
-## series (32)
+## series (34)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -62,8 +62,10 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `contrast_bolus_volume` | ContrastBolusVolume (0018,1041) | double | technical |  |
 | `contrast_flow_rate` | ContrastFlowRate (0018,1046) | double | technical |  |
 | `contrast_flow_duration` | ContrastFlowDuration (0018,1047) | double | technical |  |
+| `photometric_interpretation` | PhotometricInterpretation (0028,0004) | text | technical | addition: PhotometricInterpretation (0028,0004), MONOCHROME2, RGB and so on (2026-10-03) |
+| `samples_per_pixel` | SamplesPerPixel (0028,0002) | int | technical | addition: SamplesPerPixel (0028,0002), 1 for a grey image and 3 for a colour one (2026-10-03) |
 
-## series_mr (43, MR only)
+## series_mr (44, MR only)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -97,6 +99,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `segmented_k_space_traversal` | SegmentedKSpaceTraversal, then private per-frame .SegmentedKSpaceTraversal | text | technical | addition: SegmentedKSpaceTraversal (0018,9033), SINGLE, PARTIAL or FULL (record 53) |
 | `spoiling` | Spoiling, then fg MRModifierSequence.Spoiling, then private per-frame .Spoiling | text | technical | addition: Spoiling (0018,9016), RF, GRADIENT, RF_AND_GRADIENT or NONE, from the MR Modifier group where the top level has none (record 53) |
 | `inversion_recovery` | InversionRecovery, then fg MRModifierSequence.InversionRecovery, then private per-frame .InversionRecovery | text | technical | addition: InversionRecovery (0018,9009), YES or NO, from the MR Modifier group where the top level has none (record 53) |
+| `acquisition_contrast` | AcquisitionContrast, then fg MRImageFrameTypeSequence.AcquisitionContrast, then private per-frame .AcquisitionContrast | text | technical | addition: AcquisitionContrast (0008,9209), T1, T2, PROTON_DENSITY, DIFFUSION and so on, from the MR Image Frame Type group where the top level has none (2026-10-03) |
 | `transmit_coil_name` | TransmitCoilName, then fg MRTransmitCoilSequence.TransmitCoilName | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `acquisition_matrix` | AcquisitionMatrix (0018,1310) | text | technical |  |
 | `phase_encoding_direction` | InPlanePhaseEncodingDirection (0018,1312) | text | technical | addition: InPlanePhaseEncodingDirection; v0's keyword PhaseEncodingDirection is no element and the column was always null |
@@ -233,4 +236,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
-191 columns.
+194 columns.
