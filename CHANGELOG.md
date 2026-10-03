@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.76] - 2026-10-04
+
+A reclassify of a large archive should take about a third of the time it did (the step this release removes was about 70 % of it), and no longer grows from one run to the next. Classify read the open review questions of each chunk of stacks from Postgres, which walked every review item ever written; it now reads them once a run. Nothing else changes: after updating from alpha.75 nothing needs to run again, and the next reclassify is simply faster. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. MRI pack 0.25.0. No desk release: installs keep desk 1.0.0-alpha.62.
+
 ### Fixed
 
 - A reclassify no longer slows down as review items pile up. Before writing a window, classify supersedes the open questions of the stacks it judges again, and it used to ask Postgres for them per chunk of 256 stacks: the grouped question walked every review item ever written each time, and the per-stack one compared each chunk's refs with every open question, the run's own new ones included. On an archive of 558,874 stacks that was about 70 % of a 772 s run, and it grew with every reclassify. The open questions are now read once at the start of a run, by the stack they stand on, and each window supersedes its own by id. What is superseded is unchanged.
