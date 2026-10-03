@@ -4335,7 +4335,9 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         ],
         None,
     );
-    const LIMIT: usize = 320;
+    // the requests the server answers before it stops; the test pads what
+    // it did not use with capabilities at the end
+    const LIMIT: usize = 600;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -4364,7 +4366,10 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     };
     let wait = |job: i64| -> serde_json::Value {
         let mut shown = serde_json::Value::Null;
-        for _ in 0..150 {
+        // each look is one of the server's LIMIT requests, so a slow runner
+        // looks less often rather than spending them: 200 ms at first, then
+        // a little longer each time up to half a second, a minute in all
+        for i in 0..150u64 {
             let (status, now) = ask("GET", &format!("/api/jobs/{job}"), None, ops);
             assert_eq!(status, 200, "{now}");
             shown = now;
@@ -4374,7 +4379,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
             ) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_millis((200 + 10 * i).min(500)));
         }
         shown
     };

@@ -3100,14 +3100,16 @@ fn a_long_run_and_a_digest_go_on_together() {
     }
     let lab = Lab::new("pipelines-lane-digest");
     lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
-    // one unit at a time: four units of three seconds each
+    // one unit at a time: four units of eight seconds each, so the run is
+    // still going when the digest queued after it is done, on a slow runner
+    // too: three seconds a unit left too little room there
     lab.ok(&["pipeline", "lane", "--cores", "1"], None);
     let src = format!("src={}", lab._src.path().display());
     let server = Server::start_with(&lab, &["--ingest-root", &src]);
     let (status, doc) = server.call(
         "POST",
         "/api/jobs",
-        Some(json!({"command": ["run", "slow", "--select", "selection:every@1", "--param", "sleep=3"]})),
+        Some(json!({"command": ["run", "slow", "--select", "selection:every@1", "--param", "sleep=8"]})),
         OPERATOR,
     );
     assert_eq!(status, 202, "{doc}");

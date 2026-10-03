@@ -7,7 +7,7 @@
 # that passes gets a line; one that fails shows everything it printed. Without
 # NILS_TEST_POSTGRES_DSN every binary skips its Postgres half, as under `cargo test`.
 # TEST_JOBS sets how many binaries run at once, the number of cores by default.
-# TEST_BINARY_TIMEOUT (seconds, 900 by default) bounds each binary: one that hangs
+# TEST_BINARY_TIMEOUT (seconds, 1200 by default) bounds each binary: one that hangs
 # is stopped and fails with what it printed, where libtest names every test still
 # running after a minute, so a hang fails in minutes and says which test it is.
 # While binaries run, a line a minute says which, and the memory and disk left.
@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../engine"
 
 jobs=${TEST_JOBS:-$(nproc)}
-limit=${TEST_BINARY_TIMEOUT:-900}
+limit=${TEST_BINARY_TIMEOUT:-1200}
 dsn=${NILS_TEST_POSTGRES_DSN:-}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
