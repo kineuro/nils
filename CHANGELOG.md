@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.75] - 2026-10-03
+
+A pass's target reads a field by pattern as a rule does. With MRI pack 0.25.0, whose physics vote reads a sequence variant and a series name by pattern, alpha.74's classify ended in a panic at the vote; this release fixes that, and nothing else changes. After updating from alpha.74, a reclassify is all that is needed: the re-read and the fingerprint alpha.74 asked for stand. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.
+
 ### Fixed
 
 - A pass's target may read a field by pattern (`matches`), as a rule may: the physics vote's reference keeps the pack's patterns, where a row of it panicked on the first pattern it met. MRI pack 0.25.0's vote reads a sequence variant and a series name so, and a classify with it ended in that panic.
