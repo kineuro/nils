@@ -402,3 +402,62 @@ fn a_base_the_rules_decide_as_nothing_is_no_gap() {
     let at: Vec<usize> = answers.iter().map(|a| a.at).collect();
     assert_eq!(at, vec![21, 22], "only the two gaps: {at:?}");
 }
+
+/// MRI pack 0.25.0: the vote's target reads a sequence variant and a series
+/// name by pattern, so a row must answer `matches` as a stack does. Before
+/// the corpus carried the pack's patterns, the first Philips 3D stack with no
+/// technique ended the classify with a panic. A Philips 3D TFE whose
+/// technique was left undecided (no `MP`, no inversion time) is no gap, and
+/// one written `MP` still is.
+#[test]
+fn a_pattern_in_the_vote_s_target_is_read_on_a_row() {
+    let pack = mri();
+    let pass = pack
+        .passes
+        .iter()
+        .find(|p| p.vote().is_some())
+        .expect("the physics vote");
+    let vote = pass.vote().expect("the physics vote");
+
+    let mut c = Corpus::new(&pack);
+    let push = |c: &mut Corpus, id: i64, base: &str, technique: &str, variant: &str| {
+        let mut s = stack(9.0, 4.0, "GR");
+        s.set(
+            "manufacturer",
+            nils_pack::stack::Value::Text(Some("Philips")),
+        )
+        .unwrap();
+        s.set(
+            "mr_acquisition_type",
+            nils_pack::stack::Value::Text(Some("3D")),
+        )
+        .unwrap();
+        s.set(
+            "sequence_variant",
+            nils_pack::stack::Value::Text(Some(variant)),
+        )
+        .unwrap();
+        c.push(
+            id,
+            |f| s.as_text(f).into_owned(),
+            |a| match pack.axes[a].name.as_str() {
+                "base" => base.to_string(),
+                "technique" => technique.to_string(),
+                "directory_type" => "anat".to_string(),
+                _ => String::new(),
+            },
+        );
+    };
+    for i in 0..10 {
+        push(&mut c, i + 1, "T1w", "MPRAGE", "SP\\MP");
+    }
+    push(&mut c, 11, "", "", "SP");
+    push(&mut c, 12, "", "", "SP\\MP");
+    let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
+    let at: Vec<usize> = answers.iter().map(|a| a.at).collect();
+    assert!(
+        !at.contains(&10),
+        "the undecided TFE is left for a person: {at:?}"
+    );
+    assert!(at.contains(&11), "a TFE written MP is still a gap: {at:?}");
+}

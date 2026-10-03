@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A pass's target may read a field by pattern (`matches`), as a rule may: the physics vote's reference keeps the pack's patterns, where a row of it panicked on the first pattern it met. MRI pack 0.25.0's vote reads a sequence variant and a series name so, and a classify with it ended in that panic.
+
 ## [1.0.0-alpha.74] - 2026-10-03
 
 The MRI pack is 0.25.0, the fingerprint reads seven more fields, and classify is faster. MRI pack 0.25.0 carries conventions round 5 and round 6 and the rule gaps an archive-wide protocol read found; it reads the Philips TFE prepulse, which tells an MPRAGE from a turbo field echo where neither the sequence variant nor InversionRecovery does, and leaves the technique undecided where the file cannot tell. The fingerprint adds AngioFlag, Acquisition Contrast, the temporal resolution, the diffusion directionality and how the pixels are stored, and the MRI pack ingests Philips' Prepulse Type and Prepulse Delay. Classifying a stack takes about 30 % less time, and a process reuses a pack it loaded while its files are unchanged. Registry schema 79 and fingerprint revision 7: after updating, `nils digest <root> --reread-every --reread-one --reread-missing` for each root fills the new columns from one file per MR series, then `nils fingerprint` and a reclassify. No desk release: installs keep desk 1.0.0-alpha.62. HTTP API contract 7 (amended in place), pack contract 8, review-item contract 4, suite contract 3 and job contract 1. Kvasir 1.0.0-alpha.9 and the assistant 1.0.0-alpha.27, as before.
