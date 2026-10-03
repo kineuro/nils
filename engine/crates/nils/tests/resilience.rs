@@ -544,3 +544,45 @@ fn many_readers_warming_pictures_leave_the_engine_bounded_and_answering() {
     // a claim or a status is not stuck behind the pictures
     assert!(slowest < Duration::from_secs(3), "{slowest:?}");
 }
+
+/// `--requests N` (for tests) ends the engine as it always did: each
+/// handler ends after it serves a request at or past N, or when it finds
+/// nothing to take for 250 ms once N are served, and the engine exits when
+/// they all have. A caller that keeps asking past N is answered by a handler
+/// still there or turned away at once, never left waiting, and the engine
+/// ends by itself with success.
+#[test]
+fn a_server_told_its_requests_ends_by_itself_while_a_caller_keeps_asking() {
+    let home = TempDir::new("resilience-requests");
+    ok(&home, &["key", "add", "k"], Some("a resilience test key\n"));
+    ok(&home, &["init", "--key", "k"], None);
+    let mut extra = tokens();
+    extra.extend(["--requests".to_string(), "3".to_string()]);
+    let mut engine = Engine::start(&home, 1024, 2, &extra);
+    for i in 0..3 {
+        let (status, body) = engine.get("/api/status", Some(READERS[0])).unwrap();
+        assert_eq!(status, 200, "ask {i}: {}", String::from_utf8_lossy(&body));
+    }
+    // past N, every 50 ms: each ask comes back at once, whatever it says
+    let asking = Instant::now();
+    let ended = loop {
+        if let Some(status) = engine.child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if asking.elapsed() > Duration::from_secs(20) {
+            break None;
+        }
+        let asked = Instant::now();
+        let _ = engine.get("/api/status", Some(READERS[0]));
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "an ask past N waited"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        ended.is_some_and(|s| s.success()),
+        "{ended:?}: {}",
+        engine.said()
+    );
+}
