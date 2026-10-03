@@ -1265,8 +1265,10 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
                     });
                 }
                 drop(taken);
+                // the handler that served the last of `--requests` ends; the
+                // others end when they find nothing to take, as before, so a
+                // caller that keeps asking is still answered meanwhile
                 if limit.is_some_and(|max| n >= max) {
-                    intake.stop();
                     return;
                 }
             }
