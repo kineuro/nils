@@ -393,10 +393,15 @@ flags:
   has_pd_synthetic:    image_type.has_pd_synthetic
   has_flair_synthetic: image_type.has_flair_synthetic
   has_myelin:          image_type.has_myelin
+  # MRI pack 0.25.0: never an old Philips acquisition written `T1 MAP`
+  # (section 25).
   is_qmap:
-    any: [image_type.has_qmap, scanning_sequence.has_qmap, image_type.has_t1_map,
-          image_type.has_t2_map, image_type.has_r1, image_type.has_r2]
-  has_t1_map: image_type.has_t1_map
+    all:
+      - any: [image_type.has_qmap, scanning_sequence.has_qmap, image_type.has_t1_map,
+              image_type.has_t2_map, image_type.has_r1, image_type.has_r2]
+      - {not: philips_t1_map_token_on_acquisition}
+  # MRI pack 0.25.0: not an old Philips acquisition written `T1 MAP` (section 25).
+  has_t1_map: {all: [image_type.has_t1_map, {not: philips_t1_map_token_on_acquisition}]}
   has_t2_map: image_type.has_t2_map
   has_r1:     image_type.has_r1
   has_r2:     image_type.has_r2
@@ -454,7 +459,8 @@ flags:
   # enhanced mDixon object (parsers.yml, `frame_image_type`).
   has_water:     {any: [image_type.has_water, frame_image_type.has_water]}
   has_fat:       {any: [image_type.has_fat, frame_image_type.has_fat]}
-  has_in_phase:  {any: [image_type.has_in_phase, frame_image_type.has_in_phase]}
+  # MRI pack 0.25.0: never the `IP` of a GE `MIN IP` (section 25).
+  has_in_phase:  {all: [{any: [image_type.has_in_phase, frame_image_type.has_in_phase]}, {not: in_phase_token_of_a_minip}]}
   has_out_phase: {any: [image_type.has_out_phase, frame_image_type.has_out_phase]}
   has_psir:      {any: [image_type.has_psir, image_type.has_psir_synthetic]}
   has_stir:      image_type.has_stir_synthetic
@@ -3564,3 +3570,63 @@ flags:
       - {not: inversion_present}
       - te_under_t2star_threshold
       - {not: r8_spoiled_t1_gre_named_t2}
+
+  # === 25. MRI pack 0.25.0: conventions round 5 =============================
+  #
+  # The deep research of round 5 (record 48, "Conventions, round 5"; the
+  # design repository's `studies/2026-10-02-pack-0240/deep-research-r5.md`)
+  # on six questions the final certificate's grade left, checked against
+  # our archive's counts (`studies/2026-10-03-pack-0250/`).
+
+  # --- GE SWAN: its outputs are written one image per slice location, the
+  # echoes combined as a weighted average (GE: "Several echoes are read out
+  # at different TE times and then combined as a weighted average"), the
+  # operation MEDIC and MERGE perform: comb-ME-GRE. An export that keeps the
+  # echoes apart (split by echo) stays ME-GRE. The SWAN pulse sequence, or a
+  # SWAN name on GE's `efgre3d`; never a GE multi-echo QSM (`psd/QSM/me`,
+  # section 20), which has its own reading.
+  ge_swan_combined:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - any:
+          - {text: ge_pulse_sequence_name, matches: '^\s*swan'}
+          # or a series named SWAN where the pulse sequence is not shown
+          # (an export without GE's private elements)
+          - all:
+              - {text: search_text, matches: '(^|[^a-z])e?swan'}
+              - has_gre
+      - {not: is_multi_echo}
+      - {not: has_epi}
+
+  # --- a GE `MIN IP` reformat is no in-phase image: GE writes the minimum
+  # intensity projection as the ImageType value `MIN IP`, whose `IP` the
+  # Dixon part's token read as in phase (14 SWAN minIP reformats on the
+  # archive were InPhase with base T1w).
+  in_phase_token_of_a_minip: {all: [image_type.has_in_phase, image_type.is_minip, {not: {text: image_type, matches: 'IN_PHASE'}}]}
+
+  # --- old Philips software (Gyroscan Intera) writes `T1 MAP` in the
+  # ImageType of an ordinary T1 FFE acquisition (ORIGINAL, a gradient echo
+  # at a TR of a few tens of ms): a weighted image, no quantitative map. On
+  # the archive 41 such stacks (surveys and 3D T1 volumes) took construct
+  # T1map and base T1w from the token.
+  philips_t1_map_token_on_acquisition:
+    all:
+      - {text: manufacturer, prefix: philips}
+      - image_type.is_original
+      - image_type.has_t1_map
+      - has_gre
+      - {field: repetition_time, lt: 100}
+  # A quantitative T1 or R1 map by the image type, as the construct reads it.
+  quantitative_t1_map: {all: [{any: [has_t1_map, has_r1]}, {not: philips_t1_map_token_on_acquisition}]}
+
+  # --- a subtraction of a stitched composite (round 5, case 5: Subtraction
+  # and Composed both). Our vocabulary carries the subtraction as the
+  # provenance SubtractionDerived and the stitching as the construct
+  # Composed, so a stated subtraction whose only projection is the
+  # composite stays SubtractionDerived (record 48's conflict 1 makes a
+  # composite alone ProjectionDerived), and keeps Composed.
+  subtraction_of_a_composite:
+    all:
+      - {any: [is_subtraction, sub_named]}
+      - {any: [is_composite, composed_named, composite_not_survey]}
+      - {not: {any: [is_mip, is_minip, is_mpr, is_projection]}}

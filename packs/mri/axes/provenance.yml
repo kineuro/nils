@@ -245,7 +245,9 @@ values:
     alternative_flags: [is_mip, is_minip, is_mpr, is_projection, projection_extra, composite_not_survey]
     # MRI pack 0.21.0: never GE's collapse of a 2D phase contrast, the
     # acquisition's own image (case 5).
-    requires: {all: [{not: is_diffusion_projection}, {not: ge_pc_2d_collapse}]}
+    # MRI pack 0.25.0: nor a stated subtraction of a composite, which is
+    # SubtractionDerived with Composed (round 5, case 5; flags.yml, section 25).
+    requires: {all: [{not: is_diffusion_projection}, {not: ge_pc_2d_collapse}, {not: subtraction_of_a_composite}]}
   SubtractionDerived:
     terms: ['subtraction', 'SUB', 'post minus pre']
     keywords:

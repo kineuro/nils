@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.24.0
+version: 0.25.0
 contract: 8
 modality: MR
 
@@ -115,6 +115,9 @@ passes:
   # certificate's A1 and A7), before the vote as the others.
   - passes/session_ir_reformat.yml
   - passes/session_black_blood.yml
+  # MRI pack 0.25.0: a subtraction beside the composite it was made from
+  # (round 5, case 5).
+  - passes/session_subtraction_composite.yml
   - passes/physics_vote.yml
 
 # Which stack stands for a session's role (Wave 3 section 10). A pack that

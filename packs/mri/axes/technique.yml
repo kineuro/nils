@@ -259,10 +259,14 @@ values:
     terms: ['dynamic contrast enhanced', 'DCE-MRI', 'DCE perfusion', 'permeability']
     description: 'dynamic contrast enhanced perfusion: a T1-weighted 3D spoiled gradient echo repeated through a bolus'
     family: GRE
-    requires: {any: [is_dce_series, dce_words]}
+    # MRI pack 0.25.0 (round 5, case 1): or a Siemens TWIST-VIBE dynamic run
+    # that names no angiography (flags.yml, `twist_vibe_dynamic`): DCE by
+    # default; an angiography name keeps it CE-MRA.
+    requires: {any: [is_dce_series, dce_words, twist_vibe_dynamic]}
     keywords:
       - dce
       - dynamic contrast enhanced
+    alternative_flags: [twist_vibe_dynamic]
     detection:
       combination: [is_dce_series]
   Perfusion-EPI:
@@ -614,6 +618,9 @@ values:
     # MRI pack 0.20.0: or a Siemens MEAN phase or magnitude over the echoes of
     # a multi-echo gradient echo (record 48, dev-5's case 5; flags.yml,
     # `combined_echoes_stated`).
+    # MRI pack 0.25.0 (round 5, case 2): or a GE SWAN output, its echoes
+    # combined as a weighted average (flags.yml, `ge_swan_combined`).
+    alternative_flags: [ge_swan_combined]
     detection:
       exclusive: is_medic
       combination: [combined_echoes_stated]

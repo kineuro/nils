@@ -233,10 +233,12 @@ rules:
   # base (above) [P9, MQ6, B1]
   'technique:MP2RAGE':
     clauses:
-      - {when: {all: [{axis: technique, is: 'MP2RAGE'}, {not: {axis: construct, is: INV1}}, {not: {axis: construct, is: INV2}}]}, cite: 'MP2RAGE', source: technique}
+      # MRI pack 0.25.0 (round 5, case 6): nor its T1 map, a quantity
+      # with no base (`flag:t1_map`); UNI and UNI-DEN stay T1w.
+      - {when: {all: [{axis: technique, is: 'MP2RAGE'}, {not: {axis: construct, is: INV1}}, {not: {axis: construct, is: INV2}}, {not: {axis: construct, is: T1map}}, {not: {axis: construct, is: R1map}}]}, cite: 'MP2RAGE', source: technique}
     set: {base: 'T1w', base_basis: physics, contrast_mix: null}
     confidence: 0.95
-    why: 'the MP2RAGE uniform image and T1 map are T1-weighted; its inversions have no base'
+    why: 'the MP2RAGE uniform image is T1-weighted; its inversions and its T1 map have no base'
 
   # The physics sources agree the stationary tissue of a TOF is T1-weighted
   # [RP7, MQ7]; DICOM and BIDS give angiography a class of its own [D3, D4,
@@ -531,11 +533,15 @@ rules:
       - {when: {all: [has_psir, is_synthetic]}, cite: 'has_psir and is_synthetic', source: flags, tier: exclusive}
     set: {base: 'T1w', base_basis: physics, contrast_mix: null}
 
+  # MRI pack 0.25.0 (round 5, case 6): a quantitative T1 or R1 map is a
+  # quantity, not a weighting (BIDS T1map, DICOM QUANTITY): no base. A
+  # synthetic T1-weighted image and MP2RAGE's UNI stay T1w by their own
+  # rules. Never an old Philips acquisition written `T1 MAP` (flags.yml,
+  # section 25).
   'flag:t1_map':
     clauses:
-      - {flag: has_t1_map, tier: exclusive}
-      - {flag: has_r1, tier: exclusive}
-    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
+      - {flag: quantitative_t1_map, tier: exclusive}
+    set: {base: null, base_basis: null, contrast_mix: null}
 
   'flag:t2_map':
     clauses:

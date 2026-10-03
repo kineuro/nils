@@ -54,6 +54,9 @@ derive:
       # its MAG and PHS at one echo (flags.yml, section 20).
       - {when: ge_qsm_me_combined, value: comb-ME-GRE}
       - {when: ge_qsm_me_echo_output, value: ME-GRE}
+      # MRI pack 0.25.0 (round 5, case 2): a GE SWAN output written one image
+      # per slice combines its echoes as a weighted average.
+      - {when: ge_swan_combined, value: comb-ME-GRE}
       # MRI pack 0.24.0: a GE SWI made by EPI is EPI by its pulse sequence
       # (D12), whatever its train (flags.yml, section 20, `ge_swi_epi_psd`).
       - {when: ge_swi_epi_psd, value: EPI}
@@ -105,6 +108,9 @@ derive:
       # MRI pack 0.24.0, as swi_technique
       - {when: ge_qsm_me_combined, value: comb-ME-GRE}
       - {when: ge_qsm_me_echo_output, value: ME-GRE}
+      # MRI pack 0.25.0 (round 5, case 2): a GE SWAN output written one image
+      # per slice combines its echoes as a weighted average.
+      - {when: ge_swan_combined, value: comb-ME-GRE}
       - {when: ge_swi_epi_psd, value: EPI}
       # the rest as swi_technique
       - {when: is_gre_epi, value: GRE-EPI}

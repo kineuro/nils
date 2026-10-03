@@ -569,7 +569,9 @@ cases:
       technique: MEGRE
       construct: SWI
 
-  - name: a GE SWAN states its echoes in the echo train
+  # MRI pack 0.25.0 (round 5, case 2): written one image per slice, its
+  # echoes are combined as a weighted average: comb-ME-GRE, not ME-GRE.
+  - name: a GE SWAN states its echoes in the echo train, and combines them
     stack:
       image_type: 'ORIGINAL\PRIMARY\OTHER'
       scanning_sequence: GR
@@ -579,7 +581,7 @@ cases:
       text_series_description: 'SWAN'
       echo_train_length: 8
     axes:
-      technique: MEGRE
+      technique: MEDIC
 
   - name: a GE 3D EPI SWI's train is its EPI factor, and it stays EPI
     stack:
