@@ -55,8 +55,9 @@ values:
     # magnetisation-prepared gradient echo (MPRAGE, a TFE), whose inversion
     # belongs to its technique (a BRAVO reformat named `T1 FLAIR CUBE`, a
     # `*tfl3d1` view named `Ax Flair`); nor the magnitude of nothing: a
-    # Siemens real (R) inversion recovery is PSIR by DR3, whatever its name.
-    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}, {not: {all: [{not: is_flair}, {any: [{axis: technique, is: MPRAGE}, {axis: technique, is: MEMPRAGE}, {axis: technique, is: MP2RAGE}, {axis: technique, is: FSP-GRE}]}]}}, {not: siemens_real_ir}]}
+    # real (R) inversion recovery is PSIR by DR3, whatever its name (Siemens,
+    # and Philips `R_IR` since the sweep's disputes, section 26e).
+    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}, {not: {all: [{not: is_flair}, {any: [{axis: technique, is: MPRAGE}, {axis: technique, is: MEMPRAGE}, {axis: technique, is: MP2RAGE}, {axis: technique, is: FSP-GRE}]}]}}, {not: real_ir}]}
     keywords:
       - flair
       - t2 flair
@@ -83,8 +84,9 @@ values:
     # saturation delay reads as a short TI.
     # MRI pack 0.25.0 (the protocol sweep): nor a Siemens spin echo whose
     # header states no inversion (flags.yml, section 26d), nor a Siemens
-    # real (R) inversion recovery, which DR3 makes PSIR whatever its name.
-    requires: {all: [{not: {axis: technique, is: MDME}}, {not: siemens_stir_named_without_inversion}, {not: siemens_real_ir}]}
+    # real (R) inversion recovery, Siemens or Philips (section 26e), which
+    # DR3 makes PSIR whatever its name.
+    requires: {all: [{not: {axis: technique, is: MDME}}, {not: siemens_stir_named_without_inversion}, {not: real_ir}]}
     keywords:
       - stir
       - short tau
@@ -112,6 +114,10 @@ values:
     terms: ['phase sensitive inversion recovery']
     group: IR_CONTRAST
     priority: 4
+    # MRI pack 0.25.0: never the magnitude of a real-IR pair named PSIR,
+    # which keeps IR, FLAIR or STIR by its inversion time (DR3; flags.yml,
+    # section 26e); a Philips real IR (`R_IR`) is PSIR as a Siemens one is.
+    requires: {not: ir_magnitude_component}
     keywords:
       - psir
       - phase sensitive
@@ -124,7 +130,7 @@ values:
     # source.
     detection:
       exclusive: has_psir
-      combination: [siemens_real_ir]
+      combination: [real_ir]
     # MRI pack 0.25.0: or a Siemens range that kept the real component and
     # lost the inversion its protocol names (flags.yml, section 26d).
     alternative_flags: [siemens_real_ir_named]

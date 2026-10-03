@@ -1,0 +1,325 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 0.25.0: the protocol sweep's disputes settled under record 48's
+# rule (the deep research where it is confident, our counts where it is
+# not). One or more cases for each rule, and the cases that keep each rule
+# from reaching what it must not. Every stack here is invented from the
+# pattern the design repository's files name; none is a real header.
+
+cases:
+
+  # --- a real-part inversion recovery is PSIR, a Philips one as a Siemens one
+
+  - name: a Philips real STIR (R_IR) is PSIR with Real, not STIR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\R_IR\R\IR'
+      scanning_sequence: IR
+      sequence_variant: SS
+      scan_options: FC
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'real - STIR sag HWS'
+      n_slices: 15
+      repetition_time: 4820
+      echo_time: 50
+      inversion_time: 200
+      flip_angle: 90
+      echo_train_length: 22
+    flags:
+      philips_real_ir: true
+      real_ir: true
+    axes:
+      modifier: FlowComp,PSIR
+      construct: Real
+
+  - name: guard, the magnitude of a Philips real-IR pair named PSIR keeps IR by its inversion time
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_IR\M\IR'
+      scanning_sequence: IR
+      sequence_variant: SK
+      scan_options: OTHER
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'PSIR BWS'
+      n_slices: 15
+      repetition_time: 4400
+      echo_time: 9.4
+      inversion_time: 400
+      flip_angle: 90
+      echo_train_length: 18
+    flags:
+      ir_magnitude_component: true
+      real_ir: false
+    axes:
+      modifier: IR
+
+  - name: a Siemens real STIR is PSIR, as DR3 reads a real IR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\R\NORM\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't2_tirm_sag'
+      text_sequence_name: '*tir2d1_11'
+      n_slices: 15
+      repetition_time: 4000
+      echo_time: 40
+      inversion_time: 160
+      flip_angle: 150
+    flags:
+      real_ir: true
+    axes:
+      modifier: PSIR
+
+  # --- a Siemens composed copy named _FILT, written DERIVED, is Filtered
+
+  - name: a Siemens composed copy named _COMP_FILT is Filtered
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NORM\DIS2D\COMP_SP\COMPOSED'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 't1_tse_sag_COMP_FILT'
+      text_protocol_name: 't1_tse_sag_3mm'
+      text_sequence_name: '*tse2d1_3'
+      n_slices: 15
+      repetition_time: 600
+      echo_time: 10
+      flip_angle: 150
+    flags:
+      siemens_filter_copy: true
+    axes:
+      construct: Composed,Filtered
+
+  - name: guard, a composite written ORIGINAL named _FILT is no filtered copy
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D\COMP_SP\COMPOSED'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'haste_rygg_comp_sp_filt'
+      text_sequence_name: '*h2d1_256'
+      n_slices: 15
+      repetition_time: 1400
+      echo_time: 90
+      flip_angle: 150
+    flags:
+      siemens_filter_copy: false
+
+  # --- a Siemens trace-named diffusion stack holding its b=0 and its trace images
+
+  - name: a Siemens ORIGINAL diffusion named for the trace with more images than slices is Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_3scan_trace'
+      text_sequence_name: '*ep_b0'
+      diffusion_b_value: 0
+      n_slices: 19
+      n_instances: 57
+      repetition_time: 3600
+      echo_time: 90
+    flags:
+      b0_image_trace_named: false
+    axes:
+      construct: ND,Trace
+
+  - name: guard, a Siemens b=0 image of one image a slice named for the trace stays no Trace
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'ep2d_diff_3scan_trace'
+      text_sequence_name: '*ep_b0'
+      diffusion_b_value: 0
+      n_slices: 19
+      n_instances: 19
+      repetition_time: 3600
+      echo_time: 90
+    flags:
+      b0_image_trace_named: true
+
+  # --- a GE nominal b=0 reference named for the reversed direction
+
+  - name: a GE reference of b values 0 and 10 named PA is FieldmapRef
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EPI_GEMS\ACC_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'DTI_PA'
+      dwi_b_values: '0,10'
+      stacks_in_series: 1
+      n_slices: 67
+      n_instances: 469
+      repetition_time: 8150
+      echo_time: 83
+    flags:
+      ge_nominal_b0_reversed: true
+    axes:
+      construct: FieldmapRef
+
+  - name: guard, the same reference named AP is no reversed reference
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: 'EP\RM'
+      sequence_variant: NONE
+      scan_options: 'SAT_GEMS\EPI_GEMS\ACC_GEMS\FS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'DTI_AP_b0_script'
+      dwi_b_values: '0,10'
+      stacks_in_series: 1
+      n_slices: 67
+      n_instances: 469
+      repetition_time: 8150
+      echo_time: 83
+    flags:
+      ge_nominal_b0_reversed: false
+
+  # --- a Philips projection of thin contiguous slices named mip is a reformat
+
+  - name: a Philips PROJECTION IMAGE named mip of 60 thin slices is MPR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROJECTION IMAGE\M\IR'
+      scanning_sequence: IR
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'mip'
+      n_slices: 60
+      slice_thickness: 3
+      repetition_time: 4800
+      echo_time: 306
+      inversion_time: 1660
+    flags:
+      philips_projection_thin_named_mip: true
+    axes:
+      construct: MPR
+
+  - name: guard, a Philips projection slab named mip stays a MIP
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROJECTION IMAGE\M\FFE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 3D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'mip'
+      n_slices: 3
+      slice_thickness: 30
+      repetition_time: 25
+      echo_time: 3.5
+    flags:
+      philips_projection_thin_named_mip: false
+    axes:
+      construct: MIP
+
+  # --- a Siemens 3D HASTE is single-shot
+
+  - name: a Siemens 3D HASTE is single-shot TSE, not 3D-TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_haste3d_cor_iso_myelo'
+      text_sequence_name: '*h3d1_256'
+      n_slices: 80
+      repetition_time: 1200
+      echo_time: 300
+      echo_train_length: 159
+    flags:
+      siemens_haste_3d: true
+    axes:
+      technique: HASTE
+
+  - name: guard, a Siemens 3D SPACE stays 3D-TSE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SP\SK'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_series_description: 't2_space_sag_iso'
+      text_sequence_name: '*spc_256ns'
+      n_slices: 176
+      repetition_time: 3200
+      echo_time: 400
+      echo_train_length: 240
+    flags:
+      siemens_haste_3d: false
+    axes:
+      technique: SPACE
+
+  # --- a sequence named scout alone does not make a localizer of many slices
+
+  - name: a plane-split series of 54 slices named only by its sequence scout is no localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      scan_options: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'CREATE'
+      text_sequence_name: 'scout'
+      split_reason: multi_orientation
+      stacks_in_series: 3
+      n_slices: 54
+      repetition_time: 4761
+      echo_time: 22
+      flip_angle: 180
+    flags:
+      scout_sequence_name_only: true
+    axes:
+      provenance: RawRecon
+
+  - name: guard, an old Siemens scout of 3 slices named by its sequence stays a localizer
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: RM
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'SCOUT'
+      text_sequence_name: 'scout'
+      split_reason: multi_orientation
+      stacks_in_series: 3
+      n_slices: 3
+      repetition_time: 15
+      echo_time: 6
+      flip_angle: 30
+    flags:
+      scout_sequence_name_only: false
+    axes:
+      provenance: Localizer
+
+  # --- GE IFLOW_GEMS is Inhance 3D Velocity, a phase contrast
+
+  - name: a GE reconstruction with IFLOW_GEMS and no pulse sequence shown is a phase contrast
+    stack:
+      image_type: 'DERIVED\SECONDARY\AXIAL\MIP'
+      scanning_sequence: GR
+      sequence_variant: SS
+      scan_options: 'FILTERED_GEMS\ACC_GEMS\IFLOW_GEMS\PFP'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Sectra Reconstruction'
+      repetition_time: 9.9
+      echo_time: 5.2
+    flags:
+      ge_iflow_phase_contrast: true
+    axes:
+      technique: PC

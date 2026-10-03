@@ -365,8 +365,9 @@ values:
     # family (flags.yml, section 19); the same guard is on every spin-echo
     # value below.
     # MRI pack 0.25.0 (the protocol sweep): nor a GE 2D fast spin echo by its
-    # pulse sequence named Cube (flags.yml, section 26d).
-    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}, {not: ge_2d_fse_psd}]}
+    # pulse sequence named Cube (flags.yml, section 26d), nor a Siemens 3D
+    # HASTE, single-shot (section 26e).
+    requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}, {not: ge_2d_fse_psd}, {not: siemens_haste_3d}]}
     keywords:
       - space
       - cube

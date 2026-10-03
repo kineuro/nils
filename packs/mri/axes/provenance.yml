@@ -209,7 +209,9 @@ values:
     # slices a plane that no vendor flag marks, nor a composite of other
     # than survey stations (record 48, conventions round 3; flags.yml,
     # section 18). GE's calibration is the value Calibration now.
-    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}, {not: planning_word_too_many_slices}, {not: composite_not_survey}]}
+    # MRI pack 0.25.0: nor a series of more than 5 slices a plane whose only
+    # planning word is the sequence name `scout` (flags.yml, section 26e).
+    requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}, {not: planning_word_too_many_slices}, {not: composite_not_survey}, {not: scout_sequence_name_only}]}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
     keywords:
       - localizer

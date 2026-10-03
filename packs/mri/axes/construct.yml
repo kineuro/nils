@@ -397,8 +397,9 @@ values:
     # MRI pack 0.21.0: nor a Siemens `CSA MPR` image, a reformat whatever
     # its series is named (record 48, conventions round 3, case 3).
     # MRI pack 0.25.0: nor a Philips `MAX_IP` over a volume of thin slices,
-    # a reformat (flags.yml, section 26a).
-    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}, {not: csa_mpr_image}, {not: philips_max_ip_volume}]}
+    # a reformat (flags.yml, section 26a), nor a Philips projection of thin
+    # contiguous slices named mip, a reformat (section 26e).
+    requires: {all: [{not: is_minip}, {not: mip_only_in_protocol}, {not: csa_mpr_image}, {not: philips_max_ip_volume}, {not: philips_projection_thin_named_mip}]}
     keywords:
       - mip
       - maximum intensity projection
@@ -447,7 +448,9 @@ values:
     # image from being the reformat its image type says (case 3).
     # MRI pack 0.21.0: nor a Siemens position display, whose protocol's name
     # (`t1_mpr`) is another series' (dev-6's A9).
-    requires: {not: {any: [is_mip, is_minip, {all: [projection_named, {not: csa_mpr_image}]}, stddev_projection, stddev_time, image_type.is_posdisp]}}
+    # MRI pack 0.25.0: a projection name does not hold off a Philips
+    # projection of thin contiguous slices (flags.yml, section 26e).
+    requires: {not: {any: [is_mip, is_minip, {all: [projection_named, {not: csa_mpr_image}, {not: philips_projection_thin_named_mip}]}, stddev_projection, stddev_time, image_type.is_posdisp]}}
     keywords:
       - multiplanar reformat
       - reformatted
