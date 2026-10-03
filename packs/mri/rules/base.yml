@@ -96,6 +96,11 @@ order:
   - 'keywords:PDw'
   - 'keywords:T1w'
   - 'keywords:MTw'
+  - 'r9:acq_contrast_t1'
+  - 'r9:acq_contrast_t2'
+  - 'r9:acq_contrast_pd'
+  - 'r9:acq_contrast_t2star'
+  - 'r9:acq_contrast_flair'
   - 'modifier:stir'
   - 'physics:ir_stir_like'
   - 'physics:ir_standard'
@@ -842,6 +847,55 @@ rules:
     clauses:
       - {flag: mtw_named, tier: keywords}
     set: {base: 'MTw', base_basis: name, contrast_mix: null}
+
+  # The fingerprint's 2026-10-03 fields: round 4's R9, Acquisition Contrast
+  # (0008,9209) read as a name where no word states a weighting, before the
+  # physics windows (flags.yml, section 26g). R1, R3 and R5 stay the
+  # contradiction checks: an inversion recovery is left to its inversion
+  # time, and a T1 stated on a long-TR, long-TE spin echo or on a gradient
+  # echo at an echo time of 15 ms or more is left to the physics.
+  'r9:acq_contrast_t1':
+    clauses:
+      - when:
+          all:
+            - acq_contrast_t1
+            - {not: acq_contrast_ir}
+            - {not: acq_contrast_t1_on_t2star_echo}
+            - {not: {all: [has_se, {not: has_ir}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 50}]}}
+        cite: 'Acquisition Contrast T1'
+        source: flags
+        tier: exclusive
+    set: {base: 'T1w', base_basis: acq_contrast, contrast_mix: null}
+    confidence: 0.85
+    why: 'the header states the contrast the acquisition was made for: T1'
+
+  'r9:acq_contrast_t2':
+    clauses:
+      - {when: {all: [acq_contrast_t2, {not: acq_contrast_ir}]}, cite: 'Acquisition Contrast T2', source: flags, tier: exclusive}
+    set: {base: 'T2w', base_basis: acq_contrast, contrast_mix: null}
+    confidence: 0.85
+    why: 'the header states the contrast the acquisition was made for: T2'
+
+  'r9:acq_contrast_pd':
+    clauses:
+      - {when: {all: [acq_contrast_pd, {not: acq_contrast_ir}]}, cite: 'Acquisition Contrast PROTON_DENSITY', source: flags, tier: exclusive}
+    set: {base: 'PDw', base_basis: acq_contrast, contrast_mix: null}
+    confidence: 0.85
+    why: 'the header states the contrast the acquisition was made for: proton density'
+
+  'r9:acq_contrast_t2star':
+    clauses:
+      - {when: {all: [acq_contrast_t2star, {not: acq_contrast_ir}]}, cite: 'Acquisition Contrast T2_STAR', source: flags, tier: exclusive}
+    set: {base: 'T2starw', base_basis: acq_contrast, contrast_mix: null}
+    confidence: 0.85
+    why: 'the header states the contrast the acquisition was made for: T2*'
+
+  'r9:acq_contrast_flair':
+    clauses:
+      - {when: {all: [acq_contrast_flair, {not: acq_contrast_ir}]}, cite: 'Acquisition Contrast FLUID_ATTENUATED', source: flags, tier: exclusive}
+    set: {base: 'T2w', base_basis: acq_contrast, contrast_mix: null}
+    confidence: 0.85
+    why: 'the header states the contrast the acquisition was made for: fluid attenuated, a T2-weighted FLAIR'
 
   # MRI pack 0.14.0: a STIR the modifier axis found by its words, where no
   # word and no inversion time said a base, is T2-weighted as the window

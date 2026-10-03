@@ -1550,7 +1550,8 @@ flags:
   # its isotropic image; the standard (0018,9075) ISOTROPIC is absent on
   # every Philips DTI of the archive, where (2001,1004) marks 81 of its 140
   # isotropic images (the deep research, case 11; `empirical-conventions.md`).
-  trace_image: {any: [trace_named, philips_trace_projection, philips_isotropic_private]}
+  # MRI pack 0.25.0: or DiffusionDirectionality ISOTROPIC on every image (section 26g).
+  trace_image: {any: [trace_named, philips_trace_projection, philips_isotropic_private, isotropic_stated]}
 
   # --- R1: a GE SWI written in research mode (ScanningSequence RM) with an
   # echo train of 32 or more is an EPI: a train of 48 inside a repetition
@@ -3492,6 +3493,8 @@ flags:
       - {text: technique_text, matches: 'vibe'}
       - {text: technique_text, matches: '(^|[^a-z])dyn(amic)?([^a-z]|$)|_dyn'}
       - {not: {text: technique_text, matches: '(^|[^a-z])(mra|angio|angiography)'}}
+      # the fingerprint's 2026-10-03 fields (section 26g): no angio signal
+      - {not: twist_angio_evidence}
 
   # --- single: a Siemens MEAN magnitude over the echoes of a multi-echo
   # gradient echo (`DERIVED\PRIMARY\M\...\MEAN`, `*fl2d8`, no SWI token) is
@@ -4268,6 +4271,9 @@ flags:
     all:
       - philips_3d_tfe
       - {not: smart_survey}
+      # the fingerprint's 2026-10-03 fields (section 26g): a prepulse read
+      - {not: philips_prepulse_stated}
+      - {not: {field: philips_prepulse_delay, gt: 0}}
       - {not: {field: inversion_time, gt: 0}}
       - {not: has_mag_prepared}
       # a name for the spoiled interpolated product (e-THRIVE) says it
@@ -4370,3 +4376,119 @@ flags:
     all:
       - ge_reversed_run
       - ge_b_values_review_band
+
+  # === 26g. MRI pack 0.25.0: the fingerprint's fields of 2026-10-03 ==========
+  #
+  # The fields research round 6 and round 5 asked for (the design repository's
+  # `studies/2026-10-03-pack-0250/README.md`, "For Nima", items 1, 11 and 12):
+  # the Philips TFE prepulse (2001,xx1C) and its delay (2001,xx1B), AngioFlag
+  # (0018,0025), the temporal resolution, Acquisition Contrast (0008,9209),
+  # every DiffusionDirectionality (0018,9075) a stack writes,
+  # PhotometricInterpretation (0028,0004) and SamplesPerPixel (0028,0002).
+
+  # --- the Philips 3D TFE by its Prepulse Type (item 1): INV or BBI an
+  # inversion, an MPRAGE; NO, SAT or ECHO none, a turbo field echo; it
+  # outranks InversionRecovery and `MP`. Where the type is not written, a
+  # delay above nought is an inversion's. On the archive (one raw file of
+  # each of 5,808 3D TFE stacks): INV on every stack written `MP` but three
+  # (MEMPRAGE localizers and one MEMPRAGE written NO), INV on the 31 without
+  # `MP` written InversionRecovery NO, NO on the 36 without `MP` named 3D TFE
+  # or mDixon, and none on 708 classic objects whose private block was
+  # stripped.
+  philips_prepulse_stated: {text: philips_prepulse_type, matches: '[a-z]'}
+  philips_prepulse_inversion: {text: philips_prepulse_type, matches: '^\s*(inv|bbi)\s*$'}
+  philips_prepulse_none: {text: philips_prepulse_type, matches: '^\s*(no|sat|echo)\s*$'}
+  philips_tfe_inversion_prepulse:
+    all:
+      - philips_3d_tfe
+      - {not: smart_survey}
+      - any:
+          - philips_prepulse_inversion
+          - all: [{not: philips_prepulse_stated}, {field: philips_prepulse_delay, gt: 0}]
+  philips_tfe_no_prepulse:
+    all:
+      - philips_3d_tfe
+      - philips_prepulse_none
+
+  # --- AngioFlag (0018,0025), "primary image for angio processing".
+  angio_flag_y: {text: angio_flag, matches: '^\s*y'}
+  # Round 5's TWIST rules 1 and 3 (the research, case 1): a TWIST-VIBE
+  # dynamic run that names no angiography is a CE-MRA where AngioFlag is Y,
+  # or where its frames come under 5 s apart on a thin slab (under 20
+  # partitions) with no fat saturation and no Dixon. On the archive the 49
+  # such runs carry AngioFlag N, and all are Dixon, so they stay DCE. Rule 2
+  # (spatial MIP or subtraction children in the study) is the session's, and
+  # the archive holds none.
+  twist_angio_evidence:
+    any:
+      - angio_flag_y
+      - all:
+          # the interval between acquisitions of one position, read with
+          # the time points the series states (a diffusion repeats its
+          # positions too)
+          - {field: temporal_positions, ge: 2}
+          - {field: temporal_resolution, gt: 0}
+          - {field: temporal_resolution, lt: 5000}
+          - {field: n_slices, lt: 20}
+          - {not: has_fat_sat}
+          - {not: has_dixon}
+          - {not: {text: technique_text, matches: 'dixon'}}
+  # The protocol sweep's unnamed angiogram: a Siemens 3D FLASH acquisition
+  # whose AngioFlag is Y and whose name says nothing of angiography, of a
+  # contrast or of another technique, is a time of flight (the adjudicators
+  # read TOF-MRA). A CE-MRA is decided before it (the technique's order).
+  angio_flag_flash:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - angio_flag_y
+      - {text: text_sequence_name, matches: '^\*?(wip_?)?fl3d'}
+      - is_3d
+      - is_original
+      - has_gre
+      - {not: has_epi}
+      - {not: has_se}
+      - {not: is_pc}
+      - {not: is_mip}
+      - {not: is_mpr}
+      - {not: contrast_said}
+      # a time of flight's repetition time, as `tof_by_words` reads it: a
+      # FLASH at a few milliseconds with AngioFlag Y is a contrast run's
+      # mask or its phase (`fl3d-cor_pre`, `_post`; 4 on the archive)
+      - {field: repetition_time, ge: 15}
+
+  # --- Acquisition Contrast (0008,9209) where it states a weighting: round
+  # 4's R9, the stated contrast read as a name where no word states one,
+  # before the physics windows (rules/base.yml). Never on an inversion
+  # recovery, which its inversion time reads (round 4's R1 and R3; Philips
+  # writes PROTON_DENSITY on a T1-weighted PSIR and on a STIR), nor T1 on a
+  # gradient echo at an echo time of 15 ms or more (Philips writes T1 on its
+  # T2*-weighted venous FFE).
+  acq_contrast_t1: {text: acquisition_contrast, matches: '^\s*t1\s*$'}
+  acq_contrast_t2: {text: acquisition_contrast, matches: '^\s*t2\s*$'}
+  acq_contrast_pd: {text: acquisition_contrast, matches: '^\s*proton_density\s*$'}
+  acq_contrast_t2star: {text: acquisition_contrast, matches: '^\s*t2_star\s*$'}
+  acq_contrast_flair: {text: acquisition_contrast, matches: '^\s*fluid_attenuated\s*$'}
+  acq_contrast_ir: {all: [has_ir, {field: inversion_time, gt: 0}]}
+  acq_contrast_t1_on_t2star_echo: {all: [has_gre, {not: has_se}, {field: echo_time, ge: 15}]}
+
+  # --- DiffusionDirectionality ISOTROPIC on every image of the stack: the
+  # isotropic (trace) image an enhanced object writes.
+  isotropic_stated: {text: diffusion_directionality, matches: '^\s*isotropic\s*$'}
+
+  # --- a SyMRI stack saved in colour (PhotometricInterpretation RGB or a
+  # YBR form, or three samples a pixel): a display composite of the viewer's
+  # settings, a map coloured over a synthetic image, not a map (research
+  # round 6, question 3, from the SyMRI manual). Read as the SyMRI
+  # screenshot is (record 48, D4): no axis of an image of a person.
+  colour_pixels:
+    any:
+      - {text: photometric_interpretation, matches: '^\s*(rgb|ybr)'}
+      - {field: samples_per_pixel, gt: 1}
+  symri_colour_display:
+    all:
+      - colour_pixels
+      - any:
+          - is_synthetic
+          - has_multi_qmap
+          - is_mdme
+          - {text: search_text, matches: 'symri|syntac|synthetic|qrapmaster|(^|[^a-z])magic([^a-z]|$)'}

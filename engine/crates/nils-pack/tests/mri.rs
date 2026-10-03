@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        546,
+        564,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -142,7 +142,11 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          prepulse cannot be told, a GE BRAVO reformat named a Cube FLAIR, a \
          Siemens name with fs, a Philips registered DWI, a two-echo FLASH's \
          SWI outputs, and a GE reversed run, its nominal b=0 values and its \
-         review band"
+         review band, and the 18 that read the fingerprint's fields of \
+         2026-10-03: the TFE prepulse (five), AngioFlag (three: the flag, a TWIST's \
+         angio signal and an unnamed FLASH angiogram), Acquisition \
+         Contrast (seven), an isotropic directionality, and a SyMRI stack \
+         saved in colour (two)"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

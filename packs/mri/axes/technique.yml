@@ -525,6 +525,9 @@ values:
       - me-mprage
       - multi echo mprage
       - multi-echo mprage
+    # The fingerprint's 2026-10-03 fields: never a Philips 3D TFE with no
+    # inversion prepulse (flags.yml, section 26g).
+    requires: {not: philips_tfe_no_prepulse}
     detection:
       combination: [is_multi_echo, has_ir, has_gre, is_3d]
   # Siemens `tfl` is TurboFLASH in 2D and 3D, so bare TFL is FSP-GRE's and
@@ -545,7 +548,10 @@ values:
     # inversion time says so, since every such stack read carries an
     # inversion prepulse; with neither, its technique cannot be told
     # (flags.yml, section 26f; rules/cant_tell.yml).
-    requires: {all: [{not: smart_survey}, {not: siemens_tfl_unprepared}]}
+    # The fingerprint's 2026-10-03 fields: never a Philips 3D TFE whose
+    # Prepulse Type is NO, SAT or ECHO, and one whose type is INV or BBI is
+    # an MPRAGE whatever else it states (flags.yml, section 26g).
+    requires: {all: [{not: smart_survey}, {not: siemens_tfl_unprepared}, {not: philips_tfe_no_prepulse}]}
     keywords:
       - mprage
       # MRI pack 0.13.0: `MP-RAGE`, as the normalizer spells it (dev-1).
@@ -557,7 +563,7 @@ values:
       - ir spgr
     # MRI pack 0.24.0: or a Siemens 3D gradient echo whose repetition time is
     # a shot interval (flags.yml section 23).
-    alternative_flags: [siemens_mprage_by_shot_tr]
+    alternative_flags: [siemens_mprage_by_shot_tr, philips_tfe_inversion_prepulse]
     detection:
       exclusive: is_mprage
       combination: [has_ir, has_gre, is_3d]
@@ -598,6 +604,9 @@ values:
       - inhance inflow
     # MRI pack 0.14.0: or a 3D gradient echo named for angiography, of a
     # time-of-flight's repetition time (flags.yml, `tof_by_words`).
+    # The fingerprint's 2026-10-03 fields: or a Siemens 3D FLASH acquisition
+    # named for nothing whose AngioFlag is Y (flags.yml, section 26g).
+    alternative_flags: [angio_flag_flash]
     detection:
       exclusive: is_tof
       combination: [tof_by_words]
