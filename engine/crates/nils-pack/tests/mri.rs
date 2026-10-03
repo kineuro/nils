@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        482,
+        537,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -130,7 +130,13 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          and their qualifiers, and the 5 of pack 0.25.0, conventions round \
          5: a GE SWAN's echoes combined, the IP of a GE MIN IP, an old \
          Philips acquisition written T1 MAP, a quantitative T1 map, and a \
-         subtraction of a composite"
+         subtraction of a composite, and the 55 of a protocol sweep's rule gaps \
+         (exported and session reformats, planning series, two-echo and \
+         combined gradient echoes, a fast FLASH CE-MRA, velocity-encoded \
+         FLASH, gradient-echo components, Dixon part prefixes, GE's map \
+         families, SyMRI's synthetic contrasts and split maps, diffusion \
+         references, names against the sequence, MT weighting, STIR and PSIR \
+         edges) and its settled disputes"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());
