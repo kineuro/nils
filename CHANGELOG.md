@@ -7,6 +7,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.73 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.
+- Classifying a stack takes about 30 % less time, which more than takes back what MRI pack 0.24.0 added. A keyword clause's words are lowercased once, when the pack loads, and found in a stack's text by one automaton per text rather than searched for one by one, each lowercased again for every stack; and a stack's lowercased texts are kept while it is classified. The verdicts are the same, evidence, votes and diagnostics included, on the pack's 806 cases and on about 9,700 variants of them.
+- A process that loads a pack it has loaded before, with every file it read unchanged, takes the pack it built then instead of building it and running its corpus again. The loader notes each file it read and the corpus folder's listing and reads them again to compare; any difference, and the pack is built afresh. The engine's doors that name a pack, `GET /api/capabilities` among them, ran the whole corpus on every request, about 0.2 s each.
 
 ## [1.0.0-alpha.73] - 2026-10-03
 

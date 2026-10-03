@@ -17,7 +17,7 @@ pub struct File {
 
 impl File {
     pub fn read(path: &Path) -> R<File> {
-        let source = std::fs::read_to_string(path).map_err(|e| Error {
+        let source = crate::cache::read_to_string(path).map_err(|e| Error {
             file: Some(path.to_path_buf()),
             line: None,
             path: String::new(),
