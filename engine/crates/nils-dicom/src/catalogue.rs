@@ -306,6 +306,19 @@ const SPOILING_CHAIN: &[Step] = &[
     Fg(tags::MR_MODIFIER_SEQUENCE, tags::SPOILING),
     Private(tags::SPOILING),
 ];
+/// The 2026-10-03 fingerprint fields: AcquisitionContrast (0008,9209), the
+/// contrast an enhanced MR object says it was acquired for (T1, T2,
+/// PROTON_DENSITY, FLUID_ATTENUATED, DIFFUSION and so on), at the top level
+/// or in the MR Image Frame Type functional group, shared or per frame, and
+/// in the private per-frame sequences after, as for the timing.
+const ACQUISITION_CONTRAST_CHAIN: &[Step] = &[
+    Top(tags::ACQUISITION_CONTRAST),
+    Fg(
+        tags::MR_IMAGE_FRAME_TYPE_SEQUENCE,
+        tags::ACQUISITION_CONTRAST,
+    ),
+    Private(tags::ACQUISITION_CONTRAST),
+];
 const INVERSION_RECOVERY_CHAIN: &[Step] = &[
     Top(tags::INVERSION_RECOVERY),
     Fg(tags::MR_MODIFIER_SEQUENCE, tags::INVERSION_RECOVERY),
@@ -441,7 +454,7 @@ pub static CATALOGUE: &[Field] = &[
         Quasi,
         "",
     ),
-    // series (30)
+    // series (34)
     f(
         "modality",
         Series,
@@ -691,6 +704,26 @@ pub static CATALOGUE: &[Field] = &[
         Double,
         Tech,
         "",
+    ),
+    // The 2026-10-03 fingerprint fields: how the pixels are stored, so a
+    // pack tells a colour display composite (a SyMRI segmentation saved as
+    // RGB) from the map it shows. Per series, since a series is one or the
+    // other, and so that one file of a series read again fills them.
+    f(
+        "photometric_interpretation",
+        Series,
+        T(tags::PHOTOMETRIC_INTERPRETATION),
+        Text,
+        Tech,
+        "addition: PhotometricInterpretation (0028,0004), MONOCHROME2, RGB and so on (2026-10-03)",
+    ),
+    f(
+        "samples_per_pixel",
+        Series,
+        T(tags::SAMPLES_PER_PIXEL),
+        Int,
+        Tech,
+        "addition: SamplesPerPixel (0028,0002), 1 for a grey image and 3 for a colour one (2026-10-03)",
     ),
     // instance (26)
     f(
@@ -988,7 +1021,7 @@ pub static CATALOGUE: &[Field] = &[
         Tech,
         "addition: the ImageType Philips writes per frame of an enhanced MR object in (2005,140F), whose third and fourth values name a Dixon part W, F, IP or OP; empty on a classic image and on any other vendor's object",
     ),
-    // series_mr (33 + 6)
+    // series_mr (33 + 11)
     f(
         "mr_acquisition_type",
         SeriesMr,
@@ -1236,6 +1269,14 @@ pub static CATALOGUE: &[Field] = &[
         Text,
         Tech,
         "addition: InversionRecovery (0018,9009), YES or NO, from the MR Modifier group where the top level has none (record 53)",
+    ),
+    f(
+        "acquisition_contrast",
+        SeriesMr,
+        Chain(ACQUISITION_CONTRAST_CHAIN),
+        Text,
+        Tech,
+        "addition: AcquisitionContrast (0008,9209), T1, T2, PROTON_DENSITY, DIFFUSION and so on, from the MR Image Frame Type group where the top level has none (2026-10-03)",
     ),
     f(
         "transmit_coil_name",
@@ -1957,7 +1998,8 @@ mod tests {
         let count = |l: Level| CATALOGUE.iter().filter(|f| f.level == l).count();
         assert_eq!(count(Subject), 2);
         assert_eq!(count(Study), 12);
-        assert_eq!(count(Series), 32);
+        // PhotometricInterpretation and SamplesPerPixel (2026-10-03)
+        assert_eq!(count(Series), 34);
         // Wave 3 §6 moved the seven diffusion values that vary from one image
         // of a series to the next: a b value, a gradient orientation and a
         // directionality are per image by design, and keeping one per series
@@ -1965,10 +2007,11 @@ mod tests {
         assert_eq!(count(Instance), 34);
         // the Philips per-frame ImageType, which names a Dixon part
         assert_eq!(count(Stack), 15);
-        assert_eq!(count(SeriesMr), 43);
+        // AcquisitionContrast (2026-10-03)
+        assert_eq!(count(SeriesMr), 44);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 191);
+        assert_eq!(CATALOGUE.len(), 194);
     }
 
     #[test]
@@ -2067,8 +2110,8 @@ mod tests {
             "EchoTime, then fg MREchoSequence.EffectiveEchoTime, then private per-frame .EchoTime"
         ));
         let md = render_markdown();
-        assert!(md.contains("## series_mr (43, MR only)"));
-        assert!(md.contains("191 columns."));
+        assert!(md.contains("## series_mr (44, MR only)"));
+        assert!(md.contains("194 columns."));
         assert!(md.contains("## stack (15)"));
         assert_eq!(
             Chain(PRIVATE_FRAME_IMAGE_TYPE_CHAIN).text(),

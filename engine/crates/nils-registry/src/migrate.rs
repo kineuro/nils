@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 78;
+pub const SCHEMA_VERSION: i64 = 79;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +366,46 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 78,
         apply: a_stack_keeps_the_philips_frame_image_type,
     },
+    Migration {
+        version: 79,
+        apply: a_fingerprint_reads_the_2026_10_03_fields,
+    },
+];
+
+/// The 2026-10-03 fingerprint fields: a series gains how it stores its
+/// pixels (PhotometricInterpretation and SamplesPerPixel), an MR series the
+/// contrast an enhanced object says it was acquired for
+/// (AcquisitionContrast), and the fingerprint those, the angiography flag,
+/// the temporal resolution with where it came from, and the diffusion
+/// directionality of the stack's images, for a pack to read. A registry from
+/// before gains every column empty and no row is written. The fingerprint's
+/// revision moved with them, so the next `nils fingerprint` derives every
+/// stack again, and the angiography flag, the temporal resolution and the
+/// directionality fill at once from what the registry holds. The series
+/// columns fill when one file of each series is read again, which `nils
+/// digest <root> --reread-every --reread-one --reread-missing` does.
+fn a_fingerprint_reads_the_2026_10_03_fields(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "series",
+        &["photometric_interpretation", "samples_per_pixel"],
+    )?;
+    add_columns(store, "series_mr", &["acquisition_contrast"])?;
+    add_columns(store, "stack_fingerprint", FINGERPRINT_79)
+}
+
+/// The fingerprint's columns of schema 79.
+pub const FINGERPRINT_79: &[&str] = &[
+    "angio_flag",
+    "acquisition_contrast",
+    "temporal_resolution",
+    "temporal_resolution_source",
+    "diffusion_directionality",
+    "photometric_interpretation",
+    "samples_per_pixel",
 ];
 
 /// A stack, and its fingerprint for a pack to read, gain the ImageType

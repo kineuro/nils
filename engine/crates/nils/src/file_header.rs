@@ -143,6 +143,34 @@ const TEXTS: &[(&str, &str, &str, bool)] = &[
         "private_frame_image_type",
         false,
     ),
+    // The 2026-10-03 fields, from the stack's own fingerprint: the contrast
+    // an enhanced object says it was acquired for, every directionality the
+    // stack's images write, how the series stores its pixels, and where the
+    // temporal resolution among the physics came from.
+    (
+        "acquisition_contrast",
+        "fingerprint",
+        "acquisition_contrast",
+        false,
+    ),
+    (
+        "diffusion_directionality",
+        "fingerprint",
+        "diffusion_directionality",
+        false,
+    ),
+    (
+        "photometric_interpretation",
+        "fingerprint",
+        "photometric_interpretation",
+        false,
+    ),
+    (
+        "temporal_resolution_source",
+        "fingerprint",
+        "temporal_resolution_source",
+        false,
+    ),
     ("image_comments", "instance", "image_comments", true),
     (
         "derivation_description",
@@ -179,6 +207,10 @@ const PHYSICS: &[(&str, &str)] = &[
     ("number_of_averages", "fingerprint"),
     ("imaged_nucleus", "series_mr"),
     ("contrast_bolus_volume", "series"),
+    // The 2026-10-03 fields: how fast a dynamic series samples, in
+    // milliseconds, and how many samples a pixel holds.
+    ("temporal_resolution", "fingerprint"),
+    ("samples_per_pixel", "fingerprint"),
 ];
 
 /// The UIDs a reader may see: which kind of object and syntax the file is,

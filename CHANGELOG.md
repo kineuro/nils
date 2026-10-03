@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A pack may read seven more fields of a stack (the 2026-10-03 fingerprint fields): `angio_flag` (AngioFlag), `acquisition_contrast` (AcquisitionContrast, from the MR Image Frame Type group where an enhanced object leaves the top level empty), `temporal_resolution` in milliseconds with `temporal_resolution_source` (TemporalResolution where the series writes it above nought, `header`, else the median interval between acquisitions of one slice position, `acquisition_times`), `diffusion_directionality` (every DiffusionDirectionality the stack's images write, `ISOTROPIC` on an enhanced trace image), and `photometric_interpretation` and `samples_per_pixel`, which tell a colour display composite from a map. The MRI pack ingests and shows Philips' TFE prepulse, `philips_prepulse_type` (2001,xx1C) and `philips_prepulse_delay` (2001,xx1B), which tell an MPRAGE from a TurboFLASH on a classic Philips 3D T1 TFE. A private element whose VR is CS is read in upper case, so `Inv` is `INV`. The reader shows the new fields. The fingerprint's revision moves to 7, so the next `nils fingerprint` derives every stack again and fills the angiography flag, the temporal resolution and the directionality from what the registry holds. Registry schema 79; the pack contract stays version 8, with fields added; the HTTP API contract stays version 7, amended in place.
+- `nils digest <root> --reread-every --reread-one --reread-missing` fills the new series columns and the prepulse on a registry digested before them: every MR series whatever its manufacturer, one file of each series rather than every file (found a chunk of 500 series a query), and only the series whose row has no SamplesPerPixel yet, so a run stopped or repeated reads only what is still missing. `--reread-one` suits a value a series holds once; it does not see two files of a series disagree.
+
 ### Changed
 
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.73 published, a new build of the same sources. Its baked encoder weights verify with the same two digests as before, so those pins stay.

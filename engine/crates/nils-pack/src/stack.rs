@@ -44,6 +44,13 @@ pub const FIELDS: &[&str] = &[
     // fingerprint and no rule could read them.
     "temporal_positions",
     "series_number",
+    // The 2026-10-03 fields: how fast a dynamic series samples, in
+    // milliseconds (TemporalResolution where the series writes one above
+    // nought, else the frame interval of its images; which one answered is
+    // `temporal_resolution_source`), and how many samples a pixel holds (3
+    // for a colour image).
+    "temporal_resolution",
+    "samples_per_pixel",
     // text
     "modality",
     "manufacturer",
@@ -108,10 +115,22 @@ pub const FIELDS: &[&str] = &[
     // (2005,140F), whose third and fourth values name a Dixon part (W, F, IP
     // or OP) that the object's top-level ImageType does not.
     "private_frame_image_type",
+    // The 2026-10-03 fields: AngioFlag (0018,0025), Y or N;
+    // AcquisitionContrast (0008,9209), the contrast an enhanced object says
+    // it was acquired for; where the temporal resolution came from (`header`
+    // or `acquisition_times`); every DiffusionDirectionality (0018,9075) the
+    // stack's images write, ISOTROPIC for an enhanced trace image; and
+    // PhotometricInterpretation (0028,0004), RGB for a colour display
+    // composite rather than a map.
+    "angio_flag",
+    "acquisition_contrast",
+    "temporal_resolution_source",
+    "diffusion_directionality",
+    "photometric_interpretation",
 ];
 
 /// Where the text half begins.
-pub const FIRST_TEXT: usize = 23;
+pub const FIRST_TEXT: usize = 25;
 
 pub fn field_index(name: &str) -> Option<usize> {
     FIELDS.iter().position(|f| *f == name)

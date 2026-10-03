@@ -311,6 +311,30 @@ private:
       kind: parameter
       why: "the imaging frequency, which the dictionary names; a parameter (0 of 380 varied within on mix; 354 distinct)"
 
+    # The 2026-10-03 fingerprint fields: the TFE prepulse, which decides an
+    # inversion-prepared 3D T1 TFE (MPRAGE) from one with no prepulse
+    # (TurboFLASH) on a classic Philips object, where neither the sequence
+    # variant's MP nor the enhanced InversionRecovery does. Philips' Intera
+    # R7 to R9 conformance statement defines both, and DICOM CP-2017 lists
+    # them as safe to keep. Read from one raw file of each stack in the
+    # archive: INV on 648 stacks pack 0.25.0 reads TurboFLASH and NO on 31 it
+    # reads MPRAGE, every INV with a delay above nought and every NO with
+    # none (design repository, studies/2026-10-03-pack-0250). A code string,
+    # so the engine reads it in upper case (`Inv` is `INV`).
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x1C
+      name: philips_prepulse_type
+      kind: parameter
+      why: "the TFE prepulse type: NO, INV, SAT, ECHO (T2 preparation) or BBI (black blood); constant within a series"
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x1B
+      name: philips_prepulse_delay
+      kind: timing
+      why: "the time from the TFE prepulse to the centre of k-space in the next shot, in milliseconds; above nought on every INV stack measured, nought on every NO"
+
   # Measured and left out, so the next survey does not propose them again
   # without a reason. Per image means the value changed inside nearly every
   # series that carried it, which is not a parameter of the acquisition and
@@ -376,6 +400,12 @@ private:
       why: "GE's series plane: 256 marks a three-plane localizer, whatever its slice count"
     - name: philips_number_of_echoes
       why: "how many echoes Philips acquired, which its echo train length does not say on a turbo field echo"
+    # The 2026-10-03 fingerprint fields: the TFE prepulse, which tells an
+    # MPRAGE from a TurboFLASH on a classic Philips object.
+    - name: philips_prepulse_type
+      why: "Philips' TFE prepulse (NO, INV, SAT, ECHO, BBI): INV marks an inversion-prepared 3D T1 TFE"
+    - name: philips_prepulse_delay
+      why: "Philips' delay from the TFE prepulse to the centre of k-space, in milliseconds"
 
   # What a release keeps. These six are the ones Wave 1 reads and Wave 3
   # section 6 derives from: a release that dropped them would export

@@ -86,6 +86,9 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("slice_span_mm", "slice_span_mm"),
     ("temporal_positions", "temporal_positions"),
     ("series_number", "series_number"),
+    // The 2026-10-03 fields, numbers.
+    ("temporal_resolution", "temporal_resolution"),
+    ("samples_per_pixel", "samples_per_pixel"),
     ("modality", "modality"),
     ("manufacturer", "manufacturer"),
     ("manufacturer_model_name", "manufacturer_model_name"),
@@ -144,6 +147,12 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("spoiling", "spoiling"),
     ("inversion_recovery", "inversion_recovery"),
     ("private_frame_image_type", "private_frame_image_type"),
+    // The 2026-10-03 fields, text.
+    ("angio_flag", "angio_flag"),
+    ("acquisition_contrast", "acquisition_contrast"),
+    ("temporal_resolution_source", "temporal_resolution_source"),
+    ("diffusion_directionality", "diffusion_directionality"),
+    ("photometric_interpretation", "photometric_interpretation"),
 ];
 
 /// The select that reads one window of fingerprints, ordered by stack. With

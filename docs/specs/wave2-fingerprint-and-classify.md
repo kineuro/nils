@@ -187,6 +187,25 @@ otherwise do per stack, materialized and typed once**. Per stack, in
   differ in it otherwise, as a magnitude and a phase image do, stay one stack
   as before. A split by it is `image_type_variation`. A classic image, and
   any other vendor's enhanced object, reads it empty.
+- **The 2026-10-03 fields**: AngioFlag (0018,0025) and AcquisitionContrast
+  (0008,9209) of the MR series, the latter from the MR Image Frame Type
+  functional group where an enhanced object leaves the top level empty; how
+  the series stores its pixels, PhotometricInterpretation (0028,0004) and
+  SamplesPerPixel (0028,0002), which tell a colour display composite (a
+  SyMRI segmentation saved as RGB) from the map it shows; every distinct
+  DiffusionDirectionality (0018,9075) the stack's images write, upper case,
+  sorted and joined by commas, which names an enhanced object's isotropic
+  trace image; and the temporal resolution of a dynamic series in
+  milliseconds with its source. TemporalResolution (0020,0110) answers
+  where the series writes it above nought (`header`; GE writes 0 on most
+  series). Otherwise the stack's images answer (`acquisition_times`): at each
+  slice position acquired at more than one time on one day, the mean time
+  between its acquisitions, (latest - earliest) / (times - 1), and the
+  median over the positions, to a tenth of a millisecond. A stack with one
+  image per position, or whose images share one time (GE writes one for a
+  whole series), has none. The interval is between acquisitions of one
+  position whatever made them, so a diffusion series' volumes have one too;
+  a pack reads it beside the temporal positions.
 
 Deliberately **not** in it, and this settles the open question §14 carried:
 
