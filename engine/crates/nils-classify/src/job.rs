@@ -221,7 +221,6 @@ fn run(
     let select_diffusion = fingerprint::select_diffusion(store);
     let select_positions = fingerprint::select_positions(store);
     let select_acquired = fingerprint::select_acquired(store);
-    let select_frames = fingerprint::select_frames(store);
     let select_fresh = fingerprint::select_fresh(store);
     let table = fingerprint::fingerprint_table();
     let overwritten = fingerprint::overwritten();
@@ -296,13 +295,22 @@ fn run(
         // With them, where each image sits in three dimensions (record 38,
         // S2), for the stations a slice location cannot tell apart.
         let mut positions: Vec<(i64, Vec<f64>, Vec<[f64; 3]>)> = Vec::new();
+        // how many distinct positions each of those stacks has, aligned
+        // with `positions`, which says which stacks can repeat one
+        let mut distinct: Vec<usize> = Vec::new();
         for r in store.query(&select_positions, &[Param::Int(after), Param::Int(last)])? {
             let stack_id = r.int(0)?;
             let at = r.opt_double(1)?;
             let point = r.opt_text(2)?.and_then(coverage::point);
             match positions.last_mut() {
                 Some((id, _, _)) if *id == stack_id => {}
-                _ => positions.push((stack_id, Vec::new(), Vec::new())),
+                _ => {
+                    positions.push((stack_id, Vec::new(), Vec::new()));
+                    distinct.push(0);
+                }
+            }
+            if let Some(n) = distinct.last_mut() {
+                *n += 1;
             }
             if let Some((_, values, points)) = positions.last_mut() {
                 values.extend(at);
@@ -327,18 +335,34 @@ fn run(
         }
 
         // How often each slice position was acquired again (the 2026-10-03
-        // fields), one row per stack and repeated position; a stack of one
-        // image per position has none.
-        let mut repeats: Vec<(i64, Vec<fingerprint::Repeats>)> = Vec::new();
-        for r in store.query(&select_frames, &[Param::Int(after), Param::Int(last)])? {
+        // fields), one row per stack and repeated position. Asked only of
+        // the stacks with more images than the positions just counted, a
+        // chunk at a time; a window of one image per position asks nothing.
+        let mut candidates: Vec<i64> = Vec::new();
+        for r in &rows {
             let stack_id = r.int(0)?;
-            let (Some(lo), Some(hi)) = (r.opt_text(1)?, r.opt_text(2)?) else {
-                continue;
-            };
-            let row = (lo.to_string(), hi.to_string(), r.int(3)?, r.int(4)?);
-            match repeats.last_mut() {
-                Some((id, rows)) if *id == stack_id => rows.push(row),
-                _ => repeats.push((stack_id, vec![row])),
+            let n_positions = positions
+                .binary_search_by_key(&stack_id, |(id, _, _)| *id)
+                .map(|i| *distinct.get(i).unwrap_or(&0))
+                .unwrap_or(0);
+            if fingerprint::repeats_a_position(r.int(7)?, n_positions) {
+                candidates.push(stack_id);
+            }
+        }
+        let mut repeats: Vec<(i64, Vec<fingerprint::Repeats>)> = Vec::new();
+        for chunk in candidates.chunks(fingerprint::FRAMES_CHUNK) {
+            let sql = fingerprint::select_frames(store, chunk.len());
+            let params: Vec<Param> = chunk.iter().map(|&id| Param::Int(id)).collect();
+            for r in store.query(&sql, &params)? {
+                let stack_id = r.int(0)?;
+                let (Some(lo), Some(hi)) = (r.opt_text(1)?, r.opt_text(2)?) else {
+                    continue;
+                };
+                let row = (lo.to_string(), hi.to_string(), r.int(3)?, r.int(4)?);
+                match repeats.last_mut() {
+                    Some((id, rows)) if *id == stack_id => rows.push(row),
+                    _ => repeats.push((stack_id, vec![row])),
+                }
             }
         }
 
