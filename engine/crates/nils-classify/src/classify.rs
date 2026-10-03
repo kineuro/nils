@@ -779,6 +779,49 @@ impl Voters {
     }
 }
 
+/// The classifier's questions still open before a run, by the stack they
+/// stand on: a question about one stack, whose ref names it, and a grouped
+/// question, under each of its members. A run supersedes them a window at
+/// a time by id. Asked per window instead, the grouped question walked
+/// every review item ever written once for each window's members, and a
+/// full re-classification of the archive spent most of its time there.
+/// What this run asks itself is written after the read, and a stack is
+/// judged once in a run, so none of it is ever here.
+fn open_questions(store: &mut Store) -> Result<HashMap<i64, Vec<i64>>, Error> {
+    let mut asked: HashMap<i64, Vec<i64>> = HashMap::new();
+    let review = store.qualified("review_item");
+    let members = store.qualified("review_member");
+    for r in store.query(
+        &format!(
+            "SELECT id, CAST(ref AS TEXT) FROM {review} \
+             WHERE status = 'open' AND scope = 'stack' AND kind LIKE '%:%'"
+        ),
+        &[],
+    )? {
+        // The ref a classifier question is written with, and nothing else.
+        let stack = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .and_then(|v| match v.as_object() {
+                Some(o) if o.len() == 1 => o.get("stack_id").and_then(|s| s.as_i64()),
+                _ => None,
+            });
+        if let Some(stack) = stack {
+            asked.entry(stack).or_default().push(r.int(0)?);
+        }
+    }
+    for r in store.query(
+        &format!(
+            "SELECT m.stack_id, m.item_id FROM {members} m JOIN {review} i ON i.id = m.item_id \
+             WHERE i.status = 'open' AND i.scope = 'group'"
+        ),
+        &[],
+    )? {
+        asked.entry(r.int(0)?).or_default().push(r.int(1)?);
+    }
+    Ok(asked)
+}
+
 /// Classify every stack in scope.
 pub fn classify(
     registry: &mut Registry,
@@ -857,20 +900,9 @@ fn run(
     let vote_t = table("classification_vote");
     let review_t = table("review_item");
 
-    // Whether any classifier question is still open from an earlier run. A
-    // first run has none, and then no window pays for the check.
-    let stale = store
-        .query(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE status = 'open' AND kind LIKE '%:%'",
-                store.qualified("review_item")
-            ),
-            &[],
-        )?
-        .first()
-        .and_then(|r| r.int(0).ok())
-        .unwrap_or(0)
-        > 0;
+    // The questions still open from an earlier run, by the stack they stand
+    // on, read once. A first run has none, and then no window pays for them.
+    let asked = open_questions(store)?;
 
     // Wave 4c §6.6: what the evaluator noticed, tallied per batch and
     // written once at the end as diagnostic rows with samples.
@@ -1279,39 +1311,33 @@ fn run(
                 // A question this run asks again is asked once, not twice:
                 // the open items of the stacks being re-judged are marked
                 // superseded before the new ones are written. What a person
-                // already answered is accepted and stays that way.
-                if stale {
-                    for chunk in ids.chunks(256) {
-                        let holes: Vec<String> = (0..chunk.len())
-                            .map(|i| store.dialect().param(i + 1, Type::Json))
-                            .collect();
-                        let sql = format!(
-                            "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND scope = 'stack' AND kind LIKE '%:%' AND ref IN ({})",
+                // already answered is accepted and stays that way. Wave 4a
+                // §10.2, C15: a re-classification emits new items and never
+                // overwrites; an earlier grouped question one of these
+                // stacks belongs to is superseded too, and this run asks
+                // again. The items are named by id, so a window costs what
+                // it supersedes and not what the table holds.
+                let mut stale: Vec<i64> = ids
+                    .iter()
+                    .filter_map(|id| asked.get(id))
+                    .flatten()
+                    .copied()
+                    .collect();
+                stale.sort_unstable();
+                stale.dedup();
+                for chunk in stale.chunks(500) {
+                    store.execute(
+                        &format!(
+                            "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND id IN ({})",
                             store.qualified("review_item"),
-                            holes.join(", "),
-                        );
-                        let params: Vec<Param> = chunk
-                            .iter()
-                            .map(|id| Param::from(serde_json::json!({"stack_id": id}).to_string()))
-                            .collect();
-                        store.execute(&sql, &params)?;
-                        // Wave 4a §10.2, C15: a re-classification emits new
-                        // items and never overwrites; an earlier grouped
-                        // question one of these stacks belongs to is
-                        // superseded, and this run asks again.
-                        let grouped = format!(
-                            "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND scope = 'group' \
-                             AND id IN (SELECT item_id FROM {} WHERE stack_id IN ({}))",
-                            store.qualified("review_item"),
-                            store.qualified("review_member"),
                             chunk
                                 .iter()
                                 .map(i64::to_string)
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        );
-                        store.execute(&grouped, &[])?;
-                    }
+                        ),
+                        &[],
+                    )?;
                 }
                 for t in [axis_t, ev_t, vote_t] {
                     let sql = format!(

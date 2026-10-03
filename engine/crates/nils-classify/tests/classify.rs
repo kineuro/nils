@@ -876,6 +876,125 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
     }
 }
 
+/// A re-classification supersedes what the last run asked about the stacks
+/// it judges again, grouped or not, a window at a time, and asks again. A
+/// question that is not the classifier's, and one a person answered, stay
+/// as they are.
+#[test]
+fn a_re_classification_supersedes_the_open_questions_of_its_stacks_and_asks_again() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("classify-again");
+        for (n, sop) in [("1", "A.1.1"), ("2", "A.2.1"), ("3", "A.3.1")] {
+            let mut e = synth::minimal_mr("A", &format!("A.{n}"), sop);
+            e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+            e.push(elem(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+            dir.file(
+                &format!("s{n}/1"),
+                &synth::part10(&MetaFields::mr(sop), &e, true),
+            );
+        }
+        let mut reg = prepare(&lab, &dir);
+        // One stack a window, so a group's members are judged in different
+        // windows.
+        let settings = nils_classify::job::Settings {
+            review_below: Some(1.0),
+            window: 1,
+            ..Default::default()
+        };
+        let first =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(first.written, 3, "{name}");
+        let groups = |reg: &mut Registry, status: &str| -> Vec<i64> {
+            rows(
+                reg,
+                &format!(
+                    "SELECT id FROM {{review_item}} WHERE scope = 'group' AND status = '{status}' ORDER BY id"
+                ),
+            )
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+        };
+        let asked = groups(&mut reg, "open");
+        assert!(!asked.is_empty(), "{name}: {first:?}");
+        let stacks: Vec<i64> = rows(&mut reg, "SELECT id FROM {stack} ORDER BY id")
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        // What an older engine left open on the first stack: a classifier
+        // question of its own, one that is not the classifier's, and one a
+        // person accepted.
+        for (kind, status) in [
+            ("base:conflict", "open"),
+            ("split", "open"),
+            ("technique:conflict", "accepted"),
+        ] {
+            reg.store()
+                .insert(
+                    &Insert::new(
+                        nils_registry::schema::table("review_item"),
+                        &["kind", "scope", "ref", "evidence", "status", "created_at"],
+                    ),
+                    &[vec![
+                        Param::from(kind),
+                        Param::from("stack"),
+                        Param::from(format!("{{\"stack_id\": {}}}", stacks[0])),
+                        Param::from("{}"),
+                        Param::from(status),
+                        Param::from("2026-10-01T10:00:00Z"),
+                    ]],
+                )
+                .unwrap();
+        }
+        let status_of = |reg: &mut Registry, kind: &str| -> String {
+            rows(
+                reg,
+                &format!(
+                    "SELECT status FROM {{review_item}} WHERE kind = '{kind}' AND scope = 'stack'"
+                ),
+            )[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+        };
+
+        let again =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(again.written, 3, "{name}");
+        let superseded = groups(&mut reg, "superseded");
+        for g in &asked {
+            assert!(superseded.contains(g), "{name}: group {g} was asked again");
+        }
+        let open = groups(&mut reg, "open");
+        assert_eq!(
+            open.len(),
+            asked.len(),
+            "{name}: the same questions, asked again"
+        );
+        assert!(
+            open.iter().all(|g| !asked.contains(g)),
+            "{name}: as new items"
+        );
+        assert_eq!(status_of(&mut reg, "base:conflict"), "superseded", "{name}");
+        assert_eq!(status_of(&mut reg, "split"), "open", "{name}");
+        assert_eq!(
+            status_of(&mut reg, "technique:conflict"),
+            "accepted",
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE status = 'open' AND scope = 'stack' AND kind LIKE '%:%'"
+            ),
+            0,
+            "{name}: no per-stack rows are left"
+        );
+    }
+}
+
 /// Wave 4c §6.6: what the evaluator noticed is counted per batch, and a
 /// site term that matched nothing is named, whether it was added to a
 /// bucket or to an axis value's list (pack contract 5).

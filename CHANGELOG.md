@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A reclassify no longer slows down as review items pile up. Before writing a window, classify supersedes the open questions of the stacks it judges again, and it used to ask Postgres for them per chunk of 256 stacks: the grouped question walked every review item ever written each time, and the per-stack one compared each chunk's refs with every open question, the run's own new ones included. On an archive of 558,874 stacks that was about 70 % of a 772 s run, and it grew with every reclassify. The open questions are now read once at the start of a run, by the stack they stand on, and each window supersedes its own by id. What is superseded is unchanged.
+
 ## [1.0.0-alpha.75] - 2026-10-03
 
 A pass's target reads a field by pattern as a rule does. With MRI pack 0.25.0, whose physics vote reads a sequence variant and a series name by pattern, alpha.74's classify ended in a panic at the vote; this release fixes that, and nothing else changes. After updating from alpha.74, a reclassify is all that is needed: the re-read and the fingerprint alpha.74 asked for stand. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.
