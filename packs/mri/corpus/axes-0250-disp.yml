@@ -323,3 +323,23 @@ cases:
       ge_iflow_phase_contrast: true
     axes:
       technique: PC
+
+  # --- SyMRI's computed tissue maps are quantitative maps
+
+  - name: a SyMRI EPW map is a quantitative tissue map, Qmap, with no base
+    stack:
+      image_type: 'DERIVED\PRIMARY\EPW'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'EPW'
+      text_protocol_name: 'SyMRI'
+      repetition_time: 15000
+      echo_time: 100
+      inversion_time: 3000
+    flags:
+      is_symri_tissue_map: true
+    axes:
+      construct: Qmap
+      base: ''

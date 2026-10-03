@@ -1282,9 +1282,12 @@ flags:
   # MRI pack 0.14.0: never a synthetic weighted image, which may name a
   # tissue it adds (Philips `DERIVED\PRIMARY\T2\SYNTHETIC\CSF`, a synthetic
   # T2w "+ CSF" that 0.13.0 made a CSF map; dev-2).
+  # MRI pack 0.25.0: and its other computed tissue maps, EPW (excess
+  # parenchymal water), NON, NAC and ICV, which the fallback called a
+  # magnitude (the protocol sweep's dispute, section 26e).
   is_symri_tissue_map:
     all:
-      - {parser: image_type, any_token: [CSF, WM, GM]}
+      - {parser: image_type, any_token: [CSF, WM, GM, EPW, NON, NAC, ICV]}
       - {not: {parser: image_type, token: SYNTHETIC}}
       - {not: is_synthetic}
 
