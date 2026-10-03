@@ -578,11 +578,13 @@ rules:
       - {flag: quantitative_t1_map, tier: exclusive}
     set: {base: null, base_basis: null, contrast_mix: null}
 
+  # MRI pack 0.25.0 (Nima, 2026-10-03, after round 5): a quantitative T2 or
+  # R2 map has no base either, consistent with the T1 map above.
   'flag:t2_map':
     clauses:
       - {flag: has_t2_map, tier: exclusive}
       - {flag: has_r2, tier: exclusive}
-    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
+    set: {base: null, base_basis: null, contrast_mix: null}
 
   # Pack 0.9.0: an inversion the construct did not name still has no base
   # [B1, P9]

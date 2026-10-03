@@ -278,3 +278,21 @@ cases:
     axes:
       provenance: ProjectionDerived
       construct: Composed
+
+  # --- Nima, 2026-10-03: a quantitative T2 or R2 map has no base either
+
+  - name: a T2 map is a quantity with no base
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2 MAP'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'T2Map_mapit'
+      n_slices: 20
+      repetition_time: 2000
+      echo_time: 13
+      flip_angle: 180
+    axes:
+      construct: T2map
+      base: ''
