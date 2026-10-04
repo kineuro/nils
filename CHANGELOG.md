@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- `nils labels seal --select` seals a saved selection however many stacks it holds. It froze the selection under an answer's cap and refused one of more than 5,000 stacks, so a certification sample larger than that could not be sealed in one piece.
+
 ## [1.0.0-alpha.76] - 2026-10-04
 
 A reclassify of a large archive should take about a third of the time it did (the step this release removes was about 70 % of it), and no longer grows from one run to the next. Classify read the open review questions of each chunk of stacks from Postgres, which walked every review item ever written; it now reads them once a run. Nothing else changes: after updating from alpha.75 nothing needs to run again, and the next reclassify is simply faster. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. MRI pack 0.25.0. No desk release: installs keep desk 1.0.0-alpha.62.

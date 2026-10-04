@@ -5624,6 +5624,29 @@ fn a_run_takes_a_selection_larger_than_an_answer_holds() {
             err.contains("cannot be used with") || err.contains("--chunk"),
             "{err}"
         );
+
+        // a seal takes the whole sample however large, here 5,101 stacks
+        let sealed = lab.json(&[
+            "labels",
+            "seal",
+            "--select",
+            "selection:listed@1",
+            "--pack-dir",
+            packs,
+            "--json",
+        ]);
+        assert_eq!(sealed["stacks"], 5_101, "{sealed}");
+        let mut store = lab.store();
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE sample = 'selection:listed@1' AND unsealed_at IS NULL",
+                    store.qualified("sealed_stack")
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 5_101);
     });
 }
 

@@ -5497,13 +5497,19 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
         } => {
             let (handle, sample) = match (&select, handle) {
                 (Some(spec), _) => {
-                    let h = crate::ask_cli::freeze_selection(
+                    // A sample is as large as its design draws, not as an
+                    // answer holds: a seal covers every stack of it or
+                    // fails, never the first 5,000 (certificate 2 drew
+                    // 6,245).
+                    let h = crate::ask_cli::freeze(
                         home,
                         spec,
                         Grain::Stack,
                         pack_dir,
                         &pack,
-                    )?;
+                        crate::ask_cli::Freeze::Whole,
+                    )?
+                    .handle;
                     let (name, version) = selection_spec(spec);
                     let mut registry = crate::open(home)?;
                     let version = match version {
