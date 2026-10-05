@@ -10,7 +10,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
-- The MRI pack is 1.0.1: certificate 2's five rule gaps and three questions of convention, which deep research and a production archive's counts settled. It is not certified: 1.0.0 is, and 1.0.1 claims that certificate only after a small fresh read. Replayed over the 546,440 unsealed MR stacks of the archive, 29 stacks move against 1.0.0; over every held development reference, 10 settled cells move, all to the reference's value, and none is broken.
+- The MRI pack is 1.0.1: certificate 2's five rule gaps and three questions of convention, which deep research and a production archive's counts settled. It is not certified: 1.0.0 is, and 1.0.1 claims that certificate only after a small fresh read. Replayed over the 546,440 unsealed MR stacks of the archive, 28 stacks move against 1.0.0; over every held development reference, 10 settled cells move, all to the reference's value, and none is broken.
   - A spin-echo inversion recovery above 2,600 ms whose inversion time nulls CSF at its long repetition time is a FLAIR (a `t2_tirm` at TR 10,140 ms read STIR by its `tirm`).
   - GE's private pulse sequence name states an inversion (`T1FLAIR/Prop`), so a PROPELLER written ScanningSequence SE at a STIR's inversion time is a STIR.
   - A Philips diffusion stack with direction `I` and no direction count that holds more images a slice than b values is a diffusion set, no Trace, as one with a direction count already was.
