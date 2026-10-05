@@ -49,6 +49,8 @@ derive:
       # SWI and minIP as its own series (echo numbers 1 to 4) and one MEAN
       # SWI and one MEAN minIP beside them (echo number 1).
       - {when: {all: [is_mean, {not: has_epi}]}, value: comb-ME-GRE}
+      # MRI pack 1.0.1 (F4, certificate 2's errors): a Siemens SMWI combines the echoes.
+      - {when: siemens_smwi_output, value: comb-ME-GRE}
       # MRI pack 0.24.0 (the final certificate's A11): GE's multi-echo QSM
       # writes its SWI image, minIP and maps combined over the echoes, and
       # its MAG and PHS at one echo (flags.yml, section 20).
@@ -299,6 +301,8 @@ rules:
       # MRI pack 0.25.0 (the protocol sweep): GE multi-echo QSM's output named
       # SWI (flags.yml, section 26b).
       - {when: ge_qsm_me_swi_output, cite: ge_qsm_me_swi_output, source: flags, tier: exclusive}
+      # MRI pack 1.0.1 (F4, certificate 2's errors): a Siemens SMWI.
+      - {when: siemens_smwi_output, cite: siemens_smwi_output, source: flags, tier: exclusive}
     set:
       base: SWI
       base_basis: physics

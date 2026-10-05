@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@1.0.0");
+    assert_eq!(pack.id(), "mri@1.0.1");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
@@ -41,7 +41,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        563,
+        584,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -146,7 +146,10 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          2026-10-03: the TFE prepulse (five), AngioFlag (three: the flag, a TWIST's \
          angio signal and an unnamed FLASH angiogram), Acquisition \
          Contrast (seven), an isotropic directionality, and a SyMRI stack \
-         saved in colour (two)"
+         saved in colour (two), and the 21 of pack 1.0.1: certificate 2's \
+         rule gaps (a Siemens SMWI, GE's registered copy and either \
+         vendor's), a real STIR (six), a pituitary dynamic (three) and GE's \
+         output labels in ReceiveCoilName (nine)"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

@@ -145,8 +145,6 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
     let reads = model.reads();
     // A name is either a fingerprint column or an axis. The fingerprint half
     // is read in one pass over the table; the axes in one pass over theirs.
-    let t = table("stack_fingerprint");
-    let dialect = store.dialect();
     let mut columns = vec![
         "f.stack_id".to_string(),
         "f.subject_id".to_string(),
@@ -154,13 +152,10 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
     ];
     let mut fields: Vec<String> = Vec::new();
     for name in &reads {
-        let Some((_, column)) = crate::classify::FIELDS.iter().find(|(n, _)| n == name) else {
+        let Some(field) = crate::classify::FIELDS.iter().find(|(n, _)| n == name) else {
             continue;
         };
-        let c = t
-            .column(column)
-            .unwrap_or_else(|| panic!("stack_fingerprint.{column} is not a column"));
-        columns.push(dialect.text_of_qualified(Some("f"), c));
+        columns.push(crate::classify::field_sql(store, Some("f"), *field));
         fields.push(name.clone());
     }
     let filter = match subject {

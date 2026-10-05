@@ -42,6 +42,8 @@ order:
   - 'technique:ASL'
   - 'perfusion:single_volume'
   - 'technique:Perfusion-EPI'
+  - 'q2:pituitary_dynamic_named_t1'
+  - 'q2:pituitary_dynamic'
   - 'technique:DCE'
   - 'balanced:low_flip_2d'
   - 'balanced:t2_over_t1'
@@ -71,6 +73,8 @@ order:
   - 'r4:keep_R2_stir_named_t2'
   - 'r4:keep_R2_stir_named_pd'
   - 'r4:keep_R4_t1_ir_long_te'
+  - 'q1:real_stir_named_pd'
+  - 'q1:real_stir_long_te'
   - 'r4:keep_R8_t2_named_gre_short_te'
   - 'flair:t1_text'
   - 'flair:t2_text'
@@ -442,6 +446,25 @@ rules:
     confidence: 0.95
     why: 'a dynamic susceptibility contrast series is perfusion-weighted imaging'
 
+  # MRI pack 1.0.1 (Q2, Nima 2026-10-05 after the deep research on
+  # certificate 2's disputes): a pituitary or sella dynamic of fewer than 10
+  # time points, or frames more than 10 s apart, is a T1-weighted run read
+  # for its enhancement, never perfusion, whatever its name says (flags.yml,
+  # section 27).
+  'q2:pituitary_dynamic_named_t1':
+    clauses:
+      - {when: {all: [pituitary_dynamic_t1, t1_word_alone, {not: {axis: provenance, is: Localizer}}]}, cite: pituitary_dynamic_t1, source: flags, tier: exclusive}
+    set: {base: 'T1w', base_basis: name, contrast_mix: null}
+    confidence: 0.9
+    why: 'a pituitary dynamic named T1 is the T1-weighted run its name says, not a perfusion series'
+
+  'q2:pituitary_dynamic':
+    clauses:
+      - {when: {all: [pituitary_dynamic_t1, {not: {axis: provenance, is: Localizer}}]}, cite: pituitary_dynamic_t1, source: flags, tier: exclusive}
+    set: {base: 'T1w', base_basis: physics, contrast_mix: null}
+    confidence: 0.85
+    why: 'a pituitary dynamic of a few slow phases is a T1-weighted run read for its enhancement, not a perfusion series'
+
   'technique:DCE':
     clauses:
       - {when: {axis: technique, is: 'DCE'}, cite: 'DCE', source: technique}
@@ -678,6 +701,26 @@ rules:
     set: {base: 'T1w', base_basis: 'name+physics', contrast_mix: T1like_IR_longTE}
     confidence: 0.85
     why: 'R4: an inversion in the T1-IR window keeps a T1 name, whatever its echo time; a 2D one at 40 ms or more carries some T2'
+
+  # MRI pack 1.0.1 (Q1, Nima 2026-10-05 after the deep research on
+  # certificate 2's disputes): a real (phase-sensitive) inversion recovery in
+  # the STIR window whose name states no weighting is T2w, as its magnitude
+  # twin is, where its echo time is 40 ms or more; PDw where named PD. Its
+  # PSIR and Real are the modifier's and the construct's. One at a shorter
+  # echo time is left for a person (rules/cant_tell.yml).
+  'q1:real_stir_named_pd':
+    clauses:
+      - {when: {all: [real_stir_named_pd, {not: {axis: provenance, is: Localizer}}]}, cite: real_stir_named_pd, source: physics, tier: physics}
+    set: {base: 'PDw', base_basis: 'name+physics', contrast_mix: null}
+    confidence: 0.85
+    why: 'a real STIR named PD keeps its name'
+
+  'q1:real_stir_long_te':
+    clauses:
+      - {when: {all: [real_stir_unnamed_long_te, {not: {axis: provenance, is: Localizer}}]}, cite: real_stir_unnamed_long_te, source: physics, tier: physics}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null}
+    confidence: 0.8
+    why: 'Q1: a real STIR inverts the magnitude STIR''s polarity, not its weighting: T2-weighted at an echo time of 40 ms or more'
 
   'r4:keep_R8_t2_named_gre_short_te':
     clauses:

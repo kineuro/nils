@@ -51,6 +51,16 @@ pub const FIELDS: &[&str] = &[
     // for a colour image).
     "temporal_resolution",
     "samples_per_pixel",
+    // MRI pack 1.0.1: two numbers the view works out from the fingerprint's
+    // own fields, never stored. How many images the stack holds at each slice
+    // position (`n_instances` over `n_slices`), and how many distinct b values
+    // its images write (`dwi_b_values` counted). A pack compares them with
+    // each other: a diffusion stack with more images a slice than b values
+    // holds directional images beside its isotropic one. Read from a
+    // registry, they are the same arithmetic on the columns
+    // ([`DERIVED`]); anywhere else, [`Stack::num`] works them out.
+    "images_per_position",
+    "dwi_b_value_count",
     // text
     "modality",
     "manufacturer",
@@ -130,10 +140,29 @@ pub const FIELDS: &[&str] = &[
 ];
 
 /// Where the text half begins.
-pub const FIRST_TEXT: usize = 25;
+pub const FIRST_TEXT: usize = 27;
 
 pub fn field_index(name: &str) -> Option<usize> {
     FIELDS.iter().position(|f| *f == name)
+}
+
+/// The fields the view works out rather than reads (MRI pack 1.0.1), each
+/// with the fields it is worked out from. A value set on the stack wins; an
+/// absent one is worked out when it is read.
+pub const DERIVED: &[(&str, &[&str])] = &[
+    ("images_per_position", &["n_instances", "n_slices"]),
+    ("dwi_b_value_count", &["dwi_b_values"]),
+];
+
+const IMAGES_PER_POSITION: usize = 25;
+const DWI_B_VALUE_COUNT: usize = 26;
+const N_INSTANCES: usize = 9;
+const N_SLICES: usize = 19;
+const DWI_B_VALUES: usize = 56;
+
+/// Whether a field is one the view works out ([`DERIVED`]).
+pub fn is_derived(i: usize) -> bool {
+    i == IMAGES_PER_POSITION || i == DWI_B_VALUE_COUNT
 }
 
 /// One stack, as a pack sees it: numbers by index, text by index, nothing
@@ -171,9 +200,35 @@ impl Stack {
     /// digits does, which is how v0's b value (stored as text) is compared.
     pub fn num(&self, i: usize) -> Option<f64> {
         if i < FIRST_TEXT {
-            self.num[i]
+            self.num[i].or_else(|| self.derived(i))
         } else {
             self.text[i - FIRST_TEXT].trim().parse().ok()
+        }
+    }
+
+    /// A field the view works out ([`DERIVED`]), from the stack's own:
+    /// images a slice position where both counts are above nought, and the
+    /// distinct b values `dwi_b_values` lists (comma-separated, as the
+    /// fingerprint writes them). None for any other field.
+    fn derived(&self, i: usize) -> Option<f64> {
+        match i {
+            IMAGES_PER_POSITION => {
+                let n = self.num[N_INSTANCES].filter(|v| *v > 0.0)?;
+                let s = self.num[N_SLICES].filter(|v| *v > 0.0)?;
+                Some(n / s)
+            }
+            DWI_B_VALUE_COUNT => {
+                let mut seen: Vec<f64> = Vec::new();
+                for part in self.text[DWI_B_VALUES - FIRST_TEXT].split([',', '\\']) {
+                    if let Ok(v) = part.trim().parse::<f64>()
+                        && !seen.contains(&v)
+                    {
+                        seen.push(v);
+                    }
+                }
+                (!seen.is_empty()).then_some(seen.len() as f64)
+            }
+            _ => None,
         }
     }
 
@@ -192,7 +247,7 @@ impl Stack {
     /// lives in.
     pub fn as_text(&self, i: usize) -> std::borrow::Cow<'_, str> {
         if i < FIRST_TEXT {
-            match self.num[i] {
+            match self.num(i) {
                 None => std::borrow::Cow::Borrowed(""),
                 Some(v) => std::borrow::Cow::Owned(format!("{v}")),
             }
@@ -204,7 +259,7 @@ impl Stack {
     /// Whether the field carries anything at all.
     pub fn present(&self, i: usize) -> bool {
         if i < FIRST_TEXT {
-            self.num[i].is_some()
+            self.num(i).is_some()
         } else {
             !self.text[i - FIRST_TEXT].is_empty()
         }
@@ -266,6 +321,58 @@ mod tests {
         s.set("diffusion_b_value", Value::Text(Some("['0','1000']")))
             .unwrap();
         assert_eq!(s.num(field_index("diffusion_b_value").unwrap()), None);
+    }
+
+    #[test]
+    fn the_derived_fields_sit_where_their_constants_say() {
+        for (name, from) in DERIVED {
+            let i = field_index(name).unwrap();
+            assert!(is_derived(i) && i < FIRST_TEXT, "{name}");
+            for f in *from {
+                assert!(field_index(f).is_some(), "{f}");
+            }
+        }
+        assert_eq!(
+            field_index("images_per_position"),
+            Some(IMAGES_PER_POSITION)
+        );
+        assert_eq!(field_index("dwi_b_value_count"), Some(DWI_B_VALUE_COUNT));
+        assert_eq!(field_index("n_instances"), Some(N_INSTANCES));
+        assert_eq!(field_index("n_slices"), Some(N_SLICES));
+        assert_eq!(field_index("dwi_b_values"), Some(DWI_B_VALUES));
+    }
+
+    #[test]
+    fn images_a_position_and_b_values_are_worked_out_from_the_stack() {
+        let ipp = field_index("images_per_position").unwrap();
+        let nb = field_index("dwi_b_value_count").unwrap();
+        let mut s = Stack::new();
+        assert_eq!(s.num(ipp), None);
+        assert_eq!(s.num(nb), None);
+        assert!(!s.present(ipp));
+        // a Philips diffusion set: b=0, three directions and the isotropic
+        // image at each of 24 slices, two b values
+        s.set("n_instances", Value::Text(Some("120"))).unwrap();
+        s.set("n_slices", Value::Num(Some(24.0))).unwrap();
+        s.set("dwi_b_values", Value::Text(Some("0,1000"))).unwrap();
+        assert_eq!(s.num(ipp), Some(5.0));
+        assert_eq!(s.num(nb), Some(2.0));
+        assert!(s.present(ipp));
+        assert_eq!(s.as_text(ipp), "5");
+        // a stack with no position counted, or none of its own, says nothing
+        s.set("n_slices", Value::Num(Some(0.0))).unwrap();
+        assert_eq!(s.num(ipp), None);
+        s.set("n_slices", Value::Num(None)).unwrap();
+        assert_eq!(s.num(ipp), None);
+        // repeated and backslash-separated values count once
+        s.set("dwi_b_values", Value::Text(Some("0\\1000, 1000 ,2000")))
+            .unwrap();
+        assert_eq!(s.num(nb), Some(3.0));
+        s.set("dwi_b_values", Value::Text(Some(""))).unwrap();
+        assert_eq!(s.num(nb), None);
+        // a value set on the stack wins over the working out
+        s.set("images_per_position", Value::Num(Some(2.0))).unwrap();
+        assert_eq!(s.num(ipp), Some(2.0));
     }
 
     #[test]
