@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.78] - 2026-10-05
+
+The MRI pack is 1.0.0, the certified pack: MRI pack 0.25.0's rules, unchanged, which passed the final header certificate of 2026-10-04 (7 of 5,000 clean stacks wrong, Korn-Graubard upper bound 0.26 % against 1 %, every make under 3 %). Only the version moves, so every answer is the same; a reclassify writes `mri@1.0.0` where rows said `mri@0.25.0`. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.
+
 ### Changed
 
 - The MRI pack is 1.0.0, the certified pack. Its rules are MRI pack 0.25.0's, byte for byte: only the version moves, so every verdict is the same and a classified stack names `mri@1.0.0` where it named `mri@0.25.0`. Pack 0.25.0 passed a final certificate on 2026-10-04: a fresh, sealed read of 5,000 stacks drawn from a production archive, graded once on the answers the pack had stored, with 7 of the 5,000 wrong (the one stack the read left out counted wrong) and a Korn-Graubard upper bound of 0.26 % against a bar of 1 %. Replayed over the 546,440 unsealed MR stacks of that archive, 1.0.0 gives the same answer as 0.25.0 on every axis of every stack. Nothing needs to run again after updating, though a reclassify writes the new version onto each stack's answer.
