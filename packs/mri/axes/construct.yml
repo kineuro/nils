@@ -90,7 +90,8 @@ values:
     # MRI pack 0.25.0: or GE's Genesis `Diffusion Coefficient` (section 26c).
     detection:
       exclusive: has_adc
-      combination: [ge_plain_adc_named]
+      # MRI pack 1.0.1 (Q3): or GE's output label `isoADC` (section 27).
+      combination: [ge_adc_by_name_or_label]
   eADC:
     terms: ['exponential ADC', 'eADC']
     keywords:
@@ -101,7 +102,8 @@ values:
     # MRI pack 0.18.0: or Siemens' `EXP` token (the deep research, case 30).
     detection:
       exclusive: has_eadc
-      combination: [eadc_stated]
+      # MRI pack 1.0.1 (Q3): or GE's output label `ExpAtt` (section 27).
+      combination: [eadc_by_words_or_label]
   FA:
     terms: ['fractional anisotropy', 'FA map', 'color FA', 'colFA']
     keywords:
@@ -110,7 +112,8 @@ values:
     # MRI pack 0.13.0: or a derived GE image named `FA` and nothing else.
     detection:
       exclusive: has_fa
-      combination: [fa_named]
+      # MRI pack 1.0.1 (Q3): or GE's output label `FA` (section 27).
+      combination: [fa_by_name_or_label]
   # the same image as isoDWI, under Siemens' and Philips' names [MQ3, D2]
   # MRI pack 0.11.0: not on a map, whose protocol name may still say
   # `3scan_trace` (Siemens `ep2d_diff_3scan_trace_ADC` was ADC and Trace).
@@ -118,7 +121,9 @@ values:
     terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b', 'DIFFUSION_ISO']
     # MRI pack 0.24.0: nor a b=0 image named for the trace its series makes
     # (flags.yml, section 22).
-    requires: {all: [{not: {any: [has_adc, has_eadc, has_fa]}}, {not: b0_image_trace_named}]}
+    # MRI pack 1.0.1 (Q3): nor a GE output whose ReceiveCoilName label names
+    # another image (flags.yml, section 27).
+    requires: {all: [{not: {any: [has_adc, has_eadc, has_fa]}}, {not: b0_image_trace_named}, {not: ge_coil_label_not_isodwi}]}
     keywords:
       - trace
       - tracew

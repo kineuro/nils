@@ -282,4 +282,6 @@ values:
     # the registered copy (record 48, conventions round 3, cases 26 and 37).
     detection:
       exclusive: has_moco
-      combination: [philips_registered_copy]
+      # MRI pack 1.0.1 (F5, certificate 2's errors): or GE's `Reg - ` copy
+      # written DERIVED (flags.yml, `registered_copy`).
+      combination: [registered_copy]

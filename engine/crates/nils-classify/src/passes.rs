@@ -56,15 +56,12 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
     if needed.is_empty() {
         return Ok(corpus);
     }
-    let t = table("stack_fingerprint");
-    let dialect = store.dialect();
     let columns: Vec<String> = std::iter::once("stack_id".to_string())
-        .chain(needed.iter().map(|f| {
-            let column = t
-                .column(FIELDS[*f].1)
-                .unwrap_or_else(|| panic!("stack_fingerprint.{} is not a column", FIELDS[*f].1));
-            dialect.text_of_qualified(None, column)
-        }))
+        .chain(
+            needed
+                .iter()
+                .map(|f| crate::classify::field_sql(store, None, FIELDS[*f])),
+        )
         .collect();
     let filter = match modality {
         Some(m) => format!(" WHERE modality = '{}'", m.replace('\'', "''")),

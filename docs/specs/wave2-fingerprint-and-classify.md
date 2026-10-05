@@ -206,6 +206,18 @@ otherwise do per stack, materialized and typed once**. Per stack, in
   whole series), has none. The interval is between acquisitions of one
   position whatever made them, so a diffusion series' volumes have one too;
   a pack reads it beside the temporal positions.
+- **Two numbers the view works out** (MRI pack 1.0.1), which a pack reads as
+  fields but the fingerprint does not store: `images_per_position`, the
+  stack's images over its slice positions (`n_instances` / `n_slices`, where
+  both are above nought), and `dwi_b_value_count`, the distinct b values its
+  images write (`dwi_b_values` counted). A pack compares them with each
+  other, which its language can do and arithmetic it cannot: a diffusion
+  stack of more images a slice than b values holds directional images beside
+  its isotropic one. Read from a registry they are the same arithmetic in the
+  select (`field_sql`), so a pass and a pick read them as a rule does; in a
+  packet, a corpus case or a session sibling the view works them out from the
+  fields beside them, and a value set on the stack wins. Nothing new is
+  stored, so no fingerprint runs again for them.
 
 Deliberately **not** in it, and this settles the open question §14 carried:
 

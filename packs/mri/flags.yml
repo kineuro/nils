@@ -1130,6 +1130,11 @@ flags:
           # one that nulls CSF at the stated repetition time, below the
           # window above (the deep research, case 15; below, `ti_near_csf_null`)
           - all: [{field: inversion_time, ge: 300}, {field: inversion_time, lt: 1400}, ti_near_csf_null]
+          # MRI pack 1.0.1 (F1, certificate 2's errors): or above the long window, within 20
+          # per cent of the null at its long repetition time (a Siemens
+          # `t2_tirm` at TR 10,140 ms and TI 2,616 ms was read STIR by its
+          # `tirm`)
+          - all: [{field: inversion_time, gt: 2600}, ti_near_csf_null]
   # A short tau inversion recovery from its inversion time: under 300 ms on
   # an inversion-recovery spin echo nulls fat [IM3, MQ12], the window the
   # base rule `physics:ir_stir_like` already reads. dev-1: all 19 such spin
@@ -1162,6 +1167,10 @@ flags:
       # range that keeps `*spcir` and drops ScanningSequence IR).
       - sequence_name.is_space_ir
       - {text: search_text, matches: '(^|[^a-z])(stir|tirm|irfse|ir-fse|ir fse)'}
+      # MRI pack 1.0.1 (F2, certificate 2's errors): or GE's private pulse sequence name
+      # stating an inversion (`T1FLAIR/Prop`, which writes ScanningSequence
+      # SE and no IR token: a PROPELLER at TI 110 ms had no STIR)
+      - all: [{text: manufacturer, prefix: ge}, {text: ge_pulse_sequence_name, matches: 'flair|stir|(^|[^a-z])ir([^a-z]|$)|irfse|ir-fse'}]
   # Black blood by name: a DANTE preparation (Siemens `dante` in the
   # sequence name) or Philips' `BB` (`3D T1 BB`, the black-blood VISTA).
   black_blood_named: {text: search_text, matches: '(^|[^a-z0-9])(bb|dante)([^a-z0-9]|$)|-dante-'}
@@ -1551,7 +1560,9 @@ flags:
   # every Philips DTI of the archive, where (2001,1004) marks 81 of its 140
   # isotropic images (the deep research, case 11; `empirical-conventions.md`).
   # MRI pack 0.25.0: or DiffusionDirectionality ISOTROPIC on every image (section 26g).
-  trace_image: {any: [trace_named, philips_trace_projection, philips_isotropic_private, isotropic_stated]}
+  # MRI pack 1.0.1 (Q3, a declared local convention): or GE's output label
+  # `isoDWI` in ReceiveCoilName (section 27, `ge_coil_label_isodwi`).
+  trace_image: {any: [trace_named, philips_trace_projection, philips_isotropic_private, isotropic_stated, ge_coil_label_isodwi]}
 
   # --- R1: a GE SWI written in research mode (ScanningSequence RM) with an
   # echo train of 32 or more is an EPI: a train of 48 inside a repetition
@@ -2897,6 +2908,21 @@ flags:
     all:
       - {text: manufacturer, prefix: philips}
       - {text: text_series_description, matches: '^\s*reg\s*-'}
+  # MRI pack 1.0.1 (F5, certificate 2's errors): GE's registration tool writes its
+  # motion-corrected copy of a DSC run DERIVED and named `Reg - ` as well.
+  ge_registered_copy:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - image_type.is_derived
+      - {text: text_series_description, matches: '^\s*reg\s*-'}
+  registered_copy: {any: [philips_registered_copy, ge_registered_copy]}
+  # MRI pack 1.0.1 (F4, certificate 2's errors): a Siemens susceptibility-map-weighted image
+  # (SMWI), named for it: an SWI output the scanner computed from the QSM
+  # acquisition's echoes.
+  siemens_smwi_output:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: search_text, matches: '(^|[^a-z])smwi'}
 
   # --- multi-shot diffusion EPI (case 27): GE MUSE by its pulse sequence or
   # name, Philips IRIS by its name, beside RESOLVE.
@@ -3195,8 +3221,21 @@ flags:
   philips_directional_set:
     all:
       - {text: manufacturer, prefix: philips}
-      - {field: dwi_directions, ge: 2}
       - {field: n_instances, gt: {field: n_slices}}
+      - any:
+          - {field: dwi_directions, ge: 2}
+          # MRI pack 1.0.1 (F3, certificate 2's errors): or, where the file
+          # counts no directions (a classic object), more images a slice
+          # than b values. A `DW_SSh` of five images a slice (b=0, three
+          # directions and the isotropic image) at two b values read Trace;
+          # a stack of b=0 and the isotropic image alone (two a slice, two b
+          # values) stays Trace, as C3 makes it.
+          # Two or more images a slice, so one of 1.4 a slice at one b
+          # value (overlapping or repeated slices) is not taken for a set.
+          - all:
+              - {field: dwi_directions, present: false}
+              - {field: images_per_position, ge: 2}
+              - {field: images_per_position, gt: {field: dwi_b_value_count}}
       # MRI pack 0.25.0 (item 7 of the study's questions, checked on every
       # image of 30 registered copies and 30 sources): a registered copy
       # (`Reg - DWI`) holds the same b=0, M, P and S directional images and
@@ -3237,6 +3276,9 @@ flags:
       - {text: text_sequence_name, matches: '^\*?(wip)?fl[23]d'}
       - {text: search_text, matches: '(^|[^a-z])qsm'}
       - {not: {text: search_text, matches: '(^|[^a-z])swi'}}
+      # MRI pack 1.0.1 (F4, certificate 2's errors): nor the susceptibility-map-weighted image
+      # (SMWI) the scanner computes from the echoes
+      - {not: siemens_smwi_output}
 
 
   # === 22. MRI pack 0.24.0: the final certificate's rule gaps, Philips and
@@ -4484,3 +4526,84 @@ flags:
           - has_multi_qmap
           - is_mdme
           - {text: search_text, matches: 'symri|syntac|synthetic|qrapmaster|(^|[^a-z])magic([^a-z]|$)'}
+
+  # === 27. MRI pack 1.0.1: certificate 2's three convention questions =======
+  #
+  # Certificate 2's error lists, read as development evidence after its grade
+  # (the design repository's `studies/2026-10-05-cert2-errors/`), left two
+  # disputes and one header question, put to deep research
+  # (`deep-research-cert2.md` there) and settled by Nima on 2026-10-05
+  # (`studies/2026-10-05-pack-100/`).
+  #
+  # --- Q1: a real (phase-sensitive) inversion recovery in the STIR window
+  # whose name states no weighting is the STIR it is: a sign-keeping
+  # reconstruction at TI 200 ms leaves nearly every tissue negative at
+  # readout and inverts the magnitude STIR's polarity rather than its
+  # weighting. The literature's "T1-weighted PSIR" is a TI near 400 ms at a
+  # short echo time, the T1-IR window, which a T1 word already keeps (round
+  # 4, R4; the SPACE real IR). So base T2w (PDw where named PD) beside its
+  # PSIR and Real, where the echo time is long enough to carry the STIR's T2
+  # weighting (40 ms or more). A short-echo real IR in the STIR window has no
+  # precedent in the literature and is left for a person (rules/cant_tell.yml).
+  real_ir_stir_window: {all: [real_ir, se_readout_plain, {not: is_dir}, ti_stir_window]}
+  # A weighting word as `search_text` spells it: a bare `PD` becomes
+  # `proton-density` there.
+  weighting_word: {text: search_text, matches: '(^|[^a-z0-9])(t1|t2|pd)|proton'}
+  real_stir_named_pd:
+    all:
+      - real_ir_stir_window
+      - {text: search_text, matches: '(^|[^a-z0-9])pd|proton'}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(t1|t2)'}}
+  real_stir_unnamed: {all: [real_ir_stir_window, {not: weighting_word}]}
+  real_stir_unnamed_long_te: {all: [real_stir_unnamed, {field: echo_time, ge: 40}]}
+  real_stir_unnamed_short_te: {all: [real_stir_unnamed, {not: {field: echo_time, ge: 40}}]}
+
+  # --- Q2: a series named for a pituitary or sella dynamic is the
+  # T1-weighted run it is, whatever `dynamic` or `DCE` its name holds, where
+  # it holds fewer than 10 time points or its frames are more than 10 s
+  # apart: papers call such runs "DCE-MRI" loosely, but a qualitative run of
+  # 5 to 10 phases at 10 to 30 s fails every criterion of quantitative DCE
+  # (QIBA's profile: under 10 s a frame, 5 or more baseline phases, typically
+  # 40 to 80). It keeps the gradient echo (or GE's 2D spin echo or FSE) its
+  # header states and takes base T1w; never DCE, never PWI.
+  pituitary_dynamic_named:
+    all:
+      - {text: search_text, matches: 'sella|hypof|hypoph|pituit|(^|[^a-z])hyp([^a-z]|$)'}
+      - {text: search_text, matches: 'dyn|(^|[^a-z])dce([^a-z]|$)'}
+  pituitary_dynamic_slow:
+    all:
+      - pituitary_dynamic_named
+      - any:
+          - {not: {field: temporal_positions, ge: 10}}
+          - {field: temporal_resolution, gt: 10000}
+  pituitary_dynamic_t1:
+    all:
+      - pituitary_dynamic_slow
+      - any: [has_gre, has_se]
+      - {not: has_epi}
+      - {not: is_perfusion_derived}
+      - {not: {text: search_text, matches: '(^|[^a-z0-9])(t2|pd)'}}
+
+  # --- Q3, a declared local convention, grounded in the labels' meaning
+  # and not in vendor documentation (none says which tool writes them):
+  # GE's motion-corrected diffusion outputs name each output in
+  # ReceiveCoilName (`isoDWI/b1000/R3`, `T2w(b=0)/R3`, `isoADC/b1000/R3`,
+  # `FA/b1000/R3`, `ExpAtt/b1000/R3`, `DTI15/R3`, `Evec1/b1000/R3`). The
+  # engine already splits a series by ReceiveCoilName (record 37 S3), so one
+  # stack holds one label. Within this closed set the label outranks the
+  # series name and the b value: `isoDWI` is the isotropic image (Trace),
+  # `T2w(b=0)` the b=0 image (no Trace), `isoADC` the ADC, `FA` the FA,
+  # `ExpAtt` the exponential ADC. Revisit if GE or the site that wrote them
+  # documents the tool.
+  ge_coil_output_label:
+    all:
+      - {text: manufacturer, prefix: ge}
+      - {text: receive_coil_name, matches: '^\s*(isodwi|t2w\(b=0\)|isoadc|fa|expatt|evec[0-9]*|dti[0-9]*)(/b[0-9]+)?/r[0-9]+\s*$'}
+  ge_coil_label_isodwi: {all: [ge_coil_output_label, {text: receive_coil_name, matches: '^\s*isodwi/'}]}
+  ge_coil_label_isoadc: {all: [ge_coil_output_label, {text: receive_coil_name, matches: '^\s*isoadc/'}]}
+  ge_coil_label_fa: {all: [ge_coil_output_label, {text: receive_coil_name, matches: '^\s*fa/'}]}
+  ge_coil_label_expatt: {all: [ge_coil_output_label, {text: receive_coil_name, matches: '^\s*expatt/'}]}
+  ge_coil_label_not_isodwi: {all: [ge_coil_output_label, {not: ge_coil_label_isodwi}]}
+  ge_adc_by_name_or_label: {any: [ge_plain_adc_named, ge_coil_label_isoadc]}
+  eadc_by_words_or_label: {any: [eadc_stated, ge_coil_label_expatt]}
+  fa_by_name_or_label: {any: [fa_named, ge_coil_label_fa]}

@@ -18,13 +18,17 @@
 #   * A GE reversed-phase run whose highest b value lies between 50 and 100
 #     (item 11, research round 6): a nominal b=0 for some and a diffusion for
 #     others, so FieldmapRef is offered below the review threshold.
+#   * MRI pack 1.0.1 (Q1, Nima 2026-10-05): a real (phase-sensitive)
+#     inversion recovery in the STIR window whose name states no weighting,
+#     at an echo time under 40 ms or none written: the literature has no
+#     such object, so its base is not defaulted.
 #
 # It runs after the routes and before the technique axis (pack.yml `order`).
 
 rule_set: cant_tell
 decides: [technique, modifier, construct, base, base_basis, contrast_mix]
 
-order: ['philips_tfe_prepulse_unread', 'ge_bravo_named_cube_flair', 'ge_reversed_reference_review']
+order: ['philips_tfe_prepulse_unread', 'ge_bravo_named_cube_flair', 'ge_reversed_reference_review', 'real_stir_short_te']
 
 rules:
 
@@ -50,3 +54,12 @@ rules:
     set: {construct: [FieldmapRef]}
     confidence: 0.6
     why: 'a GE reversed-phase run whose highest b value is between 50 and 100: a field-map reference or a diffusion, for a person to say'
+
+  'real_stir_short_te':
+    clauses:
+      - when: {all: [real_stir_unnamed_short_te, {not: {axis: provenance, is: Localizer}}]}
+        cite: 'a real STIR named for no weighting at an echo time under 40 ms'
+        source: flags
+    set: {base: null, base_basis: null, contrast_mix: null}
+    confidence: 0.5
+    why: 'a real STIR named for no weighting at a short echo time: neither the STIR window nor the sign-keeping reconstruction says its base'

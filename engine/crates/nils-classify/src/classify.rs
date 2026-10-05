@@ -89,6 +89,9 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     // The 2026-10-03 fields, numbers.
     ("temporal_resolution", "temporal_resolution"),
     ("samples_per_pixel", "samples_per_pixel"),
+    // MRI pack 1.0.1: worked out, not stored (no column; [`field_sql`]).
+    ("images_per_position", ""),
+    ("dwi_b_value_count", ""),
     ("modality", "modality"),
     ("manufacturer", "manufacturer"),
     ("manufacturer_model_name", "manufacturer_model_name"),
@@ -155,6 +158,35 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("photometric_interpretation", "photometric_interpretation"),
 ];
 
+/// The SQL that reads one field of the pack's view from `stack_fingerprint`
+/// (under `alias`), as text: its column, or for a field the view works out
+/// rather than stores (MRI pack 1.0.1, [`nils_pack::stack::DERIVED`]), the
+/// same arithmetic on the columns it is worked out from, so a pass or a pick
+/// that reads only that field sees what a rule sees. `field` is an entry of
+/// [`FIELDS`].
+pub fn field_sql(store: &Store, alias: Option<&str>, (name, column): (&str, &str)) -> String {
+    let a = alias.map(|a| format!("{a}.")).unwrap_or_default();
+    match name {
+        // images a slice position, where both counts are above nought
+        "images_per_position" => format!(
+            "CASE WHEN {a}n_instances > 0 AND {a}n_slices > 0 \
+             THEN CAST({a}n_instances AS DOUBLE PRECISION) / {a}n_slices END"
+        ),
+        // the distinct b values, which the fingerprint writes once each,
+        // comma-separated
+        "dwi_b_value_count" => format!(
+            "CASE WHEN {a}dwi_b_values IS NULL OR {a}dwi_b_values = '' THEN NULL \
+             ELSE LENGTH({a}dwi_b_values) - LENGTH(REPLACE({a}dwi_b_values, ',', '')) + 1 END"
+        ),
+        _ => {
+            let c = table("stack_fingerprint")
+                .column(column)
+                .unwrap_or_else(|| panic!("stack_fingerprint.{column} is not a column"));
+            store.dialect().text_of_qualified(alias, c)
+        }
+    }
+}
+
 /// The select that reads one window of fingerprints, ordered by stack. With
 /// `ids`, it also says which series and subject each stack belongs to, which
 /// is what a decision wider than a stack is matched on.
@@ -190,7 +222,6 @@ pub(crate) fn select_stacks(store: &Store, stacks: &[i64]) -> String {
 }
 
 fn select_parts(store: &Store, ids: bool) -> (Vec<String>, String) {
-    let t = table("stack_fingerprint");
     let dialect = store.dialect();
     let head = if ids {
         vec![
@@ -203,12 +234,7 @@ fn select_parts(store: &Store, ids: bool) -> (Vec<String>, String) {
     };
     let cols: Vec<String> = head
         .into_iter()
-        .chain(FIELDS.iter().map(|(_, c)| {
-            let column = t
-                .column(c)
-                .unwrap_or_else(|| panic!("stack_fingerprint.{c} is not a column"));
-            dialect.text_of_qualified(Some("f"), column)
-        }))
+        .chain(FIELDS.iter().map(|f| field_sql(store, Some("f"), *f)))
         .collect();
     // The series' private elements ride along as the last column (Wave 4a
     // §5.2): beside the fingerprint and not in it, because which elements
@@ -275,15 +301,9 @@ pub(crate) fn scoped_select(
     scope: &crate::scope::Scope,
     limit: usize,
 ) -> (String, Vec<Param>) {
-    let t = table("stack_fingerprint");
     let dialect = store.dialect();
     let cols: Vec<String> = std::iter::once("f.stack_id".to_string())
-        .chain(FIELDS.iter().map(|(_, c)| {
-            let column = t
-                .column(c)
-                .unwrap_or_else(|| panic!("stack_fingerprint.{c} is not a column"));
-            dialect.text_of_qualified(Some("f"), column)
-        }))
+        .chain(FIELDS.iter().map(|f| field_sql(store, Some("f"), *f)))
         .chain(std::iter::once(
             dialect.text_of_qualified(
                 Some("sp"),
@@ -1709,8 +1729,48 @@ mod tests {
     fn every_field_is_a_fingerprint_column() {
         let t = table("stack_fingerprint");
         for (name, column) in FIELDS {
+            // MRI pack 1.0.1: the two the view works out have none
+            if nils_pack::stack::DERIVED.iter().any(|(d, _)| d == name) {
+                assert!(column.is_empty(), "{name}");
+                continue;
+            }
             assert!(t.column(column).is_some(), "{name} reads {column}");
         }
+    }
+
+    /// MRI pack 1.0.1: a pass or a pick reads a derived field by the same
+    /// arithmetic the view does, so a stack's images a position and its b
+    /// values counted read alike in SQL and in a packet.
+    #[test]
+    fn a_derived_field_is_read_by_the_same_arithmetic_in_sql() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        store
+            .batch(
+                "CREATE TABLE stack_fingerprint (stack_id INTEGER, n_instances INTEGER, n_slices INTEGER, dwi_b_values TEXT);\n\
+                 INSERT INTO stack_fingerprint VALUES (1, 120, 24, '0,1000'), (2, 7, 0, ''), (3, 30, 30, NULL), (4, 9, 3, '0,500,1000')",
+            )
+            .unwrap();
+        let ipp = field_sql(&store, Some("f"), ("images_per_position", ""));
+        let nb = field_sql(&store, Some("f"), ("dwi_b_value_count", ""));
+        let rows = store
+            .query(
+                &format!("SELECT {ipp}, {nb} FROM stack_fingerprint f ORDER BY f.stack_id"),
+                &[],
+            )
+            .unwrap();
+        let got: Vec<(Option<String>, Option<String>)> = rows
+            .iter()
+            .map(|r| (cell_text(r.get(0)), cell_text(r.get(1))))
+            .collect();
+        let n = |v: &Option<String>| v.as_deref().and_then(|t| t.parse::<f64>().ok());
+        assert_eq!(
+            got.iter().map(|g| n(&g.0)).collect::<Vec<_>>(),
+            [Some(5.0), None, Some(1.0), Some(3.0)]
+        );
+        assert_eq!(
+            got.iter().map(|g| n(&g.1)).collect::<Vec<_>>(),
+            [Some(2.0), None, None, Some(3.0)]
+        );
     }
 }
 

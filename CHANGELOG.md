@@ -4,8 +4,23 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A pack may read two numbers the engine works out from the fingerprint rather than stores: `images_per_position`, a stack's images over its slice positions, and `dwi_b_value_count`, the distinct b values its images write. A pack compares them with each other (`{field: images_per_position, gt: {field: dwi_b_value_count}}`), which tells a diffusion set that holds directional images beside its isotropic one where the file counts no directions. A rule, a pass and a pick read them alike; a replayed packet, a corpus case and a session sibling work them out from the fields beside them. No column is added and the fingerprint's revision does not move, so nothing needs to be fingerprinted again for them.
+
 ### Changed
 
+- The MRI pack is 1.0.1: certificate 2's five rule gaps and three questions of convention, which deep research and a production archive's counts settled. It is not certified: 1.0.0 is, and 1.0.1 claims that certificate only after a small fresh read. Replayed over the 546,440 unsealed MR stacks of the archive, 29 stacks move against 1.0.0; over every held development reference, 10 settled cells move, all to the reference's value, and none is broken.
+  - A spin-echo inversion recovery above 2,600 ms whose inversion time nulls CSF at its long repetition time is a FLAIR (a `t2_tirm` at TR 10,140 ms read STIR by its `tirm`).
+  - GE's private pulse sequence name states an inversion (`T1FLAIR/Prop`), so a PROPELLER written ScanningSequence SE at a STIR's inversion time is a STIR.
+  - A Philips diffusion stack with direction `I` and no direction count that holds more images a slice than b values is a diffusion set, no Trace, as one with a direction count already was.
+  - A Siemens susceptibility-map-weighted image (SMWI) is the SWI output of its QSM protocol, not an acquired echo.
+  - GE's `Reg - ` copy of a perfusion run written DERIVED is motion corrected, as Philips' is.
+  - A real (phase-sensitive) inversion recovery in the STIR window whose name states no weighting is T2-weighted at an echo time of 40 ms or more (PD-weighted where named PD), beside its PSIR and Real; at a shorter echo time its base is left for a person.
+  - A series named for a pituitary or sella dynamic of fewer than 10 time points, or frames more than 10 s apart, is a T1-weighted run, never DCE or PWI, whatever its name says; and DCE now also needs frames no more than 10 s apart where the fingerprint knows the interval.
+  - A declared local convention: GE's motion-corrected diffusion outputs name each output in ReceiveCoilName (`isoDWI/b1000/R3`, `T2w(b=0)/R3`, `isoADC/...`, `FA/...`, `ExpAtt/...`), and within that closed set the label outranks the series name and the b value: `isoDWI` is Trace, any other label is no Trace, `isoADC`, `FA` and `ExpAtt` are the ADC, FA and exponential ADC. It rests on what the labels mean, not on vendor documentation, and is to be revisited if the tool that writes them is documented.
+
+  After updating, a reclassify applies the pack. No re-read and no fingerprint is needed: the fields it reads are the fingerprint's of revision 7.
 - The MRI pack is 1.0.0, the certified pack. Its rules are MRI pack 0.25.0's, byte for byte: only the version moves, so every verdict is the same and a classified stack names `mri@1.0.0` where it named `mri@0.25.0`. Pack 0.25.0 passed a final certificate on 2026-10-04: a fresh, sealed read of 5,000 stacks drawn from a production archive, graded once on the answers the pack had stored, with 7 of the 5,000 wrong (the one stack the read left out counted wrong) and a Korn-Graubard upper bound of 0.26 % against a bar of 1 %. Replayed over the 546,440 unsealed MR stacks of that archive, 1.0.0 gives the same answer as 0.25.0 on every axis of every stack. Nothing needs to run again after updating, though a reclassify writes the new version onto each stack's answer.
 
 ## [1.0.0-alpha.77] - 2026-10-04

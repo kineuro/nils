@@ -451,6 +451,26 @@ fn the_new_fields_fill_by_a_fingerprint_and_a_one_file_reread_and_reach_the_pack
             "{name}"
         );
         assert_eq!(text(&s, "angio_flag"), "N", "{name}");
+        // MRI pack 1.0.1: images a slice position, worked out from the
+        // fingerprint's counts as the select reads them, on both backends
+        assert_eq!(num(&s, "images_per_position"), Some(4.0), "{name}");
+        {
+            let id = stack_of_series(&mut reg, "F.3");
+            let store = reg.store();
+            let sql = format!(
+                "SELECT {} FROM {} f WHERE f.stack_id = {id}",
+                nils_classify::classify::field_sql(store, Some("f"), ("images_per_position", "")),
+                store.qualified("stack_fingerprint"),
+            );
+            let row = &store.query(&sql, &[]).unwrap()[0];
+            let v = match row.get(0) {
+                nils_registry::store::Cell::Double(d) => *d,
+                nils_registry::store::Cell::Int(i) => *i as f64,
+                nils_registry::store::Cell::Text(t) => t.parse().unwrap(),
+                other => panic!("{name}: {other:?}"),
+            };
+            assert_eq!(v, 4.0, "{name}");
+        }
         let (s, _) = stack(&mut reg, "F.4");
         assert_eq!(num(&s, "temporal_resolution"), Some(59192.0), "{name}");
         assert_eq!(text(&s, "temporal_resolution_source"), "header", "{name}");

@@ -262,7 +262,13 @@ values:
     # MRI pack 0.25.0 (round 5, case 1): or a Siemens TWIST-VIBE dynamic run
     # that names no angiography (flags.yml, `twist_vibe_dynamic`): DCE by
     # default; an angiography name keeps it CE-MRA.
-    requires: {any: [is_dce_series, dce_words, twist_vibe_dynamic]}
+    # MRI pack 1.0.1 (Q2): never a pituitary or sella dynamic of fewer than
+    # 10 time points or frames more than 10 s apart, whatever its name says
+    # (flags.yml, section 27).
+    # And, after QIBA's DCE profile (Q2's option, which moves no archive stack
+    # today), never a series whose frames are stated or measured more than
+    # 10 s apart (the fingerprint's temporal resolution).
+    requires: {all: [{any: [is_dce_series, dce_words, twist_vibe_dynamic]}, {not: pituitary_dynamic_slow}, {not: {field: temporal_resolution, gt: 10000}}]}
     keywords:
       - dce
       - dynamic contrast enhanced
