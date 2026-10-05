@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.79] - 2026-10-06
+
+The MRI pack is 1.0.1: certificate 2's rule gaps and three conventions settled by deep research, on top of the certified pack 1.0.0. 1.0.1 is not certified; it is shown by an archive replay (28 of 546,440 stacks move) and by every earlier reference read (10 settled cells fixed, none broken), and it needs a fresh read before it may claim the certificate. After updating from alpha.77 or alpha.78, a reclassify is all that is needed: no re-read and no fingerprint. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.
+
+
 ### Added
 
 - A pack may read two numbers the engine works out from the fingerprint rather than stores: `images_per_position`, a stack's images over its slice positions, and `dwi_b_value_count`, the distinct b values its images write. A pack compares them with each other (`{field: images_per_position, gt: {field: dwi_b_value_count}}`), which tells a diffusion set that holds directional images beside its isotropic one where the file counts no directions. A rule, a pass and a pick read them alike; a replayed packet, a corpus case and a session sibling work them out from the fields beside them. No column is added and the fingerprint's revision does not move, so nothing needs to be fingerprinted again for them.
@@ -21,6 +26,13 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
   - A declared local convention: GE's motion-corrected diffusion outputs name each output in ReceiveCoilName (`isoDWI/b1000/R3`, `T2w(b=0)/R3`, `isoADC/...`, `FA/...`, `ExpAtt/...`), and within that closed set the label outranks the series name and the b value: `isoDWI` is Trace, any other label is no Trace, `isoADC`, `FA` and `ExpAtt` are the ADC, FA and exponential ADC. It rests on what the labels mean, not on vendor documentation, and is to be revisited if the tool that writes them is documented.
 
   After updating, a reclassify applies the pack. No re-read and no fingerprint is needed: the fields it reads are the fingerprint's of revision 7.
+
+## [1.0.0-alpha.78] - 2026-10-05
+
+The MRI pack is 1.0.0, the certified pack: MRI pack 0.25.0's rules, unchanged, which passed the final header certificate of 2026-10-04 (7 of 5,000 clean stacks wrong, Korn-Graubard upper bound 0.26 % against 1 %, every make under 3 %). Released from a branch at the pack's merge, so it carries no later change.
+
+### Changed
+
 - The MRI pack is 1.0.0, the certified pack. Its rules are MRI pack 0.25.0's, byte for byte: only the version moves, so every verdict is the same and a classified stack names `mri@1.0.0` where it named `mri@0.25.0`. Pack 0.25.0 passed a final certificate on 2026-10-04: a fresh, sealed read of 5,000 stacks drawn from a production archive, graded once on the answers the pack had stored, with 7 of the 5,000 wrong (the one stack the read left out counted wrong) and a Korn-Graubard upper bound of 0.26 % against a bar of 1 %. Replayed over the 546,440 unsealed MR stacks of that archive, 1.0.0 gives the same answer as 0.25.0 on every axis of every stack. Nothing needs to run again after updating, though a reclassify writes the new version onto each stack's answer.
 
 ## [1.0.0-alpha.77] - 2026-10-04
