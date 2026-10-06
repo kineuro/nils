@@ -1212,10 +1212,10 @@ fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
 }
 
 /// The tax agency's published test numbers, which nobody holds, as a
-/// source may write them, with KI_ID_GEN of their twelve digits under a
+/// source may write them, with v0's derivation of their twelve digits under a
 /// made-up key (Python's `hashlib.blake2b(pn, key=key, digest_size=8)`).
-const KI_KEY: &[u8] = b"test-reg-key-not-real";
-const KI_PEOPLE: [(&[&str], &str, &str); 2] = [
+const V0_KEY: &[u8] = b"test-reg-key-not-real";
+const V0_PEOPLE: [(&[&str], &str, &str); 2] = [
     (
         &["19850101-2382", "850101-2382"],
         "198501012382",
@@ -1226,10 +1226,10 @@ const KI_PEOPLE: [(&[&str], &str, &str); 2] = [
 
 /// A blake2b-8 registry under the made-up key, and a dataset whose
 /// originals carry the numbers in PatientID, written several ways.
-fn ki_lab() -> (Lab, TempDir) {
+fn v0_lab() -> (Lab, TempDir) {
     let dir = TempDir::new("pseudonymize-home");
     let home = Home::new(dir.path());
-    home.keys(None).add("k", KI_KEY).unwrap();
+    home.keys(None).add("k", V0_KEY).unwrap();
     home.init(&InitOptions {
         backend: Backend::Sqlite,
         dsn: None,
@@ -1246,7 +1246,7 @@ fn ki_lab() -> (Lab, TempDir) {
     let data = TempDir::new("pseudonymize-ds");
     let originals = Path::new("derivatives/dcm-original");
     let mut n = 0;
-    for (p, (forms, _, _)) in KI_PEOPLE.iter().enumerate() {
+    for (p, (forms, _, _)) in V0_PEOPLE.iter().enumerate() {
         for (study, written) in forms.iter().enumerate() {
             n += 1;
             data.file(
@@ -1273,12 +1273,12 @@ fn anon_patient_ids(anon: &Path) -> std::collections::BTreeSet<String> {
 }
 
 #[test]
-fn a_personnummer_dataset_is_written_under_ki_id_gen_codes() {
+fn a_personnummer_dataset_is_written_under_v0_code_codes() {
     let expected: std::collections::BTreeSet<String> =
-        KI_PEOPLE.iter().map(|(_, _, c)| c.to_string()).collect();
+        V0_PEOPLE.iter().map(|(_, _, c)| c.to_string()).collect();
     // by the identity rule: the originals' number is the identifier, and
     // the codes are derived from its twelve digits
-    let (lab, data) = ki_lab();
+    let (lab, data) = v0_lab();
     let mut registry = lab.home.open().unwrap();
     let mut place = declare(&mut registry, data.path(), json!({}));
     place.dataset["identity"] =
@@ -1294,7 +1294,7 @@ fn a_personnummer_dataset_is_written_under_ki_id_gen_codes() {
 
     // by a map: the numbers filed first as the canonical identifier, and
     // the dataset holding what no map named, so nothing is provisional
-    let (lab, data) = ki_lab();
+    let (lab, data) = v0_lab();
     let mut registry = lab.home.open().unwrap();
     let mut place = declare(&mut registry, data.path(), json!({}));
     place.dataset["identity"] =
@@ -1302,12 +1302,12 @@ fn a_personnummer_dataset_is_written_under_ki_id_gen_codes() {
     {
         use nils_registry::identity_map::{self, Column, Derive, Map, Role as MapRole, Row};
         let mut store = registry.open_linkage().unwrap();
-        let keys = Subkeys::derive(KI_KEY);
+        let keys = Subkeys::derive(V0_KEY);
         let columns = [Column {
             header: "pnr".into(),
             role: MapRole::Canonical("personnummer".into()),
         }];
-        let rows: Vec<Row> = KI_PEOPLE
+        let rows: Vec<Row> = V0_PEOPLE
             .iter()
             .enumerate()
             .map(|(i, (forms, _, _))| Row {
@@ -1321,7 +1321,7 @@ fn a_personnummer_dataset_is_written_under_ki_id_gen_codes() {
             &keys,
             Some(&Derive {
                 scheme: Scheme::Blake2b8,
-                key: KI_KEY,
+                key: V0_KEY,
                 display_length: 12,
             }),
             &Map {

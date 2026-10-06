@@ -471,9 +471,9 @@ fn a_blake2b_8_registry_reproduces_the_v0_codes() {
 }
 
 #[test]
-fn a_personnummer_rule_on_blake2b_8_gives_ki_id_gen_of_the_twelve_digits() {
+fn a_personnummer_rule_on_blake2b_8_gives_v0_code_of_the_twelve_digits() {
     // The tax agency's published test numbers, which nobody holds, under a
-    // made-up key; the codes are KI_ID_GEN of the twelve digits as Python's
+    // made-up key; the codes are v0's derivation of the twelve digits as Python's
     // hashlib.blake2b(pn, key=key, digest_size=8) gives them.
     let rule = Rule::parse("identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n")
         .unwrap();
