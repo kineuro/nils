@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - A new registry is made with the pseudonym scheme `blake2b-8` by default, by `nils setup` and by `nils init`: a person's code is the keyed 8-byte BLAKE2b of their identifier, as 16 hex characters, which is the function a site's existing codes were made with. `blake2b-32` stays selectable with `--scheme blake2b-32`. A registry keeps the scheme it was made with; a setup rerun that names another is refused.
+- An identifier filed under the id type `personnummer` is read as its twelve digits before its code or its lookup is derived: separators and spaces are dropped, a ten digit number gets its century (a `+` meaning a hundred years or more), and a coordination number keeps its day as written. So one person derives one code however a source wrote the number. A value of that type that is no personnummer (another shape, a date that is no date, a wrong check digit) does not answer the identity rule, which goes on to its next source with an `identity_unparsed` diagnostic, and refuses its row in a map import, which names the column and never the value. Identifiers of every other type are hashed as read. A registry that filed personnummer under their written forms before this release finds them under the twelve digits now, so a map of such numbers is best imported again.
 
 ### Added
 
