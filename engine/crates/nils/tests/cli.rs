@@ -61,7 +61,15 @@ fn home() -> TempDir {
     let out = nils()
         .args(["--registry"])
         .arg(home.path())
-        .args(["init", "--key", "k", "--display-length", "10"])
+        .args([
+            "init",
+            "--key",
+            "k",
+            "--scheme",
+            "blake2b-32",
+            "--display-length",
+            "10",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
@@ -2801,6 +2809,8 @@ fn the_cli_runs_a_round_on_postgres_too() {
             schema,
             "--key",
             "k",
+            "--scheme",
+            "blake2b-32",
             "--display-length",
             "10",
         ])

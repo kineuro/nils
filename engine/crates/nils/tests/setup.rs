@@ -299,6 +299,125 @@ fn yes_makes_a_registry_and_a_state_file_and_a_second_run_changes_nothing() {
     );
 }
 
+/// A site's key file makes the registry: its value is the key byte for byte
+/// under the default scheme, blake2b-8, so the registry gives every person
+/// the code the site's key has always given them. A file others may read is
+/// refused before anything is made, the key is never said, and a rerun that
+/// names another scheme is refused, since a registry keeps its own.
+#[test]
+fn a_registry_key_file_makes_a_blake2b_8_registry_on_the_files_key() {
+    // made up for this test; no site's key
+    const VALUE: &str = "test-reg-key-not-real";
+    let nils = Installed::new("nils-setup-reg-key");
+    let config = TempDir::new("nils-setup-reg-key-config");
+    let base = TempDir::new("nils-setup-reg-key-base");
+    let dir = base.path().join("nils");
+    let key_file = base.path().join("reg-key");
+    std::fs::write(&key_file, format!("REG_KEY={VALUE}\n")).unwrap();
+    let args = [
+        "--yes",
+        "--parts",
+        "engine",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--no-service",
+        "--reg-key-file",
+        key_file.to_str().unwrap(),
+    ];
+    let never_said = |o: &Out| {
+        assert!(
+            !o.stdout.contains(VALUE) && !o.stderr.contains(VALUE),
+            "the key was said"
+        );
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let open = setup(&nils.path(), config.path(), &args);
+        assert!(!open.ok, "a key file others may read was taken");
+        assert!(open.stderr.contains("chmod 600"), "{}", open.stderr);
+        never_said(&open);
+        assert!(
+            !dir.join("registry").join("nils.toml").exists(),
+            "a registry was made on a refused key file"
+        );
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let made = setup(&nils.path(), config.path(), &args);
+    assert!(made.ok, "{}", made.stderr);
+    never_said(&made);
+    let fingerprint = nils_registry::pseudonym::fingerprint(VALUE.as_bytes());
+    made.says(&fingerprint);
+    let registry = dir.join("registry");
+    let db = rusqlite::Connection::open(registry.join("registry.db")).unwrap();
+    let scheme: String = db
+        .query_row(
+            "SELECT value FROM registry_meta WHERE key = 'pseudonym_scheme'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(scheme, "blake2b-8");
+    // the key the registry holds is the value, without the prefix or the line end
+    let listed = output(
+        Command::new(nils.path())
+            .arg("--registry")
+            .arg(&registry)
+            .args(["key", "list"]),
+    );
+    let listed = String::from_utf8_lossy(&listed.stdout).to_string();
+    let line = listed
+        .lines()
+        .find(|l| l.contains(" nils "))
+        .unwrap_or_else(|| panic!("no key nils in {listed}"));
+    assert!(line.contains(&fingerprint), "{line}");
+    assert!(line.contains(&format!("{} bytes", VALUE.len())), "{line}");
+
+    // a registry keeps its scheme
+    let mut other = args.to_vec();
+    other.extend(["--scheme", "blake2b-32"]);
+    let refused = setup(&nils.path(), config.path(), &other);
+    assert!(!refused.ok, "another scheme was taken over a registry");
+    assert!(
+        refused.stderr.contains("made with blake2b-8"),
+        "{}",
+        refused.stderr
+    );
+
+    // and blake2b-32 is still there to choose for a new one
+    let config32 = TempDir::new("nils-setup-reg-key-config-32");
+    let dir32 = base.path().join("nils-32");
+    let chose = setup(
+        &nils.path(),
+        config32.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir32.to_str().unwrap(),
+            "--no-service",
+            "--reg-key-file",
+            key_file.to_str().unwrap(),
+            "--scheme",
+            "blake2b-32",
+        ],
+    );
+    assert!(chose.ok, "{}", chose.stderr);
+    let db = rusqlite::Connection::open(dir32.join("registry").join("registry.db")).unwrap();
+    let scheme: String = db
+        .query_row(
+            "SELECT value FROM registry_meta WHERE key = 'pseudonym_scheme'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(scheme, "blake2b-32");
+}
+
 /// A rerun that names another directory of DICOM moves the source place
 /// there, where the old path stayed and the engine was given the new one;
 /// and a source place added with nils place add is mounted and handed to the
@@ -976,7 +1095,7 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     );
     o.says(&format!("{as_engine} key add nils\n"));
     o.says(&format!(
-        "{as_engine} setup-registry init --backend sqlite\n"
+        "{as_engine} setup-registry init --backend sqlite --scheme blake2b-8\n"
     ));
     o.says(&format!("{as_engine} setup-registry declare\n"));
     o.says(&format!(
@@ -1623,7 +1742,14 @@ fn the_steps_taken_as_the_engines_account_declare_and_read_back_the_places_as_se
         String::from_utf8_lossy(&added.stderr)
     );
     let made = with_input(
-        nils_at(&registry).args(["setup-registry", "init", "--backend", "sqlite"]),
+        nils_at(&registry).args([
+            "setup-registry",
+            "init",
+            "--backend",
+            "sqlite",
+            "--scheme",
+            "blake2b-8",
+        ]),
         "",
     );
     assert!(
@@ -1648,7 +1774,7 @@ fn the_steps_taken_as_the_engines_account_declare_and_read_back_the_places_as_se
             .collect()
     };
     let made_as_setup = [
-        ("pseudonym_scheme".to_string(), "blake2b-32".to_string()),
+        ("pseudonym_scheme".to_string(), "blake2b-8".to_string()),
         ("display_length".to_string(), "12".to_string()),
         ("pseudonym_key".to_string(), "nils".to_string()),
     ];
@@ -1912,7 +2038,7 @@ fn the_step_that_makes_a_registry_on_postgres_reads_the_connection_string_from_i
         [
             ("display_length".to_string(), "12".to_string()),
             ("pseudonym_key".to_string(), "nils".to_string()),
-            ("pseudonym_scheme".to_string(), "blake2b-32".to_string()),
+            ("pseudonym_scheme".to_string(), "blake2b-8".to_string()),
         ]
     );
     drop();

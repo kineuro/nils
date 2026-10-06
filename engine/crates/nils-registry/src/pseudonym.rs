@@ -18,13 +18,17 @@ use blake2::{Blake2b, Blake2bMac, Digest};
 pub enum Scheme {
     /// v0's: the keyed 8-byte BLAKE2b of the identifier, as 16 hex characters.
     Blake2b8,
-    /// The default: a keyed 32-byte BLAKE2b kept as the digest, with a
-    /// Crockford base32 display code of `display_length` characters.
+    /// A keyed 32-byte BLAKE2b kept as the digest, with a Crockford base32
+    /// display code of `display_length` characters.
     Blake2b32,
 }
 
 impl Scheme {
-    pub const DEFAULT: Scheme = Scheme::Blake2b32;
+    /// The scheme a new registry is made with when none is named:
+    /// `blake2b-8`, so that a registry made with a site's existing key gives
+    /// every person the code that key has always given them. `blake2b-32`
+    /// stays selectable.
+    pub const DEFAULT: Scheme = Scheme::Blake2b8;
 
     pub fn name(self) -> &'static str {
         match self {

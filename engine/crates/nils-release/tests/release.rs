@@ -84,7 +84,7 @@ fn registry_in(
         backend,
         dsn,
         schema: (backend == Backend::Postgres).then(|| schema.to_string()),
-        scheme: Scheme::DEFAULT,
+        scheme: Scheme::Blake2b32,
         key: "k".to_string(),
         display_length: 12,
         session_scheme: None,

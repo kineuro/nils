@@ -153,7 +153,7 @@ fn one_identifier_is_one_subject_across_studies_and_runs() {
         // the code is the scheme's code of the identifier under the key
         assert_eq!(
             code_of(&mut reg, sub_a),
-            pseudonym::code(Scheme::DEFAULT, KEY, "P1", 12).code,
+            pseudonym::code(Scheme::Blake2b32, KEY, "P1", 12).code,
             "{name}"
         );
         // the identifier comes back from the linkage store, and the read is audited
@@ -530,7 +530,7 @@ fn two_identifiers_on_one_code_stop_the_job_with_a_review_item() {
     let mut by_code: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for i in 0..256 {
         let id = format!("P{i}");
-        let code = pseudonym::code(Scheme::DEFAULT, KEY, &id, 1).code;
+        let code = pseudonym::code(Scheme::Blake2b32, KEY, &id, 1).code;
         by_code.entry(code).or_default().push(id);
     }
     let mut pairs = by_code.values().filter(|ids| ids.len() >= 2);
@@ -542,7 +542,7 @@ fn two_identifiers_on_one_code_stop_the_job_with_a_review_item() {
         let ids = pairs.next().expect("a second pair");
         (ids[0].clone(), ids[1].clone())
     };
-    for lab in labs_with(Scheme::DEFAULT, 1) {
+    for lab in labs_with(Scheme::Blake2b32, 1) {
         let name = lab.name;
         let dir = TempDir::new("identity-collision");
         dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", &a, &[]));

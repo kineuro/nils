@@ -1650,12 +1650,10 @@ struct InitArgs {
     /// The Postgres schema of the registry; the linkage store lives in <schema>_linkage
     #[arg(long, value_name = "NAME")]
     schema: Option<String>,
-    /// The pseudonym scheme
-    #[arg(
-        long,
-        default_value = "blake2b-32",
-        value_name = "blake2b-32|blake2b-8"
-    )]
+    /// The pseudonym scheme: blake2b-8, the keyed 8-byte BLAKE2b of the
+    /// identifier as 16 hex characters, or blake2b-32, a 32-byte digest shown
+    /// as a Crockford code of --display-length characters
+    #[arg(long, default_value = "blake2b-8", value_name = "blake2b-8|blake2b-32")]
     scheme: String,
     /// The name of the key in the key store the pseudonyms are derived from
     #[arg(long, value_name = "NAME")]

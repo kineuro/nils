@@ -42,7 +42,7 @@ fn lab() -> Lab {
         backend: Backend::Sqlite,
         dsn: None,
         schema: None,
-        scheme: Scheme::DEFAULT,
+        scheme: Scheme::Blake2b32,
         key: "k".to_string(),
         display_length: 12,
         session_scheme: None,
@@ -1204,7 +1204,7 @@ fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
         .iter()
         .map(|r| r.text(0).unwrap().to_string())
         .collect();
-    let expected = nils_registry::pseudonym::code(Scheme::DEFAULT, KEY, UNMAPPED, 12).code;
+    let expected = nils_registry::pseudonym::code(Scheme::Blake2b32, KEY, UNMAPPED, 12).code;
     assert!(codes.contains(&expected), "{codes:?}");
     let again = pseudonymize(&s, &mut registry).unwrap();
     assert_eq!(files_of(&again), (16, 0, 15, 0, 1), "{again}");

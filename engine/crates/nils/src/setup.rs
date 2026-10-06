@@ -577,6 +577,16 @@ pub(crate) struct SetupArgs {
     /// The registry key's passphrase, from a file instead of a prompt
     #[arg(long, value_name = "FILE")]
     key_file: Option<PathBuf>,
+    /// The registry's key from a key file, where a site already has one:
+    /// one line, REG_KEY=<value> or the value alone, kept readable by its
+    /// owner only (chmod 600). The value is the key, byte for byte
+    #[arg(long, value_name = "FILE", conflicts_with = "key_file")]
+    reg_key_file: Option<PathBuf>,
+    /// The pseudonym scheme a new registry is made with: blake2b-8, the keyed
+    /// 8-byte BLAKE2b of the identifier as 16 hex characters (the default),
+    /// or blake2b-32. A registry keeps the scheme it was made with
+    #[arg(long, value_name = "blake2b-8|blake2b-32")]
+    scheme: Option<String>,
     /// Write and start services
     #[arg(long)]
     service: bool,
@@ -1337,7 +1347,7 @@ struct AccountStep {
 /// account makes it, since every pseudonym the registry ever gives follows
 /// from these, so a registry made in setup's own process and one made as the
 /// engine's account are both made from this.
-fn registry_init(backend: &BackendChoice) -> InitOptions {
+fn registry_init(backend: &BackendChoice, scheme: Scheme) -> InitOptions {
     let (backend, dsn, schema) = match backend {
         BackendChoice::Sqlite => (Backend::Sqlite, None, None),
         BackendChoice::Postgres { dsn, schema } => {
@@ -1348,11 +1358,118 @@ fn registry_init(backend: &BackendChoice) -> InitOptions {
         backend,
         dsn,
         schema,
-        scheme: Scheme::Blake2b32,
+        scheme,
         key: "nils".to_string(),
         display_length: 12,
         session_scheme: None,
     }
+}
+
+/// The longest key BLAKE2b takes, in bytes.
+const MAX_KEY_BYTES: usize = 64;
+
+/// The prefix a site's key file may write before the value.
+const REG_KEY_PREFIX: &str = "REG_KEY=";
+
+/// The pseudonym scheme an install's registry has: the one named, else the
+/// default, for a registry this install makes. A registry that is already
+/// there keeps the scheme it was made with, since every code it has given
+/// follows from it: a scheme named that is not its own is refused, and one
+/// that cannot be read where it stands is left to the registry.
+fn scheme_for(named: Option<&str>, existing: Option<&Home>) -> Result<Scheme, String> {
+    let scheme = match named {
+        Some(name) => name
+            .parse::<Scheme>()
+            .map_err(|_| format!("--scheme {name}: blake2b-8 or blake2b-32"))?,
+        None => Scheme::DEFAULT,
+    };
+    if let (Some(name), Some(home)) = (named, existing)
+        && let Some(own) = scheme_of(home)
+        && own != scheme
+    {
+        return Err(format!(
+            "--scheme {name}: the registry at {} was made with {own}, and a registry keeps \
+             the scheme it was made with; leave --scheme out to keep it",
+            home.dir().display()
+        ));
+    }
+    Ok(scheme)
+}
+
+/// The scheme of the registry at `home`, read as it stands with nothing
+/// changed; none where it cannot be read that way.
+fn scheme_of(home: &Home) -> Option<Scheme> {
+    use nils_registry::store::Param;
+    let mut store = home.open_as_it_stands().ok()?;
+    let table = store.qualified("registry_meta");
+    let sql = format!(
+        "SELECT value FROM {table} WHERE key = {}",
+        store.dialect().param(1, nils_registry::schema::Type::Text)
+    );
+    let row = store
+        .query_opt(&sql, &[Param::from("pseudonym_scheme")])
+        .ok()??;
+    row.text(0).ok()?.parse().ok()
+}
+
+/// The registry's key from a site's key file (`--reg-key-file`): one line,
+/// `REG_KEY=<value>` or the value alone, with one line end after it. The
+/// value is the key byte for byte, so nothing in it is changed: a value
+/// that begins or ends with a space or a tab is refused rather than trimmed,
+/// since trimming would make another key without a word. Refused as well:
+/// a file that is not a regular file, one that its group or others may
+/// read or write, an empty value, a second line, and a value longer than
+/// the 64 bytes BLAKE2b takes as a key. The value is never in a message.
+fn reg_key_from_file(path: &Path) -> Result<String, String> {
+    let named = || format!("--reg-key-file {}", path.display());
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", named()))?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a regular file", named()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{}: its group or others may read or write it (mode {mode:o}); the registry's \
+                 key is readable by its owner only: chmod 600 {}",
+                named(),
+                path.display()
+            ));
+        }
+    }
+    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", named()))?;
+    let text = String::from_utf8(raw).map_err(|_| format!("{}: not text", named()))?;
+    let line = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(&text);
+    if line.contains(['\n', '\r']) {
+        return Err(format!(
+            "{}: more than one line; the file holds the key alone",
+            named()
+        ));
+    }
+    let value = line.strip_prefix(REG_KEY_PREFIX).unwrap_or(line);
+    if value.is_empty() {
+        return Err(format!("{}: the key is empty", named()));
+    }
+    if value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) {
+        return Err(format!(
+            "{}: the key begins or ends with a space or a tab, which is not trimmed, since the \
+             key is used byte for byte; remove it from the file",
+            named()
+        ));
+    }
+    if value.len() > MAX_KEY_BYTES {
+        return Err(format!(
+            "{}: the key is {} bytes, and a key is at most {MAX_KEY_BYTES}",
+            named(),
+            value.len()
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// The two steps that make a registry: the key added, with its passphrase on
@@ -1367,10 +1484,21 @@ fn registry_init(backend: &BackendChoice) -> InitOptions {
 /// reads the connection string from its input. It makes the registry from
 /// [`registry_init`] itself, as setup's own process does, so the pseudonym
 /// settings are one place's and cannot drift between the two.
-fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<AccountStep> {
+fn registry_made_steps(
+    backend: &BackendChoice,
+    scheme: Scheme,
+    passphrase: &str,
+) -> Vec<AccountStep> {
     let (init, input) = match backend {
         BackendChoice::Sqlite => (
-            owned_words(&[REGISTRY_STEP, "init", "--backend", Backend::Sqlite.name()]),
+            owned_words(&[
+                REGISTRY_STEP,
+                "init",
+                "--backend",
+                Backend::Sqlite.name(),
+                "--scheme",
+                scheme.name(),
+            ]),
             None,
         ),
         BackendChoice::Postgres { dsn, schema } => (
@@ -1381,6 +1509,8 @@ fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<Account
                 Backend::Postgres.name(),
                 "--schema",
                 schema,
+                "--scheme",
+                scheme.name(),
             ]),
             Some(dsn.as_bytes().to_vec()),
         ),
@@ -4073,6 +4203,12 @@ pub(crate) struct Plan {
     /// given the one setup asked for.
     pub(crate) sources: Vec<(String, PathBuf)>,
     pub(crate) registry_exists: bool,
+    /// The pseudonym scheme a registry made by this install is made with.
+    /// A registry that is already there keeps its own.
+    pub(crate) scheme: Scheme,
+    /// The key file the registry's key is read from (`--reg-key-file`),
+    /// named in the plan; the key itself never is.
+    pub(crate) reg_key_file: Option<PathBuf>,
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
@@ -4375,6 +4511,8 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
             .map(|p| PathBuf::from(&p.path)),
         sources,
         registry_exists: true,
+        scheme: Scheme::DEFAULT,
+        reg_key_file: None,
         service: !state.service.is_empty() && state.service != "none",
         channel: channel.map(str::to_string),
         version: update::VERSION.to_string(),
@@ -6301,8 +6439,21 @@ fn questions(
             }
         }
     };
+    let scheme =
+        scheme_for(args.scheme.as_deref(), registry_exists.then_some(&home)).map_err(usage)?;
+    if let Some(path) = &args.reg_key_file
+        && !registry_exists
+    {
+        // read now, so a key file that would be refused costs a sentence
+        // before anything is written; the key is read again where it is used
+        reg_key_from_file(path).map_err(usage)?;
+    }
     let mut answers = Answers::default();
-    if !registry_exists && args.key_file.is_none() && console.interactive() {
+    if !registry_exists
+        && args.key_file.is_none()
+        && args.reg_key_file.is_none()
+        && console.interactive()
+    {
         answers.passphrase = console.ask_secret("A passphrase for the registry's key")?;
     }
 
@@ -6790,6 +6941,8 @@ fn questions(
         source,
         sources,
         registry_exists,
+        scheme,
+        reg_key_file: args.reg_key_file.clone(),
         host_loopback,
         postgres,
         service,
@@ -7337,6 +7490,17 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         ),
     ));
     rows.push((
+        "pseudonyms",
+        if plan.registry_exists {
+            "the registry's own scheme and key".to_string()
+        } else {
+            match &plan.reg_key_file {
+                Some(path) => format!("{}, the key from {}", plan.scheme, path.display()),
+                None => format!("{}, the key from a passphrase", plan.scheme),
+            }
+        },
+    ));
+    rows.push((
         "backend",
         match &plan.backend {
             BackendChoice::Sqlite => "sqlite".to_string(),
@@ -7630,7 +7794,7 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
                 acting.account
             ))
         );
-        for step in registry_made_steps(&plan.backend, "") {
+        for step in registry_made_steps(&plan.backend, plan.scheme, "") {
             let _ = writeln!(out, "    {}", acting.argv(&step.words).join(" "));
         }
     }
@@ -8731,6 +8895,8 @@ fn registry_container_steps(plan: &Plan) -> Option<Vec<Vec<String>>> {
         "init",
         "--key",
         "nils",
+        "--scheme",
+        plan.scheme.name(),
     ]));
     made.extend(backend);
     Some(vec![key, made])
@@ -8747,7 +8913,20 @@ fn make_registry(
     asked: Option<&str>,
     acting: Option<&AsAccount>,
 ) -> Result<(), Exit> {
+    let from_key_file = match &args.reg_key_file {
+        Some(path) => {
+            let key = reg_key_from_file(path).map_err(usage)?;
+            console.note(&format!(
+                "the registry's key is read from {}, fingerprint {}",
+                path.display(),
+                nils_registry::pseudonym::fingerprint(key.as_bytes())
+            ));
+            Some(key)
+        }
+        None => None,
+    };
     let passphrase = match (&args.key_file, asked) {
+        _ if let Some(key) = from_key_file => key,
         (Some(path), _) => std::fs::read_to_string(path)
             .map_err(|e| usage(format!("--key-file {}: {e}", path.display())))?,
         (None, Some(asked)) => asked.to_string(),
@@ -8855,7 +9034,7 @@ fn make_registry(
                 acting.account
             ))
         })?;
-        for step in registry_made_steps(&plan.backend, &passphrase) {
+        for step in registry_made_steps(&plan.backend, plan.scheme, &passphrase) {
             let ran = acting.run(&step.words, step.input.as_deref());
             if !ran.ok {
                 return Err(fail(format!(
@@ -8874,7 +9053,7 @@ fn make_registry(
         .map_err(|e| fail(e.to_string()))?;
     // The connection string goes into `nils.toml` as it was given, and is
     // dialled from here, which is where this process runs.
-    let init = registry_init(&plan.backend);
+    let init = registry_init(&plan.backend, plan.scheme);
     home.clone()
         .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
         .init(&init)
@@ -9125,6 +9304,9 @@ pub(crate) enum RegistryStep {
         /// The Postgres schema of the registry
         #[arg(long, value_name = "NAME")]
         schema: Option<String>,
+        /// The pseudonym scheme; the default scheme where not named
+        #[arg(long, value_name = "blake2b-8|blake2b-32")]
+        scheme: Option<String>,
     },
     /// The registry's source places as it stands, as JSON; a registry at
     /// another schema is left as it is, and where it stands is said instead
@@ -9155,8 +9337,13 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             println!("dropped {schema} and {schema}_linkage");
             Ok(())
         }
-        RegistryStep::Init { backend, schema } => {
-            let meta = registry_made_here(home, &backend, schema, std::io::stdin().lock())?;
+        RegistryStep::Init {
+            backend,
+            schema,
+            scheme,
+        } => {
+            let scheme = scheme_for(scheme.as_deref(), None).map_err(usage)?;
+            let meta = registry_made_here(home, &backend, schema, scheme, std::io::stdin().lock())?;
             println!(
                 "initialised {} on {backend}: registry {}, schema version {}, pseudonyms {} from key {}",
                 home.dir().display(),
@@ -9212,6 +9399,7 @@ fn registry_made_here(
     home: &Home,
     backend: &str,
     schema: Option<String>,
+    scheme: Scheme,
     input: impl std::io::Read,
 ) -> Result<nils_registry::Meta, Exit> {
     let backend: Backend = backend
@@ -9235,7 +9423,7 @@ fn registry_made_here(
             BackendChoice::Postgres { dsn, schema }
         }
     };
-    let init = registry_init(&choice);
+    let init = registry_init(&choice, scheme);
     let registry = home
         .clone()
         .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
@@ -18753,6 +18941,8 @@ mod tests {
             source: Some(PathBuf::from("/data/source")),
             sources: Vec::new(),
             registry_exists: false,
+            scheme: Scheme::DEFAULT,
+            reg_key_file: None,
             service: true,
             channel: None,
             version: "1.0.0-alpha.2".to_string(),
@@ -22951,7 +23141,7 @@ mod tests {
             dsn: dsn.to_string(),
             schema: "nils".to_string(),
         };
-        let steps = registry_made_steps(&postgres, passphrase);
+        let steps = registry_made_steps(&postgres, Scheme::DEFAULT, passphrase);
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].words, ["key", "add", "nils"]);
         assert_eq!(
@@ -22967,7 +23157,9 @@ mod tests {
                 "--backend",
                 "postgres",
                 "--schema",
-                "nils"
+                "nils",
+                "--scheme",
+                "blake2b-8"
             ]
         );
         assert_eq!(
@@ -22985,10 +23177,17 @@ mod tests {
                 "a command line is every account's to read: {argv:?}"
             );
         }
-        let sqlite = registry_made_steps(&BackendChoice::Sqlite, passphrase);
+        let sqlite = registry_made_steps(&BackendChoice::Sqlite, Scheme::Blake2b32, passphrase);
         assert_eq!(
             sqlite[1].words,
-            ["setup-registry", "init", "--backend", "sqlite"]
+            [
+                "setup-registry",
+                "init",
+                "--backend",
+                "sqlite",
+                "--scheme",
+                "blake2b-32"
+            ]
         );
         assert_eq!(sqlite[1].input, None);
     }
@@ -22997,11 +23196,12 @@ mod tests {
     /// account and from setup's own process, and what each came to.
     fn made_both_ways(
         backend: &BackendChoice,
+        chosen: Scheme,
         dir: &Path,
         clear: &dyn Fn(),
     ) -> [(nils_registry::Meta, String); 2] {
         use clap::Parser as _;
-        let steps = registry_made_steps(backend, "a passphrase");
+        let steps = registry_made_steps(backend, chosen, "a passphrase");
         let argv = as_the_engine().argv(&steps[1].words);
         // the words as the engine binary reads them
         let cli = crate::Cli::try_parse_from(&argv[4..])
@@ -23015,6 +23215,7 @@ mod tests {
                 RegistryStep::Init {
                     backend: named,
                     schema,
+                    scheme,
                 },
         } = cli.command
         else {
@@ -23028,12 +23229,17 @@ mod tests {
         clear();
         let step = home_at("as-the-account");
         let input = steps[1].input.clone().unwrap_or_default();
-        let by_step = registry_made_here(&step, &named, schema, input.as_slice())
+        let scheme = scheme_for(scheme.as_deref(), None).unwrap();
+        let by_step = registry_made_here(&step, &named, schema, scheme, input.as_slice())
             .unwrap_or_else(|e| panic!("{argv:?} was refused: {}", e.message));
         let by_step_config = std::fs::read_to_string(step.config_path()).unwrap();
         clear();
         let own = home_at("in-process");
-        let in_process = own.init(&registry_init(backend)).unwrap().meta().clone();
+        let in_process = own
+            .init(&registry_init(backend, chosen))
+            .unwrap()
+            .meta()
+            .clone();
         let own_config = std::fs::read_to_string(own.config_path()).unwrap();
         clear();
         [(by_step, by_step_config), (in_process, own_config)]
@@ -23056,11 +23262,17 @@ mod tests {
             }
             _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
         }
-        for (backend, postgres) in backends {
-            let at = dir.join(match backend {
-                BackendChoice::Sqlite => "sqlite",
-                BackendChoice::Postgres { .. } => "postgres",
-            });
+        for ((backend, postgres), chosen) in backends
+            .into_iter()
+            .flat_map(|b| [(b.clone(), Scheme::Blake2b8), (b, Scheme::Blake2b32)])
+        {
+            let at = dir.join(format!(
+                "{}-{chosen}",
+                match backend {
+                    BackendChoice::Sqlite => "sqlite",
+                    BackendChoice::Postgres { .. } => "postgres",
+                }
+            ));
             let clear = || {
                 if let Some((dsn, schema)) = &postgres {
                     nils_registry::store::Store::connect_postgres(dsn, schema)
@@ -23072,10 +23284,10 @@ mod tests {
                         .unwrap();
                 }
             };
-            let [(step, step_config), (own, own_config)] = made_both_ways(&backend, &at, &clear);
+            let [(step, step_config), (own, own_config)] =
+                made_both_ways(&backend, chosen, &at, &clear);
             assert_eq!(
-                step.pseudonym_scheme,
-                Scheme::Blake2b32,
+                step.pseudonym_scheme, chosen,
                 "every pseudonym follows from the scheme: {backend:?}"
             );
             assert_eq!(
@@ -23100,15 +23312,152 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A key made up for these tests; no site's key.
+    const TEST_REG_KEY: &str = "test-reg-key-not-real";
+
+    #[test]
+    fn a_registry_key_file_gives_its_value_byte_for_byte_and_refuses_what_is_not_one() {
+        let dir = scratch("reg-key-file");
+        let file = |name: &str, content: &[u8], mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            #[cfg(not(unix))]
+            let _ = mode;
+            path
+        };
+        let key = format!("REG_KEY={TEST_REG_KEY}");
+        for (name, content) in [
+            ("prefixed", format!("{key}\n")),
+            ("prefixed-no-end", key.clone()),
+            ("prefixed-crlf", format!("{key}\r\n")),
+            ("value-alone", format!("{TEST_REG_KEY}\n")),
+        ] {
+            let path = file(name, content.as_bytes(), 0o600);
+            assert_eq!(
+                reg_key_from_file(&path).as_deref(),
+                Ok(TEST_REG_KEY),
+                "{name}"
+            );
+        }
+        let refused = |name: &str, content: &[u8], mode: u32, says: &str| {
+            let path = file(name, content, mode);
+            let why = reg_key_from_file(&path).expect_err(name);
+            assert!(why.contains(says), "{name}: {why}");
+            assert!(
+                !why.contains(TEST_REG_KEY),
+                "{name}: the key was said: {why}"
+            );
+        };
+        refused("empty", b"", 0o600, "empty");
+        refused("prefix-only", b"REG_KEY=\n", 0o600, "empty");
+        refused(
+            "spaces",
+            format!("REG_KEY= {TEST_REG_KEY}\n").as_bytes(),
+            0o600,
+            "space",
+        );
+        refused(
+            "trailing-tab",
+            format!("{TEST_REG_KEY}\t\n").as_bytes(),
+            0o600,
+            "space or a tab",
+        );
+        refused(
+            "two-lines",
+            format!("{TEST_REG_KEY}\nmore\n").as_bytes(),
+            0o600,
+            "more than one line",
+        );
+        refused("too-long", "k".repeat(65).as_bytes(), 0o600, "at most 64");
+        assert_eq!(
+            reg_key_from_file(&file("longest", "k".repeat(64).as_bytes(), 0o600)).map(|k| k.len()),
+            Ok(64)
+        );
+        #[cfg(unix)]
+        {
+            refused("group-reads", key.as_bytes(), 0o640, "chmod 600");
+            refused("all-read", key.as_bytes(), 0o644, "chmod 600");
+            refused("others-write", key.as_bytes(), 0o602, "chmod 600");
+        }
+        let missing = reg_key_from_file(&dir.join("not-there")).unwrap_err();
+        assert!(missing.contains("--reg-key-file"), "{missing}");
+        let directory = reg_key_from_file(&dir).unwrap_err();
+        assert!(directory.contains("not a regular file"), "{directory}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_registry_made_on_a_key_files_value_gives_the_codes_of_that_key() {
+        let dir = scratch("reg-key-registry");
+        let path = dir.join("reg-key");
+        std::fs::write(&path, format!("REG_KEY={TEST_REG_KEY}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let value = reg_key_from_file(&path).unwrap();
+        let home = Home::new(dir.join("registry"));
+        // as setup's own process adds it and makes the registry
+        let (bytes, _) = nils_registry::keys::strip_newline(value.as_bytes());
+        home.keys(None).add("nils", bytes).unwrap();
+        let scheme = scheme_for(None, None).unwrap();
+        assert_eq!(scheme, Scheme::Blake2b8, "the default for a new registry");
+        let registry = home
+            .clone()
+            .init(&registry_init(&BackendChoice::Sqlite, scheme))
+            .unwrap();
+        assert_eq!(registry.meta().pseudonym_scheme, Scheme::Blake2b8);
+        let key = registry.pseudonym_key().unwrap();
+        assert_eq!(key, TEST_REG_KEY.as_bytes());
+        let code = nils_registry::pseudonym::code(Scheme::Blake2b8, &key, "PID-0001", 12).code;
+        assert_eq!(
+            code,
+            nils_registry::pseudonym::code(
+                Scheme::Blake2b8,
+                TEST_REG_KEY.as_bytes(),
+                "PID-0001",
+                12
+            )
+            .code
+        );
+        assert_eq!(code.len(), 16);
+        drop(registry);
+
+        // the registry keeps its scheme: the same named again is taken,
+        // another is refused, and none named is the registry's own business
+        assert_eq!(
+            scheme_for(Some("blake2b-8"), Some(&home)),
+            Ok(Scheme::Blake2b8)
+        );
+        let why = scheme_for(Some("blake2b-32"), Some(&home)).unwrap_err();
+        assert!(why.contains("made with blake2b-8"), "{why}");
+        assert!(scheme_for(None, Some(&home)).is_ok());
+        let why = scheme_for(Some("sha"), None).unwrap_err();
+        assert!(why.contains("blake2b-8 or blake2b-32"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_step_that_makes_a_registry_takes_a_connection_string_only_on_its_input() {
         let dir = scratch("registry-step-refusals");
         let home = Home::new(dir.join("registry"));
         let refused = |backend: &str, schema: Option<&str>, input: &str| {
-            registry_made_here(&home, backend, schema.map(str::to_string), input.as_bytes())
-                .map(|_| ())
-                .unwrap_err()
-                .message
+            registry_made_here(
+                &home,
+                backend,
+                schema.map(str::to_string),
+                Scheme::DEFAULT,
+                input.as_bytes(),
+            )
+            .map(|_| ())
+            .unwrap_err()
+            .message
         };
         assert!(
             refused("postgres", Some("nils"), "")
@@ -23243,7 +23592,7 @@ mod tests {
         );
         assert!(
             said.contains(&format!(
-                "{as_engine} setup-registry init --backend postgres --schema nils\n"
+                "{as_engine} setup-registry init --backend postgres --schema nils --scheme blake2b-8\n"
             )),
             "{said}"
         );
@@ -27087,6 +27436,8 @@ mod tests {
                 "init",
                 "--key",
                 "nils",
+                "--scheme",
+                "blake2b-8",
             ])
         );
 

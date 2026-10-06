@@ -43,7 +43,7 @@ pub const KEY: &[u8] = b"nils-digest-fixture-key";
 
 impl Lab {
     fn new(name: &'static str, backend: Backend, dsn: Option<String>) -> Lab {
-        Lab::with(name, backend, dsn, Scheme::DEFAULT, 12, KEY)
+        Lab::with(name, backend, dsn, Scheme::Blake2b32, 12, KEY)
     }
 
     fn with(
@@ -99,7 +99,7 @@ fn drop_schemas(dsn: &str) {
 
 /// SQLite always; Postgres when the DSN is set, one test at a time.
 pub fn labs() -> Vec<Lab> {
-    labs_with(Scheme::DEFAULT, 12)
+    labs_with(Scheme::Blake2b32, 12)
 }
 
 /// The labs on a pseudonym scheme and display length of the test's choosing.

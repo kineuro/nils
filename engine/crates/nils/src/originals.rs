@@ -1577,7 +1577,7 @@ mod tests {
             backend: nils_registry::Backend::Sqlite,
             dsn: None,
             schema: None,
-            scheme: nils_registry::pseudonym::Scheme::DEFAULT,
+            scheme: nils_registry::pseudonym::Scheme::Blake2b32,
             key: "k".to_string(),
             display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
             session_scheme: None,

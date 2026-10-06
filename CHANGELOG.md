@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A new registry is made with the pseudonym scheme `blake2b-8` by default, by `nils setup` and by `nils init`: a person's code is the keyed 8-byte BLAKE2b of their identifier, as 16 hex characters, which is the function a site's existing codes were made with. `blake2b-32` stays selectable with `--scheme blake2b-32`. A registry keeps the scheme it was made with; a setup rerun that names another is refused.
+
+### Added
+
+- `nils setup --scheme blake2b-8|blake2b-32` chooses the scheme of the registry it makes, and `--reg-key-file FILE` takes the registry's key from a site's key file instead of a passphrase: one line, `REG_KEY=<value>` or the value alone, used byte for byte, readable by its owner only. A file others may read, an empty value, a value with a leading or trailing space and one longer than 64 bytes are refused before anything is written, and the key is never shown, only its fingerprint.
+
 ## [1.0.0-alpha.79] - 2026-10-06
 
 The MRI pack is 1.0.1: certificate 2's rule gaps and three conventions settled by deep research, on top of the certified pack 1.0.0. 1.0.1 is not certified; it is shown by an archive replay (28 of 546,440 stacks move) and by every earlier reference read (10 settled cells fixed, none broken), and it needs a fresh read before it may claim the certificate. After updating from alpha.77 or alpha.78, a reclassify is all that is needed: no re-read and no fingerprint. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.

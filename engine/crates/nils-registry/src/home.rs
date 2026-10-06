@@ -721,7 +721,7 @@ mod tests {
             backend: Backend::Sqlite,
             dsn: None,
             schema: None,
-            scheme: Scheme::DEFAULT,
+            scheme: Scheme::Blake2b32,
             key: key.to_string(),
             display_length: DEFAULT_DISPLAY_LENGTH,
             session_scheme: None,

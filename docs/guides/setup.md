@@ -71,6 +71,21 @@ made from the machine's own randomness and written to `<dir>/key.passphrase`
 readable by nobody else. Move it into your password manager and delete the
 file.
 
+A new registry is made with the pseudonym scheme `blake2b-8`: a person's
+code is the keyed 8-byte BLAKE2b of their identifier, as 16 hex characters.
+`--scheme blake2b-32` makes one with a 32-byte digest and a shorter display
+code instead. A registry keeps the scheme it was made with: a rerun over an
+existing registry that names another scheme is refused.
+
+Where a site already derives codes with a key of its own, give that key with
+`--reg-key-file FILE` instead of a passphrase, so that the registry gives
+every person the code the key has always given them. The file holds one
+line, `REG_KEY=<value>` or the value alone, and the value is the key byte for
+byte: it is not trimmed, so a value that begins or ends with a space is
+refused, as is an empty one or one longer than 64 bytes. The file must be
+readable by its owner only (`chmod 600 FILE`); setup refuses it otherwise,
+before anything is written. The key is never shown, only its fingerprint.
+
 **5. Who may sign in.** Three answers, and each one sets both parts at once:
 
 | | The engine | The desk |
@@ -646,6 +661,8 @@ directory is NILS's.
 | `--pack-dir DIR` | Where the engine reads its rule packs |
 | `--workers N` | How many requests the engine answers at once |
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |
+| `--reg-key-file FILE` | The registry's key from a site's key file (`REG_KEY=<value>`, mode 600), instead of a passphrase |
+| `--scheme blake2b-8\|blake2b-32` | The pseudonym scheme of a new registry; `blake2b-8` by default |
 | `--service`, `--no-service` | Write and start services, or do not |
 | `--system` | Write the services of this machine, in `/etc/systemd/system`; root's to do |
 | `--account PART=ACCOUNT` | With `--system`: the account a part runs as; `supervisor=` is required, and must be nobody else's |

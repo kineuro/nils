@@ -81,7 +81,7 @@ fn released(home_dir: &TempDir, source: &TempDir, out: &Path) -> (Home, Registry
         backend: Backend::Sqlite,
         dsn: None,
         schema: None,
-        scheme: Scheme::DEFAULT,
+        scheme: Scheme::Blake2b32,
         key: "k".to_string(),
         display_length: 12,
         session_scheme: None,

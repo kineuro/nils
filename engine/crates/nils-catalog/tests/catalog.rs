@@ -27,7 +27,7 @@ fn registry() -> (Registry, TempDir) {
             backend: Backend::Sqlite,
             dsn: None,
             schema: None,
-            scheme: nils_registry::Scheme::DEFAULT,
+            scheme: nils_registry::Scheme::Blake2b32,
             key: "k".to_string(),
             display_length: 12,
             session_scheme: None,
