@@ -1706,7 +1706,7 @@ struct DigestArgs {
         value_name = "all|dcm|no-ext|<glob>[,...]"
     )]
     files: String,
-    /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default
+    /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default. A rule whose id_type is personnummer files each number as its twelve digits and skips a value that is no personnummer
     #[arg(long, value_name = "FILE")]
     identity_rule: Option<PathBuf>,
     /// The pack whose ingest list says which private elements are read into
@@ -1875,7 +1875,7 @@ enum LinkageCommand {
 struct ImportArgs {
     /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it; a personnummer column is read as twelve digits and a cell that is no personnummer refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
     #[arg(long, value_name = "HEADER=ROLE")]
     column: Vec<String>,
     /// The type the identifiers are filed under, without --column

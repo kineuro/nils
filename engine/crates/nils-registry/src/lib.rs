@@ -43,6 +43,7 @@ pub mod migrate;
 pub mod model;
 pub mod overlay;
 pub mod pair;
+pub mod personnummer;
 pub mod pipeline;
 pub mod place;
 pub mod principal;

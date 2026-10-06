@@ -13,6 +13,7 @@ use std::fmt;
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 
+use crate::personnummer;
 use crate::pseudonym::{self, ENCRYPT_DOMAIN, LOOKUP_DOMAIN};
 use crate::schema::table;
 use crate::store::{Error, Insert, Param, Row, Store};
@@ -49,8 +50,16 @@ impl Subkeys {
         }
     }
 
-    /// The lookup of an identifier of a type (§7.4 step 2).
+    /// The lookup of an identifier of a type (§7.4 step 2). A personnummer
+    /// is looked up as its twelve digits however it was written, so that a
+    /// number typed into a selection or a map finds the identity the digest
+    /// filed; a value of that type that is no personnummer is looked up as
+    /// given, and finds nothing the digest or a map filed.
     pub fn lookup(&self, id_type: &str, value: &str) -> Vec<u8> {
+        let normal = personnummer::is_type(id_type)
+            .then(|| personnummer::normalise(value).ok())
+            .flatten();
+        let value = normal.as_deref().unwrap_or(value);
         pseudonym::lookup(&self.k_lookup, id_type, value).to_vec()
     }
 

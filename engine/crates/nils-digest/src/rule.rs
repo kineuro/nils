@@ -15,6 +15,7 @@ use std::fmt;
 
 use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, IdentityFields, tag_of};
 use nils_registry::linkage::valid_id_type_name;
+use nils_registry::personnummer;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
@@ -82,6 +83,9 @@ pub struct Rule {
     /// default.
     pub source: Option<String>,
     fields: IdentityFields,
+    /// The day a ten digit personnummer takes its century against, read
+    /// once when the rule is made.
+    today: personnummer::Day,
 }
 
 /// The `n`th directory of `rel`, counted from one. The last component is the
@@ -196,6 +200,7 @@ impl Default for Rule {
             own_codes: false,
             source: None,
             fields: IdentityFields::default(),
+            today: personnummer::today(),
         }
     }
 }
@@ -296,6 +301,13 @@ impl Rule {
                     .into(),
             ));
         }
+        if verbatim && personnummer::is_type(&spec.id_type) {
+            return Err(RuleError(format!(
+                "identity.code: verbatim reads codes, and a {} is no code; a personnummer rule \
+                 derives the code from the number",
+                personnummer::ID_TYPE
+            )));
+        }
         let keywords: Vec<&str> = from
             .iter()
             .filter_map(|s| match &s.from {
@@ -311,7 +323,25 @@ impl Rule {
             own_codes: false,
             source: None,
             fields,
+            today: personnummer::today(),
         })
+    }
+
+    /// Whether the rule files personnummer, whose values are normalised to
+    /// twelve digits before a code or a lookup is derived from them, and a
+    /// value that is no personnummer does not answer.
+    pub fn normalises(&self) -> bool {
+        personnummer::is_type(&self.id_type)
+    }
+
+    /// What a source's answer becomes: the value as read, or under a
+    /// personnummer rule its twelve digits, or nothing when it is none.
+    fn taken(&self, id: &str) -> Option<String> {
+        if self.normalises() {
+            personnummer::normalise_on(id, self.today).ok()
+        } else {
+            Some(id.to_string())
+        }
     }
 
     /// The fields the reader must extract, in the rule's order. A path source
@@ -347,6 +377,9 @@ impl Rule {
             out.push_str(&format!("as {}: ", self.id_type));
         }
         out.push_str(&fields.join(", "));
+        if self.normalises() {
+            out.push_str(" (a personnummer, as twelve digits)");
+        }
         out.push_str(&format!(", then {FALLBACK_FIELD}"));
         if self.verbatim {
             out.push_str("; the value read is the code itself");
@@ -376,13 +409,17 @@ impl Rule {
                 o
             })
             .collect();
-        json!({
+        let mut out = json!({
             "id_type": self.id_type,
             "from": from,
             "fallback": FALLBACK_FIELD,
             "code": if self.verbatim { "verbatim" } else { "derived" },
             "source": self.source,
-        })
+        });
+        if self.normalises() {
+            out["normalise"] = json!("personnummer-12");
+        }
+        out
     }
 
     /// Wave 4c §6.6: resolve one file without touching it, and say what
@@ -419,25 +456,20 @@ impl Rule {
                 sources.push((shape, Outcome::Unread));
                 continue;
             }
-            match &source.pattern {
-                None => {
+            let id = match &source.pattern {
+                None => Some(value),
+                Some(re) => re
+                    .captures(value)
+                    .and_then(|c| c.name("id"))
+                    .map(|m| m.as_str())
+                    .filter(|id| !id.is_empty()),
+            };
+            match id.and_then(|id| self.taken(id)) {
+                Some(id) => {
                     sources.push((shape, Outcome::Answered));
-                    answer = Some((i, value.to_string()));
+                    answer = Some((i, id));
                 }
-                Some(re) => {
-                    let id = re
-                        .captures(value)
-                        .and_then(|c| c.name("id"))
-                        .map(|m| m.as_str())
-                        .filter(|id| !id.is_empty());
-                    match id {
-                        Some(id) => {
-                            sources.push((shape, Outcome::Answered));
-                            answer = Some((i, id.to_string()));
-                        }
-                        None => sources.push((shape, Outcome::Unparsed)),
-                    }
-                }
+                None => sources.push((shape, Outcome::Unparsed)),
             }
         }
         match answer {
@@ -510,34 +542,26 @@ impl Rule {
             let Some(value) = read.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
                 continue;
             };
-            match &source.pattern {
-                None => {
+            let id = match &source.pattern {
+                None => Some(value),
+                Some(re) => re
+                    .captures(value)
+                    .and_then(|c| c.name("id"))
+                    .map(|m| m.as_str())
+                    .filter(|id| !id.is_empty()),
+            };
+            match id.and_then(|id| self.taken(id)) {
+                Some(id) => {
                     return Ident {
-                        value: value.to_string(),
+                        value: id,
                         probe,
                         fell_back: false,
                     };
                 }
-                Some(re) => {
-                    let id = re
-                        .captures(value)
-                        .and_then(|c| c.name("id"))
-                        .map(|m| m.as_str())
-                        .filter(|id| !id.is_empty());
-                    match id {
-                        Some(id) => {
-                            return Ident {
-                                value: id.to_string(),
-                                probe,
-                                fell_back: false,
-                            };
-                        }
-                        None => x.diagnostics.push(
-                            Diagnostic::new(DiagnosticKind::IdentityUnparsed, source.from.label())
-                                .with_shape(value),
-                        ),
-                    }
-                }
+                None => x.diagnostics.push(
+                    Diagnostic::new(DiagnosticKind::IdentityUnparsed, source.from.label())
+                        .with_shape(value),
+                ),
             }
         }
         let tried: Vec<String> = self.from.iter().map(|s| s.from.label()).collect();
@@ -660,6 +684,88 @@ identity:
                 .contains("(?<id>")
         );
         assert!(json["from"][1].get("pattern").is_none());
+    }
+
+    /// The tax agency's published test numbers, which nobody holds.
+    const PN: &str = "198501012382";
+    const PN_OTHER: &str = "201501012395";
+
+    #[test]
+    fn a_personnummer_rule_files_twelve_digits_and_refuses_what_is_none() {
+        let yaml = r"
+identity:
+  id_type: personnummer
+  from:
+    - field: PatientID
+    - field: OtherPatientIDs
+";
+        let rule = Rule::parse(yaml).unwrap();
+        assert!(rule.normalises());
+        assert_eq!(
+            rule.describe(),
+            "as personnummer: PatientID, OtherPatientIDs (a personnummer, as twelve digits), \
+             then StudyInstanceUID"
+        );
+        assert_eq!(rule.to_json()["normalise"], "personnummer-12");
+        // every written form is the one number
+        for written in [
+            PN.to_string(),
+            format!("{}-{}", &PN[..8], &PN[8..]),
+            format!("{}-{}", &PN[2..8], &PN[8..]),
+            format!(" {} {} ", &PN[2..8], &PN[8..]),
+        ] {
+            let mut x = extracted(vec![Some(&written), None]);
+            let ident = rule.apply(&mut x, "s/1.dcm");
+            assert_eq!(ident.value, PN, "{written}");
+            assert!(!ident.fell_back);
+            assert!(x.diagnostics.is_empty());
+            let traced = rule.trace(&[Some(written.clone()), None], "1.2.3", "s/1.dcm");
+            assert_eq!(traced.ident.value, PN);
+            assert_eq!(traced.sources[0].1, Outcome::Answered);
+        }
+        // a study's own id is no personnummer: unparsed, then the next field
+        let mut x = extracted(vec![Some("BROMS-0042"), Some(PN_OTHER)]);
+        let ident = rule.apply(&mut x, "s/1.dcm");
+        assert_eq!(ident.value, PN_OTHER);
+        assert_eq!(x.diagnostics.len(), 1);
+        assert_eq!(x.diagnostics[0].kind, DiagnosticKind::IdentityUnparsed);
+        // a wrong check digit too, and with nothing else the fallback
+        let mut wrong = PN.to_string();
+        wrong.replace_range(11.., "3");
+        let mut x = extracted(vec![Some(&wrong), None]);
+        let ident = rule.apply(&mut x, "s/1.dcm");
+        assert!(ident.fell_back);
+        assert_eq!(rule.id_type_of(&ident), FALLBACK_ID_TYPE);
+        assert_eq!(x.diagnostics.len(), 2);
+        let traced = rule.trace(&[Some(wrong), None], "1.2.3", "s/1.dcm");
+        assert!(traced.ident.fell_back);
+        assert_eq!(traced.sources[0].1, Outcome::Unparsed);
+    }
+
+    #[test]
+    fn only_a_personnummer_rule_normalises() {
+        // the default rule, and any other type, hash what they read
+        let dashed = format!("{}-{}", &PN[2..8], &PN[8..]);
+        let mut x = extracted(vec![Some(&dashed)]);
+        let ident = Rule::default().apply(&mut x, "s/1.dcm");
+        assert_eq!(ident.value, dashed);
+        assert!(!Rule::default().normalises());
+        assert!(Rule::default().to_json().get("normalise").is_none());
+        // and a verbatim rule cannot be a personnummer rule
+        let yaml = r"
+identity:
+  id_type: personnummer
+  from:
+    - field: PatientID
+      pattern: '^(?<id>\d{12})$'
+  code: verbatim
+";
+        assert!(
+            Rule::parse(yaml)
+                .unwrap_err()
+                .0
+                .contains("a personnummer is no code")
+        );
     }
 
     #[test]

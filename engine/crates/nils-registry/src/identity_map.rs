@@ -22,6 +22,7 @@ use std::fmt;
 use crate::linkage::{self, Identity, NewIdentity, Subject, Subkeys};
 use crate::merge;
 use crate::migrate;
+use crate::personnummer;
 use crate::pseudonym::{self, Scheme};
 use crate::schema::{Type, table};
 use crate::store::{Error, Insert, Param, Store};
@@ -139,6 +140,12 @@ pub enum Why {
     Mapped { code: String },
     /// The row's code names a subject that was merged into another.
     Merged { code: String, into: String },
+    /// A cell of a personnummer column is no personnummer: the column's
+    /// header and what is wrong with it, never the value.
+    NotPersonnummer {
+        column: String,
+        invalid: personnummer::Invalid,
+    },
 }
 
 impl fmt::Display for Why {
@@ -166,6 +173,11 @@ impl fmt::Display for Why {
             Why::Merged { code, into } => {
                 write!(f, "subject {code} was merged into {into}; name {into}")
             }
+            Why::NotPersonnummer { column, invalid } => write!(
+                f,
+                "{column}: not a personnummer ({invalid}); a personnummer column takes ten or \
+                 twelve digits with a valid date and check digit"
+            ),
         }
     }
 }
@@ -455,11 +467,35 @@ pub fn import(
             canonical: None,
             idents: Vec::new(),
         };
+        let mut refused = false;
         for (i, c) in map.columns.iter().enumerate() {
             let v = cell(i);
             if v.is_empty() {
                 continue;
             }
+            // a personnummer is filed, looked up and coded as its twelve
+            // digits, as the digest files it
+            let normal;
+            let v = match c.role.id_type() {
+                Some(t) if personnummer::is_type(t) => match personnummer::normalise(v) {
+                    Ok(n) => {
+                        normal = n;
+                        normal.as_str()
+                    }
+                    Err(invalid) => {
+                        report.conflicts.push(Conflict {
+                            row: r.line,
+                            why: Why::NotPersonnummer {
+                                column: c.header.clone(),
+                                invalid,
+                            },
+                        });
+                        refused = true;
+                        continue;
+                    }
+                },
+                _ => v,
+            };
             match &c.role {
                 Role::Identifier(t) => raw.idents.push(Ident {
                     id_type: t.clone(),
@@ -478,8 +514,8 @@ pub fn import(
                 Role::Ignore => {}
             }
         }
-        if raw.idents.is_empty() && raw.code.is_none() {
-            // a blank line
+        if refused || (raw.idents.is_empty() && raw.code.is_none()) {
+            // a blank line, or one refused above
             continue;
         }
         raws.push(raw);
@@ -1169,6 +1205,93 @@ mod tests {
         assert!(text.starts_with("2 row(s): 2 subject(s) named, 2 known, 0 new; 2 identifier(s) filed, 2 known, 0 new\n"), "{text}");
     }
 
+    /// A personnummer column under blake2b-8 gives KI_ID_GEN of the twelve
+    /// digits however the number was written, and a cell that is no
+    /// personnummer refuses its row without naming the value. The numbers
+    /// are the tax agency's published test numbers; the vectors were made
+    /// with Python's hashlib under the made-up key.
+    #[test]
+    fn a_personnummer_column_codes_the_twelve_digits_as_ki_id_gen() {
+        const TEST_KEY: &[u8] = b"test-reg-key-not-real";
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut linkage, Kind::Linkage).unwrap();
+        let keys = Subkeys::derive(TEST_KEY);
+        let derive = Derive {
+            scheme: Scheme::Blake2b8,
+            key: TEST_KEY,
+            display_length: 12,
+        };
+        let cols = columns(&[
+            ("study_id", "identifier:study-id"),
+            ("pnr", "canonical:personnummer"),
+        ]);
+        let data = rows(&[
+            &["S-1", "850101-2382"],
+            &["S-2", "19850101-2382"],
+            &["S-3", "201501012395"],
+            &["S-4", "850101-2383"],
+            &["S-5", "BROMS-0042"],
+        ]);
+        let apply = |registry: &mut Store, linkage: &mut Store, data: &[Row]| {
+            import(
+                registry,
+                linkage,
+                &keys,
+                Some(&derive),
+                &Map {
+                    columns: &cols,
+                    rows: data,
+                    dry_run: false,
+                    make_types: true,
+                    place_id: None,
+                    actor: "tester@lab",
+                    job_id: None,
+                },
+            )
+            .unwrap()
+        };
+        let r = apply(&mut registry, &mut linkage, &data);
+        assert_eq!(r.conflicts.len(), 2, "{r}");
+        assert_eq!(r.conflicts[0].row, 5);
+        assert_eq!(
+            r.conflicts[0].why,
+            Why::NotPersonnummer {
+                column: "pnr".into(),
+                invalid: personnummer::Invalid::Checksum
+            }
+        );
+        assert_eq!(r.conflicts[1].row, 6);
+        let text = r.to_string();
+        assert!(!text.contains("2383") && !text.contains("BROMS"), "{text}");
+        assert!(!r.written());
+        // without the two bad rows: two people, one of them written twice
+        let r = apply(&mut registry, &mut linkage, &data[..3]);
+        assert!(r.written(), "{r}");
+        assert_eq!(r.subjects.new, 2);
+        assert_eq!(
+            codes(&mut registry),
+            ["97567e4f9035c39b", "c6d36050d4d0a55b"]
+        );
+        // the number is filed as its twelve digits, found however written
+        let found = linkage::identities_by_lookup(
+            &mut linkage,
+            &[keys.lookup("personnummer", "8501012382")],
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].lookup,
+            pseudonym::lookup(
+                &pseudonym::subkey(TEST_KEY, pseudonym::LOOKUP_DOMAIN),
+                "personnummer",
+                "198501012382"
+            )
+            .to_vec()
+        );
+    }
+
     #[test]
     fn a_canonical_column_derives_the_code_as_a_digest_would() {
         let (mut registry, mut linkage, keys) = stores();
@@ -1680,7 +1803,7 @@ mod tests {
             ("study", "identifier:study-id"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[&["AA1234", "199001011234"], &["AA5678", "198502023456"]]);
+        let data = rows(&[&["AA1234", "198501012382"], &["AA5678", "198501012390"]]);
         let dry = run(&mut registry, &mut linkage, &keys, &cols, &data, true, true);
         assert_eq!(dry.held_released, 3, "{dry}");
         assert_eq!(
@@ -1768,15 +1891,15 @@ mod tests {
         let (mut registry, mut linkage, keys) = stores();
         linkage::add_id_type(&mut linkage, "personnummer", None).unwrap();
         // the two subjects as the pseudonymiser would have coded them
-        let first = pseudonym::code(Scheme::Blake2b32, KEY, "199001011234", 12).code;
-        let second = pseudonym::code(Scheme::Blake2b32, KEY, "199001019876", 12).code;
+        let first = pseudonym::code(Scheme::Blake2b32, KEY, "198501012382", 12).code;
+        let second = pseudonym::code(Scheme::Blake2b32, KEY, "200002292399", 12).code;
         let cols = columns(&[("nummer", "canonical:personnummer")]);
         let r = run(
             &mut registry,
             &mut linkage,
             &keys,
             &cols,
-            &rows(&[&["199001011234"], &["199001019876"]]),
+            &rows(&[&["198501012382"], &["200002292399"]]),
             false,
             false,
         );
@@ -1805,7 +1928,7 @@ mod tests {
             ("other", "identifier:personnummer"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[&["199001019876", "199001011234"]]);
+        let data = rows(&[&["200002292399", "198501012382"]]);
         let dry = run(
             &mut registry,
             &mut linkage,
@@ -1856,8 +1979,8 @@ mod tests {
         assert_eq!(
             values,
             [
-                ("personnummer".to_string(), "199001011234".to_string()),
-                ("personnummer".to_string(), "199001019876".to_string()),
+                ("personnummer".to_string(), "198501012382".to_string()),
+                ("personnummer".to_string(), "200002292399".to_string()),
                 ("subject-code".to_string(), second.clone()),
             ]
         );
@@ -1865,12 +1988,12 @@ mod tests {
         // a map whose apply fails: two new people and a merge, with the
         // linkage store refusing to file; no subject is created and the
         // merge does not happen
-        let third = pseudonym::code(Scheme::Blake2b32, KEY, "198001011111", 12).code;
+        let third = pseudonym::code(Scheme::Blake2b32, KEY, "201501012395", 12).code;
         let cols = columns(&[
             ("other", "identifier:personnummer"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[&["", "198001011111"], &["199001011234", "198001011111"]]);
+        let data = rows(&[&["", "201501012395"], &["198501012382", "201501012395"]]);
         linkage
             .execute(
                 "CREATE TRIGGER refuse BEFORE INSERT ON identity BEGIN SELECT RAISE(ABORT, 'the store refused'); END",

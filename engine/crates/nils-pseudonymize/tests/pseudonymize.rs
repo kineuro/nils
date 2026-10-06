@@ -1210,3 +1210,138 @@ fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
     assert_eq!(files_of(&again), (16, 0, 15, 0, 1), "{again}");
     assert_eq!(again.subjects.new, 0);
 }
+
+/// The tax agency's published test numbers, which nobody holds, as a
+/// source may write them, with KI_ID_GEN of their twelve digits under a
+/// made-up key (Python's `hashlib.blake2b(pn, key=key, digest_size=8)`).
+const KI_KEY: &[u8] = b"test-reg-key-not-real";
+const KI_PEOPLE: [(&[&str], &str, &str); 2] = [
+    (
+        &["19850101-2382", "850101-2382"],
+        "198501012382",
+        "c6d36050d4d0a55b",
+    ),
+    (&["201501012395"], "201501012395", "97567e4f9035c39b"),
+];
+
+/// A blake2b-8 registry under the made-up key, and a dataset whose
+/// originals carry the numbers in PatientID, written several ways.
+fn ki_lab() -> (Lab, TempDir) {
+    let dir = TempDir::new("pseudonymize-home");
+    let home = Home::new(dir.path());
+    home.keys(None).add("k", KI_KEY).unwrap();
+    home.init(&InitOptions {
+        backend: Backend::Sqlite,
+        dsn: None,
+        schema: None,
+        scheme: Scheme::Blake2b8,
+        key: "k".to_string(),
+        display_length: 12,
+        session_scheme: None,
+    })
+    .unwrap();
+    let registry = home.open().unwrap();
+    let mut store = registry.open_linkage().unwrap();
+    linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+    let data = TempDir::new("pseudonymize-ds");
+    let originals = Path::new("derivatives/dcm-original");
+    let mut n = 0;
+    for (p, (forms, _, _)) in KI_PEOPLE.iter().enumerate() {
+        for (study, written) in forms.iter().enumerate() {
+            n += 1;
+            data.file(
+                &originals
+                    .join(format!("p{p}/s{study}/IM_{n:04}"))
+                    .display()
+                    .to_string(),
+                &original(written, study as u32 + 1, 1, 1, "t1_mprage"),
+            );
+        }
+    }
+    std::fs::create_dir_all(data.path().join("derivatives/dcm-anon")).unwrap();
+    (Lab { home, _dir: dir }, data)
+}
+
+fn anon_patient_ids(anon: &Path) -> std::collections::BTreeSet<String> {
+    outputs(anon)
+        .iter()
+        .map(|p| {
+            let ds = dicom_object::open_file(p).unwrap();
+            text(&ds, tags::PATIENT_ID).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn a_personnummer_dataset_is_written_under_ki_id_gen_codes() {
+    let expected: std::collections::BTreeSet<String> =
+        KI_PEOPLE.iter().map(|(_, _, c)| c.to_string()).collect();
+    // by the identity rule: the originals' number is the identifier, and
+    // the codes are derived from its twelve digits
+    let (lab, data) = ki_lab();
+    let mut registry = lab.home.open().unwrap();
+    let mut place = declare(&mut registry, data.path(), json!({}));
+    place.dataset["identity"] =
+        json!({"id_type": "personnummer", "from": [{"field": "PatientID"}]});
+    place.dataset["unmapped"] = json!("code");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 3, 0, 0, 0), "{report}");
+    assert_eq!(report.subjects.new, 2);
+    assert_eq!(
+        anon_patient_ids(&data.path().join("derivatives/dcm-anon")),
+        expected
+    );
+
+    // by a map: the numbers filed first as the canonical identifier, and
+    // the dataset holding what no map named, so nothing is provisional
+    let (lab, data) = ki_lab();
+    let mut registry = lab.home.open().unwrap();
+    let mut place = declare(&mut registry, data.path(), json!({}));
+    place.dataset["identity"] =
+        json!({"id_type": "personnummer", "from": [{"field": "PatientID"}]});
+    {
+        use nils_registry::identity_map::{self, Column, Derive, Map, Role as MapRole, Row};
+        let mut store = registry.open_linkage().unwrap();
+        let keys = Subkeys::derive(KI_KEY);
+        let columns = [Column {
+            header: "pnr".into(),
+            role: MapRole::Canonical("personnummer".into()),
+        }];
+        let rows: Vec<Row> = KI_PEOPLE
+            .iter()
+            .enumerate()
+            .map(|(i, (forms, _, _))| Row {
+                line: i + 2,
+                cells: vec![forms[0].to_string()],
+            })
+            .collect();
+        let r = identity_map::import(
+            registry.store(),
+            &mut store,
+            &keys,
+            Some(&Derive {
+                scheme: Scheme::Blake2b8,
+                key: KI_KEY,
+                display_length: 12,
+            }),
+            &Map {
+                columns: &columns,
+                rows: &rows,
+                dry_run: false,
+                make_types: false,
+                place_id: None,
+                actor: "tester@lab",
+                job_id: None,
+            },
+        )
+        .unwrap();
+        assert!(r.written(), "{r}");
+    }
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 3, 0, 0, 0), "{report}");
+    assert_eq!(report.subjects.provisional, 0);
+    assert_eq!(
+        anon_patient_ids(&data.path().join("derivatives/dcm-anon")),
+        expected
+    );
+}
