@@ -37,8 +37,10 @@ it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 The source place is a root, and setup adds the root alone. A folder under
 it becomes a dataset only when you add it, and only then is its structure
 read; nothing else is assumed, since a folder may hold no data at all.
-`nils place folders source` lists the folders with whether each holds DICOM
-and `derivatives/`, and `nils place add-dataset source FOLDER` adds one.
+`nils place folders source --search NAME` finds folders by name, a page at
+a time, `nils place folder source FOLDER` shows whether one holds DICOM and
+`derivatives/` and what it would be, and `nils place add-dataset source
+FOLDER` adds it.
 What a dataset is, its structure says:
 
 | Under the dataset's folder | It is | What reads it |

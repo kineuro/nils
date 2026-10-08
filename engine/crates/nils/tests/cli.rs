@@ -6091,21 +6091,39 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
     let listed = run(&["place", "folders", "src", "--json"]);
     assert!(listed.status.success(), "{}", stderr(&listed));
     let doc: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    let dicom: std::collections::BTreeMap<String, String> = doc["folders"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| {
-            assert_eq!(f["added"], false, "{f}");
-            (
-                f["name"].as_str().unwrap().to_string(),
-                f["holds_dicom"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-    assert_eq!(dicom["papers"], "no", "{doc}");
-    assert_eq!(dicom["loose"], "yes", "{doc}");
-    assert_eq!(dicom.len(), 7, "{doc}");
+    assert_eq!(doc["matching"], 7, "{doc}");
+    assert_eq!(doc["next"], serde_json::Value::Null, "{doc}");
+    assert!(
+        doc["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["added"] == false),
+        "{doc}"
+    );
+    // found by name, a page at a time
+    let found = run(&["place", "folders", "src", "--search", "PAP", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert_eq!(doc["folders"][0]["name"], "papers", "{doc}");
+    assert_eq!(doc["count"], 1, "{doc}");
+    let paged = run(&["place", "folders", "src", "--limit", "2", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&paged.stdout).unwrap();
+    assert_eq!(doc["next"], "both", "{doc}");
+    let paged = run(&[
+        "place", "folders", "src", "--limit", "2", "--after", "both", "--json",
+    ]);
+    let doc: serde_json::Value = serde_json::from_slice(&paged.stdout).unwrap();
+    assert_eq!(doc["folders"][0]["name"], "idf", "{doc}");
+    // one folder looked at before it is added
+    let look = |name: &str| -> serde_json::Value {
+        let out = run(&["place", "folder", "src", name, "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    assert_eq!(look("papers")["holds_dicom"], "no");
+    assert_eq!(look("loose")["holds_dicom"], "yes");
+    assert_eq!(look("loose")["layout"]["state"], "unknown");
+    assert_eq!(look("idf")["layout"]["state"], "identified");
     assert!(
         root.join("raw/derivatives/dcm-raw").is_dir(),
         "nothing renamed yet"
@@ -6294,7 +6312,7 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         .find(|f| f["name"] == "late")
         .unwrap();
     assert_eq!(late["added"], false, "{doc}");
-    assert_eq!(late["has_derivatives"], true, "{doc}");
+    assert_eq!(late.get("has_derivatives"), None, "{doc}");
 }
 
 /// Wave 7a: a place from before that names a dataset's pseudonymised tree

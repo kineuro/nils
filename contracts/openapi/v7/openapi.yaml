@@ -1249,15 +1249,29 @@ paths:
         "409": {description: The registry role would lose its backup, or the folder could not be arranged}
   /api/places/{id}/folders:
     get:
-      summary: A source root's folders as they are, nothing changed (Wave 7a; data:see or places:see)
-      description: "A source place is a root; a folder under it becomes a dataset only when a person adds it, with POST /api/places and {role: source, root, folder}. This lists each folder right under the root, hidden ones aside, and assumes nothing: `added` and `dataset_id` (`dataset`, its name) say whether it was added; `holds_dicom` is yes, no or unknown, from a bounded look (a .dcm name or the DICM mark at byte 128), unknown where the look ran out; `has_derivatives` whether it holds derivatives/. `{id}` is the root's id or name."
+      summary: A page of a source root's folders, found by name (Wave 7a; data:see or places:see)
+      description: "A source place is a root; a folder under it becomes a dataset only when a person adds it, with POST /api/places and {role: source, root, folder}. This answers one read of the root's own listing and never looks inside a folder: the folders, hidden ones aside, whose name holds `q` (any case), sorted by name, after the name `after`, at most `limit` (50 by default, 1 to 200). Each says whether it was added and as which dataset. `matching` counts every folder `q` matches, `count` those on the page, and `next` is the name to page on from with `after`, or null at the end. What a folder holds is the single look's, /api/places/{id}/folders/{name}. `{id}` is the root's id or name."
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: q, in: query, required: false, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, required: false, schema: {type: string}}
       responses:
-        "200": {description: "{root, root_id, path, count, folders: [{name, path, added, dataset_id, dataset, holds_dicom, has_derivatives}]}"}
-        "400": {description: The place is not a source root}
+        "200": {description: "{root, root_id, path, q, matching, count, folders: [{name, path, added, dataset_id, dataset}], next}"}
+        "400": {description: The place is not a source root, or the limit is out of range}
         "404": {description: No such place}
-        "409": {description: The root's folder is not a directory}
+        "409": {description: The root's folder cannot be listed}
+  /api/places/{id}/folders/{name}:
+    get:
+      summary: One folder of a source root looked at before it is added (Wave 7a; data:see or places:see)
+      description: "Nothing is changed. `holds_dicom` is yes, no or unknown, from a bounded look into the folder (a .dcm name or the DICM mark at byte 128), unknown where the look ran out; `has_derivatives` whether it holds derivatives/; `layout` the structure it would have as a dataset, as a declaration's answer carries it: its `state` (identified, anonymised, both or unknown), what would be read, and for an unknown one the move question. `added`, `dataset_id` and `dataset` say whether it was added already."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: "{name, path, added, dataset_id, dataset, holds_dicom, has_derivatives, layout}"}
+        "400": {description: The place is not a source root, or the name is no folder's name}
+        "404": {description: No such place, or no such folder under the root}
   /api/places/{id}/originals:
     get:
       summary: What a vault or a purge of a dataset's originals would do, without doing it (record 26 section 1; data:see)

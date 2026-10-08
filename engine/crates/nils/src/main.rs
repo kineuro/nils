@@ -900,12 +900,31 @@ enum PlaceCommand {
         #[arg(long)]
         json: bool,
     },
-    /// A root's folders as they are (Wave 7a): whether each was added as a
-    /// dataset, whether a bounded look found DICOM in it (yes, no or
-    /// unknown) and whether it holds derivatives/. Nothing is written
+    /// A page of a root's folders, found by name (Wave 7a): whether each
+    /// was added as a dataset. Nothing is looked into and nothing written
     Folders {
         /// The root, by its id or name
         root: String,
+        /// Only folders whose name holds this, in any case
+        #[arg(long, value_name = "Q")]
+        search: Option<String>,
+        /// The most folders shown, 1 to 200
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
+        /// The folders after this name: the next page
+        #[arg(long, value_name = "NAME")]
+        after: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One folder of a root looked at before it is added (Wave 7a): whether
+    /// it holds DICOM (a bounded look), derivatives/, and the structure it
+    /// would have as a dataset. Nothing is written
+    Folder {
+        /// The root, by its id or name
+        root: String,
+        /// The folder's name under the root
+        name: String,
         #[arg(long)]
         json: bool,
     },
@@ -2976,35 +2995,101 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             }
             Ok(())
         }
-        PlaceCommand::Folders { root, json } => {
-            // Wave 7a: a root's folders as they are, nothing changed
+        PlaceCommand::Folders {
+            root,
+            search,
+            limit,
+            after,
+            json,
+        } => {
+            // Wave 7a: a page of a root's folders, found by name; nothing
+            // is looked into and nothing changed
             let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
-            let listed = dataset::folders(registry.store(), &r).map_err(|r| fail(r.message))?;
+            if !(1..=dataset::FOLDERS_MOST).contains(&limit) {
+                return Err(usage(format!("--limit is 1 to {}", dataset::FOLDERS_MOST)));
+            }
+            let (listed, matching, next) = dataset::folders(
+                registry.store(),
+                &r,
+                search.as_deref(),
+                limit,
+                after.as_deref(),
+            )
+            .map_err(|r| fail(r.message))?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "root": r.name, "path": r.path, "folders": listed,
+                        "root": r.name, "path": r.path, "q": search, "matching": matching,
+                        "count": listed.len(), "folders": listed, "next": next,
                     }))
                     .unwrap_or_default()
                 );
             } else {
-                println!("root {}: {} at {}", r.id, r.name, r.path);
+                println!(
+                    "root {}: {} at {}: {} of {matching} folder(s)",
+                    r.id,
+                    r.name,
+                    r.path,
+                    listed.len()
+                );
                 for f in &listed {
                     println!(
-                        "  {:<24} {:<10} DICOM {:<7} {}",
+                        "  {:<32} {}",
                         f["name"].as_str().unwrap_or(""),
                         match f["dataset"].as_str() {
                             Some(d) => format!("dataset {d}"),
                             None => "not added".to_string(),
-                        },
-                        f["holds_dicom"].as_str().unwrap_or(""),
-                        if f["has_derivatives"].as_bool() == Some(true) {
-                            "derivatives/"
-                        } else {
-                            ""
                         }
                     );
+                }
+                if let Some(n) = next {
+                    println!("  more: --after {n}");
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::Folder { root, name, json } => {
+            // Wave 7a: one folder looked at before it is added
+            let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
+            let look =
+                dataset::folder_look(registry.store(), &r, &name).map_err(|r| fail(r.message))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&look).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "{} under {}: {}, DICOM {}, {}",
+                    name,
+                    r.name,
+                    match look["dataset"].as_str() {
+                        Some(d) => format!("dataset {d}"),
+                        None => "not added".to_string(),
+                    },
+                    look["holds_dicom"].as_str().unwrap_or(""),
+                    if look["has_derivatives"].as_bool() == Some(true) {
+                        "holds derivatives/"
+                    } else {
+                        "no derivatives/"
+                    }
+                );
+                let derived = serde_json::json!({
+                    "arrives": match look["layout"]["state"].as_str() {
+                        Some("identified" | "both") => "identified",
+                        Some("anonymised") => "deidentified",
+                        _ => "undeclared",
+                    },
+                    "state": look["layout"]["state"],
+                    "trees": {"originals": null, "anon": "derivatives/dcm-anon"},
+                });
+                for line in dataset::layout_lines(
+                    look["dataset_id"].as_i64().unwrap_or(0),
+                    &derived,
+                    &look["layout"],
+                ) {
+                    println!("  {line}");
                 }
             }
             Ok(())

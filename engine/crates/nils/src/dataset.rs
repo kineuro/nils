@@ -834,41 +834,120 @@ pub(crate) fn root_named(store: &mut Store, given: &str) -> Result<Place, Refuse
     }
 }
 
-/// A root's folders as they are, nothing changed and nothing assumed
-/// (Wave 7a, Nima 2026-10-08: "some might not even be data or include
-/// dicom"): each folder's name and path, whether it was added as a dataset
-/// and which, whether a bounded look found DICOM in it (`yes`, `no`, or
-/// `unknown` where the look ran out), and whether it holds `derivatives/`.
-pub(crate) fn folders(store: &mut Store, root: &Place) -> Result<Vec<Value>, Refused> {
-    let places = place::active(store).map_err(|e| Refused {
-        status: 500,
-        message: e.to_string(),
-        layout: None,
-    })?;
+/// The most folders one page of a root's listing names, and its default.
+pub(crate) const FOLDERS_PAGE: usize = 50;
+pub(crate) const FOLDERS_MOST: usize = 200;
+
+/// A page of a root's folders (Wave 7a, Nima 2026-10-08: "if user want
+/// will add one by looking up. what if the root folder has 1000 folders"):
+/// one read of the root's own listing, never a look inside a folder. The
+/// folders whose name holds `q` (any case), by name, after the name
+/// `after`, at most `limit`; each with its path and whether, and as which
+/// dataset, it was added. `next` is the name to page on from, or none at
+/// the end. What a folder holds is the single look's, [`folder_look`].
+pub(crate) fn folders(
+    store: &mut Store,
+    root: &Place,
+    q: Option<&str>,
+    limit: usize,
+    after: Option<&str>,
+) -> Result<(Vec<Value>, usize, Option<String>), Refused> {
     let path = PathBuf::from(&root.path);
-    if !path.is_dir() {
-        return Err(conflict(format!("{} is not a directory", path.display())));
-    }
-    Ok(sub_folders(&path)
+    let entries =
+        std::fs::read_dir(&path).map_err(|e| conflict(format!("{}: {e}", path.display())))?;
+    let q = q.map(str::to_lowercase).filter(|q| !q.is_empty());
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .filter(|n| q.as_deref().is_none_or(|q| n.to_lowercase().contains(q)))
+        .collect();
+    names.sort();
+    let matching = names.len();
+    let limit = limit.clamp(1, FOLDERS_MOST);
+    let page: Vec<String> = names
         .into_iter()
-        .map(|folder| {
-            let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
-            let added = places.iter().find(|p| {
-                p.role == Role::Source
-                    && std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path))
-                        == real
-            });
+        .filter(|n| after.is_none_or(|a| n.as_str() > a))
+        .take(limit + 1)
+        .collect();
+    let next = (page.len() > limit).then(|| page[limit - 1].clone());
+    let added = added_places(store, &path)?;
+    let root_real = std::fs::canonicalize(&path).unwrap_or(path);
+    let rows = page
+        .into_iter()
+        .take(limit)
+        .map(|name| {
+            let real = root_real.join(&name);
+            let p = added.iter().find(|(at, _)| *at == real).map(|(_, p)| p);
             json!({
-                "name": folder.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "name": name,
                 "path": real.display().to_string(),
-                "added": added.is_some(),
-                "dataset_id": added.map(|p| p.id),
-                "dataset": added.map(|p| p.name.clone()),
-                "holds_dicom": look_for_dicom(&folder).name(),
-                "has_derivatives": folder.join("derivatives").is_dir(),
+                "added": p.is_some(),
+                "dataset_id": p.map(|p| p.id),
+                "dataset": p.map(|p| p.name.clone()),
             })
         })
+        .collect();
+    Ok((rows, matching, next))
+}
+
+/// The active source places directly under a folder, by canonical path.
+fn added_places(store: &mut Store, under: &Path) -> Result<Vec<(PathBuf, Place)>, Refused> {
+    let under = std::fs::canonicalize(under).unwrap_or_else(|_| under.to_path_buf());
+    Ok(place::active(store)
+        .map_err(|e| Refused {
+            status: 500,
+            message: e.to_string(),
+            layout: None,
+        })?
+        .into_iter()
+        .filter(|p| p.role == Role::Source)
+        .filter_map(|p| {
+            let real = std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path));
+            (real.parent() == Some(under.as_path())).then_some((real, p))
+        })
         .collect())
+}
+
+/// One folder of a root looked at before it is added (Wave 7a), nothing
+/// changed: whether it was added and as which dataset, whether a bounded
+/// look finds DICOM in it (yes, no or unknown where the look ran out),
+/// whether it holds `derivatives/`, and the layout its structure would give
+/// it as a dataset: its state, what would be read, and the question an
+/// unknown one would ask. The folder is named as it is under the root.
+pub(crate) fn folder_look(store: &mut Store, root: &Place, name: &str) -> Result<Value, Refused> {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(bad(format!("{name}: a folder's name under the root")));
+    }
+    let root_path = PathBuf::from(&root.path);
+    let path = root_path.join(name);
+    if !path.is_dir() {
+        return Err(Refused {
+            status: 404,
+            message: format!("no folder {name} under the root {}", root.name),
+            layout: None,
+        });
+    }
+    let added = added_places(store, &root_path)?;
+    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let p = added.iter().find(|(at, _)| *at == real).map(|(_, p)| p);
+    let layout = match shape_of(&path) {
+        Shape::Legacy => {
+            json!({"legacy": true, "state": "anonymised", "reads": ".", "question": false})
+        }
+        _ => layout_doc(&path, &detect(&path)),
+    };
+    Ok(json!({
+        "name": name,
+        "path": real.display().to_string(),
+        "added": p.is_some(),
+        "dataset_id": p.map(|p| p.id),
+        "dataset": p.map(|p| p.name.clone()),
+        "holds_dicom": look_for_dicom(&path).name(),
+        "has_derivatives": path.join("derivatives").is_dir(),
+        "layout": layout,
+    }))
 }
 
 /// A folder under a root added as a dataset, by a person's act (Wave 7a):
@@ -1868,15 +1947,20 @@ mod tests {
         .unwrap();
         assert_eq!(place::list(&mut store).unwrap().len(), 1);
         let root = place::show(&mut store, id).unwrap().unwrap();
-        // the folders as they are; nothing written, nothing assumed
-        let listed = folders(&mut store, &root).unwrap();
+        // the folders as they are, each looked at alone; nothing written,
+        // nothing assumed
+        let (listed, matching, next) = folders(&mut store, &root, None, 50, None).unwrap();
+        assert_eq!((matching, next), (8, None));
         let shown: Vec<(String, String, bool, bool)> = listed
             .iter()
             .map(|f| {
+                let name = f["name"].as_str().unwrap();
+                let look = folder_look(&mut store, &root, name).unwrap();
+                assert_eq!(f.get("holds_dicom"), None, "the listing never looks inside");
                 (
-                    f["name"].as_str().unwrap().to_string(),
-                    f["holds_dicom"].as_str().unwrap().to_string(),
-                    f["has_derivatives"].as_bool().unwrap(),
+                    name.to_string(),
+                    look["holds_dicom"].as_str().unwrap().to_string(),
+                    look["has_derivatives"].as_bool().unwrap(),
                     f["added"].as_bool().unwrap(),
                 )
             })
@@ -1944,14 +2028,95 @@ mod tests {
         assert!(add_dataset(&mut store, &root, "../elsewhere", None, &json!({})).is_err());
         assert!(add_dataset(&mut store, &root, "/tmp", None, &json!({})).is_err());
         // the folders say which are datasets now
-        let listed = folders(&mut store, &root).unwrap();
+        let (listed, _, _) = folders(&mut store, &root, None, 50, None).unwrap();
         assert!(listed.iter().all(|f| f["added"] == true), "{listed:?}");
+        // the look at an added folder names its dataset and its structure
+        let look = folder_look(&mut store, &root, "rawb").unwrap();
+        assert_eq!(look["dataset"], "rawb");
+        assert_eq!(look["layout"]["state"], "anonymised");
+        assert_eq!(
+            folder_look(&mut store, &root, "nowhere")
+                .unwrap_err()
+                .status,
+            404
+        );
+        assert_eq!(
+            folder_look(&mut store, &root, "../x").unwrap_err().status,
+            400
+        );
         // a refresh reads each again and adds nothing
         let before = place::list(&mut store).unwrap().len();
         let again = refresh(&mut store, None).unwrap();
         assert_eq!(again.len(), 8);
         assert!(again.iter().all(|f| !f.new));
         assert_eq!(place::list(&mut store).unwrap().len(), before);
+    }
+
+    /// Wave 7a (Nima, 2026-10-08: "what if the root folder has 1000
+    /// folders"): a root of a thousand folders, each holding many files,
+    /// lists a page in one read of the root's listing, never looking into a
+    /// folder; it is searched by name in any case and paged by name.
+    #[test]
+    fn a_root_of_a_thousand_folders_lists_a_page_found_by_name() {
+        let dir = TempDir::new("dataset-thousand");
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        for i in 0..1000 {
+            std::fs::create_dir_all(dir.path().join(format!("Study-{i:04}"))).unwrap();
+        }
+        // what the listing must never read: a folder heavy with files
+        for i in 0..3000 {
+            dir.file(&format!("Study-0500/IM_{i:05}"), &dicom_bytes());
+        }
+        dir.file("readme.txt", b"r");
+        let id = place::add(
+            &mut store,
+            &place::New {
+                name: "src",
+                role: Role::Source,
+                path: &dir.path().display().to_string(),
+                guarantees: json!({}),
+                probed: Value::Null,
+                handling: Value::Null,
+                dataset: json!({"kind": "root"}),
+            },
+        )
+        .unwrap();
+        let root = place::show(&mut store, id).unwrap().unwrap();
+        let started = Instant::now();
+        let (page, matching, next) = folders(&mut store, &root, None, 50, None).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(matching, 1000);
+        assert_eq!(page.len(), 50);
+        assert_eq!(page[0]["name"], "Study-0000");
+        assert_eq!(next.as_deref(), Some("Study-0049"));
+        // the next page, from the name the first ended on
+        let (page, _, next) = folders(&mut store, &root, None, 50, next.as_deref()).unwrap();
+        assert_eq!(page[0]["name"], "Study-0050");
+        assert_eq!(next.as_deref(), Some("Study-0099"));
+        // found by a part of the name, in any case; the last page says so
+        let (page, matching, next) =
+            folders(&mut store, &root, Some("study-05"), 200, None).unwrap();
+        assert_eq!(matching, 100);
+        assert_eq!(page.len(), 100);
+        assert_eq!(next, None);
+        let (page, matching, _) = folders(&mut store, &root, Some("0999"), 50, None).unwrap();
+        assert_eq!((page.len(), matching), (1, 1));
+        let (page, _, next) = folders(&mut store, &root, Some("nothing"), 50, None).unwrap();
+        assert!(page.is_empty() && next.is_none());
+        // a limit past the most is the most
+        let (page, _, _) = folders(&mut store, &root, None, 5000, None).unwrap();
+        assert_eq!(page.len(), FOLDERS_MOST);
+        // the one heavy folder, looked at alone
+        let look = folder_look(&mut store, &root, "Study-0500").unwrap();
+        assert_eq!(look["holds_dicom"], "yes");
+        assert_eq!(look["layout"]["state"], "unknown");
+        assert_eq!(look["added"], false);
     }
 
     #[test]
