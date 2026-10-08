@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 82;
+pub const SCHEMA_VERSION: i64 = 83;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,7 +382,20 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 82,
         apply: a_personnummer_is_never_kept,
     },
+    Migration {
+        version: 83,
+        apply: a_dataset_s_declaration_is_its_structure,
+    },
 ];
+
+/// Wave 7a: schema 80's step again, for a store a development build
+/// migrated under its earlier form, before a dataset's state was read from
+/// its structure: every source place without a whole, current declaration
+/// undeclared, a place on a dataset's pseudonymised tree legacy. On a store
+/// schema 80 already brought there it changes nothing.
+fn a_dataset_s_declaration_is_its_structure(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    a_source_place_nobody_declared_is_undeclared(store, kind)
+}
 
 /// Wave 7a §5.4: a dataset may write an id type's value into PatientID,
 /// and a file whose subject has none is held with its subject and the type
