@@ -475,8 +475,11 @@ fn the_pyramid_is_built_into_a_working_place_and_the_doors_are_gated() {
     server.finish();
 }
 
+/// Record 55 H2: before the pyramid exists the door queues its build and
+/// answers 202, never 404; with no worker the build waits, queued, and the
+/// tiles asked meanwhile name the same build.
 #[test]
-fn a_reader_of_the_manifest_is_refused_before_the_pyramid_exists() {
+fn a_reader_of_the_manifest_has_its_build_queued_before_the_pyramid_exists() {
     let (home, _src) = registry();
     let work = TempDir::new("instances-work-2");
     ok(
@@ -502,16 +505,13 @@ fn a_reader_of_the_manifest_is_refused_before_the_pyramid_exists() {
         ],
     );
     let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
-    assert_eq!(status, 404, "{doc}");
-    assert!(
-        doc["error"]
-            .as_str()
-            .unwrap()
-            .contains("pyramid build --stack 1"),
-        "{doc}"
-    );
+    assert_eq!(status, 202, "{doc}");
+    assert_eq!(doc["building"], true, "{doc}");
+    assert_eq!(doc["state"], "queued", "{doc}");
+    let job = doc["job"].as_i64().unwrap();
     let (status, doc) = server.json("/api/instances/1/tiles/9/0", REVIEWER);
-    assert_eq!(status, 404, "{doc}");
+    assert_eq!(status, 202, "{doc}");
+    assert_eq!(doc["job"], job, "one build for the stack: {doc}");
     let (status, doc) = server.json("/api/instances/x/manifest", REVIEWER);
     assert_eq!(status, 404, "{doc}");
     server.finish();

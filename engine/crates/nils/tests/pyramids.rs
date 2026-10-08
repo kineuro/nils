@@ -1052,3 +1052,287 @@ fn a_gallery_s_pictures_come_after_the_database_restarts() {
         ))
         .unwrap();
 }
+
+impl Server {
+    /// A GET with the answer's headers, lower-cased, beside its JSON.
+    fn headed(&self, path: &str, token: &str) -> (u16, String, Value) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        let response = String::from_utf8_lossy(&bytes).to_string();
+        let (headers, text) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        let status: u16 = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (
+            status,
+            headers.to_ascii_lowercase(),
+            serde_json::from_str(text).unwrap_or(Value::Null),
+        )
+    }
+
+    /// The pyramid jobs that build one stack alone, as the door queued them.
+    fn stack_builds(&self, stack: i64) -> Vec<Value> {
+        let (status, jobs) = self.call("GET", "/api/jobs?all=1&limit=500", None, OPERATOR);
+        assert_eq!(status, 200, "{jobs}");
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| {
+                j["kind"] == "pyramid"
+                    && j["args"]["queued"].as_array().is_some_and(|q| {
+                        q.len() >= 4
+                            && q[2] == "--stack"
+                            && q[3].as_str() == Some(stack.to_string().as_str())
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// Record 55 H2, round 3: a picture is built when it is first asked for.
+/// A stack with no pyramid answers 202 with the build the door queued and
+/// a Retry-After, never 404; tiles asked meanwhile name the same build; the
+/// worker builds it and the door answers 200; a stack that cannot be read
+/// answers 422 with the reason's class and is not queued again; a stack
+/// the registry does not hold is 404 and queues nothing.
+#[test]
+fn a_picture_is_built_when_it_is_first_asked_for() {
+    let lab = lab("pyramids-demand");
+    let server = Server::start(&lab.home);
+    let (status, headers, first) = server.headed("/api/instances/1/manifest", OPERATOR);
+    assert_eq!(status, 202, "{first}");
+    assert_eq!(first["building"], true, "{first}");
+    assert_eq!(first["stack"], 1, "{first}");
+    assert_eq!(first["place"], "scratch", "{first}");
+    assert!(
+        first["retry_after"].as_u64().is_some_and(|s| s > 0),
+        "{first}"
+    );
+    assert!(headers.contains("retry-after: "), "{headers}");
+    let job = first["job"].as_i64().unwrap();
+    // asked again at once, the tiles name the same build or find it built
+    let (status, again) = server.call("GET", "/api/instances/1/tiles/0/0", None, OPERATOR);
+    assert!(status == 202 || status == 200, "{status} {again}");
+    if status == 202 {
+        assert_eq!(again["job"], job, "{again}");
+    }
+    // every stack asked for: two are built by the worker, the one whose
+    // files went answers 422 with the reason's class
+    let mut answers = std::collections::BTreeMap::new();
+    for stack in 1..=3i64 {
+        let mut last = (0, Value::Null);
+        for _ in 0..600 {
+            let (status, doc) = server.call(
+                "GET",
+                &format!("/api/instances/{stack}/manifest"),
+                None,
+                OPERATOR,
+            );
+            last = (status, doc);
+            if last.0 != 202 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        answers.insert(stack, last);
+    }
+    let built: Vec<i64> = answers
+        .iter()
+        .filter(|(_, (s, _))| *s == 200)
+        .map(|(k, _)| *k)
+        .collect();
+    let failed: Vec<i64> = answers
+        .iter()
+        .filter(|(_, (s, _))| *s == 422)
+        .map(|(k, _)| *k)
+        .collect();
+    assert_eq!(built.len(), 2, "{answers:?}");
+    assert_eq!(failed.len(), 1, "{answers:?}");
+    let gone = failed[0];
+    let refused = &answers[&gone].1;
+    assert_eq!(refused["building"], false, "{refused}");
+    assert_eq!(refused["stack"], gone, "{refused}");
+    assert!(refused["reason"].is_string(), "{refused}");
+    assert!(refused["job"].is_i64(), "{refused}");
+    // the reason is a class, never the reader's words with the file's path
+    let src = lab._src.path().to_str().unwrap().to_string();
+    assert!(!refused.to_string().contains(&src), "{refused}");
+    for stack in &built {
+        assert!(lab.manifest(*stack).is_some(), "stack {stack}");
+        let (status, _) = server.bytes(&format!("/api/instances/{stack}/render/0/0"), OPERATOR);
+        assert_eq!(status, 200);
+        assert_eq!(server.stack_builds(*stack).len(), 1, "one build per stack");
+    }
+    // the failed build is not queued again by asking
+    let (status, still) = server.call(
+        "GET",
+        &format!("/api/instances/{gone}/thumb"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 422, "{still}");
+    assert_eq!(server.stack_builds(gone).len(), 1);
+    // a stack the registry does not hold queues nothing
+    let (status, none) = server.call("GET", "/api/instances/999/manifest", None, OPERATOR);
+    assert_eq!(status, 404, "{none}");
+    assert!(server.stack_builds(999).is_empty());
+    // a door that is not one is not a reason to build
+    let (status, _) = server.call("GET", "/api/instances/2/nowhere", None, OPERATOR);
+    assert_eq!(status, 404);
+}
+
+/// Record 55 H2: `pyramid build --force` builds again what is built, at the
+/// keyboard and through the jobs door; without it a single stack that has
+/// its pyramid is skipped, as a selection's are.
+#[test]
+fn force_builds_again_what_is_built() {
+    let lab = lab("pyramids-force");
+    let packs = packs();
+    let packs = packs.to_str().unwrap();
+    let first: Value =
+        serde_json::from_str(ok(&lab.home, &["pyramid", "build", "--stack", "1"]).trim()).unwrap();
+    assert_eq!(first["levels"], 4, "{first}");
+    let built_at = lab.manifest(1).unwrap()["built_at"].clone();
+    let skipped: Value =
+        serde_json::from_str(ok(&lab.home, &["pyramid", "build", "--stack", "1"]).trim()).unwrap();
+    assert_eq!(skipped["skipped"], true, "{skipped}");
+    assert_eq!(lab.manifest(1).unwrap()["built_at"], built_at);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let again: Value = serde_json::from_str(
+        ok(&lab.home, &["pyramid", "build", "--stack", "1", "--force"]).trim(),
+    )
+    .unwrap();
+    assert_eq!(again["levels"], 4, "{again}");
+    assert_ne!(lab.manifest(1).unwrap()["built_at"], built_at);
+    // a selection: what is built is skipped, and built again with --force
+    let select = [
+        "pyramid",
+        "build",
+        "--select",
+        "selection:every@1",
+        "--pack-dir",
+        packs,
+    ];
+    let once: Value = serde_json::from_str(ok(&lab.home, &select).trim()).unwrap();
+    assert_eq!(once["built"], 1, "{once}");
+    assert_eq!(once["skipped"], 1, "{once}");
+    let mut forced = select.to_vec();
+    forced.push("--force");
+    let all: Value = serde_json::from_str(ok(&lab.home, &forced).trim()).unwrap();
+    assert_eq!(all["built"], 2, "{all}");
+    assert_eq!(all["skipped"], 0, "{all}");
+    // through the jobs door, the flag passes and the job says so
+    let server = Server::start(&lab.home);
+    let job = server.job(json!([
+        "pyramid",
+        "build",
+        "--select",
+        "selection:every@1",
+        "--force"
+    ]));
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["result"]["built"], 2, "{job}");
+    assert_eq!(job["args"]["force"], true, "{job}");
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["pyramid", "list", "--force"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 400, "{refused}");
+}
+
+/// Record 55 H2: the saved selections as a list, a page at a time in name
+/// order, each with its versions, who made it and when, and its size as
+/// the newest answer that froze it whole says.
+#[test]
+fn the_saved_selections_are_listed_with_their_versions_and_size() {
+    let lab = lab("selections-list");
+    let server = Server::start(&lab.home);
+    let (status, listed) = server.call("GET", "/api/ask/selections", None, OPERATOR);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["total"], 1, "{listed}");
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["next"], Value::Null, "{listed}");
+    let every = &listed["selections"][0];
+    assert_eq!(every["name"], "every", "{every}");
+    assert_eq!(every["spec"], "selection:every@1", "{every}");
+    assert_eq!(every["versions"], 1, "{every}");
+    assert_eq!(every["grain"], "stack", "{every}");
+    assert_eq!(every["owner"], "anna@ward-3", "{every}");
+    assert_eq!(every["updated_by"], "anna@ward-3", "{every}");
+    assert!(every["created_at"].is_string(), "{every}");
+    assert!(every["updated_at"].is_string(), "{every}");
+    assert_eq!(every["size"], Value::Null, "not run yet: {every}");
+    // a campaign freezes it whole: its size is the answer's rows
+    let (status, made) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(json!({"name": "look", "question": {"kind": "free"}, "source": {"selection": "every@1"}})),
+        CURATOR,
+    );
+    assert_eq!(status, 201, "{made}");
+    let (_, listed) = server.call("GET", "/api/ask/selections", None, OPERATOR);
+    let size = &listed["selections"][0]["size"];
+    assert_eq!(size["rows"], 3, "{listed}");
+    assert_eq!(size["grain"], "stack", "{listed}");
+    assert_eq!(size["version"], 1, "{listed}");
+    assert!(size["handle"].is_i64(), "{listed}");
+    // two more, one of them in two versions, saved through the door
+    let doc = json!({"ast_version": 1, "sets": {"every": {"grain": "stack"}}, "out": {"set": "every", "level": "record"}});
+    for (name, note) in [("apple", "first"), ("apple", "second"), ("zebra", "only")] {
+        let (status, saved) = server.call(
+            "PUT",
+            &format!("/api/ask/selections/{name}"),
+            Some(json!({"document": doc, "note": note})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{saved}");
+    }
+    let (_, listed) = server.call("GET", "/api/ask/selections", None, OPERATOR);
+    let names: Vec<&str> = listed["selections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["apple", "every", "zebra"], "{listed}");
+    let apple = &listed["selections"][0];
+    assert_eq!(apple["versions"], 2, "{apple}");
+    assert_eq!(apple["spec"], "selection:apple@2", "{apple}");
+    assert_eq!(apple["note"], "second", "{apple}");
+    assert_eq!(apple["owner"], "ops@lab", "{apple}");
+    // a page at a time: limit, then after the last page's next
+    let (_, first) = server.call("GET", "/api/ask/selections?limit=2", None, OPERATOR);
+    assert_eq!(first["count"], 2, "{first}");
+    assert_eq!(first["next"], "every", "{first}");
+    let (_, second) = server.call(
+        "GET",
+        "/api/ask/selections?limit=2&after=every",
+        None,
+        OPERATOR,
+    );
+    assert_eq!(second["count"], 1, "{second}");
+    assert_eq!(second["selections"][0]["name"], "zebra", "{second}");
+    assert_eq!(second["next"], Value::Null, "{second}");
+    // part of a name, any case
+    let (_, found) = server.call("GET", "/api/ask/selections?q=EBR", None, OPERATOR);
+    assert_eq!(found["matching"], 1, "{found}");
+    assert_eq!(found["total"], 3, "{found}");
+    assert_eq!(found["selections"][0]["name"], "zebra", "{found}");
+    // the policy names the door's grant
+    let (_, caps) = server.call("GET", "/api/capabilities", None, OPERATOR);
+    let row = caps["policy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["door"] == "GET /api/ask/selections")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["grant"], "query:see", "{row}");
+}
