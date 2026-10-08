@@ -107,7 +107,7 @@ fn source(
         "unmapped",
         "patient_id",
         "subjects",
-        "folder",
+        "copy_folder",
         "cohort",
         "tags",
         "originals_kept",

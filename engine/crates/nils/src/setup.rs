@@ -23798,9 +23798,10 @@ mod tests {
     }
 
     /// Wave 7a, T4 for `nils setup`: the source place setup declares is a
-    /// root, explored: each folder under it is a dataset whose structure
-    /// says what it is, said in words. Nothing is moved; an unknown dataset
-    /// and the root itself are never read, nor any dataset's originals.
+    /// root, and only the root (Nima, 2026-10-08): its folders are listed
+    /// as they are and become datasets only when a person adds them, whose
+    /// structure then says what each is. Nothing is moved; the root, its
+    /// folders and an unknown dataset are never read, nor any originals.
     /// Moved on a rerun to another folder, the place is that folder's root.
     #[test]
     fn setup_s_source_place_is_a_root_whose_datasets_say_what_they_are() {
@@ -23838,25 +23839,44 @@ mod tests {
         };
         let mut said = Vec::new();
         let declared = declare_in(&mut registry, &[spec(&data)], &mut |l| said.push(l)).unwrap();
-        // the root alone is mounted; its datasets are under it
+        // the root alone, its folders listed as they are
         assert_eq!(declared.len(), 1, "{declared:?}");
         let root = place::by_name(registry.store(), "data").unwrap().unwrap();
         assert_eq!(root.dataset["kind"], "root", "{}", root.dataset);
-        let known = place::by_name(registry.store(), "known").unwrap().unwrap();
-        assert_eq!(known.dataset["state"], "identified", "{}", known.dataset);
-        assert_eq!(known.dataset["root"], "data");
-        let loose = place::by_name(registry.store(), "loose").unwrap().unwrap();
-        assert_eq!(loose.dataset["state"], "unknown", "{}", loose.dataset);
+        assert_eq!(place::list(registry.store()).unwrap().len(), 1);
         assert!(
-            said.iter().any(|l| l.contains("a root: 2 dataset(s)")),
+            said.iter().any(|l| l.contains("a root: 2 folder(s)")),
             "{said:?}"
         );
-        assert!(
-            said.iter()
-                .any(|l| l.starts_with("the loose dataset: unknown")),
-            "{said:?}"
-        );
-        assert!(said.iter().any(|l| l.contains("--move-into")), "{said:?}");
+        let listed = crate::dataset::folders(registry.store(), &root).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|f| f["added"] == false));
+        for path in [data.clone(), data.join("loose/sub-1"), data.join("known")] {
+            assert!(
+                crate::dataset::not_read(registry.store(), &path).is_some(),
+                "{} would be read",
+                path.display()
+            );
+        }
+        // added by a person, each says what it is
+        let known = crate::dataset::add_dataset(
+            registry.store(),
+            &root,
+            "known",
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(known.place.dataset["state"], "identified");
+        let loose = crate::dataset::add_dataset(
+            registry.store(),
+            &root,
+            "loose",
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(loose.place.dataset["state"], "unknown");
         assert!(data.join("loose/sub-1/IM_0001").is_file());
         assert!(!data.join("loose/derivatives").exists());
         for path in [
@@ -23885,7 +23905,7 @@ mod tests {
         let p = place::by_name(registry.store(), "data").unwrap().unwrap();
         assert_eq!(p.dataset["kind"], "root", "{}", p.dataset);
         assert!(
-            said.iter().any(|l| l.contains("a root: 0 dataset(s)")),
+            said.iter().any(|l| l.contains("a root: 0 folder(s)")),
             "{said:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);

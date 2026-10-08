@@ -813,7 +813,7 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
     };
     // the folder of each pseudonymised copy: the subject's code, or the id
     // type's value PatientID holds
-    let folder = pick(doc, current, "folder", &FOLDERS, FOLDERS[0])?;
+    let folder = pick(doc, current, "copy_folder", &FOLDERS, FOLDERS[0])?;
     if folder == "id-type"
         && !matches!(
             PatientId::of(&json!({ "patient_id": patient_id })),
@@ -821,7 +821,7 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         )
     {
         return Err(
-            "folder id-type names each copy's folder by the id type PatientID holds; declare patient_id: id-type:<name> with it".into(),
+            "copy_folder id-type names each copy's folder by the id type PatientID holds; declare patient_id: id-type:<name> with it".into(),
         );
     }
     let originals_kept = pick(
@@ -855,7 +855,7 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         "unmapped": unmapped,
         "patient_id": patient_id,
         "subjects": subjects,
-        "folder": folder,
+        "copy_folder": folder,
         "kind": kind,
         "state": state,
         "root": root,
@@ -1144,7 +1144,7 @@ mod tests {
                 "unmapped": "hold",
                 "patient_id": null,
                 "subjects": null,
-                "folder": "subject-code",
+                "copy_folder": "subject-code",
                 "kind": "dataset",
                 "state": "unknown",
                 "root": null,
@@ -1267,17 +1267,20 @@ mod tests {
         assert!(why.contains("map, generated"), "{why}");
         // the folder by the id type needs PatientID to hold one
         let d = dataset_of(
-            &json!({"arrives": "identified", "patient_id": "id-type:site-id", "folder": "id-type"}),
+            &json!({"arrives": "identified", "patient_id": "id-type:site-id", "copy_folder": "id-type"}),
             None,
         )
         .unwrap();
-        assert_eq!(d["folder"], "id-type");
+        assert_eq!(d["copy_folder"], "id-type");
         assert_eq!(
-            dataset_of(&json!({}), None).unwrap()["folder"],
+            dataset_of(&json!({}), None).unwrap()["copy_folder"],
             "subject-code"
         );
-        let why =
-            dataset_of(&json!({"arrives": "identified", "folder": "id-type"}), None).unwrap_err();
+        let why = dataset_of(
+            &json!({"arrives": "identified", "copy_folder": "id-type"}),
+            None,
+        )
+        .unwrap_err();
         assert!(why.contains("patient_id: id-type"), "{why}");
     }
 

@@ -2733,7 +2733,8 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     );
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
     loose.file("sub-9/a.dcm", &dicom("1.2.3.F", "1.2.3.F.1.1"));
-    const LIMIT: usize = 52;
+    loose.file("sub-8/notes.txt", b"no dicom here");
+    const LIMIT: usize = 56;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -2936,17 +2937,76 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         serde_json::Value::Null,
         "{undeclared}"
     );
+    // Wave 7a (Nima, 2026-10-08): the root alone; its folders listed as
+    // they are; a folder a dataset only when a person adds it
     assert_eq!(undeclared["dataset"]["kind"], "root", "{undeclared}");
-    assert_eq!(undeclared["layout"]["datasets"], 1, "{undeclared}");
-    let under = &undeclared["datasets"][0];
-    assert_eq!(under["name"], "sub-9", "{undeclared}");
-    assert_eq!(under["dataset"]["state"], "unknown", "{undeclared}");
-    assert_eq!(under["dataset"]["root"], "loose", "{undeclared}");
-    assert_eq!(under["layout"]["question"], true, "{undeclared}");
+    assert_eq!(undeclared["layout"]["folders"], 2, "{undeclared}");
+    assert_eq!(
+        undeclared["datasets"],
+        serde_json::Value::Null,
+        "{undeclared}"
+    );
+    let (status, listed) = ask("GET", "/api/places/loose/folders", None, reader);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["root"], "loose", "{listed}");
+    assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["folders"][0]["name"], "sub-8", "{listed}");
+    assert_eq!(listed["folders"][0]["holds_dicom"], "no", "{listed}");
+    assert_eq!(listed["folders"][0]["added"], false, "{listed}");
+    assert_eq!(
+        listed["folders"][0]["dataset_id"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
+    assert_eq!(listed["folders"][1]["name"], "sub-9", "{listed}");
+    assert_eq!(listed["folders"][1]["holds_dicom"], "yes", "{listed}");
+    assert_eq!(listed["folders"][1]["has_derivatives"], false, "{listed}");
+    // looking at the roots again adds no dataset
+    let (status, again) = ask("GET", "/api/places?explore=1", None, ops);
+    assert_eq!(status, 200, "{again}");
+    assert!(
+        !again["places"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "sub-9" || p["name"] == "sub-8"),
+        "{again}"
+    );
+    let (status, under) = ask(
+        "POST",
+        "/api/places",
+        Some(r#"{"role": "source", "root": "loose", "folder": "sub-9"}"#),
+        ops,
+    );
+    assert_eq!(status, 201, "{under}");
+    let (status, notes) = ask(
+        "POST",
+        "/api/places",
+        Some(
+            &serde_json::json!({
+                "role": "source",
+                "name": "notes",
+                "path": loose.path().join("sub-8").display().to_string(),
+            })
+            .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{notes}");
+    assert_eq!(notes["dataset"]["root"], "loose", "{notes}");
+    assert_eq!(notes["dataset"]["state"], "unknown", "{notes}");
+    assert_eq!(under["name"], "sub-9", "{under}");
+    assert_eq!(under["dataset"]["state"], "unknown", "{under}");
+    assert_eq!(under["dataset"]["root"], "loose", "{under}");
+    assert_eq!(under["layout"]["question"], true, "{under}");
+    assert!(
+        under["not_read"].as_str().unwrap().contains("unknown"),
+        "{under}"
+    );
     assert_eq!(
         under["layout"]["loose_dicom"],
         serde_json::json!(["a.dcm"]),
-        "{undeclared}"
+        "{under}"
     );
     assert!(loose.path().join("sub-9/a.dcm").is_file());
     for command in [
@@ -2978,7 +3038,11 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         .cloned()
         .unwrap();
     assert_eq!(row["layout"]["root"], true, "{row}");
-    assert_eq!(row["datasets"], serde_json::json!(["sub-9"]), "{row}");
+    assert_eq!(
+        row["datasets"],
+        serde_json::json!(["sub-9", "notes"]),
+        "{row}"
+    );
     assert!(row["not_read"].as_str().unwrap().contains("root"), "{row}");
     let row = listed["places"]
         .as_array()
@@ -3153,11 +3217,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     );
     assert_eq!(status, 201, "{bare_place}");
     assert_eq!(bare_place["dataset"]["kind"], "root", "{bare_place}");
-    assert_eq!(
-        bare_place["datasets"],
-        serde_json::json!([]),
-        "{bare_place}"
-    );
+    assert_eq!(bare_place["layout"]["folders"], 0, "{bare_place}");
     assert_eq!(
         bare_place["dataset"]["arrives"], "undeclared",
         "{bare_place}"

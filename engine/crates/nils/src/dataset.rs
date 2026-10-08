@@ -48,7 +48,7 @@ pub(crate) const FIELDS: [&str; 11] = [
     "unmapped",
     "patient_id",
     "subjects",
-    "folder",
+    "copy_folder",
     "cohort",
     "tags",
     "confirm_move",
@@ -202,10 +202,29 @@ impl Layout {
 const LOOK_ENTRIES: usize = 2_000;
 const LOOK_FOR: Duration = Duration::from_millis(500);
 
-/// Whether a loose entry holds DICOM: a file named `.dcm`, or one with the
+/// What a bounded look found of DICOM in an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dicom {
+    Yes,
+    No,
+    /// The look ran out of its bound before it found any or was through.
+    Unknown,
+}
+
+impl Dicom {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Dicom::Yes => "yes",
+            Dicom::No => "no",
+            Dicom::Unknown => "unknown",
+        }
+    }
+}
+
+/// Whether an entry holds DICOM: a file named `.dcm`, or one with the
 /// `DICM` mark at byte 128; a folder holding one. A look that runs out of
-/// its bound says yes, since what it did not see it cannot vouch for.
-fn holds_dicom(path: &Path) -> bool {
+/// its bound says it does not know.
+pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
     use std::io::Read as _;
     let until = Instant::now() + LOOK_FOR;
     let mut seen = 0usize;
@@ -216,7 +235,7 @@ fn holds_dicom(path: &Path) -> bool {
         };
         seen += 1;
         if seen > LOOK_ENTRIES || Instant::now() >= until {
-            return true;
+            return Dicom::Unknown;
         }
         if meta.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&at) {
@@ -231,17 +250,23 @@ fn holds_dicom(path: &Path) -> bool {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("dcm"))
         {
-            return true;
+            return Dicom::Yes;
         }
         let mut head = [0u8; 132];
         if let Ok(mut f) = std::fs::File::open(&at)
             && f.read_exact(&mut head).is_ok()
             && &head[128..132] == b"DICM"
         {
-            return true;
+            return Dicom::Yes;
         }
     }
-    false
+    Dicom::No
+}
+
+/// Whether a loose entry may hold DICOM: what the look did not see it
+/// cannot vouch for, so an unfinished look counts.
+fn holds_dicom(path: &Path) -> bool {
+    look_for_dicom(path) != Dicom::No
 }
 
 pub(crate) fn detect(path: &Path) -> Layout {
@@ -386,7 +411,7 @@ fn layout_doc_with(path: &Path, layout: &Layout, counted: bool) -> Value {
                 "map": "a map of subject codes to the dataset's ids, given or already in the registry; a file whose id no map names is held",
                 "generated": "the subject code generator makes each code from the id, as from a personnummer; every subject is a subject, never provisional",
             })),
-            "folder": {"choices": place::FOLDERS, "default": place::FOLDERS[0]},
+            "copy_folder": {"choices": place::FOLDERS, "default": place::FOLDERS[0]},
         },
         "moved": layout.moved.map(|(into, n)| json!({"into": into, "entries": n})),
         "renamed": layout.renamed,
@@ -607,7 +632,7 @@ pub(crate) fn declare(
     let in_force = current.and_then(|c| place::dataset_of(&c.dataset, None).ok());
     if let (Some(c), Some(was)) = (current, in_force.as_ref()) {
         let changed = |k: &str| dataset[k] != was[k] && !was[k].is_null();
-        if changed("patient_id") || changed("folder") {
+        if changed("patient_id") || changed("copy_folder") {
             let written = pseudonymised_files(store, c.id).map_err(|e| Refused {
                 status: 500,
                 message: e.to_string(),
@@ -651,33 +676,34 @@ fn pseudonymised_files(
         .unwrap_or(0))
 }
 
-/// One dataset an exploration found under a root, as an answer names it.
+/// One dataset a refresh settled, or one a person added, as an answer
+/// names it.
 pub(crate) struct Found {
     pub(crate) place: Place,
     pub(crate) layout: Value,
-    /// Made by this exploration, not met again.
+    /// Made by this act, not met again.
     pub(crate) new: bool,
 }
 
-/// A source place's folder made what it is (Wave 7a): a root, its
-/// datasets explored; a dataset or a legacy tree, settled. The settings
-/// asked go to a dataset; a root takes none. Returns the dataset to store
-/// on the place, its layout, and for a root what it found. A place made or
-/// changed under a root is written here; the place itself is the caller's
-/// to write.
+/// A source place's folder made what it is (Wave 7a): a root is only the
+/// root (Nima, 2026-10-08: "on starting page we just need to add a root";
+/// a folder under it becomes a dataset only when a person adds it); a
+/// dataset or a legacy tree is settled. The settings asked go to a
+/// dataset; a root takes none. Returns the dataset to store on the place
+/// and its layout; the place itself is the caller's to write.
 pub(crate) fn shape_place(
     store: &mut Store,
-    name: &str,
+    _name: &str,
     path: &Path,
     asked: &Value,
     current: Option<&Place>,
-    guarantees: &Value,
+    _guarantees: &Value,
 ) -> Result<(Declared, Vec<Found>), Refused> {
     if asked.get("arrives").is_some_and(|a| !a.is_null()) {
         return Err(bad(ARRIVES_IS_READ));
     }
     // a folder whose entries a person puts into a tree is one dataset,
-    // whatever it held before; so is a dataset found under a root, and one
+    // whatever it held before; so is a dataset added under a root, and one
     // whose structure said what it is. A place from before that said
     // nothing is looked at again, and may be a root
     let one = asked["move_into"].is_string()
@@ -703,14 +729,7 @@ pub(crate) fn shape_place(
             other.name
         )));
     }
-    let parts: Vec<_> = path
-        .components()
-        .map(|c| c.as_os_str().to_owned())
-        .collect();
-    if parts
-        .windows(2)
-        .any(|w| w[0] == "derivatives" && w[1] == "dcm-original")
-    {
+    if in_originals(path) {
         return Err(conflict(format!(
             "{} is in a dataset's originals, which the pseudonymiser alone reads",
             path.display()
@@ -724,7 +743,7 @@ pub(crate) fn shape_place(
     }
     if fields_given(asked) {
         return Err(bad(format!(
-            "{} is a root: each folder under it is a dataset, and a dataset's settings are given on the dataset, not on its root",
+            "{} is a root: a folder under it becomes a dataset when it is added (nils place add-dataset ROOT FOLDER, or POST /api/places with root and folder), and a dataset's settings are given on the dataset",
             path.display()
         )));
     }
@@ -733,22 +752,33 @@ pub(crate) fn shape_place(
         current.map(|p| &p.dataset),
     )
     .map_err(bad)?;
-    let found = explore(store, name, path, guarantees)?;
+    let folders = sub_folders(path).len();
     let layout = json!({
         "root": true,
-        "datasets": found.len(),
+        "folders": folders,
         "loose": root_loose(path),
     });
     let mut probed = crate::places::probe(path);
-    probed["datasets"] = json!(found.len());
+    probed["folders"] = json!(folders);
     Ok((
         Declared {
             dataset,
             layout,
             probed,
         },
-        found,
+        Vec::new(),
     ))
+}
+
+/// Whether a path is in a dataset's originals, whoever's.
+fn in_originals(path: &Path) -> bool {
+    let parts: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_owned())
+        .collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == "derivatives" && w[1] == "dcm-original")
 }
 
 /// The files at a root's top, which belong to no dataset and are not read.
@@ -765,73 +795,213 @@ fn root_loose(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// The datasets under a root (Wave 7a): each folder under it, hidden ones
-/// aside, as a source place of its own whose state its structure says. A
-/// folder a place already names is that place, settled again with its
-/// settings; another is a new place, named as the folder where that name is
-/// free and `<root>-<folder>` otherwise, with the root's guarantees.
-pub(crate) fn explore(
+/// The folders right under a root, hidden ones aside, sorted.
+fn sub_folders(path: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(path)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| {
+                    !e.file_name().to_string_lossy().starts_with('.')
+                        && e.file_type().is_ok_and(|t| t.is_dir())
+                })
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// The active source place a root is, by its id or its name.
+pub(crate) fn root_named(store: &mut Store, given: &str) -> Result<Place, Refused> {
+    let found = match given.parse::<i64>() {
+        Ok(id) => place::show(store, id),
+        Err(_) => place::by_name(store, given),
+    }
+    .map_err(|e| Refused {
+        status: 500,
+        message: e.to_string(),
+        layout: None,
+    })?;
+    match found {
+        Some(p) if p.retired_at.is_none() && p.dataset["kind"] == "root" => Ok(p),
+        Some(p) => Err(bad(format!("{} is no source root", p.name))),
+        None => Err(Refused {
+            status: 404,
+            message: format!("no place {given}"),
+            layout: None,
+        }),
+    }
+}
+
+/// A root's folders as they are, nothing changed and nothing assumed
+/// (Wave 7a, Nima 2026-10-08: "some might not even be data or include
+/// dicom"): each folder's name and path, whether it was added as a dataset
+/// and which, whether a bounded look found DICOM in it (`yes`, `no`, or
+/// `unknown` where the look ran out), and whether it holds `derivatives/`.
+pub(crate) fn folders(store: &mut Store, root: &Place) -> Result<Vec<Value>, Refused> {
+    let places = place::active(store).map_err(|e| Refused {
+        status: 500,
+        message: e.to_string(),
+        layout: None,
+    })?;
+    let path = PathBuf::from(&root.path);
+    if !path.is_dir() {
+        return Err(conflict(format!("{} is not a directory", path.display())));
+    }
+    Ok(sub_folders(&path)
+        .into_iter()
+        .map(|folder| {
+            let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
+            let added = places.iter().find(|p| {
+                p.role == Role::Source
+                    && std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path))
+                        == real
+            });
+            json!({
+                "name": folder.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "path": real.display().to_string(),
+                "added": added.is_some(),
+                "dataset_id": added.map(|p| p.id),
+                "dataset": added.map(|p| p.name.clone()),
+                "holds_dicom": look_for_dicom(&folder).name(),
+                "has_derivatives": folder.join("derivatives").is_dir(),
+            })
+        })
+        .collect())
+}
+
+/// A folder under a root added as a dataset, by a person's act (Wave 7a):
+/// only then is its structure read and its state derived, with the move
+/// question and the settings as any declaration has them. The folder is
+/// named by its name under the root or by a path under it; the dataset
+/// takes the name given, else the folder's, the root's name before it
+/// where that is taken. A folder already a place is refused.
+pub(crate) fn add_dataset(
     store: &mut Store,
-    root: &str,
-    path: &Path,
-    guarantees: &Value,
-) -> Result<Vec<Found>, Refused> {
+    root: &Place,
+    folder: &str,
+    name: Option<&str>,
+    asked: &Value,
+) -> Result<Found, Refused> {
     let failed = |e: nils_registry::store::Error| Refused {
         status: 500,
         message: e.to_string(),
         layout: None,
     };
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(path)
-        .map_err(|e| conflict(format!("{}: {e}", path.display())))?
-        .flatten()
-        .filter(|e| {
-            !e.file_name().to_string_lossy().starts_with('.')
-                && e.file_type().is_ok_and(|t| t.is_dir())
-        })
-        .map(|e| e.path())
-        .collect();
-    folders.sort();
-    let places = place::active(store).map_err(failed)?;
-    let mut out = Vec::new();
-    for folder in folders {
-        let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
-        let there = places.iter().find(|p| {
-            p.role == Role::Source
-                && std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path)) == real
-        });
-        let d = match declare(store, &real, &json!({}), there) {
-            Ok(d) => d,
-            // a folder that cannot be settled is said, not a reason to stop
-            Err(r) => {
-                out.push(Found {
-                    place: Place {
-                        id: 0,
-                        name: folder
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        role: Role::Source,
-                        path: real.display().to_string(),
-                        guarantees: Value::Null,
-                        probed: Value::Null,
-                        probed_at: None,
-                        created_at: String::new(),
-                        updated_at: None,
-                        retired_at: None,
-                        handling: Value::Null,
-                        dataset: Value::Null,
-                    },
-                    layout: json!({"error": r.message}),
-                    new: false,
-                });
-                continue;
+    let root_path = std::fs::canonicalize(&root.path).unwrap_or_else(|_| PathBuf::from(&root.path));
+    let given = Path::new(folder);
+    let path = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        if folder.split('/').any(|s| s == ".." || s.is_empty()) {
+            return Err(bad(format!(
+                "{folder}: a folder under the root, by its name"
+            )));
+        }
+        root_path.join(given)
+    };
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    if path == root_path || !path.starts_with(&root_path) {
+        return Err(bad(format!(
+            "{} is not a folder under the root {}",
+            path.display(),
+            root.name
+        )));
+    }
+    if !path.is_dir() {
+        return Err(conflict(format!("{} is not a directory", path.display())));
+    }
+    if in_originals(&path) {
+        return Err(conflict(format!(
+            "{} is in a dataset's originals, which the pseudonymiser alone reads",
+            path.display()
+        )));
+    }
+    if let Some(p) = place::active(store)
+        .map_err(failed)?
+        .into_iter()
+        .find(|p| std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path)) == path)
+    {
+        return Err(conflict(format!(
+            "{} is already the place {}",
+            path.display(),
+            p.name
+        )));
+    }
+    let name = match name {
+        Some(n) => {
+            if place::by_name(store, n).map_err(failed)?.is_some() {
+                return Err(conflict(format!("a place is already named {n}")));
             }
-        };
-        let mut dataset = d.dataset;
-        dataset["root"] = json!(root);
-        match there {
-            Some(p) => {
+            n.to_string()
+        }
+        None => {
+            let base = dataset_name(&path);
+            if base != root.name && place::by_name(store, &base).map_err(failed)?.is_none() {
+                base
+            } else {
+                format!("{}-{base}", root.name)
+            }
+        }
+    };
+    let d = declare(store, &path, asked, None)?;
+    let mut dataset = d.dataset;
+    dataset["root"] = json!(root.name);
+    let id = place::add(
+        store,
+        &place::New {
+            name: &name,
+            role: Role::Source,
+            path: &path.display().to_string(),
+            guarantees: root.guarantees.clone(),
+            probed: d.probed,
+            handling: Value::Null,
+            dataset,
+        },
+    )
+    .map_err(|e| conflict(e.to_string()))?;
+    let p = place::show(store, id)
+        .map_err(failed)?
+        .ok_or_else(|| conflict(format!("place {id} was not written")))?;
+    Ok(Found {
+        place: p,
+        layout: d.layout,
+        new: true,
+    })
+}
+
+/// The datasets' folders looked at again (Wave 7a): each dataset and
+/// legacy place, the one named or all, settled with its own settings, its
+/// state read again from its structure. Nothing is added and nothing
+/// moved. A folder that cannot be settled is said, not a reason to stop.
+pub(crate) fn refresh(store: &mut Store, only: Option<&str>) -> Result<Vec<Found>, Refused> {
+    let failed = |e: nils_registry::store::Error| Refused {
+        status: 500,
+        message: e.to_string(),
+        layout: None,
+    };
+    let places: Vec<Place> = place::active(store)
+        .map_err(failed)?
+        .into_iter()
+        .filter(|p| p.role == Role::Source && p.dataset["kind"] != "root")
+        .filter(|p| match only {
+            Some(o) => {
+                o == p.name
+                    || o.parse::<i64>().ok() == Some(p.id)
+                    || p.dataset["root"].as_str() == Some(o)
+            }
+            None => true,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for p in places {
+        let path = PathBuf::from(&p.path);
+        match declare(store, &path, &json!({}), Some(&p)) {
+            Ok(d) => {
                 place::set(store, p.id, None, None, Some(&d.probed)).map_err(failed)?;
+                let mut dataset = d.dataset;
+                dataset["root"] = p.dataset["root"].clone();
                 let p = place::set_dataset(store, p.id, &dataset).map_err(failed)?;
                 out.push(Found {
                     place: p,
@@ -839,36 +1009,11 @@ pub(crate) fn explore(
                     new: false,
                 });
             }
-            None => {
-                let base = dataset_name(&folder);
-                let name =
-                    if base != root && place::by_name(store, &base).map_err(failed)?.is_none() {
-                        base
-                    } else {
-                        format!("{root}-{base}")
-                    };
-                let id = place::add(
-                    store,
-                    &place::New {
-                        name: &name,
-                        role: Role::Source,
-                        path: &real.display().to_string(),
-                        guarantees: guarantees.clone(),
-                        probed: d.probed,
-                        handling: Value::Null,
-                        dataset,
-                    },
-                )
-                .map_err(|e| conflict(e.to_string()))?;
-                let p = place::show(store, id)
-                    .map_err(failed)?
-                    .ok_or_else(|| conflict(format!("place {id} was not written")))?;
-                out.push(Found {
-                    place: p,
-                    layout: d.layout,
-                    new: true,
-                });
-            }
+            Err(r) => out.push(Found {
+                layout: json!({"error": r.message}),
+                place: p,
+                new: false,
+            }),
         }
     }
     Ok(out)
@@ -926,8 +1071,8 @@ pub(crate) fn layout_lines(id: i64, dataset: &Value, layout: &Value) -> Vec<Stri
     let mut out = Vec::new();
     if dataset["kind"] == "root" {
         out.push(format!(
-            "a root: {} dataset(s) under it, each read by its own name; {} file(s) at its top belong to none and are not read",
-            layout["datasets"], layout["loose"]
+            "a root: {} folder(s) under it, none read until it is added as a dataset (nils place folders {id} lists them, nils place add-dataset {id} FOLDER adds one); {} file(s) at its top are not read",
+            layout["folders"], layout["loose"]
         ));
         return out;
     }
@@ -1669,21 +1814,20 @@ mod tests {
         assert!(why.message.contains("keep one"), "{}", why.message);
     }
 
-    /// Wave 7a: a root's folders are its datasets, each a source place of
-    /// its own whose state its structure says, named as its folder, the
-    /// root's name before it where that is taken. Explored again, each is
-    /// met, not made twice. Nothing of an unknown dataset is moved.
+    /// Wave 7a (Nima, 2026-10-08: "the only assumption is when we add data
+    /// and expect the structure"): adding a root adds the root alone; its
+    /// folders are listed as they are, with no DICOM where there is none;
+    /// a folder becomes a dataset only when added, and only then is its
+    /// structure read, every kind as it is; a refresh reads each again and
+    /// adds nothing.
     #[test]
-    fn a_root_is_explored_into_datasets_of_every_kind() {
+    fn a_root_s_folders_become_datasets_only_when_added() {
         let dir = TempDir::new("dataset-root");
-        let home = TempDir::new("dataset-root-home");
         let mut store = Store::sqlite_in_memory().unwrap();
         nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
             .unwrap();
-        let _ = home;
         for (folder, files) in [
             ("ida", vec!["derivatives/dcm-original/p1/IM_1"]),
-            ("idb", vec!["derivatives/dcm-original/p1/IM_1"]),
             ("anona", vec!["derivatives/dcm-anon/s1/IM_1"]),
             ("rawb", vec!["derivatives/dcm-raw/s1/IM_1"]),
             (
@@ -1701,23 +1845,77 @@ mod tests {
                 dir.file(&format!("{folder}/{f}"), &dicom_bytes());
             }
         }
+        dir.file("papers/notes.txt", b"no dicom here");
         dir.file("readme.txt", b"r");
-        let found = explore(&mut store, "src", dir.path(), &json!({})).unwrap();
-        let states: Vec<(String, String, String)> = found
+        // the root alone
+        let (d, found) =
+            shape_place(&mut store, "src", dir.path(), &json!({}), None, &json!({})).unwrap();
+        assert!(found.is_empty());
+        assert_eq!(d.dataset["kind"], "root");
+        assert_eq!(d.layout["folders"], 8);
+        let id = place::add(
+            &mut store,
+            &place::New {
+                name: "src",
+                role: Role::Source,
+                path: &dir.path().display().to_string(),
+                guarantees: json!({}),
+                probed: d.probed,
+                handling: Value::Null,
+                dataset: d.dataset,
+            },
+        )
+        .unwrap();
+        assert_eq!(place::list(&mut store).unwrap().len(), 1);
+        let root = place::show(&mut store, id).unwrap().unwrap();
+        // the folders as they are; nothing written, nothing assumed
+        let listed = folders(&mut store, &root).unwrap();
+        let shown: Vec<(String, String, bool, bool)> = listed
             .iter()
             .map(|f| {
                 (
-                    f.place.name.clone(),
-                    f.place.dataset["state"].as_str().unwrap().to_string(),
-                    f.place.dataset["root"].as_str().unwrap().to_string(),
+                    f["name"].as_str().unwrap().to_string(),
+                    f["holds_dicom"].as_str().unwrap().to_string(),
+                    f["has_derivatives"].as_bool().unwrap(),
+                    f["added"].as_bool().unwrap(),
                 )
             })
             .collect();
         let want = [
+            ("anona", "yes", true),
+            ("both", "yes", true),
+            ("ida", "yes", true),
+            ("loose", "yes", false),
+            ("mixed", "yes", true),
+            ("papers", "no", false),
+            ("rawb", "yes", true),
+            ("src", "yes", true),
+        ];
+        assert_eq!(
+            shown,
+            want.iter()
+                .map(|(n, d, h)| (n.to_string(), d.to_string(), *h, false))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            dir.path().join("rawb/derivatives/dcm-raw").is_dir(),
+            "nothing renamed"
+        );
+        assert_eq!(place::list(&mut store).unwrap().len(), 1);
+        // each added: its structure read, every kind as it is
+        let mut states = Vec::new();
+        for folder in ["anona", "both", "ida", "loose", "mixed", "rawb", "src"] {
+            let f = add_dataset(&mut store, &root, folder, None, &json!({})).unwrap();
+            assert_eq!(f.place.dataset["root"], "src");
+            states.push((
+                f.place.name.clone(),
+                f.place.dataset["state"].as_str().unwrap().to_string(),
+            ));
+        }
+        let want = [
             ("anona", "anonymised"),
             ("both", "both"),
             ("ida", "identified"),
-            ("idb", "identified"),
             ("loose", "unknown"),
             ("mixed", "unknown"),
             ("rawb", "anonymised"),
@@ -1726,35 +1924,34 @@ mod tests {
         assert_eq!(
             states,
             want.iter()
-                .map(|(n, s)| (n.to_string(), s.to_string(), "src".to_string()))
+                .map(|(n, s)| (n.to_string(), s.to_string()))
                 .collect::<Vec<_>>()
         );
-        assert!(found.iter().all(|f| f.new));
-        // nothing of an unknown dataset moved; dcm-raw renamed, shown
+        // nothing of an unknown dataset moved; dcm-raw renamed once added
         assert!(dir.path().join("loose/p1/IM_1").is_file());
-        assert!(dir.path().join("mixed/p9/IM_9").is_file());
         assert!(
             dir.path()
                 .join("rawb/derivatives/dcm-anon/s1/IM_1")
                 .is_file()
         );
-        let rawb = found.iter().find(|f| f.place.name == "rawb").unwrap();
-        assert_eq!(rawb.layout["renamed"], true);
-        // what is read and what is not
-        for f in &found {
-            let why = place::incomplete(&f.place.dataset);
-            match f.place.dataset["state"].as_str().unwrap() {
-                "identified" | "both" => assert_eq!(why, None, "{}", f.place.name),
-                // anonymised data says what PatientID holds first
-                "anonymised" => assert!(why.unwrap().contains("patient_id"), "{}", f.place.name),
-                _ => assert!(why.unwrap().contains("unknown"), "{}", f.place.name),
-            }
-        }
-        // explored again: met, not made again
-        let again = explore(&mut store, "src", dir.path(), &json!({})).unwrap();
+        // added twice, by path, outside the root, or the root: refused
+        let twice = add_dataset(&mut store, &root, "ida", None, &json!({}));
+        assert!(matches!(twice, Err(Refused { status: 409, .. })));
+        let by_path = dir.path().join("papers").display().to_string();
+        let f = add_dataset(&mut store, &root, &by_path, Some("notes"), &json!({})).unwrap();
+        assert_eq!(f.place.name, "notes");
+        assert_eq!(f.place.dataset["state"], "unknown");
+        assert!(add_dataset(&mut store, &root, "../elsewhere", None, &json!({})).is_err());
+        assert!(add_dataset(&mut store, &root, "/tmp", None, &json!({})).is_err());
+        // the folders say which are datasets now
+        let listed = folders(&mut store, &root).unwrap();
+        assert!(listed.iter().all(|f| f["added"] == true), "{listed:?}");
+        // a refresh reads each again and adds nothing
+        let before = place::list(&mut store).unwrap().len();
+        let again = refresh(&mut store, None).unwrap();
         assert_eq!(again.len(), 8);
         assert!(again.iter().all(|f| !f.new));
-        assert_eq!(place::list(&mut store).unwrap().len(), 8);
+        assert_eq!(place::list(&mut store).unwrap().len(), before);
     }
 
     #[test]

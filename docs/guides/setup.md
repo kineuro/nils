@@ -34,9 +34,12 @@ assistant, `assistant/`, `kvasir/` and `llama.cpp/`. A directory of DICOM the en
 read can be named here; it becomes an ingest root and a `source` place, and
 it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 
-The source place is a root: setup explores it, and each folder under it is
-a dataset whose structure says what it is. Nothing is moved and nothing is
-read until the structure says how:
+The source place is a root, and setup adds the root alone. A folder under
+it becomes a dataset only when you add it, and only then is its structure
+read; nothing else is assumed, since a folder may hold no data at all.
+`nils place folders source` lists the folders with whether each holds DICOM
+and `derivatives/`, and `nils place add-dataset source FOLDER` adds one.
+What a dataset is, its structure says:
 
 | Under the dataset's folder | It is | What reads it |
 |---|---|---|
@@ -47,14 +50,14 @@ read until the structure says how:
 
 A dataset is unknown when entries holding DICOM sit beside `derivatives/`,
 or when it has no tree at all. Say which tree those entries go into, and
-they move only then: `nils place layout source` shows each dataset and what
-would move, and `nils place set <id> --move-into originals --confirm-move`
+they move only then: the answer of `add-dataset` says what would move, and `nils place set <id> --move-into originals --confirm-move`
 (identified data) or `--move-into anon --confirm-move` (already anonymised)
 moves them. An anonymised dataset also says what its PatientID holds and
 how its subjects are found, before anything reads it: `nils place set <id>
 --patient-id id-type:NAME --subjects map` (a map of subject codes to its
 ids) or `--subjects generated` (the subject code generator makes each code
-from the id). `nils place explore` finds the folders added since.
+from the id). `nils place explore` reads each dataset's structure again and
+adds nothing.
 
 A site that has places of its own names them instead, once each, with the
 role and the guarantees they really have: `--place
