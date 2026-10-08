@@ -683,6 +683,9 @@ enum PyramidCommand {
         /// Planes encoded at once; the machine's cores when absent
         #[arg(long, value_name = "N")]
         workers: Option<usize>,
+        /// Build again the pyramids that are built; without it a stack that has one is skipped
+        #[arg(long)]
+        force: bool,
     },
     /// The pyramids a working place holds
     List {
@@ -1308,6 +1311,12 @@ struct PickArgs {
     /// Only this subject, which also narrows the population scored against
     #[arg(long, value_name = "CODE")]
     subject: Option<String>,
+    /// Decide the occasions of this cohort's members alone, scored against the whole registry
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["subject", "dataset"])]
+    cohort: Option<String>,
+    /// Decide the occasions of this dataset's subjects alone, scored against the whole registry
+    #[arg(long, value_name = "NAME", conflicts_with = "subject")]
+    dataset: Option<String>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -4100,11 +4109,17 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     // a tree holding files no digest has read is digested first, so the
     // pseudonymiser knows what the tree holds (lab 26, defect 7)
     let unread = chain::unread_in_tree(registry.store(), &dataset);
+    // record 55 H2: a pick run ends the thread where the dataset feeds a
+    // cohort and the pack declares picks
+    let picks = pack_dir(home, None)
+        .ok()
+        .is_some_and(|d| chain::pack_has_picks(Some(&d), args.pack.as_deref().unwrap_or("mri")));
     let (first, then) = chain::bring_in(
         &dataset,
         args.name.as_deref(),
         args.pack.as_deref(),
         unread.is_some(),
+        picks,
     );
     let name = first
         .iter()
@@ -4194,6 +4209,7 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             pack_dir,
             place,
             workers,
+            force,
         } => {
             let working =
                 crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
@@ -4204,9 +4220,24 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             });
             let Some(stack) = stack else {
                 drop(registry);
-                return pyramid_many(home, select, handle, &pack, pack_dir, &working, workers);
+                return pyramid_many(
+                    home, select, handle, &pack, pack_dir, &working, workers, force,
+                );
             };
             let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
+            // record 55 H2: a stack that has its pyramid is skipped, as a
+            // selection's are, unless it is built again with --force; a
+            // build the picture door queued twice builds once
+            if !force && matches!(crate::pyramid::manifest(&root), Ok(Some(_))) {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "stack": stack, "place": working.name, "skipped": true,
+                        "why": "the stack has its pyramid; --force builds it again",
+                    })
+                );
+                return Ok(());
+            }
             // The reader's words name a file's path, which can hold a
             // subject code or a series name: they are said at a terminal,
             // and a queued job's error (what the verb printed) keeps the
@@ -4273,7 +4304,8 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
 /// Record 45 E1: the pyramids of a selection's or a handle's stacks as one
 /// job of kind `pyramid`, which skips the stacks built, counts the ones
 /// that fail with why and goes on, and ends with built, skipped and failed
-/// in its result.
+/// in its result; with `force` the ones built are built again.
+#[allow(clippy::too_many_arguments)]
 fn pyramid_many(
     home: &Home,
     select: Option<String>,
@@ -4282,6 +4314,7 @@ fn pyramid_many(
     pack_dir: Option<std::path::PathBuf>,
     working: &nils_registry::place::Place,
     workers: usize,
+    force: bool,
 ) -> Result<(), Exit> {
     let handle = match (&select, handle) {
         (Some(spec), _) => crate::ask_cli::freeze(
@@ -4310,7 +4343,7 @@ fn pyramid_many(
             name: select.as_deref().unwrap_or("handle"),
             args: serde_json::json!({
                 "selection": select, "handle": handle, "place": working.name,
-                "stacks": stacks.len(), "workers": workers,
+                "stacks": stacks.len(), "workers": workers, "force": force,
             }),
         },
     )
@@ -4333,6 +4366,7 @@ fn pyramid_many(
         &stacks,
         workers,
         None,
+        force,
         &mut go_on,
     );
     let mut result = many.as_json(&working.name);
@@ -7591,11 +7625,36 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
         (None, None) => session::Scheme::default(),
     };
 
-    let report = nils_classify::picking::run(
+    // record 55 H2: a run for a cohort or a dataset decides their subjects'
+    // occasions, scored against the whole registry
+    let only = match (&args.cohort, &args.dataset) {
+        (Some(name), _) => {
+            let subjects = nils_registry::cohort::open_members_of(registry.store(), name)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no cohort named {name}")))?;
+            Some(nils_classify::picking::Only {
+                label: format!("cohort:{name}"),
+                subjects,
+            })
+        }
+        (None, Some(name)) => {
+            let name = name.trim_start_matches('@');
+            let place = dataset_named(&mut registry, &format!("@{name}"))?;
+            let subjects = crate::chain::dataset_subjects(registry.store(), &place)
+                .map_err(|e| fail(e.to_string()))?;
+            Some(nils_classify::picking::Only {
+                label: format!("dataset:{name}"),
+                subjects,
+            })
+        }
+        (None, None) => None,
+    };
+    let report = nils_classify::picking::run_for(
         &mut registry,
         &pack,
         &scheme,
         args.subject.as_deref(),
+        only.as_ref(),
         &format!("pick:{}", pack.id()),
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -7609,6 +7668,9 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
         return Ok(());
     }
     println!("pick with {} against {}", pack.id(), report.reference);
+    if let (Some(only), Some(n)) = (&report.only, report.subjects) {
+        println!("  for              {only} ({n} subject(s))");
+    }
     println!("  occasions        {:>12}", report.sessions);
     println!("  picked           {:>12}", report.written);
     println!("  nothing eligible {:>12}", report.empty);

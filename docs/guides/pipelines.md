@@ -344,6 +344,14 @@ nils pyramid build --select selection:every-t1@1
 
 The job's result counts what it built, skipped and failed, with why for each failure. Run it again after a failure and it builds only what is missing. A campaign made from a selection says how many of its stacks have their picture (`pictures {have, missing}`) and names the job that builds the rest, `pyramid build --handle <id>`. Each manifest names the stack's `orientation`, `origin` and `frame`, so a viewer draws the planes where they are in the patient.
 
+A picture is also built when it is first asked for: a reader that opens a stack with no pyramid gets an answer that it is being built, and the engine queues the build itself. Building the pictures of a selection ahead is still worth it before many people read at once.
+
+To build again pyramids that are built, for example after a fix to the reader, add `--force`:
+
+```sh
+nils pyramid build --select selection:every-t1@1 --force
+```
+
 ## Ask several axes of a stack at once
 
 1. Make an `axes` campaign. The served pack's legal combinations are frozen into the question:

@@ -53,7 +53,25 @@ pub struct Picked {
     pub raised: i64,
     /// The population each role was scored against.
     pub reference: String,
+    /// Record 55 H2: the subjects whose occasions this run decided, when it
+    /// decided some and not all: `cohort:NAME` or `dataset:NAME`. They are
+    /// scored against the whole registry as any run is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub only: Option<String>,
+    /// How many subjects `only` named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subjects: Option<usize>,
     pub seconds: f64,
+}
+
+/// Record 55 H2: the subjects a run decides, named for the report: a
+/// cohort's open members or a dataset's subjects. The population a role is
+/// scored against stays the registry's, so a pick does not change with the
+/// part of the registry it was run for.
+#[derive(Debug, Clone)]
+pub struct Only {
+    pub label: String,
+    pub subjects: std::collections::BTreeSet<i64>,
 }
 
 /// One stack, as the picks need it.
@@ -74,12 +92,28 @@ pub fn run(
     subject: Option<&str>,
     actor: &str,
 ) -> Result<Picked, Error> {
+    run_for(registry, pack, scheme, subject, None, actor)
+}
+
+/// [`run`] deciding the occasions of `only`'s subjects alone (record 55
+/// H2: a pick run for a dataset or a cohort, as the bring-in runs it).
+pub fn run_for(
+    registry: &mut Registry,
+    pack: &Pack,
+    scheme: &Scheme,
+    subject: Option<&str>,
+    only: Option<&Only>,
+    actor: &str,
+) -> Result<Picked, Error> {
     let settings = crate::job::Settings {
-        name: subject.unwrap_or("all").to_string(),
+        name: only
+            .map(|o| o.label.clone())
+            .or_else(|| subject.map(str::to_string))
+            .unwrap_or_else(|| "all".to_string()),
         ..crate::job::Settings::default()
     };
     let job_id = crate::job::claim_for(registry, &settings, "pick")?;
-    let result = run_pick(registry, pack, scheme, subject, actor, Some(job_id));
+    let result = run_pick(registry, pack, scheme, subject, only, actor, Some(job_id));
     let (state, error) = match &result {
         Ok(_) => ("done", None),
         Err(e) => ("failed", Some(e.to_string())),
@@ -93,11 +127,16 @@ fn run_pick(
     pack: &Pack,
     scheme: &Scheme,
     subject: Option<&str>,
+    only: Option<&Only>,
     actor: &str,
     job_id: Option<i64>,
 ) -> Result<Picked, Error> {
     let started = std::time::Instant::now();
     let mut report = Picked::default();
+    if let Some(o) = only {
+        report.only = Some(o.label.clone());
+        report.subjects = Some(o.subjects.len());
+    }
     if pack.picks.is_empty() {
         return Ok(report);
     }
@@ -123,6 +162,7 @@ fn run_pick(
             scheme,
             &labels,
             &rows,
+            only.map(|o| &o.subjects),
             actor,
             job_id,
             &mut report,
@@ -236,6 +276,7 @@ fn run_one(
     scheme: &Scheme,
     labels: &HashMap<i64, nils_session::Labelled>,
     rows: &[Row],
+    only: Option<&std::collections::BTreeSet<i64>>,
     actor: &str,
     job_id: Option<i64>,
     report: &mut Picked,
@@ -269,6 +310,10 @@ fn run_one(
             by_subject.entry(r.subject).or_default().push(r);
         }
         for (subject, subject_rows) in &by_subject {
+            // the population is everyone's; the occasions decided are only's
+            if only.is_some_and(|o| !o.contains(subject)) {
+                continue;
+            }
             let mut occasions: BTreeMap<i64, (Day, Vec<&Row>)> = BTreeMap::new();
             for r in subject_rows {
                 let Some(l) = labels.get(&r.study) else {

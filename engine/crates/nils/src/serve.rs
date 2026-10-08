@@ -3081,11 +3081,18 @@ fn routed(
                 // a tree holding files no digest has read is digested
                 // first, so the pseudonymiser knows what the tree holds
                 let unread = crate::chain::unread_in_tree(registry.store(), &place);
+                // record 55 H2: a pick run ends the thread where the
+                // dataset feeds a cohort and the pack declares picks
+                let picks = crate::chain::pack_has_picks(
+                    doors.pack_dir.as_deref(),
+                    asked.pack.as_deref().unwrap_or("mri"),
+                );
                 let (first, mut rest) = crate::chain::bring_in(
                     &place,
                     asked.name.as_deref(),
                     asked.pack.as_deref(),
                     unread.is_some(),
+                    picks,
                 );
                 command = first;
                 rest.append(&mut then);
@@ -3752,6 +3759,81 @@ fn routed(
                 serde_json::to_value(picked).unwrap_or(serde_json::Value::Null),
             ))
         }
+        // Record 55 H2: a pick run started from the desk, for a cohort's
+        // members or a dataset's subjects (or the whole registry), queued
+        // as a job; the button a cohort's or a dataset's page carries
+        ["api", "picks", "run"] if post => {
+            let doc = json_body(body)?;
+            let text = |key: &str| -> Result<Option<String>, Reply> {
+                match doc.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(None),
+                    Some(v) => v
+                        .as_str()
+                        .map(|t| Some(t.trim().trim_start_matches('@').to_string()))
+                        .filter(|t| t.as_ref().is_some_and(|t| !t.is_empty()))
+                        .ok_or_else(|| Reply::error(400, format!("{key}: a name"))),
+                }
+            };
+            let (cohort, dataset) = (text("cohort")?, text("dataset")?);
+            let pack = text("pack")?.unwrap_or_else(|| "mri".to_string());
+            let scheme = text("scheme")?;
+            let mut command = vec!["pick".to_string(), "run".to_string()];
+            let target = match (&cohort, &dataset) {
+                (Some(_), Some(_)) => {
+                    return Err(Reply::error(
+                        400,
+                        "a pick run is for a cohort or a dataset, not both",
+                    ));
+                }
+                (Some(c), None) => {
+                    if nils_registry::cohort::by_name(registry.store(), c)?.is_none() {
+                        return Err(Reply::error(404, format!("no cohort named {c}")));
+                    }
+                    command.extend(["--cohort".to_string(), c.clone()]);
+                    format!("cohort:{c}")
+                }
+                (None, Some(d)) => {
+                    let is_dataset = nils_registry::place::by_name(registry.store(), d)?
+                        .is_some_and(|p| {
+                            p.role == nils_registry::place::Role::Source && p.retired_at.is_none()
+                        });
+                    if !is_dataset {
+                        return Err(Reply::error(404, format!("no dataset named {d}")));
+                    }
+                    command.extend(["--dataset".to_string(), d.clone()]);
+                    format!("dataset:{d}")
+                }
+                (None, None) => "registry".to_string(),
+            };
+            if !crate::chain::pack_has_picks(doors.pack_dir.as_deref(), &pack) {
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "no pack named {pack} that declares picks is served, so there is nothing to pick"
+                    ),
+                ));
+            }
+            command.extend(["--pack".to_string(), pack]);
+            if let Some(n) = scheme
+                && n != "default"
+                && n != "day"
+            {
+                crate::stored_scheme(registry, &n).map_err(Reply::from)?;
+                command.extend(["--scheme-name".to_string(), n]);
+            }
+            let command = located(doors, registry.store(), command)?;
+            let id = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                Some(&target),
+                Some(principal),
+                queued_by(caller),
+            )
+            .map_err(job_err)?;
+            Ok(Reply::accepted(serde_json::json!({
+                "job": id, "state": "queued", "for": target, "command": command,
+            })))
+        }
         ["api", "picks", _, "withdraw"] if post => {
             // a person's pick is a person's to withdraw, as it is theirs to
             // write
@@ -3896,7 +3978,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             [
                 "api",
                 "ask",
-                "schema" | "catalog" | "guide" | "documents" | "handles",
+                "schema" | "catalog" | "guide" | "documents" | "handles" | "selections",
             ],
         )
         | ("GET", ["api", "ask", "catalog", _])
@@ -3957,6 +4039,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
             (Need::One("data:work"), Detail::Sensitive)
         }
+        // record 55 H2: a pick run is the pick verb queued, which is
+        // Pipelines work as at the jobs door
+        ("POST", ["api", "picks", "run"]) => (Need::One("pipelines:work"), Plain),
         // the Review page, and the knob engine of Wave 4c §6.6; record 26
         // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
@@ -4389,6 +4474,7 @@ fn capabilities(
         "POST /api/models/{id}/promote",
         "POST /api/models/{id}/retire",
         "POST /api/picks",
+        "POST /api/picks/run",
         "POST /api/picks/{id}/withdraw",
         "GET /api/timeline/{kind}/{id}",
         "GET /api/depends/{kind}/{id}",
@@ -4710,6 +4796,11 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         // record 45 E1: a pyramid names a stack, a selection or a handle, and
         // the deployment's packs where a selection is frozen; never a path
         "pyramid" => return crate::pyramid::located(doors.pack_dir.as_deref(), command),
+        // record 55 H2: a pick run reads the deployment's packs and names a
+        // cohort or a dataset by name; never a path a caller composes
+        "pick" if command.get(1).is_some_and(|w| w == "run") => {
+            return pick_run_located(doors.pack_dir.as_deref(), command);
+        }
         _ => {}
     }
     let takes_a_tree =
@@ -4780,6 +4871,45 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         } else {
             out.push(arg);
         }
+    }
+    Ok(out)
+}
+
+/// A pick run as the jobs door queues it (record 55 H2): the flags that
+/// name no path, and the deployment's packs.
+fn pick_run_located(
+    pack_dir: Option<&std::path::Path>,
+    command: Vec<String>,
+) -> Result<Vec<String>, Reply> {
+    const TAKES: &[&str] = &[
+        "--pack",
+        "--scheme-name",
+        "--subject",
+        "--cohort",
+        "--dataset",
+    ];
+    let mut out = vec!["pick".to_string(), "run".to_string()];
+    let mut it = command.into_iter().skip(2);
+    while let Some(arg) = it.next() {
+        if arg == "--json" {
+            out.push(arg);
+            continue;
+        }
+        if !TAKES.contains(&arg.as_str()) {
+            return Err(Reply::error(
+                400,
+                format!("pick run takes {}, not {arg}", TAKES.join(", ")),
+            ));
+        }
+        let value = it
+            .next()
+            .ok_or_else(|| Reply::error(400, format!("pick run {arg} takes a value")))?;
+        out.push(arg);
+        out.push(value.trim_start_matches('@').to_string());
+    }
+    if let Some(d) = pack_dir {
+        out.push("--pack-dir".into());
+        out.push(d.display().to_string());
     }
     Ok(out)
 }
@@ -5037,6 +5167,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one pick",
             "Picking a stack",
             "Picked a stack",
+        ),
+        row(
+            "POST /api/picks/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Starting a pick run",
+            "Started a pick run",
         ),
         row(
             "POST /api/picks/{id}/withdraw",
@@ -5713,6 +5852,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading a document",
             "Read a document",
+        ),
+        row(
+            "GET /api/ask/selections",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing selections",
+            "Listed selections",
         ),
         row(
             "PUT /api/ask/selections/{name}",

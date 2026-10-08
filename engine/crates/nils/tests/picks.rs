@@ -1213,3 +1213,355 @@ fn keeping_nothing_eligible_is_a_person_s_pick_of_no_stack_on_postgres_too() {
     nothing_round(&registry(Some((dsn.clone(), schema.to_string()))));
     drop();
 }
+
+/// Record 55 H2: a pick run for a cohort decides its members' occasions
+/// alone, scored against the whole registry, so each of its picks is the
+/// pick a run over everyone makes; a cohort or a dataset that is not there
+/// is refused before anything is written.
+#[test]
+fn a_pick_run_for_a_cohort_decides_its_members_against_the_whole_registry() {
+    let home = registry(None);
+    let p = packs();
+    // three subjects who have a candidate for the role
+    let mut store = home.store();
+    let sql = format!(
+        "SELECT DISTINCT su.code FROM {} ca JOIN {} f ON f.stack_id = ca.stack_id \
+         JOIN {} su ON su.id = f.subject_id WHERE ca.axis = 'role' ORDER BY su.code",
+        store.qualified("classification_axis"),
+        store.qualified("stack_fingerprint"),
+        store.qualified("subject"),
+    );
+    let codes: Vec<String> = store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    drop(store);
+    assert!(codes.len() > 4, "{codes:?}");
+    let members: Vec<&str> = codes.iter().take(3).map(String::as_str).collect();
+    home.ok(&["clinical", "cohort", "make", "trio"]);
+    let mut add = vec!["clinical", "cohort", "add", "trio"];
+    add.extend(members.iter().copied());
+    add.extend(["--why", "a pick run's test"]);
+    home.ok(&add);
+    let report = home.json(&[
+        "pick",
+        "run",
+        "--pack-dir",
+        &p,
+        "--cohort",
+        "trio",
+        "--json",
+    ]);
+    assert_eq!(report["only"], "cohort:trio", "{report}");
+    assert_eq!(report["subjects"], 3, "{report}");
+    assert_eq!(report["reference"], "registry", "{report}");
+    assert!(report["written"].as_i64().unwrap() > 0, "{report}");
+    let key = |p: &serde_json::Value| {
+        (
+            p["subject"].as_str().unwrap().to_string(),
+            p["session"].as_str().unwrap().to_string(),
+            p["role"].as_str().unwrap().to_string(),
+            format!("{:.9}", p["score"].as_f64().unwrap()),
+        )
+    };
+    let mine: std::collections::BTreeSet<_> = home
+        .json(&["pick", "list", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(key)
+        .collect();
+    assert!(!mine.is_empty());
+    assert!(
+        mine.iter().all(|(s, ..)| members.contains(&s.as_str())),
+        "only the cohort's members are decided: {mine:?}"
+    );
+    // a run over everyone decides more, and the same for the members
+    let all = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert!(
+        all["sessions"].as_i64() > report["sessions"].as_i64(),
+        "{all}"
+    );
+    assert!(all.get("only").is_none(), "{all}");
+    let theirs: std::collections::BTreeSet<_> = home
+        .json(&["pick", "list", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(key)
+        .filter(|(s, ..)| members.contains(&s.as_str()))
+        .collect();
+    assert_eq!(mine, theirs, "the population is the registry's either way");
+    // what is not there is refused
+    let (good, _, err) = home.run(
+        &["pick", "run", "--pack-dir", &p, "--cohort", "nobody"],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("no cohort named nobody"), "{err}");
+    let (good, _, err) = home.run(
+        &["pick", "run", "--pack-dir", &p, "--dataset", "nowhere"],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("not a dataset"), "{err}");
+    let (good, _, _) = home.run(
+        &[
+            "pick",
+            "run",
+            "--pack-dir",
+            &p,
+            "--cohort",
+            "trio",
+            "--dataset",
+            "x",
+        ],
+        None,
+    );
+    assert!(!good, "a cohort or a dataset, not both");
+}
+
+/// A `nils serve` with its worker, killed when dropped, for the doors.
+struct Worked {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl Drop for Worked {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+const OPS: &str = "an-operator-token-of-length";
+const READS: &str = "a-reader-token-of-its-length";
+
+impl Worked {
+    fn start(home: &Home, ingest: &std::path::Path) -> Worked {
+        use std::io::BufRead as _;
+        let tokens = [
+            format!("{OPS}=ops@lab:operator"),
+            format!("{READS}=lou@lab:reader"),
+        ]
+        .join(",");
+        let mut child = nils()
+            .arg("--registry")
+            .arg(home.dir.path())
+            .args([
+                "serve",
+                "--bind",
+                "127.0.0.1:0",
+                "--workers",
+                "2",
+                "--worker",
+            ])
+            .args(["--auth", "token", "--pack-dir", &packs()])
+            .arg("--ingest-root")
+            .arg(format!("ds={}", ingest.display()))
+            .env("NILS_TOKENS", tokens)
+            .env("NILS_PACK_DIR", packs())
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .env_remove("NILS_JOB_ID")
+            .env_remove("NILS_JOB_DETAIL")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let Some(Ok(first)) = lines.next() else {
+            let _ = child.kill();
+            panic!("nils serve did not listen");
+        };
+        let addr = first.split_whitespace().nth(2).unwrap();
+        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+        std::thread::spawn(move || for _ in lines {});
+        Worked { child, port }
+    }
+
+    fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+        token: &str,
+    ) -> (u16, serde_json::Value) {
+        use std::io::{Read as _, Write as _};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/json\r\nAuthorization: Bearer {token}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body.as_bytes()).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        let response = String::from_utf8_lossy(&bytes).to_string();
+        let (headers, text) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        let status: u16 = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (
+            status,
+            serde_json::from_str(text).unwrap_or(serde_json::Value::String(text.to_string())),
+        )
+    }
+
+    /// A job once it is over, two minutes at most.
+    fn over(&self, job: i64) -> serde_json::Value {
+        for _ in 0..1200 {
+            let (_, j) = self.call("GET", &format!("/api/jobs/{job}"), None, OPS);
+            if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                return j;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("job {job} did not end");
+    }
+}
+
+/// Record 55 H2 through the doors: the bring-in of a dataset that feeds a
+/// cohort ends with a pick run for the dataset, and `POST /api/picks/run`
+/// starts one for a cohort or a dataset as a job, the button the desk
+/// carries; what is not there, both at once and a caller without
+/// pipelines:work are refused.
+#[test]
+fn a_pick_run_is_part_of_the_bring_in_and_has_a_door() {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+    let home = Home {
+        dir: TempDir::new("picks-door-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a picks door test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let dir = TempDir::new("picks-door-ds");
+    for (p, patient) in ["S-ONE", "S-TWO"].iter().enumerate() {
+        let study = format!("1.2.826.0.1.3680043.8.498.{}.1", p + 1);
+        let series = format!("{study}.1");
+        for instance in 1..=3u32 {
+            let sop = format!("{series}.{instance}");
+            let mut e = synth::minimal_mr(&study, &series, &sop);
+            e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+            e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+            e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+            e.push(synth::text(
+                tags::INSTANCE_NUMBER,
+                VR::IS,
+                &instance.to_string(),
+            ));
+            e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+            dir.file(
+                &format!("sub-{p}/IM_{instance:04}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    home.ok(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--arrives",
+        "deidentified",
+        "--cohort",
+        "fed",
+    ]);
+    let server = Worked::start(&home, dir.path());
+    // the bring-in: digest, fingerprint, classify and the pick run
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["bring-in", "@ds", "--name", "first"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(queued["command"][0], "digest", "{queued}");
+    let then = queued["then"].as_array().unwrap();
+    assert_eq!(then.len(), 3, "{queued}");
+    let pick: Vec<&str> = then[2]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert_eq!(pick[..4], ["pick", "run", "--dataset", "ds"], "{queued}");
+    assert!(
+        pick.contains(&"--pack-dir"),
+        "the deployment's packs: {queued}"
+    );
+    let mut job = server.over(queued["job"].as_i64().unwrap());
+    for expected in ["fingerprint", "classify", "pick"] {
+        assert_eq!(job["state"], "done", "{job}");
+        let mut next = job["chain"]["after"].as_i64();
+        for _ in 0..600 {
+            if next.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let (_, j) = server.call("GET", &format!("/api/jobs/{}", job["id"]), None, OPS);
+            next = j["chain"]["after"].as_i64();
+        }
+        job = server.over(next.unwrap_or_else(|| panic!("no job after {job}")));
+        assert_eq!(job["kind"], expected, "{job}");
+    }
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["name"], "dataset:ds", "{job}");
+    // the cohort the digest fed holds both subjects, and the bring-in
+    // picked each one's T1w
+    let (status, cohort) = server.call("GET", "/api/cohorts/fed", None, OPS);
+    assert_eq!(status, 200, "{cohort}");
+    assert_eq!(cohort["subjects"], 2, "{cohort}");
+    let picked = home.json(&["pick", "list", "--json"]);
+    let picked = picked.as_array().unwrap();
+    assert_eq!(picked.len(), 2, "{picked:?}");
+    assert!(
+        picked
+            .iter()
+            .all(|p| p["role"] == "t1w" && p["author_kind"] == "agent")
+    );
+    // the door: a cohort, then a dataset
+    for (body, target) in [
+        (serde_json::json!({"cohort": "fed"}), "cohort:fed"),
+        (serde_json::json!({"dataset": "@ds"}), "dataset:ds"),
+        (serde_json::json!({}), "registry"),
+    ] {
+        let (status, started) = server.call("POST", "/api/picks/run", Some(body), OPS);
+        assert_eq!(status, 202, "{started}");
+        assert_eq!(started["for"], target, "{started}");
+        assert_eq!(started["command"][0], "pick", "{started}");
+        let done = server.over(started["job"].as_i64().unwrap());
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(done["kind"], "pick", "{done}");
+    }
+    // refused: what is not there, both at once, no pipelines:work, a pack
+    // that is not served
+    for (body, token, want) in [
+        (serde_json::json!({"cohort": "nobody"}), OPS, 404),
+        (serde_json::json!({"dataset": "nowhere"}), OPS, 404),
+        (
+            serde_json::json!({"cohort": "fed", "dataset": "ds"}),
+            OPS,
+            400,
+        ),
+        (
+            serde_json::json!({"cohort": "fed", "pack": "nothing"}),
+            OPS,
+            409,
+        ),
+        (serde_json::json!({"cohort": "fed"}), READS, 403),
+    ] {
+        let (status, refused) = server.call("POST", "/api/picks/run", Some(body.clone()), token);
+        assert_eq!(status, want, "{body}: {refused}");
+    }
+    // the runs since decided the same occasions again, and nothing more
+    let listed = home.json(&["pick", "list", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
+}

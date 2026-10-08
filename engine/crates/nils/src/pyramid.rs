@@ -2202,7 +2202,8 @@ pub fn reason_of(why: &str, reading: bool) -> &'static str {
 
 /// Build the pyramids of `stacks` under a working place, one stack at a
 /// time, each with `workers` planes at once; a stack that has one is
-/// skipped, a stack that fails is counted with why and the rest go on.
+/// skipped, a stack that fails is counted with why and the rest go on;
+/// with `force` a stack that has one is built again (record 55 H2).
 /// `go_on` is asked after each stack with the counts so far, and a false
 /// stops the build there (a cancel).
 pub fn build_many(
@@ -2211,6 +2212,7 @@ pub fn build_many(
     stacks: &[i64],
     workers: usize,
     pack_version: Option<String>,
+    force: bool,
     go_on: &mut dyn FnMut(&mut Store, &Many) -> bool,
 ) -> Many {
     let mut out = Many::default();
@@ -2220,7 +2222,7 @@ pub fn build_many(
             continue;
         }
         let root = dir(working, stack);
-        if matches!(manifest(&root), Ok(Some(_))) {
+        if !force && matches!(manifest(&root), Ok(Some(_))) {
             out.skipped.push(stack);
         } else {
             match read_volume(store, stack)
@@ -2285,12 +2287,13 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             "--place",
             "--workers",
             "--pack",
+            "--force",
         ],
         Some("list") => &["--place"],
         _ => {
             return Err(Reply::error(
                 400,
-                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID) or pyramid list",
+                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID) [--force] or pyramid list",
             ));
         }
     };
@@ -2299,7 +2302,8 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     let mut sources = 0;
     let mut select = false;
     while let Some(arg) = it.next() {
-        if arg == "--json" && verb == Some("list") {
+        if (arg == "--json" && verb == Some("list")) || (arg == "--force" && verb == Some("build"))
+        {
             out.push(arg);
             continue;
         }
@@ -2706,6 +2710,161 @@ fn working_place_cached(store: &mut Store) -> Result<Place, String> {
     Ok(p)
 }
 
+/// How long a reader waits before it asks again for a picture being built.
+pub const RETRY_AFTER_SECS: u64 = 2;
+
+/// The build queued for a stack by the door, while it is not over, so many
+/// tiles asked at once queue one job and read one row (record 55 H2).
+static BUILDING: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, i64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+/// Whether a job builds the one stack's pyramid: `pyramid build --stack N`.
+fn builds_stack(job: &nils_registry::job::Job, stack: i64) -> bool {
+    if job.kind != "pyramid" {
+        return false;
+    }
+    let Some(words) = job.queued() else {
+        return false;
+    };
+    let id = stack.to_string();
+    words.len() >= 2
+        && words[0] == "pyramid"
+        && words[1] == "build"
+        && words.windows(2).any(|w| w[0] == "--stack" && w[1] == id)
+}
+
+/// Whether the registry holds a stack of that id.
+fn stack_exists(store: &mut Store, stack: i64) -> Result<bool, Reply> {
+    let sql = format!(
+        "SELECT 1 FROM {} WHERE id = {}",
+        store.qualified("stack"),
+        store.dialect().param(1, Type::Int)
+    );
+    store
+        .query_opt(&sql, &[Param::Int(stack)])
+        .map(|r| r.is_some())
+        .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// The reason class a failed single-stack build gave, as the verb printed
+/// it: `stack N: its pyramid was not built (CLASS)`.
+fn failed_class(error: Option<&str>) -> Option<String> {
+    let e = error?;
+    let at = e.find("was not built (")? + "was not built (".len();
+    let class = &e[at..at + e[at..].find(')')?];
+    class
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '_')
+        .then(|| class.to_string())
+}
+
+/// Record 55 H2, round 3: a stack with no pyramid has its build queued when
+/// its picture is first asked for, and the door answers 202 with the job
+/// and when to ask again, never 404. One build is queued per stack: a build
+/// queued or running already is answered, and a build that failed is said
+/// (422) and not queued again by the door, so a stack that cannot be read
+/// is not built over and over; `pyramid build --stack N` at the jobs door
+/// queues it again.
+fn on_demand(
+    store: &mut Store,
+    caller: &Caller,
+    stack: i64,
+    working: &Place,
+) -> Result<Reply, Reply> {
+    let mut building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let jerr = |e: nils_registry::job::Error| Reply::error(500, e.to_string());
+    // the build this process queued, or the newest one any process did
+    let mut job = match building.get(&stack) {
+        Some(&id) => nils_registry::job::show(store, id).map_err(jerr)?,
+        None => None,
+    };
+    if job.is_none() {
+        job = nils_registry::job::list(store, true, 500)
+            .map_err(jerr)?
+            .into_iter()
+            .find(|j| builds_stack(j, stack));
+    }
+    let answer = |job: &nils_registry::job::Job| {
+        let mut r = Reply::accepted(serde_json::json!({
+            "stack": stack,
+            "building": true,
+            "job": job.id,
+            "state": job.state.name(),
+            "progress": job.progress,
+            "place": working.name,
+            "retry_after": RETRY_AFTER_SECS,
+            "message": format!(
+                "the picture of stack {stack} is being built; ask again in {RETRY_AFTER_SECS} seconds"
+            ),
+        }));
+        r.headers
+            .push(("Retry-After".to_string(), RETRY_AFTER_SECS.to_string()));
+        r
+    };
+    use nils_registry::job::State;
+    match &job {
+        Some(j) if matches!(j.state, State::Queued | State::Running | State::Cancelling) => {
+            building.insert(stack, j.id);
+            return Ok(answer(j));
+        }
+        Some(j) if j.state == State::Failed => {
+            building.remove(&stack);
+            let reason = failed_class(j.error.as_deref());
+            let mut r = Reply::error(
+                422,
+                format!(
+                    "the picture of stack {stack} could not be built ({}); job {} says why, and pyramid build --stack {stack} at the jobs door tries again",
+                    reason.as_deref().unwrap_or("build_failed"),
+                    j.id
+                ),
+            );
+            r.body["stack"] = serde_json::json!(stack);
+            r.body["building"] = serde_json::json!(false);
+            r.body["job"] = serde_json::json!(j.id);
+            r.body["reason"] = serde_json::json!(reason);
+            return Err(r);
+        }
+        // done, or cancelled: built since, or to be built again
+        _ => {}
+    }
+    building.remove(&stack);
+    // a done build whose manifest is there now was read a moment after the
+    // door looked: the reader asks again and finds it
+    if let Some(j) = &job
+        && j.state == State::Done
+        && dir(Path::new(&working.path), stack)
+            .join("manifest.json")
+            .exists()
+    {
+        return Ok(answer(j));
+    }
+    if !stack_exists(store, stack)? {
+        return Err(Reply::error(404, format!("no stack {stack}")));
+    }
+    let command: Vec<String> = ["pyramid", "build", "--stack"]
+        .iter()
+        .map(|w| w.to_string())
+        .chain([
+            stack.to_string(),
+            "--place".to_string(),
+            working.name.clone(),
+        ])
+        .collect();
+    let id = nils_registry::job::enqueue_with(
+        store,
+        &command,
+        Some(&format!("stack {stack}")),
+        Some(caller.principal.as_str()),
+        crate::serve::queued_by(caller),
+    )
+    .map_err(jerr)?;
+    let j = nils_registry::job::show(store, id)
+        .map_err(jerr)?
+        .ok_or_else(|| Reply::error(500, format!("job {id} was queued and is not there")))?;
+    building.insert(stack, id);
+    Ok(answer(&j))
+}
+
 /// The gated instance door (Wave 5 §12.7): `manifest`, `tiles/{level}/{z}`,
 /// `slab/{level}/{z0}-{z1}`, `render/{level}/{z}` under a stack.
 /// `through` names the campaign a rater without query:see reads it through
@@ -2719,17 +2878,6 @@ pub fn door(
     query: &std::collections::HashMap<String, String>,
 ) -> Result<Reply, Reply> {
     let working = working_place_cached(registry.store()).map_err(|m| Reply::error(409, m))?;
-    let root = dir(Path::new(&working.path), stack);
-    let m = manifest_cached(&root)
-        .map_err(|e| Reply::error(500, e))?
-        .ok_or_else(|| {
-            Reply::error(
-                404,
-                format!(
-                    "no pyramid for stack {stack}; queue pyramid build --stack {stack} as a job"
-                ),
-            )
-        })?;
     // the disclosure class: pixels are quasi-identifying, so detail quasi
     // opens them; with burned-in annotation they are identifying until the
     // band is held, so detail sensitive opens the tiles and the slab
@@ -2739,6 +2887,24 @@ pub fn door(
             format!("the pixels of stack {stack} are quasi-identifying; detail quasi opens them"),
         ));
     }
+    let root = dir(Path::new(&working.path), stack);
+    let Some(m) = manifest_cached(&root).map_err(|e| Reply::error(500, e))? else {
+        // record 55 H2, round 3: a picture is built when it is first asked
+        // for, so no desk flow sends a person to the command line
+        if !matches!(
+            rest.first().copied(),
+            Some("manifest" | "tiles" | "slab" | "render" | "thumb")
+        ) {
+            return Err(Reply::error(
+                404,
+                format!(
+                    "GET /api/instances/{stack}/{} is not a door",
+                    rest.join("/")
+                ),
+            ));
+        }
+        return on_demand(registry.store(), caller, stack, &working);
+    };
     let held = m.annotation.burned_in && caller.access.detail < Detail::Sensitive;
     let level_of = |s: &str| -> Result<u32, Reply> {
         let l: u32 = s
