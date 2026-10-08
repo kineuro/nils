@@ -4128,6 +4128,40 @@ pub(crate) fn read_state() -> Option<State> {
     toml::from_str(&text).ok()
 }
 
+/// The copy of the setup record an uninstall that keeps the data leaves in
+/// the install's own directory, beside the data it describes: the parts, the
+/// places, the sign-in, the ports, the model server, and the schemas and the
+/// lingering this install made, which a later purge removes. The next setup
+/// in that directory reads it for its defaults, so nothing has to be given
+/// again, and carries what the install made outside its directory into the
+/// record it writes; an uninstall finds it where no record is left.
+const KEPT_RECORD: &str = "setup.kept.toml";
+
+fn kept_record_path(dir: &Path) -> PathBuf {
+    dir.join(KEPT_RECORD)
+}
+
+/// The record as it is kept: the facts, without what the uninstall took
+/// away. The programs it named and the privilege it was given are gone, and
+/// a kept record is never an install that stopped partway.
+fn kept_record_of(state: &State) -> State {
+    let mut kept = state.clone();
+    kept.programs.clear();
+    kept.helper = None;
+    kept.unfinished = false;
+    kept
+}
+
+/// The record an uninstall kept in `dir`, where there is one. The directory
+/// it was found in is the install's, wherever the directory has moved since.
+fn read_kept_record(dir: &Path) -> Option<State> {
+    let text = std::fs::read_to_string(kept_record_path(dir)).ok()?;
+    let mut kept: State = toml::from_str(&text).ok()?;
+    kept.dir = dir.display().to_string();
+    kept.unfinished = false;
+    Some(kept)
+}
+
 fn write_state(state: &State) -> Result<PathBuf, Exit> {
     let path = state_path();
     if let Some(dir) = path.parent() {
@@ -5906,11 +5940,31 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
     let mut console = Console::new(args.yes || args.print);
     let (existing, restarted) = go_on_from(read_state());
+    // With no record, the one an uninstall that kept the data left in the
+    // directory this run installs into: its choices are this run's defaults.
+    let kept = if existing.is_none() && restarted.is_none() {
+        let dir = args
+            .dir
+            .as_ref()
+            .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()))
+            .unwrap_or_else(default_dir);
+        read_kept_record(&dir)
+    } else {
+        None
+    };
     let facts = Facts::probe();
 
     let flow = if console.can_draw_screens() {
-        let (flow, answered) = console
-            .screens(|console| questions(console, &args, existing.as_ref(), &facts, restarted))?;
+        let (flow, answered) = console.screens(|console| {
+            questions(
+                console,
+                &args,
+                existing.as_ref(),
+                kept.as_ref(),
+                &facts,
+                restarted,
+            )
+        })?;
         if matches!(flow, Flow::Install(..)) && !answered.is_empty() {
             let p = console.palette;
             println!();
@@ -5922,8 +5976,15 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             "{}",
             console.bold("NILS setup: the engine, the desk and the assistant")
         );
-        questions(&mut console, &args, existing.as_ref(), &facts, restarted)
-            .map_err(Stop::into_exit)?
+        questions(
+            &mut console,
+            &args,
+            existing.as_ref(),
+            kept.as_ref(),
+            &facts,
+            restarted,
+        )
+        .map_err(Stop::into_exit)?
     };
 
     match flow {
@@ -5940,6 +6001,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             purge: false,
             yes: false,
             print: args.print,
+            dir: None,
         }),
         Flow::Printed => Ok(()),
         Flow::Unready(missing) => Err(fail(format!(
@@ -5976,6 +6038,7 @@ fn questions(
     console: &mut Console,
     args: &SetupArgs,
     existing: Option<&State>,
+    kept: Option<&State>,
     facts: &Facts,
     restarted: Option<Ports>,
 ) -> Result<Flow, Stop> {
@@ -6022,6 +6085,21 @@ fn questions(
             state_path().display()
         ))
         .into());
+    }
+
+    // What this install's own services hold is the install on record's
+    // alone; every other default is taken from it, or where none is on
+    // record, from the record an uninstall that kept the data left.
+    let installed = existing;
+    let existing = existing.or(kept);
+    if let Some(kept) = kept {
+        console.note(&format!(
+            "the setup kept with the data in {} is read, so the choices made there are the \
+             defaults: {}, {} mode",
+            kept.dir,
+            kept.parts.keys().cloned().collect::<Vec<_>>().join(", "),
+            kept.mode
+        ));
     }
 
     if !console.interactive() && !args.print {
@@ -6746,7 +6824,7 @@ fn questions(
     // from the record, or where the last run stopped partway, from the ports
     // that run chose, which its units may be running on.
     let recorded = existing.map(|s| s.ports).or(restarted).unwrap_or_default();
-    let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
+    let ours = |part: &str| installed.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
     // llama.cpp runs beside Kvasir wherever there is a build for this machine;
     // podman and docker on macOS run in a machine of their own, where it does not
@@ -8006,7 +8084,10 @@ fn do_it(
     only_update: bool,
     answers: &Answers,
 ) -> Result<Vec<Service>, Exit> {
-    let made_outside = made_outside_before(existing.as_ref(), read_state().as_ref());
+    // what an install whose data this run picks up made outside its
+    // directory: on record, or kept with the data by an uninstall
+    let on_disk = read_state().or_else(|| read_kept_record(&plan.dir));
+    let made_outside = made_outside_before(existing.as_ref(), on_disk.as_ref());
     let mut state = State {
         dir: plan.dir.display().to_string(),
         mode: plan.mode.name().to_string(),
@@ -8114,6 +8195,8 @@ fn do_it(
 
     state.unfinished = false;
     let path = write_state(&state)?;
+    // the record names everything the kept copy did, so the copy goes
+    let _ = std::fs::remove_file(kept_record_path(&plan.dir));
     if !console.live {
         println!("  {}", path.display());
     }
@@ -17528,7 +17611,8 @@ fn update_binary_part(
 #[derive(Debug, Args)]
 pub(crate) struct UninstallArgs {
     /// Remove NILS and keep the data: the registry and its key, the backups,
-    /// the desk's people and the assistant's history stay where they are
+    /// the desk's people, the assistant's history, Kvasir's models and sealed
+    /// credentials, and the setup's choices stay, for the next setup to read
     #[arg(long, conflicts_with = "purge")]
     keep_data: bool,
     /// Remove NILS and every file it made, the registry's key included
@@ -17540,6 +17624,10 @@ pub(crate) struct UninstallArgs {
     /// Say what would be removed and what kept, and change nothing
     #[arg(long)]
     print: bool,
+    /// Where no setup is recorded, the directory an uninstall that kept the
+    /// data left its setup in (the default is ~/nils)
+    #[arg(long, value_name = "DIR")]
+    dir: Option<PathBuf>,
 }
 
 /// The first-party packs a release carries. A pack directory holding only
@@ -17574,15 +17662,19 @@ struct Removal {
     packs_kept: Option<PathBuf>,
     /// What building Kvasir and the assistant made.
     built: Vec<PathBuf>,
-    /// Kvasir's directory, where the data stays: the models it holds and
-    /// their keys, its subscriptions, its seal key and pepper, and the
-    /// assistant's key go with NILS. Where everything goes, it goes with the
-    /// base directory.
-    kvasir: Option<PathBuf>,
+    /// Kvasir's directory, where the data stays: its build goes, and the
+    /// models it holds, its store with their keys and the sealed
+    /// credentials, its seal key and pepper, and the assistant's key stay
+    /// for the next setup. Where everything goes, it goes with the base
+    /// directory.
+    kvasir_kept: Option<PathBuf>,
     /// llama.cpp's build, which goes with NILS where the data stays; where
     /// everything goes, it goes with the base directory.
     llama: Option<PathBuf>,
     state: PathBuf,
+    /// Where the data stays, the record's facts as they are kept in the
+    /// install's directory for the next setup to read, and where.
+    kept_record: Option<(PathBuf, State)>,
     /// The runtime of a Postgres this setup runs, whose container goes; its
     /// data goes with the base directory, or stays with it.
     postgres: Option<String>,
@@ -17820,10 +17912,31 @@ fn remove_outside(doing: &Doing, registry: &Path) -> Result<(), String> {
 pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     let mut console = Console::new(args.yes);
     println!("{}", console.bold("NILS uninstall"));
-    let Some(state) = read_state() else {
-        return remove_leftovers(&args, &mut console);
+    // With no record, the one an uninstall that kept the data left in its
+    // directory: what it names is still this install's to remove, the
+    // registry's schemas among them.
+    let (state, from_kept) = match read_state() {
+        Some(state) => (state, false),
+        None => {
+            let dir = args
+                .dir
+                .as_ref()
+                .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()))
+                .unwrap_or_else(default_dir);
+            match read_kept_record(&dir) {
+                Some(kept) => (kept, true),
+                None => return remove_leftovers(&args, &mut console),
+            }
+        }
     };
     println!("  {}", describe_state(&state));
+    if from_kept {
+        println!(
+            "  no setup is recorded at {}; this is the one kept with the data in {}",
+            state_path().display(),
+            kept_record_path(Path::new(&state.dir)).display()
+        );
+    }
 
     let leaving = if args.purge {
         Leaving::Purge
@@ -17837,9 +17950,9 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 (
                     "NILS, keeping your data",
                     &format!(
-                        "the services, the programs, the packs and Kvasir's models and keys; the \
-                         registry and its key, the backups, the desk's people and the assistant's \
-                         history stay in {dir}"
+                        "the services, the programs and the packs; the registry and its key, the \
+                         backups, the desk's people, the assistant's history, Kvasir's models and \
+                         sealed credentials, and the setup's choices stay in {dir}"
                     ),
                 ),
                 (
@@ -17859,7 +17972,12 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     let me = std::env::current_exe()
         .ok()
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
-    let removal = gather_removal(&state, me, leaving);
+    let mut removal = gather_removal(&state, me, leaving);
+    if from_kept {
+        // the record read is the kept one, which goes with the directory or
+        // is kept again
+        removal.state = kept_record_path(&removal.dir);
+    }
 
     if leaving == Leaving::Purge
         && let Err(why) = safe_to_purge(&removal.dir, home_dir().as_deref())
@@ -17918,7 +18036,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 "  NILS is gone from this machine; your data is still in {}",
                 removal.dir.display()
             );
-            println!("  to install again and pick it up:");
+            println!("  to install again and pick it up, with the choices made before:");
             println!(
                 "    curl -fsSL https://nils.kineuro.se/get | sh -s -- --dir {}",
                 removal.dir.display()
@@ -18214,9 +18332,11 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         packs: Vec::new(),
         packs_kept: None,
         built: Vec::new(),
-        kvasir: None,
+        kvasir_kept: None,
         llama: None,
         state: state_path(),
+        kept_record: (leaving == Leaving::KeepData)
+            .then(|| (kept_record_path(&dir), kept_record_of(state))),
         postgres: None,
         // read while the registry's own configuration is still there, since
         // a purge removes the directory that holds it
@@ -18394,14 +18514,14 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
 
     // what building Kvasir and the assistant made; the rest of the
     // assistant's directory holds its data and its configuration
-    for (name, part) in state.parts.iter().filter(|(_, p)| p.kind == "node") {
+    for part in state.parts.values().filter(|p| p.kind == "node") {
         let path = PathBuf::from(&part.path);
         let outside = !path.starts_with(&dir);
         if leaving == Leaving::Purge && outside {
             removal.built.push(path);
             continue;
         }
-        if leaving == Leaving::KeepData && name != "kvasir" {
+        if leaving == Leaving::KeepData {
             for sub in ["node_modules", "dist"] {
                 if path.join(sub).exists() {
                     removal.built.push(path.join(sub));
@@ -18409,17 +18529,18 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
             }
         }
     }
-    // Kvasir's state goes with NILS where the data stays, the whole of its
-    // directory, which holds nothing else a person keeps: the models it holds
-    // and their keys, its subscriptions, its seal key and pepper, and the
-    // assistant's key.
+    // Kvasir's state stays where the data does, and only its build goes: the
+    // models it holds, its store with their keys, the subscriptions and the
+    // sealed credentials, its seal key and pepper, and the assistant's key.
+    // The next setup adopts the folder as it finds it, so the stations come
+    // back with the models and credentials they had.
     if leaving == Leaving::KeepData {
         let kvasir = state
             .parts
             .get("kvasir")
             .map_or_else(|| dir.join("kvasir"), |part| PathBuf::from(&part.path));
         if kvasir.exists() {
-            removal.kvasir = Some(kvasir);
+            removal.kvasir_kept = Some(kvasir);
         }
         let llama = dir.join(LLAMA_PART);
         if llama.exists() {
@@ -18510,17 +18631,6 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
                 .join(", "),
         );
     }
-    if let Some(kvasir) = &removal.kvasir {
-        row(
-            &mut out,
-            "kvasir",
-            format!(
-                "{}, with the models it holds, their keys, its subscriptions and the assistant's \
-                 key",
-                kvasir.display()
-            ),
-        );
-    }
     if let Some(llama) = &removal.llama {
         row(
             &mut out,
@@ -18531,11 +18641,19 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             ),
         );
     }
-    row(
-        &mut out,
-        "setup record",
-        removal.state.display().to_string(),
-    );
+    // the record, unless it is the kept copy, which an uninstall that keeps
+    // the data writes again where it is
+    let record_kept = removal
+        .kept_record
+        .as_ref()
+        .is_some_and(|(kept, _)| *kept == removal.state);
+    if !record_kept {
+        row(
+            &mut out,
+            "setup record",
+            removal.state.display().to_string(),
+        );
+    }
     if leaving == Leaving::Purge {
         row(
             &mut out,
@@ -18557,6 +18675,30 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             row(&mut out, "data", removal.dir.display().to_string());
             for line in data_summary(&removal.dir) {
                 let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
+            }
+            if let Some(kvasir) = &removal.kvasir_kept {
+                row(
+                    &mut out,
+                    "kvasir",
+                    format!(
+                        "{}: the models it holds, its store with their keys and the sealed \
+                         credentials, its seal key and pepper, and the assistant's key; only its \
+                         build goes",
+                        kvasir.display()
+                    ),
+                );
+            }
+            if let Some((kept, state)) = &removal.kept_record {
+                row(
+                    &mut out,
+                    "setup",
+                    format!(
+                        "the choices made, kept in {}, which the next nils setup in {} reads: {}",
+                        kept.display(),
+                        removal.dir.display(),
+                        kept_facts(state).join(", ")
+                    ),
+                );
             }
             // an uninstall that keeps the data keeps the registry wherever
             // it is, and says where that is
@@ -18601,6 +18743,43 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
     out
 }
 
+/// What the record kept for the next setup holds, in a few words each.
+fn kept_facts(state: &State) -> Vec<String> {
+    let mut out = Vec::new();
+    if !state.parts.is_empty() {
+        out.push(format!(
+            "the parts ({})",
+            state.parts.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out.push(format!("the {} sign-in", state.mode));
+    if state.oidc.is_some() {
+        out.push("the identity provider".to_string());
+    }
+    if !state.places.is_empty() || state.site.is_some() {
+        out.push("the places".to_string());
+    }
+    out.push("the ports".to_string());
+    if !state.origin.is_empty() {
+        out.push(format!("the address {}", state.origin));
+    }
+    if let Some(server) = &state.model_server {
+        out.push(format!("the model server at {}", server.url));
+    }
+    if let Some(schema) = &state.registry_made {
+        out.push(format!(
+            "and that this install made the schemas {schema} and {schema}_linkage, which a later \
+             purge drops"
+        ));
+    }
+    if let Some(account) = &state.linger {
+        out.push(format!(
+            "and the lingering it turned on for {account}, which a later purge turns off"
+        ));
+    }
+    out
+}
+
 /// A few lines saying what a data directory holds, without walking a
 /// working directory that may hold a whole archive.
 fn data_summary(dir: &Path) -> Vec<String> {
@@ -18635,6 +18814,14 @@ fn data_summary(dir: &Path) -> Vec<String> {
     }
     if dir.join("assistant").join("assistant.sqlite").exists() {
         out.push("the assistant's conversations".to_string());
+    }
+    let kvasir = dir.join("kvasir");
+    let models = count(&kvasir.join("models"));
+    if models > 0 {
+        out.push(format!("{models} model(s) Kvasir holds"));
+    }
+    if kvasir.join("kvasir.sqlite").exists() || kvasir.join("kvasir.seal").exists() {
+        out.push("Kvasir's store, with its keys and sealed credentials".to_string());
     }
     for sub in ["working", "export"] {
         let n = count(&dir.join(sub));
@@ -18810,15 +18997,6 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<Stri
             Err(e) => say(format!("{} was not removed: {e}", path.display())),
         }
     }
-    if let Some(kvasir) = &removal.kvasir {
-        match remove_path(kvasir, &removal.runtime) {
-            Ok(()) => say(format!(
-                "removed {}, with the models Kvasir held and their keys",
-                kvasir.display()
-            )),
-            Err(e) => say(format!("{} was not removed: {e}", kvasir.display())),
-        }
-    }
     if let Some(llama) = &removal.llama {
         match remove_path(llama, &removal.runtime) {
             Ok(()) => say(format!("removed {}", llama.display())),
@@ -18847,7 +19025,35 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<Stri
             Err(e) => say(format!("{} was not removed: {e}", path.display())),
         }
     }
-    if std::fs::remove_file(&removal.state).is_ok() {
+    // The record's facts are kept with the data before the record goes, so
+    // there is never a moment where neither says what this install made.
+    let mut record_kept = false;
+    if let Some((kept, state)) = &removal.kept_record {
+        let written = toml::to_string(state)
+            .map_err(|e| e.to_string())
+            .and_then(|text| write_secret_bytes(kept, text.as_bytes()).map_err(|e| e.message));
+        match written {
+            Ok(()) => {
+                say(format!(
+                    "kept the setup's choices in {}, for the next nils setup to read",
+                    kept.display()
+                ));
+                record_kept = *kept == removal.state;
+            }
+            Err(e) => {
+                say(format!(
+                    "the setup's choices were not kept in {}: {e}",
+                    kept.display()
+                ));
+                say(format!(
+                    "so the record stays at {}, and nothing it names is lost",
+                    removal.state.display()
+                ));
+                record_kept = true;
+            }
+        }
+    }
+    if !record_kept && std::fs::remove_file(&removal.state).is_ok() {
         say(format!("removed {}", removal.state.display()));
         // the directory the record lived in, when nothing else lives there
         if let Some(parent) = removal.state.parent() {
@@ -19138,7 +19344,7 @@ mod tests {
             llama: None,
         };
         let (outcome, drawn) = on_screens(
-            |console| questions(console, &args, None, &facts, None),
+            |console| questions(console, &args, None, None, &facts, None),
             vec![
                 Enter, // the engine and the desk
                 Enter, // no directory of DICOM
@@ -20906,12 +21112,15 @@ mod tests {
     }
 
     #[test]
-    fn an_uninstall_removes_kvasirs_state_even_where_the_data_is_kept() {
+    fn an_uninstall_that_keeps_the_data_keeps_kvasirs_models_and_credentials() {
         let root = scratch("uninstall-kvasir");
         let dir = root.join("nils");
         let kvasir = dir.join("kvasir");
         std::fs::create_dir_all(kvasir.join("state")).unwrap();
-        for file in [
+        std::fs::create_dir_all(kvasir.join("models").join("a-model")).unwrap();
+        std::fs::create_dir_all(kvasir.join("node_modules")).unwrap();
+        std::fs::create_dir_all(kvasir.join("dist")).unwrap();
+        let data = [
             "kvasir.json",
             "kvasir.sqlite",
             "kvasir.seal",
@@ -20919,7 +21128,9 @@ mod tests {
             "assistant.key",
             "backends-to-add.json",
             "state/held",
-        ] {
+            "models/a-model/weights.gguf",
+        ];
+        for file in data {
             std::fs::write(kvasir.join(file), "x").unwrap();
         }
         let assistant = dir.join("assistant");
@@ -20942,17 +21153,26 @@ mod tests {
             );
         }
         let removal = gather_removal(&state, None, Leaving::KeepData);
-        assert_eq!(removal.kvasir.as_deref(), Some(kvasir.as_path()));
+        assert_eq!(removal.kvasir_kept.as_deref(), Some(kvasir.as_path()));
+        let mut built = removal.built.clone();
+        built.sort();
         assert_eq!(
-            removal.built,
-            vec![assistant.join("node_modules")],
-            "the assistant's history stays, and Kvasir goes whole"
+            built,
+            vec![
+                assistant.join("node_modules"),
+                kvasir.join("dist"),
+                kvasir.join("node_modules"),
+            ],
+            "only what building them made goes"
         );
         let text = removal_text(&removal, Leaving::KeepData, &Console::new(true));
+        let (removing, keeping) = text.split_once("Keeping").unwrap();
+        assert!(!removing.contains("kvasir "), "{removing}");
         assert!(
-            text.contains("the models it holds, their keys, its subscriptions"),
-            "{text}"
+            keeping.contains("the models it holds, its store with their keys and the sealed"),
+            "{keeping}"
         );
+        assert!(keeping.contains("1 model(s) Kvasir holds"), "{keeping}");
 
         // carried out with nothing of this machine's own in it
         let record = root.join("setup.toml");
@@ -20971,17 +21191,23 @@ mod tests {
             ..removal
         };
         carry_out(&removal, Leaving::KeepData, &Console::new(true));
-        assert!(!kvasir.exists(), "Kvasir's state stayed");
+        for file in data {
+            assert!(kvasir.join(file).is_file(), "{file} went with NILS");
+        }
+        assert!(!kvasir.join("node_modules").exists() && !kvasir.join("dist").exists());
         assert!(
             assistant.join("assistant.sqlite").is_file(),
             "the assistant's history is data"
         );
         assert!(!assistant.join("node_modules").exists());
         assert!(!record.exists());
+        assert!(kept_record_path(&dir).is_file(), "the setup's choices stay");
 
         // where everything goes, Kvasir goes with the base directory
-        std::fs::create_dir_all(&kvasir).unwrap();
-        assert_eq!(gather_removal(&state, None, Leaving::Purge).kvasir, None);
+        assert_eq!(
+            gather_removal(&state, None, Leaving::Purge).kvasir_kept,
+            None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -21486,6 +21712,96 @@ mod tests {
         assert!(
             carry_out(&removal, Leaving::KeepData, &console).is_empty(),
             "an uninstall that keeps the data leaves nothing named"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An uninstall that keeps the data keeps the record's facts beside it:
+    /// the plan says so, the copy names the schemas this install made, the
+    /// next setup carries them into the record it writes, and a purge read
+    /// from the copy alone still drops them.
+    #[test]
+    fn the_data_kept_keeps_the_record_so_a_later_purge_still_drops_the_schemas() {
+        let root = scratch("keep-data-record");
+        let mut state = on_postgres(&root, "nils", Some("nils"));
+        let dir = PathBuf::from(&state.dir);
+        state.mode = "oidc".to_string();
+        state.origin = "https://nils.example.org".to_string();
+        state.linger = Some("nils".to_string());
+        state.programs = vec![root.join("bin").join("nils-desk").display().to_string()];
+        state.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: root.join("model.key"),
+            model: None,
+        });
+        state.parts.insert(
+            "desk".to_string(),
+            PartState {
+                version: "1.0.0".to_string(),
+                path: root.join("bin").join("nils-desk").display().to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+
+        let removal = gather_removal(&state, None, Leaving::KeepData);
+        let console = Console::new(true);
+        let text = removal_text(&removal, Leaving::KeepData, &console);
+        let (removing, keeping) = text.split_once("Keeping").unwrap();
+        assert!(removing.contains("setup record"), "{removing}");
+        let kept_at = kept_record_path(&dir);
+        for said in [
+            format!("the choices made, kept in {}", kept_at.display()),
+            "the parts (desk)".to_string(),
+            "the oidc sign-in".to_string(),
+            "the address https://nils.example.org".to_string(),
+            "the model server at https://models.example.org/v1".to_string(),
+            "this install made the schemas nils and nils_linkage, which a later purge drops"
+                .to_string(),
+        ] {
+            assert!(keeping.contains(&said), "{said} is not in:\n{keeping}");
+        }
+
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record.clone(),
+            ..removal
+        };
+        carry_out(&removal, Leaving::KeepData, &console);
+        assert!(!record.exists(), "the record itself goes");
+        let kept = read_kept_record(&dir).expect("the record's facts are kept");
+        assert_eq!(kept.registry_made.as_deref(), Some("nils"));
+        assert_eq!(kept.linger.as_deref(), Some("nils"));
+        assert_eq!(kept.origin, "https://nils.example.org");
+        assert_eq!(kept.mode, "oidc");
+        assert_eq!(kept.model_server, state.model_server);
+        assert!(kept.parts.contains_key("desk"));
+        assert!(kept.programs.is_empty(), "the programs went with NILS");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&kept_at).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+
+        // the next setup carries what the install made into its own record
+        assert_eq!(
+            made_outside_before(None, Some(&kept)),
+            (Some("nils".to_string()), Some("nils".to_string()))
+        );
+
+        // and a purge with no record but the kept one drops the schemas
+        let removal = gather_removal(&kept, None, Leaving::Purge);
+        let database = removal
+            .outside
+            .iter()
+            .find(|o| o.key == DATABASE_KEY)
+            .expect("the schemas are named");
+        assert!(
+            matches!(&database.doing, Some(Doing::Schemas { schema, .. }) if schema == "nils"),
+            "{database:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
