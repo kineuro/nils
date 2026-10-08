@@ -104,6 +104,9 @@ pub struct Settings {
     /// subject's code, or its value of an id type; a file whose subject has
     /// no value of that type is held until it has one.
     pub patient_id: PatientId,
+    /// Each copy's folder is named by the id type's value PatientID holds,
+    /// not the subject's code (Wave 7a, Nima 2026-10-08).
+    pub folder_by_id: bool,
     pub tags: TagLists,
     /// The private elements the pack keeps, by creator and offset, and
     /// which pack said so.
@@ -183,6 +186,8 @@ impl Settings {
             anon,
             identity,
             unmapped,
+            folder_by_id: dataset["folder"].as_str() == Some("id-type")
+                && matches!(patient_id, PatientId::IdType(_)),
             patient_id,
             tags,
             private: Vec::new(),
@@ -209,6 +214,7 @@ impl Settings {
             "identity": self.identity.to_json(),
             "unmapped": self.unmapped.name(),
             "patient_id": self.patient_id.as_text(),
+            "folder": if self.folder_by_id { "id-type" } else { "subject-code" },
             "tags": {
                 "keep": self.tags.keep.iter().map(tag).collect::<Vec<_>>(),
                 "remove": self.tags.remove.iter().map(tag).collect::<Vec<_>>(),

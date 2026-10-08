@@ -503,10 +503,11 @@ fn a_personnummer_rule_gives_the_generators_code_of_the_twelve_digits() {
         assert_eq!(code_of(&mut reg, sub_a), "c6d36050d4d0a55b", "{name}");
         let sub_d = subject_of_study(&mut reg, "D");
         assert_eq!(code_of(&mut reg, sub_d), "97567e4f9035c39b", "{name}");
-        // the number is filed once, as twelve digits
+        // the number is filed once, by its lookup alone: never kept, not
+        // even sealed (Wave 7a), and found again however it was written
         assert_eq!(
             revealed(&mut reg, &mut store, sub_a),
-            [identity("personnummer", "198501012382", "dicom")],
+            [identity("personnummer", "", "dicom")],
             "{name}"
         );
         // the study id is no personnummer: its study's UID stands for it

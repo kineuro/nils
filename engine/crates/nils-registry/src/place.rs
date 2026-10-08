@@ -528,6 +528,74 @@ impl PatientId {
     }
 }
 
+/// What a source place is (Wave 7a, Nima 2026-10-08: "NILS should always
+/// get the declaration from structure"): a `root` the engine explores, each
+/// folder under it a dataset; a `dataset`, one folder whose structure says
+/// how its files arrive; or a `legacy` place that names a dataset's
+/// pseudonymised tree itself (`…/derivatives/dcm-raw` or `dcm-anon`), read
+/// as that tree.
+pub const KINDS: [&str; 3] = ["dataset", "root", "legacy"];
+
+/// What a dataset's structure says (Wave 7a): only originals
+/// (`identified`), only a pseudonymised tree (`anonymised`), both (`both`,
+/// identified with its anonymised copy), or anything else (`unknown`):
+/// entries holding DICOM beside `derivatives/`, or no tree at all.
+pub const STATES: [&str; 4] = ["identified", "anonymised", "both", "unknown"];
+
+/// How a de-identified or coded dataset's subjects are found (Wave 7a): a
+/// map of subject codes to its ids, or codes the subject code generator
+/// makes from the ids.
+pub const SUBJECTS: [&str; 2] = ["map", "generated"];
+
+/// What names the folder of each pseudonymised copy (Wave 7a): the
+/// subject's code, or the id type's value PatientID holds.
+pub const FOLDERS: [&str; 2] = ["subject-code", "id-type"];
+
+/// Why a dataset may not be read yet, where its declaration is not whole
+/// (Wave 7a): undeclared, without a tree, or arriving de-identified or
+/// coded without saying what PatientID holds and how its subjects are
+/// found. None for a whole declaration.
+pub fn incomplete(dataset: &Value) -> Option<String> {
+    let Ok(d) = dataset_of(dataset, None) else {
+        return Some("its declaration cannot be read".into());
+    };
+    if d["kind"] == "root" {
+        return Some(
+            "it is a root: each folder under it is a dataset, read by its own name".into(),
+        );
+    }
+    let arrives = d["arrives"].as_str().unwrap_or(UNDECLARED);
+    if arrives == UNDECLARED || d["state"] == "unknown" {
+        return Some(
+            "its structure is unknown: entries beside derivatives/, or no tree at all; say which tree they go into"
+                .into(),
+        );
+    }
+    let legacy = d["kind"] == "legacy";
+    if d["trees"]["anon"]
+        .as_str()
+        .is_none_or(|t| t == "." && !legacy)
+    {
+        return Some("it has no pseudonymised tree".into());
+    }
+    if arrives != "identified" {
+        let mut missing = Vec::new();
+        if d["patient_id"].is_null() {
+            missing.push("what PatientID holds (patient_id: subject-code or id-type:<name>)");
+        }
+        if d["subjects"].is_null() {
+            missing.push("how its subjects are found (subjects: map or generated)");
+        }
+        if !missing.is_empty() {
+            return Some(format!(
+                "it arrives {arrives} and does not say {}",
+                missing.join(", nor ")
+            ));
+        }
+    }
+    None
+}
+
 /// The arrival of a dataset nobody has declared: the default of
 /// [`handling_of`], [`dataset_of`] and [`default_dataset`]. Such a dataset
 /// has no tree and is never digested, brought in or pseudonymised.
@@ -641,9 +709,10 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
             ));
         }
     };
+    // a tree is the engine's to set; one not set is none. The folder itself
+    // (`.`) is read from a document written before Wave 7a, which schema 80
+    // turns undeclared; nothing makes one now
     let anon = match &trees["anon"] {
-        // a dataset declared before there were trees read its folder
-        Value::Null if !undeclared => Value::String(".".into()),
         Value::Null => Value::Null,
         Value::String(s) if s == ANON_TREE || s == "." => Value::String(s.clone()),
         other => return Err(format!("trees.anon is {ANON_TREE} or ., not {other}")),
@@ -706,6 +775,55 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
     } else {
         patient_id
     };
+    // Wave 7a (Nima, 2026-10-08): how the subjects of a dataset that
+    // arrives de-identified or coded are found: through a map of subject
+    // codes to its ids, given or already in the registry (`map`), or made
+    // by the subject code generator from each id (`generated`)
+    let subjects = match doc.get("subjects") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) if SUBJECTS.contains(&s.as_str()) => Value::String(s.clone()),
+        Some(other) => {
+            return Err(format!(
+                "subjects is one of {}, not {other}",
+                SUBJECTS.join(", ")
+            ));
+        }
+        None => current
+            .map(|c| c["subjects"].clone())
+            .unwrap_or(Value::Null),
+    };
+    // what the place is and what its structure says, both the engine's
+    let kind = pick(doc, current, "kind", &KINDS, KINDS[0])?;
+    let state = pick(
+        doc,
+        current,
+        "state",
+        &STATES,
+        match arrives.as_str() {
+            "identified" => "identified",
+            "deidentified" | "coded" => "anonymised",
+            _ => "unknown",
+        },
+    )?;
+    let root = match doc.get("root") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) => Value::String(s.clone()),
+        Some(other) => return Err(format!("root is a place's name or null, not {other}")),
+        None => current.map(|c| c["root"].clone()).unwrap_or(Value::Null),
+    };
+    // the folder of each pseudonymised copy: the subject's code, or the id
+    // type's value PatientID holds
+    let folder = pick(doc, current, "folder", &FOLDERS, FOLDERS[0])?;
+    if folder == "id-type"
+        && !matches!(
+            PatientId::of(&json!({ "patient_id": patient_id })),
+            Ok(Some(PatientId::IdType(_)))
+        )
+    {
+        return Err(
+            "folder id-type names each copy's folder by the id type PatientID holds; declare patient_id: id-type:<name> with it".into(),
+        );
+    }
     let originals_kept = pick(
         doc,
         current,
@@ -736,6 +854,11 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         "identity": identity,
         "unmapped": unmapped,
         "patient_id": patient_id,
+        "subjects": subjects,
+        "folder": folder,
+        "kind": kind,
+        "state": state,
+        "root": root,
         "cohort": cohort,
         "tags": tags,
         "originals_kept": originals_kept,
@@ -1005,8 +1128,8 @@ pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        ANON_TREE, ORIGINALS_TREE, PatientId, UNDECLARED, dataset_of, default_dataset,
-        default_handling, handling_of, is_undeclared,
+        ANON_TREE, ORIGINALS_TREE, PatientId, SUBJECTS, UNDECLARED, dataset_of, default_dataset,
+        default_handling, handling_of, incomplete, is_undeclared,
     };
     use serde_json::json;
 
@@ -1020,6 +1143,11 @@ mod tests {
                 "identity": null,
                 "unmapped": "hold",
                 "patient_id": null,
+                "subjects": null,
+                "folder": "subject-code",
+                "kind": "dataset",
+                "state": "unknown",
+                "root": null,
                 "cohort": null,
                 "tags": {"keep_demographics": true, "remove": [], "keep": []},
                 "originals_kept": "kept",
@@ -1044,9 +1172,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d["trees"], json!({"originals": null, "anon": null}));
-        // a declaration from before there were trees keeps reading its folder
+        // a declared dataset has the trees the engine set, and no other
         let d = dataset_of(&json!({"arrives": "deidentified"}), None).unwrap();
-        assert_eq!(d["trees"], json!({"originals": null, "anon": "."}));
+        assert_eq!(d["trees"], json!({"originals": null, "anon": null}));
         assert_eq!(d["unmapped"], "code");
     }
 
@@ -1082,6 +1210,75 @@ mod tests {
             let why = dataset_of(&json!({"patient_id": bad}), None).unwrap_err();
             assert!(why.contains(what), "{bad}: {why}");
         }
+    }
+
+    /// Wave 7a (Nima, 2026-10-08): a dataset is read only on a whole
+    /// declaration. One arriving de-identified or coded says what PatientID
+    /// holds and how its subjects are found; the copy's folder is the code
+    /// unless PatientID holds an id type and the dataset asks for it.
+    #[test]
+    fn a_dataset_is_read_only_on_a_whole_declaration() {
+        let trees = json!({"originals": null, "anon": ANON_TREE});
+        assert!(incomplete(&json!(null)).unwrap().contains("unknown"));
+        assert!(
+            incomplete(&json!({"kind": "root"}))
+                .unwrap()
+                .contains("root")
+        );
+        // a legacy place reads the pseudonymised tree it names, once whole
+        assert_eq!(
+            incomplete(
+                &json!({"kind": "legacy", "arrives": "deidentified", "trees": {"anon": "."}, "patient_id": "id-type:site-id", "subjects": "map"})
+            ),
+            None
+        );
+        assert!(
+            incomplete(&json!({"arrives": "deidentified", "trees": {"anon": "."}}))
+                .unwrap()
+                .contains("no pseudonymised tree")
+        );
+        let why = incomplete(&json!({"arrives": "deidentified", "trees": trees})).unwrap();
+        assert!(
+            why.contains("patient_id") && why.contains("subjects"),
+            "{why}"
+        );
+        let why =
+            incomplete(&json!({"arrives": "coded", "trees": trees, "patient_id": "subject-code"}))
+                .unwrap();
+        assert!(
+            !why.contains("patient_id") && why.contains("subjects"),
+            "{why}"
+        );
+        for subjects in SUBJECTS {
+            assert_eq!(
+                incomplete(
+                    &json!({"arrives": "deidentified", "trees": trees, "patient_id": "id-type:site-id", "subjects": subjects})
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            incomplete(
+                &json!({"arrives": "identified", "trees": {"originals": ORIGINALS_TREE, "anon": ANON_TREE}})
+            ),
+            None
+        );
+        let why = dataset_of(&json!({"subjects": "guessed"}), None).unwrap_err();
+        assert!(why.contains("map, generated"), "{why}");
+        // the folder by the id type needs PatientID to hold one
+        let d = dataset_of(
+            &json!({"arrives": "identified", "patient_id": "id-type:site-id", "folder": "id-type"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["folder"], "id-type");
+        assert_eq!(
+            dataset_of(&json!({}), None).unwrap()["folder"],
+            "subject-code"
+        );
+        let why =
+            dataset_of(&json!({"arrives": "identified", "folder": "id-type"}), None).unwrap_err();
+        assert!(why.contains("patient_id: id-type"), "{why}");
     }
 
     /// Wave 7a §5.3: the handling's arrival and the dataset's agree when

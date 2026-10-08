@@ -862,8 +862,17 @@ mod tests {
                 guarantees: serde_json::json!({}),
                 probed: serde_json::json!({}),
                 handling: serde_json::Value::Null,
-                // read in place, as these tests' datasets were declared
-                dataset: serde_json::json!({"arrives": "deidentified"}),
+                // read in place, a whole declaration: the folder is the
+                // pseudonymised tree, PatientID holds the patient id, and
+                // subjects are found through a map
+                dataset: serde_json::json!({
+                    "kind": "legacy",
+                    "arrives": "deidentified",
+                    "state": "anonymised",
+                    "trees": {"originals": null, "anon": "."},
+                    "patient_id": "id-type:patient-id",
+                    "subjects": "map",
+                }),
             },
         )
         .unwrap()
@@ -1068,6 +1077,55 @@ mod tests {
             r#"{"place": "nowhere", "columns": [{"header": "pid", "role": "identifier", "id_type": "patient-id"}], "rows": []}"#,
         );
         assert_eq!(r.status, 404);
+    }
+
+    #[test]
+    fn a_file_waiting_for_an_id_type_value_is_never_coded_anyway() {
+        // Wave 7a: its subject is known; it waits for the value, which a
+        // map gives, and the door names the type it waits for
+        let dir = TempDir::new("linkage-doors-wanting");
+        let (home, mut registry) = registry(&dir);
+        let work = caller("data:work,sensitive");
+        let see = caller("data:see");
+        let place_id = a_place(&mut registry, &dir, "ward-w");
+        // the table is the pseudonymiser's: one held file makes it
+        registry
+            .store()
+            .execute(
+                "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, shape, id_type, first_seen, code_anyway, subject_id, wants_type) VALUES (?, 'w1', 0, 0, 'held', '999999999999', 'personnummer', '2026-10-08T00:00:00Z', 0, 7, 'site-id')",
+                &[Param::Int(place_id)],
+            )
+            .unwrap();
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/code",
+            r#"{"place": "ward-w"}"#,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["files"], 0, "{}", r.body);
+        assert_eq!(r.body["job"], serde_json::Value::Null, "{}", r.body);
+        let flagged = registry
+            .store()
+            .query(
+                "SELECT COUNT(*) FROM pseudonym_file WHERE code_anyway = 1",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(flagged, 0);
+        let r = call(
+            &home,
+            &mut registry,
+            &see,
+            "GET",
+            "/api/linkage/held?place=ward-w",
+            "",
+        );
+        assert_eq!(r.body[0]["waits_for"], "site-id", "{}", r.body);
     }
 
     #[test]
@@ -1347,9 +1405,12 @@ mod tests {
                 probed: serde_json::json!({}),
                 handling: serde_json::json!({}),
                 dataset: serde_json::json!({
+                    "kind": "legacy",
                     "arrives": "deidentified",
+                    "state": "anonymised",
                     "trees": {"originals": null, "anon": "."},
-                    "unmapped": "hold",
+                    "patient_id": "id-type:patient-id",
+                    "subjects": "map",
                 }),
             },
         )

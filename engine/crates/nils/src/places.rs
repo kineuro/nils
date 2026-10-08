@@ -541,9 +541,18 @@ pub fn capabilities(store: &mut Store) -> Value {
             "grant": "data:work",
             "fields": crate::dataset::FIELDS,
             "arrives": place::ARRIVALS,
+            // Wave 7a: what the structure says, what a source place is, and
+            // where an unknown dataset's entries may go
+            "states": place::STATES,
+            "kinds": place::KINDS,
+            "move_into": crate::dataset::MOVE_INTO.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
             "trees": {"originals": place::ORIGINALS_TREE, "anon": place::ANON_TREE},
             // Wave 7a §5.4: what PatientID may hold in the pseudonymised tree
             "patient_id": [place::PATIENT_ID_CODE, format!("{}<name>", place::PATIENT_ID_TYPE)],
+            // Wave 7a (Nima, 2026-10-08): how a de-identified or coded
+            // dataset's subjects are found, and what names a copy's folder
+            "subjects": place::SUBJECTS,
+            "folder": place::FOLDERS,
         },
     })
 }
