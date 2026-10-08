@@ -348,7 +348,17 @@ fn dataset(reg: &mut Registry, name: &str, path: &Path, on_release: serde_json::
             guarantees: serde_json::json!({}),
             probed: serde_json::json!({}),
             handling: serde_json::json!({"on_release": on_release}),
-            dataset: serde_json::Value::Null,
+            // a whole declaration of a tree read where it lies (Wave 7a): a
+            // place with no dataset is undeclared and has no tree, so no
+            // release would find its policy
+            dataset: serde_json::json!({
+                "kind": "legacy",
+                "arrives": "deidentified",
+                "state": "anonymised",
+                "trees": {"originals": null, "anon": "."},
+                "patient_id": "id-type:patient-id",
+                "subjects": "map",
+            }),
         },
     )
     .unwrap()
