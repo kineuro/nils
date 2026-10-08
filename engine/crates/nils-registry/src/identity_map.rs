@@ -892,7 +892,7 @@ fn apply(
             subject_id,
             id_type_id,
             lookup: i.lookup,
-            ciphertext: keys.seal(&i.value),
+            ciphertext: keys.seal_kept(&i.id_type, &i.value),
             source: "csv",
             first_batch_id: None,
         });
@@ -1978,9 +1978,10 @@ mod tests {
         values.sort();
         assert_eq!(
             values,
+            // a personnummer is never kept, only its lookup (Wave 7a)
             [
-                ("personnummer".to_string(), "198501012382".to_string()),
-                ("personnummer".to_string(), "200002292399".to_string()),
+                ("personnummer".to_string(), String::new()),
+                ("personnummer".to_string(), String::new()),
                 ("subject-code".to_string(), second.clone()),
             ]
         );

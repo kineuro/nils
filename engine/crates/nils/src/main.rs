@@ -4935,7 +4935,14 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             for r in &shown {
                 println!(
                     "  {:<24} {}   (identity {}, from {})",
-                    r.id_type, r.value, r.identity_id, r.source
+                    r.id_type,
+                    if r.kept {
+                        r.value.as_str()
+                    } else {
+                        "not kept; the subject's code stands for it"
+                    },
+                    r.identity_id,
+                    r.source
                 );
             }
             let links = linkage::linkages_of(&mut store, subject)?;

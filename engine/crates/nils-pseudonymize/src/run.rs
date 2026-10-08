@@ -347,7 +347,7 @@ enum Answer {
     Wanting {
         subject: i64,
         lookup: Vec<u8>,
-        sealed: Vec<u8>,
+        sealed: Option<Vec<u8>>,
         id_type: String,
         wants: String,
     },
@@ -355,7 +355,7 @@ enum Answer {
     /// held with these, or would be coded in a dry run.
     Unknown {
         lookup: Vec<u8>,
-        sealed: Vec<u8>,
+        sealed: Option<Vec<u8>>,
         id_type: String,
     },
     /// The tree holds a file of this SOP instance already, read by a
@@ -405,7 +405,7 @@ pub enum Item {
         mtime: i64,
         shape: String,
         lookup: Vec<u8>,
-        sealed: Vec<u8>,
+        sealed: Option<Vec<u8>>,
         id_type: String,
         /// Of a file held for want of an id type's value: its subject and
         /// the type (Wave 7a §5.4); none of a file whose subject is unknown.
@@ -1447,7 +1447,7 @@ impl<'a> Recorder<'a> {
                         }
                         Answer::Unknown {
                             lookup: self.resolver.lookup(&ask.ident),
-                            sealed: self.resolver.seal(&ask.ident.value),
+                            sealed: self.resolver.seal(&ask.ident),
                             id_type: self.resolver.type_of(&ask.ident).name.clone(),
                         }
                     }
@@ -1491,7 +1491,7 @@ impl<'a> Recorder<'a> {
                                     None => Answer::Wanting {
                                         subject: id,
                                         lookup: self.resolver.lookup(&ask.ident),
-                                        sealed: self.resolver.seal(&ask.ident.value),
+                                        sealed: self.resolver.seal(&ask.ident),
                                         id_type: self.resolver.type_of(&ask.ident).name.clone(),
                                         wants: wanted.clone(),
                                     },
@@ -1738,7 +1738,7 @@ impl<'a> Recorder<'a> {
                         Param::from(state::HELD),
                         Param::from(shape.as_str()),
                         Param::Bytes(lookup.clone()),
-                        Param::Bytes(sealed.clone()),
+                        sealed.clone().map_or(Param::Null, Param::Bytes),
                         Param::from(id_type.as_str()),
                         Param::Int(batch_id),
                         Param::from(now.as_str()),

@@ -274,6 +274,75 @@ fn imports(
         Need::One("data:work"),
         Detail::Sensitive,
     )?;
+    // Wave 7a (Nima, 2026-10-08): a personnummer is never saved anywhere
+    // in the registry, a job's map file included. A map with a personnummer
+    // column is imported here and now, from the request alone, and nothing
+    // of it touches the disk but what the import files: the keyed lookup.
+    let numbers = columns.iter().any(|c| {
+        c.role
+            .id_type()
+            .is_some_and(nils_registry::personnummer::is_type)
+    });
+    if numbers {
+        let (key, keys) = keys_of(registry)?;
+        let derive = Derive {
+            scheme: registry.meta().pseudonym_scheme,
+            key: &key,
+            display_length: registry.meta().display_length,
+        };
+        let mut linkage = open_linkage(registry)?;
+        let report = identity_map::import(
+            registry.store(),
+            &mut linkage,
+            &keys,
+            Some(&derive),
+            &Map {
+                columns: &columns,
+                rows: &rows,
+                dry_run: false,
+                make_types,
+                place_id: place.as_ref().map(|p| p.id),
+                actor: &caller.principal,
+                job_id: None,
+            },
+        )
+        .map_err(|e| Reply::error(400, e.to_string()))?;
+        if report.written() {
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal: &caller.principal,
+                    action: nils_registry::audit::Action::LinkageImport,
+                    scope: serde_json::json!({
+                        "rows": report.rows,
+                        "place": place.as_ref().map(|p| p.id),
+                        "held_released": report.held_released,
+                    }),
+                    policy: None,
+                    job_id: None,
+                    details: Some(serde_json::json!({ "inline": "a personnummer column" })),
+                },
+            )?;
+        }
+        registry
+            .refresh_meta()
+            .map_err(|e| Reply::error(500, e.to_string()))?;
+        let mut answer = report.as_json();
+        answer["job"] = serde_json::Value::Null;
+        answer["state"] = serde_json::json!(if report.conflicts.is_empty() {
+            "done"
+        } else {
+            "refused"
+        });
+        let status = if report.conflicts.is_empty() {
+            200
+        } else {
+            422
+        };
+        let mut reply = Reply::ok(answer);
+        reply.status = status;
+        return Ok(reply);
+    }
     let path = write_map(home, &columns, &rows).map_err(|e| Reply::error(500, e))?;
     let mut command = vec![
         "linkage".to_string(),
