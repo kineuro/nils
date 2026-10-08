@@ -1074,7 +1074,8 @@ fn fixed_fields() -> Vec<Field> {
             "stack",
             "text_series_description",
             "text",
-            QuasiIdentifying,
+            // a sequence name is never hidden (ruling of 2026-10-01)
+            Technical,
             false,
             false,
             "fingerprint",
@@ -1084,7 +1085,8 @@ fn fixed_fields() -> Vec<Field> {
             "stack",
             "text_protocol_name",
             "text",
-            QuasiIdentifying,
+            // a sequence name is never hidden (ruling of 2026-10-01)
+            Technical,
             false,
             false,
             "fingerprint",
@@ -1776,7 +1778,6 @@ impl Catalog {
                 _ => true,
             }
     }
-
     /// The fields of one level a principal may see, sorted by path.
     pub fn fields_of(&self, level: &str, scope: &Scope) -> Vec<&Field> {
         self.fields

@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The series description and the protocol name are technical, as every sequence name is: the catalog classed them quasi-identifying, so the value sampler showed only their shapes, even at detail quasi. They are now answered as values at every detail.
+
 ## [1.0.0-alpha.79] - 2026-10-06
 
 The MRI pack is 1.0.1: certificate 2's rule gaps and three conventions settled by deep research, on top of the certified pack 1.0.0. 1.0.1 is not certified; it is shown by an archive replay (28 of 546,440 stacks move) and by every earlier reference read (10 settled cells fixed, none broken), and it needs a fresh read before it may claim the certificate. After updating from alpha.77 or alpha.78, a reclassify is all that is needed: no re-read and no fingerprint. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.

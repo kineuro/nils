@@ -6239,8 +6239,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "where": where_db(REGISTRY_DB, &registry_schema),
             "files": if sqlite { db_files(REGISTRY_DB) } else { Vec::new() },
             "holds": [
-                "quasi-identifying: birth dates, sex, study dates and times, station and institution names, descriptions and comments, source paths",
-                "technical: everything else the catalogue declares",
+                "quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths",
+                "technical: everything else the catalogue declares, the series description and the protocol name among them",
             ],
             "counts": { "subjects": subjects, "studies": studies, "series": series, "instances": instances, "source_files": source_files },
             "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",

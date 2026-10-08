@@ -22,7 +22,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 |---|---|
 | what | the pseudonymous catalogue: subjects, studies, series, stacks, instances, source files, diagnostics, review items, jobs and batches |
 | where | `<home>/registry.db`, mode 600 (SQLite keeps registry.db-wal and registry.db-shm beside it while a connection is open) |
-| holds | quasi-identifying: birth dates, sex, study dates and times, station and institution names, descriptions and comments, source paths<br>technical: everything else the catalogue declares |
+| holds | quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths<br>technical: everything else the catalogue declares, the series description and the protocol name among them |
 | owner | the registry's operator, for the research group that owns the archive |
 | kept | until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed |
 | read | `nils status [--batch <id>]`<br>`nils quarantine list`<br>`nils review list` |
