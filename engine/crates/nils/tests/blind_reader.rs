@@ -537,14 +537,19 @@ fn a_blind_reader_sees_the_file_and_answers_what_needs_a_person() {
         None,
         &pia,
     );
+    // a sequence name is shown at every detail (record 55 K7); the station
+    // name is held below quasi
+    let columns: Vec<&Value> = plain["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| &f["column"])
+        .collect();
     assert!(
-        !plain["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f["column"] == "series_description"),
+        columns.iter().any(|c| *c == "series_description"),
         "{plain}"
     );
+    assert!(!columns.iter().any(|c| *c == "station_name"), "{plain}");
     // nothing opens for a stack outside the rater's campaigns
     for door in ["header", "why"] {
         let (status, doc) = server.call(

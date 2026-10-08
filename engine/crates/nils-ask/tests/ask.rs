@@ -951,3 +951,120 @@ out: {set: people, level: count}
     );
     accepted(serde_json::to_value(&ask).unwrap());
 }
+
+/// Record 55 K7 (spec §7.1, T13): below detail quasi, a column that reads a
+/// quasi identifying field is answered as its shape, whether it projects the
+/// field, a binding or a group's key made from it, or a value computed from
+/// it; a filter, an order, a comparison and a count read it freely; the
+/// series description is technical and never shaped; at detail quasi and
+/// above nothing is.
+#[test]
+fn a_quasi_identifying_column_is_shaped_below_detail_quasi() {
+    let plain = Scope::default();
+    let quasi = Scope {
+        classes: [Class::QuasiIdentifying].into_iter().collect(),
+        ..Scope::default()
+    };
+    let sensitive = Scope {
+        classes: [Class::QuasiIdentifying, Class::Sensitive]
+            .into_iter()
+            .collect(),
+        ..Scope::default()
+    };
+    let doc = json!({
+        "ast_version": 1,
+        "name": "k7",
+        "sets": {
+            "people": {
+                "grain": "subject",
+                "bind": {
+                    "born": ["field", {}, "birth_date"],
+                    "born_year": ["part", {"unit": "year"}, ["field", {}, "born"]],
+                    "n": ["count", {"set": "visits"}],
+                    "latest": ["max", {"set": "visits"}, ["field", {}, "first"]]
+                },
+                "where": [["not_null", {}, ["field", {}, "deceased_at"]]]
+            },
+            "visits": {"grain": "session"}
+        },
+        "out": {
+            "set": "people",
+            "level": "record",
+            "columns": [
+                ["field", {}, "id"],
+                ["field", {}, "code"],
+                ["field", {}, "born_year"],
+                ["field", {}, "n"],
+                ["field", {}, "latest"],
+                ["=", {}, ["field", {}, "sex"], "F"],
+                ["field", {}, "sex"]
+            ],
+            "order": [[["field", {}, "birth_date"], "asc"]]
+        }
+    })
+    .to_string();
+    let shaped = |scope: &Scope| -> Vec<usize> {
+        prepare(parse(&doc).unwrap(), &Fixture, scope)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .validated
+            .shaped
+            .into_iter()
+            .collect()
+    };
+    // the code, the year of birth, the latest session's day; not the id, the
+    // count, the comparison or the technical sex
+    assert_eq!(shaped(&plain), vec![1, 2, 4]);
+    assert!(shaped(&quasi).is_empty());
+    assert!(shaped(&sensitive).is_empty());
+
+    // a group's key made from a quasi field is shaped, its count is not, and
+    // the series description is technical at every detail
+    let grouped = json!({
+        "ast_version": 1,
+        "name": "k7 groups",
+        "sets": {
+            "s": {"grain": "stack"},
+            "g": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "station_name"]]}},
+            "d": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "series.series_description"]]}}
+        },
+        "out": {
+            "set": "g",
+            "level": "record",
+            "columns": [["field", {}, "station_name"], ["field", {}, "_rows"]]
+        }
+    });
+    let prepared = prepare(parse(&grouped.to_string()).unwrap(), &Fixture, &plain).unwrap();
+    assert_eq!(
+        prepared.validated.shaped.into_iter().collect::<Vec<_>>(),
+        vec![0]
+    );
+    let mut by_description = grouped.clone();
+    by_description["out"] = json!({
+        "set": "d",
+        "level": "record",
+        "columns": [["field", {}, "series.series_description"], ["field", {}, "_rows"]]
+    });
+    let prepared = prepare(
+        parse(&by_description.to_string()).unwrap(),
+        &Fixture,
+        &plain,
+    )
+    .unwrap();
+    assert!(prepared.validated.shaped.is_empty());
+
+    // a measure over a shaped column would read the raw values: refused below
+    // quasi, answered at quasi
+    let mut measured: Value = serde_json::from_str(&doc).unwrap();
+    measured["out"]["measures"] = json!([{"median": {"of": "latest"}}]);
+    let text = measured.to_string();
+    let refused = prepare(parse(&text).unwrap(), &Fixture, &plain).unwrap_err();
+    assert!(refused.to_string().contains("forbidden_field"), "{refused}");
+    prepare(parse(&text).unwrap(), &Fixture, &quasi).unwrap();
+
+    // the shape itself, as the values sampler shows it
+    assert_eq!(nils_ask::validate::shape("Scanner-01 b"), "Aaaaaaa-99 a");
+    assert_eq!(
+        nils_ask::validate::shape(&"x".repeat(41)),
+        format!("{}~", "a".repeat(40))
+    );
+}

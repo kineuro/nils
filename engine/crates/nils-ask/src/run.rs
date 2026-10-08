@@ -161,11 +161,16 @@ const MAX_DEPTH: usize = 4;
 /// it may project, and (record 48, D1 of the move) whether it read the
 /// stacks of a sample sealed now, `withheld` or `read`, so a cached answer
 /// is never one another scope made, and a handle that read sealed stacks
-/// is opened only by a scope that reads them.
+/// is opened only by a scope that reads them. Record 55 K7: `quasi` says
+/// whether a quasi identifying column was answered `raw` or as its `shape`,
+/// so no cached answer from before the rule held at every door is answered
+/// again below detail quasi.
 pub fn suppression_of(scope: &Scope) -> Value {
+    let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
     json!({
         "classes": scope.classes,
         "sealed": if scope.unsealed { "read" } else { "withheld" },
+        "quasi": if raw { "raw" } else { "shape" },
     })
 }
 

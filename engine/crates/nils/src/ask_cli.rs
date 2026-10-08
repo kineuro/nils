@@ -1354,6 +1354,21 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         Ok(out) => {
             job::finish(registry.store(), job, State::Done, None)
                 .map_err(|e| fail(e.to_string()))?;
+            // Record 55 K7 (spec §7.1): the keyboard holds every class, and
+            // what it read raw is audited, one row per run
+            if queued.is_none() {
+                let epoch = registry.meta().epoch;
+                handle::read_audit(
+                    registry.store(),
+                    &who,
+                    out.handle.id,
+                    &out.answer.columns,
+                    out.answer.rows.len(),
+                    Some("nils ask run at the keyboard"),
+                    epoch,
+                )
+                .map_err(|e| fail(e.to_string()))?;
+            }
             let doc = json!({
                 "handle": out.handle.id,
                 "hash": out.hash,

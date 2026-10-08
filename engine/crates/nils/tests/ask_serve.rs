@@ -2370,3 +2370,214 @@ fn the_catalog_lists_only_the_kinds_the_callers_detail_opens() {
     assert_eq!(status, 200, "{valid}");
     server.finish();
 }
+
+/// Record 55 K7 (spec §7.1, T13): the quasi-identifier rule at every door
+/// that runs a question. A run, a preview and a queued job answer a quasi
+/// identifying column (the station name, the stack's day, the subject's
+/// code) as its shape below detail quasi and raw at quasi and above; the
+/// series description and the protocol name are sequence names, answered
+/// raw at every detail, and the value sampler lists them as values.
+#[test]
+fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        12,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let ops = Some("an-operator-token-of-len");
+    let doc = serde_json::json!({
+        "ast_version": 1,
+        "name": "k7 doors",
+        "sets": {"s": {"grain": "stack", "where": [["not_null", {}, ["field", {}, "station_name"]]]}},
+        "out": {
+            "set": "s",
+            "level": "record",
+            "columns": [
+                ["field", {}, "text_series_description"],
+                ["field", {}, "text_protocol_name"],
+                ["field", {}, "station_name"],
+                ["field", {}, "day"],
+                ["field", {}, "subject.code"],
+                ["field", {}, "n_instances"]
+            ],
+            "order": [[["field", {}, "id"], "asc"]],
+            "limit": 40
+        }
+    });
+    // the named columns of an answer, by name
+    fn column(answer: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+        let names = answer["columns"].as_array().unwrap();
+        let i = names
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column {name} in {answer}"));
+        answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    }
+    fn shapes(raw: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        raw.iter()
+            .map(|v| match v {
+                serde_json::Value::Null => serde_json::Value::Null,
+                serde_json::Value::String(t) => nils_ask::validate::shape(t).into(),
+                other => nils_ask::validate::shape(&other.to_string()).into(),
+            })
+            .collect()
+    }
+    let held = ["station_name", "day", "subject.code"];
+    let shown = [
+        "text_series_description",
+        "text_protocol_name",
+        "n_instances",
+    ];
+    // what each door answers, checked against the sensitive caller's raw rows
+    let check = |door: &str,
+                 plain: &serde_json::Value,
+                 quasi: &serde_json::Value,
+                 raw: &serde_json::Value| {
+        assert!(
+            !raw["rows"].as_array().unwrap().is_empty(),
+            "{door}: no rows to compare: {raw}"
+        );
+        for name in held {
+            let r = column(raw, name);
+            assert!(
+                r.iter().any(|v| !v.is_null()),
+                "{door}: {name} is never filled: {raw}"
+            );
+            assert_eq!(column(plain, name), shapes(&r), "{door}: {name} at plain");
+            assert_ne!(column(plain, name), r, "{door}: {name} at plain is raw");
+            assert_eq!(column(quasi, name), r, "{door}: {name} at quasi");
+        }
+        for name in shown {
+            let r = column(raw, name);
+            assert!(r.iter().any(|v| !v.is_null()), "{door}: {name}: {raw}");
+            assert_eq!(column(plain, name), r, "{door}: {name} at plain");
+            assert_eq!(column(quasi, name), r, "{door}: {name} at quasi");
+        }
+    };
+    // the run door, at each detail
+    let ran = |token: Option<&str>| {
+        let (status, answer) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": doc, "fresh": true}))),
+            token,
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer
+    };
+    let (plain, quasi, raw) = (ran(reader), ran(reviewer), ran(ops));
+    check("run", &plain, &quasi, &raw);
+    // the preview door
+    let previewed = |token: Option<&str>| {
+        let (status, answer) = server.request(
+            "POST",
+            "/api/ask/preview",
+            Some(&body(serde_json::json!({"document": doc, "rows": 40}))),
+            token,
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer
+    };
+    let (p_plain, p_quasi, p_raw) = (previewed(reader), previewed(reviewer), previewed(ops));
+    check("preview", &p_plain, &p_quasi, &p_raw);
+    // the value sampler: sequence names are values at every detail, the
+    // station name a shape
+    for token in [reader, reviewer] {
+        for field in ["text_series_description", "text_protocol_name"] {
+            let (status, sample) = server.request(
+                "GET",
+                &format!("/api/ask/catalog/stack/{field}/values"),
+                None,
+                token,
+            );
+            assert_eq!(status, 200, "{sample}");
+            assert_eq!(sample["kind"], "values", "{field}: {sample}");
+        }
+    }
+    let (status, sample) = server.request(
+        "GET",
+        "/api/ask/catalog/stack/station_name/values",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{sample}");
+    assert_eq!(sample["kind"], "shapes", "{sample}");
+    // the job door: each job runs under the detail its door recorded
+    let queued = |token: Option<&str>, name: &str| {
+        let (status, q) = server.request(
+            "POST",
+            "/api/ask/jobs",
+            Some(&body(serde_json::json!({"document": doc, "name": name}))),
+            token,
+        );
+        assert_eq!(status, 202, "{q}");
+        q["job"].as_i64().unwrap()
+    };
+    let jobs = [queued(reader, "k7-plain"), queued(reviewer, "k7-quasi")];
+    server.finish();
+    for _ in jobs {
+        run(&home, &["jobs", "work", "--once"], None);
+    }
+    let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let handle_of = |id: i64| -> i64 {
+        let job = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == id)
+            .unwrap_or_else(|| panic!("no job {id}: {listed}"));
+        assert_eq!(job["state"], "done", "{job}");
+        job["result"]["handle"].as_i64().unwrap()
+    };
+    let handles: Vec<i64> = jobs.iter().map(|j| handle_of(*j)).collect();
+    let server = Server::start(
+        &home,
+        2,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let page = |h: i64| {
+        let (status, page) = server.request(
+            "GET",
+            &format!("/api/ask/handles/{h}/rows?page=0"),
+            None,
+            ops,
+        );
+        assert_eq!(status, 200, "{page}");
+        // a page's columns are objects with a name
+        let mut page = page;
+        if let Some(cols) = page["columns"].as_array() {
+            let names: Vec<serde_json::Value> = cols
+                .iter()
+                .map(|c| c.get("name").cloned().unwrap_or_else(|| c.clone()))
+                .collect();
+            page["columns"] = names.into();
+        }
+        page
+    };
+    let (j_plain, j_quasi) = (page(handles[0]), page(handles[1]));
+    server.finish();
+    check("job", &j_plain, &j_quasi, &raw);
+}

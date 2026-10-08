@@ -263,6 +263,44 @@ pub struct Validated {
     /// set filtered on one, and a set filtered on a measure whose count or
     /// existence is the answer (Nima's ruling after record 49's review).
     pub small_cells: BTreeSet<String>,
+    /// Record 55 K7 (spec §7.1): the places in `out.columns` that read a
+    /// quasi identifying field this scope may not project raw, and so are
+    /// answered as their shapes (see [`may_project_raw`]).
+    pub shaped: BTreeSet<usize>,
+}
+
+/// Record 55 K7, the one place the quasi-identifier rule is decided:
+/// whether a scope projects a field of this class raw. An identifier never
+/// (it enters through values and leaves through `out.identifiers`); a
+/// sensitive or a quasi identifying field with its class; a technical or a
+/// clinical field always. Below the rule, a quasi identifying field is
+/// answered as its shape and still filters, orders and counts.
+pub fn may_project_raw(class: Class, scope: &Scope) -> bool {
+    match class {
+        Class::Identifying => false,
+        Class::Sensitive => scope.classes.contains(&Class::Sensitive),
+        Class::QuasiIdentifying => scope.classes.contains(&Class::QuasiIdentifying),
+        Class::Technical | Class::Clinical => true,
+    }
+}
+
+/// A value's shape, as the values sampler shows a field no caller may
+/// project raw: digits as 9, letters as a or A, everything else kept, the
+/// first 40 characters and a `~` when there were more.
+pub fn shape(v: &str) -> String {
+    let mut out = String::new();
+    for c in v.chars().take(40) {
+        out.push(match c {
+            '0'..='9' => '9',
+            'a'..='z' => 'a',
+            'A'..='Z' => 'A',
+            other => other,
+        });
+    }
+    if v.chars().count() > 40 {
+        out.push('~');
+    }
+    out
 }
 
 /// The smallest group of scans whose totals of a measure the ask shows
@@ -561,6 +599,8 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     measures_within_detail(ask, scope, &mut issues);
     rows_within_detail(ask, scope, &mut issues);
     out.small_cells = small_cells(ask, scope);
+    out.shaped = shaped_columns(ask, names, scope, &out);
+    measures_of_shapes(ask, &out.shaped, &mut issues);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
         issues.into_iter().partition(|i| i.code.is_warning());
@@ -1914,6 +1954,215 @@ fn measure_filtered(ask: &Ask) -> BTreeSet<String> {
         }
     }
     filtered
+}
+
+/// Derived fields whose value is a date of the record, and so read a quasi
+/// identifying field.
+const QUASI_DERIVED: &[&str] = &["study_day"];
+
+/// What reads a quasi identifying field the scope may not project raw
+/// (record 55 K7): per set, the names it exposes that do, bindings and a
+/// group's keys, filled in topological order.
+struct Shapes<'a> {
+    ask: &'a Ask,
+    names: &'a dyn Names,
+    scope: &'a Scope,
+    v: &'a Validated,
+    tainted: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Shapes<'_> {
+    fn below(&self, info: &FieldInfo) -> bool {
+        !may_project_raw(info.class, self.scope)
+    }
+
+    /// Whether a clause's value, read in a set, carries a field below the
+    /// rule. A comparison or a predicate answers a boolean and a count or a
+    /// distinct count a number, as a filter does, so neither carries it.
+    fn clause(&self, c: &Clause, set: &str, depth: u8) -> bool {
+        let op = c.op.as_str();
+        if depth > 12 || COMPARISONS.contains(&op) || PREDICATES.contains(&op) {
+            return false;
+        }
+        match op {
+            "field" => c.ref_name().is_some_and(|p| self.path(p, set, 0)),
+            "derived" => c.ref_name().is_some_and(|n| {
+                QUASI_DERIVED.contains(&n) && !may_project_raw(Class::QuasiIdentifying, self.scope)
+            }),
+            "axis" | "param" => false,
+            "count" | "distinct" => false,
+            op if AGGREGATES.contains(&op) => {
+                // the aggregated clause reads the target's names
+                let target = c.opts.get("set").and_then(Value::as_str).unwrap_or(set);
+                c.args.iter().any(|a| self.arg(a, target, depth + 1))
+            }
+            _ => c.args.iter().any(|a| self.arg(a, set, depth + 1)),
+        }
+    }
+
+    fn arg(&self, a: &Arg, set: &str, depth: u8) -> bool {
+        match a {
+            Arg::Clause(c) => self.clause(c, set, depth),
+            Arg::List(items) => items.iter().any(|i| self.arg(i, set, depth)),
+            _ => false,
+        }
+    }
+
+    /// Whether a path, read in a set, is a field below the rule or a name
+    /// made from one; the walk follows `resolve_field`'s.
+    fn path(&self, path: &str, set_name: &str, depth: u8) -> bool {
+        let (Some(set), Some(exposed)) = (self.ask.sets.get(set_name), self.v.sets.get(set_name))
+        else {
+            return false;
+        };
+        if depth > 6 {
+            return false;
+        }
+        let own = self.tainted.get(set_name);
+        if exposed.bindings.iter().any(|b| b == path) {
+            return own.is_some_and(|t| t.contains(path));
+        }
+        for b in &exposed.change_bindings {
+            if let Some(rest) = path
+                .strip_prefix(b.as_str())
+                .and_then(|r| r.strip_prefix('.'))
+            {
+                // a change pair's days, and the days between them
+                return matches!(rest, "from_date" | "to_date" | "gap_days")
+                    && !may_project_raw(Class::QuasiIdentifying, self.scope);
+            }
+        }
+        if set.grain == Grain::Group {
+            return own.is_some_and(|t| t.contains(path));
+        }
+        if is_measure_path(path) {
+            // record 49 R4 decides a pipeline's measures
+            return false;
+        }
+        let (first, rest) = match path.split_once('.') {
+            Some((f, r)) => (f, Some(r)),
+            None => (path, None),
+        };
+        if first == "pick" {
+            return false;
+        }
+        if let Some(partner) = exposed.partners.get(first) {
+            return rest.is_some_and(|r| match r {
+                // the partner's day, and the days to it
+                "date" | "offset_days" => !may_project_raw(Class::QuasiIdentifying, self.scope),
+                r if PARTNER_EXTRAS.contains(&r) => false,
+                r => self.path(r, partner, depth + 1),
+            });
+        }
+        if let Some(of) = &exposed.of
+            && of == first
+        {
+            return rest.is_some_and(|r| self.path(r, of, depth + 1));
+        }
+        if let Some(rest) = rest
+            && level_prefix(set.grain, first)
+        {
+            return self
+                .names
+                .field(first, rest)
+                .is_some_and(|i| self.below(&i));
+        }
+        self.names
+            .field(set.grain.name(), path)
+            .is_some_and(|i| self.below(&i))
+    }
+}
+
+/// Record 55 K7 (spec §7.1): below detail quasi, a column of the answer that
+/// reads a quasi identifying field is projected as its shape, as the values
+/// sampler shows it, whichever door ran the question (a run, a preview, a
+/// job, and MCP through them). Its use as a filter, an order or a count
+/// stays allowed. Empty at detail quasi and above.
+fn shaped_columns(ask: &Ask, names: &dyn Names, scope: &Scope, v: &Validated) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    if may_project_raw(Class::QuasiIdentifying, scope) || !ask.sets.contains_key(&ask.out.set) {
+        return out;
+    }
+    let mut s = Shapes {
+        ask,
+        names,
+        scope,
+        v,
+        tainted: BTreeMap::new(),
+    };
+    for name in &v.order {
+        let Some(set) = ask.sets.get(name) else {
+            continue;
+        };
+        let mut t: BTreeSet<String> = BTreeSet::new();
+        // what a set narrows or combines passes its bindings on
+        if let Some(Src::Set(from)) = &set.from {
+            t.extend(s.tainted.get(from).cloned().unwrap_or_default());
+        }
+        if let Some(a) = &set.algebra {
+            for operand in &a.sets {
+                t.extend(s.tainted.get(operand).cloned().unwrap_or_default());
+            }
+        }
+        if let Some(g) = &set.group {
+            for c in &g.by {
+                if let Some(p) = c.ref_name()
+                    && s.clause(c, &g.of, 0)
+                {
+                    t.insert(p.to_string());
+                }
+            }
+        }
+        s.tainted.insert(name.clone(), t);
+        // bind reads what was bound before it
+        for (b, c) in &set.bind.0 {
+            if s.clause(c, name, 0) {
+                s.tainted.entry(name.clone()).or_default().insert(b.clone());
+            }
+        }
+    }
+    for (i, c) in ask.out.columns.iter().enumerate() {
+        if s.clause(c, &ask.out.set, 0) {
+            out.insert(i);
+        }
+    }
+    out
+}
+
+/// A post pass measure over a shaped column would compute over the raw
+/// values a caller may not see; it is refused (record 55 K7).
+fn measures_of_shapes(ask: &Ask, shaped: &BTreeSet<usize>, issues: &mut Vec<Issue>) {
+    if shaped.is_empty() {
+        return;
+    }
+    let shaped_names: BTreeSet<String> = ask
+        .out
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| shaped.contains(i))
+        .map(|(i, c)| {
+            c.ref_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("col{i}"))
+        })
+        .collect();
+    for (i, m) in ask.out.measures.iter().enumerate() {
+        for (k, v) in &m.0 {
+            if let Some(of) = v.get("of").and_then(Value::as_str)
+                && shaped_names.contains(of)
+            {
+                issues.push(issue(
+                    Code::ForbiddenField,
+                    format!("out.measures[{i}]"),
+                    format!(
+                        "{k} of {of}: {of} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7)"
+                    ),
+                    "measure another column, or ask for detail quasi",
+                ));
+            }
+        }
+    }
 }
 
 /// Pin every bare `selection:<name>` to its current version (§8.2), inside

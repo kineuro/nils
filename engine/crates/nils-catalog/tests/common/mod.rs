@@ -168,9 +168,20 @@ pub fn ask_of(l: &mut Lab, text: &str) -> (Compiled, Answer) {
     run_ask(l, ask)
 }
 
+/// The scope the compiler's tests read under: quasi identifying fields
+/// raw, since they hold the planted rows against what the compiler answers
+/// (below detail quasi those columns are shapes, record 55 K7).
+pub fn quasi() -> Scope {
+    Scope {
+        classes: [nils_ask::validate::Class::QuasiIdentifying]
+            .into_iter()
+            .collect(),
+        ..Scope::default()
+    }
+}
+
 pub fn run_ask(l: &mut Lab, ask: Ask) -> (Compiled, Answer) {
-    let prepared =
-        prepare(ask, &l.catalog, &Scope::default()).unwrap_or_else(|e| panic!("{}: {e}", l.name));
+    let prepared = prepare(ask, &l.catalog, &quasi()).unwrap_or_else(|e| panic!("{}: {e}", l.name));
     let store = l.registry.store();
     let ctx = Context {
         names: &l.catalog,
