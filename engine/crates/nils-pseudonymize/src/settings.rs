@@ -122,7 +122,16 @@ impl Settings {
     /// dataset's tree is read in place and never rewritten (record 26 §2).
     pub fn for_dataset(place: &Place) -> Result<Settings, String> {
         let dataset = &place.dataset;
-        let arrives = dataset["arrives"].as_str().unwrap_or("deidentified");
+        let arrives = dataset["arrives"]
+            .as_str()
+            .unwrap_or(nils_registry::place::UNDECLARED);
+        // Wave 7a §5.3: nothing in an undeclared dataset is read
+        if arrives == nils_registry::place::UNDECLARED {
+            return Err(format!(
+                "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared; declare it identified to pseudonymise its originals",
+                place.name
+            ));
+        }
         if arrives != "identified" {
             return Err(format!(
                 "the dataset {} arrives {arrives}: its tree is read in place and there is nothing to pseudonymise; only an identified dataset has originals to rewrite",

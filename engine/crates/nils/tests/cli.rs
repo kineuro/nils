@@ -4606,7 +4606,14 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
         .args(registry)
         .args(["place", "add", "ds"])
         .arg(dir.path())
-        .args(["--role", "source", "--arrives", "identified", "--identity"])
+        .args([
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+            "--confirm-move",
+            "--identity",
+        ])
         .arg(&rule)
         .args(["--cohort", "study-a", "--remove", "0010,1010", "--json"])
         .output()
@@ -4800,7 +4807,13 @@ fn a_dataset_s_originals_are_surveyed_then_vaulted_at_the_keyboard() {
         .args(registry)
         .args(["place", "add", "ds"])
         .arg(dir.path())
-        .args(["--role", "source", "--arrives", "identified"])
+        .args([
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+            "--confirm-move",
+        ])
         .output()
         .unwrap();
     assert!(added.status.success(), "{}", stderr(&added));
@@ -4948,6 +4961,7 @@ fn a_changed_original_refuses_a_purge_until_the_dataset_is_pseudonymised_again()
         "source",
         "--arrives",
         "identified",
+        "--confirm-move",
         "--unmapped",
         "code",
     ]);
@@ -5112,6 +5126,7 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "source",
         "--arrives",
         "identified",
+        "--confirm-move",
         "--unmapped",
         "code",
     ]);
@@ -5123,9 +5138,9 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "--role",
         "source",
     ]);
-    // a dataset read in place has nothing to pseudonymise
+    // a dataset nobody declared is not read, so not pseudonymised either
     let why = refused(&["pseudonymize", "@plain"]);
-    assert!(why.contains("read in place"), "{why}");
+    assert!(why.contains("undeclared"), "{why}");
     assert!(
         refused(&["pseudonymize", "ds"]).contains("@name"),
         "a dataset is named as @name"
@@ -6009,4 +6024,255 @@ fn a_pack_is_replayed_over_header_packets() {
         "{}",
         stderr(&out)
     );
+}
+
+/// One MR file with its own UIDs, for the layout tests.
+fn mr_file(dir: &TempDir, rel: &str, n: u32) {
+    let sop = format!("1.2.7.{n}.1.1");
+    let mr = synth::minimal_mr(&format!("1.2.7.{n}"), &format!("1.2.7.{n}.1"), &sop);
+    dir.file(rel, &synth::part10(&MetaFields::mr(&sop), &mr, true));
+}
+
+/// Wave 7a §5.3, T4 at the keyboard: a folder of loose DICOM with neither
+/// tree, added as a source place without an arrival, is undeclared, and
+/// nothing in it is digested: not by its name, its path, a folder under it
+/// or a folder holding it, and it is not brought in. Declaring it
+/// de-identified without a confirmation is refused, names what would move
+/// and writes nothing. Confirmed, the loose entries move into
+/// `derivatives/dcm-anon`, and only that tree is read.
+#[test]
+fn a_folder_without_the_layout_is_never_read() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let outer = TempDir::new("cli-layout");
+    mr_file(&outer, "study/a/IM_0001", 1);
+    mr_file(&outer, "study/b/IM_0002", 2);
+    let dir = outer.path().join("study");
+
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "ds"])
+        .arg(&dir)
+        .args(["--role", "source", "--json"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["arrives"], "undeclared", "{ds}");
+    assert_eq!(
+        ds["dataset"]["trees"]["anon"],
+        serde_json::Value::Null,
+        "{ds}"
+    );
+    assert_eq!(ds["layout"]["question"], true, "{ds}");
+    assert_eq!(
+        ds["layout"]["loose_entries"],
+        serde_json::json!(["a", "b"]),
+        "{ds}"
+    );
+    assert_eq!(
+        ds["layout"]["declarations"]["deidentified"]["into"], "derivatives/dcm-anon",
+        "{ds}"
+    );
+    let id = ds["id"].as_i64().unwrap().to_string();
+    // nothing was moved or made
+    assert!(!dir.join("derivatives").exists());
+
+    let shown = nils()
+        .args(registry)
+        .args(["place", "layout", "ds"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let text = stdout(&shown);
+    assert!(text.contains("undeclared: nothing in it is read"), "{text}");
+    assert!(text.contains("--confirm-move"), "{text}");
+
+    // 0 files digested, whichever way the folder is named
+    for target in [
+        "@ds".to_string(),
+        dir.display().to_string(),
+        dir.join("a").display().to_string(),
+        outer.path().display().to_string(),
+    ] {
+        let refused = nils()
+            .args(registry)
+            .args(["digest", &target])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "{target}");
+        assert!(
+            stderr(&refused).contains("undeclared"),
+            "{target}: {}",
+            stderr(&refused)
+        );
+    }
+    let refused = nils()
+        .args(registry)
+        .args(["bring-in", "@ds"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("undeclared"),
+        "{}",
+        stderr(&refused)
+    );
+    let status = status_json(&home);
+    assert_eq!(
+        status["batches"].as_array().map(Vec::len),
+        Some(0),
+        "{status}"
+    );
+    assert_eq!(status["jobs"].as_array().map(Vec::len), Some(0), "{status}");
+
+    // declared without the word: refused, the question answered whole
+    let asked = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--arrives", "deidentified", "--json"])
+        .output()
+        .unwrap();
+    assert!(!asked.status.success());
+    assert!(
+        stderr(&asked).contains("2 loose entries"),
+        "{}",
+        stderr(&asked)
+    );
+    assert!(
+        stderr(&asked).contains("--confirm-move"),
+        "{}",
+        stderr(&asked)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&asked.stdout).unwrap();
+    assert_eq!(
+        doc["layout"]["loose_entries"],
+        serde_json::json!(["a", "b"]),
+        "{doc}"
+    );
+    assert!(!dir.join("derivatives").exists());
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list", "--json"])
+        .output()
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows[0]["dataset"]["arrives"], "undeclared", "{rows}");
+
+    // confirmed: moved, and said
+    let set = nils()
+        .args(registry)
+        .args([
+            "place",
+            "set",
+            &id,
+            "--arrives",
+            "deidentified",
+            "--confirm-move",
+        ])
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "{}", stderr(&set));
+    let text = stdout(&set);
+    assert!(
+        text.contains("2 loose entries moved into derivatives/dcm-anon"),
+        "{text}"
+    );
+    assert!(text.contains("reads derivatives/dcm-anon only"), "{text}");
+    assert!(dir.join("derivatives/dcm-anon/a/IM_0001").is_file());
+
+    // the folder outside its tree is still not read; @ds is
+    let refused = nils()
+        .args(registry)
+        .arg("digest")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("pseudonymised tree alone"),
+        "{}",
+        stderr(&refused)
+    );
+    let done = nils()
+        .args(registry)
+        .args(["digest", "@ds", "--json"])
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+    let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    assert_eq!(report["parsed"], 2, "{report}");
+}
+
+/// Wave 7a §5.3, T4: a folder that holds `derivatives/dcm-original` is never
+/// read past it. Undeclared, nothing in it is read; declared identified
+/// with its loose entries confirmed into the originals, the digest reads
+/// the pseudonymised tree and nothing of the originals.
+#[test]
+fn a_folder_with_originals_is_never_read_past_them() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-layout-originals");
+    mr_file(&dir, "derivatives/dcm-original/p1/IM_0001", 11);
+    mr_file(&dir, "loose/IM_0002", 12);
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "ds"])
+        .arg(dir.path())
+        .args(["--role", "source", "--json"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["arrives"], "undeclared", "{ds}");
+    assert_eq!(ds["layout"]["originals"], true, "{ds}");
+    assert_eq!(ds["layout"]["question"], false, "{ds}");
+    let id = ds["id"].as_i64().unwrap().to_string();
+    let refused = nils()
+        .args(registry)
+        .args(["digest", "@ds"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert_eq!(
+        status_json(&home)["batches"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    // identified: the originals are there, so the loose entry waits unread
+    // unless the move is confirmed
+    let set = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--arrives", "identified", "--json"])
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "{}", stderr(&set));
+    let doc: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(doc["layout"]["loose"], 1, "{doc}");
+    assert_eq!(doc["layout"]["moved"], serde_json::Value::Null, "{doc}");
+    assert!(dir.path().join("loose/IM_0002").is_file());
+    let set = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--confirm-move", "--json"])
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "{}", stderr(&set));
+    let doc: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(
+        doc["layout"]["moved"]["into"], "derivatives/dcm-original",
+        "{doc}"
+    );
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/loose/IM_0002")
+            .is_file()
+    );
+    // the pseudonymised tree is empty, and no original is ever read
+    let done = nils()
+        .args(registry)
+        .args(["digest", "@ds", "--json"])
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+    let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    assert_eq!(report["parsed"], 0, "{report}");
 }

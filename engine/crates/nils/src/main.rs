@@ -891,6 +891,16 @@ enum PlaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// What a folder holds before anything reads it (Wave 7a §5.3): its
+    /// trees, the loose entries beside derivatives/, and for each way its
+    /// files may arrive the tree that is read and what a confirmed
+    /// declaration would move there. Nothing is written
+    Layout {
+        /// A source place by its id or name, or a directory
+        place: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Retire a place: it binds nothing from now on and stays as history
     Retire { id: i64 },
     /// The verbs that take a path and the role each needs, and where @name
@@ -905,7 +915,8 @@ enum PlaceCommand {
 /// it. A flag not given keeps what is in force, or takes its default.
 #[derive(Debug, Args, Default)]
 struct DatasetFlags {
-    /// What arrives: identified, deidentified or coded
+    /// What arrives: identified, deidentified or coded; undeclared (the
+    /// default) reads nothing until one of those is declared
     #[arg(long, value_name = "HOW")]
     arrives: Option<String>,
     /// The identity rule its files are read under, as nils digest --identity-rule reads it
@@ -935,8 +946,14 @@ struct DatasetFlags {
     /// A tag to keep out of those groups, as gggg,eeee (repeatable)
     #[arg(long, value_name = "TAG")]
     keep: Vec<String>,
-    /// Move the loose entries of a de-identified or coded folder into its pseudonymised tree
+    /// Move the loose entries beside derivatives/ into the tree the arrival
+    /// reads (the originals for identified data, the pseudonymised tree
+    /// otherwise); without it a declaration that needs the move is refused
+    /// and names what would move
     #[arg(long)]
+    confirm_move: bool,
+    /// The name --confirm-move had for a de-identified or coded folder
+    #[arg(long, hide = true)]
     move_into_anon: bool,
 }
 
@@ -979,8 +996,8 @@ impl DatasetFlags {
         if !tags.is_empty() {
             asked.insert("tags".into(), serde_json::Value::Object(tags));
         }
-        if self.move_into_anon {
-            asked.insert("move_into_anon".into(), serde_json::json!(true));
+        if self.confirm_move || self.move_into_anon {
+            asked.insert("confirm_move".into(), serde_json::json!(true));
         }
         Ok(serde_json::Value::Object(asked))
     }
@@ -2615,22 +2632,27 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             tree(&d["trees"]["anon"])
         ))
     };
-    let show_layout = |layout: &serde_json::Value| {
-        if let Some(v0) = layout["v0"].as_object() {
+    // Wave 7a §5.3: what is read and what is not, said
+    let show_layout = |p: &place::Place, layout: &serde_json::Value| {
+        if p.role != Role::Source || !layout.is_object() {
+            return;
+        }
+        for line in dataset::layout_lines(p.id, &p.dataset, layout) {
+            println!("  {line}");
+        }
+    };
+    // a refused declaration names what it would move, with --json whole
+    let refused = |r: dataset::Refused, json: bool| -> Exit {
+        if json && let Some(layout) = &r.layout {
             println!(
-                "  a v0 cohort folder: {} original files, {} pseudonymised files{}",
-                v0["original_files"],
-                v0["raw_files"],
-                if v0["renamed"].as_bool() == Some(true) {
-                    "; dcm-raw is now dcm-anon"
-                } else {
-                    ""
-                }
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"error": r.message, "layout": layout})
+                )
+                .unwrap_or_default()
             );
         }
-        if let Some(n) = layout["loose"].as_u64().filter(|n| *n > 0) {
-            println!("  {n} loose entries beside derivatives/, not read");
-        }
+        fail(r.message)
     };
     match command {
         PlaceCommand::List { json, probe } => {
@@ -2735,7 +2757,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     return Err(fail(format!("a place is already named {name}")));
                 }
                 let d = dataset::declare(registry.store(), &path, &asked, None)
-                    .map_err(|r| fail(r.message))?;
+                    .map_err(|r| refused(r, json))?;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2789,7 +2811,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 if let Some(line) = trees_line(&p) {
                     println!("  {line}");
                 }
-                show_layout(&layout);
+                show_layout(&p, &layout);
                 println!("  probed {}", p.probed);
             }
             Ok(())
@@ -2849,7 +2871,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 let folder = path.clone().unwrap_or_else(|| PathBuf::from(&current.path));
                 Some(
                     dataset::declare(registry.store(), &folder, &asked, Some(&current))
-                        .map_err(|r| fail(r.message))?,
+                        .map_err(|r| refused(r, json))?,
                 )
             } else {
                 None
@@ -2896,7 +2918,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 if let Some(line) = trees_line(&p) {
                     println!("  {line}");
                 }
-                show_layout(&layout);
+                show_layout(&p, &layout);
             }
             Ok(())
         }
@@ -2966,6 +2988,79 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     code: STOPPED,
                     message: "stopped: what was done stays done; run it again to go on".into(),
                 });
+            }
+            Ok(())
+        }
+        PlaceCommand::Layout { place: asked, json } => {
+            let found = match asked.parse::<i64>() {
+                Ok(id) => place::show(registry.store(), id),
+                Err(_) => place::by_name(registry.store(), &asked),
+            }
+            .map_err(|e| fail(e.to_string()))?;
+            let (folder, p) = match found {
+                Some(p) => (PathBuf::from(&p.path), Some(p)),
+                None => {
+                    let dir = fs::canonicalize(&asked).unwrap_or_else(|_| PathBuf::from(&asked));
+                    if !dir.is_dir() {
+                        return Err(usage(format!("{asked} is neither a place nor a directory")));
+                    }
+                    (dir, None)
+                }
+            };
+            let layout = dataset::layout_doc(&folder, &dataset::detect(&folder));
+            if json {
+                let doc = serde_json::json!({
+                    "path": folder.display().to_string(),
+                    "place": p.as_ref().map(|p| p.name.clone()),
+                    "dataset": p.as_ref().filter(|p| p.role == Role::Source).map(|p| p.dataset.clone()),
+                    "layout": layout,
+                });
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+                return Ok(());
+            }
+            println!("{}", folder.display());
+            match &p {
+                Some(p) if p.role == Role::Source => {
+                    for line in dataset::layout_lines(p.id, &p.dataset, &layout) {
+                        println!("  {line}");
+                    }
+                }
+                _ => {
+                    let undeclared = place::default_dataset(None);
+                    for line in dataset::layout_lines(0, &undeclared, &layout)
+                        .into_iter()
+                        .take(1)
+                    {
+                        println!(
+                            "  {}",
+                            line.replacen("undeclared: nothing in it is read. ", "", 1)
+                        );
+                    }
+                }
+            }
+            for (arrives, d) in layout["declarations"].as_object().into_iter().flatten() {
+                let moves = d["moves"].as_u64().unwrap_or(0);
+                println!(
+                    "  declared {arrives}: reads {}{}",
+                    if arrives == "identified" {
+                        "its pseudonymised tree, written by the pseudonymiser from the originals"
+                    } else {
+                        d["reads"].as_str().unwrap_or("")
+                    },
+                    match (moves, d["needed"].as_bool() == Some(true)) {
+                        (0, _) => String::new(),
+                        (n, true) => format!(
+                            "; moves {n} loose entr{} into {} once confirmed",
+                            if n == 1 { "y" } else { "ies" },
+                            d["into"].as_str().unwrap_or("")
+                        ),
+                        (n, false) => format!(
+                            "; {n} loose entr{} not read, moved into {} only with --confirm-move",
+                            if n == 1 { "y" } else { "ies" },
+                            d["into"].as_str().unwrap_or("")
+                        ),
+                    }
+                );
             }
             Ok(())
         }
@@ -3834,6 +3929,10 @@ fn digest_tree(home: &Home, root: &Path) -> Result<PathBuf, Exit> {
             p.name
         )));
     }
+    // Wave 7a §5.3: never read without the layout
+    if let Some(why) = dataset::not_read(store, &path) {
+        return Err(fail(why));
+    }
     Ok(path)
 }
 
@@ -4098,6 +4197,9 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     use nils_registry::job;
     let mut registry = open(home)?;
     let dataset = dataset_named(&mut registry, &args.dataset)?;
+    if let Some(why) = dataset::undeclared_refusal(&dataset) {
+        return Err(fail(why));
+    }
     // a tree holding files no digest has read is digested first, so the
     // pseudonymiser knows what the tree holds (lab 26, defect 7)
     let unread = chain::unread_in_tree(registry.store(), &dataset);

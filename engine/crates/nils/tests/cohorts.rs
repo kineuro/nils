@@ -101,20 +101,14 @@ fn registry() -> (TempDir, TempDir) {
             dir.path().to_str().unwrap(),
             "--role",
             "source",
+            "--arrives",
+            "deidentified",
+            "--confirm-move",
             "--cohort",
             "fed",
         ],
     );
-    ok(
-        &home,
-        &[
-            "digest",
-            "--name",
-            "a",
-            "--no-private",
-            dir.path().to_str().unwrap(),
-        ],
-    );
+    ok(&home, &["digest", "--name", "a", "--no-private", "@ds"]);
     ok(&home, &["fingerprint"]);
     ok(
         &home,
@@ -310,14 +304,7 @@ fn a_digest_of_a_dataset_feeds_its_cohort_and_review_reads_by_cohort() {
     server.finish();
     let again = ok(
         &home,
-        &[
-            "digest",
-            "--name",
-            "b",
-            "--no-private",
-            "--json",
-            _dir.path().to_str().unwrap(),
-        ],
+        &["digest", "--name", "b", "--no-private", "--json", "@ds"],
     );
     let report: serde_json::Value = serde_json::from_str(&again).unwrap();
     assert_eq!(report["joined"]["cohort"], "fed", "{report}");

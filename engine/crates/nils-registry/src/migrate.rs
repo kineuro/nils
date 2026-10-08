@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 79;
+pub const SCHEMA_VERSION: i64 = 80;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +370,45 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 79,
         apply: a_fingerprint_reads_the_2026_10_03_fields,
     },
+    Migration {
+        version: 80,
+        apply: a_source_place_nobody_declared_is_undeclared,
+    },
 ];
+
+/// Wave 7a §5.3: a source place whose dataset was never declared is
+/// `undeclared`, and nothing in it is read until a person says how its
+/// files arrive. A place `nils setup` made before held no dataset at all,
+/// which every reader took as a de-identified folder read whole; it now
+/// holds the undeclared dataset. A place whose dataset was declared keeps
+/// its declaration, a de-identified one reading its folder included. No
+/// file is touched.
+fn a_source_place_nobody_declared_is_undeclared(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "place")? {
+        return Ok(());
+    }
+    let t = schema::table("place");
+    let rows = store.query(
+        &format!(
+            "SELECT id FROM {} WHERE role = 'source' AND dataset IS NULL ORDER BY id",
+            store.qualified("place")
+        ),
+        &[],
+    )?;
+    let undeclared = crate::place::default_dataset(None).to_string();
+    for r in &rows {
+        store.update_by_id(
+            t,
+            &[("dataset", Param::from(undeclared.as_str()))],
+            "id",
+            r.int(0)?,
+        )?;
+    }
+    Ok(())
+}
 
 /// The 2026-10-03 fingerprint fields: a series gains how it stores its
 /// pixels (PhotometricInterpretation and SamplesPerPixel), an MR series the
@@ -1165,7 +1203,16 @@ fn a_source_place_is_a_dataset(store: &mut Store, kind: Kind) -> Result<(), Erro
             .opt_text(1)?
             .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
             .and_then(|h| h["arrives"].as_str().map(str::to_string));
-        let dataset = crate::place::default_dataset(arrives.as_deref());
+        // what a dataset was by default when this migration was written: the
+        // arrival its handling named, else de-identified, reading its folder
+        let dataset = crate::place::dataset_of(
+            &serde_json::json!({
+                "arrives": arrives.as_deref().filter(|a| *a != crate::place::UNDECLARED).unwrap_or("deidentified"),
+                "trees": {"originals": null, "anon": "."},
+            }),
+            None,
+        )
+        .map_err(Error::Message)?;
         store.update_by_id(
             t,
             &[("dataset", Param::from(dataset.to_string()))],
@@ -2619,6 +2666,72 @@ mod column_migration {
         let places = crate::place::list(&mut store).unwrap();
         let plain = places.iter().find(|p| p.name == "plain").unwrap();
         assert_eq!(plain.dataset["arrives"], "coded");
+    }
+
+    /// Wave 7a §5.3: a source place nobody declared (setup made it with no
+    /// dataset) becomes undeclared; a declared one, a de-identified one
+    /// reading its folder included, keeps its declaration; a place of
+    /// another role keeps none. Twice is the same as once.
+    #[test]
+    fn a_source_place_nobody_declared_becomes_undeclared() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 79) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        let declared = r#"{"arrives": "deidentified", "trees": {"originals": null, "anon": "."}}"#;
+        let row = |name: &str, role: &str, dataset: Option<&str>| {
+            vec![
+                Param::from(name),
+                Param::from(role),
+                Param::from(format!("/data/{name}")),
+                Param::from("{}"),
+                Param::from("2026-10-01T00:00:00Z"),
+                dataset.map_or(Param::Null, Param::from),
+            ]
+        };
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "dataset",
+            ],
+        );
+        store
+            .insert(
+                &spec,
+                &[
+                    row("setup", "source", None),
+                    row("kept", "source", Some(declared)),
+                    row("out", "export", None),
+                ],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            a_source_place_nobody_declared_is_undeclared(&mut store, Kind::Registry).unwrap();
+            let places = crate::place::list(&mut store).unwrap();
+            let of = |name: &str| {
+                places
+                    .iter()
+                    .find(|p| p.name == name)
+                    .unwrap()
+                    .dataset
+                    .clone()
+            };
+            assert_eq!(of("setup")["arrives"], "undeclared");
+            assert_eq!(
+                of("setup")["trees"],
+                serde_json::json!({"originals": null, "anon": null})
+            );
+            assert_eq!(of("kept")["arrives"], "deidentified");
+            assert_eq!(of("kept")["trees"]["anon"], ".");
+            assert!(of("out").is_null());
+        }
     }
 
     /// Record 38 S3: a registry and a linkage store from before open with

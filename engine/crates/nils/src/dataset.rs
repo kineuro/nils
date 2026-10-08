@@ -8,13 +8,20 @@
 //!
 //! A dataset's two trees are `derivatives/dcm-original`, the originals the
 //! pseudonymiser reads and nothing else does, and `derivatives/dcm-anon`,
-//! the pseudonymised tree the registry reads. A folder with neither reads
-//! itself as the pseudonymised tree, which is how every place declared before
-//! record 26 keeps working. A v0 cohort folder holds `derivatives/dcm-raw`,
-//! which is renamed `dcm-anon` on declaration and never rewritten. Loose
-//! entries beside `derivatives/` are moved into the originals when the data
-//! arrives identified, or into the pseudonymised tree when asked, by a rename
-//! on the same filesystem; nothing is copied and nothing is read.
+//! the pseudonymised tree the registry reads. A v0 cohort folder holds
+//! `derivatives/dcm-raw`, which is renamed `dcm-anon` on declaration, shown,
+//! and never rewritten.
+//!
+//! Wave 7a §5.3: a folder is never read without the layout. A source place
+//! nobody declared is `undeclared`, has no tree, and nothing in it is read.
+//! Declaring it says how its files arrive, and the tree that arrival reads
+//! must be there: where it is not and loose entries wait beside
+//! `derivatives/`, the declaration names them and the tree they would go
+//! into and is refused until the move is confirmed (`--confirm-move`,
+//! `confirm_move: true`). Identified data goes into the originals, de-identified
+//! or coded data into the pseudonymised tree, by a rename on the same
+//! filesystem; nothing is copied and nothing is read. A dataset declared
+//! before this, reading its folder itself, keeps that declaration.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,12 +41,13 @@ const COUNT_FOR: Duration = Duration::from_secs(2);
 
 /// The keys a declaration may set on a dataset, beside the trees the engine
 /// sets itself.
-pub(crate) const FIELDS: [&str; 6] = [
+pub(crate) const FIELDS: [&str; 7] = [
     "arrives",
     "identity",
     "unmapped",
     "cohort",
     "tags",
+    "confirm_move",
     "move_into_anon",
 ];
 
@@ -56,6 +64,9 @@ pub(crate) const ENGINE_WRITTEN: [&str; 2] = ["originals_kept", "originals_vault
 pub(crate) struct Refused {
     pub(crate) status: u16,
     pub(crate) message: String,
+    /// What the folder holds, when the refusal is the question of §5.3: the
+    /// loose entries and the tree they would be moved into.
+    pub(crate) layout: Option<Value>,
 }
 
 impl std::fmt::Display for Refused {
@@ -68,6 +79,7 @@ fn bad(message: impl Into<String>) -> Refused {
     Refused {
         status: 400,
         message: message.into(),
+        layout: None,
     }
 }
 
@@ -75,6 +87,7 @@ fn conflict(message: impl Into<String>) -> Refused {
     Refused {
         status: 409,
         message: message.into(),
+        layout: None,
     }
 }
 
@@ -109,6 +122,9 @@ pub(crate) struct Layout {
     pub(crate) loose: Vec<String>,
     /// Whether a declaration renamed `dcm-raw` to `dcm-anon` just now.
     pub(crate) renamed: bool,
+    /// The loose entries a confirmed declaration moved just now, and the
+    /// tree they went into.
+    pub(crate) moved: Option<(&'static str, usize)>,
 }
 
 impl Layout {
@@ -126,6 +142,7 @@ pub(crate) fn detect(path: &Path) -> Layout {
         raw: path.join(RAW_TREE).is_dir(),
         loose: Vec::new(),
         renamed: false,
+        moved: None,
     };
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
@@ -140,10 +157,58 @@ pub(crate) fn detect(path: &Path) -> Layout {
     layout
 }
 
-/// The layout as a door answers it: the v0 folder's counts when it is one,
-/// which trees are there, and how many loose entries wait beside them.
+/// The most loose entries an answer names; the count is always whole.
+const NAMED_ENTRIES: usize = 100;
+
+/// The tree a declared arrival reads, which its loose entries are moved
+/// into: the originals for identified data, the pseudonymised tree
+/// otherwise.
+fn tree_for(arrives: &str) -> &'static str {
+    if arrives == "identified" {
+        ORIGINALS_TREE
+    } else {
+        ANON_TREE
+    }
+}
+
+/// Whether a folder already holds the tree a declared arrival reads, a v0
+/// folder's `dcm-raw` counting as the pseudonymised tree it becomes.
+fn has_tree_for(layout: &Layout, arrives: &str) -> bool {
+    if arrives == "identified" {
+        layout.originals
+    } else {
+        layout.anon || layout.raw
+    }
+}
+
+/// The layout as a door answers it (Wave 7a §5.3): the v0 folder's counts
+/// when it is one, which trees are there, the loose entries beside them by
+/// name (the first hundred) and in number, and for each declaration the
+/// tree it reads and what it would move there: `needed` when that tree is
+/// missing, so the declaration is refused until the move is confirmed.
+/// `question` is true when neither tree is there: then nothing is read
+/// until a person says how the files arrive. `moved` is what a confirmed
+/// declaration moved just now.
 pub(crate) fn layout_doc(path: &Path, layout: &Layout) -> Value {
+    layout_doc_with(path, layout, true)
+}
+
+/// The layout from the folder's own listing alone, for a door that answers
+/// every place at once: a v0 folder's files are not counted.
+pub(crate) fn layout_doc_listed(path: &Path, layout: &Layout) -> Value {
+    layout_doc_with(path, layout, false)
+}
+
+fn layout_doc_with(path: &Path, layout: &Layout, counted: bool) -> Value {
     let v0 = layout.v0().then(|| {
+        if !counted {
+            return json!({
+                "original_files": null,
+                "raw_files": null,
+                "partial": true,
+                "renamed": layout.renamed,
+            });
+        }
         let raw = if layout.raw {
             path.join(RAW_TREE)
         } else {
@@ -158,27 +223,57 @@ pub(crate) fn layout_doc(path: &Path, layout: &Layout) -> Value {
             "renamed": layout.renamed,
         })
     });
+    let declarations: serde_json::Map<String, Value> = place::ARRIVALS
+        .iter()
+        .filter(|a| **a != place::UNDECLARED)
+        .map(|a| {
+            let tree = tree_for(a);
+            let there = has_tree_for(layout, a);
+            (
+                a.to_string(),
+                json!({
+                    "reads": tree,
+                    "tree_there": there,
+                    "moves": layout.loose.len(),
+                    "into": tree,
+                    "needed": !there && !layout.loose.is_empty(),
+                }),
+            )
+        })
+        .collect();
     json!({
         "v0": v0,
         "originals": layout.originals,
         "anon": layout.anon,
+        "raw": layout.raw,
         "loose": layout.loose.len(),
+        "loose_entries": layout.loose.iter().take(NAMED_ENTRIES).collect::<Vec<_>>(),
+        "question": !layout.originals && !layout.anon && !layout.raw,
+        "declarations": declarations,
+        "moved": layout.moved.map(|(into, n)| json!({"into": into, "entries": n})),
+        "renamed": layout.renamed,
     })
 }
 
 /// The one write the engine makes under a source place outside the
-/// pseudonymiser: the look at the folder when a dataset is declared. A v0
-/// folder's `dcm-raw` becomes `dcm-anon`; when the data arrives identified
-/// the loose entries are moved into the originals and an empty
-/// pseudonymised tree is made beside them; when it arrives de-identified or
-/// coded and the caller asked, the loose entries are moved into the
-/// pseudonymised tree. Every move is a rename inside the folder, top-level
-/// entries only. The trees the dataset reads from now on come back with the
-/// layout found.
+/// pseudonymiser: the look at the folder when a dataset is declared
+/// (Wave 7a §5.3). An undeclared dataset is only looked at: nothing is
+/// written and it has no tree. A declared one has a v0 folder's `dcm-raw`
+/// renamed `dcm-anon`. Its loose entries are moved into the tree its
+/// arrival reads (the originals for identified data, the pseudonymised tree
+/// otherwise) only when the move is confirmed; where that tree is missing
+/// and loose entries wait, the declaration is refused with the question,
+/// so nothing beside the layout is ever read. An empty tree is made where
+/// one is missing and nothing would go into it. Every move is a rename
+/// inside the folder, top-level entries only. A dataset declared before
+/// Wave 7a that reads its folder itself (`keep_folder`) keeps doing so
+/// unless a move is confirmed. The trees the dataset reads from now on come
+/// back with the layout found.
 pub(crate) fn look(
     path: &Path,
     arrives: &str,
-    move_into_anon: bool,
+    confirm_move: bool,
+    keep_folder: bool,
 ) -> Result<(Value, Layout), Refused> {
     if !path.is_dir() {
         return Err(conflict(format!(
@@ -187,6 +282,9 @@ pub(crate) fn look(
         )));
     }
     let mut layout = detect(path);
+    if arrives == place::UNDECLARED {
+        return Ok((json!({"originals": null, "anon": null}), layout));
+    }
     let io = |what: String, e: std::io::Error| conflict(format!("{what}: {e}"));
     if layout.raw {
         if layout.anon {
@@ -201,38 +299,54 @@ pub(crate) fn look(
         layout.anon = true;
         layout.renamed = true;
     }
-    let into = |tree: &str, layout: &mut Layout| -> Result<(), Refused> {
+    let tree = tree_for(arrives);
+    let there = has_tree_for(&layout, arrives);
+    if keep_folder && arrives != "identified" && !layout.anon && !confirm_move {
+        // declared before Wave 7a to read its folder itself: kept
+        let trees = json!({
+            "originals": layout.originals.then_some(ORIGINALS_TREE),
+            "anon": ".",
+        });
+        return Ok((trees, layout));
+    }
+    if !layout.loose.is_empty() && !confirm_move && !there {
+        let n = layout.loose.len();
+        let mut refused = conflict(format!(
+            "{} holds {n} loose entr{} and no {tree}: declared {arrives}, they would be moved into {tree}, and nothing is moved without a confirmation. Nothing was written. Confirm the move (--confirm-move, or confirm_move: true), or leave the folder undeclared",
+            path.display(),
+            if n == 1 { "y" } else { "ies" },
+        ));
+        refused.layout = Some(layout_doc(path, &layout));
+        return Err(refused);
+    }
+    if confirm_move && !layout.loose.is_empty() {
         let dir = path.join(tree);
         std::fs::create_dir_all(&dir).map_err(|e| io(format!("making {tree}"), e))?;
+        // every target checked before the first rename, so a clash moves
+        // nothing
+        if let Some(name) = layout.loose.iter().find(|n| dir.join(n).exists()) {
+            return Err(conflict(format!(
+                "{tree} already holds {name}; the loose entries were not moved"
+            )));
+        }
+        let n = layout.loose.len();
         for name in std::mem::take(&mut layout.loose) {
-            let target = dir.join(&name);
-            if target.exists() {
-                return Err(conflict(format!(
-                    "{tree} already holds {name}; the loose {name} was not moved"
-                )));
-            }
-            std::fs::rename(path.join(&name), &target)
+            std::fs::rename(path.join(&name), dir.join(&name))
                 .map_err(|e| io(format!("moving {name} into {tree}"), e))?;
         }
-        Ok(())
-    };
-    match arrives {
-        "identified" => {
-            into(ORIGINALS_TREE, &mut layout)?;
-            std::fs::create_dir_all(path.join(ANON_TREE))
-                .map_err(|e| io(format!("making {ANON_TREE}"), e))?;
-            layout.originals = true;
-            layout.anon = true;
-        }
-        _ if move_into_anon && !layout.loose.is_empty() => {
-            into(ANON_TREE, &mut layout)?;
-            layout.anon = true;
-        }
-        _ => {}
+        layout.moved = Some((tree, n));
     }
+    if arrives == "identified" {
+        std::fs::create_dir_all(path.join(ORIGINALS_TREE))
+            .map_err(|e| io(format!("making {ORIGINALS_TREE}"), e))?;
+        layout.originals = true;
+    }
+    std::fs::create_dir_all(path.join(ANON_TREE))
+        .map_err(|e| io(format!("making {ANON_TREE}"), e))?;
+    layout.anon = true;
     let trees = json!({
         "originals": layout.originals.then_some(ORIGINALS_TREE),
-        "anon": if layout.anon { ANON_TREE } else { "." },
+        "anon": ANON_TREE,
     });
     Ok((trees, layout))
 }
@@ -249,7 +363,8 @@ pub(crate) struct Declared {
 /// over the place in force; the identity rule parsed as the digest parses
 /// it; the folder refused when it is a tree of another dataset; then the
 /// look at the folder, whose trees the dataset reads from now on; and the
-/// probe with the trees counted.
+/// probe with the trees counted. `confirm_move` (or `move_into_anon`, its
+/// name from before) is the person's word that the loose entries may move.
 pub(crate) fn declare(
     store: &mut Store,
     path: &Path,
@@ -264,6 +379,7 @@ pub(crate) fn declare(
         tree_of_another(store, path, current.map(|p| p.id)).map_err(|e| Refused {
             status: 500,
             message: e.to_string(),
+            layout: None,
         })?
     {
         return Err(conflict(format!(
@@ -272,12 +388,20 @@ pub(crate) fn declare(
             other.name
         )));
     }
-    let move_into_anon = asked["move_into_anon"].as_bool() == Some(true);
+    let confirm_move = asked["confirm_move"].as_bool() == Some(true)
+        || asked["move_into_anon"].as_bool() == Some(true);
     let arrives = dataset["arrives"]
         .as_str()
-        .unwrap_or("deidentified")
+        .unwrap_or(place::UNDECLARED)
         .to_string();
-    let (trees, layout) = look(path, &arrives, move_into_anon)?;
+    // a dataset declared before Wave 7a to read its folder itself, and
+    // declared the same way again, keeps reading it
+    let keep_folder = current.is_some_and(|c| {
+        c.dataset["trees"]["anon"].as_str() == Some(".")
+            && c.dataset["arrives"].as_str() == Some(arrives.as_str())
+            && current.map(|c| Path::new(&c.path)) == Some(path)
+    });
+    let (trees, layout) = look(path, &arrives, confirm_move, keep_folder)?;
     dataset["trees"] = trees;
     let mut probed = crate::places::probe(path);
     probed["trees"] = count_trees(path, &dataset);
@@ -285,6 +409,135 @@ pub(crate) fn declare(
         dataset,
         layout: layout_doc(path, &layout),
         probed,
+    })
+}
+
+/// What a source place is now, for a path that adds one without declaring
+/// it (`nils setup`'s source place): undeclared, its folder looked at and
+/// nothing written, with the layout found (Wave 7a §5.3).
+pub(crate) fn undeclared(path: &Path) -> (Value, Value) {
+    let layout = detect(path);
+    (place::default_dataset(None), layout_doc(path, &layout))
+}
+
+/// What a person reads about a dataset's folder after it was added or
+/// declared: what is read and what is not, in words (Wave 7a §5.3). The
+/// place's id is the one `nils place set` names.
+pub(crate) fn layout_lines(id: i64, dataset: &Value, layout: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(v0) = layout["v0"].as_object() {
+        out.push(format!(
+            "a v0 cohort folder: {} original files, {} pseudonymised files",
+            v0["original_files"], v0["raw_files"]
+        ));
+    }
+    if layout["renamed"].as_bool() == Some(true) {
+        out.push(format!("{RAW_TREE} is now {ANON_TREE}"));
+    }
+    if let Some(m) = layout["moved"].as_object() {
+        out.push(format!(
+            "{} loose entries moved into {}",
+            m["entries"],
+            m["into"].as_str().unwrap_or("")
+        ));
+    }
+    let loose = layout["loose"].as_u64().unwrap_or(0);
+    let arrives = dataset["arrives"].as_str().unwrap_or(place::UNDECLARED);
+    if arrives == place::UNDECLARED {
+        let found = match (
+            layout["originals"].as_bool() == Some(true),
+            layout["anon"].as_bool() == Some(true) || layout["raw"].as_bool() == Some(true),
+        ) {
+            (true, true) => format!("{ORIGINALS_TREE} and a pseudonymised tree"),
+            (true, false) => ORIGINALS_TREE.to_string(),
+            (false, true) => "a pseudonymised tree".to_string(),
+            (false, false) => format!("neither {ORIGINALS_TREE} nor {ANON_TREE}"),
+        };
+        out.push(format!(
+            "undeclared: nothing in it is read. It holds {found}, and {loose} loose entr{} beside derivatives/",
+            if loose == 1 { "y" } else { "ies" }
+        ));
+        out.push(format!(
+            "declare how its files arrive: nils place set {id} --arrives identified|deidentified|coded{}",
+            if loose > 0 && layout["question"].as_bool() == Some(true) {
+                " --confirm-move (identified moves the loose entries into the originals, the others into the pseudonymised tree)"
+            } else {
+                ""
+            }
+        ));
+        return out;
+    }
+    let reads = dataset["trees"]["anon"].as_str().unwrap_or("");
+    if reads == "." {
+        out.push(
+            "reads the folder itself, as declared before the layout; never its originals".into(),
+        );
+    } else {
+        out.push(format!("reads {reads} only"));
+    }
+    if loose > 0 && reads != "." {
+        out.push(format!(
+            "{loose} loose entr{} beside derivatives/, not read; nils place set {id} --confirm-move moves them into {}",
+            if loose == 1 { "y" } else { "ies" },
+            tree_for(arrives)
+        ));
+    }
+    out
+}
+
+/// Why a digest of a path is refused (Wave 7a §5.3), beside the originals'
+/// own refusal: the path lies in a source place whose dataset is
+/// undeclared, or holds one, or lies in a declared dataset's folder outside
+/// the tree its digest reads. None where the path is no dataset's, or is
+/// inside the tree a dataset's digest reads.
+pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
+    let places = place::active(store).ok()?;
+    let theirs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for p in places.iter().filter(|p| p.role == Role::Source) {
+        let mine = std::fs::canonicalize(&p.path).unwrap_or_else(|_| PathBuf::from(&p.path));
+        let inside = theirs.starts_with(&mine);
+        let holds = !inside && mine.starts_with(&theirs);
+        if !inside && !holds {
+            continue;
+        }
+        if place::is_undeclared(&p.dataset) {
+            return Some(format!(
+                "{} {} the dataset {}, which is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Places page",
+                path.display(),
+                if inside { "is in" } else { "holds" },
+                p.name,
+                p.id
+            ));
+        }
+        let Some(anon) = p.tree_path("anon") else {
+            continue;
+        };
+        let anon = std::fs::canonicalize(&anon).unwrap_or(anon);
+        if holds || !theirs.starts_with(&anon) {
+            return Some(format!(
+                "{} {} the dataset {}, whose digest reads its pseudonymised tree alone: digest @{}",
+                path.display(),
+                if inside {
+                    "is in the folder of"
+                } else {
+                    "holds"
+                },
+                p.name,
+                p.name
+            ));
+        }
+    }
+    None
+}
+
+/// Why a dataset may not be brought in, digested or pseudonymised: it is
+/// undeclared (Wave 7a §5.3).
+pub(crate) fn undeclared_refusal(p: &Place) -> Option<String> {
+    place::is_undeclared(&p.dataset).then(|| {
+        format!(
+            "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Places page",
+            p.name, p.id
+        )
     })
 }
 
@@ -647,12 +900,37 @@ mod tests {
         let found = detect(dir.path());
         assert_eq!(found.loose, ["notes.txt", "sub-1", "sub-2"]);
         assert!(!found.v0());
-        let (trees, layout) = look(dir.path(), "identified", false).unwrap();
+        // not confirmed: the question, naming the entries and the tree, and
+        // nothing moved or made
+        let asked = look(dir.path(), "identified", false, false).unwrap_err();
+        assert_eq!(asked.status, 409);
+        assert!(
+            asked.message.contains("3 loose entries"),
+            "{}",
+            asked.message
+        );
+        assert!(asked.message.contains(ORIGINALS_TREE), "{}", asked.message);
+        let layout = asked.layout.unwrap();
+        assert_eq!(
+            layout["loose_entries"],
+            json!(["notes.txt", "sub-1", "sub-2"])
+        );
+        assert_eq!(layout["question"], true);
+        assert_eq!(layout["declarations"]["identified"]["into"], ORIGINALS_TREE);
+        assert_eq!(layout["declarations"]["identified"]["needed"], true);
+        assert_eq!(layout["declarations"]["deidentified"]["into"], ANON_TREE);
+        assert_eq!(
+            names(dir.path()),
+            [".hidden", "notes.txt", "sub-1", "sub-2"]
+        );
+        // confirmed: moved
+        let (trees, layout) = look(dir.path(), "identified", true, false).unwrap();
         assert_eq!(
             trees,
             json!({"originals": ORIGINALS_TREE, "anon": ANON_TREE})
         );
         assert!(layout.loose.is_empty() && !layout.renamed);
+        assert_eq!(layout.moved, Some((ORIGINALS_TREE, 3)));
         assert_eq!(names(dir.path()), [".hidden", "derivatives"]);
         assert_eq!(
             names(&dir.path().join(ORIGINALS_TREE)),
@@ -667,7 +945,7 @@ mod tests {
         assert!(dir.path().join(ANON_TREE).is_dir());
         assert!(names(&dir.path().join(ANON_TREE)).is_empty());
         // declared again, nothing is left to move and the trees stand
-        let (again, layout) = look(dir.path(), "identified", false).unwrap();
+        let (again, layout) = look(dir.path(), "identified", false, false).unwrap();
         assert_eq!(again, trees);
         assert!(layout.loose.is_empty());
         let doc = layout_doc(dir.path(), &layout);
@@ -686,7 +964,12 @@ mod tests {
         let found = detect(dir.path());
         assert!(found.raw && found.originals && !found.anon && found.v0());
         assert!(found.loose.is_empty());
-        let (trees, layout) = look(dir.path(), "deidentified", false).unwrap();
+        // undeclared: looked at, nothing renamed
+        let (trees, layout) = look(dir.path(), "undeclared", false, false).unwrap();
+        assert_eq!(trees, json!({"originals": null, "anon": null}));
+        assert!(layout.raw && !layout.renamed);
+        assert!(dir.path().join(RAW_TREE).is_dir());
+        let (trees, layout) = look(dir.path(), "deidentified", false, false).unwrap();
         assert_eq!(
             trees,
             json!({"originals": ORIGINALS_TREE, "anon": ANON_TREE})
@@ -701,35 +984,57 @@ mod tests {
         assert_eq!(doc["v0"]["renamed"], true);
         // both trees there is a folder to sort out by hand, not by a rename
         std::fs::create_dir_all(dir.path().join(RAW_TREE)).unwrap();
-        let why = look(dir.path(), "deidentified", false).unwrap_err();
+        let why = look(dir.path(), "deidentified", false, false).unwrap_err();
         assert_eq!(why.status, 409);
         assert!(why.message.contains("keep one"), "{}", why.message);
     }
 
     #[test]
-    fn a_deidentified_dataset_moves_into_the_anon_tree_only_when_asked() {
+    fn a_deidentified_dataset_moves_into_the_anon_tree_only_when_confirmed() {
         let dir = TempDir::new("dataset-deidentified");
         dir.file("sub-1/a.dcm", b"x");
-        // not asked: the folder itself is the pseudonymised tree
-        let (trees, layout) = look(dir.path(), "deidentified", false).unwrap();
-        assert_eq!(trees, json!({"originals": null, "anon": "."}));
+        // not confirmed: refused, the folder untouched and never read as
+        // the pseudonymised tree
+        let why = look(dir.path(), "deidentified", false, false).unwrap_err();
+        assert_eq!(why.status, 409);
+        assert!(why.message.contains(ANON_TREE), "{}", why.message);
+        assert_eq!(names(dir.path()), ["sub-1"]);
+        // undeclared: nothing written, no tree
+        let (trees, layout) = look(dir.path(), "undeclared", true, false).unwrap();
+        assert_eq!(trees, json!({"originals": null, "anon": null}));
         assert_eq!(layout.loose, ["sub-1"]);
         assert_eq!(names(dir.path()), ["sub-1"]);
-        // asked: moved, and the tree is dcm-anon
-        let (trees, layout) = look(dir.path(), "coded", true).unwrap();
+        // confirmed: moved, and the tree is dcm-anon
+        let (trees, layout) = look(dir.path(), "coded", true, false).unwrap();
         assert_eq!(trees, json!({"originals": null, "anon": ANON_TREE}));
         assert!(layout.loose.is_empty());
+        assert_eq!(layout.moved, Some((ANON_TREE, 1)));
         assert!(dir.path().join(ANON_TREE).join("sub-1/a.dcm").is_file());
         assert_eq!(names(dir.path()), ["derivatives"]);
-        // an empty folder declared with nothing to move reads itself
+        // an empty folder declared with nothing to move gets an empty tree
         let empty = TempDir::new("dataset-empty");
-        let (trees, _) = look(empty.path(), "deidentified", true).unwrap();
+        let (trees, _) = look(empty.path(), "deidentified", false, false).unwrap();
+        assert_eq!(trees, json!({"originals": null, "anon": ANON_TREE}));
+        assert!(empty.path().join(ANON_TREE).is_dir());
+        // a dataset declared before to read its folder keeps reading it
+        let kept = TempDir::new("dataset-kept");
+        kept.file("sub-1/a.dcm", b"x");
+        let (trees, _) = look(kept.path(), "deidentified", false, true).unwrap();
         assert_eq!(trees, json!({"originals": null, "anon": "."}));
+        assert_eq!(names(kept.path()), ["sub-1"]);
+        // where the tree is there, loose entries wait unread and unmoved
+        let beside = TempDir::new("dataset-beside");
+        beside.file("notes/a.txt", b"x");
+        beside.file("derivatives/dcm-anon/sub-1/a.dcm", b"y");
+        let (trees, layout) = look(beside.path(), "deidentified", false, false).unwrap();
+        assert_eq!(trees["anon"], ANON_TREE);
+        assert_eq!(layout.loose, ["notes"]);
+        assert_eq!(layout.moved, None);
         // a loose entry the tree already holds is not moved over it
         let clash = TempDir::new("dataset-clash");
         clash.file("sub-1/a.dcm", b"x");
         clash.file("derivatives/dcm-anon/sub-1/a.dcm", b"y");
-        let why = look(clash.path(), "deidentified", true).unwrap_err();
+        let why = look(clash.path(), "deidentified", true, false).unwrap_err();
         assert_eq!(why.status, 409);
         assert!(
             why.message.contains("already holds sub-1"),

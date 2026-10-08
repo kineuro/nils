@@ -34,6 +34,18 @@ assistant, `assistant/`, `kvasir/` and `llama.cpp/`. A directory of DICOM the en
 read can be named here; it becomes an ingest root and a `source` place, and
 it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 
+A source place setup makes is undeclared: setup looks at the folder, says
+what it holds, and moves nothing, and nothing in it is read until you say
+how its files arrive. A folder that holds identified data is declared
+`identified`, and its files belong in `derivatives/dcm-original`; one that is
+already de-identified is declared `deidentified` (or `coded`), and its files
+belong in `derivatives/dcm-anon`, the only tree a digest reads. Where the
+files sit loose beside `derivatives/`, the declaration names them and moves
+them only when you confirm: `nils place layout source` shows what would move,
+and `nils place set <id> --arrives identified --confirm-move` declares it
+and moves them. A `derivatives/dcm-raw` from the previous prototype is
+renamed `dcm-anon` when the folder is declared.
+
 A site that has places of its own names them instead, once each, with the
 role and the guarantees they really have: `--place
 archives=/data/archives,role=backup,snapshots,protected`. After the name and

@@ -2392,6 +2392,15 @@ fn routed(
                 .iter()
                 .map(|p| {
                     let mut doc = p.as_json();
+                    // Wave 7a §5.3: what a dataset's folder holds and what a
+                    // declaration would move, read from its own listing
+                    if p.role == place::Role::Source && p.retired_at.is_none() {
+                        let folder = std::path::Path::new(&p.path);
+                        doc["layout"] = crate::dataset::layout_doc_listed(
+                            folder,
+                            &crate::dataset::detect(folder),
+                        );
+                    }
                     doc["bound"] = serde_json::json!(crate::places::bound_paths(p, &configured));
                     doc["holds"] = serde_json::json!(p.role.holds());
                     doc["must"] = serde_json::json!(p.role.must());
@@ -2540,7 +2549,7 @@ fn routed(
                     ));
                 }
                 let d = crate::dataset::declare(registry.store(), &path, &asked, None)
-                    .map_err(|r| Reply::error(r.status, r.message))?;
+                    .map_err(declare_refused)?;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2657,7 +2666,7 @@ fn routed(
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from(&current.path));
                 let d = crate::dataset::declare(registry.store(), &folder, &asked, Some(&current))
-                    .map_err(|r| Reply::error(r.status, r.message))?;
+                    .map_err(declare_refused)?;
                 (Some(d.probed.clone()), Some(d))
             } else {
                 (path.as_deref().map(crate::places::probe), None)
@@ -3078,6 +3087,9 @@ fn routed(
                             ),
                         )
                     })?;
+                if let Some(why) = crate::dataset::undeclared_refusal(&place) {
+                    return Err(Reply::error(409, why));
+                }
                 // a tree holding files no digest has read is digested
                 // first, so the pseudonymiser knows what the tree holds
                 let unread = crate::chain::unread_in_tree(registry.store(), &place);
@@ -4090,6 +4102,18 @@ pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
 /// takes them, a null among them (no cohort, no rule) as much as a value;
 /// `handling.arrives` stands for `arrives` for a caller from before, when
 /// the body names no `arrives` of its own.
+/// A declaration refused, as a door answers it: with the layout when the
+/// refusal is the question of Wave 7a §5.3, so a desk can name the entries
+/// and the tree and ask for the confirmation.
+fn declare_refused(r: crate::dataset::Refused) -> Reply {
+    let mut reply = Reply::error(r.status, r.message);
+    if let Some(layout) = r.layout {
+        reply.body["layout"] = layout;
+        reply.body["confirm"] = serde_json::json!("confirm_move");
+    }
+    reply
+}
+
 fn dataset_asked(doc: &serde_json::Value) -> serde_json::Value {
     let mut asked = serde_json::Map::new();
     for key in crate::dataset::FIELDS {
@@ -4765,6 +4789,10 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
                         p.name
                     ),
                 ));
+            }
+            // Wave 7a §5.3: never read without the layout
+            if digests && let Some(why) = crate::dataset::not_read(store, &path) {
+                return Err(Reply::error(409, why));
             }
             out.push(path.display().to_string());
         } else if takes_a_tree

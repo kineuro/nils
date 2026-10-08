@@ -16,6 +16,12 @@
 //! under, what an unmapped identifier does, the cohort it feeds, its tag
 //! lists and what becomes of the originals. The `dataset` column holds
 //! that; [`dataset_of`] checks it and fills what it does not name.
+//!
+//! A source place whose arrival has not been declared is `undeclared`
+//! (Wave 7a §5.3): it has no tree, and nothing in it is read until a person
+//! says how its files arrive. That is the default everywhere a dataset or a
+//! handling is read, so a folder without the layout is never read as
+//! de-identified.
 
 use std::path::Path;
 
@@ -115,9 +121,8 @@ pub struct Place {
     /// The dataset a source place is (record 26): what arrives, the two
     /// trees, the identity rule, what an unmapped identifier does, the
     /// cohort it feeds, the tag lists and what becomes of the originals.
-    /// Null on a place of another role, and on a source place from before
-    /// it was declared, which reads as the defaults: the folder itself is
-    /// the pseudonymised tree.
+    /// Null on a place of another role. A source place always has one:
+    /// one whose arrival was never declared is `undeclared` and has no tree.
     pub dataset: Value,
 }
 
@@ -293,7 +298,13 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
         handling_of(&p.handling).map_err(Error::Message)?
     };
     let dataset = if p.dataset.is_null() {
-        Value::Null
+        // Wave 7a §5.3: a source place is a dataset from the start, and
+        // undeclared until a person says how its files arrive
+        if p.role == Role::Source {
+            default_dataset(None)
+        } else {
+            Value::Null
+        }
     } else if p.role != Role::Source {
         return Err(Error::Message(format!(
             "a dataset is a source place; {} is a {} place",
@@ -445,14 +456,29 @@ fn pick(
     }
 }
 
-/// The three ways data arrives in a dataset (record 26 §2).
-pub const ARRIVALS: [&str; 3] = ["identified", "deidentified", "coded"];
+/// The ways data arrives in a dataset (record 26 §2), and `undeclared`
+/// (Wave 7a §5.3): nobody has said yet, so nothing in it is read.
+pub const ARRIVALS: [&str; 4] = [UNDECLARED, "identified", "deidentified", "coded"];
+
+/// The arrival of a dataset nobody has declared: the default of
+/// [`handling_of`], [`dataset_of`] and [`default_dataset`]. Such a dataset
+/// has no tree and is never digested, brought in or pseudonymised.
+pub const UNDECLARED: &str = "undeclared";
+
+/// Whether a dataset document says its arrival was never declared; a null
+/// document is one.
+pub fn is_undeclared(dataset: &Value) -> bool {
+    dataset_of(dataset, None)
+        .map(|d| d["arrives"] == UNDECLARED)
+        .unwrap_or(true)
+}
 
 /// How what comes in through a place is handled, as the operator declares it:
 /// whether it arrives identified, and what a release does to it on the way
-/// out. A key not given takes its default; a value not known is refused with
-/// the choices. `arrives` lives on the dataset since record 26 and is
-/// mirrored here for a reader from before.
+/// out. A key not given takes its default, `undeclared` for the arrival, as
+/// [`dataset_of`] has it; a value not known is refused with the choices.
+/// `arrives` lives on the dataset since record 26 and is mirrored here for a
+/// reader from before.
 ///
 /// The dates are not a choice (record 38 S3): a release writes the real date.
 /// `dates: keep`, which a caller from before may send, is taken and dropped;
@@ -461,7 +487,7 @@ pub fn handling_of(doc: &Value) -> Result<Value, String> {
     if !(doc.is_object() || doc.is_null()) {
         return Err("handling is an object: {arrives, on_release: {uids, deface}}".into());
     }
-    let arrives = pick(doc, None, "arrives", &ARRIVALS, "identified")?;
+    let arrives = pick(doc, None, "arrives", &ARRIVALS, UNDECLARED)?;
     let release = doc.get("on_release").cloned().unwrap_or(Value::Null);
     if !(release.is_object() || release.is_null()) {
         return Err("on_release is an object: {uids, deface}".into());
@@ -502,34 +528,36 @@ pub fn set_handling(store: &mut Store, id: i64, handling: &Value) -> Result<Plac
 }
 
 /// The two trees of a dataset, under the place's path (record 26 §1). A
-/// dataset with no such layout reads the folder itself, `.`, as its
-/// pseudonymised tree.
+/// dataset declared before Wave 7a may read the folder itself, `.`, as its
+/// pseudonymised tree, and keeps that declaration; no declaration makes one
+/// now, and an undeclared dataset has no tree at all.
 pub const ORIGINALS_TREE: &str = "derivatives/dcm-original";
 pub const ANON_TREE: &str = "derivatives/dcm-anon";
 
 /// The dataset a source place is, as the operator declares it: what
-/// arrives (`identified`, `deidentified` or `coded`), the two trees as the
+/// arrives (`undeclared`, `identified`, `deidentified` or `coded`), the two trees as the
 /// engine found or made them, the identity rule as `nils digest
 /// --identity-rule` reads it or null, what an unmapped identifier does
 /// (`hold` or `code`), the cohort every digest of it feeds or null, the tag
 /// lists (`keep_demographics`, `remove`, `keep`, each tag as `gggg,eeee`)
 /// and what becomes of the originals (`kept`, `vaulted` or `purged`). A key
-/// not given keeps what is in force, or takes its default: de-identified,
-/// the folder itself as the pseudonymised tree, no rule, `hold` for
-/// identified arrivals and `code` otherwise, no cohort, demographics kept,
-/// the originals kept. A value not known is refused with the choices.
+/// not given keeps what is in force, or takes its default: undeclared, with
+/// no tree, no rule, `code` for de-identified and coded arrivals and `hold`
+/// otherwise, no cohort, demographics kept, the originals kept. A value not
+/// known is refused with the choices.
 pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String> {
     if !(doc.is_object() || doc.is_null()) {
         return Err("dataset is an object: {arrives, trees, identity, unmapped, cohort, tags, originals_kept}".into());
     }
     let current = current.filter(|c| c.is_object());
-    let arrives = pick(doc, current, "arrives", &ARRIVALS, "deidentified")?;
+    let arrives = pick(doc, current, "arrives", &ARRIVALS, UNDECLARED)?;
+    let undeclared = arrives == UNDECLARED;
     let trees = match doc.get("trees") {
         Some(t) if t.is_object() => t.clone(),
         Some(Value::Null) | None => current
             .map(|c| c["trees"].clone())
             .filter(Value::is_object)
-            .unwrap_or_else(|| json!({"originals": null, "anon": "."})),
+            .unwrap_or_else(|| json!({"originals": null, "anon": null})),
         Some(other) => {
             return Err(format!(
                 "trees is an object {{originals, anon}}, not {other}"
@@ -546,9 +574,17 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         }
     };
     let anon = match &trees["anon"] {
-        Value::Null => Value::String(".".into()),
+        // a dataset declared before there were trees read its folder
+        Value::Null if !undeclared => Value::String(".".into()),
+        Value::Null => Value::Null,
         Value::String(s) if s == ANON_TREE || s == "." => Value::String(s.clone()),
         other => return Err(format!("trees.anon is {ANON_TREE} or ., not {other}")),
+    };
+    // an undeclared dataset has no tree: nothing in it is read (§5.3)
+    let (originals, anon) = if undeclared {
+        (Value::Null, Value::Null)
+    } else {
+        (originals, anon)
     };
     let identity = match doc.get("identity") {
         Some(Value::Null) => Value::Null,
@@ -567,10 +603,10 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         current,
         "unmapped",
         &["hold", "code"],
-        if arrives == "identified" {
-            "hold"
-        } else {
+        if arrives == "deidentified" || arrives == "coded" {
             "code"
+        } else {
+            "hold"
         },
     )?;
     let cohort = match doc.get("cohort") {
@@ -690,12 +726,12 @@ fn tags_of(doc: Option<&Value>, current: Option<&Value>) -> Result<Value, String
     Ok(json!({"keep_demographics": keep_demographics, "remove": remove, "keep": keep}))
 }
 
-/// The dataset a source place is until one is declared: de-identified
-/// unless said otherwise, reading the folder itself.
+/// The dataset a source place is until one is declared: undeclared unless
+/// said otherwise, with no tree (Wave 7a §5.3).
 pub fn default_dataset(arrives: Option<&str>) -> Value {
     let arrives = arrives
         .filter(|a| ARRIVALS.contains(a))
-        .unwrap_or("deidentified");
+        .unwrap_or(UNDECLARED);
     dataset_of(&json!({"arrives": arrives}), None).expect("the defaults are a dataset")
 }
 
@@ -884,19 +920,20 @@ pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        ANON_TREE, ORIGINALS_TREE, dataset_of, default_dataset, default_handling, handling_of,
+        ANON_TREE, ORIGINALS_TREE, UNDECLARED, dataset_of, default_dataset, default_handling,
+        handling_of, is_undeclared,
     };
     use serde_json::json;
 
     #[test]
-    fn a_dataset_not_declared_arrives_deidentified_and_reads_its_folder() {
+    fn a_dataset_not_declared_is_undeclared_and_has_no_tree() {
         assert_eq!(
             default_dataset(None),
             json!({
-                "arrives": "deidentified",
-                "trees": {"originals": null, "anon": "."},
+                "arrives": "undeclared",
+                "trees": {"originals": null, "anon": null},
                 "identity": null,
-                "unmapped": "code",
+                "unmapped": "hold",
                 "cohort": null,
                 "tags": {"keep_demographics": true, "remove": [], "keep": []},
                 "originals_kept": "kept",
@@ -910,7 +947,33 @@ mod tests {
         );
         // an arrival the handling of before named is kept; one it could not is not
         assert_eq!(default_dataset(Some("identified"))["arrives"], "identified");
-        assert_eq!(default_dataset(Some("maybe"))["arrives"], "deidentified");
+        assert_eq!(default_dataset(Some("maybe"))["arrives"], "undeclared");
+        assert!(is_undeclared(&json!(null)));
+        assert!(is_undeclared(&default_dataset(None)));
+        assert!(!is_undeclared(&default_dataset(Some("deidentified"))));
+        // an undeclared dataset has no tree whatever it is given
+        let d = dataset_of(
+            &json!({"trees": {"originals": ORIGINALS_TREE, "anon": ANON_TREE}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["trees"], json!({"originals": null, "anon": null}));
+        // a declaration from before there were trees keeps reading its folder
+        let d = dataset_of(&json!({"arrives": "deidentified"}), None).unwrap();
+        assert_eq!(d["trees"], json!({"originals": null, "anon": "."}));
+        assert_eq!(d["unmapped"], "code");
+    }
+
+    /// Wave 7a §5.3: the handling's arrival and the dataset's agree when
+    /// neither was declared.
+    #[test]
+    fn the_handling_and_the_dataset_default_to_the_same_arrival() {
+        assert_eq!(default_handling()["arrives"], UNDECLARED);
+        assert_eq!(default_dataset(None)["arrives"], UNDECLARED);
+        assert_eq!(
+            handling_of(&json!(null)).unwrap()["arrives"],
+            dataset_of(&json!(null), None).unwrap()["arrives"]
+        );
     }
 
     #[test]
@@ -1004,10 +1067,10 @@ mod tests {
     }
 
     #[test]
-    fn a_handling_not_declared_arrives_identified_and_remaps_uids() {
+    fn a_handling_not_declared_is_undeclared_and_remaps_uids() {
         assert_eq!(
             default_handling(),
-            json!({"arrives": "identified", "on_release": {"uids": "remap", "deface": false}})
+            json!({"arrives": "undeclared", "on_release": {"uids": "remap", "deface": false}})
         );
         assert_eq!(handling_of(&json!({})).unwrap(), default_handling());
     }

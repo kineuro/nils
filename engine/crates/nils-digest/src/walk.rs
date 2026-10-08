@@ -7,6 +7,11 @@
 //! files are reported as skipped; a directory that cannot be listed is a
 //! `walk_error` and the walk goes on; a root that cannot be listed is the
 //! caller's error.
+//!
+//! A dataset's originals, `derivatives/dcm-original`, are never walked into
+//! from above (Wave 7a §5.3): they hold identified files, which only the
+//! pseudonymiser reads, and it names that tree as its root. A folder
+//! without the layout that holds one is read up to it and never past it.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -251,7 +256,9 @@ fn list(dir: &Path, filter: &Filter, queue: &Queue, tx: &Sender<WalkEvent>) {
             }
         };
         if kind.is_dir() {
-            queue.push(path);
+            if !is_originals(dir, &entry.file_name()) {
+                queue.push(path);
+            }
             continue;
         }
         let reason = if kind.is_symlink() {
@@ -293,6 +300,12 @@ fn list(dir: &Path, filter: &Filter, queue: &Queue, tx: &Sender<WalkEvent>) {
             return;
         }
     }
+}
+
+/// Whether the directory `name` under `parent` is a dataset's originals,
+/// `derivatives/dcm-original`.
+fn is_originals(parent: &Path, name: &std::ffi::OsStr) -> bool {
+    name == "dcm-original" && parent.file_name().is_some_and(|p| p == "derivatives")
 }
 
 #[cfg(test)]
@@ -350,6 +363,25 @@ mod tests {
         assert!(with_glob.matches("IM_0001.txt") && !with_glob.matches("XX_0001"));
         assert!(matches!(Filter::parse("dcm,").unwrap(), Filter::Dcm));
         assert!(Filter::parse("dcm,[").is_err());
+    }
+
+    /// Wave 7a §5.3, T4: a folder that holds `derivatives/dcm-original` is
+    /// never read past it, wherever it sits below the root; the root
+    /// itself, which is how the pseudonymiser names the originals, is read.
+    #[test]
+    fn a_dataset_s_originals_are_never_walked_into_from_above() {
+        let dir = TempDir::new("walk-originals");
+        dir.file("loose/a.dcm", b"x");
+        dir.file("derivatives/dcm-original/sub-1/b.dcm", b"x");
+        dir.file("derivatives/dcm-anon/sub-1/c.dcm", b"x");
+        dir.file("study/derivatives/dcm-original/d.dcm", b"x");
+        dir.file("dcm-original/e.dcm", b"x");
+        let mut names: Vec<String> = files(&run(dir.path(), &Filter::All)).into_iter().collect();
+        names.sort();
+        assert_eq!(names, ["a.dcm", "c.dcm", "e.dcm"]);
+        let originals = dir.path().join("derivatives/dcm-original");
+        let names: Vec<String> = files(&run(&originals, &Filter::All)).into_iter().collect();
+        assert_eq!(names, ["b.dcm"]);
     }
 
     #[test]

@@ -148,6 +148,7 @@ fn bad(message: impl Into<String>) -> Refused {
     Refused {
         status: 400,
         message: message.into(),
+        layout: None,
     }
 }
 
@@ -155,6 +156,7 @@ fn conflict(message: impl Into<String>) -> Refused {
     Refused {
         status: 409,
         message: message.into(),
+        layout: None,
     }
 }
 
@@ -162,6 +164,7 @@ fn store_failed(e: StoreError) -> Refused {
     Refused {
         status: 500,
         message: e.to_string(),
+        layout: None,
     }
 }
 
@@ -204,6 +207,7 @@ pub(crate) fn dataset_at(store: &mut Store, id: i64) -> Result<Place, Refused> {
         None => Err(Refused {
             status: 404,
             message: format!("no place {id}"),
+            layout: None,
         }),
     }
 }
