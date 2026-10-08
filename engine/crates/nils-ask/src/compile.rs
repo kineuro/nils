@@ -75,6 +75,9 @@ pub struct Compiled {
     pub columns: Vec<String>,
     /// Which answer columns are subject codes, digested before hashing.
     pub code_columns: Vec<usize>,
+    /// Record 55 K7: which answer columns read a quasi identifying field the
+    /// caller may not project raw, answered as their shapes.
+    pub shaped_columns: Vec<usize>,
 }
 
 /// The dialect layer: the hooks (H1 to H11) and the closures (§11.2, §11.3).
@@ -413,6 +416,10 @@ struct Builder<'a> {
     external: HashMap<String, BTreeSet<String>>,
     answer_columns: Vec<String>,
     code_columns: Vec<usize>,
+    /// The places in `out.columns` answered as their shapes (record 55 K7),
+    /// and their places in the answer.
+    shaped: BTreeSet<usize>,
+    shaped_columns: Vec<usize>,
     /// The sets whose totals show only for `MEASURE_K` scans or more
     /// (below detail quasi, over a pipeline's measures).
     small_cells: BTreeSet<String>,
@@ -3099,6 +3106,7 @@ impl<'a> Builder<'a> {
         let mut cols = vec!["o.k AS _key".to_string(), "o.subj AS _subject".to_string()];
         let mut names = vec!["_key".to_string(), "_subject".to_string()];
         let mut code_columns = Vec::new();
+        let mut shaped_columns = Vec::new();
         match out.level {
             crate::ast::Level::Count => {
                 let subjects = if frame.has_subj {
@@ -3166,6 +3174,9 @@ impl<'a> Builder<'a> {
             if name == "code" || name == "subject.code" {
                 code_columns.push(cols.len());
             }
+            if self.shaped.contains(&i) {
+                shaped_columns.push(cols.len());
+            }
             cols.push(format!("{rendered} AS c{i}"));
             names.push(name);
         }
@@ -3205,6 +3216,7 @@ impl<'a> Builder<'a> {
         }
         self.answer_columns = names;
         self.code_columns = code_columns;
+        self.shaped_columns = shaped_columns;
         Ok(sql)
     }
 }
@@ -3232,6 +3244,8 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         external: external_paths(ask),
         answer_columns: Vec::new(),
         code_columns: Vec::new(),
+        shaped: validated.shaped.clone(),
+        shaped_columns: Vec::new(),
         small_cells: validated.small_cells.clone(),
     };
     for name in &validated.order {
@@ -3246,5 +3260,6 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         params: b.params,
         columns: b.answer_columns.clone(),
         code_columns: b.code_columns.clone(),
+        shaped_columns: b.shaped_columns.clone(),
     })
 }

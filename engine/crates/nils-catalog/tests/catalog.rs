@@ -217,7 +217,7 @@ fn a_sensitive_kind_is_absent_without_the_class_and_refused_at_validate() {
 /// technical, the series description and the protocol name among them since
 /// record 55 K7, so the ask doors read it and project it raw at plain, quasi
 /// and sensitive alike, while a quasi-identifying text stays held below
-/// quasi and an identifier has no record.
+/// quasi (answered as its shape) and an identifier has no record.
 #[test]
 fn sequence_names_are_projected_raw_at_every_detail() {
     let (mut registry, _dir) = registry();
@@ -270,6 +270,21 @@ fn sequence_names_are_projected_raw_at_every_detail() {
     assert_eq!(f.class, Class::QuasiIdentifying);
     assert!(!catalog.may_project_raw(&f, &plain));
     assert!(catalog.may_project_raw(&f, &quasi));
+    let ask = parse(
+        r#"{"ast_version": 1, "sets": {"s": {"grain": "stack"}}, "out": {"set": "s", "level": "record", "columns": [["field", {}, "text_series_description"], ["field", {}, "station_name"], ["field", {}, "text_all"]]}}"#,
+    )
+    .unwrap();
+    let shaped = |s: &Scope| -> Vec<usize> {
+        prepare(ask.clone(), &catalog, s)
+            .unwrap()
+            .validated
+            .shaped
+            .into_iter()
+            .collect()
+    };
+    assert_eq!(shaped(&plain), vec![1, 2]);
+    assert!(shaped(&quasi).is_empty());
+    assert!(shaped(&sensitive).is_empty());
     // and an identifier has no record at all
     assert!(catalog.field("subject", "patient_name").is_none());
 }

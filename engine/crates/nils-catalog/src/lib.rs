@@ -1768,16 +1768,15 @@ impl Catalog {
         }
     }
 
-    /// Whether a principal may project a field's raw value (rule 15): a
-    /// quasi-identifying field needs the class; a technical or clinical one
-    /// does not.
+    /// Whether a principal may project a field's raw value (rule 15;
+    /// record 55 K7): a quasi-identifying field needs the class; a technical
+    /// or clinical one does not. The rule itself is the ask's
+    /// [`nils_ask::validate::may_project_raw`], which every door that answers
+    /// rows reaches through validation.
     pub fn may_project_raw(&self, f: &Field, scope: &Scope) -> bool {
-        self.visible(f, scope)
-            && match f.class {
-                Class::QuasiIdentifying => scope.classes.contains(&Class::QuasiIdentifying),
-                _ => true,
-            }
+        self.visible(f, scope) && nils_ask::validate::may_project_raw(f.class, scope)
     }
+
     /// The fields of one level a principal may see, sorted by path.
     pub fn fields_of(&self, level: &str, scope: &Scope) -> Vec<&Field> {
         self.fields

@@ -360,21 +360,7 @@ pub struct Sample {
     pub truncated: bool,
 }
 
-fn shape_of(v: &str) -> String {
-    let mut out = String::new();
-    for c in v.chars().take(40) {
-        out.push(match c {
-            '0'..='9' => '9',
-            'a'..='z' => 'a',
-            'A'..='Z' => 'A',
-            other => other,
-        });
-    }
-    if v.chars().count() > 40 {
-        out.push('~');
-    }
-    out
-}
+use crate::validate::shape as shape_of;
 
 /// Sample the values of one field at one level, as a grouped count under
 /// the caller's own scope and bounds: values for a technical or clinical

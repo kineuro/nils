@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - The series description and the protocol name are technical, as every sequence name is: the catalog classed them quasi-identifying, so the value sampler showed only their shapes, even at detail quasi. They are now answered as values at every detail.
+- The quasi-identifier rule holds at every door that runs a question. Below detail quasi, a column that reads a quasi-identifying field (a station name, a date, a subject's code, or a binding, a group's key or a value worked out from one) is answered as its shape, as the value sampler shows it, by a run, a preview and a queued job, and so by MCP and by a handle's pages. The field still filters, orders and counts. A post-pass measure over such a column is refused below detail quasi. A handle records which way it answered (`quasi`: raw or shape), so an answer cached before this is never served again below detail quasi. The command line still reads every class, and each `nils ask run` at the keyboard writes an audit row.
 
 ## [1.0.0-alpha.79] - 2026-10-06
 
