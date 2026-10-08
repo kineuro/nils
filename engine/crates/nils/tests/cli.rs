@@ -3363,11 +3363,11 @@ fn a_scheme_anchored_on_a_diagnosis_takes_month_zero_from_the_clinical_layer() {
 
 #[test]
 fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_sense() {
-    // Record 37 S7. A person chooses with `--naming`; unasked it follows the
-    // layout, and the release row carries the answer, so a re-run of that
-    // release writes the names that release wrote. `--naming bids` on a
-    // descriptive tree is the one pair that means nothing: that tree has no
-    // entities, so its names carry every axis whatever the flag says.
+    // Record 37 S7 and record 55 C4. A person chooses with `--naming`; unasked
+    // it is `full`, and the release row carries the answer, so a re-run of
+    // that release writes the names that release wrote. `--naming minimal`
+    // on a descriptive tree is the one pair that means nothing: that tree is
+    // v0's grammar and spells every slot whatever the flag says.
     let home = home();
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
     let registry = ["--registry", home.path().to_str().unwrap()];
@@ -3395,7 +3395,7 @@ fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_
             "--layout",
             "descriptive",
             "--naming",
-            "bids",
+            "minimal",
             "--pack-dir",
             packs.to_str().unwrap(),
             "--out",
@@ -3405,7 +3405,7 @@ fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_
         .unwrap();
     assert!(!refused.status.success());
     assert!(
-        stderr(&refused).contains("--naming bids needs --layout bids"),
+        stderr(&refused).contains("--naming minimal needs --layout bids"),
         "{}",
         stderr(&refused)
     );
@@ -3428,7 +3428,7 @@ fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_
         .unwrap();
     assert!(written.status.success(), "{}", stderr(&written));
     let report: serde_json::Value = serde_json::from_str(&stdout(&written)).unwrap();
-    assert_eq!(report["naming"], "informative", "{report}");
+    assert_eq!(report["naming"], "full", "{report}");
 }
 
 #[test]

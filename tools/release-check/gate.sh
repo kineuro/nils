@@ -101,11 +101,11 @@ if [[ -n "$converter" ]]; then
     --json > "$work/bids.json" 2> "$work/bids.time"
   "$nils" release --out "$work/bids" --name gate-bids --layout bids \
     --json > "$work/bids-again.json"
-  # Wave 7a section 8.2: the informative naming mode is a BIDS tree too, and
-  # the official validator reads both.
-  echo "gate: the BIDS layout, informative names"
-  "$nils" release --out "$work/bids-informative" --name gate-bids-informative --layout bids \
-    --naming informative --json > "$work/bids-informative.json"
+  # Wave 7a section 8.2 and record 55 C4: the minimal naming style is a BIDS
+  # tree too, and the official validator reads both styles.
+  echo "gate: the BIDS layout, minimal names"
+  "$nils" release --out "$work/bids-minimal" --name gate-bids-minimal --layout bids \
+    --naming minimal --json > "$work/bids-minimal.json"
 
   # Wave 7a section 8.1: a second, smaller tree of stacks that want shared
   # names, in a registry of its own so that no other bar counts it. Released
@@ -122,8 +122,8 @@ if [[ -n "$converter" ]]; then
     "$nils" classify --json > /dev/null
     "$nils" release --out "$work/names-bids" --name gate-names --layout bids \
       --json > "$work/names-bids.json"
-    "$nils" release --out "$work/names-informative" --name gate-names-informative \
-      --layout bids --naming informative --json > "$work/names-informative.json"
+    "$nils" release --out "$work/names-minimal" --name gate-names-minimal \
+      --layout bids --naming minimal --json > "$work/names-minimal.json"
     "$nils" release --out "$work/names-descriptive" --name gate-names-descriptive \
       --layout descriptive --json > "$work/names-descriptive.json"
   )

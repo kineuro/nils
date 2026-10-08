@@ -42,6 +42,24 @@ pub struct Scan {
     /// The path, relative to the subject and session directory.
     pub filename: String,
     pub acq_time: Option<String>,
+    /// The stack's descriptive name, v0's grammar (record 55 C4), so a
+    /// minimal BIDS name can be read back to what the scan is.
+    pub nils_name: Option<String>,
+}
+
+/// `scans.json` at the root, which describes the `nils_name` column every
+/// `scans.tsv` of the tree carries (the inheritance principle).
+pub fn scans_description() -> String {
+    let doc = serde_json::json!({
+        "nils_name": {
+            "LongName": "NILS descriptive name",
+            "Description": "The stack's name in the NILS descriptive grammar (v0's): body part, orientation, base contrast, 2D or 3D, modifiers, technique, acceleration and construct joined by underscores, then _CE for a post-contrast stack and the diffusion and echo suffixes. The sidecar's NILS object holds every axis it is built from."
+        }
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&doc).unwrap_or_default()
+    )
 }
 
 /// A registered model whose answers are in force on the tree's stacks
@@ -203,9 +221,15 @@ pub fn sessions(rows: &[Session]) -> String {
 pub fn scans(rows: &[Scan]) -> String {
     let mut sorted = rows.to_vec();
     sorted.sort_by(|a, b| a.filename.cmp(&b.filename));
-    let mut out = String::from("filename\tacq_time\n");
+    let mut out = String::from("filename\tacq_time\tnils_name\n");
     for r in &sorted {
-        let _ = writeln!(out, "{}\t{}", r.filename, cell(r.acq_time.as_deref()));
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}",
+            r.filename,
+            cell(r.acq_time.as_deref()),
+            cell(r.nils_name.as_deref())
+        );
     }
     out
 }
@@ -303,7 +327,7 @@ pub fn readme(
     // wearing one name. So the tree says what its own indices are worth.
     if repeats.names > 0 {
         let (difference, number) = (
-            "the value of the axis or the property that differs, in its own `+` slot of `acq-`",
+            "the value of the axis or the property that differs, in its own slot of `acq-`",
             "a plain number, the last slot of `acq-`",
         );
         let _ = writeln!(
@@ -432,10 +456,12 @@ mod tests {
             Scan {
                 filename: "anat/b.nii.gz".into(),
                 acq_time: None,
+                nils_name: None,
             },
             Scan {
                 filename: "anat/a.nii.gz".into(),
                 acq_time: Some("t".into()),
+                nils_name: Some("Ax_T1w_3D_MPRAGE".into()),
             },
         ];
         let a = scans(&rows);
@@ -443,7 +469,7 @@ mod tests {
         reversed.reverse();
         assert_eq!(a, scans(&reversed));
         assert!(
-            a.starts_with("filename\tacq_time\nanat/a.nii.gz\tt\n"),
+            a.starts_with("filename\tacq_time\tnils_name\nanat/a.nii.gz\tt\tAx_T1w_3D_MPRAGE\n"),
             "{a}"
         );
     }
@@ -483,7 +509,7 @@ mod tests {
                 repeats: 2,
                 separated: 3,
                 numbered: 1,
-                naming: crate::name::Naming::Bids,
+                naming: crate::name::Naming::Full,
             },
         );
         assert!(!text.contains("What is not here"), "{text}");

@@ -37,7 +37,7 @@ four are wastes three runs.
 | | |
 |---|---|
 | 2 | every name in the raw tree, against the schema the engine carries |
-| 2b | the official BIDS validator: 0 errors on every BIDS tree, in both naming modes |
+| 2b | the official BIDS validator: 0 errors on every BIDS tree, in both naming styles (full, minimal) |
 | 2c | the names tree: no stack refused its name, and the names `[names]` expects |
 | 3 | the reference answers, in both layouts |
 | 4, 5 | every stack placed, the counts reconciling, and nothing unnamed |

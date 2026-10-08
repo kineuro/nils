@@ -419,11 +419,12 @@ struct ReleaseArgs {
     /// which names what the standard admits and routes the rest (§9)
     #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
     layout: String,
-    /// What a name carries: what the standard's entities admit, with the rest
-    /// in acq-, or every axis the pack declares, for a tree a person reads.
-    /// The default is bids in the BIDS layout, and informative in the
-    /// descriptive one, which has no entities to carry anything (record 37)
-    #[arg(long, value_name = "bids|informative")]
+    /// How a BIDS name spells what the entities do not: full puts v0's slots
+    /// in acq- in v0's order (the default), minimal writes acq- only where two
+    /// stacks of a session would share a name, with the first slot that
+    /// differs. Every axis is in the sidecar's NILS object either way. The
+    /// descriptive layout is v0's grammar whatever this says (record 55 C4)
+    #[arg(long, value_name = "full|minimal")]
     naming: Option<String>,
     /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
     /// 22 percent of a clinical archive is one (§9.3)
@@ -9584,17 +9585,14 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // for a validator first; asked for, it is the release's own answer and is
     // recorded on the row, so a re-run writes the same names.
     let naming = match &args.naming {
-        None => match layout {
-            run::Layout::Bids => nils_release::name::Naming::Bids,
-            run::Layout::Descriptive => nils_release::name::Naming::Informative,
-        },
+        None => nils_release::name::Naming::Full,
         Some(text) => {
             let asked = nils_release::name::Naming::parse(text)
-                .ok_or_else(|| usage(format!("--naming is bids or informative, not {text}")))?;
-            if asked == nils_release::name::Naming::Bids && layout == run::Layout::Descriptive {
+                .ok_or_else(|| usage(format!("--naming is full or minimal, not {text}")))?;
+            if asked == nils_release::name::Naming::Minimal && layout == run::Layout::Descriptive {
                 return Err(usage(
-                    "--naming bids needs --layout bids: the descriptive tree has no \
-                     entities, so its names carry every axis whatever this says",
+                    "--naming minimal needs --layout bids: the descriptive tree is v0's \
+                     grammar and spells every slot",
                 ));
             }
             asked
@@ -9737,8 +9735,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     println!(
         "  names            {}",
         match report.naming.as_str() {
-            "informative" => "informative: every axis the pack declares",
-            _ => "bids: the standard's entities, and the rest in acq-",
+            "minimal" => "minimal: acq- only where two stacks would share a name",
+            _ => "full: v0's slots in acq-, and the rest in the standard's entities",
         }
     );
     // record 26 section 13: what each dataset's files left under

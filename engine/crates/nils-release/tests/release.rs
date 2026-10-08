@@ -145,7 +145,7 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         key: KEY,
         pack: pack(),
         layout: run::Layout::Descriptive,
-        naming: nils_release::name::Naming::Informative,
+        naming: nils_release::name::Naming::Full,
         places: nils_release::bids::place::Options::default(),
         converter: None,
         compress: true,

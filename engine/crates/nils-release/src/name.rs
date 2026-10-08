@@ -33,40 +33,45 @@
 
 use std::collections::BTreeMap;
 
-/// Which of the two naming modes a release writes (record 37 S7).
+/// Which of the two BIDS naming styles a release writes (record 37 S7,
+/// record 55 C4, ruled 2026-10-08: "how about having both as option").
 ///
-/// Not two grammars for one tree: one question, asked of every name a release
-/// writes. **BIDS** is the default and is what the standard's entities carry,
-/// with what they have no entity for in `acq-`; a validator reads it and a
-/// tool joins on it. **Informative** carries every axis the pack declares,
-/// including the ones an entity already says, for a tree a person reads: in
-/// the BIDS layout that is a longer `acq-` label, which is still a legal BIDS
-/// label because `acq-` is free-form, and in the descriptive layout it is
-/// §9.1's grammar, which has no entities to carry anything.
+/// **Full**, the default, spells v0's slots inside `acq-` in v0's order, as
+/// one CamelCase label (`acq-Ax2DIRTSE_FLAIR`): the body part (the brain is
+/// implicit), the orientation, 2D or 3D, the modifiers, the technique, the
+/// acceleration and the construct, leaving out whatever the suffix or
+/// another entity already says. **Minimal** writes `acq-` only where two
+/// stacks of a session would otherwise share a name, and then only the first
+/// of those slots that differs (`acq-Ax` against `acq-Sag`, `acq-3mm`).
+/// Either way every axis, the descriptive name and the acquisition details
+/// are in the sidecar's `NILS` object and the descriptive name in the
+/// `nils_name` column of `scans.tsv`, so a minimal name loses nothing.
 ///
-/// So the mode is a fact about the release and not about the run: it is
-/// recorded on the release row, reported, and a re-run under the same mode
-/// writes the same names.
+/// The descriptive layout has no entities and is v0's grammar whichever is
+/// asked. The style is a fact about the release: it is recorded on the
+/// release row, and a re-run under the same style writes the same names. The
+/// words of the earlier pair, `bids` and `informative`, read as `full`, so a
+/// release recorded under them re-runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Naming {
     #[default]
-    Bids,
-    Informative,
+    Full,
+    Minimal,
 }
 
 impl Naming {
     /// The word a flag, a row and a report use.
     pub fn name(self) -> &'static str {
         match self {
-            Naming::Bids => "bids",
-            Naming::Informative => "informative",
+            Naming::Full => "full",
+            Naming::Minimal => "minimal",
         }
     }
 
     pub fn parse(text: &str) -> Option<Naming> {
         match text.trim() {
-            "bids" => Some(Naming::Bids),
-            "informative" => Some(Naming::Informative),
+            "full" | "bids" | "informative" => Some(Naming::Full),
+            "minimal" => Some(Naming::Minimal),
             _ => None,
         }
     }

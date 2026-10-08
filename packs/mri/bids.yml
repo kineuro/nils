@@ -154,10 +154,13 @@ entities:
 
 # Everything else that describes the acquisition, joined into `acq-`.
 #
-# A group with no `modes` is in both names. A group that says
-# `modes: [informative]` is in the informative name only, because in a BIDS
-# name the standard has an entity for it and a name that said it twice would
-# be a name arguing with itself (record 37 S7).
+# A group with no `modes` is spelled in the full naming style. A group that
+# says `modes: [separate]` is never spelled as a slot, because the standard
+# has an entity for it and a name that said it twice would be a name arguing
+# with itself (record 37 S7); its tokens are there for the one case they are
+# needed, two stacks of a session that differ only on that axis (Wave 7a
+# section 8.1). The minimal naming style spells one slot, the first that
+# differs, and only where two stacks would otherwise share a name.
 #
 # A BIDS label is `[0-9a-zA-Z+]+`, so a token is spelled here rather than
 # derived by stripping characters out of a value: `ME-GRE` and `MEGRE` are the
@@ -168,11 +171,12 @@ entities:
 # joined in** and an order that depends on how a reader happens to sort its
 # keys is not an order. It is v0's slot order (record 55 C4, 2026-10-08):
 # body part, orientation, base, 2D or 3D, modifiers, technique, acceleration,
-# construct, then the contrast. The engine joins the tokens with `+`, the one
-# separator a BIDS label admits, so each slot stays readable on its own; it
-# leaves out whatever the suffix already says (no `FLAIR` in `acq-` when the
-# suffix is `FLAIR`). The pack has no acceleration axis yet, so that slot is
-# empty. The quality flags have no slot in v0 and come last.
+# construct. The engine joins the tokens as they are, each with its own
+# capital (`Ax2DIRTSE`), and leaves out whatever the suffix already says (no
+# `FLAIR` in `acq-` when the suffix is `FLAIR`). The pack has no acceleration
+# axis yet, so that slot is empty. The quality flags have no slot in v0 and
+# come last. Every axis is in the sidecar's `NILS` object whatever a name
+# spells.
 acq:
   - from: body_part
     # Where in the body, which BIDS has no entity for and which a brain and a
@@ -195,21 +199,6 @@ acq:
       Sagittal: Sag
       Coronal: Cor
       Oblique: Obl
-  - from: base
-    modes: [informative]
-    # The suffix in the BIDS name; v0's second slot, so the informative
-    # name says it in its place (record 55 C4).
-    tokens:
-      T1w: T1w
-      T2w: T2w
-      PDw: PDw
-      T2starw: T2starw
-      T1rho: T1rho
-      T2rho: T2rho
-      DWI: DWI
-      PWI: PWI
-      SWI: SWI
-      MTw: MTw
   - from: acquisition_type
     tokens:
       '2D': 2D
@@ -279,8 +268,9 @@ acq:
     # reconstruction kinds. The first says only that a vendor's distortion
     # correction was off, which every other stack of the series also says; the
     # complex parts are the `part` entity and the reconstruction kinds are
-    # `rec-`, and either would say it twice. The last two are below, in the
-    # informative name, where there are no entities to say it once.
+    # `rec-`, and either would say it twice. The last two are below, as
+    # tokens a name conflict may need, and the sidecar's `NILS` object
+    # carries all of them.
     tokens:
       MD: MD
       CBF: CBF
@@ -302,7 +292,7 @@ acq:
       MyelinMap: MyelinMap
       SWI: SWI
   - from: construct
-    modes: [informative]
+    modes: [separate]
     # The complex part and the reconstruction kinds, which the BIDS name
     # carries as `part-` and `rec-`.
     tokens:
@@ -320,13 +310,13 @@ acq:
       Filtered: Filtered
       ORIG: ORIG
   - from: post_contrast
-    modes: [informative]
-    # `ce-` in the BIDS name; section 9.1 spells it `_CE` and this is the
-    # same fact in the same place as the rest of them.
+    modes: [separate]
+    # `ce-` in the BIDS name; section 9.1 spells it `_CE`, and so does a
+    # name conflict the contrast alone decides.
     tokens:
       given: CE
   - from: provenance
-    modes: [informative]
+    modes: [separate]
     # `rec-` in the BIDS name. `RawRecon` is not a token: it is the axis's
     # default, so it holds on every stack nothing else claimed and would be in
     # every filename saying nothing. The same argument as `ND`.

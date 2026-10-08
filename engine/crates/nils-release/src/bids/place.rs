@@ -203,6 +203,7 @@ mod tests {
             refused: Vec::new(),
             aslcontext: None,
             acq: Vec::new(),
+            latent: Vec::new(),
         })
     }
 

@@ -78,18 +78,20 @@ def bar_reference(work: Path) -> list[str]:
             side = "missing" if line in want else "unexpected"
             bad.append(f"the descriptive tree: {side} {line}")
 
-    if (work / "bids").is_dir():
+    for tree, key in (("bids", "bids"), ("bids-minimal", "bids_minimal")):
+        if not (work / tree).is_dir() or key not in expected:
+            continue
         images = sorted(
             re.sub(r"sub-[0-9a-z]+", "sub-X", p)
-            for p in files_under(work / "bids")
+            for p in files_under(work / tree)
             if p.endswith(".nii.gz") or p.endswith(".dcm")
         )
         images = sorted({re.sub(r"/[0-9]{8}\.dcm$", "/<dicom>", p) for p in images})
-        want = sorted(expected["bids"]["files"])
+        want = sorted(expected[key]["files"])
         if images != want:
             for line in sorted(set(want) ^ set(images)):
                 side = "missing" if line in want else "unexpected"
-                bad.append(f"the BIDS tree: {side} {line}")
+                bad.append(f"the BIDS tree ({tree}): {side} {line}")
     return bad
 
 
@@ -106,7 +108,7 @@ def bar_validator(work: Path) -> list[str]:
     neither mode has anything to exempt.
     """
     bad = []
-    for tree in ("bids", "bids-informative", "names-bids", "names-informative"):
+    for tree in ("bids", "bids-minimal", "names-bids", "names-minimal"):
         if (work / tree).is_dir():
             bad.extend(structural(work, tree))
     return bad
@@ -197,7 +199,7 @@ def bar_official(work: Path) -> list[str]:
 
     trees = [
         t
-        for t in ("bids", "bids-informative", "names-bids", "names-informative")
+        for t in ("bids", "bids-minimal", "names-bids", "names-minimal")
         if (work / t).is_dir()
     ]
     if not trees:
@@ -279,7 +281,7 @@ def bar_names(work: Path) -> list[str]:
     """
     expected = tomllib.loads((HERE / "reference.toml").read_text()).get("names", {})
     bad = []
-    for tree in ("names-bids", "names-informative", "names-descriptive"):
+    for tree in ("names-bids", "names-minimal", "names-descriptive"):
         root = work / tree
         if not root.is_dir():
             continue

@@ -1271,10 +1271,14 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
             if let Some(v) = im.get("modes") {
                 let at = format!("{at}.modes");
                 for mode in f.blame(yaml::texts(v, &at))? {
-                    if mode != "bids" && mode != "informative" {
+                    // Record 55 C4: `full` is spelled in the full naming
+                    // style, `separate` only where a name conflict needs it.
+                    // The earlier pair's words still load, and are never
+                    // spelled.
+                    if !["full", "separate", "bids", "informative"].contains(&mode.as_str()) {
                         return Err(Error::at(
                             &at,
-                            format!("{mode} is not a naming mode: bids or informative"),
+                            format!("{mode} is not a naming mode: full or separate"),
                         )
                         .in_file(&f.path, Some(&f.source)));
                     }

@@ -150,7 +150,7 @@ fn settings<'a>(
         key: KEY,
         pack: pack(),
         layout: Layout::Bids,
-        naming: nils_release::name::Naming::Bids,
+        naming: nils_release::name::Naming::Full,
         places,
         converter,
         compress: true,
@@ -257,7 +257,10 @@ fn the_tree_is_a_dataset_and_not_only_a_pile_of_named_files() {
         .collect();
     assert_eq!(scans.len(), 1, "{written:?}");
     let text = std::fs::read_to_string(out.path().join(&scans[0])).unwrap();
-    assert!(text.starts_with("filename\tacq_time\n"), "{text}");
+    assert!(
+        text.starts_with("filename\tacq_time\tnils_name\n"),
+        "{text}"
+    );
     assert!(text.contains("2022-01-15T03:14:15"), "{text}");
 }
 
@@ -488,14 +491,10 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
     // v0's prefix for the spine (record 55 C4), and the FLAIR is said once,
     // by its suffix.
     assert!(
-        now.iter().all(|n| n.contains("acq-SC+")),
+        now.iter().all(|n| n.contains("acq-SCAx")),
         "and the new name says so: {now:?}"
     );
-    assert!(
-        now.iter()
-            .all(|n| !n.contains("FLAIR_FLAIR") && !n.contains("+FLAIR")),
-        "{now:?}"
-    );
+    assert!(now.iter().all(|n| !acq_of(n).contains("FLAIR")), "{now:?}");
 }
 
 #[test]
@@ -760,7 +759,7 @@ fn the_body_part_is_in_the_name_and_in_the_sidecar() {
         .collect();
     assert!(!sidecars.is_empty(), "the converter writes a sidecar");
     for file in &sidecars {
-        assert!(file.contains("acq-SC+"), "the name says it too: {file}");
+        assert!(file.contains("acq-SCAx"), "the name says it too: {file}");
         let text = std::fs::read_to_string(out.path().join(file)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(doc["BodyPart"], serde_json::Value::from("spine"), "{file}");
@@ -806,11 +805,12 @@ fn an_axis_the_pack_declares_reaches_a_name_without_the_engine_learning_it() {
 }
 
 #[test]
-fn the_informative_mode_says_what_the_entities_say_and_the_bids_one_does_not() {
-    // Record 37 S7. One question asked of every name: BIDS mode puts the
-    // contrast in `ce-` and nowhere else, because a name that said it twice
-    // would be a name arguing with itself; informative mode puts every axis
-    // in the label as well, for a tree read by people rather than tools.
+fn the_full_style_spells_the_slots_and_the_minimal_one_only_what_separates() {
+    // Record 55 C4, ruled 2026-10-08: both styles, as a release's option.
+    // The full style spells v0's slots in `acq-` and the contrast in `ce-`
+    // only; the minimal style writes no `acq-` where nothing shares a name.
+    // Both carry everything in the sidecar's `NILS` object and the
+    // descriptive name in `scans.tsv`.
     let Some(converter) = converter() else { return };
     let source = tree();
     let home_dir = TempDir::new("bids-home");
@@ -820,11 +820,11 @@ fn the_informative_mode_says_what_the_entities_say_and_the_bids_one_does_not() {
     let policy = Policy::default();
     let scheme = SessionScheme::default();
 
-    let plain = TempDir::new("bids-out");
-    run::run(
+    let full = TempDir::new("bids-out");
+    let report = run::run(
         &mut reg,
         &settings(
-            plain.path(),
+            full.path(),
             &policy,
             &scheme,
             Options::default(),
@@ -832,18 +832,19 @@ fn the_informative_mode_says_what_the_entities_say_and_the_bids_one_does_not() {
         ),
     )
     .unwrap();
-    let told = TempDir::new("bids-told");
+    assert_eq!(report.naming, "full");
+    let minimal = TempDir::new("bids-minimal");
     let mut s = settings(
-        told.path(),
+        minimal.path(),
         &policy,
         &scheme,
         Options::default(),
         Some(&converter),
     );
-    s.name = "a cohort read by people";
-    s.naming = nils_release::name::Naming::Informative;
+    s.name = "a cohort, minimal";
+    s.naming = nils_release::name::Naming::Minimal;
     let report = run::run(&mut reg, &s).unwrap();
-    assert_eq!(report.naming, "informative");
+    assert_eq!(report.naming, "minimal");
 
     let named = |root: &Path| -> Vec<String> {
         files_under(root)
@@ -851,21 +852,92 @@ fn the_informative_mode_says_what_the_entities_say_and_the_bids_one_does_not() {
             .filter(|f| f.starts_with("sub-") && f.ends_with(".nii.gz"))
             .collect()
     };
-    let bids = named(plain.path());
-    let informative = named(told.path());
-    assert!(!bids.is_empty() && bids.len() == informative.len());
+    let long = named(full.path());
+    let short = named(minimal.path());
+    assert!(!long.is_empty() && long.len() == short.len());
     assert!(
-        bids.iter().all(|n| n.contains("_ce-contrast_")),
-        "the entity carries it in both: {bids:?}"
+        long.iter()
+            .all(|n| n.contains("_ce-contrast_") && n.contains("_acq-")),
+        "{long:?}"
     );
     assert!(
-        bids.iter().all(|n| !n.contains("CE_ce-contrast")),
-        "and only the entity, in BIDS mode: {bids:?}"
+        long.iter().all(|n| !acq_of(n).contains("CE")),
+        "the contrast is said once, by its entity: {long:?}"
     );
     assert!(
-        informative.iter().all(|n| n.contains("CE_ce-contrast")),
-        "the label says it too, in informative mode: {informative:?}"
+        short
+            .iter()
+            .all(|n| n.contains("_ce-contrast_") && !n.contains("_acq-")),
+        "nothing shares a name, so no acq-: {short:?}"
     );
+
+    // The sidecar's `NILS` object, in both.
+    for root in [full.path(), minimal.path()] {
+        let sidecars: Vec<String> = files_under(root)
+            .into_iter()
+            .filter(|f| f.starts_with("sub-") && f.ends_with(".json"))
+            .collect();
+        assert!(!sidecars.is_empty());
+        for file in &sidecars {
+            let doc: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(root.join(file)).unwrap()).unwrap();
+            let card = &doc["NILS"];
+            assert!(
+                card["DescriptiveName"]
+                    .as_str()
+                    .is_some_and(|n| n.contains("_CE")),
+                "{file}: {card}"
+            );
+            assert_eq!(
+                card["Axes"]["post_contrast"]["values"],
+                serde_json::json!(["given"]),
+                "{file}"
+            );
+            assert!(
+                card["Axes"]["post_contrast"]["tier"].is_string(),
+                "{file}: {card}"
+            );
+            assert!(card["Axes"]["base"]["values"].is_array(), "{file}: {card}");
+            // What this fixture's files state; the timings are the card's
+            // unit test's.
+            for key in [
+                "SliceThicknessMm",
+                "Matrix",
+                "VoxelSizeMm",
+                "FieldOfViewMm",
+                "NumberOfImages",
+                "AcquisitionType",
+                "Manufacturer",
+            ] {
+                assert!(
+                    !card["Acquisition"][key].is_null(),
+                    "{file}: {key} in {card}"
+                );
+            }
+            // Never the station, which names a place.
+            assert!(card["Acquisition"].get("StationName").is_none());
+        }
+        // And the descriptive name beside every file in `scans.tsv`.
+        let scans: Vec<String> = files_under(root)
+            .into_iter()
+            .filter(|f| f.ends_with("_scans.tsv"))
+            .collect();
+        assert!(!scans.is_empty());
+        for f in scans {
+            let text = std::fs::read_to_string(root.join(&f)).unwrap();
+            assert!(
+                text.starts_with("filename\tacq_time\tnils_name\n"),
+                "{text}"
+            );
+            assert!(
+                text.lines()
+                    .skip(1)
+                    .all(|l| l.split('\t').nth(2).is_some_and(|n| !n.is_empty())),
+                "{text}"
+            );
+        }
+        assert!(root.join("scans.json").is_file(), "the column is described");
+    }
 }
 
 /// One session with two names more than one stack wants (record 37, S2).
@@ -1020,8 +1092,8 @@ fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
     assert_eq!(flair.len(), 2, "{written:?}");
     assert!(flair.iter().all(|f| !f.contains("_run-")), "{flair:?}");
     assert!(
-        flair.iter().any(|f| f.contains("+4sl_FLAIR"))
-            && flair.iter().any(|f| f.contains("+6sl_FLAIR")),
+        flair.iter().any(|f| f.contains("4sl_FLAIR"))
+            && flair.iter().any(|f| f.contains("6sl_FLAIR")),
         "the slice count, in acq-: {flair:?}"
     );
 
@@ -1148,6 +1220,14 @@ fn anat_names(root: &Path) -> Vec<String> {
         .into_iter()
         .filter(|f| f.contains("/anat/") && f.ends_with(".nii.gz"))
         .collect()
+}
+
+/// The `acq-` label of a name, or nothing.
+fn acq_of(name: &str) -> &str {
+    name.split("_acq-")
+        .nth(1)
+        .and_then(|rest| rest.split('_').next())
+        .unwrap_or("")
 }
 
 /// What a name says before its suffix.
@@ -1370,8 +1450,8 @@ fn two_sagittal_stations_that_share_every_slice_location_are_two_acquisitions() 
     numbered_with(upper, lower, serde_json::json!(["where it sits"]), false);
 }
 
-/// Release one source tree into a BIDS tree under the informative mode.
-fn released_informative(
+/// Release one source tree into a BIDS tree under the minimal naming style.
+fn released_minimal(
     source: &TempDir,
     home_dir: &TempDir,
     out: &TempDir,
@@ -1387,7 +1467,7 @@ fn released_informative(
         Options::default(),
         Some(converter),
     );
-    s.naming = nils_release::name::Naming::Informative;
+    s.naming = nils_release::name::Naming::Minimal;
     let report = run::run(&mut reg, &s).unwrap();
     (reg, report)
 }
@@ -1417,8 +1497,8 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
-        names.iter().any(|n| n.ends_with("+1mm_T1w.nii.gz"))
-            && names.iter().any(|n| n.ends_with("+3mm_T1w.nii.gz")),
+        names.iter().any(|n| n.ends_with("MPRAGE1mm_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("MPRAGE3mm_T1w.nii.gz")),
         "{names:?}"
     );
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
@@ -1442,12 +1522,12 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     let source = twins(thin, thick);
     let home_dir = TempDir::new("bids-home");
     let out = TempDir::new("bids-out");
-    let (_reg, _) = released_informative(&source, &home_dir, &out, &converter);
+    let (_reg, _) = released_minimal(&source, &home_dir, &out, &converter);
     let names = anat_names(out.path());
     assert!(
-        names.iter().any(|n| n.ends_with("+1mm_T1w.nii.gz"))
-            && names.iter().any(|n| n.ends_with("+3mm_T1w.nii.gz")),
-        "{names:?}"
+        names.iter().any(|n| n.ends_with("_acq-1mm_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("_acq-3mm_T1w.nii.gz")),
+        "the minimal style: the one slot that differs: {names:?}"
     );
     assert!(
         !out.path().join(".bidsignore").exists(),
@@ -1469,7 +1549,6 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
         Some(&converter),
     );
     s.layout = Layout::Descriptive;
-    s.naming = nils_release::name::Naming::Informative;
     run::run(&mut reg, &s).unwrap();
     let dirs: std::collections::BTreeSet<String> = files_under(out.path())
         .iter()
@@ -1488,7 +1567,8 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
 #[test]
 fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
     // Wave 7a §8.1: two stations of one spine prescription that nothing a
-    // name may spell separates take the plain number, last in `acq-`.
+    // name may spell separates take the plain number, alone in `acq-` in the
+    // minimal style.
     let Some(converter) = converter() else { return };
     let upper = twin("t1_mprage_sag", "T1 MPRAGE");
     let lower = Twin {
@@ -1498,12 +1578,12 @@ fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
     let source = twins(upper, lower);
     let home_dir = TempDir::new("bids-home");
     let out = TempDir::new("bids-out");
-    let (_reg, report) = released_informative(&source, &home_dir, &out, &converter);
+    let (_reg, report) = released_minimal(&source, &home_dir, &out, &converter);
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
-        names.iter().any(|n| before_suffix(n).ends_with("+1"))
-            && names.iter().any(|n| before_suffix(n).ends_with("+2")),
+        names.iter().any(|n| before_suffix(n).ends_with("_acq-1"))
+            && names.iter().any(|n| before_suffix(n).ends_with("_acq-2")),
         "{names:?}"
     );
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");

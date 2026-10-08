@@ -563,6 +563,16 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         .iter()
         .filter_map(|(stack, p)| p.body_part.clone().map(|b| (*stack, b)))
         .collect();
+    // Record 55 C4: the sidecar's `NILS` object and the descriptive name, by
+    // stack, whatever the name spells.
+    let cards: HashMap<i64, serde_json::Value> = named
+        .iter()
+        .map(|(stack, p)| (*stack, p.card.clone()))
+        .collect();
+    let nils_names: HashMap<i64, String> = named
+        .iter()
+        .map(|(stack, p)| (*stack, p.descriptive.name.clone()))
+        .collect();
     // What every volume of an ASL image is, by stack, for the aslcontext.tsv
     // BIDS requires beside it (MRI pack 0.11.0).
     let asl_contexts: HashMap<i64, String> = named
@@ -1004,6 +1014,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                         &mut report,
                         body_parts.get(&job.stack).map(String::as_str),
                         asl_contexts.get(&job.stack).map(String::as_str),
+                        cards.get(&job.stack),
                     ),
                 };
                 let mut wrote: Vec<Wrote> = Vec::new();
@@ -1090,6 +1101,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     .push(crate::bids::dataset::Scan {
                         filename: file.to_string(),
                         acq_time: acq_times.get(&job.stack).map(acquisition_time),
+                        nils_name: nils_names.get(&job.stack).cloned(),
                     });
             }
         }
@@ -1679,6 +1691,8 @@ fn write_dataset(
             dataset::scans(rows),
         )?;
     }
+    // Record 55 C4: what the `nils_name` column of every `scans.tsv` is.
+    std::fs::write(root.join("scans.json"), dataset::scans_description())?;
     for (code, mut sessions) in by_subject {
         sessions.sort_by(|a, b| a.label.cmp(&b.label));
         let dir = root.join(format!("sub-{code}"));
@@ -1956,7 +1970,7 @@ pub fn plan_picked(
     let pixels = pixel_verdicts(registry.store())?;
     let Placements {
         by_stack: named, ..
-    } = places(registry.store(), &by_study, pack, name::Naming::Bids)?;
+    } = places(registry.store(), &by_study, pack, name::Naming::Full)?;
     let planner = Planner {
         layout: Layout::Bids,
         options: crate::bids::place::Options::default(),
@@ -2967,7 +2981,7 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
 /// refusing the whole release over a metadata field would be the wrong answer
 /// to it. The field is added after the conversion and before the digest, so a
 /// tree's own state covers it and a re-run sees no change.
-fn add_to_sidecar(path: &Path, key: &str, value: &str) {
+fn add_to_sidecar(path: &Path, key: &str, value: serde_json::Value) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
@@ -2977,7 +2991,7 @@ fn add_to_sidecar(path: &Path, key: &str, value: &str) {
     let Some(fields) = doc.as_object_mut() else {
         return;
     };
-    fields.insert(key.to_string(), serde_json::Value::from(value));
+    fields.insert(key.to_string(), value);
     if let Ok(out) = serde_json::to_string_pretty(&doc) {
         std::fs::write(path, format!("{out}\n")).ok();
     }
@@ -3007,6 +3021,7 @@ fn write_bids(
     report: &mut Report,
     body_part: Option<&str>,
     aslcontext: Option<&str>,
+    card: Option<&serde_json::Value>,
 ) -> Vec<Result<Written, String>> {
     let root = settings.root;
     let staging = root.join(".nils-convert").join(job.stack.to_string());
@@ -3058,7 +3073,16 @@ fn write_bids(
             // vendor wrote; this is the pack's own answer, the one the axis
             // decided and the one `acq-` spells.
             if let Some(part) = body_part {
-                add_to_sidecar(&into.join(format!("{stem}.json")), "BodyPart", part);
+                add_to_sidecar(
+                    &into.join(format!("{stem}.json")),
+                    "BodyPart",
+                    serde_json::Value::from(part),
+                );
+            }
+            // Record 55 C4: everything NILS knows about the stack, whatever
+            // the name spells.
+            if let Some(card) = card {
+                add_to_sidecar(&into.join(format!("{stem}.json")), "NILS", card.clone());
             }
             let mut out = refused;
             let mut files = made.files;
@@ -3432,6 +3456,7 @@ fn places(
     naming: crate::name::Naming,
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
+    let tiers = axis_tiers(store)?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
     let text = |c: &str| {
@@ -3715,7 +3740,12 @@ fn places(
                 sequence_variant: r.opt_text(30)?.map(str::to_string),
             },
         );
-        if let Ok(n) = &built {
+        // A scout or a working scan never takes its BIDS name (§9.3 routes it
+        // by the release's choice), so it does not share one either: a
+        // localizer must not put `acq-3D` on the session's MPRAGE.
+        if let Ok(n) = &built
+            && !matches!(get("disposition"), Some("scout" | "working_scan"))
+        {
             bids_buckets
                 .entry((subject, label.clone(), n.datatype))
                 .or_default()
@@ -3797,7 +3827,15 @@ fn places(
                 if first {
                     shared.names += 1;
                 }
-                settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
+                settle(
+                    &group,
+                    &acquisitions,
+                    &stated,
+                    pack,
+                    naming,
+                    &mut bids,
+                    &mut shared,
+                );
             }
             first = false;
         }
@@ -3825,6 +3863,12 @@ fn places(
             out.insert(
                 n.stack,
                 Placed {
+                    card: crate::bids::card::card(
+                        &n.name,
+                        stated.get(&n.stack),
+                        tiers.get(&n.stack),
+                        acquisitions.get(&n.stack),
+                    ),
                     descriptive: n.clone(),
                     bids: bids
                         .remove(&n.stack)
@@ -3919,6 +3963,7 @@ fn settle(
     acquisitions: &HashMap<i64, crate::bids::repeat::Acquisition>,
     stated: &HashMap<i64, BTreeMap<String, Vec<String>>>,
     pack: &nils_pack::pack::Pack,
+    naming: crate::name::Naming,
     bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
     shared: &mut Shared,
 ) {
@@ -3953,6 +3998,21 @@ fn settle(
             }
         }
         return;
+    }
+    // The minimal style first says the first of v0's slots that differs,
+    // as the full style would have spelled it (record 55 C4).
+    if naming == crate::name::Naming::Minimal {
+        let names: Vec<crate::bids::name::Name> =
+            group.iter().filter_map(|s| name_of(bids, s)).collect();
+        if names.len() == group.len()
+            && let Some(marks) =
+                crate::bids::separate::first_slot(&names.iter().collect::<Vec<_>>(), &pack.bids)
+        {
+            for (stack, m) in group.iter().zip(marks) {
+                record(bids, shared, *stack, m, &differs);
+            }
+            return;
+        }
     }
     let said: Vec<Member> = group
         .iter()
@@ -4057,6 +4117,9 @@ struct Placed {
     /// keeps the fact in the sidecar, as `BodyPart`, and that is where a
     /// reader looks it up (record 37 S6).
     body_part: Option<String>,
+    /// The sidecar's `NILS` object: every axis, the descriptive name and the
+    /// acquisition (record 55 C4).
+    card: serde_json::Value,
 }
 
 /// `EchoNumbers` may carry several values; the first is this stack's.
@@ -4102,6 +4165,25 @@ fn axis_values(store: &mut Store) -> Result<HashMap<i64, BTreeMap<String, String
                 })
                 .or_insert_with(|| v.to_string());
         }
+    }
+    Ok(out)
+}
+
+/// How each stack's axes were decided: the tier and the confidence, by axis
+/// (record 55 C4), for the sidecar's `NILS` object. One row per value; the
+/// first row of an axis speaks for it, since every value of one axis is
+/// decided at once.
+fn axis_tiers(store: &mut Store) -> Result<HashMap<i64, crate::bids::card::Tiers>, Error> {
+    let sql = format!(
+        "SELECT stack_id, axis, tier, confidence FROM {} ORDER BY id",
+        store.qualified("classification_axis")
+    );
+    let mut out: HashMap<i64, crate::bids::card::Tiers> = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        out.entry(r.int(0)?)
+            .or_default()
+            .entry(r.text(1)?.to_string())
+            .or_insert((r.text(2)?.to_string(), r.double(3)?));
     }
     Ok(out)
 }
@@ -4651,7 +4733,7 @@ mod tests {
             "{\"SliceTiming\": [0, 212.91890726713459, 479.60756426982596], \"EchoTime\": 0.0029}\n",
         )
         .unwrap();
-        add_to_sidecar(&path, "BodyPart", "BRAIN");
+        add_to_sidecar(&path, "BodyPart", serde_json::Value::from("BRAIN"));
         let text = std::fs::read_to_string(&path).unwrap();
         for exact in ["212.91890726713459", "479.60756426982596", "0.0029"] {
             assert!(text.contains(exact), "{exact} not kept: {text}");
