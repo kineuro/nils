@@ -160,12 +160,12 @@ pub struct Report {
     /// not invent one. `identity.no_study` is the open question that says
     /// the same thing about the same subjects.
     pub without_a_session: BTreeMap<String, i64>,
-    /// Record 37 S2, the three numbers behind every `run-` index the tree
-    /// carries: how many BIDS names two or more stacks of one subject,
-    /// session and datatype built; how many of those stacks are one
+    /// Record 37 S2 and Wave 7a §8.1, the numbers behind every `run-` index
+    /// the tree carries: how many BIDS names two or more stacks of one
+    /// subject, session and datatype built; how many of those stacks are one
     /// acquisition measured again, which is what `run-` says; and how many
-    /// are not, and were refused the name and written to `sourcedata/` under
-    /// their informative ones instead, each with a question against it.
+    /// are not, and were told apart by what differs or by a plain number.
+    /// None is refused its name.
     ///
     /// Said out loud because the failure it replaces was silent: a counter
     /// writes `run-2` whether or not there was a second run, and two thirds
@@ -175,6 +175,12 @@ pub struct Report {
     pub shared_names: i64,
     pub repeats: i64,
     pub not_repeats: i64,
+    /// Of `not_repeats`, the stacks nothing that can be spelled told apart,
+    /// which carry the plain fallback number (Wave 7a §8.1).
+    pub numbered: i64,
+    /// Wave 7a §8.1: every name a difference or a number decided, with the
+    /// property and the value, which is the release's record of them.
+    pub decided: Vec<DecidedName>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
@@ -547,8 +553,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let with_a_study = subjects_with_a_study(registry.store())?;
     let Placements {
         by_stack: named,
-        shared,
+        mut shared,
     } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
+    let named_by = std::mem::take(&mut shared.decided);
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
     // other; this is the slot the standard keeps the fact in.
@@ -611,7 +618,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             Layout::Descriptive => 0,
         },
         not_repeats: match settings.layout {
-            Layout::Bids => shared.refused,
+            Layout::Bids => shared.separated.len() as i64,
+            Layout::Descriptive => 0,
+        },
+        numbered: match settings.layout {
+            Layout::Bids => shared.numbered.len() as i64,
             Layout::Descriptive => 0,
         },
         ..Report::default()
@@ -781,6 +792,18 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             // often: a number here is a place the standard has no slot for
             // something the archive states, which is the evidence a pack
             // extension or a specification issue is argued from.
+            // Wave 7a §8.1: a name a difference or a number decided is listed
+            // with what decided it.
+            if route == crate::bids::place::Route::Raw
+                && let Some(d) = named_by.get(&stack)
+            {
+                report.decided.push(DecidedName {
+                    stack,
+                    name: place.key(),
+                    marks: d.marks.clone(),
+                    differs: d.differs.clone(),
+                });
+            }
             if let Some(name) = placed.and_then(|p| p.bids.as_ref().ok()) {
                 for key in &name.refused {
                     *report
@@ -1089,6 +1112,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     forget_stacks(registry.store(), dataset, &gone)?;
     report.models = models_in_force(registry.store(), dataset)?;
 
+    // Wave 7a §8.1: the record of decided names in a fixed order, so two runs
+    // of one version say the same thing.
+    report.decided.sort_by(|a, b| a.name.cmp(&b.name));
     // §9.5. The files that make the tree a dataset rather than a pile of
     // correctly named images. v0 writes none of them.
     if settings.layout == Layout::Bids {
@@ -1613,7 +1639,9 @@ fn write_dataset(
             crate::bids::dataset::Repeats {
                 names: report.shared_names,
                 repeats: report.repeats,
-                refused: report.not_repeats,
+                separated: report.not_repeats,
+                numbered: report.numbered,
+                naming: settings.naming,
             },
         ),
     )?;
@@ -1670,6 +1698,14 @@ fn write_dataset(
     }
     if report.routes.contains_key("unofficial") {
         ignore.push("*_localizer.*".to_string());
+    }
+    // Wave 7a §8.1: the informative mode's `diff-` and plain `_<n>` are not
+    // the standard's, so the files that carry them are named here, each by
+    // its own place, and the standard's validator reads the rest of the tree.
+    if settings.naming == crate::name::Naming::Informative {
+        for d in report.decided.iter().filter(|d| !d.marks.is_empty()) {
+            ignore.push(format!("{}.*", d.name));
+        }
     }
     if !ignore.is_empty() {
         std::fs::write(root.join(".bidsignore"), dataset::bidsignore(&ignore))?;
@@ -3472,6 +3508,7 @@ fn places(
     // Record 37 S2: what the repeat test reads of each stack, kept for the
     // stacks that turn out to collide, which is the only place it is asked.
     let mut acquisitions: HashMap<i64, crate::bids::repeat::Acquisition> = HashMap::new();
+    let mut stated: HashMap<i64, BTreeMap<String, Vec<String>>> = HashMap::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -3581,6 +3618,10 @@ fn places(
             pe_direction: r.opt_text(10)?,
         };
         let built = crate::bids::name::build(&facts, &pack.bids, naming);
+        // Wave 7a §8.1: what the stack says, kept for the stacks that turn
+        // out to share a name, whose axes are the first thing that may tell
+        // them apart.
+        stated.insert(stack, said.clone());
         let synthetic = pack.bids.is_synthetic(
             provenance.as_deref(),
             &constructs.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -3698,97 +3739,65 @@ fn places(
             });
     }
 
-    // Record 37 S2. Where two stacks of one subject, session and datatype
-    // build one name, `run-` is written only when they are measurably one
-    // acquisition done twice (`bids::repeat`). Where they are not, no name is
-    // written at all: the stack is refused with what differs, `§9.3` routes it
-    // to `sourcedata/` under its informative name, and a person is asked.
+    // Record 37 S2 and Wave 7a §8.1. Where two stacks of one subject, session
+    // and datatype build one name, `run-` is written only when they are
+    // measurably one acquisition done twice (`bids::repeat`). Where they are
+    // not, the name is never refused: it carries what separates them, an
+    // axis's value first, then a measured property and its value, and last a
+    // plain number that is never called a run (`bids::separate`).
     //
-    // What this replaces is a counter, and the counter is why: of the 403
-    // stacks that took a `run-` index over record 34's corpus, 270 sat in a
-    // name that covered more than one acquisition. A `run-2` that is really a
-    // different echo time is a claim no validator can catch.
+    // What this replaces is first a counter, which wrote `run-2` on 270 of the
+    // 403 stacks of record 34's corpus that were not one acquisition twice,
+    // and then a refusal, which routed 434 stacks of the same corpus to
+    // `sourcedata/` because a thin name could not tell them apart.
     //
-    // In a fixed order, so that `run-1` is the one made first and two runs of
-    // one version agree: by the earliest acquisition, then by the series
-    // number, then by the stack's id.
+    // In a fixed order, so that `run-1` and the fallback's `1` are the ones
+    // made first and two runs of one version agree: by the earliest
+    // acquisition, then by the series number, then by the stack's id. The
+    // marks go on one at a time and the bucket is grouped again after each,
+    // so that two true repeats inside a wider group still end as runs.
     let mut shared = Shared::default();
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
-        let mut groups: BTreeMap<&String, Vec<i64>> = BTreeMap::new();
-        for (_, stack, stem) in bucket.iter() {
-            groups.entry(stem).or_default().push(*stack);
-        }
-        for (_, group) in groups.iter().filter(|(_, g)| g.len() > 1) {
-            shared.names += 1;
-            let members: Vec<&crate::bids::repeat::Acquisition> =
-                group.iter().filter_map(|s| acquisitions.get(s)).collect();
-            // A stack with no fingerprint row is one nothing can be measured
-            // about, and a claim nothing was measured for is not one to make.
-            let measurable = members.len() == group.len();
-            let differs = match measurable {
-                true => crate::bids::repeat::one_acquisition(&members),
-                false => vec!["one of them has no fingerprint".to_string()],
-            };
-            // A group the standard gives no `run` to has no answer even when
-            // it is a true repeat: the second stack would rewrite the first,
-            // silently, which is the bug this slice exists to stop.
-            let admits_run = group.iter().all(|stack| {
+        let order: Vec<i64> = bucket.iter().map(|(_, stack, _)| *stack).collect();
+        let stem_of =
+            |bids: &HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+             stack: &i64|
+             -> Option<String> {
                 bids.get(stack)
                     .and_then(|b| b.as_ref().ok())
-                    .is_some_and(|n| n.with_run(1).is_some())
-            });
-            let refuse = if !measurable {
-                Some(
-                    "one of them has no fingerprint, so nothing about them can be compared"
-                        .to_string(),
-                )
-            } else if !differs.is_empty() {
-                Some(crate::bids::repeat::why(&differs))
-            } else if !admits_run {
-                Some(format!(
-                    "they are one acquisition measured {} times, and BIDS gives this suffix no \
-                     run entity, so one of them would rewrite the other",
-                    group.len()
-                ))
-            } else {
-                None
+                    .map(|n| n.stem("s", "s"))
             };
-            match refuse {
-                None => {
-                    shared.repeats += group.len() as i64;
-                    for (n, stack) in group.iter().enumerate() {
-                        if let Some(name) = bids.get(stack).and_then(|b| b.as_ref().ok())
-                            && let Some(with) = name.with_run(n as i64 + 1)
-                        {
-                            bids.insert(*stack, Ok(with));
-                        }
-                    }
-                }
-                Some(why) => {
-                    shared.refused += group.len() as i64;
-                    let suffix = group
-                        .iter()
-                        .find_map(|s| bids.get(s).and_then(|b| b.as_ref().ok()))
-                        .map(|n| n.suffix)
-                        .unwrap_or("");
-                    shared.groups.push(SharedGroup {
-                        stacks: group.clone(),
-                        suffix: suffix.to_string(),
-                        differs: differs.clone(),
-                        why: why.clone(),
-                    });
-                    for stack in group {
-                        bids.insert(
-                            *stack,
-                            Err(crate::bids::name::Why::Shared {
-                                others: group.len() - 1,
-                                differs: why.clone(),
-                            }),
-                        );
-                    }
+        // Each round settles at least one group for good or adds a mark that
+        // splits it, and a stack carries at most one mark per axis and per
+        // property, so this ends; the bound is a guard, not a rule.
+        let mut first = true;
+        for _ in 0..64 {
+            let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+            for stack in &order {
+                if let Some(stem) = stem_of(&bids, stack) {
+                    groups.entry(stem).or_default().push(*stack);
                 }
             }
+            let colliding: Vec<Vec<i64>> = groups.into_values().filter(|g| g.len() > 1).collect();
+            if colliding.is_empty() {
+                break;
+            }
+            for group in colliding {
+                if first {
+                    shared.names += 1;
+                }
+                settle(
+                    &group,
+                    &acquisitions,
+                    &stated,
+                    pack,
+                    naming,
+                    &mut bids,
+                    &mut shared,
+                );
+            }
+            first = false;
         }
     }
 
@@ -3840,10 +3849,39 @@ struct Shared {
     /// Stacks under those names that are one acquisition measured again, and
     /// took a `run-` index.
     repeats: i64,
-    /// Stacks that are not, refused the name and routed to `sourcedata/`.
-    refused: i64,
-    /// One per refused group, for the questions.
+    /// Stacks that are not, and were told apart by what differs or by the
+    /// fallback number (Wave 7a §8.1). Never refused.
+    separated: std::collections::BTreeSet<i64>,
+    /// Of those, the stacks the fallback number told apart.
+    numbered: std::collections::BTreeSet<i64>,
+    /// What decided each such stack's name, by stack, for the release record.
+    decided: HashMap<i64, Decided>,
+    /// One per group a person is asked about: two or more stacks that differ
+    /// in nothing the engine can see and are not a repeat.
     groups: Vec<SharedGroup>,
+}
+
+/// What decided one stack's name where it shared one with others
+/// (Wave 7a §8.1): the marks in the order they went on, and what the repeat
+/// test found between the stacks of its group.
+#[derive(Debug, Clone, Default)]
+struct Decided {
+    marks: Vec<crate::bids::separate::Mark>,
+    differs: Vec<String>,
+}
+
+/// One entry of the release record's list of names a difference or a number
+/// decided (Wave 7a §8.1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DecidedName {
+    pub stack: i64,
+    /// Where its files are, as `<dir>/<stem>`.
+    pub name: String,
+    /// What was added to the name, with the property and the value.
+    pub marks: Vec<crate::bids::separate::Mark>,
+    /// What the repeat test found between it and the stacks it shared a name
+    /// with, in words; never a text's value.
+    pub differs: Vec<String>,
 }
 
 /// A name more than one acquisition wanted.
@@ -3852,12 +3890,126 @@ struct SharedGroup {
     stacks: Vec<i64>,
     suffix: String,
     /// What the test found between them, field by field, which is also the
-    /// evidence a pack extension would need: "these four differ in their
-    /// velocity encoding, which the pack has no axis for" arrives from the
-    /// data rather than from a chair.
+    /// evidence a pack extension would need.
     differs: Vec<String>,
     /// The same thing as a sentence, which is what a person reads.
     why: String,
+}
+
+/// Settle one group of stacks that built one BIDS name (Wave 7a §8.1): a true
+/// repeat takes `run-`, anything else a mark that tells its members apart,
+/// and the last fallback is a plain number. Never a refusal.
+fn settle(
+    group: &[i64],
+    acquisitions: &HashMap<i64, crate::bids::repeat::Acquisition>,
+    stated: &HashMap<i64, BTreeMap<String, Vec<String>>>,
+    pack: &nils_pack::pack::Pack,
+    naming: crate::name::Naming,
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    shared: &mut Shared,
+) {
+    use crate::bids::repeat::SAME_MOMENT;
+    use crate::bids::separate::{Mark, Member, separator};
+    let members: Vec<&crate::bids::repeat::Acquisition> =
+        group.iter().filter_map(|s| acquisitions.get(s)).collect();
+    // A stack with no fingerprint row is one nothing can be measured about,
+    // and a claim nothing was measured for is not one to make.
+    let measurable = members.len() == group.len();
+    let differs = match measurable {
+        true => crate::bids::repeat::one_acquisition(&members),
+        false => vec!["one of them has no fingerprint".to_string()],
+    };
+    // A group the standard gives no `run` to cannot say a true repeat as one,
+    // and the second stack would rewrite the first: it falls to the number.
+    let admits_run = group.iter().all(|stack| {
+        bids.get(stack)
+            .and_then(|b| b.as_ref().ok())
+            .is_some_and(|n| n.with_run(1).is_some())
+    });
+    let name_of = |bids: &HashMap<_, Result<crate::bids::name::Name, _>>, stack: &i64| {
+        bids.get(stack).and_then(|b| b.as_ref().ok()).cloned()
+    };
+    if measurable && differs.is_empty() && admits_run {
+        shared.repeats += group.len() as i64;
+        for (n, stack) in group.iter().enumerate() {
+            if let Some(name) = name_of(bids, stack)
+                && let Some(with) = name.with_run(n as i64 + 1)
+            {
+                bids.insert(*stack, Ok(with));
+            }
+        }
+        return;
+    }
+    let said: Vec<Member> = group
+        .iter()
+        .map(|s| Member {
+            acquisition: acquisitions.get(s),
+            said: stated.get(s),
+        })
+        .collect();
+    if let Some(marks) = separator(&said, &pack.bids) {
+        // A member that says nothing on the deciding axis keeps its name, and
+        // is still one of the stacks a difference told apart.
+        for (stack, m) in group.iter().zip(marks) {
+            record(bids, shared, *stack, m, &differs, naming);
+        }
+        return;
+    }
+    // Nothing that can be spelled separates them: the plain number, in the
+    // order they were made.
+    for (n, stack) in group.iter().enumerate() {
+        record(
+            bids,
+            shared,
+            *stack,
+            Some(Mark::number(n as i64 + 1)),
+            &differs,
+            naming,
+        );
+        shared.numbered.insert(*stack);
+    }
+    // A person is asked only where the engine sees no difference at all and
+    // they are not a repeat: no fingerprint, or one moment written twice.
+    // A true repeat the suffix gives no `run` to is a repeat, and a pair the
+    // texts alone separate is a difference the engine sees and never spells.
+    let unseen = !measurable || (!differs.is_empty() && differs.iter().all(|d| d == SAME_MOMENT));
+    if unseen {
+        let suffix = group
+            .iter()
+            .find_map(|s| bids.get(s).and_then(|b| b.as_ref().ok()))
+            .map(|n| n.suffix)
+            .unwrap_or("");
+        shared.groups.push(SharedGroup {
+            stacks: group.to_vec(),
+            suffix: suffix.to_string(),
+            differs: differs.clone(),
+            why: crate::bids::repeat::why(&differs),
+        });
+    }
+}
+
+/// Put one mark on a stack's name, and remember what decided it.
+fn record(
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    shared: &mut Shared,
+    stack: i64,
+    mark: Option<crate::bids::separate::Mark>,
+    differs: &[String],
+    naming: crate::name::Naming,
+) {
+    shared.separated.insert(stack);
+    let d = shared.decided.entry(stack).or_default();
+    for why in differs {
+        if !d.differs.contains(why) {
+            d.differs.push(why.clone());
+        }
+    }
+    let Some(mark) = mark else { return };
+    if let Some(Ok(name)) = bids.get(&stack) {
+        let marked = name.marked(&mark, naming);
+        bids.insert(stack, Ok(marked));
+    }
+    d.marks.push(mark);
 }
 
 /// The stacks of one subject, session and datatype, ordered by when they
@@ -4190,7 +4342,7 @@ fn raise_shared(store: &mut Store, report: &Report, groups: &[SharedGroup]) -> R
                         "suffix": g.suffix,
                         "differs": g.differs,
                         "why": g.why,
-                        "placed": "sourcedata",
+                        "placed": "numbered",
                     })
                     .to_string(),
                 ),

@@ -969,12 +969,11 @@ fn a_site_that_scanned_one_protocol_twice_still_gets_run_indices() {
 }
 
 #[test]
-fn two_acquisitions_that_want_one_name_are_refused_and_a_person_is_asked() {
-    // Record 37 S2. The pair differs in what it covers and in nothing a BIDS
-    // name can say, so no name is written: a `run-2` there would claim a
-    // rescan that never happened, and a validator would pass it. The stacks
-    // are in `sourcedata/` under the informative names of §9.1, which are
-    // unique, and the question says what differs.
+fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
+    // Wave 7a §8.1. The pair differs in what it covers, so neither is refused
+    // its name and neither is a run: each says how many slices it has,
+    // inside `acq-`, and nobody is asked, because the engine saw what
+    // differs and said it. Record 37 S2 refused them both before.
     let Some(converter) = converter() else { return };
     let source = colliding();
     let home_dir = TempDir::new("bids-home");
@@ -998,80 +997,52 @@ fn two_acquisitions_that_want_one_name_are_refused_and_a_person_is_asked() {
     assert_eq!(report.shared_names, 2, "{report:?}");
     assert_eq!(report.repeats, 2, "{report:?}");
     assert_eq!(report.not_repeats, 2, "{report:?}");
+    assert_eq!(report.numbered, 0, "{report:?}");
 
     let written = files_under(out.path());
-    // No FLAIR in the raw tree, under a `run-` or under anything else ...
     assert!(
         !written
             .iter()
-            .any(|f| f.contains("FLAIR") && !f.starts_with("sourcedata/")),
-        "{written:?}"
+            .any(|f| f.contains("FLAIR") && f.starts_with("sourcedata/")),
+        "nothing is refused its name: {written:?}"
     );
-    // ... and both of them under `sourcedata/`, as DICOM, told apart by the
-    // informative names, which are unique.
-    let source_side: Vec<&String> = written
+    let flair: Vec<&String> = written
         .iter()
-        .filter(|f| f.starts_with("sourcedata/") && f.contains("FLAIR"))
+        .filter(|f| f.contains("FLAIR") && f.ends_with(".nii.gz"))
         .collect();
-    assert_eq!(source_side.len(), 10, "{written:?}");
-    let places: std::collections::BTreeSet<&str> = source_side
-        .iter()
-        .filter_map(|f| f.rsplit_once('/').map(|(dir, _)| dir))
-        .collect();
-    assert_eq!(places.len(), 2, "{source_side:?}");
-
-    // And the question, with what differs in it.
-    let asked = |reg: &mut Registry| -> Vec<(serde_json::Value, serde_json::Value)> {
-        let store = reg.store();
-        let sql = format!(
-            "SELECT ref, evidence FROM {} WHERE kind = 'release.shared_name'",
-            store.qualified("review_item"),
-        );
-        store
-            .query(&sql, &[])
-            .unwrap()
-            .iter()
-            .map(|r| {
-                let of = |i: usize| {
-                    serde_json::from_str(r.opt_text(i).unwrap().unwrap_or_default())
-                        .unwrap_or(serde_json::Value::Null)
-                };
-                (of(0), of(1))
-            })
-            .collect()
-    };
-    let items = asked(&mut reg);
-    assert_eq!(items.len(), 1, "one question, and one only");
-    let (reference, evidence) = &items[0];
-    assert_eq!(evidence["stacks"], 2);
-    assert_eq!(evidence["placed"], "sourcedata");
-    assert_eq!(
-        evidence["differs"],
-        serde_json::json!(["the number of images", "what it covers"])
-    );
-    assert_eq!(
-        reference["stack_ids"].as_array().map(Vec::len),
-        Some(2),
-        "the item names both stacks"
+    assert_eq!(flair.len(), 2, "{written:?}");
+    assert!(flair.iter().all(|f| !f.contains("_run-")), "{flair:?}");
+    assert!(
+        flair.iter().any(|f| f.contains("4sl_FLAIR"))
+            && flair.iter().any(|f| f.contains("6sl_FLAIR")),
+        "the slice count, in acq-: {flair:?}"
     );
 
-    // And a re-run does not file it again: a release is re-run whenever
-    // anything upstream changes, and stacks that say what they said last time
-    // raise the same question with the same answer. What recurs is the number
-    // in the report.
-    let again = run::run(
-        &mut reg,
-        &settings(
-            out.path(),
-            &policy,
-            &scheme,
-            Options::default(),
-            Some(&converter),
-        ),
-    )
-    .unwrap();
-    assert_eq!(again.not_repeats, 2, "{again:?}");
-    assert_eq!(asked(&mut reg).len(), 1, "the question is filed once");
+    // The release's record lists both, with the property and the values.
+    let mut decided: Vec<(String, String)> = report
+        .decided
+        .iter()
+        .flat_map(|d| {
+            d.marks
+                .iter()
+                .map(|m| (m.property.clone(), m.value.clone()))
+        })
+        .collect();
+    decided.sort();
+    assert_eq!(
+        decided,
+        [
+            ("Slices".to_string(), "4".to_string()),
+            ("Slices".to_string(), "6".to_string())
+        ],
+        "{:?}",
+        report.decided
+    );
+    assert!(report.decided.iter().all(|d| d.name.contains("_FLAIR")));
+    assert!(
+        shared_differs(&mut reg).is_empty(),
+        "nobody is asked about a difference the name says"
+    );
 }
 
 /// One series of a pair: what a console recorded for it, where its first
@@ -1086,6 +1057,8 @@ struct Twin<'a> {
     /// slice location is the position along the normal, left to right, and
     /// this moves the stack in the plane of its slices, which it never sees.
     sagittal_at: Option<f64>,
+    /// The slice thickness, in millimetres.
+    thickness: &'a str,
 }
 
 fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
@@ -1095,6 +1068,7 @@ fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
         first_slice: 1.0,
         acquired: None,
         sagittal_at: None,
+        thickness: "1.0",
     }
 }
 
@@ -1102,8 +1076,15 @@ fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
 /// no archive: one protocol step, the same geometry, the same timings, the
 /// same image type, written twice (record 37 S4's fixture, and record 38's).
 fn twins(one: Twin, two: Twin) -> TempDir {
+    scans(&[one, two])
+}
+
+/// Series of one session, numbered from 1 in the order given.
+fn scans(series: &[Twin]) -> TempDir {
     let dir = TempDir::new("bids-twins");
-    for (n, t) in [("1", one), ("2", two)] {
+    for (i, t) in series.iter().enumerate() {
+        let n = (i + 1).to_string();
+        let n = n.as_str();
         for slice in 1..=4 {
             let at = t.first_slice + f64::from(slice - 1);
             let (orientation, position) = match t.sagittal_at {
@@ -1135,7 +1116,7 @@ fn twins(one: Twin, two: Twin) -> TempDir {
                 synth::us(tags::SAMPLES_PER_PIXEL, 1),
                 synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
                 synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
-                synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
+                synth::text(tags::SLICE_THICKNESS, VR::DS, t.thickness),
                 synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, orientation),
                 synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &position),
                 synth::text(tags::SLICE_LOCATION, VR::DS, &at.to_string()),
@@ -1158,8 +1139,13 @@ fn twins(one: Twin, two: Twin) -> TempDir {
 fn anat_names(root: &Path) -> Vec<String> {
     files_under(root)
         .into_iter()
-        .filter(|f| f.ends_with("_T1w.nii.gz"))
+        .filter(|f| f.contains("/anat/") && f.ends_with(".nii.gz"))
         .collect()
+}
+
+/// What a name says before its suffix.
+fn before_suffix(name: &str) -> &str {
+    name.rsplit_once('_').map(|(head, _)| head).unwrap_or(name)
 }
 
 fn review_kinds(reg: &mut Registry) -> Vec<String> {
@@ -1219,9 +1205,10 @@ fn shared_differs(reg: &mut Registry) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// A pair that is not a rescan: no BIDS name for either, nothing numbered,
-/// nothing named by text, and one question saying what differs.
-fn refused_with(one: Twin, two: Twin, differs: serde_json::Value) {
+/// A pair that is not a rescan and that nothing a name may spell separates:
+/// both keep a BIDS name, told apart by a plain number inside `acq-` that is
+/// never a run, nothing named by text, and a question only when `asked`.
+fn numbered_with(one: Twin, two: Twin, differs: serde_json::Value, asked: bool) {
     let Some(converter) = converter() else { return };
     let source = twins(one, two);
     let home_dir = TempDir::new("bids-home");
@@ -1231,14 +1218,39 @@ fn refused_with(one: Twin, two: Twin, differs: serde_json::Value) {
     assert_eq!(report.shared_names, 1, "{report:?}");
     assert_eq!(report.repeats, 0, "{report:?}");
     assert_eq!(report.not_repeats, 2, "{report:?}");
+    assert_eq!(report.numbered, 2, "{report:?}");
     let names = anat_names(out.path());
-    assert!(names.is_empty(), "neither has a BIDS name: {names:?}");
+    assert_eq!(names.len(), 2, "both have a BIDS name: {names:?}");
+    assert!(
+        names.iter().any(|n| before_suffix(n).ends_with('1'))
+            && names.iter().any(|n| before_suffix(n).ends_with('2')),
+        "the number, in acq-: {names:?}"
+    );
+    assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
     let written = files_under(out.path());
+    assert!(
+        written.iter().all(|f| !f.starts_with("sourcedata/")),
+        "nothing is refused: {written:?}"
+    );
     assert!(
         written.iter().all(|f| !f.contains("Text")),
         "no name rests on text: {written:?}"
     );
-    assert_eq!(shared_differs(&mut reg), [differs]);
+    assert!(report.decided.iter().all(|d| {
+        d.marks.len() == 1
+            && d.marks[0].property == "number"
+            && d.differs
+                == differs
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+    }));
+    match asked {
+        true => assert_eq!(shared_differs(&mut reg), [differs]),
+        false => assert!(shared_differs(&mut reg).is_empty()),
+    }
     assert!(
         !review_kinds(&mut reg).contains(&"release.named_by_text".to_string()),
         "and no text question is raised"
@@ -1284,13 +1296,14 @@ fn one_protocol_measured_twice_is_numbered_in_the_order_it_was_made() {
 }
 
 #[test]
-fn a_pair_whose_series_description_differs_is_asked_about_and_not_numbered() {
+fn a_pair_whose_series_description_differs_is_numbered_and_never_named_by_it() {
     // Record 38: inside one session a rescan's texts are identical. The text
     // makes no name; it refuses one, and a person decides.
-    refused_with(
+    numbered_with(
         twin("t1_mprage_sag", "T1 MPRAGE"),
         twin("t1_mprage_sag_iso", "T1 MPRAGE"),
         serde_json::json!(["the series description"]),
+        false,
     );
 }
 
@@ -1298,10 +1311,11 @@ fn a_pair_whose_series_description_differs_is_asked_about_and_not_numbered() {
 fn the_counter_a_scanner_welds_on_a_rerun_step_is_a_different_text() {
     // Record 37 folded the counter away; record 38 compares the texts as they
     // were written, less case and whitespace.
-    refused_with(
+    numbered_with(
         twin("t1_mprage_sag", "T1 MPRAGE"),
         twin("t1_mprage_sag", "T1 MPRAGE 2"),
         serde_json::json!(["the protocol name"]),
+        false,
     );
 }
 
@@ -1314,17 +1328,23 @@ fn two_stations_that_differ_only_in_position_are_two_acquisitions() {
         first_slice: -199.0,
         ..upper
     };
-    refused_with(upper, lower, serde_json::json!(["where it sits"]));
+    numbered_with(upper, lower, serde_json::json!(["where it sits"]), false);
 }
 
 #[test]
-fn two_series_made_at_one_moment_are_asked_about() {
+fn two_series_made_at_one_moment_are_numbered_and_asked_about() {
     // One acquisition written twice is not a rescan, whatever its UIDs.
     let one = Twin {
         acquired: Some("102000"),
         ..twin("t1_mprage_sag", "T1 MPRAGE")
     };
-    refused_with(one, one, serde_json::json!(["acquired at the same moment"]));
+    // The one case the engine sees nothing in: numbered, and asked about.
+    numbered_with(
+        one,
+        one,
+        serde_json::json!(["acquired at the same moment"]),
+        true,
+    );
 }
 
 #[test]
@@ -1340,5 +1360,158 @@ fn two_sagittal_stations_that_share_every_slice_location_are_two_acquisitions() 
         sagittal_at: Some(-200.0),
         ..upper
     };
-    refused_with(upper, lower, serde_json::json!(["where it sits"]));
+    numbered_with(upper, lower, serde_json::json!(["where it sits"]), false);
+}
+
+/// Release one source tree into a BIDS tree under the informative mode.
+fn released_informative(
+    source: &TempDir,
+    home_dir: &TempDir,
+    out: &TempDir,
+    converter: &nils_release::bids::convert::Converter,
+) -> (Registry, run::Report) {
+    let (_home, mut reg) = registry(home_dir, source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(converter),
+    );
+    s.naming = nils_release::name::Naming::Informative;
+    let report = run::run(&mut reg, &s).unwrap();
+    (reg, report)
+}
+
+#[test]
+fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
+    // Wave 7a §8.1, Nima's example: two scans of one protocol step, one cut
+    // at 1 mm and one at 3 mm. Same name before; refused before; now each
+    // says its thickness, in `acq-` in the BIDS mode and as `diff-` in the
+    // informative one.
+    let Some(converter) = converter() else { return };
+    let thin = Twin {
+        acquired: Some("100500"),
+        ..twin("t1_mprage_sag", "T1 MPRAGE")
+    };
+    let thick = Twin {
+        acquired: Some("102000"),
+        thickness: "3.0",
+        ..thin
+    };
+
+    let source = twins(thin, thick);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+    let names = anat_names(out.path());
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(
+        names.iter().any(|n| n.ends_with("1mm_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("3mm_T1w.nii.gz")),
+        "{names:?}"
+    );
+    assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
+    assert_eq!(report.numbered, 0, "{report:?}");
+    assert!(shared_differs(&mut reg).is_empty());
+    let marks: Vec<String> = report
+        .decided
+        .iter()
+        .flat_map(|d| {
+            d.marks
+                .iter()
+                .map(|m| format!("{}={}", m.property, m.value))
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        ["SliceThickness=1", "SliceThickness=3"],
+        "{report:?}"
+    );
+
+    let source = twins(thin, thick);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_reg, _) = released_informative(&source, &home_dir, &out, &converter);
+    let names = anat_names(out.path());
+    assert!(
+        names
+            .iter()
+            .any(|n| n.ends_with("_diff-SliceThickness1_T1w.nii.gz"))
+            && names
+                .iter()
+                .any(|n| n.ends_with("_diff-SliceThickness3_T1w.nii.gz")),
+        "{names:?}"
+    );
+    // The standard has no `diff-`, so the tree says which files carry it.
+    let ignore = std::fs::read_to_string(out.path().join(".bidsignore")).unwrap();
+    for n in &names {
+        let stem = n.trim_end_matches(".nii.gz");
+        assert!(ignore.contains(&format!("{stem}.*")), "{ignore}");
+    }
+}
+
+#[test]
+fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
+    // Wave 7a §8.1: two stations of one spine prescription that nothing a
+    // name may spell separates are `_1` and `_2` in the informative mode.
+    let Some(converter) = converter() else { return };
+    let upper = twin("t1_mprage_sag", "T1 MPRAGE");
+    let lower = Twin {
+        first_slice: -199.0,
+        ..upper
+    };
+    let source = twins(upper, lower);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_reg, report) = released_informative(&source, &home_dir, &out, &converter);
+    let names = anat_names(out.path());
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(
+        names.iter().any(|n| n.ends_with("_1_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("_2_T1w.nii.gz")),
+        "{names:?}"
+    );
+    assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
+    assert_eq!(report.numbered, 2, "{report:?}");
+}
+
+#[test]
+fn two_rescans_beside_a_different_scan_stay_runs_and_the_third_says_why() {
+    // Wave 7a §8.1, rule 1 inside rule 3: three series want one name; two
+    // are one acquisition made again and the third is cut thicker. The
+    // thickness goes on first, and the two that still share a name are
+    // measured again and are runs.
+    let Some(converter) = converter() else { return };
+    let first = Twin {
+        acquired: Some("100500"),
+        ..twin("t1_mprage_sag", "T1 MPRAGE")
+    };
+    let again = Twin {
+        acquired: Some("101500"),
+        ..first
+    };
+    let thick = Twin {
+        acquired: Some("103000"),
+        thickness: "3.0",
+        ..first
+    };
+    let source = scans(&[first, again, thick]);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+    let names = anat_names(out.path());
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert!(
+        names.iter().any(|n| n.ends_with("1mm_run-1_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("1mm_run-2_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("3mm_T1w.nii.gz")),
+        "{names:?}"
+    );
+    assert_eq!(report.shared_names, 1, "{report:?}");
+    assert_eq!(report.repeats, 2, "{report:?}");
+    assert_eq!(report.numbered, 0, "{report:?}");
+    assert!(shared_differs(&mut reg).is_empty());
 }

@@ -80,7 +80,16 @@ pub struct Name {
     /// which the release writes as the `aslcontext.tsv` beside the image.
     /// Only ever on suffix `asl`.
     pub aslcontext: Option<String>,
+    /// Wave 7a §8.1: the informative mode's last fallback, a plain number
+    /// spelled `_<n>` before the suffix and never called a run. Always `None`
+    /// in the BIDS mode, which puts the number into `acq-`.
+    pub number: Option<i64>,
 }
+
+/// The entity the informative mode names a difference with (Wave 7a §8.1).
+/// Not the standard's, so it is spelled after every entity the standard has
+/// and only ever in the informative mode.
+pub const DIFF: &str = "diff";
 
 /// Why a stack has no BIDS name.
 ///
@@ -105,14 +114,6 @@ pub enum Why {
     Missing(&'static str, String),
     /// `func` requires `task`, and no rule can invent one (§9.2).
     NoTask,
-    /// Record 37 S2. Two or more stacks of one subject, session and datatype
-    /// built this same name, and they are not one acquisition done twice, so
-    /// there is no honest name here: `run-` would claim a rescan that never
-    /// happened, and a counter of ours would claim nothing at all while
-    /// looking exactly like one. `differs` is what
-    /// [`super::repeat::one_acquisition`] found between them, which is also
-    /// the evidence a pack extension would need.
-    Shared { others: usize, differs: String },
 }
 
 impl std::fmt::Display for Why {
@@ -129,11 +130,6 @@ impl std::fmt::Display for Why {
             Why::NoTask => {
                 f.write_str("func requires task and nobody has said what the subject was doing")
             }
-            Why::Shared { others, differs } => write!(
-                f,
-                "it would share one BIDS name with {others} other stack(s) of this session: \
-                 {differs}"
-            ),
         }
     }
 }
@@ -148,7 +144,6 @@ impl Why {
             Why::NotInSchema(_, _) => "not_in_schema",
             Why::Missing(_, _) => "missing_entity",
             Why::NoTask => "no_task",
-            Why::Shared { .. } => "shared_name",
         }
     }
 }
@@ -311,6 +306,7 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
         entities,
         refused,
         aslcontext: named.aslcontext.clone().filter(|_| named.suffix == "asl"),
+        number: None,
     })
 }
 
@@ -346,6 +342,9 @@ impl Name {
         for (key, value) in &self.entities {
             let name = schema::entity(key).map(|e| e.name).unwrap_or(key);
             out.push_str(&format!("_{name}-{value}"));
+        }
+        if let Some(n) = self.number {
+            out.push_str(&format!("_{n}"));
         }
         out.push('_');
         out.push_str(self.suffix);
@@ -385,16 +384,48 @@ impl Name {
             .collect();
         have.push(("run", n.to_string()));
         let mut out = self.clone();
-        out.entities = schema::ENTITIES
-            .iter()
-            .filter_map(|e| {
-                have.iter()
-                    .find(|(k, _)| *k == e.key)
-                    .map(|(k, v)| (*k, v.clone()))
-            })
-            .collect();
+        out.entities = ordered(have);
         Some(out)
     }
+
+    /// Carry one more thing that tells this name from the names beside it
+    /// (Wave 7a §8.1), in the mode's own spelling: inside `acq-` in the BIDS
+    /// mode, which admits no new entity, and as `diff-` or the plain `_<n>`
+    /// in the informative mode.
+    pub fn marked(&self, mark: &super::separate::Mark, naming: crate::name::Naming) -> Name {
+        use super::separate::By;
+        let mut out = self.clone();
+        let (key, token) = match (naming, mark.by) {
+            (crate::name::Naming::Informative, By::Number) => {
+                out.number = mark.value.parse().ok();
+                return out;
+            }
+            (crate::name::Naming::Informative, _) => (DIFF, &mark.informative),
+            (crate::name::Naming::Bids, _) => ("acquisition", &mark.bids),
+        };
+        let mut have = out.entities.clone();
+        match have.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, value)) => value.push_str(token),
+            None => have.push((key, token.clone())),
+        }
+        out.entities = ordered(have);
+        out
+    }
+}
+
+/// Entities in the standard's order, then the informative mode's `diff-`,
+/// which the standard does not have and so comes after all of them.
+fn ordered(have: Vec<(&'static str, String)>) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = schema::ENTITIES
+        .iter()
+        .filter_map(|e| {
+            have.iter()
+                .find(|(k, _)| *k == e.key)
+                .map(|(k, v)| (*k, v.clone()))
+        })
+        .collect();
+    out.extend(have.into_iter().filter(|(k, _)| *k == DIFF));
+    out
 }
 
 /// Everything that describes the acquisition and is not a suffix or an entity,

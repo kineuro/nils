@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A BIDS release is never refused for a name conflict. Where two or more stacks of one session build one BIDS name and are not one acquisition made again, each now carries what separates it instead of going to `sourcedata/`: the value of a classification axis where they differ on one, otherwise the measured property and its value (the slice thickness, the repetition time, the matrix and so on), and as the last fallback a plain number, which is never a `run-`. In the BIDS naming mode all of it goes into the `acq-` label (`acq-BrainAx2DFLAIR3mm`, `acq-BrainAx3DMPRAGE2`); in the informative mode a difference is a `diff-` label (`diff-SliceThickness3`) and the number a plain `_2` before the suffix, and the tree's `.bidsignore` names the files that carry them. True repeats keep `run-` as before. No text, such as a protocol name or a series description, ever makes a name. The release's report lists every name a difference or a number decided, with the property and the values, and the `README` says how many there are. A `release.shared_name` review item is raised only where the stacks differ in nothing the engine can see (no fingerprint, or one moment written twice) and are not a repeat.
+
 ## [1.0.0-alpha.79] - 2026-10-06
 
 The MRI pack is 1.0.1: certificate 2's rule gaps and three conventions settled by deep research, on top of the certified pack 1.0.0. 1.0.1 is not certified; it is shown by an archive replay (28 of 546,440 stacks move) and by every earlier reference read (10 settled cells fixed, none broken), and it needs a fresh read before it may claim the certificate. After updating from alpha.77 or alpha.78, a reclassify is all that is needed: no re-read and no fingerprint. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.

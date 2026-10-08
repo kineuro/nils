@@ -223,7 +223,8 @@ pub fn bidsignore(lines: &[String]) -> String {
     out
 }
 
-/// Record 37 S2: the three numbers behind every `run-` index in the tree.
+/// Record 37 S2 and Wave 7a §8.1: the numbers behind every `run-` index and
+/// every name a difference or a number decided.
 ///
 /// In the `README` because the reader of a tree is exactly the person a false
 /// `run-2` fools: a validator passes it, and nothing else in a BIDS dataset
@@ -234,8 +235,12 @@ pub struct Repeats {
     pub names: i64,
     /// Stacks under those names that are one acquisition measured again.
     pub repeats: i64,
-    /// Stacks that are not, and have no name in this tree.
-    pub refused: i64,
+    /// Stacks that are not, told apart by what differs or by a number.
+    pub separated: i64,
+    /// Of those, the ones only the plain fallback number told apart.
+    pub numbered: i64,
+    /// How the names spell a difference.
+    pub naming: crate::name::Naming,
 }
 
 /// The `README`, which BIDS requires and which is the one file in the tree
@@ -297,15 +302,26 @@ pub fn readme(
     // until this was measured two thirds of them were a different acquisition
     // wearing one name. So the tree says what its own indices are worth.
     if repeats.names > 0 {
+        let (difference, number) = match repeats.naming {
+            crate::name::Naming::Bids => (
+                "the value of the axis or the property that differs, added to `acq-`",
+                "a plain number added to `acq-`",
+            ),
+            crate::name::Naming::Informative => (
+                "a `diff-` label naming the axis or the property and its value",
+                "a plain `_<n>` before the suffix",
+            ),
+        };
         let _ = writeln!(
             out,
             "## What `run-` means here\n\n\
              {} name(s) here were built by more than one stack. {} of those stacks are \
              measurably one acquisition made again, which is what `run-` says, and they are \
-             told apart by it. {} are not, so they have no name in this tree at all: they are \
-             under `sourcedata/` with their informative names, and each carries a question \
-             saying what differs. A `run-` index in this tree is never a counter.\n",
-            repeats.names, repeats.repeats, repeats.refused
+             told apart by it. {} are not, and each carries what separates it: {difference}. \
+             {} of them differ in nothing a name may spell and carry {number}, which is never \
+             a run. The release's report lists every such name with what decided it. A `run-` \
+             index in this tree is never a counter.\n",
+            repeats.names, repeats.repeats, repeats.separated, repeats.numbered
         );
     }
     out.push_str(
@@ -471,7 +487,9 @@ mod tests {
             Repeats {
                 names: 2,
                 repeats: 2,
-                refused: 3,
+                separated: 3,
+                numbered: 1,
+                naming: crate::name::Naming::Bids,
             },
         );
         assert!(!text.contains("What is not here"), "{text}");
@@ -483,6 +501,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("never a counter"), "{text}");
+        // Wave 7a §8.1: nothing is refused, and the number is never a run.
+        assert!(text.contains("3 are not, and each carries"), "{text}");
+        assert!(text.contains("added to `acq-`"), "{text}");
+        assert!(text.contains("1 of them differ in nothing"), "{text}");
     }
 
     #[test]

@@ -6010,12 +6010,13 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["shape"]),
             s(&e["place"])
         ),
-        // Record 37 S2: a BIDS name more than one acquisition wanted. What a
-        // person is asked is which of them it belongs to, or whether the pack
-        // needs an axis for what differs.
+        // Record 37 S2 and Wave 7a §8.1: a BIDS name more than one stack
+        // wanted where the engine sees no difference and they are not a
+        // repeat. They are named with a plain number; what a person is asked
+        // is what they are.
         "release.shared_name" => format!(
-            "{} stack(s) would share one {} name and are not repeats of one another: {}; they \
-             are in sourcedata/ under their informative names",
+            "{} stack(s) share one {} name, are not repeats of one another and differ in \
+             nothing the engine can see: {}; they carry a plain number",
             e["stacks"],
             s(&e["suffix"]),
             s(&e["why"])
@@ -9909,9 +9910,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
                 report.repeats
             );
             println!(
-                "      {:>10}   stack(s) that are not: no BIDS name, in sourcedata/ under their \
-                 informative names, each a review item",
-                report.not_repeats
+                "      {:>10}   stack(s) that are not, named by what differs",
+                report.not_repeats - report.numbered
+            );
+            println!(
+                "      {:>10}   stack(s) nothing spellable separates, named by a plain number",
+                report.numbered
             );
         }
         for (why, n) in &report.unconvertible {
