@@ -272,8 +272,16 @@ jobs:
               "${{ runner.os }}-${{ runner.arch }}" --stage fingerprint
           python3 benches/gate.py "$RUNNER_TEMP/classify.json" benches/baseline.json \
               "${{ runner.os }}-${{ runner.arch }}" --stage classify
+      # Wave 7a §8.2: the official BIDS validator runs under Deno, at the
+      # version `tools/release-check/bids-validator.sh` pins, and the gate
+      # holds every BIDS tree it writes to 0 errors in both naming modes.
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.7
       # Wave 3 §12. Its own tree, its own registry, and every bar.
       - name: the release gate
+        env:
+          NILS_GATE_VALIDATOR: required
         run: tools/release-check/gate.sh "$RUNNER_TEMP/release-gate"
 
   build:
