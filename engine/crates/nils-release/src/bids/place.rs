@@ -50,9 +50,10 @@ pub enum Localizers {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Synthetic {
     /// In the raw tree, under the suffix its contrast gives it.
-    #[default]
     Anat,
-    /// In `derivatives/nils/`, with everything else that was computed.
+    /// In `derivatives/nils/`, with everything else that was computed: the
+    /// default since record 55 C4, after the 2026-10-08 naming research.
+    #[default]
     Derivatives,
 }
 
@@ -161,6 +162,7 @@ fn is_derived(disposition: Option<&str>) -> bool {
 pub fn route(
     disposition: Option<&str>,
     synthetic: bool,
+    derived: bool,
     named: &Result<super::name::Name, Why>,
     options: Options,
 ) -> Route {
@@ -179,6 +181,12 @@ pub fn route(
         return Route::SourceData;
     }
     if synthetic && options.synthetic == Synthetic::Derivatives {
+        return Route::Derivatives;
+    }
+    // Record 55 C4, after the naming research: raw BIDS admits none of the
+    // projections, reformats and perfusion maps the pack lists (`derived`),
+    // and no reformat at all, so they are derivatives with `desc-`.
+    if derived || disposition == Some("reformat") {
         return Route::Derivatives;
     }
     match named {
@@ -203,7 +211,6 @@ mod tests {
             refused: Vec::new(),
             aslcontext: None,
             acq: Vec::new(),
-            latent: Vec::new(),
         })
     }
 
@@ -224,18 +231,24 @@ mod tests {
                 localizers: choice,
                 ..Options::default()
             };
-            assert_eq!(route(Some("scout"), false, &named(), o), expected);
+            assert_eq!(route(Some("scout"), false, false, &named(), o), expected);
         }
         let dropped = Options {
             localizers: Localizers::Drop,
             ..Options::default()
         };
-        assert!(!route(Some("scout"), false, &named(), dropped).is_written());
+        assert!(!route(Some("scout"), false, false, &named(), dropped).is_written());
     }
 
     #[test]
     fn a_working_scan_is_the_source_and_stays_dicom() {
-        let r = route(Some("working_scan"), false, &named(), Options::default());
+        let r = route(
+            Some("working_scan"),
+            false,
+            false,
+            &named(),
+            Options::default(),
+        );
         assert_eq!(r, Route::SourceData);
         assert!(r.is_source());
     }
@@ -246,12 +259,9 @@ mod tests {
         // cannot name is a hole in the standard, and a release has to admit to
         // it rather than file it under `derivatives`.
         assert_eq!(
-            route(Some("reformat"), false, &unnamed(), Options::default()),
-            Route::Derivatives
-        );
-        assert_eq!(
             route(
-                Some("scanner_derived"),
+                Some("reformat"),
+                false,
                 false,
                 &unnamed(),
                 Options::default()
@@ -259,7 +269,23 @@ mod tests {
             Route::Derivatives
         );
         assert_eq!(
-            route(Some("acquisition"), false, &unnamed(), Options::default()),
+            route(
+                Some("scanner_derived"),
+                false,
+                false,
+                &unnamed(),
+                Options::default()
+            ),
+            Route::Derivatives
+        );
+        assert_eq!(
+            route(
+                Some("acquisition"),
+                false,
+                false,
+                &unnamed(),
+                Options::default()
+            ),
             Route::Nowhere(Why::NoSuffix)
         );
     }
@@ -269,7 +295,13 @@ mod tests {
         // An ADC map is `dwi/ADC` in raw BIDS, so being derived is not on its
         // own a reason to leave.
         assert_eq!(
-            route(Some("scanner_derived"), false, &named(), Options::default()),
+            route(
+                Some("scanner_derived"),
+                false,
+                false,
+                &named(),
+                Options::default()
+            ),
             Route::Raw
         );
     }
@@ -281,12 +313,46 @@ mod tests {
             ..Options::default()
         };
         assert_eq!(
-            route(Some("scanner_derived"), true, &named(), purist),
+            route(Some("scanner_derived"), true, false, &named(), purist),
+            Route::Derivatives
+        );
+        // The default since record 55 C4: a synthetic contrast is computed.
+        assert_eq!(
+            route(
+                Some("scanner_derived"),
+                true,
+                false,
+                &named(),
+                Options::default()
+            ),
+            Route::Derivatives
+        );
+        let anat = Options {
+            synthetic: Synthetic::Anat,
+            ..Options::default()
+        };
+        assert_eq!(
+            route(Some("scanner_derived"), true, false, &named(), anat),
+            Route::Raw
+        );
+    }
+
+    #[test]
+    fn a_reformat_or_a_listed_construct_is_a_derivative_even_with_a_name() {
+        // Record 55 C4, after the naming research.
+        assert_eq!(
+            route(Some("reformat"), false, false, &named(), Options::default()),
             Route::Derivatives
         );
         assert_eq!(
-            route(Some("scanner_derived"), true, &named(), Options::default()),
-            Route::Raw
+            route(
+                Some("scanner_derived"),
+                false,
+                true,
+                &named(),
+                Options::default()
+            ),
+            Route::Derivatives
         );
     }
 
@@ -294,6 +360,7 @@ mod tests {
     fn nowhere_carries_the_reason() {
         let r = route(
             Some("acquisition"),
+            false,
             false,
             &Err(Why::NoTask),
             Options::default(),
@@ -314,6 +381,6 @@ mod tests {
             Some(Synthetic::Derivatives)
         );
         assert_eq!(Localizers::default().name(), "sourcedata");
-        assert_eq!(Synthetic::default().name(), "anat");
+        assert_eq!(Synthetic::default().name(), "derivatives");
     }
 }

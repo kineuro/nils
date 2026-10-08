@@ -82,8 +82,10 @@ suffix:
     PC-MRA: {datatype: anat, suffix: angio}
     BOLD-EPI: {datatype: func, suffix: bold}
     ASL: {datatype: perf, suffix: asl}
-  modifier:
-    FLAIR: {datatype: anat, suffix: FLAIR}
+  # No modifier names a suffix (record 55 C4, Nima 2026-10-08: "FLAIR is
+  # always a modifier"). The suffix is the base contrast: a T2 FLAIR is
+  # `acq-...+FLAIR+..._T2w` and a T1 FLAIR `..._T1w`, as STIR, DIR, PSIR and
+  # FatSat are, although BIDS defines `FLAIR` for the T2-weighted one.
   base:
     T1w: {datatype: anat, suffix: T1w}
     T2w: {datatype: anat, suffix: T2w}
@@ -137,12 +139,16 @@ entities:
       ASLRecon: ASLRecon
       BOLDRecon: BOLDRecon
       Calibration: Calibration
+    # A Dixon reconstruction is `rec-water`, `rec-fat`, `rec-inphase` or
+    # `rec-outphase` of the base contrast (record 55 C4, after the naming
+    # research). The projections and reformats (MIP, MinIP, MPR, StdDevProj)
+    # are not here: they go to `derivatives/` (below).
     construct:
-      MIP: MIP
-      MinIP: MinIP
-      StdDevProj: StdDev
+      Water: water
+      Fat: fat
+      InPhase: inphase
+      OutPhase: outphase
       StdDevTime: StdDevTime
-      MPR: MPR
       UniformDenoised: Denoised
       Filtered: Filtered
       ORIG: ORIG
@@ -154,13 +160,15 @@ entities:
 
 # Everything else that describes the acquisition, joined into `acq-`.
 #
-# A group with no `modes` is spelled in the full naming style. A group that
+# Record 55 C4 (Nima, 2026-10-08): a group with no `modes` is spelled in both
+# BIDS naming styles, a group that says `modes: [full]` in the full style
+# only. So the minimal style's `acq-` is always 2D or 3D, the modifiers and
+# the technique, and the full style's every slot the stack has. A group that
 # says `modes: [separate]` is never spelled as a slot, because the standard
 # has an entity for it and a name that said it twice would be a name arguing
 # with itself (record 37 S7); its tokens are there for the one case they are
 # needed, two stacks of a session that differ only on that axis (Wave 7a
-# section 8.1). The minimal naming style spells one slot, the first that
-# differs, and only where two stacks would otherwise share a name.
+# section 8.1).
 #
 # A BIDS label is `[0-9a-zA-Z+]+`, so a token is spelled here rather than
 # derived by stripping characters out of a value: `ME-GRE` and `MEGRE` are the
@@ -171,14 +179,16 @@ entities:
 # joined in** and an order that depends on how a reader happens to sort its
 # keys is not an order. It is v0's slot order (record 55 C4, 2026-10-08):
 # body part, orientation, base, 2D or 3D, modifiers, technique, acceleration,
-# construct. The engine joins the tokens as they are, each with its own
-# capital (`Ax2DIRTSE`), and leaves out whatever the suffix already says (no
-# `FLAIR` in `acq-` when the suffix is `FLAIR`). The pack has no acceleration
-# axis yet, so that slot is empty. The quality flags have no slot in v0 and
-# come last. Every axis is in the sidecar's `NILS` object whatever a name
-# spells.
+# construct. The engine joins the tokens with `+`, the one separator a BIDS
+# label admits (Nima: "+ is ok since that is our only option here"), and
+# leaves out a token that is the suffix itself (`MEGRE` on `_MEGRE`, `ASL`
+# on `_asl`); `TOFMRA` stays on `_angio`, which says nothing of the
+# technique. The pack has no acceleration axis yet, so that slot is empty.
+# The quality flags have no slot in v0 and come last. Every axis is in the
+# sidecar's `NILS` object whatever a name spells.
 acq:
   - from: body_part
+    modes: [full]
     # Where in the body, which BIDS has no entity for and which a brain and a
     # spine acquisition of one session need to tell them apart. v0's prefix
     # (record 55 C4): the brain is implicit and adds nothing, the spine is
@@ -190,6 +200,7 @@ acq:
       neck: Neck
       spine: SC
   - from: orientation
+    modes: [full]
     # The words the fingerprint stores, which are the standard's own and not
     # the abbreviations section 9.1 renders them as: a token here is matched
     # against a column, and `Ax` is what a name says rather than what a row
@@ -264,6 +275,7 @@ acq:
       GRE: GRE
       EPI: EPI
   - from: construct
+    modes: [full]
     # Deliberately not tokens here: `ND`, the four complex parts and the six
     # reconstruction kinds. The first says only that a vendor's distortion
     # correction was off, which every other stack of the series also says; the
@@ -271,8 +283,23 @@ acq:
     # `rec-`, and either would say it twice. The last two are below, as
     # tokens a name conflict may need, and the sidecar's `NILS` object
     # carries all of them.
+    # Nor the perfusion maps and the synthetic contrasts: they are
+    # derivatives, and their `desc-` says it (record 55 C4).
     tokens:
       MD: MD
+      Velocity: Velocity
+      MyelinMap: MyelinMap
+      SWI: SWI
+  - from: construct
+    modes: [separate]
+    # The complex part, the reconstruction kinds, the Dixon images, the
+    # projections and the derivative constructs, which the BIDS name carries
+    # as `part-`, `rec-` or `desc-`.
+    tokens:
+      Water: Water
+      Fat: Fat
+      InPhase: InPhase
+      OutPhase: OutPhase
       CBF: CBF
       CBV: CBV
       MTT: MTT
@@ -280,22 +307,10 @@ acq:
       TTP: TTP
       PBP: PBP
       K2: K2
-      Velocity: Velocity
-      Water: Water
-      Fat: Fat
-      InPhase: InPhase
-      OutPhase: OutPhase
       SyntheticT1w: SynT1w
       SyntheticT2w: SynT2w
       SyntheticFLAIR: SynFLAIR
       SyntheticPDw: SynPDw
-      MyelinMap: MyelinMap
-      SWI: SWI
-  - from: construct
-    modes: [separate]
-    # The complex part and the reconstruction kinds, which the BIDS name
-    # carries as `part-` and `rec-`.
-    tokens:
       Magnitude: Mag
       Phase: Phase
       Real: Real
@@ -332,6 +347,7 @@ acq:
       BOLDRecon: BOLDRecon
       Calibration: Calibration
   - from: quality
+    modes: [full]
     # What the file says is wrong with its own image. It belongs in the name
     # because two stacks that agree on everything else and disagree here are
     # not interchangeable: the survey found `NAVAIL` separating 93 colliding
@@ -348,9 +364,21 @@ acq:
 # these in raw `anat/`; a purist puts every one in `derivatives/`. Both are
 # defensible, so a release chooses and this says which stacks the choice is
 # about.
+#
+# Record 55 C4: the synthetic contrasts only, not every SyMRI image, so that
+# its quantitative maps (`T1map`, `PDmap`, ...) stay in raw `anat/` as BIDS
+# permits, and the synthetic contrasts go to `derivatives/` by default.
 synthetic:
-  provenance: [SyMRI]
-  construct: [SyntheticT1w, SyntheticT2w, SyntheticFLAIR, SyntheticPDw]
+  construct:
+    [SyntheticT1w, SyntheticT2w, SyntheticFLAIR, SyntheticPDw, SyntheticSTIR, SyntheticDIR, SyntheticPSIR]
+
+# Constructs whose stacks are derivatives whatever a release chooses, named
+# there with `desc-<construct>` (record 55 C4, after the 2026-10-08 naming
+# research): raw BIDS admits the scanner's diffusion maps, the qMRI maps and
+# `UNIT1` among derived images, and none of these. The projections and
+# reformats, and the perfusion maps of ASL and DSC.
+derivatives:
+  construct: [MIP, MinIP, MPR, StdDevProj, CBF, CBV, MTT, Tmax, TTP, PBP, K2]
 
 # What the subject was doing, which is the one thing here that no rule sets.
 #

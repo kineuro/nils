@@ -1275,10 +1275,12 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                     // style, `separate` only where a name conflict needs it.
                     // The earlier pair's words still load, and are never
                     // spelled.
-                    if !["full", "separate", "bids", "informative"].contains(&mode.as_str()) {
+                    if !["full", "minimal", "separate", "bids", "informative"]
+                        .contains(&mode.as_str())
+                    {
                         return Err(Error::at(
                             &at,
-                            format!("{mode} is not a naming mode: full or separate"),
+                            format!("{mode} is not a naming mode: full, minimal or separate"),
                         )
                         .in_file(&f.path, Some(&f.source)));
                     }
@@ -1321,6 +1323,16 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
             for value in f.blame(yaml::texts(v, &at))? {
                 check(axis, &value, &at)?;
                 into_list.push(value);
+            }
+        }
+    }
+    if let Some(v) = top.get("derivatives") {
+        let dm = f.blame(yaml::obj(v, "bids.derivatives"))?;
+        if let Some(v) = dm.get("construct") {
+            let at = "bids.derivatives.construct".to_string();
+            for value in f.blame(yaml::texts(v, &at))? {
+                check("construct", &value, &at)?;
+                into.derivative_construct.push(value);
             }
         }
     }

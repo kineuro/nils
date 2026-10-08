@@ -1898,6 +1898,7 @@ impl Planner<'_> {
             Layout::Bids => crate::bids::place::route(
                 placed.and_then(|p| p.disposition.as_deref()),
                 placed.is_some_and(|p| p.synthetic),
+                placed.is_some_and(|p| p.derived),
                 &placed
                     .map(|p| p.bids.clone())
                     .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
@@ -2105,10 +2106,22 @@ fn place_of(
         Route::SourceData => Place::dir(format!("sourcedata/{session}/{folder}/{stem}")),
         // A dataset in its own right, so the tree stays valid and the data
         // stays present.
-        Route::Derivatives => Place::file(
-            format!("derivatives/nils/{session}/{folder}"),
-            unofficial(code, label, stem),
-        ),
+        // Record 55 C4: the name the raw tree would give it, with `desc-`,
+        // which BIDS keeps for derivatives; where the standard has no name
+        // for it, the descriptive one as `desc-` and its folder as suffix.
+        Route::Derivatives => {
+            let desc = placed.and_then(|p| p.desc.clone());
+            match placed.and_then(|p| p.bids.as_ref().ok()) {
+                Some(n) => Place::file(
+                    format!("derivatives/nils/{}", n.dir(code, label)),
+                    n.stem_with_desc(code, label, desc.as_deref().unwrap_or(stem)),
+                ),
+                None => Place::file(
+                    format!("derivatives/nils/{session}/{folder}"),
+                    derivative_stem(code, label, stem, placed.and_then(|p| p.base.as_deref())),
+                ),
+            }
+        }
         // Outside the standard, so the entity set is ours and a `.bidsignore`
         // line says the standard does not know it.
         Route::Beside(what) => Place::file(
@@ -2131,6 +2144,23 @@ fn place_of(
 /// describes an acquisition belongs, reduced to what a BIDS label may spell.
 /// Uniqueness comes from §9.1's own disambiguation, which already ran over the
 /// session as the registry holds it.
+/// A derivative the standard has no name for (record 55 C4): its descriptive
+/// name, which is unique in its folder, as `desc-`, and its base contrast as
+/// the suffix (`desc-AxSWI3DGRESWI_SWI`). Where the stack states no base,
+/// the unofficial name of §9.3.
+fn derivative_stem(code: &str, label: &str, stem: &str, base: Option<&str>) -> String {
+    let desc: String = stem.chars().filter(char::is_ascii_alphanumeric).collect();
+    let suffix: String = base
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    match (desc.is_empty(), suffix.is_empty()) {
+        (false, false) => format!("sub-{code}_ses-{label}_desc-{desc}_{suffix}"),
+        _ => unofficial(code, label, stem),
+    }
+}
+
 fn unofficial(code: &str, label: &str, stem: &str) -> String {
     let acq: String = stem
         .chars()
@@ -3539,7 +3569,7 @@ fn places(
     // then its id (record 38, S2), so that `run-1` is the one made first and
     // two runs of one version assign the same numbers.
     let mut bids_buckets: BidsBuckets = BTreeMap::new();
-    let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
+    let mut extra: HashMap<i64, Extra> = HashMap::new();
     // Record 37 S2: what the repeat test reads of each stack, kept for the
     // stacks that turn out to collide, which is the only place it is asked.
     let mut acquisitions: HashMap<i64, crate::bids::repeat::Acquisition> = HashMap::new();
@@ -3661,12 +3691,29 @@ fn places(
             provenance.as_deref(),
             &constructs.iter().map(String::as_str).collect::<Vec<_>>(),
         );
+        // Record 55 C4: what makes the stack a derivative, and the `desc-`
+        // its name takes there: a construct the pack lists, or a synthetic
+        // contrast's own construct.
+        let construct_ids: Vec<&str> = constructs.iter().map(String::as_str).collect();
+        let derived_by = pack.bids.derived_by(&construct_ids);
+        let desc = derived_by
+            .or_else(|| {
+                construct_ids
+                    .iter()
+                    .find(|c| pack.bids.synthetic_construct.iter().any(|s| s == *c))
+                    .copied()
+            })
+            .or_else(|| construct_ids.iter().find(|c| **c != "ND").copied())
+            .map(str::to_string);
         extra.insert(
             stack,
             (
                 synthetic,
                 get("disposition").map(str::to_string),
                 body_part.clone(),
+                derived_by.is_some(),
+                desc,
+                base.clone(),
             ),
         );
         let acquired_date = r.opt_text(45)?.map(str::to_string);
@@ -3743,11 +3790,29 @@ fn places(
         // A scout or a working scan never takes its BIDS name (§9.3 routes it
         // by the release's choice), so it does not share one either: a
         // localizer must not put `acq-3D` on the session's MPRAGE.
+        //
+        // A derivative (record 55 C4) shares a name only with derivatives:
+        // a MIP that shared the TOF's name would put a token on the TOF, and
+        // three MIPs of one TOF still need telling apart from each other.
+        let derivative = get("disposition") == Some("reformat")
+            || pack
+                .bids
+                .derived_by(
+                    &ids_of("construct", get("construct"))
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+                .is_some();
+        let bucket_label = match derivative {
+            true => format!("{label}#derivatives"),
+            false => label.clone(),
+        };
         if let Ok(n) = &built
             && !matches!(get("disposition"), Some("scout" | "working_scan"))
         {
             bids_buckets
-                .entry((subject, label.clone(), n.datatype))
+                .entry((subject, bucket_label, n.datatype))
                 .or_default()
                 .push((
                     (
@@ -3827,15 +3892,7 @@ fn places(
                 if first {
                     shared.names += 1;
                 }
-                settle(
-                    &group,
-                    &acquisitions,
-                    &stated,
-                    pack,
-                    naming,
-                    &mut bids,
-                    &mut shared,
-                );
+                settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
             }
             first = false;
         }
@@ -3858,8 +3915,9 @@ fn places(
                 .map(|marks| marks.into_iter().map(|m| m.map(|m| m.token)).collect())
         });
         for n in bucket.iter() {
-            let (synthetic, disposition, body_part) =
-                extra.remove(&n.stack).unwrap_or((false, None, None));
+            let (synthetic, disposition, body_part, derived, desc, base) = extra
+                .remove(&n.stack)
+                .unwrap_or((false, None, None, false, None, None));
             out.insert(
                 n.stack,
                 Placed {
@@ -3874,6 +3932,9 @@ fn places(
                         .remove(&n.stack)
                         .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
                     synthetic,
+                    derived,
+                    desc,
+                    base,
                     disposition,
                     body_part,
                 },
@@ -3885,6 +3946,18 @@ fn places(
         shared,
     })
 }
+
+/// What [`places`] keeps of a stack beside its names: whether it is a
+/// synthetic contrast, its disposition, its body part, whether a construct
+/// makes it a derivative, the `desc-` it takes there, and its base contrast.
+type Extra = (
+    bool,
+    Option<String>,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+);
 
 /// What [`places`] worked out for a run: where every stack goes, and what the
 /// collision test of record 37 S2 found.
@@ -3963,7 +4036,6 @@ fn settle(
     acquisitions: &HashMap<i64, crate::bids::repeat::Acquisition>,
     stated: &HashMap<i64, BTreeMap<String, Vec<String>>>,
     pack: &nils_pack::pack::Pack,
-    naming: crate::name::Naming,
     bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
     shared: &mut Shared,
 ) {
@@ -3998,21 +4070,6 @@ fn settle(
             }
         }
         return;
-    }
-    // The minimal style first says the first of v0's slots that differs,
-    // as the full style would have spelled it (record 55 C4).
-    if naming == crate::name::Naming::Minimal {
-        let names: Vec<crate::bids::name::Name> =
-            group.iter().filter_map(|s| name_of(bids, s)).collect();
-        if names.len() == group.len()
-            && let Some(marks) =
-                crate::bids::separate::first_slot(&names.iter().collect::<Vec<_>>(), &pack.bids)
-        {
-            for (stack, m) in group.iter().zip(marks) {
-                record(bids, shared, *stack, m, &differs);
-            }
-            return;
-        }
     }
     let said: Vec<Member> = group
         .iter()
@@ -4111,6 +4168,13 @@ struct Placed {
     bids: Result<crate::bids::name::Name, crate::bids::name::Why>,
     /// A vendor's synthetic contrast, which §9.3 lets a release place.
     synthetic: bool,
+    /// A construct the pack lists as a derivative made it one (record 55 C4).
+    derived: bool,
+    /// The `desc-` its name takes in `derivatives/`.
+    desc: Option<String>,
+    /// Its base contrast, the suffix of a derivative the standard has no
+    /// name for.
+    base: Option<String>,
     disposition: Option<String>,
     /// Where in the body, as the pack's axis states it. It is in `acq-`
     /// because names must be unique, and it is here because the standard

@@ -86,16 +86,13 @@ pub struct Name {
     /// so that a difference found later goes in its own slot rather than at
     /// the end. Empty in the minimal style until a conflict needs one.
     pub acq: Vec<(usize, String)>,
-    /// Every piece the full style would spell, whichever style was asked:
-    /// what the minimal style chooses its one token from.
-    pub latent: Vec<(usize, String)>,
 }
 
-/// What joins the pieces of an `acq-` label: nothing, so each piece keeps its
-/// own capital (`Ax2DIRTSE`). A BIDS label is `[0-9a-zA-Z+]+`, and `+` passes
-/// the official validator, but Nima found it no help to a reader (record 55
-/// C4, 2026-10-08).
-pub const ACQ_SEPARATOR: &str = "";
+/// What joins the pieces of an `acq-` label. A BIDS label is
+/// `[0-9a-zA-Z+]+` (since BIDS 1.10.1), so `+` is the one separator the
+/// standard admits, and the official validator 3.0.2 accepts it. Nima, record
+/// 55 C4, 2026-10-08: "+ is ok since that is our only option here".
+pub const ACQ_SEPARATOR: &str = "+";
 
 /// The slot of a refused entity's fact in `acq-`: after every pack group.
 pub const SLOT_REFUSED: usize = 1_000;
@@ -275,7 +272,7 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
         if !from.is_empty()
             && from
                 .iter()
-                .all(|(axis, v)| map.acq_carries(crate::name::Naming::Full.name(), axis, v))
+                .all(|(axis, v)| map.acq_carries(naming.name(), axis, v))
         {
             continue;
         }
@@ -285,19 +282,12 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
     spelled.sort();
     // Record 55 C4: what the suffix already says is not said again in the
     // BIDS name. The informative name says everything, as v0's does.
-    let said_by_suffix = map.suffix_source(
-        &facts.constructs,
-        facts.technique,
-        &facts.modifiers,
-        facts.base,
-    );
-    let mut parts = acq_label(facts, map, said_by_suffix);
+    // Record 55 C4: a token that is the suffix itself is not said twice
+    // (`MEGRE` on `_MEGRE`); one the suffix does not say stays (`TOFMRA` on
+    // `_angio`, `MP2RAGE` on `_UNIT1`).
+    let mut parts = acq_label(facts, map, naming, &named.suffix);
     for (at, token) in spelled {
         parts.push((SLOT_REFUSED + at.min(SLOT_REFUSED - 1), token));
-    }
-    let latent = parts.clone();
-    if naming == crate::name::Naming::Minimal {
-        parts.clear();
     }
     let acq = join_acq(&parts);
     if !acq.is_empty()
@@ -344,14 +334,13 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
         refused,
         aslcontext: named.aslcontext.clone().filter(|_| named.suffix == "asl"),
         acq: parts,
-        latent,
     })
 }
 
 /// A fact the schema refuses an entity for, as an `acq-` token.
 ///
 /// The entity's own word and its value, each with a capital, so that a reader
-/// of `acq-Ax2DDWIEPICeContrast` can see which entity the standard would
+/// of `acq-Ax+2D+DWIEPI+CeContrast` can see which entity the standard would
 /// not take: `ce-contrast` refused reads `CeContrast`, `part-mag` reads
 /// `PartMag`, `echo-2` reads `Echo2`. A BIDS label is `[0-9a-zA-Z+]+`, so
 /// anything else is dropped from the token rather than spelled.
@@ -384,6 +373,17 @@ impl Name {
         out.push('_');
         out.push_str(self.suffix);
         out
+    }
+
+    /// The name a derivative of this stack takes (record 55 C4): the same
+    /// entities, then `desc-<desc>`, which BIDS reserves for derivatives.
+    pub fn stem_with_desc(&self, subject: &str, session: &str, desc: &str) -> String {
+        let stem = self.stem(subject, session);
+        let label: String = desc.chars().filter(char::is_ascii_alphanumeric).collect();
+        match stem.rsplit_once('_') {
+            Some((head, suffix)) if !label.is_empty() => format!("{head}_desc-{label}_{suffix}"),
+            _ => stem,
+        }
     }
 
     /// Where in the tree it goes, under a subject and session.
@@ -466,18 +466,18 @@ fn ordered(have: Vec<(&'static str, String)>) -> Vec<(&'static str, String)> {
 fn acq_label(
     facts: &Facts,
     map: &Mapping,
-    said_by_suffix: Option<(&str, &str)>,
+    naming: crate::name::Naming,
+    suffix: &str,
 ) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (slot, group) in map.acq.iter().enumerate() {
-        if !group.in_mode(crate::name::Naming::Full.name()) {
+        if !group.in_mode(naming.name()) {
             continue;
         }
         for value in facts.axes.get(group.from.as_str()).into_iter().flatten() {
-            if said_by_suffix == Some((group.from.as_str(), *value)) {
-                continue;
-            }
-            if let Some(token) = group.tokens.get(*value) {
+            if let Some(token) = group.tokens.get(*value)
+                && !token.eq_ignore_ascii_case(suffix)
+            {
                 out.push((slot, token.clone()));
             }
         }
@@ -601,7 +601,7 @@ mod tests {
             ..Facts::default()
         };
         let n = build(&facts, &mapping(), Naming::Full).unwrap();
-        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-SpineMPRAGE_T1w");
+        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-Spine+MPRAGE_T1w");
         let mark = |by, slot, token: &str| Mark {
             by,
             property: String::new(),
@@ -615,7 +615,7 @@ mod tests {
             .marked(&mark(By::Axis, slot_of(&mapping(), "modifier"), "FatSat"));
         assert_eq!(
             n.stem("x", "1"),
-            "sub-x_ses-1_acq-SpineFatSatMPRAGE3mm2_T1w"
+            "sub-x_ses-1_acq-Spine+FatSat+MPRAGE+3mm+2_T1w"
         );
     }
 
@@ -650,7 +650,7 @@ mod tests {
         let n = build(&facts, &mapping(), Naming::Full).unwrap();
         assert_eq!(
             n.stem("x", "1"),
-            "sub-x_ses-1_acq-SpineFatSatMTMPRAGE_ce-contrast_echo-2_part-mag_T1w"
+            "sub-x_ses-1_acq-Spine+FatSat+MT+MPRAGE_ce-contrast_echo-2_part-mag_T1w"
         );
         // And `mt-` is not there, though the stack says `MT`: the schema gives
         // `mt` only to `MTR`, `MTS` and `MPM`, each computed from more than one
@@ -658,7 +658,7 @@ mod tests {
         // The fact is not lost with it: the pack puts `MT` in `acq-`, the name
         // says so, and the refusal is counted rather than passed over.
         assert!(!n.stem("x", "1").contains("mt-"));
-        assert!(n.stem("x", "1").contains("acq-SpineFatSatMTMPRAGE"));
+        assert!(n.stem("x", "1").contains("acq-Spine+FatSat+MT+MPRAGE"));
         // And the `MT` in the label is the pack's own token and not a second
         // spelling of the refusal: a fact already in the name is not said
         // twice to say it was refused.
@@ -969,41 +969,51 @@ mod tests {
             build(&facts, &mapping(), Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
-            "sub-x_ses-1_acq-MPRAGEDistorted_T1w"
+            "sub-x_ses-1_acq-MPRAGE+Distorted_T1w"
         );
     }
 
     #[test]
-    fn the_minimal_style_writes_no_acq_and_keeps_what_the_full_one_would() {
-        // Record 55 C4: the full style spells the slots in `acq-`, the
-        // minimal one none until a conflict asks for one, and both keep the
-        // pieces the full style would spell. The complex part is `part-` and
-        // the pipeline `rec-` in both.
+    fn the_minimal_style_spells_the_type_the_modifiers_and_the_technique_only() {
+        // Record 55 C4, Nima 2026-10-08: "minimal to have only acq type
+        // modifier and technique for acq- and full have all we have". The
+        // body part is a full-only group here, as in the MRI pack, and the
+        // complex part is `part-` and the pipeline `rec-` in both.
         let facts = Facts {
             intent: Some("anat"),
             base: Some("T1w"),
             technique: Some("MPRAGE"),
             provenance: Some("DTIRecon"),
             constructs: vec!["Magnitude"],
+            modifiers: vec!["FatSat"],
             axes: axes(&[
+                ("body_part", "spine"),
+                ("modifier", "FatSat"),
                 ("technique", "MPRAGE"),
                 ("construct", "Magnitude"),
                 ("provenance", "DTIRecon"),
             ]),
             ..Facts::default()
         };
+        let mut map = mapping();
+        map.acq[0].modes = vec!["full".into()];
         assert_eq!(
-            build(&facts, &mapping(), Naming::Full)
-                .unwrap()
-                .stem("x", "1"),
-            "sub-x_ses-1_acq-MPRAGE_rec-DTIRecon_part-mag_T1w"
+            build(&facts, &map, Naming::Full).unwrap().stem("x", "1"),
+            "sub-x_ses-1_acq-Spine+FatSat+MPRAGE_rec-DTIRecon_part-mag_T1w"
         );
-        let minimal = build(&facts, &mapping(), Naming::Minimal).unwrap();
         assert_eq!(
-            minimal.stem("x", "1"),
-            "sub-x_ses-1_rec-DTIRecon_part-mag_T1w"
+            build(&facts, &map, Naming::Minimal).unwrap().stem("x", "1"),
+            "sub-x_ses-1_acq-FatSat+MPRAGE_rec-DTIRecon_part-mag_T1w"
         );
-        assert_eq!(minimal.latent, vec![(2, "MPRAGE".to_string())]);
+    }
+
+    #[test]
+    fn a_derivative_keeps_the_name_and_adds_desc() {
+        let n = build(&t1w(), &mapping(), Naming::Full).unwrap();
+        assert_eq!(
+            n.stem_with_desc("x", "1", "MinIP"),
+            "sub-x_ses-1_desc-MinIP_T1w"
+        );
     }
 
     #[test]

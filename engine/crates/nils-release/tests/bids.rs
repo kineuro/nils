@@ -293,9 +293,16 @@ fn what_the_standard_admits_gets_the_standards_name() {
         names.iter().any(|n| n.contains("_T1w.nii.gz")),
         "a T1w by its suffix: {names:?}"
     );
+    // Record 55 C4: FLAIR is a modifier, in `acq-`; the suffix is the base.
     assert!(
-        names.iter().any(|n| n.contains("_FLAIR.nii.gz")),
+        names
+            .iter()
+            .any(|n| acq_of(n).contains("FLAIR") && n.ends_with("_T2w.nii.gz")),
         "and a FLAIR: {names:?}"
+    );
+    assert!(
+        names.iter().all(|n| !n.ends_with("_FLAIR.nii.gz")),
+        "never the FLAIR suffix: {names:?}"
     );
     assert!(
         names.iter().all(|n| n.starts_with("sub-")),
@@ -488,13 +495,12 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
         .collect();
     assert_eq!(now.len(), before.len());
     assert_ne!(now, before, "the tree is named differently");
-    // v0's prefix for the spine (record 55 C4), and the FLAIR is said once,
-    // by its suffix.
+    // v0's prefix for the spine (record 55 C4), and the FLAIR is a modifier.
     assert!(
-        now.iter().all(|n| n.contains("acq-SCAx")),
+        now.iter().all(|n| n.contains("acq-SC+Ax")),
         "and the new name says so: {now:?}"
     );
-    assert!(now.iter().all(|n| !acq_of(n).contains("FLAIR")), "{now:?}");
+    assert!(now.iter().all(|n| !n.ends_with("_FLAIR.nii.gz")), "{now:?}");
 }
 
 #[test]
@@ -759,7 +765,7 @@ fn the_body_part_is_in_the_name_and_in_the_sidecar() {
         .collect();
     assert!(!sidecars.is_empty(), "the converter writes a sidecar");
     for file in &sidecars {
-        assert!(file.contains("acq-SCAx"), "the name says it too: {file}");
+        assert!(file.contains("acq-SC+Ax"), "the name says it too: {file}");
         let text = std::fs::read_to_string(out.path().join(file)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(doc["BodyPart"], serde_json::Value::from("spine"), "{file}");
@@ -805,12 +811,12 @@ fn an_axis_the_pack_declares_reaches_a_name_without_the_engine_learning_it() {
 }
 
 #[test]
-fn the_full_style_spells_the_slots_and_the_minimal_one_only_what_separates() {
+fn the_full_style_spells_every_slot_and_the_minimal_one_the_type_modifiers_and_technique() {
     // Record 55 C4, ruled 2026-10-08: both styles, as a release's option.
-    // The full style spells v0's slots in `acq-` and the contrast in `ce-`
-    // only; the minimal style writes no `acq-` where nothing shares a name.
-    // Both carry everything in the sidecar's `NILS` object and the
-    // descriptive name in `scans.tsv`.
+    // The full style spells every slot without an entity in `acq-` and the
+    // contrast in `ce-` only; the minimal style's `acq-` is always 2D or 3D,
+    // the modifiers and the technique. Both carry everything in the
+    // sidecar's `NILS` object and the descriptive name in `scans.tsv`.
     let Some(converter) = converter() else { return };
     let source = tree();
     let home_dir = TempDir::new("bids-home");
@@ -865,10 +871,10 @@ fn the_full_style_spells_the_slots_and_the_minimal_one_only_what_separates() {
         "the contrast is said once, by its entity: {long:?}"
     );
     assert!(
-        short
-            .iter()
-            .all(|n| n.contains("_ce-contrast_") && !n.contains("_acq-")),
-        "nothing shares a name, so no acq-: {short:?}"
+        short.iter().all(|n| n.contains("_ce-contrast_")
+            && acq_of(n).starts_with("3D")
+            && !acq_of(n).contains("Ax")),
+        "the minimal acq- is the type, the modifiers and the technique: {short:?}"
     );
 
     // The sidecar's `NILS` object, in both.
@@ -1092,8 +1098,8 @@ fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
     assert_eq!(flair.len(), 2, "{written:?}");
     assert!(flair.iter().all(|f| !f.contains("_run-")), "{flair:?}");
     assert!(
-        flair.iter().any(|f| f.contains("4sl_FLAIR"))
-            && flair.iter().any(|f| f.contains("6sl_FLAIR")),
+        flair.iter().any(|f| f.contains("+4sl_T2w"))
+            && flair.iter().any(|f| f.contains("+6sl_T2w")),
         "the slice count, in acq-: {flair:?}"
     );
 
@@ -1117,7 +1123,12 @@ fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
         "{:?}",
         report.decided
     );
-    assert!(report.decided.iter().all(|d| d.name.contains("_FLAIR")));
+    assert!(
+        report
+            .decided
+            .iter()
+            .all(|d| d.name.contains("FLAIR") && d.name.ends_with("_T2w"))
+    );
     assert!(
         shared_differs(&mut reg).is_empty(),
         "nobody is asked about a difference the name says"
@@ -1497,8 +1508,8 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
-        names.iter().any(|n| n.ends_with("MPRAGE1mm_T1w.nii.gz"))
-            && names.iter().any(|n| n.ends_with("MPRAGE3mm_T1w.nii.gz")),
+        names.iter().any(|n| n.ends_with("+MPRAGE+1mm_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("+MPRAGE+3mm_T1w.nii.gz")),
         "{names:?}"
     );
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
@@ -1525,9 +1536,13 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     let (_reg, _) = released_minimal(&source, &home_dir, &out, &converter);
     let names = anat_names(out.path());
     assert!(
-        names.iter().any(|n| n.ends_with("_acq-1mm_T1w.nii.gz"))
-            && names.iter().any(|n| n.ends_with("_acq-3mm_T1w.nii.gz")),
-        "the minimal style: the one slot that differs: {names:?}"
+        names
+            .iter()
+            .any(|n| n.ends_with("_acq-3D+MPRAGE+1mm_T1w.nii.gz"))
+            && names
+                .iter()
+                .any(|n| n.ends_with("_acq-3D+MPRAGE+3mm_T1w.nii.gz")),
+        "the minimal style: type, technique, and the difference: {names:?}"
     );
     assert!(
         !out.path().join(".bidsignore").exists(),
@@ -1567,8 +1582,7 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
 #[test]
 fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
     // Wave 7a §8.1: two stations of one spine prescription that nothing a
-    // name may spell separates take the plain number, alone in `acq-` in the
-    // minimal style.
+    // name may spell separates take the plain number, last in `acq-`.
     let Some(converter) = converter() else { return };
     let upper = twin("t1_mprage_sag", "T1 MPRAGE");
     let lower = Twin {
@@ -1582,8 +1596,12 @@ fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
-        names.iter().any(|n| before_suffix(n).ends_with("_acq-1"))
-            && names.iter().any(|n| before_suffix(n).ends_with("_acq-2")),
+        names
+            .iter()
+            .any(|n| before_suffix(n).ends_with("_acq-3D+MPRAGE+1"))
+            && names
+                .iter()
+                .any(|n| before_suffix(n).ends_with("_acq-3D+MPRAGE+2")),
         "{names:?}"
     );
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");

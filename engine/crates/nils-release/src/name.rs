@@ -34,24 +34,29 @@
 use std::collections::BTreeMap;
 
 /// Which of the two BIDS naming styles a release writes (record 37 S7,
-/// record 55 C4, ruled 2026-10-08: "how about having both as option").
+/// record 55 C4, Nima's ruling of 2026-10-08: "lets minimal to have only acq
+/// type modifier and technique for acq- and full have all we have and + is
+/// ok since that is our only option here. so we get 3 way to name stacks").
 ///
-/// **Full**, the default, spells v0's slots inside `acq-` in v0's order, as
-/// one CamelCase label (`acq-Ax2DIRTSE_FLAIR`): the body part (the brain is
-/// implicit), the orientation, 2D or 3D, the modifiers, the technique, the
-/// acceleration and the construct, leaving out whatever the suffix or
-/// another entity already says. **Minimal** writes `acq-` only where two
-/// stacks of a session would otherwise share a name, and then only the first
-/// of those slots that differs (`acq-Ax` against `acq-Sag`, `acq-3mm`).
-/// Either way every axis, the descriptive name and the acquisition details
-/// are in the sidecar's `NILS` object and the descriptive name in the
-/// `nils_name` column of `scans.tsv`, so a minimal name loses nothing.
+/// In both, the suffix is the base contrast (or a construct suffix BIDS
+/// defines: `ADC`, `T1map`, `UNIT1`, ...), never `FLAIR`, which like STIR,
+/// DIR, PSIR and FatSat is a modifier; what has an entity goes to it (`ce-`,
+/// `rec-`, `part-`, `echo-`, `inv-`); and `acq-` joins its slots with `+`.
+/// **Full**, the default, spells in `acq-` every axis without an entity of
+/// its own, in v0's slot order: the body part (the brain is implicit), the
+/// orientation, 2D or 3D, the modifiers, the technique and the construct
+/// (`acq-Ax+2D+FLAIR+IRTSE_T2w`). **Minimal** spells 2D or 3D, the modifiers
+/// and the technique, always, and nothing else (`acq-2D+FLAIR+IRTSE_T2w`).
+/// A name conflict adds what differs to either. Every axis, the descriptive
+/// name and the acquisition details are in the sidecar's `NILS` object and
+/// the descriptive name in the `nils_name` column of `scans.tsv`.
 ///
-/// The descriptive layout has no entities and is v0's grammar whichever is
-/// asked. The style is a fact about the release: it is recorded on the
-/// release row, and a re-run under the same style writes the same names. The
-/// words of the earlier pair, `bids` and `informative`, read as `full`, so a
-/// release recorded under them re-runs.
+/// The third way is the descriptive layout, v0's grammar, which has no
+/// entities and spells every slot whatever is asked. The style is a fact
+/// about the release: it is recorded on the release row, and a re-run under
+/// the same style writes the same names. The words of the earlier pair,
+/// `bids` and `informative`, read as `full`, so a release recorded under
+/// them re-runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Naming {
     #[default]

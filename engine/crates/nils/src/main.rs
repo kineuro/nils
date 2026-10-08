@@ -419,11 +419,11 @@ struct ReleaseArgs {
     /// which names what the standard admits and routes the rest (§9)
     #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
     layout: String,
-    /// How a BIDS name spells what the entities do not: full puts v0's slots
-    /// in acq- in v0's order (the default), minimal writes acq- only where two
-    /// stacks of a session would share a name, with the first slot that
-    /// differs. Every axis is in the sidecar's NILS object either way. The
-    /// descriptive layout is v0's grammar whatever this says (record 55 C4)
+    /// How a BIDS name spells what the entities do not: full puts every slot
+    /// without an entity in acq- in v0's order (the default), minimal only 2D
+    /// or 3D, the modifiers and the technique. Every axis is in the sidecar's
+    /// NILS object either way. The descriptive layout is v0's grammar
+    /// whatever this says (record 55 C4)
     #[arg(long, value_name = "full|minimal")]
     naming: Option<String>,
     /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
@@ -435,8 +435,9 @@ struct ReleaseArgs {
     )]
     localizers: String,
     /// Where a vendor's synthetic contrast goes. The qMRI appendix permits it
-    /// in raw anat/; a purist puts every synthetic image in derivatives/
-    #[arg(long, default_value = "anat", value_name = "anat|derivatives")]
+    /// in raw anat/; derivatives/ is the default since record 55 C4, after
+    /// the naming research: a synthetic contrast is computed, not acquired
+    #[arg(long, default_value = "derivatives", value_name = "anat|derivatives")]
     synthetic: String,
     /// The DICOM to NIfTI converter, a prerequisite of a BIDS release (§9.6)
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
@@ -9735,8 +9736,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     println!(
         "  names            {}",
         match report.naming.as_str() {
-            "minimal" => "minimal: acq- only where two stacks would share a name",
-            _ => "full: v0's slots in acq-, and the rest in the standard's entities",
+            "minimal" => "minimal: 2D or 3D, the modifiers and the technique in acq-",
+            _ => "full: every slot without an entity in acq-, in v0's order",
         }
     );
     // record 26 section 13: what each dataset's files left under

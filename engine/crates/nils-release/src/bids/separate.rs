@@ -231,42 +231,6 @@ const PROPERTIES: &[Property] = &[
     },
 ];
 
-/// The minimal style's answer (record 55 C4): the first of v0's slots, in
-/// order, that differs between the members of a group, as one token each,
-/// read off what the full style would have spelled. `None` when every slot
-/// agrees, and [`separator`] is asked next.
-pub fn first_slot(names: &[&super::name::Name], map: &Mapping) -> Option<Vec<Option<Mark>>> {
-    let pieces: Vec<BTreeMap<usize, &str>> = names
-        .iter()
-        .map(|n| n.latent.iter().map(|(s, t)| (*s, t.as_str())).collect())
-        .collect();
-    let mut slots: Vec<usize> = pieces.iter().flat_map(|p| p.keys().copied()).collect();
-    slots.sort_unstable();
-    slots.dedup();
-    let slot = slots
-        .into_iter()
-        .find(|s| !all_same(&pieces.iter().map(|p| p.get(s)).collect::<Vec<_>>()))?;
-    let property = map
-        .acq
-        .get(slot)
-        .map(|g| g.from.clone())
-        .unwrap_or_else(|| "entity".to_string());
-    Some(
-        pieces
-            .iter()
-            .map(|p| {
-                p.get(&slot).map(|t| Mark {
-                    by: By::Axis,
-                    property: property.clone(),
-                    value: t.to_string(),
-                    token: t.to_string(),
-                    slot,
-                })
-            })
-            .collect(),
-    )
-}
-
 /// What tells the members of a group apart, one mark per member, or `None`
 /// when nothing that can be spelled does: an axis first, then a measured
 /// property. A member that states nothing on the deciding axis gets no mark
