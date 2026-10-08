@@ -19,7 +19,7 @@ use nils_dicom::{Framed, QuarantineClass, Refusal};
 use nils_digest::rule::{Ident, Rule};
 use nils_pack::private::Allowed;
 use nils_release::policy::{Policy, Uids};
-use nils_release::scrub::{self, Applied, Plan};
+use nils_release::scrub::{self, Applied, Plan, Writer};
 use nils_release::tags::Category;
 
 use crate::layout::Facts;
@@ -128,6 +128,7 @@ impl<'a> Scrub<'a> {
     /// of record 28 serves and what a file meets cannot part company.
     pub fn plan<'p>(&'p self, code: &'p str) -> Plan<'p> {
         Plan {
+            writer: Writer::Pseudonymise,
             policy: &self.policy,
             categories: &CATEGORIES,
             private: self.private,
@@ -379,6 +380,33 @@ mod tests {
             "1.2.3.3"
         );
         assert!(outcome.applied.total("removed") >= 4);
+        // the marks of spec Wave 7a §6.1: the dates, the covariates, the
+        // device serial number and the UIDs kept, and the private element
+        // the allowlist names
+        assert_eq!(
+            text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("YES")
+        );
+        assert_eq!(
+            text(ds, tags::DEIDENTIFICATION_METHOD),
+            Some(format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            text(ds, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED).as_deref(),
+            Some("UNMODIFIED")
+        );
+        let codes: Vec<String> = ds
+            .get(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|i| text(i, tags::CODE_VALUE).unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            ["113100", "113106", "113108", "113109", "113110", "113111"]
+        );
         // the pixels read back as an element of the right length
         let whole = dicom_object::OpenFileOptions::new()
             .open_file(&target)

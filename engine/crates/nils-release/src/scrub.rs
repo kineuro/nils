@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use dicom_core::header::Header as _;
+use dicom_core::value::DataSetSequence;
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_object::{DefaultDicomObject, InMemDicomObject};
@@ -26,8 +27,35 @@ use crate::tags::{Category, MANDATORY};
 use crate::uid::Remap;
 use nils_registry::day::Day;
 
+/// Which of the two writers applies a plan: the pseudonymiser, writing
+/// `dcm-anon`, or a release (spec Wave 7a §6.1). The writer is named in the
+/// file's `DeidentificationMethod`, and its own plan decides the options the
+/// file says were applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Writer {
+    Pseudonymise,
+    Release,
+}
+
+impl Writer {
+    pub fn name(self) -> &'static str {
+        match self {
+            Writer::Pseudonymise => "pseudonymise",
+            Writer::Release => "release",
+        }
+    }
+
+    /// The text of (0012,0063): NILS, its version and the writer. Short, so
+    /// it fits one LO value of 64 characters.
+    pub fn method(self) -> String {
+        format!("NILS {} {}", env!("CARGO_PKG_VERSION"), self.name())
+    }
+}
+
 /// What to do to one subject's files.
 pub struct Plan<'a> {
+    /// Who writes the file, named in its de-identification marks.
+    pub writer: Writer,
     pub policy: &'a Policy,
     pub categories: &'a [Category],
     /// The private elements the pack says are worth keeping (§8.4). Everything
@@ -106,23 +134,7 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
 
     // 2. The declared categories and the named removals, less what makes a
     //    file a file and less what is named to keep.
-    let mut removals = crate::tags::tags_of(plan.categories);
-    removals.extend_from_slice(plan.remove);
-    removals.sort_unstable();
-    removals.dedup();
-    for tag in removals {
-        if MANDATORY.iter().any(|(g, e)| Tag(*g, *e) == tag) {
-            continue;
-        }
-        // The age is written above and is not an identifier: v0's patient
-        // category holds it, which is why v0 cannot both remove the birth date
-        // and keep an age.
-        if tag == tags::PATIENT_AGE || tag == tags::PATIENT_ID {
-            continue;
-        }
-        if plan.keep.contains(&tag) {
-            continue;
-        }
+    for tag in removals(plan) {
         if object.remove_element(tag) {
             done.note(tag, "removed");
         }
@@ -135,6 +147,13 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
         PrimitiveValue::from(plan.code),
     ));
     done.note(tags::PATIENT_ID, "replaced");
+
+    // 3b. What the file says about itself (spec Wave 7a §6.1): that it was
+    //     de-identified, by which writer, and under which options of the
+    //     standard, derived from this plan. Written after the removals, so no
+    //     category and no dataset's `remove` list can take them out; never
+    //     counted, because they are not a change to anything the file held.
+    mark(object, plan);
 
     // 4. The private blocks, the overlays and the curves, none of which a
     //    list of named standard tags can reach.
@@ -184,6 +203,192 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
 
     done
 }
+
+/// The elements a plan removes: the declared categories and the named
+/// removals, less what makes a file a file, less the age (written, not
+/// removed) and the code's element, and less what is named to keep. One
+/// statement of it, so that what `apply` removes and what the marks say was
+/// kept cannot part company.
+pub fn removals(plan: &Plan) -> Vec<Tag> {
+    let mut out = crate::tags::tags_of(plan.categories);
+    out.extend_from_slice(plan.remove);
+    out.sort_unstable();
+    out.dedup();
+    out.retain(|tag| {
+        // The age is written by `apply` and is not an identifier: v0's
+        // patient category holds it, which is why v0 cannot both remove the
+        // birth date and keep an age.
+        !MANDATORY.iter().any(|(g, e)| Tag(*g, *e) == *tag)
+            && *tag != tags::PATIENT_AGE
+            && *tag != tags::PATIENT_ID
+            && !plan.keep.contains(tag)
+    });
+    out
+}
+
+/// One option of DICOM PS3.16 CID 7050, "De-identification Method", as the
+/// code sequence (0012,0064) carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deid {
+    pub code: &'static str,
+    pub meaning: &'static str,
+    /// When a writer applies it, in a reader's words.
+    pub when: &'static str,
+}
+
+/// The coding scheme of every option: DICOM's own.
+pub const DEID_SCHEME: &str = "DCM";
+
+pub const BASIC_PROFILE: Deid = Deid {
+    code: "113100",
+    meaning: "Basic Application Confidentiality Profile",
+    when: "always",
+};
+pub const FULL_DATES: Deid = Deid {
+    code: "113106",
+    meaning: "Retain Longitudinal Temporal Information Full Dates Option",
+    when: "while no date is removed, which is always: the date is the date",
+};
+pub const PATIENT_CHARACTERISTICS: Deid = Deid {
+    code: "113108",
+    meaning: "Retain Patient Characteristics Option",
+    when: "while the age, sex, size or weight is kept",
+};
+pub const DEVICE_IDENTITY: Deid = Deid {
+    code: "113109",
+    meaning: "Retain Device Identity Option",
+    when: "while the device serial number or the station name is kept",
+};
+pub const UIDS: Deid = Deid {
+    code: "113110",
+    meaning: "Retain UIDs Option",
+    when: "while the UIDs are kept, not remapped",
+};
+pub const SAFE_PRIVATE: Deid = Deid {
+    code: "113111",
+    meaning: "Retain Safe Private Option",
+    when: "while the pack's allowlist keeps private elements",
+};
+pub const INSTITUTION_IDENTITY: Deid = Deid {
+    code: "113112",
+    meaning: "Retain Institution Identity Option",
+    when: "while the institution's name or address is kept",
+};
+
+/// Every option a writer of NILS can state, in code order.
+pub const DEID_OPTIONS: [Deid; 7] = [
+    BASIC_PROFILE,
+    FULL_DATES,
+    PATIENT_CHARACTERISTICS,
+    DEVICE_IDENTITY,
+    UIDS,
+    SAFE_PRIVATE,
+    INSTITUTION_IDENTITY,
+];
+
+/// The dates and datetimes the full-dates option speaks for.
+const DATES: [Tag; 8] = [
+    tags::STUDY_DATE,
+    tags::SERIES_DATE,
+    tags::ACQUISITION_DATE,
+    tags::CONTENT_DATE,
+    tags::INSTANCE_CREATION_DATE,
+    tags::ACQUISITION_DATE_TIME,
+    tags::PERFORMED_PROCEDURE_STEP_START_DATE,
+    tags::PERFORMED_PROCEDURE_STEP_END_DATE,
+];
+
+/// The patient characteristics of PS3.15's option that a plan can keep.
+const CHARACTERISTICS: [Tag; 4] = [
+    tags::PATIENT_AGE,
+    tags::PATIENT_SEX,
+    tags::PATIENT_SIZE,
+    tags::PATIENT_WEIGHT,
+];
+
+const DEVICE: [Tag; 2] = [tags::DEVICE_SERIAL_NUMBER, tags::STATION_NAME];
+
+const INSTITUTION: [Tag; 2] = [tags::INSTITUTION_NAME, tags::INSTITUTION_ADDRESS];
+
+/// The options of CID 7050 this plan applies, in code order: derived from
+/// the plan and never written by hand, so a change of policy changes the
+/// marks (spec Wave 7a §6.1).
+pub fn options(plan: &Plan) -> Vec<Deid> {
+    let gone = removals(plan);
+    let kept = |list: &[Tag]| list.iter().any(|t| !gone.contains(t));
+    let mut out = vec![BASIC_PROFILE];
+    if DATES.iter().all(|t| !gone.contains(t)) {
+        out.push(FULL_DATES);
+    }
+    if kept(&CHARACTERISTICS) {
+        out.push(PATIENT_CHARACTERISTICS);
+    }
+    if kept(&DEVICE) {
+        out.push(DEVICE_IDENTITY);
+    }
+    if plan.remap.is_none() {
+        out.push(UIDS);
+    }
+    if !plan.private.is_empty() {
+        out.push(SAFE_PRIVATE);
+    }
+    if kept(&INSTITUTION) {
+        out.push(INSTITUTION_IDENTITY);
+    }
+    out
+}
+
+/// What (0028,0303) says: every date leaves as it is (record 38 S3), so
+/// the longitudinal information is unmodified.
+pub const LONGITUDINAL: &str = "UNMODIFIED";
+
+/// Write the four marks of spec Wave 7a §6.1, replacing any a file carried:
+/// a release of a pseudonymised file states its own options, not the
+/// pseudonymiser's.
+fn mark(object: &mut DefaultDicomObject, plan: &Plan) {
+    object.put(DataElement::new(
+        tags::PATIENT_IDENTITY_REMOVED,
+        VR::CS,
+        PrimitiveValue::from("YES"),
+    ));
+    object.put(DataElement::new(
+        tags::DEIDENTIFICATION_METHOD,
+        VR::LO,
+        PrimitiveValue::from(plan.writer.method()),
+    ));
+    let items: Vec<InMemDicomObject> = options(plan)
+        .into_iter()
+        .map(|o| {
+            InMemDicomObject::from_element_iter([
+                DataElement::new(tags::CODE_VALUE, VR::SH, PrimitiveValue::from(o.code)),
+                DataElement::new(
+                    tags::CODING_SCHEME_DESIGNATOR,
+                    VR::SH,
+                    PrimitiveValue::from(DEID_SCHEME),
+                ),
+                DataElement::new(tags::CODE_MEANING, VR::LO, PrimitiveValue::from(o.meaning)),
+            ])
+        })
+        .collect();
+    object.put(DataElement::new(
+        tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(items),
+    ));
+    object.put(DataElement::new(
+        tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED,
+        VR::CS,
+        PrimitiveValue::from(LONGITUDINAL),
+    ));
+}
+
+/// The four marks' tags, which no category and no removal list may hold.
+pub const MARKS: [Tag; 4] = [
+    tags::PATIENT_IDENTITY_REMOVED,
+    tags::DEIDENTIFICATION_METHOD,
+    tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE,
+    tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED,
+];
 
 /// A transfer syntax or a SOP class is a UID that names a standard, not a
 /// study. Remapping one would make the file unreadable.
@@ -245,6 +450,7 @@ mod tests {
 
     fn plan<'a>(policy: &'a Policy, remap: Option<&'a Remap>) -> Plan<'a> {
         Plan {
+            writer: Writer::Release,
             policy,
             private: &[],
             categories: ALL,
@@ -514,6 +720,189 @@ mod tests {
                 "{named} is not in {:?}",
                 done.changes
             );
+        }
+    }
+
+    /// The option codes of (0012,0064), in the order the file carries them.
+    fn codes(o: &DefaultDicomObject) -> Vec<String> {
+        let e = o
+            .element(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .expect("the code sequence");
+        e.items()
+            .expect("items")
+            .iter()
+            .map(|item| {
+                let scheme = item
+                    .element(tags::CODING_SCHEME_DESIGNATOR)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(scheme.trim(), "DCM");
+                let meaning = item.element(tags::CODE_MEANING).unwrap().to_str().unwrap();
+                let code = item
+                    .element(tags::CODE_VALUE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .trim()
+                    .to_string();
+                let known = DEID_OPTIONS.iter().find(|d| d.code == code).unwrap();
+                assert_eq!(meaning.trim(), known.meaning);
+                code
+            })
+            .collect()
+    }
+
+    fn marked(o: &DefaultDicomObject, writer: &str) {
+        assert_eq!(
+            text(o, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("YES")
+        );
+        assert_eq!(
+            text(o, tags::DEIDENTIFICATION_METHOD),
+            Some(format!("NILS {} {writer}", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            text(o, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED).as_deref(),
+            Some("UNMODIFIED")
+        );
+    }
+
+    fn identified() -> DefaultDicomObject {
+        object(&[
+            (tags::PATIENT_ID, VR::LO, "x"),
+            (tags::PATIENT_NAME, VR::PN, "SVENSSON^ANNA"),
+            (tags::PATIENT_SEX, VR::CS, "F"),
+            (tags::PATIENT_BIRTH_DATE, VR::DA, "19800615"),
+            (tags::STUDY_DATE, VR::DA, "20220115"),
+            (tags::INSTITUTION_NAME, VR::LO, "Somewhere"),
+            (tags::DEVICE_SERIAL_NUMBER, VR::LO, "SN1"),
+            (tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3.4"),
+        ])
+    }
+
+    #[test]
+    fn a_release_that_remaps_says_so_and_states_no_uids_option() {
+        // Spec Wave 7a §6.1: every category removed, the UIDs remapped. The
+        // age is computed and kept, the dates kept; nothing else retained.
+        let policy = Policy::default();
+        let remap = Remap::new(Root::default(), b"a key of some length");
+        let mut o = identified();
+        apply(&mut o, &plan(&policy, Some(&remap)));
+        marked(&o, "release");
+        assert_eq!(codes(&o), ["113100", "113106", "113108"]);
+    }
+
+    #[test]
+    fn a_release_that_keeps_the_uids_and_private_elements_says_both() {
+        let policy = Policy {
+            uids: Uids::Preserve,
+            ..Policy::default()
+        };
+        let allowed = [nils_pack::private::Allowed {
+            creator: "A VENDOR".into(),
+            group: 0x0019,
+            element: 0x0C,
+            why: "a test".into(),
+        }];
+        let mut o = identified();
+        apply(
+            &mut o,
+            &Plan {
+                private: &allowed,
+                ..plan(&policy, None)
+            },
+        );
+        marked(&o, "release");
+        assert_eq!(
+            codes(&o),
+            ["113100", "113106", "113108", "113110", "113111"]
+        );
+    }
+
+    #[test]
+    fn the_options_follow_what_the_plan_keeps_and_never_a_hand_list() {
+        // The pseudonymiser's four categories leave the device serial number
+        // (the ids category is a release's), and a plan that keeps the
+        // institution says so; one that removes them both says neither.
+        let policy = Policy::default();
+        let four = [
+            Category::Patient,
+            Category::Trial,
+            Category::Provider,
+            Category::Institution,
+        ];
+        let keep = [tags::PATIENT_SEX, tags::INSTITUTION_NAME];
+        let p = Plan {
+            writer: Writer::Pseudonymise,
+            categories: &four,
+            keep: &keep,
+            ..plan(&policy, None)
+        };
+        let mut o = identified();
+        apply(&mut o, &p);
+        marked(&o, "pseudonymise");
+        assert_eq!(
+            codes(&o),
+            ["113100", "113106", "113108", "113109", "113110", "113112"]
+        );
+        assert_eq!(text(&o, tags::DEVICE_SERIAL_NUMBER).as_deref(), Some("SN1"));
+        assert_eq!(
+            text(&o, tags::INSTITUTION_NAME).as_deref(),
+            Some("Somewhere")
+        );
+
+        let remove = [tags::DEVICE_SERIAL_NUMBER, tags::STATION_NAME];
+        let p = Plan {
+            writer: Writer::Pseudonymise,
+            categories: &four,
+            remove: &remove,
+            ..plan(&policy, None)
+        };
+        let mut o = identified();
+        apply(&mut o, &p);
+        assert_eq!(codes(&o), ["113100", "113106", "113108", "113110"]);
+    }
+
+    #[test]
+    fn no_removal_list_strips_the_marks_and_a_file_s_old_marks_are_replaced() {
+        // A dataset's `remove` naming the marks, and a file that arrives with
+        // another writer's: the file leaves with this writer's, exactly.
+        let policy = Policy::default();
+        let remap = Remap::new(Root::default(), b"a key of some length");
+        let mut o = identified();
+        o.put(DataElement::new(
+            tags::PATIENT_IDENTITY_REMOVED,
+            VR::CS,
+            PrimitiveValue::from("NO"),
+        ));
+        o.put(DataElement::new(
+            tags::DEIDENTIFICATION_METHOD,
+            VR::LO,
+            PrimitiveValue::from("NILS 0.0.0 pseudonymise"),
+        ));
+        o.put(DataElement::new(
+            tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED,
+            VR::CS,
+            PrimitiveValue::from("MODIFIED"),
+        ));
+        let p = Plan {
+            remove: &MARKS,
+            ..plan(&policy, Some(&remap))
+        };
+        apply(&mut o, &p);
+        marked(&o, "release");
+        assert_eq!(codes(&o), ["113100", "113106", "113108"]);
+        for tag in MARKS {
+            assert!(o.element_opt(tag).unwrap().is_some(), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn the_method_fits_one_value_of_its_type() {
+        // LO holds 64 characters.
+        for w in [Writer::Pseudonymise, Writer::Release] {
+            assert!(w.method().len() <= 64, "{}", w.method());
         }
     }
 

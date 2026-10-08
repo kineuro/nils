@@ -959,6 +959,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 let code = job.code.clone();
                 let policy = &policies.all[job.policy];
                 let plan = Plan {
+                    writer: scrub::Writer::Release,
                     policy,
                     categories: &settings.categories,
                     private: settings.private,

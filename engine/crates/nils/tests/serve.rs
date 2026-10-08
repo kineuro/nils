@@ -372,6 +372,26 @@ fn the_door_serves_what_the_command_line_has() {
         policy["covariates"]["opt_out"], "keep_demographics",
         "{policy}"
     );
+    // Wave 7a §6.2: the version a cache keys on, a reason on every row, and
+    // the marks every pseudonymised file carries, per writer.
+    assert_eq!(policy["version"], env!("CARGO_PKG_VERSION"), "{policy}");
+    assert!(
+        policy["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["reason"].is_string()),
+        "{policy}"
+    );
+    assert_eq!(policy["marks"]["tags"][0]["tag"], "0012,0062", "{policy}");
+    assert_eq!(
+        policy["marks"]["writers"][0]["writer"], "pseudonymise",
+        "{policy}"
+    );
+    assert_eq!(
+        policy["marks"]["writers"][1]["writer"], "release",
+        "{policy}"
+    );
 
     let (status, doc) = server.request("GET", "/api/status", None, None);
     assert_eq!(status, 200, "{doc}");

@@ -471,6 +471,21 @@ mod tests {
     }
 
     #[test]
+    fn no_category_holds_a_de_identification_mark() {
+        // Spec Wave 7a §6.1: the trial category lives in group 0012 beside
+        // the marks, and a release's removal list must never take them out.
+        for c in Category::every() {
+            for m in crate::scrub::MARKS {
+                assert!(
+                    !c.tags().contains(&(m.group(), m.element())),
+                    "{} holds the mark {m:?}",
+                    c.name()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_category_is_named_and_reads_back() {
         for c in Category::every() {
             assert_eq!(Category::parse(c.name()), Some(c));

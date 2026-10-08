@@ -352,6 +352,41 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         assert!(parts[3].ends_with(".dcm") && parts[3].len() == 9, "{rel:?}");
         assert!(!path.with_extension("dcm.part").exists());
     }
+    // T7 (spec Wave 7a §6.1): every copy says it was de-identified, by
+    // whom, and under the options this run's plan applies: the dates, the
+    // covariates, the station name the dataset keeps (its device identity;
+    // the serial number its own list removes), the UIDs, and the private
+    // element the allowlist keeps.
+    for path in &written {
+        let read = nils_dicom::read(path).unwrap();
+        let ds = &read.dataset;
+        assert_eq!(
+            text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("YES")
+        );
+        assert_eq!(
+            text(ds, tags::DEIDENTIFICATION_METHOD),
+            Some(format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            text(ds, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED).as_deref(),
+            Some("UNMODIFIED")
+        );
+        let codes: Vec<String> = ds
+            .get(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|i| text(i, tags::CODE_VALUE).unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            ["113100", "113106", "113108", "113109", "113110", "113111"],
+            "{}",
+            path.display()
+        );
+    }
     // one of them against its source: the code in, the identifiers out,
     // the dates and UIDs kept, the pixels the same bytes
     let sample = written
