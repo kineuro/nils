@@ -23532,7 +23532,8 @@ mod tests {
             said.iter().any(|l| l.contains("a root: 2 folder(s)")),
             "{said:?}"
         );
-        let listed = crate::dataset::folders(registry.store(), &root).unwrap();
+        let (listed, _, _) =
+            crate::dataset::folders(registry.store(), &root, None, 50, None).unwrap();
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().all(|f| f["added"] == false));
         for path in [data.clone(), data.join("loose/sub-1"), data.join("known")] {

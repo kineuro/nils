@@ -2469,20 +2469,51 @@ fn routed(
             })))
         }
         ["api", "places", _, "folders"] if get => {
-            // Wave 7a: a root's folders as they are, nothing changed and
-            // nothing assumed; a folder becomes a dataset only when added
-            let given = segs[2];
+            // Wave 7a (Nima, 2026-10-08): a root's folders a page at a
+            // time, found by name; one read of the root's listing, never a
+            // look inside a folder
             let root =
-                crate::dataset::root_named(registry.store(), given).map_err(declare_refused)?;
-            let folders =
-                crate::dataset::folders(registry.store(), &root).map_err(declare_refused)?;
+                crate::dataset::root_named(registry.store(), segs[2]).map_err(declare_refused)?;
+            let limit = match query.get("limit") {
+                Some(l) => l
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=crate::dataset::FOLDERS_MOST).contains(n))
+                    .ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            format!("limit is 1 to {}", crate::dataset::FOLDERS_MOST),
+                        )
+                    })?,
+                None => crate::dataset::FOLDERS_PAGE,
+            };
+            let (folders, matching, next) = crate::dataset::folders(
+                registry.store(),
+                &root,
+                query.get("q").map(String::as_str),
+                limit,
+                query.get("after").map(String::as_str),
+            )
+            .map_err(declare_refused)?;
             Ok(Reply::ok(serde_json::json!({
                 "root": root.name,
                 "root_id": root.id,
                 "path": root.path,
+                "q": query.get("q"),
+                "matching": matching,
                 "count": folders.len(),
                 "folders": folders,
+                "next": next,
             })))
+        }
+        ["api", "places", _, "folders", _] if get => {
+            // Wave 7a: one folder looked at before it is added, nothing
+            // changed: what a bounded look finds and the structure it has
+            let root =
+                crate::dataset::root_named(registry.store(), segs[2]).map_err(declare_refused)?;
+            let look = crate::dataset::folder_look(registry.store(), &root, segs[4])
+                .map_err(declare_refused)?;
+            Ok(Reply::ok(look))
         }
         ["api", "places", _, "originals"] if get => {
             // record 26 §1: what a vault or a purge would do, without doing
@@ -4070,7 +4101,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // identified files, so they are Data work at detail sensitive.
         ("GET", ["api", "places", _, "originals"]) => (Need::One("data:see"), Plain),
         // Wave 7a: a root's folders, read, nothing changed
-        ("GET", ["api", "places", _, "folders"]) => {
+        ("GET", ["api", "places", _, "folders"]) | ("GET", ["api", "places", _, "folders", _]) => {
             (Need::AnyOf(&["data:see", "places:see"]), Plain)
         }
         ("POST", ["api", "places", _, "originals"]) => (Need::One("data:work"), Detail::Sensitive),

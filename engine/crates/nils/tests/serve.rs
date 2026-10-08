@@ -2734,7 +2734,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
     loose.file("sub-9/a.dcm", &dicom("1.2.3.F", "1.2.3.F.1.1"));
     loose.file("sub-8/notes.txt", b"no dicom here");
-    const LIMIT: usize = 56;
+    const LIMIT: usize = 60;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -2950,8 +2950,11 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     assert_eq!(status, 200, "{listed}");
     assert_eq!(listed["root"], "loose", "{listed}");
     assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["matching"], 2, "{listed}");
+    assert_eq!(listed["next"], serde_json::Value::Null, "{listed}");
     assert_eq!(listed["folders"][0]["name"], "sub-8", "{listed}");
-    assert_eq!(listed["folders"][0]["holds_dicom"], "no", "{listed}");
+    // the listing never looks inside a folder
+    assert_eq!(listed["folders"][0].get("holds_dicom"), None, "{listed}");
     assert_eq!(listed["folders"][0]["added"], false, "{listed}");
     assert_eq!(
         listed["folders"][0]["dataset_id"],
@@ -2959,8 +2962,30 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         "{listed}"
     );
     assert_eq!(listed["folders"][1]["name"], "sub-9", "{listed}");
-    assert_eq!(listed["folders"][1]["holds_dicom"], "yes", "{listed}");
-    assert_eq!(listed["folders"][1]["has_derivatives"], false, "{listed}");
+    // found by name, a page at a time
+    let (status, found) = ask(
+        "GET",
+        "/api/places/loose/folders?q=SUB-9&limit=1",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["count"], 1, "{found}");
+    assert_eq!(found["folders"][0]["name"], "sub-9", "{found}");
+    let (status, refused) = ask("GET", "/api/places/loose/folders?limit=500", None, reader);
+    assert_eq!(status, 400, "{refused}");
+    // one folder looked at before it is added: a bounded look and the
+    // structure it would have; nothing changed
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-9", None, reader);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["holds_dicom"], "yes", "{look}");
+    assert_eq!(look["has_derivatives"], false, "{look}");
+    assert_eq!(look["added"], false, "{look}");
+    assert_eq!(look["layout"]["state"], "unknown", "{look}");
+    assert_eq!(look["layout"]["question"], true, "{look}");
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-8", None, reader);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["holds_dicom"], "no", "{look}");
     // looking at the roots again adds no dataset
     let (status, again) = ask("GET", "/api/places?explore=1", None, ops);
     assert_eq!(status, 200, "{again}");
