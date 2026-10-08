@@ -71,8 +71,11 @@ made from the machine's own randomness and written to `<dir>/key.passphrase`
 readable by nobody else. Move it into your password manager and delete the
 file.
 
-A new registry is made with the pseudonym scheme `blake2b-8`: a person's
-code is the keyed 8-byte BLAKE2b of their identifier, as 16 hex characters.
+A new registry is made with the scheme of the subject code generator,
+`blake2b-8`: a person's code is the keyed 8-byte BLAKE2b of their identifier
+(of a personnummer, its twelve digits) under the site's own constant key, as
+16 hex characters. Every site has its own key, so its codes are its own.
+`--scheme subject-code-generator` names the same scheme.
 `--scheme blake2b-32` makes one with a 32-byte digest and a shorter display
 code instead. A registry keeps the scheme it was made with: a rerun over an
 existing registry that names another scheme is refused.
@@ -662,7 +665,7 @@ directory is NILS's.
 | `--workers N` | How many requests the engine answers at once |
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |
 | `--reg-key-file FILE` | The registry's key from a site's key file (`REG_KEY=<value>`, mode 600), instead of a passphrase |
-| `--scheme blake2b-8\|blake2b-32` | The pseudonym scheme of a new registry; `blake2b-8` by default |
+| `--scheme blake2b-8\|blake2b-32` | The pseudonym scheme of a new registry; `blake2b-8`, the subject code generator, by default |
 | `--service`, `--no-service` | Write and start services, or do not |
 | `--system` | Write the services of this machine, in `/etc/systemd/system`; root's to do |
 | `--account PART=ACCOUNT` | With `--system`: the account a part runs as; `supervisor=` is required, and must be nobody else's |

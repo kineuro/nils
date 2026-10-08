@@ -16,7 +16,10 @@ use blake2::{Blake2b, Blake2bMac, Digest};
 /// The two schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheme {
-    /// v0's: the keyed 8-byte BLAKE2b of the identifier, as 16 hex characters.
+    /// The subject code generator: the keyed 8-byte BLAKE2b of the
+    /// identifier (of a personnummer, its twelve digits) under the site's own
+    /// constant key, as 16 hex characters. The previous prototype's function,
+    /// byte for byte. Its name on disk and on the wire stays `blake2b-8`.
     Blake2b8,
     /// A keyed 32-byte BLAKE2b kept as the digest, with a Crockford base32
     /// display code of `display_length` characters.
@@ -24,11 +27,18 @@ pub enum Scheme {
 }
 
 impl Scheme {
-    /// The scheme a new registry is made with when none is named:
-    /// `blake2b-8`, so that a registry made with a site's existing key gives
-    /// every person the code that key has always given them. `blake2b-32`
-    /// stays selectable.
-    pub const DEFAULT: Scheme = Scheme::Blake2b8;
+    /// The subject code generator's scheme (`blake2b-8`).
+    pub const SUBJECT_CODE_GENERATOR: Scheme = Scheme::Blake2b8;
+
+    /// The other name the subject code generator's scheme is given by on
+    /// the command line; a registry records it as `blake2b-8`.
+    pub const SUBJECT_CODE_GENERATOR_NAME: &'static str = "subject-code-generator";
+
+    /// The scheme a new registry is made with when none is named: the
+    /// subject code generator, so that a registry made with a site's own key
+    /// gives every person the code that key has always given them.
+    /// `blake2b-32` stays selectable.
+    pub const DEFAULT: Scheme = Scheme::SUBJECT_CODE_GENERATOR;
 
     pub fn name(self) -> &'static str {
         match self {
@@ -52,7 +62,7 @@ impl fmt::Display for UnknownScheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown pseudonym scheme {:?}; expected blake2b-32 or blake2b-8",
+            "unknown pseudonym scheme {:?}; expected blake2b-8 (the subject code generator) or blake2b-32",
             self.0
         )
     }
@@ -65,7 +75,7 @@ impl FromStr for Scheme {
 
     fn from_str(s: &str) -> Result<Scheme, UnknownScheme> {
         match s {
-            "blake2b-8" => Ok(Scheme::Blake2b8),
+            "blake2b-8" | Scheme::SUBJECT_CODE_GENERATOR_NAME => Ok(Scheme::Blake2b8),
             "blake2b-32" => Ok(Scheme::Blake2b32),
             other => Err(UnknownScheme(other.to_string())),
         }
@@ -237,10 +247,16 @@ mod tests {
     #[test]
     fn scheme_names_round_trip() {
         assert_eq!("blake2b-8".parse::<Scheme>(), Ok(Scheme::Blake2b8));
+        // the subject code generator's other name, recorded as blake2b-8
+        assert_eq!(
+            "subject-code-generator".parse::<Scheme>(),
+            Ok(Scheme::SUBJECT_CODE_GENERATOR)
+        );
+        assert_eq!(Scheme::SUBJECT_CODE_GENERATOR.name(), "blake2b-8");
         assert_eq!("blake2b-32".parse::<Scheme>(), Ok(Scheme::Blake2b32));
         assert_eq!(
             "sha".parse::<Scheme>().unwrap_err().to_string(),
-            "unknown pseudonym scheme \"sha\"; expected blake2b-32 or blake2b-8"
+            "unknown pseudonym scheme \"sha\"; expected blake2b-8 (the subject code generator) or blake2b-32"
         );
     }
 }

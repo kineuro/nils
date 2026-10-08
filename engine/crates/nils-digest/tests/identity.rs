@@ -4,7 +4,8 @@
 //! runs; the linkage store holds the identifier sealed and gives it back to
 //! `reveal` with an audit row; a file without the field falls back to its
 //! study; a rule reads another field through a pattern; a subject an import
-//! created keeps its code; a blake2b-8 registry reproduces the v0 codes; two
+//! created keeps its code; a registry of the subject code generator reproduces
+//! the previous prototype's codes; two
 //! identifiers on one code stop the job with a review item. Every test runs
 //! on each backend.
 
@@ -432,7 +433,7 @@ fn a_subject_an_import_created_keeps_its_code() {
 }
 
 #[test]
-fn a_blake2b_8_registry_reproduces_the_v0_codes() {
+fn the_subject_code_generator_reproduces_the_prototypes_codes() {
     // the fixture of §7.1: PID-0001 under nils-fixture-key
     for lab in labs_keyed(Scheme::Blake2b8, 16, b"nils-fixture-key") {
         let name = lab.name;
@@ -471,9 +472,10 @@ fn a_blake2b_8_registry_reproduces_the_v0_codes() {
 }
 
 #[test]
-fn a_personnummer_rule_on_blake2b_8_gives_v0_code_of_the_twelve_digits() {
+fn a_personnummer_rule_gives_the_generators_code_of_the_twelve_digits() {
     // The tax agency's published test numbers, which nobody holds, under a
-    // made-up key; the codes are v0's derivation of the twelve digits as Python's
+    // made-up key; the codes are the subject code generator's of the twelve digits,
+    // as Python's
     // hashlib.blake2b(pn, key=key, digest_size=8) gives them.
     let rule = Rule::parse("identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n")
         .unwrap();

@@ -582,9 +582,11 @@ pub(crate) struct SetupArgs {
     /// owner only (chmod 600). The value is the key, byte for byte
     #[arg(long, value_name = "FILE", conflicts_with = "key_file")]
     reg_key_file: Option<PathBuf>,
-    /// The pseudonym scheme a new registry is made with: blake2b-8, the keyed
-    /// 8-byte BLAKE2b of the identifier as 16 hex characters (the default),
-    /// or blake2b-32. A registry keeps the scheme it was made with
+    /// The pseudonym scheme a new registry is made with: blake2b-8, the
+    /// subject code generator, the keyed 8-byte BLAKE2b of the identifier as
+    /// 16 hex characters (the default; also accepted as
+    /// subject-code-generator), or blake2b-32. A registry keeps the scheme it
+    /// was made with
     #[arg(long, value_name = "blake2b-8|blake2b-32")]
     scheme: Option<String>,
     /// Write and start services
@@ -1378,9 +1380,9 @@ const REG_KEY_PREFIX: &str = "REG_KEY=";
 /// that cannot be read where it stands is left to the registry.
 fn scheme_for(named: Option<&str>, existing: Option<&Home>) -> Result<Scheme, String> {
     let scheme = match named {
-        Some(name) => name
-            .parse::<Scheme>()
-            .map_err(|_| format!("--scheme {name}: blake2b-8 or blake2b-32"))?,
+        Some(name) => name.parse::<Scheme>().map_err(|_| {
+            format!("--scheme {name}: blake2b-8 (the subject code generator) or blake2b-32")
+        })?,
         None => Scheme::DEFAULT,
     };
     if let (Some(name), Some(home)) = (named, existing)
@@ -7494,9 +7496,14 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         if plan.registry_exists {
             "the registry's own scheme and key".to_string()
         } else {
+            let scheme = if plan.scheme == Scheme::SUBJECT_CODE_GENERATOR {
+                format!("{} (the subject code generator)", plan.scheme)
+            } else {
+                plan.scheme.to_string()
+            };
             match &plan.reg_key_file {
-                Some(path) => format!("{}, the key from {}", plan.scheme, path.display()),
-                None => format!("{}, the key from a passphrase", plan.scheme),
+                Some(path) => format!("{scheme}, the key from {}", path.display()),
+                None => format!("{scheme}, the key from a passphrase"),
             }
         },
     ));
@@ -23439,7 +23446,15 @@ mod tests {
         assert!(why.contains("made with blake2b-8"), "{why}");
         assert!(scheme_for(None, Some(&home)).is_ok());
         let why = scheme_for(Some("sha"), None).unwrap_err();
-        assert!(why.contains("blake2b-8 or blake2b-32"), "{why}");
+        assert!(
+            why.contains("blake2b-8 (the subject code generator) or blake2b-32"),
+            "{why}"
+        );
+        // the generator's other name is the same scheme as the registry's own
+        assert_eq!(
+            scheme_for(Some("subject-code-generator"), Some(&home)),
+            Ok(Scheme::Blake2b8)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

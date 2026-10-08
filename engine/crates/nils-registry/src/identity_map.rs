@@ -1205,13 +1205,13 @@ mod tests {
         assert!(text.starts_with("2 row(s): 2 subject(s) named, 2 known, 0 new; 2 identifier(s) filed, 2 known, 0 new\n"), "{text}");
     }
 
-    /// A personnummer column under blake2b-8 gives v0's derivation of the twelve
+    /// A personnummer column gives the subject code generator's code of the twelve
     /// digits however the number was written, and a cell that is no
     /// personnummer refuses its row without naming the value. The numbers
     /// are the tax agency's published test numbers; the vectors were made
     /// with Python's hashlib under the made-up key.
     #[test]
-    fn a_personnummer_column_codes_the_twelve_digits_as_v0_code() {
+    fn a_personnummer_column_codes_the_twelve_digits_by_the_generator() {
         const TEST_KEY: &[u8] = b"test-reg-key-not-real";
         let mut registry = Store::sqlite_in_memory().unwrap();
         migrate::migrate(&mut registry, Kind::Registry).unwrap();

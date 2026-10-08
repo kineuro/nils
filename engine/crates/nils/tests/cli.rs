@@ -717,7 +717,7 @@ fn an_identity_rule_comes_from_a_file() {
 }
 
 #[test]
-fn a_blake2b_8_registry_gives_the_v0_code() {
+fn the_subject_code_generator_gives_the_prototypes_code() {
     let home = TempDir::new("cli-v0");
     let out = nils()
         .args(["--registry"])

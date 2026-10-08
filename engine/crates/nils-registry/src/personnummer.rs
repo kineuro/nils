@@ -311,13 +311,13 @@ mod tests {
         assert_eq!(for_type(ID_TYPE, "anything"), Err(Invalid::Shape));
     }
 
-    /// v0's derivation as written in Python,
+    /// The subject code generator as written in Python,
     /// `hashlib.blake2b(pn.encode(), key=key.encode(), digest_size=8).hexdigest()`,
     /// of the twelve digits, under a made-up test key. Each vector was
     /// computed with Python's hashlib; every written form of the number must
-    /// give it through blake2b-8.
+    /// give it through the generator's scheme.
     #[test]
-    fn every_written_form_derives_the_v0_code_code_of_the_twelve_digits() {
+    fn every_written_form_derives_the_generators_code_of_the_twelve_digits() {
         const KEY: &[u8] = b"test-reg-key-not-real";
         let vectors = [
             (ADULT, "c6d36050d4d0a55b"),
@@ -328,7 +328,7 @@ mod tests {
             (LEAP, "0bdc645f3f1978f4"),
             (COORDINATION, "652381cebe1443e3"),
         ];
-        for (pn, v0_code) in vectors {
+        for (pn, expected) in vectors {
             let sep = if pn.starts_with("20") || pn == ADULT {
                 '-'
             } else {
@@ -342,8 +342,8 @@ mod tests {
             ];
             for written in forms {
                 let twelve = normalise_on(&written, TODAY).unwrap();
-                let c = pseudonym::code(Scheme::Blake2b8, KEY, &twelve, 12);
-                assert_eq!(c.code, v0_code, "{written}");
+                let c = pseudonym::code(Scheme::SUBJECT_CODE_GENERATOR, KEY, &twelve, 12);
+                assert_eq!(c.code, expected, "{written}");
             }
         }
     }

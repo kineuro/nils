@@ -1650,9 +1650,10 @@ struct InitArgs {
     /// The Postgres schema of the registry; the linkage store lives in <schema>_linkage
     #[arg(long, value_name = "NAME")]
     schema: Option<String>,
-    /// The pseudonym scheme: blake2b-8, the keyed 8-byte BLAKE2b of the
-    /// identifier as 16 hex characters, or blake2b-32, a 32-byte digest shown
-    /// as a Crockford code of --display-length characters
+    /// The pseudonym scheme: blake2b-8, the subject code generator (the keyed
+    /// 8-byte BLAKE2b of the identifier as 16 hex characters; also accepted
+    /// as subject-code-generator), or blake2b-32, a 32-byte digest shown as a
+    /// Crockford code of --display-length characters
     #[arg(long, default_value = "blake2b-8", value_name = "blake2b-8|blake2b-32")]
     scheme: String,
     /// The name of the key in the key store the pseudonyms are derived from
@@ -2084,10 +2085,12 @@ fn init(home: &Home, args: InitArgs) -> Result<(), Exit> {
         .backend
         .parse()
         .map_err(|_| usage(format!("--backend {}: sqlite or postgres", args.backend)))?;
-    let scheme: Scheme = args
-        .scheme
-        .parse()
-        .map_err(|_| usage(format!("--scheme {}: blake2b-32 or blake2b-8", args.scheme)))?;
+    let scheme: Scheme = args.scheme.parse().map_err(|_| {
+        usage(format!(
+            "--scheme {}: blake2b-8 (the subject code generator) or blake2b-32",
+            args.scheme
+        ))
+    })?;
     let session_scheme = match &args.session_scheme {
         Some(path) => Some(
             fs::read_to_string(path)
@@ -4592,9 +4595,10 @@ fn status_print(
     println!("  epoch            {}", meta.epoch);
     println!("  created          {}", meta.created_at);
     match meta.pseudonym_scheme {
-        // v0's code is the whole digest in hex; no display length applies
+        // the subject code generator's code is the whole digest in hex; no
+        // display length applies
         Scheme::Blake2b8 => println!(
-            "  pseudonyms       {} from key {}, 16 hex characters",
+            "  pseudonyms       {} (the subject code generator) from key {}, 16 hex characters",
             meta.pseudonym_scheme, meta.pseudonym_key
         ),
         Scheme::Blake2b32 => println!(
