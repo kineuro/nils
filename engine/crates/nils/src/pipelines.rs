@@ -453,8 +453,23 @@ pub(crate) fn run_totals_only(doc: &mut Value) {
 }
 
 /// A job read below detail quasi: a pipeline run's result and error as its
-/// run's (record 49 R4, after review).
+/// run's (record 49 R4, after review), and a dataset probe's merge reading
+/// as its counts, never a subject's code (record 55 K9; below quasi a code
+/// is a shape everywhere, K7, and a pair says more than its two codes). A
+/// job with no result, or none of candidates, is left as it is.
 pub(crate) fn job_totals_only(job: &mut Value) {
+    if let Some(candidates) = job
+        .get_mut("result")
+        .and_then(|r| r.get_mut("candidates"))
+        .and_then(Value::as_array_mut)
+    {
+        for c in candidates {
+            if let Some(n) = c["alike"]["pairs"].as_array().map(Vec::len) {
+                c["alike"]["pairs"] = json!([]);
+                c["alike"]["withheld"] = json!(n);
+            }
+        }
+    }
     let a_run = job["kind"] == "pipeline" || job["result"]["run"].is_i64();
     if !a_run {
         return;
@@ -6278,6 +6293,31 @@ mod tests {
         });
         job_totals_only(&mut job);
         assert!(job["result"]["summary"]["numbers"]["checks"]["breaches"].is_null());
+        // record 55 K9: a dataset probe's alike subjects are counted, never named
+        let mut probe = json!({
+            "kind": "ingest",
+            "result": {"dataset": "ds", "candidates": [
+                {"label": "rule 1", "alike": {"pairs": [{"subjects": ["CODEA1", "CODEB2"]}], "linked": 0, "unmapped": 1}},
+                {"label": "rule 2"},
+            ]},
+        });
+        job_totals_only(&mut probe);
+        assert_eq!(
+            probe["result"]["candidates"][0]["alike"]["pairs"],
+            json!([])
+        );
+        assert_eq!(probe["result"]["candidates"][0]["alike"]["withheld"], 1);
+        assert_eq!(probe["result"]["candidates"][0]["alike"]["unmapped"], 1);
+        assert!(probe["result"]["candidates"][1]["alike"].is_null());
+        assert!(!probe.to_string().contains("CODEA1"));
+        // a job with no result yet, or one that is not a document, is read
+        // as it stands
+        for result in [json!(null), json!("done"), json!([1, 2])] {
+            let mut queued = json!({"kind": "ingest", "state": "queued", "result": result});
+            let before = queued.clone();
+            job_totals_only(&mut queued);
+            assert_eq!(queued, before);
+        }
         assert!(!job.to_string().contains("stack-3") && !job.to_string().contains("4.5"));
         // below detail quasi a review list says a run's items one a check
         // or a reason with its count, never one a unit

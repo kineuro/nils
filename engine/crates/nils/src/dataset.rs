@@ -1378,6 +1378,47 @@ pub(crate) fn undeclared_refusal(p: &Place) -> Option<String> {
     })
 }
 
+/// Where a dataset's probe reads (Wave 7a, record 55 K9): its originals,
+/// by the dataset's name, as its structure says them. An identified
+/// dataset holds them, and so does one with its anonymised copy beside
+/// (`both`). A root is no dataset, each folder under it one of its own
+/// (404). A dataset whose structure is unknown is read by nothing until a
+/// person says which tree its entries go into; an anonymised one holds no
+/// originals; originals vaulted or purged are no longer there; and a tree
+/// the disk does not hold is none (409).
+pub(crate) fn originals_to_probe(p: &Place) -> Result<PathBuf, Refused> {
+    let name = &p.name;
+    let d = place::dataset_of(&p.dataset, None)
+        .map_err(|e| conflict(format!("the dataset {name} cannot be read: {e}")))?;
+    if d["kind"] == "root" {
+        return Err(Refused {
+            status: 404,
+            message: format!(
+                "{name} is a root, not a dataset: each folder under it is a dataset, probed by its own name"
+            ),
+            layout: None,
+        });
+    }
+    if d["arrives"] == place::UNDECLARED || d["state"] == "unknown" {
+        return Err(conflict(format!(
+            "the dataset {name} is not probed: its structure is unknown (entries beside derivatives/, or no tree at all), and nothing in it is read until a person says which tree they go into"
+        )));
+    }
+    if d["state"] == "anonymised" {
+        return Err(conflict(format!(
+            "the dataset {name} is anonymised: it holds no originals to probe"
+        )));
+    }
+    if let Some(kept) = d["originals_kept"].as_str().filter(|k| *k != "kept") {
+        return Err(conflict(format!(
+            "the dataset {name}'s originals were {kept}: none are left to probe"
+        )));
+    }
+    p.tree_path("originals")
+        .filter(|t| t.is_dir())
+        .ok_or_else(|| conflict(format!("the dataset {name} has no originals to probe")))
+}
+
 /// The source place whose originals or pseudonymised tree holds a path, other
 /// than the place given: a dataset is declared on its own folder, never
 /// inside another's trees. A dataset reading its folder itself has no tree

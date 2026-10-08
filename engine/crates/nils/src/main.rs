@@ -1180,7 +1180,13 @@ enum IngestCommand {
 #[derive(Debug, Parser)]
 struct ProbeArgs {
     /// A registered location as @name or @name/relative, or a directory
-    location: String,
+    #[arg(required_unless_present = "dataset", conflicts_with = "dataset")]
+    location: Option<String>,
+    /// A dataset by name, whose originals are read, shapes only; the answer
+    /// adds, per candidate, the subjects whose birth date and sex agree and
+    /// whose visits overlap (record 55 K9)
+    #[arg(long, value_name = "NAME")]
+    dataset: Option<String>,
     /// The most files read
     #[arg(long, default_value_t = nils_digest::probe::SAMPLE_DEFAULT)]
     sample: usize,
@@ -3839,10 +3845,23 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     let IngestCommand::Probe(args) = command;
     use nils_registry::job::{self, Claim, State};
     let mut registry = open(home)?;
-    // Where to read: a registered name, or a directory from the keyboard.
-    // Record 26: `@name` is the dataset's pseudonymised tree and
-    // `@name/originals` its originals, which a probe may read, shapes only.
-    let root = if let Some(rest) = args.location.strip_prefix('@') {
+    // Where to read: a dataset's originals by the dataset's name (Wave 7a),
+    // a registered name, or a directory from the keyboard. Record 26:
+    // `@name` is the dataset's pseudonymised tree and `@name/originals` its
+    // originals, which a probe may read, shapes only.
+    let dataset = match &args.dataset {
+        Some(name) => Some(dataset_named(
+            &mut registry,
+            &format!("@{}", name.trim().trim_start_matches('@')),
+        )?),
+        None => None,
+    };
+    let location = args.location.clone().unwrap_or_default();
+    let root = if let Some(d) = &dataset {
+        // what the dataset's structure says it holds: identified, or both,
+        // has originals to read
+        dataset::originals_to_probe(d).map_err(|r| fail(r.message))?
+    } else if let Some(rest) = location.strip_prefix('@') {
         // the worker's locations, then every source place by its own name,
         // so a dataset added since the engine started is probed by its name
         let mut given = ingest_roots(&args.ingest_root)?;
@@ -3859,7 +3878,7 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
             .ok_or_else(|| fail(format!("no registered location named {name}")))?
             .resolve(rel)
     } else {
-        PathBuf::from(&args.location)
+        PathBuf::from(&location)
     };
     let mut candidates: Vec<(String, nils_digest::Rule)> = Vec::new();
     for p in &args.rule {
@@ -3888,13 +3907,40 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
         &Claim {
             kind: "ingest",
             name: "probe",
-            args: serde_json::json!({"location": args.location, "sample": args.sample, "rules": candidates.len()}),
+            args: match &dataset {
+                Some(d) => serde_json::json!({"dataset": d.name, "sample": args.sample, "rules": candidates.len()}),
+                None => serde_json::json!({"location": location, "sample": args.sample, "rules": candidates.len()}),
+            },
         },
     )
     .map_err(|e| fail(e.to_string()))?;
-    match nils_digest::probe::probe(&root, args.sample, &candidates, args.workers) {
+    let probed = nils_digest::probe::probe_with(
+        &root,
+        args.sample,
+        &candidates,
+        args.workers,
+        dataset.is_some(),
+    )
+    .and_then(|(mut doc, pairs)| {
+        if let Some(d) = &dataset {
+            doc["dataset"] = serde_json::json!(d.name);
+            doc["location"] = serde_json::Value::Null;
+            let named = alike_named(&registry, pairs).map_err(|e| e.to_string())?;
+            for (c, alike) in doc["candidates"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .zip(named)
+            {
+                c["alike"] = alike;
+            }
+        } else {
+            doc["location"] = serde_json::json!(location.split('/').next().unwrap_or(""));
+        }
+        Ok(doc)
+    });
+    match probed {
         Ok(mut doc) => {
-            doc["location"] = serde_json::json!(args.location.split('/').next().unwrap_or(""));
             doc["job"] = serde_json::json!(job);
             job::finish(registry.store(), job, State::Done, None)
                 .map_err(|e| fail(e.to_string()))?;
@@ -3934,6 +3980,64 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
             Err(fail(e))
         }
     }
+}
+
+/// Record 55 K9: the pairs a dataset's probe found alike, named as the
+/// subjects the linkage store files them under. A pair whose two
+/// identities are one subject already is counted as linked; one with an
+/// identity the store does not know is counted as unmapped, since a map
+/// names it and a merge cannot; the rest are proposed as `pairs`, by the
+/// two subjects' codes and how many visits they share, never a value.
+fn alike_named(
+    registry: &Registry,
+    pairs: Vec<Vec<nils_digest::probe::AlikePair>>,
+) -> Result<Vec<serde_json::Value>, nils_registry::HomeError> {
+    use nils_registry::linkage;
+    let key = registry.pseudonym_key()?;
+    let keys = linkage::Subkeys::derive(&key);
+    let mut store = registry.open_linkage()?;
+    let mut reg = registry.open_reader()?;
+    let mut subject_of = |who: &nils_digest::probe::Who| -> Result<Option<linkage::Subject>, nils_registry::HomeError> {
+        let found = linkage::identities_by_lookup(&mut store, &[keys.lookup(&who.0, &who.1)])
+            .map_err(|e| nils_registry::HomeError::Message(e.to_string()))?;
+        let Some(id) = found.first().map(|i| i.subject_id) else {
+            return Ok(None);
+        };
+        let mut subject = linkage::subjects_by_id(&mut reg, &[id])
+            .map_err(|e| nils_registry::HomeError::Message(e.to_string()))?
+            .into_iter()
+            .next();
+        // a merged subject stands for the one it was merged into
+        while let Some(into) = subject.as_ref().and_then(|s| s.merged_into) {
+            subject = linkage::subjects_by_id(&mut reg, &[into])
+                .map_err(|e| nils_registry::HomeError::Message(e.to_string()))?
+                .into_iter()
+                .next();
+        }
+        Ok(subject)
+    };
+    let mut out = Vec::with_capacity(pairs.len());
+    for list in pairs {
+        let (mut named, mut linked, mut unmapped) = (Vec::new(), 0u64, 0u64);
+        for p in list {
+            match (subject_of(&p.a)?, subject_of(&p.b)?) {
+                (Some(a), Some(b)) if a.id == b.id => linked += 1,
+                (Some(a), Some(b)) => named.push(serde_json::json!({
+                    "subjects": [a.code, b.code],
+                    "agree": ["birth_date", "sex"],
+                    "visits": {"shared": p.shared, "of": [p.days.0, p.days.1]},
+                })),
+                _ => unmapped += 1,
+            }
+        }
+        out.push(serde_json::json!({"pairs": named, "linked": linked, "unmapped": unmapped}));
+    }
+    key_zeroed(key);
+    Ok(out)
+}
+
+fn key_zeroed(mut key: Vec<u8>) {
+    key.fill(0);
 }
 
 /// `nils login` (Wave 4c §5.8).
