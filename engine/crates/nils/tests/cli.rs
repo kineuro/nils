@@ -4576,9 +4576,9 @@ fn a_laptop_binds_directories_as_places_and_a_release_keeps_to_the_export_one() 
         .output()
         .unwrap();
     let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    // the source is a root (Wave 7a): its two folders are datasets of
-    // their own, beside it and the export place
-    assert_eq!(rows.as_array().unwrap().len(), 4, "{rows}");
+    // the source is a root (Wave 7a), added alone: its folders become
+    // datasets only when a person adds them
+    assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
     let src = rows
         .as_array()
         .unwrap()
@@ -6070,6 +6070,8 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
     let root = outer.path().join("src");
     let run = |args: &[&str]| nils().args(registry).args(args).output().unwrap();
 
+    std::fs::create_dir_all(root.join("papers")).unwrap();
+    std::fs::write(root.join("papers/notes"), b"no dicom here").unwrap();
     let added = run(&[
         "place",
         "add",
@@ -6081,14 +6083,47 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
     ]);
     assert!(added.status.success(), "{}", stderr(&added));
     let src: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    // the root alone (Nima, 2026-10-08)
     assert_eq!(src["dataset"]["kind"], "root", "{src}");
-    let states: std::collections::BTreeMap<String, String> = src["datasets"]
+    assert_eq!(src["datasets"], serde_json::Value::Null, "{src}");
+    assert_eq!(src["layout"]["folders"], 7, "{src}");
+    // its folders as they are, nothing assumed
+    let listed = run(&["place", "folders", "src", "--json"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let doc: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let dicom: std::collections::BTreeMap<String, String> = doc["folders"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|d| {
+        .map(|f| {
+            assert_eq!(f["added"], false, "{f}");
             (
-                d["name"].as_str().unwrap().to_string(),
+                f["name"].as_str().unwrap().to_string(),
+                f["holds_dicom"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(dicom["papers"], "no", "{doc}");
+    assert_eq!(dicom["loose"], "yes", "{doc}");
+    assert_eq!(dicom.len(), 7, "{doc}");
+    assert!(
+        root.join("raw/derivatives/dcm-raw").is_dir(),
+        "nothing renamed yet"
+    );
+    // each data folder added by a person: only then is its structure read
+    let mut added_sets = std::collections::BTreeMap::new();
+    for folder in ["anon", "both", "idf", "loose", "mixed", "raw"] {
+        let out = run(&["place", "add-dataset", "src", folder, "--json"]);
+        assert!(out.status.success(), "{folder}: {}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["dataset"]["root"], "src", "{doc}");
+        added_sets.insert(folder.to_string(), doc);
+    }
+    let states: std::collections::BTreeMap<String, String> = added_sets
+        .iter()
+        .map(|(k, d)| {
+            (
+                k.clone(),
                 d["dataset"]["state"].as_str().unwrap().to_string(),
             )
         })
@@ -6104,25 +6139,9 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
     .into_iter()
     .map(|(a, b)| (a.to_string(), b.to_string()))
     .collect();
-    assert_eq!(states, want, "{src}");
-    let id_of = |name: &str| {
-        src["datasets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["name"] == name)
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap()
-            .to_string()
-    };
-    let loose = src["datasets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["name"] == "loose")
-        .unwrap()
-        .clone();
+    assert_eq!(states, want);
+    let id_of = |name: &str| added_sets[name]["id"].as_i64().unwrap().to_string();
+    let loose = &added_sets["loose"];
     assert_eq!(loose["layout"]["question"], true, "{loose}");
     assert_eq!(
         loose["layout"]["loose_dicom"],
@@ -6134,6 +6153,9 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         serde_json::json!(["originals", "anon"]),
         "{loose}"
     );
+    // the papers were never added: not a dataset, never read
+    let refused = run(&["digest", root.join("papers").to_str().unwrap()]);
+    assert!(!refused.status.success());
     // dcm-raw renamed, shown; nothing of an unknown dataset moved
     assert!(root.join("raw/derivatives/dcm-anon/s1/IM_0003").is_file());
     assert!(root.join("loose/p1/IM_0005").is_file());
@@ -6248,19 +6270,31 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         stderr(&refused)
     );
 
-    // explored again: what is there is met; a new folder is a new dataset
+    // looked at again: every dataset read anew, and a new folder is no
+    // dataset until a person adds it
     mr_file(&outer, "src/late/derivatives/dcm-anon/s1/IM_0008", 8);
-    let again = run(&["place", "explore", "src", "--json"]);
+    let again = run(&["place", "explore", "--json"]);
     assert!(again.status.success(), "{}", stderr(&again));
     let doc: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
-    let new: Vec<&str> = doc[0]["datasets"]
+    assert_eq!(doc["datasets"].as_array().unwrap().len(), 6, "{doc}");
+    assert!(
+        doc["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["new"] == false),
+        "{doc}"
+    );
+    let listed = run(&["place", "folders", "src", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let late = doc["folders"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|d| d["new"] == true)
-        .map(|d| d["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(new, ["late"], "{doc}");
+        .find(|f| f["name"] == "late")
+        .unwrap();
+    assert_eq!(late["added"], false, "{doc}");
+    assert_eq!(late["has_derivatives"], true, "{doc}");
 }
 
 /// Wave 7a: a place from before that names a dataset's pseudonymised tree
@@ -6483,19 +6517,19 @@ fn anonymised_data_resolves_its_subjects_by_a_map_or_by_the_generator() {
         "--json",
     ]);
     assert!(added.status.success(), "{}", stderr(&added));
-    let src: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
-    let id_of = |name: &str| {
-        src["datasets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["name"] == name)
-            .unwrap()["id"]
-            .as_i64()
-            .unwrap()
-            .to_string()
-    };
-    let gen_layout = &src["datasets"][0]["layout"];
+    // each data folder added by a person
+    let mut ids = std::collections::BTreeMap::new();
+    let mut layouts = std::collections::BTreeMap::new();
+    for folder in ["gen", "mapped"] {
+        let out = run(&["place", "add-dataset", "src", folder, "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["dataset"]["state"], "anonymised", "{doc}");
+        ids.insert(folder, doc["id"].as_i64().unwrap().to_string());
+        layouts.insert(folder, doc["layout"].clone());
+    }
+    let id_of = |name: &str| ids[name].clone();
+    let gen_layout = &layouts["gen"];
     assert_eq!(
         gen_layout["settings"]["patient_id"]["required"], true,
         "{gen_layout}"

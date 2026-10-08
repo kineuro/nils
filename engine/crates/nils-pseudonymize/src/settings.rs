@@ -186,7 +186,7 @@ impl Settings {
             anon,
             identity,
             unmapped,
-            folder_by_id: dataset["folder"].as_str() == Some("id-type")
+            folder_by_id: dataset["copy_folder"].as_str() == Some("id-type")
                 && matches!(patient_id, PatientId::IdType(_)),
             patient_id,
             tags,
@@ -214,7 +214,7 @@ impl Settings {
             "identity": self.identity.to_json(),
             "unmapped": self.unmapped.name(),
             "patient_id": self.patient_id.as_text(),
-            "folder": if self.folder_by_id { "id-type" } else { "subject-code" },
+            "copy_folder": if self.folder_by_id { "id-type" } else { "subject-code" },
             "tags": {
                 "keep": self.tags.keep.iter().map(tag).collect::<Vec<_>>(),
                 "remove": self.tags.remove.iter().map(tag).collect::<Vec<_>>(),

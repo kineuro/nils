@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 83;
+pub const SCHEMA_VERSION: i64 = 84;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,7 +386,92 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 83,
         apply: a_dataset_s_declaration_is_its_structure,
     },
+    Migration {
+        version: 84,
+        apply: a_root_s_folder_is_a_dataset_only_when_added,
+    },
 ];
+
+/// Wave 7a (Nima, 2026-10-08: "on starting page we just need to add a
+/// root/s. then on data page when we add the folder as data"): a folder
+/// under a root is a dataset only when a person adds it. The datasets a
+/// development build made of every folder under a root, and that nothing
+/// has read since (no digest of its tree, nothing pseudonymised), are
+/// removed, their folders plain folders again; one that was read stays a
+/// dataset. No file is touched.
+fn a_root_s_folder_is_a_dataset_only_when_added(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "place")? {
+        return Ok(());
+    }
+    let t = schema::table("place");
+    let dataset = store
+        .dialect()
+        .text_of(t.column("dataset").expect("place.dataset"));
+    let rows = store.query(
+        &format!(
+            "SELECT id, {dataset}, path FROM {} WHERE role = 'source' ORDER BY id",
+            store.qualified("place")
+        ),
+        &[],
+    )?;
+    let read: Vec<std::path::PathBuf> = if table_exists(store, "source")? {
+        store
+            .query(
+                &format!("SELECT root_canonical FROM {}", store.qualified("source")),
+                &[],
+            )?
+            .iter()
+            .filter_map(|r| r.opt_text(0).ok().flatten().map(std::path::PathBuf::from))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let held = table_exists(store, "pseudonym_file")?;
+    for r in &rows {
+        let doc: serde_json::Value = r
+            .opt_text(1)?
+            .and_then(|d| serde_json::from_str(d).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if doc["root"].is_null() {
+            continue;
+        }
+        let id = r.int(0)?;
+        let path = std::path::Path::new(r.text(2)?);
+        if read.iter().any(|s| s.starts_with(path)) {
+            continue;
+        }
+        if held {
+            let n = store
+                .query(
+                    &format!(
+                        "SELECT COUNT(*) FROM {} WHERE place_id = {}",
+                        store.qualified("pseudonym_file"),
+                        store.dialect().param(1, schema::Type::Int)
+                    ),
+                    &[Param::Int(id)],
+                )?
+                .first()
+                .map(|r| r.int(0))
+                .transpose()?
+                .unwrap_or(0);
+            if n > 0 {
+                continue;
+            }
+        }
+        store.execute(
+            &format!(
+                "DELETE FROM {} WHERE id = {}",
+                store.qualified("place"),
+                store.dialect().param(1, schema::Type::Int)
+            ),
+            &[Param::Int(id)],
+        )?;
+    }
+    Ok(())
+}
 
 /// Wave 7a: schema 80's step again, for a store a development build
 /// migrated under its earlier form, before a dataset's state was read from
@@ -2888,6 +2973,82 @@ mod column_migration {
             assert_eq!(of("raw")["cohort"], "ms");
             assert!(of("out").is_null());
         }
+    }
+
+    /// Wave 7a: a dataset a development build made of a root's folder and
+    /// that nothing read is removed; one a digest read, or the
+    /// pseudonymiser wrote, stays; a dataset of no root and the root stay.
+    #[test]
+    fn a_root_s_unread_folders_are_plain_folders_again() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 83) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        let under = r#"{"kind": "dataset", "root": "src", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let alone = r#"{"kind": "dataset", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let root = r#"{"kind": "root", "arrives": "undeclared"}"#;
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "dataset",
+            ],
+        );
+        let row = |name: &str, path: &str, dataset: &str| {
+            vec![
+                Param::from(name),
+                Param::from("source"),
+                Param::from(path),
+                Param::from("{}"),
+                Param::from("2026-10-08T00:00:00Z"),
+                Param::from(dataset),
+            ]
+        };
+        store
+            .insert(
+                &spec,
+                &[
+                    row("src", "/data/src", root),
+                    row("unread", "/data/src/unread", under),
+                    row("digested", "/data/src/digested", under),
+                    row("written", "/data/src/written", under),
+                    row("alone", "/data/alone", alone),
+                ],
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO source (root, root_canonical, first_seen_at) VALUES ('x', '/data/src/digested/derivatives/dcm-anon', '2026-10-08T00:00:00Z')",
+                &[],
+            )
+            .unwrap();
+        let written = store
+            .query("SELECT id FROM place WHERE name = 'written'", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!("INSERT INTO pseudonym_file (place_id, path, size, mtime, state, first_seen, code_anyway) VALUES ({written}, 'a', 1, 1, 'written', '2026-10-08T00:00:00Z', 0)"),
+                &[],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            a_root_s_folder_is_a_dataset_only_when_added(&mut store, Kind::Registry).unwrap();
+        }
+        let mut names: Vec<String> = crate::place::list(&mut store)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["alone", "digested", "src", "written"]);
     }
 
     /// Wave 7a: what a store from before sealed of a personnummer is

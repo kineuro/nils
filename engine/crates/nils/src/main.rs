@@ -891,13 +891,37 @@ enum PlaceCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Explore the source places again (Wave 7a): a root's folders found and
-    /// each settled as a dataset whose structure says how its files arrive,
-    /// a dataset settled; all the roots and datasets of no root, or the one
-    /// named
+    /// Look at the source places again (Wave 7a): each root, and each
+    /// dataset's state read again from its structure; the one named, or a
+    /// root's datasets, or all. Nothing is added
     Explore {
         /// A source place by its id or name
         place: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// A root's folders as they are (Wave 7a): whether each was added as a
+    /// dataset, whether a bounded look found DICOM in it (yes, no or
+    /// unknown) and whether it holds derivatives/. Nothing is written
+    Folders {
+        /// The root, by its id or name
+        root: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a folder under a root as a dataset (Wave 7a): only then is its
+    /// structure read and its state derived
+    AddDataset {
+        /// The root, by its id or name
+        root: String,
+        /// The folder under the root, by its name or its path
+        #[arg(value_name = "FOLDER")]
+        under: String,
+        /// The dataset's name; the folder's by default
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        #[command(flatten)]
+        dataset: DatasetFlags,
         #[arg(long)]
         json: bool,
     },
@@ -959,7 +983,7 @@ struct DatasetFlags {
     /// default) or id-type (the value PatientID holds, with --patient-id
     /// id-type:NAME); changed only before anything is pseudonymised
     #[arg(long, value_name = "subject-code|id-type")]
-    folder: Option<String>,
+    copy_folder: Option<String>,
     /// The cohort every digest of the dataset feeds
     #[arg(long, value_name = "NAME")]
     cohort: Option<String>,
@@ -1014,8 +1038,8 @@ impl DatasetFlags {
         if let Some(s) = &self.subjects {
             asked.insert("subjects".into(), serde_json::json!(s));
         }
-        if let Some(f) = &self.folder {
-            asked.insert("folder".into(), serde_json::json!(f));
+        if let Some(f) = &self.copy_folder {
+            asked.insert("copy_folder".into(), serde_json::json!(f));
         }
         if let Some(c) = &self.cohort {
             asked.insert("cohort".into(), serde_json::json!(c));
@@ -2875,9 +2899,6 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             if json {
                 let mut doc = p.as_json();
                 doc["layout"] = layout;
-                if p.dataset["kind"] == "root" {
-                    doc["datasets"] = dataset::found_doc(&found);
-                }
                 println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 println!(
@@ -2897,28 +2918,22 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             Ok(())
         }
         PlaceCommand::Explore { place: asked, json } => {
-            // Wave 7a: each source place's folder made what it is again: a
-            // root's datasets found and settled, a dataset settled
-            let rows: Vec<place::Place> = place::active(registry.store())
+            // Wave 7a: the roots and the datasets looked at again; nothing
+            // is added, and no folder becomes a dataset here
+            let tops: Vec<place::Place> = place::active(registry.store())
                 .map_err(|e| fail(e.to_string()))?
                 .into_iter()
-                .filter(|p| p.role == Role::Source)
+                .filter(|p| p.role == Role::Source && p.dataset["root"].is_null())
+                .filter(|p| p.dataset["kind"] == "root" || place::is_undeclared(&p.dataset))
                 .filter(|p| match &asked {
                     Some(a) => a == &p.name || a.parse::<i64>().ok() == Some(p.id),
-                    None => p.dataset["root"].is_null(),
+                    None => true,
                 })
                 .collect();
-            if rows.is_empty() {
-                return Err(usage(match asked {
-                    Some(a) => format!("{a} is no source place"),
-                    None => "no source places; add one with nils place add NAME DIR --role source"
-                        .into(),
-                }));
-            }
-            let mut out = Vec::new();
-            for p in rows {
+            let mut roots = Vec::new();
+            for p in tops {
                 let path = PathBuf::from(&p.path);
-                let (d, found) = dataset::shape_place(
+                let (d, _) = dataset::shape_place(
                     registry.store(),
                     &p.name,
                     &path,
@@ -2931,22 +2946,94 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     .map_err(|e| fail(e.to_string()))?;
                 let p = place::set_dataset(registry.store(), p.id, &d.dataset)
                     .map_err(|e| fail(e.to_string()))?;
-                if json {
-                    let mut doc = p.as_json();
-                    doc["layout"] = d.layout;
-                    doc["datasets"] = dataset::found_doc(&found);
-                    out.push(doc);
-                } else {
-                    println!("place {}: {} at {}", p.id, p.name, p.path);
-                    show_layout(&p, &d.layout);
-                    show_found(&found);
-                }
+                roots.push((p, d.layout));
             }
+            let found = dataset::refresh(registry.store(), asked.as_deref())
+                .map_err(|r| refused(r, json))?;
+            if roots.is_empty() && found.is_empty() {
+                return Err(usage(match asked {
+                    Some(a) => format!("{a} is no source place"),
+                    None => "no source places; add one with nils place add NAME DIR --role source"
+                        .into(),
+                }));
+            }
+            if json {
+                let doc = serde_json::json!({
+                    "roots": roots.iter().map(|(p, l)| {
+                        let mut doc = p.as_json();
+                        doc["layout"] = l.clone();
+                        doc
+                    }).collect::<Vec<_>>(),
+                    "datasets": dataset::found_doc(&found),
+                });
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                for (p, l) in &roots {
+                    println!("place {}: {} at {}", p.id, p.name, p.path);
+                    show_layout(p, l);
+                }
+                show_found(&found);
+            }
+            Ok(())
+        }
+        PlaceCommand::Folders { root, json } => {
+            // Wave 7a: a root's folders as they are, nothing changed
+            let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
+            let listed = dataset::folders(registry.store(), &r).map_err(|r| fail(r.message))?;
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::Value::from(out)).unwrap_or_default()
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "root": r.name, "path": r.path, "folders": listed,
+                    }))
+                    .unwrap_or_default()
                 );
+            } else {
+                println!("root {}: {} at {}", r.id, r.name, r.path);
+                for f in &listed {
+                    println!(
+                        "  {:<24} {:<10} DICOM {:<7} {}",
+                        f["name"].as_str().unwrap_or(""),
+                        match f["dataset"].as_str() {
+                            Some(d) => format!("dataset {d}"),
+                            None => "not added".to_string(),
+                        },
+                        f["holds_dicom"].as_str().unwrap_or(""),
+                        if f["has_derivatives"].as_bool() == Some(true) {
+                            "derivatives/"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::AddDataset {
+            root,
+            under,
+            name,
+            dataset,
+            json,
+        } => {
+            // Wave 7a: a folder becomes a dataset by a person's act, and
+            // only then is its structure read
+            let asked = dataset.asked()?;
+            let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
+            let f = dataset::add_dataset(registry.store(), &r, &under, name.as_deref(), &asked)
+                .map_err(|r| refused(r, json))?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::PlaceAdd,
+                serde_json::json!({"place": f.place.id, "name": f.place.name, "role": "source", "root": r.name}),
+                Some(serde_json::json!({"layout": f.layout})),
+            )?;
+            if json {
+                let mut doc = f.place.as_json();
+                doc["layout"] = f.layout.clone();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                show_found(std::slice::from_ref(&f));
             }
             Ok(())
         }

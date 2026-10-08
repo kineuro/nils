@@ -1672,7 +1672,7 @@ fn the_copy_s_folder_is_the_id_type_s_value_when_the_dataset_asks() {
         false,
     );
     let mut place = personnummer_dataset(&mut registry, &data, "id-type:study-id");
-    place.dataset["folder"] = json!("id-type");
+    place.dataset["copy_folder"] = json!("id-type");
     let report = pseudonymize(&settings(&place), &mut registry).unwrap();
     assert_eq!(files_of(&report), (3, 3, 0, 0, 0), "{report}");
     assert_eq!(

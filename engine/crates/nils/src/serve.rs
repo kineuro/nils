@@ -2382,6 +2382,8 @@ fn routed(
                         place::set_dataset(registry.store(), p.id, &d.dataset)?;
                     }
                 }
+                // every dataset's state read again; nothing is added
+                let _ = crate::dataset::refresh(registry.store(), None);
             }
             let mut rows = place::list(registry.store())?;
             if refresh {
@@ -2466,6 +2468,22 @@ fn routed(
                 "bindings": crate::places::bindings_doc(),
             })))
         }
+        ["api", "places", _, "folders"] if get => {
+            // Wave 7a: a root's folders as they are, nothing changed and
+            // nothing assumed; a folder becomes a dataset only when added
+            let given = segs[2];
+            let root =
+                crate::dataset::root_named(registry.store(), given).map_err(declare_refused)?;
+            let folders =
+                crate::dataset::folders(registry.store(), &root).map_err(declare_refused)?;
+            Ok(Reply::ok(serde_json::json!({
+                "root": root.name,
+                "root_id": root.id,
+                "path": root.path,
+                "count": folders.len(),
+                "folders": folders,
+            })))
+        }
         ["api", "places", _, "originals"] if get => {
             // record 26 §1: what a vault or a purge would do, without doing
             // it. Every original is checked against the pseudonymised tree
@@ -2537,6 +2555,42 @@ fn routed(
             if let Some(refused) = crate::dataset::engine_written_refused(&doc) {
                 return Err(Reply::error(refused.status, refused.message));
             }
+            // Wave 7a (Nima, 2026-10-08): a folder under a root becomes a
+            // dataset by a person's act, named by the root and the folder,
+            // or by a path under a root; only then is its structure read
+            if doc["role"].as_str() == Some("source")
+                && let Some((root, folder)) = dataset_under_root(registry, &doc)?
+            {
+                caller.allowed(
+                    "POST /api/places with a root's folder",
+                    Need::One("data:work"),
+                    Detail::Plain,
+                )?;
+                let asked = dataset_asked(&doc);
+                let f = crate::dataset::add_dataset(
+                    registry.store(),
+                    &root,
+                    &folder,
+                    doc["name"].as_str().filter(|n| !n.trim().is_empty()),
+                    &asked,
+                )
+                .map_err(declare_refused)?;
+                nils_registry::audit::record(
+                    registry,
+                    &nils_registry::audit::Entry {
+                        principal,
+                        action: nils_registry::audit::Action::PlaceAdd,
+                        scope: serde_json::json!({"place": f.place.id, "name": f.place.name, "role": "source", "root": root.name}),
+                        policy: None,
+                        job_id: None,
+                        details: Some(serde_json::json!({"layout": f.layout})),
+                    },
+                )?;
+                let mut answer = f.place.as_json();
+                answer["layout"] = f.layout;
+                answer["not_read"] = serde_json::json!(place::incomplete(&f.place.dataset));
+                return Ok(Reply::created(answer));
+            }
             let name = doc["name"]
                 .as_str()
                 .filter(|n| !n.trim().is_empty())
@@ -2593,7 +2647,6 @@ fn routed(
                     Detail::Plain,
                 )?;
             }
-            let mut found = Vec::new();
             let (probed, dataset, layout) = if role == PlaceRole::Source {
                 if place::by_name(registry.store(), name)?.is_some() {
                     return Err(Reply::error(
@@ -2603,7 +2656,7 @@ fn routed(
                 }
                 // Wave 7a: a root explored, its datasets settled; a dataset
                 // settled; each by its folder
-                let (d, under) = crate::dataset::shape_place(
+                let (d, _) = crate::dataset::shape_place(
                     registry.store(),
                     name,
                     &path,
@@ -2612,7 +2665,6 @@ fn routed(
                     &guarantees,
                 )
                 .map_err(declare_refused)?;
-                found = under;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2654,9 +2706,6 @@ fn routed(
                 .ok_or_else(|| Reply::error(500, format!("place {id} was not written")))?;
             let mut answer = p.as_json();
             answer["layout"] = layout;
-            if p.dataset["kind"] == "root" {
-                answer["datasets"] = crate::dataset::found_doc(&found);
-            }
             Ok(Reply::created(answer))
         }
         ["api", "places", _] if put => {
@@ -2726,13 +2775,12 @@ fn routed(
                     Detail::Plain,
                 )?;
             }
-            let mut found = Vec::new();
             let looked = current.role == place::Role::Source && (dataset_given || path.is_some());
             let (probed, declared) = if looked {
                 let folder = path
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from(&current.path));
-                let (d, under) = crate::dataset::shape_place(
+                let (d, _) = crate::dataset::shape_place(
                     registry.store(),
                     &current.name,
                     &folder,
@@ -2741,7 +2789,6 @@ fn routed(
                     &current.guarantees,
                 )
                 .map_err(declare_refused)?;
-                found = under;
                 (Some(d.probed.clone()), Some(d))
             } else {
                 (path.as_deref().map(crate::places::probe), None)
@@ -2798,9 +2845,6 @@ fn routed(
             answer["layout"] = declared
                 .map(|d| d.layout)
                 .unwrap_or(serde_json::Value::Null);
-            if p.dataset["kind"] == "root" {
-                answer["datasets"] = crate::dataset::found_doc(&found);
-            }
             Ok(Reply::ok(answer))
         }
         ["api", "overlays"] if get => {
@@ -4025,6 +4069,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
         ("GET", ["api", "places", _, "originals"]) => (Need::One("data:see"), Plain),
+        // Wave 7a: a root's folders, read, nothing changed
+        ("GET", ["api", "places", _, "folders"]) => {
+            (Need::AnyOf(&["data:see", "places:see"]), Plain)
+        }
         ("POST", ["api", "places", _, "originals"]) => (Need::One("data:work"), Detail::Sensitive),
         ("POST", ["api", "ingest", "folders" | "look" | "probe"]) => {
             (Need::One("data:work"), Plain)
@@ -4180,6 +4228,38 @@ pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
 /// takes them, a null among them (no cohort, no rule) as much as a value;
 /// `handling.arrives` stands for `arrives` for a caller from before, when
 /// the body names no `arrives` of its own.
+/// The root and the folder a `POST /api/places` names for a dataset (Wave
+/// 7a): `root` (its name or id) with `folder` (a name or a path under it),
+/// or a `path` under an active root. None for any other place.
+fn dataset_under_root(
+    registry: &mut Registry,
+    doc: &serde_json::Value,
+) -> Result<Option<(nils_registry::place::Place, String)>, Reply> {
+    if let Some(root) = doc["root"].as_str().filter(|r| !r.trim().is_empty()) {
+        let root = crate::dataset::root_named(registry.store(), root).map_err(declare_refused)?;
+        let folder = doc["folder"]
+            .as_str()
+            .or_else(|| doc["path"].as_str())
+            .filter(|f| !f.trim().is_empty())
+            .ok_or_else(|| Reply::error(400, "folder: the folder under the root, by its name"))?;
+        return Ok(Some((root, folder.to_string())));
+    }
+    let Some(path) = doc["path"].as_str().filter(|p| p.starts_with('/')) else {
+        return Ok(None);
+    };
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let root = nils_registry::place::active(registry.store())?
+        .into_iter()
+        .find(|p| {
+            p.role == nils_registry::place::Role::Source && p.dataset["kind"] == "root" && {
+                let mine = std::fs::canonicalize(&p.path)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&p.path));
+                path != mine && path.starts_with(&mine)
+            }
+        });
+    Ok(root.map(|r| (r, path.display().to_string())))
+}
+
 /// A declaration refused, as a door answers it: with the layout when the
 /// refusal is the question of Wave 7a §5.3, so a desk can name the entries
 /// and the tree and ask for the confirmation.

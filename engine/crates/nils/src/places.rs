@@ -552,7 +552,7 @@ pub fn capabilities(store: &mut Store) -> Value {
             // Wave 7a (Nima, 2026-10-08): how a de-identified or coded
             // dataset's subjects are found, and what names a copy's folder
             "subjects": place::SUBJECTS,
-            "folder": place::FOLDERS,
+            "copy_folder": place::FOLDERS,
         },
     })
 }
