@@ -928,6 +928,12 @@ struct DatasetFlags {
     /// What an identifier the linkage store does not know does: hold its files, or code them
     #[arg(long, value_name = "hold|code")]
     unmapped: Option<String>,
+    /// What PatientID holds in the pseudonymised tree: the subject's code
+    /// (subject-code, an identified dataset's default) or its value of an id
+    /// type (id-type:NAME), whose files wait until the subject has one;
+    /// changed only before anything is pseudonymised
+    #[arg(long, value_name = "subject-code|id-type:NAME")]
+    patient_id: Option<String>,
     /// The cohort every digest of the dataset feeds
     #[arg(long, value_name = "NAME")]
     cohort: Option<String>,
@@ -974,6 +980,9 @@ impl DatasetFlags {
         }
         if let Some(u) = &self.unmapped {
             asked.insert("unmapped".into(), serde_json::json!(u));
+        }
+        if let Some(p) = &self.patient_id {
+            asked.insert("patient_id".into(), serde_json::json!(p));
         }
         if let Some(c) = &self.cohort {
             asked.insert("cohort".into(), serde_json::json!(c));

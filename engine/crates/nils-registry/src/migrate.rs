@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 80;
+pub const SCHEMA_VERSION: i64 = 81;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,7 +374,24 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 80,
         apply: a_source_place_nobody_declared_is_undeclared,
     },
+    Migration {
+        version: 81,
+        apply: a_held_file_may_wait_for_its_subject_s_id_type,
+    },
 ];
+
+/// Wave 7a §5.4: a dataset may write an id type's value into PatientID,
+/// and a file whose subject has none is held with its subject and the type
+/// it waits for. A registry from before gains both columns empty.
+fn a_held_file_may_wait_for_its_subject_s_id_type(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pseudonym_file", &["subject_id", "wants_type"])
+}
 
 /// Wave 7a §5.3: a source place whose dataset was never declared is
 /// `undeclared`, and nothing in it is read until a person says how its

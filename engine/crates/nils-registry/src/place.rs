@@ -460,6 +460,74 @@ fn pick(
 /// (Wave 7a §5.3): nobody has said yet, so nothing in it is read.
 pub const ARRIVALS: [&str; 4] = [UNDECLARED, "identified", "deidentified", "coded"];
 
+/// What a dataset's pseudonymiser writes into PatientID, and so what its
+/// digest reads back from the pseudonymised tree (Wave 7a §5.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatientId {
+    /// The subject's code, the subject code generator's (`subject-code`).
+    SubjectCode,
+    /// The subject's value of this id type, from the linkage store
+    /// (`id-type:<name>`).
+    IdType(String),
+}
+
+/// The declaration's word for the subject's code.
+pub const PATIENT_ID_CODE: &str = "subject-code";
+
+/// The declaration's prefix for an id type.
+pub const PATIENT_ID_TYPE: &str = "id-type:";
+
+impl PatientId {
+    /// The declaration as written: `subject-code` or `id-type:<name>`. An
+    /// id type of `subject-code` is the code; a personnummer is never what
+    /// PatientID holds, since that is the identifier pseudonymisation takes
+    /// away.
+    pub fn parse(text: &str) -> Result<PatientId, String> {
+        let text = text.trim();
+        if text == PATIENT_ID_CODE {
+            return Ok(PatientId::SubjectCode);
+        }
+        let Some(name) = text.strip_prefix(PATIENT_ID_TYPE) else {
+            return Err(format!(
+                "patient_id is {PATIENT_ID_CODE} or {PATIENT_ID_TYPE}<name>, not {text}"
+            ));
+        };
+        if name == crate::schema::SUBJECT_CODE_TYPE {
+            return Ok(PatientId::SubjectCode);
+        }
+        if !crate::linkage::valid_id_type_name(name) {
+            return Err(format!(
+                "patient_id: {name} is no id type's name (lower case letters, digits and hyphens)"
+            ));
+        }
+        if crate::personnummer::is_type(name) {
+            return Err(format!(
+                "patient_id: a pseudonymised file never holds a {name}; write the subject's code or another id type"
+            ));
+        }
+        Ok(PatientId::IdType(name.to_string()))
+    }
+
+    /// The declaration as stored.
+    pub fn as_text(&self) -> String {
+        match self {
+            PatientId::SubjectCode => PATIENT_ID_CODE.to_string(),
+            PatientId::IdType(name) => format!("{PATIENT_ID_TYPE}{name}"),
+        }
+    }
+
+    /// What a dataset document declares; none where it declares nothing,
+    /// which an identified dataset reads as the subject's code and any other
+    /// as its identity rule says.
+    pub fn of(dataset: &Value) -> Result<Option<PatientId>, String> {
+        match &dataset["patient_id"] {
+            Value::Null => Ok(None),
+            Value::String(s) => PatientId::parse(s).map(Some),
+            other => Err(format!("patient_id is a word, not {other}")),
+        }
+    }
+}
+
 /// The arrival of a dataset nobody has declared: the default of
 /// [`handling_of`], [`dataset_of`] and [`default_dataset`]. Such a dataset
 /// has no tree and is never digested, brought in or pseudonymised.
@@ -622,6 +690,22 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         None => current.map(|c| c["cohort"].clone()).unwrap_or(Value::Null),
     };
     let tags = tags_of(doc.get("tags"), current.map(|c| &c["tags"]))?;
+    // Wave 7a §5.4: what the pseudonymiser writes into PatientID; an
+    // identified dataset writes the subject's code unless it says another
+    let patient_id = match doc.get("patient_id") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) => Value::String(PatientId::parse(s)?.as_text()),
+        Some(other) => return Err(format!("patient_id is a word, not {other}")),
+        None => current
+            .map(|c| c["patient_id"].clone())
+            .filter(|v| !v.is_null())
+            .unwrap_or(Value::Null),
+    };
+    let patient_id = if patient_id.is_null() && arrives == "identified" {
+        Value::String(PATIENT_ID_CODE.into())
+    } else {
+        patient_id
+    };
     let originals_kept = pick(
         doc,
         current,
@@ -651,6 +735,7 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         "trees": {"originals": originals, "anon": anon},
         "identity": identity,
         "unmapped": unmapped,
+        "patient_id": patient_id,
         "cohort": cohort,
         "tags": tags,
         "originals_kept": originals_kept,
@@ -920,8 +1005,8 @@ pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        ANON_TREE, ORIGINALS_TREE, UNDECLARED, dataset_of, default_dataset, default_handling,
-        handling_of, is_undeclared,
+        ANON_TREE, ORIGINALS_TREE, PatientId, UNDECLARED, dataset_of, default_dataset,
+        default_handling, handling_of, is_undeclared,
     };
     use serde_json::json;
 
@@ -934,6 +1019,7 @@ mod tests {
                 "trees": {"originals": null, "anon": null},
                 "identity": null,
                 "unmapped": "hold",
+                "patient_id": null,
                 "cohort": null,
                 "tags": {"keep_demographics": true, "remove": [], "keep": []},
                 "originals_kept": "kept",
@@ -962,6 +1048,40 @@ mod tests {
         let d = dataset_of(&json!({"arrives": "deidentified"}), None).unwrap();
         assert_eq!(d["trees"], json!({"originals": null, "anon": "."}));
         assert_eq!(d["unmapped"], "code");
+    }
+
+    /// Wave 7a §5.4: a dataset declares what PatientID holds; an identified
+    /// one writes the subject's code unless it says another; a personnummer
+    /// is never what it holds.
+    #[test]
+    fn a_dataset_declares_what_patient_id_holds() {
+        let d = dataset_of(&json!({"arrives": "identified"}), None).unwrap();
+        assert_eq!(d["patient_id"], "subject-code");
+        let d = dataset_of(&json!({"arrives": "deidentified"}), None).unwrap();
+        assert_eq!(d["patient_id"], json!(null));
+        let d = dataset_of(
+            &json!({"arrives": "identified", "patient_id": "id-type:study-id"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["patient_id"], "id-type:study-id");
+        assert_eq!(
+            PatientId::of(&d).unwrap(),
+            Some(PatientId::IdType("study-id".into()))
+        );
+        // kept by a change that does not name it
+        let after = dataset_of(&json!({"cohort": "x"}), Some(&d)).unwrap();
+        assert_eq!(after["patient_id"], "id-type:study-id");
+        let d = dataset_of(&json!({"patient_id": "id-type:subject-code"}), None).unwrap();
+        assert_eq!(d["patient_id"], "subject-code");
+        for (bad, what) in [
+            ("id-type:personnummer", "never holds"),
+            ("id-type:Study ID", "no id type"),
+            ("the code", "subject-code or id-type:"),
+        ] {
+            let why = dataset_of(&json!({"patient_id": bad}), None).unwrap_err();
+            assert!(why.contains(what), "{bad}: {why}");
+        }
     }
 
     /// Wave 7a §5.3: the handling's arrival and the dataset's agree when

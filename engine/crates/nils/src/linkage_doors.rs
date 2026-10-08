@@ -65,7 +65,7 @@ pub(crate) fn route(
         ["api", "linkage", "types"] if post => add_type(registry, body),
         ["api", "linkage", "imports"] if post => imports(home, registry, caller, body),
         ["api", "linkage", "held"] if get => held(registry, query.get("place").map(String::as_str)),
-        ["api", "linkage", "held", "code"] if post => held_code(registry, body),
+        ["api", "linkage", "held", "code"] if post => held_code(registry, caller, body),
         ["api", "linkage", "held", "reveal"] if post => held_reveal(registry, caller, body),
         ["api", "linkage", "merge"] if post => merge(registry, caller, body),
         _ => return None,
@@ -388,9 +388,9 @@ fn held(registry: &mut Registry, place: Option<&str>) -> Result<Reply, Reply> {
     let d = store.dialect();
     // the stamp as text, whatever type the column has
     let sql = format!(
-        "SELECT shape, id_type, COUNT(*), CAST(MIN(first_seen) AS TEXT), MIN(batch_id) FROM {} \
+        "SELECT shape, id_type, COUNT(*), CAST(MIN(first_seen) AS TEXT), MIN(batch_id), wants_type FROM {} \
          WHERE place_id = {} AND state = 'held' AND released_at IS NULL \
-         GROUP BY shape, id_type ORDER BY shape, id_type",
+         GROUP BY shape, id_type, wants_type ORDER BY shape, id_type, wants_type",
         store.qualified(HELD_TABLE),
         d.param(1, Type::Int)
     );
@@ -403,14 +403,23 @@ fn held(registry: &mut Registry, place: Option<&str>) -> Result<Reply, Reply> {
             "files": r.int(2)?,
             "first_seen": r.opt_text(3)?,
             "batch": r.opt_int(4)?,
+            // Wave 7a §5.4: the id type the files wait for their subject to
+            // have a value of; null for files whose subject is unknown
+            "waits_for": r.opt_text(5)?,
         }));
     }
     Ok(Reply::ok(serde_json::Value::from(out)))
 }
 
-/// `POST /api/linkage/held/code {place}`: code the held files anyway on
-/// the next run.
-fn held_code(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
+/// `POST /api/linkage/held/code {place}`: code the held files anyway, and
+/// queue the run that does (Wave 7a §5.4): the pseudonymise of the held
+/// files of an identified dataset, the digest of a dataset read in place.
+/// The answer names the job, `{place, files, job, state}`; with nothing new
+/// to code, no job is queued and `job` is null, so a second press queues no
+/// second run. A file held for want of its
+/// subject's id type value is not coded anyway: its subject is known, and
+/// it waits for the value, which a map gives.
+fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let name = doc["place"]
         .as_str()
@@ -418,23 +427,50 @@ fn held_code(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
         .filter(|p| !p.is_empty())
         .ok_or_else(|| Reply::error(400, "place: the dataset's name"))?;
     let p = place_named(registry, name)?;
+    if let Some(why) = crate::dataset::undeclared_refusal(&p) {
+        return Err(Reply::error(409, why));
+    }
+    let nothing = || {
+        Ok(Reply::ok(serde_json::json!({
+            "place": p.name, "files": 0, "job": null, "state": "nothing new to code",
+        })))
+    };
     if !held_table(registry)? {
-        return Ok(Reply::ok(
-            serde_json::json!({ "place": p.name, "files": 0 }),
-        ));
+        return nothing();
     }
     let store = registry.store();
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET code_anyway = 1 WHERE place_id = {} AND state = 'held' \
-         AND released_at IS NULL AND code_anyway = 0",
+         AND released_at IS NULL AND code_anyway = 0 AND wants_type IS NULL",
         store.qualified(HELD_TABLE),
         d.param(1, Type::Int)
     );
     let n = store.execute(&sql, &[Param::Int(p.id)])?;
-    Ok(Reply::ok(
-        serde_json::json!({ "place": p.name, "files": n }),
-    ))
+    if n == 0 {
+        return nothing();
+    }
+    let at = format!("@{}", p.name);
+    let command: Vec<String> = if p.dataset["arrives"].as_str() == Some("identified") {
+        vec!["pseudonymize".into(), at, "--held".into()]
+    } else {
+        vec!["digest".into(), at]
+    };
+    let job = nils_registry::job::enqueue_with(
+        registry.store(),
+        &command,
+        Some(&p.name),
+        Some(&caller.principal),
+        crate::serve::queued_by(caller),
+    )
+    .map_err(crate::serve::job_err)?;
+    Ok(Reply::accepted(serde_json::json!({
+        "place": p.name,
+        "files": n,
+        "job": job,
+        "state": "queued",
+        "command": command,
+    })))
 }
 
 /// One held identifier revealed: the value, the first held row that
@@ -757,7 +793,8 @@ mod tests {
                 guarantees: serde_json::json!({}),
                 probed: serde_json::json!({}),
                 handling: serde_json::Value::Null,
-                dataset: serde_json::Value::Null,
+                // read in place, as these tests' datasets were declared
+                dataset: serde_json::json!({"arrives": "deidentified"}),
             },
         )
         .unwrap()
@@ -1045,8 +1082,8 @@ mod tests {
         assert_eq!(
             r.body,
             serde_json::json!([
-                {"shape": "999999999999", "id_type": "patient-id", "files": 1, "first_seen": "2026-09-14T00:00:00Z", "batch": 4},
-                {"shape": "A9", "id_type": "patient-id", "files": 3, "first_seen": "2026-09-11T00:00:00Z", "batch": 3},
+                {"shape": "999999999999", "id_type": "patient-id", "files": 1, "first_seen": "2026-09-14T00:00:00Z", "batch": 4, "waits_for": null},
+                {"shape": "A9", "id_type": "patient-id", "files": 3, "first_seen": "2026-09-11T00:00:00Z", "batch": 3, "waits_for": null},
             ])
         );
         assert!(!r.body.to_string().contains("P1"));
@@ -1059,8 +1096,22 @@ mod tests {
             "/api/linkage/held/code",
             r#"{"place": "ward-b"}"#,
         );
-        assert_eq!(r.status, 200, "{}", r.body);
-        assert_eq!(r.body, serde_json::json!({"place": "ward-b", "files": 4}));
+        // Wave 7a §5.4: and the run that codes them is queued and named
+        assert_eq!(r.status, 202, "{}", r.body);
+        assert_eq!(r.body["place"], "ward-b", "{}", r.body);
+        assert_eq!(r.body["files"], 4, "{}", r.body);
+        assert_eq!(r.body["state"], "queued", "{}", r.body);
+        assert_eq!(
+            r.body["command"],
+            serde_json::json!(["digest", "@ward-b"]),
+            "{}",
+            r.body
+        );
+        let job = r.body["job"].as_i64().unwrap();
+        let queued = nils_registry::job::show(registry.store(), job)
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued.state, nils_registry::job::State::Queued);
         let r = call(
             &home,
             &mut registry,
@@ -1070,6 +1121,7 @@ mod tests {
             r#"{"place": "ward-b"}"#,
         );
         assert_eq!(r.body["files"], 0);
+        assert_eq!(r.body["job"], serde_json::Value::Null, "{}", r.body);
         let flagged = registry
             .store()
             .query(
@@ -1292,7 +1344,9 @@ mod tests {
             "/api/linkage/held/code",
             r#"{"place": "south"}"#,
         );
-        assert_eq!(r.body, serde_json::json!({"place": "south", "files": 3}));
+        assert_eq!(r.body["place"], "south", "{}", r.body);
+        assert_eq!(r.body["files"], 3, "{}", r.body);
+        assert!(r.body["job"].is_i64(), "{}", r.body);
         nils_digest::digest(&settings, &mut registry).unwrap();
         let r = call(
             &home,

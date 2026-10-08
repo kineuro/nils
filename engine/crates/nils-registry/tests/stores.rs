@@ -2067,7 +2067,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
                 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
-                80
+                80, 81
             ],
             "{name}"
         );
@@ -2226,7 +2226,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
-                61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80
+                61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81
             ],
             "{name}"
         );
@@ -2290,7 +2290,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
-                63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80
+                63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81
             ],
             "{name}"
         );
@@ -2366,7 +2366,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
-                64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80
+                64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81
             ],
             "{name}"
         );
@@ -2417,7 +2417,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
-                65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80
+                65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81
             ],
             "{name}"
         );
@@ -2459,7 +2459,9 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [
+                66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81
+            ],
             "{name}"
         );
         assert!(
@@ -2497,7 +2499,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -2535,7 +2537,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -2569,7 +2571,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -2645,7 +2647,7 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -2700,7 +2702,7 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         for table in ["series_mr", "stack_fingerprint"] {
@@ -2756,7 +2758,7 @@ fn migration_72_writes_what_each_campaign_suggested_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [72, 73, 74, 75, 76, 77, 78, 79, 80],
+            [72, 73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         let said: Vec<(String, String)> = store
@@ -2810,7 +2812,7 @@ fn migration_73_lets_a_campaign_settle_candidates_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [73, 74, 75, 76, 77, 78, 79, 80],
+            [73, 74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -2856,7 +2858,7 @@ fn migration_75_lets_a_campaign_show_the_pictures_alone_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [75, 76, 77, 78, 79, 80],
+            [75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -2993,7 +2995,7 @@ fn migration_74_lets_a_campaign_show_two_stacks_side_by_side_on_both_backends() 
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [74, 75, 76, 77, 78, 79, 80],
+            [74, 75, 76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -3028,7 +3030,7 @@ fn migration_76_lets_a_campaign_read_a_stack_beside_two_anchors_on_both_backends
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [76, 77, 78, 79, 80],
+            [76, 77, 78, 79, 80, 81],
             "{name}"
         );
         assert!(
@@ -3082,7 +3084,7 @@ fn migration_77_gives_a_series_its_mechanism_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [77, 78, 79, 80],
+            [77, 78, 79, 80, 81],
             "{name}"
         );
         for c in SERIES {
@@ -3135,7 +3137,7 @@ fn migration_78_gives_a_stack_the_philips_frame_image_type_on_both_backends() {
         }
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [78, 79, 80],
+            [78, 79, 80, 81],
             "{name}"
         );
         for table in ["stack", "stack_fingerprint"] {
@@ -3159,7 +3161,7 @@ fn migration_78_gives_a_stack_the_philips_frame_image_type_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [78, 79, 80],
+            [78, 79, 80, 81],
             "{name}"
         );
         for table in ["stack", "stack_fingerprint"] {
@@ -3200,7 +3202,7 @@ fn migration_79_gives_the_fingerprint_its_2026_10_03_fields_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [79, 80],
+            [79, 80, 81],
             "{name}"
         );
         for (t, cols) in tables {

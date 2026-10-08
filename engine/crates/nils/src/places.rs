@@ -542,6 +542,8 @@ pub fn capabilities(store: &mut Store) -> Value {
             "fields": crate::dataset::FIELDS,
             "arrives": place::ARRIVALS,
             "trees": {"originals": place::ORIGINALS_TREE, "anon": place::ANON_TREE},
+            // Wave 7a §5.4: what PatientID may hold in the pseudonymised tree
+            "patient_id": [place::PATIENT_ID_CODE, format!("{}<name>", place::PATIENT_ID_TYPE)],
         },
     })
 }

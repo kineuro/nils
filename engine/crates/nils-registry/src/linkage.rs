@@ -398,6 +398,88 @@ pub fn reveal(
         .collect()
 }
 
+/// The value of one id type that each of `subjects` holds, opened, for the
+/// pseudonymiser that writes it into PatientID (Wave 7a §5.4); a subject
+/// that holds none is not in the answer. Every value read is audited as
+/// [`reveal`] audits it, with `actor` and `why`.
+pub fn values_of_type(
+    store: &mut Store,
+    keys: &Subkeys,
+    subjects: &[i64],
+    id_type_id: i64,
+    actor: &str,
+    why: &str,
+) -> Result<std::collections::HashMap<i64, String>, Error> {
+    let mut out = std::collections::HashMap::new();
+    let mut audit: Vec<Vec<Param>> = Vec::new();
+    let now = now_iso();
+    for chunk in subjects.chunks(crate::store::SQLITE_KEY_CHUNK) {
+        let d = store.dialect();
+        let marks: Vec<String> = (0..chunk.len())
+            .map(|i| d.param(i + 2, crate::schema::Type::Int))
+            .collect();
+        let sql = format!(
+            "SELECT id, subject_id, ciphertext FROM {} WHERE id_type_id = {} AND subject_id IN ({}) ORDER BY id",
+            store.qualified("identity"),
+            d.param(1, crate::schema::Type::Int),
+            marks.join(", ")
+        );
+        let mut params = vec![Param::from(id_type_id)];
+        params.extend(chunk.iter().map(|s| Param::from(*s)));
+        for r in store.query(&sql, &params)? {
+            let subject = r.int(1)?;
+            if out.contains_key(&subject) {
+                continue;
+            }
+            out.insert(subject, keys.open(r.bytes(2)?)?);
+            audit.push(vec![
+                Param::from(now.as_str()),
+                Param::from(actor),
+                Param::from(r.int(0)?),
+                Param::from(why),
+            ]);
+        }
+    }
+    if !audit.is_empty() {
+        store.begin()?;
+        match store.insert(&Insert::all(table("read_audit")), &audit) {
+            Ok(_) => store.commit()?,
+            Err(e) => {
+                let _ = store.rollback();
+                return Err(e);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Which of `subjects` hold a value of one id type, nothing opened.
+pub fn subjects_with_type(
+    store: &mut Store,
+    subjects: &[i64],
+    id_type_id: i64,
+) -> Result<std::collections::HashSet<i64>, Error> {
+    let mut out = std::collections::HashSet::new();
+    for chunk in subjects.chunks(crate::store::SQLITE_KEY_CHUNK) {
+        let d = store.dialect();
+        let marks: Vec<String> = (0..chunk.len())
+            .map(|i| d.param(i + 2, crate::schema::Type::Int))
+            .collect();
+        let sql = format!(
+            "SELECT DISTINCT subject_id FROM {} WHERE id_type_id = {} AND subject_id IN ({})",
+            store.qualified("identity"),
+            d.param(1, crate::schema::Type::Int),
+            marks.join(", ")
+        );
+        let mut params = vec![Param::from(id_type_id)];
+        params.extend(chunk.iter().map(|s| Param::from(*s)));
+        for r in store.query(&sql, &params)? {
+            out.insert(r.int(0)?);
+        }
+    }
+    Ok(out)
+}
+
 /// Record that two subjects are one person (`nils linkage link`): `a` is
 /// canonical, `b` the alias. Returns the linkage id.
 pub fn link(

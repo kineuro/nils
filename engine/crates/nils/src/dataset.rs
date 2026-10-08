@@ -41,10 +41,11 @@ const COUNT_FOR: Duration = Duration::from_secs(2);
 
 /// The keys a declaration may set on a dataset, beside the trees the engine
 /// sets itself.
-pub(crate) const FIELDS: [&str; 7] = [
+pub(crate) const FIELDS: [&str; 8] = [
     "arrives",
     "identity",
     "unmapped",
+    "patient_id",
     "cohort",
     "tags",
     "confirm_move",
@@ -388,6 +389,29 @@ pub(crate) fn declare(
             other.name
         )));
     }
+    // Wave 7a §5.4: what PatientID holds is changed only on a dataset
+    // nothing was pseudonymised into yet, since its tree would hold two kinds
+    let in_force = current
+        .and_then(|c| place::dataset_of(&c.dataset, None).ok())
+        .map(|d| d["patient_id"].clone())
+        .unwrap_or(Value::Null);
+    if let Some(c) = current
+        && dataset["patient_id"] != in_force
+        && !in_force.is_null()
+    {
+        let written = pseudonymised_files(store, c.id).map_err(|e| Refused {
+            status: 500,
+            message: e.to_string(),
+            layout: None,
+        })?;
+        if written > 0 {
+            return Err(conflict(format!(
+                "the dataset {} has {written} pseudonymised file(s) whose PatientID holds {}; what PatientID holds is changed only before anything is pseudonymised",
+                c.name,
+                in_force.as_str().unwrap_or("")
+            )));
+        }
+    }
     let confirm_move = asked["confirm_move"].as_bool() == Some(true)
         || asked["move_into_anon"].as_bool() == Some(true);
     let arrives = dataset["arrives"]
@@ -410,6 +434,26 @@ pub(crate) fn declare(
         layout: layout_doc(path, &layout),
         probed,
     })
+}
+
+/// How many of a dataset's originals have a pseudonymised copy.
+fn pseudonymised_files(
+    store: &mut Store,
+    place_id: i64,
+) -> Result<i64, nils_registry::store::Error> {
+    if !nils_registry::migrate::table_exists(store, "pseudonym_file")? {
+        return Ok(0);
+    }
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE place_id = {} AND out_path IS NOT NULL",
+        store.qualified("pseudonym_file"),
+        store.dialect().param(1, nils_registry::schema::Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[nils_registry::store::Param::Int(place_id)])?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0))
 }
 
 /// What a source place is now, for a path that adds one without declaring
@@ -795,11 +839,21 @@ pub(crate) fn anon_rule() -> String {
     "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-hjkmnp-tv-z]+)$'\n  code: verbatim\n".to_string()
 }
 
+/// The rule a pseudonymised tree whose PatientID holds an id type's value
+/// is read under (Wave 7a §5.4): the value, as that type, found through
+/// the linkage store.
+pub(crate) fn id_type_rule(name: &str) -> String {
+    format!("identity:\n  id_type: {name}\n  from:\n    - field: PatientID\n")
+}
+
 /// The rule stored on the dataset whose pseudonymised tree holds a path,
 /// for a digest that names none of its own; none where no dataset holds the
 /// path or the dataset stores no rule. An identified dataset's own rule is
-/// for its originals, which the pseudonymiser reads; its pseudonymised
-/// tree carries codes, read under [`anon_rule`].
+/// for its originals, which the pseudonymiser reads; its pseudonymised tree
+/// is read by what the dataset declares PatientID holds (Wave 7a §5.4):
+/// the subject's code under [`anon_rule`], or an id type's value through
+/// the linkage store. A dataset read in place that declares what PatientID
+/// holds and stores no rule of its own is read the same way.
 pub(crate) fn stored_rule(
     store: &mut Store,
     path: &Path,
@@ -807,11 +861,24 @@ pub(crate) fn stored_rule(
     let Some(p) = place::tree_holding(store, "anon", path).map_err(|e| e.to_string())? else {
         return Ok(None);
     };
-    if p.dataset["arrives"].as_str() == Some("identified") {
-        let mut rule = nils_digest::Rule::parse(&anon_rule()).map_err(|e| e.to_string())?;
-        // the tree is this registry's own, so the resolver reads its codes
-        // as codes of this registry and nothing else as one (record 26 §3)
-        rule.own_codes = true;
+    let identified = p.dataset["arrives"].as_str() == Some("identified");
+    let declared =
+        place::PatientId::of(&p.dataset).map_err(|e| format!("the dataset {}: {e}", p.name))?;
+    let by_declaration = identified || (declared.is_some() && !p.dataset["identity"].is_object());
+    if by_declaration {
+        let mut rule = match declared.unwrap_or(place::PatientId::SubjectCode) {
+            place::PatientId::SubjectCode => {
+                let mut rule = nils_digest::Rule::parse(&anon_rule()).map_err(|e| e.to_string())?;
+                // an identified dataset's tree is this registry's own, so
+                // the resolver reads its codes as codes of this registry and
+                // nothing else as one (record 26 §3)
+                rule.own_codes = identified;
+                rule
+            }
+            place::PatientId::IdType(name) => {
+                nils_digest::Rule::parse(&id_type_rule(&name)).map_err(|e| e.to_string())?
+            }
+        };
         rule.source = Some(format!("the pseudonymised tree of the dataset {}", p.name));
         return Ok(Some(rule));
     }

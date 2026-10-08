@@ -34,6 +34,7 @@ use nils_digest::walk::{Filter, mtime_ns_of, walk};
 use nils_digest::writer::COLLISION_KIND;
 use nils_registry::dialect::Conflict;
 use nils_registry::job;
+use nils_registry::place::PatientId;
 use nils_registry::review;
 use nils_registry::schema::{Type, table};
 use nils_registry::store::{Insert, Param, Store};
@@ -334,8 +335,21 @@ enum Answer {
     Found {
         id: i64,
         code: String,
+        /// What PatientID holds in the copy: the code, or the subject's
+        /// value of the id type the dataset writes (Wave 7a §5.4).
+        written: String,
         created: bool,
         provisional: bool,
+    },
+    /// The subject is known and has no value of the id type the dataset
+    /// writes into PatientID: the file is held with its subject and the
+    /// type, and released once the subject has one (Wave 7a §5.4).
+    Wanting {
+        subject: i64,
+        lookup: Vec<u8>,
+        sealed: Vec<u8>,
+        id_type: String,
+        wants: String,
     },
     /// No subject holds the identifier and none was made: the file is
     /// held with these, or would be coded in a dry run.
@@ -393,6 +407,10 @@ pub enum Item {
         lookup: Vec<u8>,
         sealed: Vec<u8>,
         id_type: String,
+        /// Of a file held for want of an id type's value: its subject and
+        /// the type (Wave 7a §5.4); none of a file whose subject is unknown.
+        subject: Option<i64>,
+        wants: Option<String>,
     },
     Refused {
         rel: String,
@@ -490,6 +508,10 @@ fn execute(
         &settings.identity,
         run.map(|r| r.batch_id).unwrap_or(0),
     )?;
+    let mut resolver = resolver;
+    if !settings.dry_run {
+        release_wanting(registry, &mut resolver, settings)?;
+    }
     let held_rows = if settings.held {
         Some(held_rows(registry.store(), settings.place_id)?)
     } else {
@@ -663,6 +685,70 @@ fn held_rows(store: &mut Store, place_id: i64) -> Result<Vec<HeldRow>, HomeError
         })
         .collect::<Result<_, nils_registry::Error>>()
         .map_err(HomeError::Store)
+}
+
+/// Wave 7a §5.4: the files held for want of their subject's value of the
+/// id type the dataset writes into PatientID, released where the subject
+/// has one now (a map gave it, or a merge), so that this run writes them.
+/// A file held for another type than the dataset writes now waits no more
+/// for it, and is released too.
+fn release_wanting(
+    registry: &mut Registry,
+    resolver: &mut Resolver,
+    settings: &Settings,
+) -> Result<(), HomeError> {
+    let store = registry.store();
+    if !nils_registry::migrate::table_exists(store, "pseudonym_file")? {
+        return Ok(());
+    }
+    let t = table("pseudonym_file");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, subject_id, wants_type FROM {} WHERE place_id = {} AND state = 'held' \
+         AND released_at IS NULL AND wants_type IS NOT NULL ORDER BY id",
+        store.qualified("pseudonym_file"),
+        d.param(1, Type::Int)
+    );
+    let rows = store.query(&sql, &[Param::Int(settings.place_id)])?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let wanted = match &settings.patient_id {
+        PatientId::IdType(name) => Some(name.as_str()),
+        PatientId::SubjectCode => None,
+    };
+    let mut waiting: Vec<(i64, Option<i64>, String)> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        waiting.push((r.int(0)?, r.opt_int(1)?, r.text(2)?.to_string()));
+    }
+    let mut subjects: Vec<i64> = waiting
+        .iter()
+        .filter(|(_, _, w)| Some(w.as_str()) == wanted)
+        .filter_map(|(_, s, _)| *s)
+        .collect();
+    subjects.sort_unstable();
+    subjects.dedup();
+    let have = match wanted {
+        Some(name) if !subjects.is_empty() => resolver.subjects_with_type(&subjects, name)?,
+        _ => Default::default(),
+    };
+    let release: Vec<i64> = waiting
+        .iter()
+        .filter(|(_, s, w)| Some(w.as_str()) != wanted || s.is_some_and(|s| have.contains(&s)))
+        .map(|(id, _, _)| *id)
+        .collect();
+    if release.is_empty() {
+        return Ok(());
+    }
+    let now = now_iso();
+    let store = registry.store();
+    store.update_by_ids(
+        t,
+        &[("released_at", Param::from(now.as_str()))],
+        "id",
+        &release,
+    )?;
+    Ok(())
 }
 
 /// The source of a `--held` run: each held row's file, stat'ed, as a task
@@ -855,7 +941,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
             break;
         }
         let Ok(answer) = reply_rx.recv() else { break };
-        let (subject, code, created, provisional) = match answer {
+        let (subject, code, written, created, provisional) = match answer {
             Answer::Failed(why) => {
                 tally.error = Some(why);
                 break;
@@ -894,7 +980,13 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                     if items.send(Item::WouldCode { lookup }).is_err() {
                         break;
                     }
-                    (0, "would-be-coded".to_string(), true, true)
+                    (
+                        0,
+                        "would-be-coded".to_string(),
+                        "would-be-coded".to_string(),
+                        true,
+                        true,
+                    )
                 } else {
                     let shape = nils_dicom::diagnostic::shape(&prepared.ident.value);
                     progress.file(&progress.held, size);
@@ -908,6 +1000,8 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                             lookup,
                             sealed,
                             id_type,
+                            subject: None,
+                            wants: None,
                         })
                         .is_err()
                     {
@@ -916,12 +1010,41 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                     continue;
                 }
             }
+            Answer::Wanting {
+                subject,
+                lookup,
+                sealed,
+                id_type,
+                wants,
+            } => {
+                let shape = nils_dicom::diagnostic::shape(&prepared.ident.value);
+                progress.file(&progress.held, size);
+                if items
+                    .send(Item::Held {
+                        rel,
+                        dir,
+                        size,
+                        mtime,
+                        shape,
+                        lookup,
+                        sealed,
+                        id_type,
+                        subject: Some(subject),
+                        wants: Some(wants),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
             Answer::Found {
                 id,
                 code,
+                written,
                 created,
                 provisional,
-            } => (id, code, created, provisional),
+            } => (id, code, written, created, provisional),
         };
         let out_rel = place(ctx, &code, &prepared.facts, prior.as_ref());
         let target = ctx.settings.anon.join(&out_rel);
@@ -935,7 +1058,11 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 dirs.insert(parent.to_path_buf());
             }
         }
-        match rewrite::write(prepared, &code, &ctx.scrub, &path, &target, &mut buf, dry) {
+        // the folder is the subject's code; PatientID is what the dataset
+        // declares (Wave 7a §5.4)
+        match rewrite::write(
+            prepared, &written, &ctx.scrub, &path, &target, &mut buf, dry,
+        ) {
             Ok(outcome) => {
                 tally.applied(&outcome.applied);
                 // the output an earlier run wrote elsewhere is let go
@@ -1030,6 +1157,9 @@ struct Recorder<'a> {
     buffer: Vec<Item>,
     /// Subject id to its code and whether it is provisional.
     codes: HashMap<i64, (String, bool)>,
+    /// Subject id to its value of the id type the dataset writes into
+    /// PatientID, none where it has none (Wave 7a §5.4).
+    values: HashMap<i64, Option<String>>,
     subjects_seen: HashSet<i64>,
     provisional_seen: HashSet<i64>,
     /// The subjects this run made, with their files written. The files
@@ -1079,6 +1209,7 @@ impl<'a> Recorder<'a> {
             cancel,
             buffer: Vec::new(),
             codes: HashMap::new(),
+            values: HashMap::new(),
             subjects_seen: HashSet::new(),
             provisional_seen: HashSet::new(),
             made: BTreeMap::new(),
@@ -1277,6 +1408,34 @@ impl<'a> Recorder<'a> {
                 self.fail(e.to_string(), group);
                 continue;
             }
+            // the values of the id type the dataset writes, read once each
+            if let PatientId::IdType(wanted) = &self.settings.patient_id {
+                let mut ask_for: Vec<i64> = resolved
+                    .found
+                    .iter()
+                    .filter_map(|f| f.id())
+                    .filter(|id| !self.values.contains_key(id))
+                    .collect();
+                ask_for.sort_unstable();
+                ask_for.dedup();
+                if !ask_for.is_empty() {
+                    let why = format!(
+                        "PatientID of the pseudonymised tree of the dataset {}",
+                        self.settings.dataset
+                    );
+                    match self.resolver.values_of_type(&ask_for, wanted, &why) {
+                        Ok(mut found) => {
+                            for id in ask_for {
+                                self.values.insert(id, found.remove(&id));
+                            }
+                        }
+                        Err(e) => {
+                            self.fail(e.to_string(), group);
+                            continue;
+                        }
+                    }
+                }
+            }
             for (ask, found) in group.into_iter().zip(resolved.found) {
                 let answer = match found {
                     Found::Unknown => {
@@ -1312,11 +1471,32 @@ impl<'a> Recorder<'a> {
                         if provisional {
                             self.provisional_seen.insert(id);
                         }
-                        Answer::Found {
-                            id,
-                            code,
-                            created,
-                            provisional,
+                        match &self.settings.patient_id {
+                            PatientId::SubjectCode => Answer::Found {
+                                id,
+                                written: code.clone(),
+                                code,
+                                created,
+                                provisional,
+                            },
+                            PatientId::IdType(wanted) => {
+                                match self.values.get(&id).cloned().flatten() {
+                                    Some(value) => Answer::Found {
+                                        id,
+                                        code,
+                                        written: value,
+                                        created,
+                                        provisional,
+                                    },
+                                    None => Answer::Wanting {
+                                        subject: id,
+                                        lookup: self.resolver.lookup(&ask.ident),
+                                        sealed: self.resolver.seal(&ask.ident.value),
+                                        id_type: self.resolver.type_of(&ask.ident).name.clone(),
+                                        wants: wanted.clone(),
+                                    },
+                                }
+                            }
                         }
                     }
                 };
@@ -1476,6 +1656,7 @@ impl<'a> Recorder<'a> {
                         out_size,
                         digest,
                         original_digest,
+                        subject,
                         ..
                     } => written.push(vec![
                         Param::Int(place_id),
@@ -1497,6 +1678,8 @@ impl<'a> Recorder<'a> {
                         Param::from(now.as_str()),
                         Param::Null,
                         Param::Int(0),
+                        Param::Int(*subject),
+                        Param::Null,
                     ]),
                     // the tree's own file stands for the original: the
                     // record points at it, so the next run checks it as it
@@ -1532,6 +1715,8 @@ impl<'a> Recorder<'a> {
                         Param::Null,
                         Param::Null,
                         Param::Int(0),
+                        Param::Null,
+                        Param::Null,
                     ]),
                     Item::Held {
                         rel,
@@ -1542,6 +1727,8 @@ impl<'a> Recorder<'a> {
                         lookup,
                         sealed,
                         id_type,
+                        subject,
+                        wants,
                     } => held.push(vec![
                         Param::Int(place_id),
                         Param::from(rel.as_str()),
@@ -1556,6 +1743,8 @@ impl<'a> Recorder<'a> {
                         Param::Int(batch_id),
                         Param::from(now.as_str()),
                         Param::Int(0),
+                        subject.map_or(Param::Null, Param::Int),
+                        wants.as_deref().map_or(Param::Null, Param::from),
                     ]),
                     Item::Refused {
                         rel,
@@ -1606,6 +1795,8 @@ impl<'a> Recorder<'a> {
                                 "written_at",
                                 "released_at",
                                 "code_anyway",
+                                "subject_id",
+                                "wants_type",
                             ],
                         )
                         .on_conflict(Conflict::Update {
@@ -1627,6 +1818,8 @@ impl<'a> Recorder<'a> {
                                 "written_at",
                                 "released_at",
                                 "code_anyway",
+                                "subject_id",
+                                "wants_type",
                             ],
                         }),
                         &written,
@@ -1652,13 +1845,24 @@ impl<'a> Recorder<'a> {
                                 "batch_id",
                                 "first_seen",
                                 "code_anyway",
+                                "subject_id",
+                                "wants_type",
                             ],
                         )
                         .on_conflict(Conflict::Update {
                             target: &["place_id", "path"],
                             set: &[
-                                "dir", "size", "mtime", "state", "shape", "lookup", "sealed",
-                                "id_type", "batch_id",
+                                "dir",
+                                "size",
+                                "mtime",
+                                "state",
+                                "shape",
+                                "lookup",
+                                "sealed",
+                                "id_type",
+                                "batch_id",
+                                "subject_id",
+                                "wants_type",
                             ],
                         }),
                         &held,

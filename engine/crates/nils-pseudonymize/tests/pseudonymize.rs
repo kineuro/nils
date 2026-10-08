@@ -1377,3 +1377,274 @@ fn a_personnummer_dataset_is_written_under_the_generators_codes() {
         expected
     );
 }
+
+/// Map rows imported into a generator lab's registry, under its made-up key.
+fn import_rows(
+    registry: &mut Registry,
+    columns: Vec<(&str, nils_registry::identity_map::Role)>,
+    rows: &[&[&str]],
+    make_types: bool,
+) {
+    use nils_registry::identity_map::{self, Column, Derive, Map, Row};
+    let mut store = registry.open_linkage().unwrap();
+    let keys = Subkeys::derive(GENERATOR_KEY);
+    let columns: Vec<Column> = columns
+        .into_iter()
+        .map(|(header, role)| Column {
+            header: header.into(),
+            role,
+        })
+        .collect();
+    let rows: Vec<Row> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, cells)| Row {
+            line: i + 2,
+            cells: cells.iter().map(|c| c.to_string()).collect(),
+        })
+        .collect();
+    let r = identity_map::import(
+        registry.store(),
+        &mut store,
+        &keys,
+        Some(&Derive {
+            scheme: Scheme::Blake2b8,
+            key: GENERATOR_KEY,
+            display_length: 12,
+        }),
+        &Map {
+            columns: &columns,
+            rows: &rows,
+            dry_run: false,
+            make_types,
+            place_id: None,
+            actor: "tester@lab",
+            job_id: None,
+        },
+    )
+    .unwrap();
+    assert!(r.written(), "{r}");
+}
+
+/// What PatientID holds in every copy, by the folder it is under, which is
+/// the subject's code.
+fn patient_ids_by_code(
+    anon: &Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut out: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    for p in outputs(anon) {
+        let code = p
+            .strip_prefix(anon)
+            .unwrap()
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        let ds = dicom_object::open_file(&p).unwrap();
+        out.entry(code)
+            .or_default()
+            .insert(text(&ds, tags::PATIENT_ID).unwrap());
+    }
+    out
+}
+
+/// The generator lab's dataset, declared identified with a personnummer
+/// rule, writing `patient_id` into PatientID, holding what no map named.
+fn personnummer_dataset(registry: &mut Registry, data: &TempDir, patient_id: &str) -> place::Place {
+    let mut place = declare(registry, data.path(), json!({}));
+    place.dataset["identity"] =
+        json!({"id_type": "personnummer", "from": [{"field": "PatientID"}]});
+    place.dataset["unmapped"] = json!("hold");
+    place.dataset["patient_id"] = json!(patient_id);
+    place
+}
+
+fn set<const N: usize>(values: [&str; N]) -> std::collections::BTreeSet<String> {
+    values.iter().map(|v| v.to_string()).collect()
+}
+
+/// Wave 7a §5.4, T5, the first row: `patient_id: subject-code` writes the
+/// subject code generator's code of each person's personnummer, the copy
+/// filed under that code; a file whose PatientID is no personnummer has no
+/// person the generator can code, and is held.
+#[test]
+fn t5_a_subject_code_dataset_writes_the_generators_codes_and_holds_the_unknown() {
+    let (lab, data) = generator_lab();
+    data.file(
+        "derivatives/dcm-original/p9/s0/IM_0099",
+        &original("STUDY-0042", 9, 1, 1, "t1_mprage"),
+    );
+    let mut registry = lab.home.open().unwrap();
+    let place = personnummer_dataset(&mut registry, &data, "subject-code");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (4, 3, 0, 1, 0), "{report}");
+    let by_code = patient_ids_by_code(&data.path().join("derivatives/dcm-anon"));
+    assert_eq!(
+        by_code,
+        [
+            ("97567e4f9035c39b".to_string(), set(["97567e4f9035c39b"])),
+            ("c6d36050d4d0a55b".to_string(), set(["c6d36050d4d0a55b"])),
+        ]
+        .into_iter()
+        .collect()
+    );
+    // the one held is the one with no personnummer, waiting for no type
+    let held = rows(
+        &mut registry,
+        "SELECT COUNT(*), MAX(wants_type), MAX(subject_id) FROM pseudonym_file WHERE state = 'held'",
+    );
+    assert_eq!(held[0].int(0).unwrap(), 1);
+    assert_eq!(held[0].opt_text(1).unwrap(), None);
+    assert_eq!(held[0].opt_int(2).unwrap(), None);
+}
+
+/// Wave 7a §5.4, T5, the second row: `patient_id: id-type:<name>` for a
+/// type the registry knows writes each person's value of that type, found
+/// through the subject the generator's code names; a person with no value
+/// of it has their files held with the subject and the type, and the next
+/// run writes them once a map gives the subject one.
+#[test]
+fn t5_an_id_type_dataset_writes_each_subject_s_value_and_holds_until_a_map_gives_one() {
+    use nils_registry::identity_map::Role as MapRole;
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    {
+        let mut store = registry.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "study-id", None).unwrap();
+    }
+    // the first person's study id, mapped from their number
+    import_rows(
+        &mut registry,
+        vec![
+            ("pnr", MapRole::Canonical("personnummer".into())),
+            ("study", MapRole::Identifier("study-id".into())),
+        ],
+        &[&["19850101-2382", "STUDY-A"]],
+        false,
+    );
+    let place = personnummer_dataset(&mut registry, &data, "id-type:study-id");
+    let anon = data.path().join("derivatives/dcm-anon");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 2, 0, 1, 0), "{report}");
+    assert_eq!(
+        patient_ids_by_code(&anon),
+        [("c6d36050d4d0a55b".to_string(), set(["STUDY-A"]))]
+            .into_iter()
+            .collect()
+    );
+    let held = rows(
+        &mut registry,
+        "SELECT wants_type, subject_id FROM pseudonym_file WHERE state = 'held'",
+    );
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].opt_text(0).unwrap(), Some("study-id"));
+    let waiting = held[0].opt_int(1).unwrap().unwrap();
+    let code: String = registry
+        .store()
+        .query(
+            &format!("SELECT code FROM subject WHERE id = {waiting}"),
+            &[],
+        )
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert_eq!(code, "97567e4f9035c39b");
+    // every value written was read through the linkage store, audited
+    let audited = {
+        let mut store = registry.open_linkage().unwrap();
+        store
+            .query(
+                "SELECT COUNT(*) FROM read_audit WHERE actor = 'pseudonymize'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    assert!(audited >= 1, "{audited}");
+
+    // a run before the map changes nothing
+    let again = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&again).3, 1, "{again}");
+    // the map gives the second person theirs: the next run writes the file
+    import_rows(
+        &mut registry,
+        vec![
+            ("pnr", MapRole::Canonical("personnummer".into())),
+            ("study", MapRole::Identifier("study-id".into())),
+        ],
+        &[&["201501012395", "STUDY-B"]],
+        false,
+    );
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report).3, 0, "{report}");
+    assert_eq!(
+        patient_ids_by_code(&anon),
+        [
+            ("97567e4f9035c39b".to_string(), set(["STUDY-B"])),
+            ("c6d36050d4d0a55b".to_string(), set(["STUDY-A"])),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE state = 'held'"
+        ),
+        0
+    );
+}
+
+/// Wave 7a §5.4, T5, the third row: `patient_id: id-type:<name>` for a type
+/// the registry has not got. The generator codes every person and every
+/// file waits; the person's map of codes to values, imported with the type
+/// made, gives each subject its value, and the next run writes them all.
+#[test]
+fn t5_a_new_id_type_comes_from_a_map_of_codes_and_then_every_file_is_written() {
+    use nils_registry::identity_map::Role as MapRole;
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    let place = personnummer_dataset(&mut registry, &data, "id-type:site-id");
+    let anon = data.path().join("derivatives/dcm-anon");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 0, 0, 3, 0), "{report}");
+    // the generator made both subjects, neither provisional
+    assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM subject"), 2);
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM subject WHERE provisional = 1"
+        ),
+        0
+    );
+    assert!(outputs(&anon).is_empty());
+    import_rows(
+        &mut registry,
+        vec![
+            ("code", MapRole::Code),
+            ("site", MapRole::Identifier("site-id".into())),
+        ],
+        &[
+            &["c6d36050d4d0a55b", "SITE-0001"],
+            &["97567e4f9035c39b", "SITE-0002"],
+        ],
+        true,
+    );
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report).1, 3, "{report}");
+    assert_eq!(files_of(&report).3, 0, "{report}");
+    assert_eq!(
+        patient_ids_by_code(&anon),
+        [
+            ("97567e4f9035c39b".to_string(), set(["SITE-0002"])),
+            ("c6d36050d4d0a55b".to_string(), set(["SITE-0001"])),
+        ]
+        .into_iter()
+        .collect()
+    );
+}

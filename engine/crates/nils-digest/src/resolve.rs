@@ -236,6 +236,46 @@ impl Resolver {
         self.personnummer && !self.verbatim && !ident.fell_back
     }
 
+    /// The value of the id type `name` that each of `subjects` holds, for a
+    /// dataset that writes it into PatientID (Wave 7a §5.4); a subject with
+    /// none is not in the answer, and a type the store does not know gives
+    /// nothing. Every value read is audited with `why`.
+    pub fn values_of_type(
+        &mut self,
+        subjects: &[i64],
+        name: &str,
+        why: &str,
+    ) -> Result<HashMap<i64, String>, HomeError> {
+        let Some(type_id) = linkage::id_type_id(&mut self.linkage, name)? else {
+            return Ok(HashMap::new());
+        };
+        Ok(linkage::values_of_type(
+            &mut self.linkage,
+            &self.keys,
+            subjects,
+            type_id,
+            "pseudonymize",
+            why,
+        )?)
+    }
+
+    /// Which of `subjects` hold a value of the id type `name`, nothing
+    /// opened; none where the store does not know the type.
+    pub fn subjects_with_type(
+        &mut self,
+        subjects: &[i64],
+        name: &str,
+    ) -> Result<std::collections::HashSet<i64>, HomeError> {
+        let Some(type_id) = linkage::id_type_id(&mut self.linkage, name)? else {
+            return Ok(Default::default());
+        };
+        Ok(linkage::subjects_with_type(
+            &mut self.linkage,
+            subjects,
+            type_id,
+        )?)
+    }
+
     /// The id type a file's identifier is filed under.
     pub fn type_of(&self, ident: &Ident) -> &IdType {
         if ident.fell_back {

@@ -105,6 +105,7 @@ fn source(
         "trees",
         "identity",
         "unmapped",
+        "patient_id",
         "cohort",
         "tags",
         "originals_kept",

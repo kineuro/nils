@@ -6276,3 +6276,130 @@ fn a_folder_with_originals_is_never_read_past_them() {
     let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
     assert_eq!(report["parsed"], 0, "{report}");
 }
+
+/// Wave 7a §5.4, T5 at the keyboard: a dataset declared with `--patient-id
+/// id-type:study-id` has each person's study id written into PatientID of
+/// its pseudonymised tree, through the subject the generator's code names;
+/// its digest reads the tree back by that type and finds the same
+/// subjects; and what PatientID holds is not changed once files were
+/// pseudonymised. The numbers are the tax agency's published test numbers.
+#[test]
+fn a_dataset_writes_the_declared_id_type_and_its_digest_reads_it_back() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let go = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    let dir = TempDir::new("cli-patient-id");
+    for (n, pn) in [(1, "19850101-2382"), (2, "201501012395")] {
+        let sop = format!("1.2.8.{n}.1.1");
+        dir.file(
+            &format!("p{n}/IM_000{n}"),
+            &mr_of(&format!("1.2.8.{n}"), &sop, patient(pn, None)),
+        );
+    }
+    let aside = TempDir::new("cli-patient-id-aside");
+    let rule = aside.file(
+        "rule.yml",
+        b"identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n",
+    );
+    let map = aside.file(
+        "map.csv",
+        b"pnr,study\n19850101-2382,STUDY-A\n201501012395,STUDY-B\n",
+    );
+    go(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--column",
+        "pnr=canonical:personnummer",
+        "--column",
+        "study=identifier:study-id",
+        "--make-types",
+    ]);
+    let added = go(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--arrives",
+        "identified",
+        "--confirm-move",
+        "--identity",
+        rule.to_str().unwrap(),
+        "--patient-id",
+        "id-type:study-id",
+        "--json",
+    ]);
+    let ds: serde_json::Value = serde_json::from_str(&added).unwrap();
+    assert_eq!(ds["dataset"]["patient_id"], "id-type:study-id", "{ds}");
+    let id = ds["id"].as_i64().unwrap().to_string();
+    // a personnummer is never what PatientID holds
+    let refused = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--patient-id", "id-type:personnummer"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("never holds"),
+        "{}",
+        stderr(&refused)
+    );
+
+    go(&["pseudonymize", "@ds"]);
+    let mut ids = std::collections::BTreeSet::new();
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut queue = vec![anon.clone()];
+    while let Some(d) = queue.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            if e.path().is_dir() {
+                queue.push(e.path());
+            } else {
+                let x = nils_dicom::extract(&e.path()).unwrap();
+                ids.insert(x.identity.values[0].clone().unwrap_or_default());
+            }
+        }
+    }
+    assert_eq!(
+        ids,
+        ["STUDY-A", "STUDY-B"]
+            .into_iter()
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    let described = go(&["digest", "@ds", "--describe"]);
+    assert!(described.contains("as study-id"), "{described}");
+    let report: serde_json::Value =
+        serde_json::from_str(&go(&["digest", "@ds", "--json"])).unwrap();
+    assert_eq!(report["parsed"], 2, "{report}");
+    // the same two subjects, found by their study ids: none made
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let subjects = store.query("SELECT COUNT(*) FROM subject", &[]).unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(subjects, 2);
+    let studies = store
+        .query("SELECT COUNT(DISTINCT subject_id) FROM study", &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(studies, 2);
+
+    // once pseudonymised, what PatientID holds stays
+    let refused = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--patient-id", "subject-code"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("only before anything is pseudonymised"),
+        "{}",
+        stderr(&refused)
+    );
+}
