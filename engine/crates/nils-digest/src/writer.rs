@@ -500,6 +500,43 @@ impl<'a> Writer<'a> {
                 }
             }
         }
+        // a personnummer is its own map (record 54, D4): where the dataset
+        // holds, the subject code generator still codes it, and its subject
+        // is a subject, never a provisional one
+        if make == Make::Nothing {
+            let numbers: Vec<usize> = (0..parsed.len())
+                .filter(|&i| {
+                    resolved.found[i].id().is_none()
+                        && self.resolver.derives_by_generator(&parsed[i].ident)
+                })
+                .collect();
+            if !numbers.is_empty() {
+                let asked: Vec<Who<'_>> = numbers
+                    .iter()
+                    .map(|&i| Who {
+                        ident: &parsed[i].ident,
+                        subject: parsed[i]
+                            .extracted
+                            .row(Level::Subject)
+                            .map(|(_, v)| Param::from(v))
+                            .collect(),
+                        lookup: None,
+                    })
+                    .collect();
+                let second = self.resolve_who(&asked, now, Make::Subject)?;
+                resolved.matched += second.matched;
+                resolved.created += second.created;
+                resolved.attached += second.attached;
+                for (k, &i) in numbers.iter().enumerate() {
+                    resolved.found[i] = second.found[k];
+                }
+            }
+        }
+        for (i, p) in parsed.iter().enumerate() {
+            if coded[i] && self.resolver.derives_by_generator(&p.ident) {
+                coded[i] = false;
+            }
+        }
         self.written.subjects_matched += resolved.matched;
         self.written.subjects_created += resolved.created;
         self.written.identities_attached += resolved.attached;

@@ -830,10 +830,15 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
         // who the file is about: made when the dataset codes unmapped
         // identifiers or a person asked for this one; never in a dry run
         let anyway = prior.as_ref().is_some_and(|p| p.code_anyway);
+        // a personnummer is its own map (record 54, D4): the subject code
+        // generator codes it whatever the dataset does with what no map named
+        let by_generator = ctx.settings.identity.derives_by_generator(&prepared.ident);
         let make = if dry {
             Make::Nothing
         } else if anyway || ctx.settings.unmapped == Unmapped::Code {
             Make::Provisional
+        } else if by_generator {
+            Make::Subject
         } else {
             Make::Nothing
         };
@@ -883,7 +888,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 sealed,
                 id_type,
             } => {
-                if dry && (anyway || ctx.settings.unmapped == Unmapped::Code) {
+                if dry && (anyway || by_generator || ctx.settings.unmapped == Unmapped::Code) {
                     // would be coded: counted as a write under a code the
                     // run would derive, the plan applied for its counts
                     if items.send(Item::WouldCode { lookup }).is_err() {

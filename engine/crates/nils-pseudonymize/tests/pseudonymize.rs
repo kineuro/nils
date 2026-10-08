@@ -1212,10 +1212,10 @@ fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
 }
 
 /// The tax agency's published test numbers, which nobody holds, as a
-/// source may write them, with v0's derivation of their twelve digits under a
+/// source may write them, with the subject code generator's codes of their twelve digits under a
 /// made-up key (Python's `hashlib.blake2b(pn, key=key, digest_size=8)`).
-const V0_KEY: &[u8] = b"test-reg-key-not-real";
-const V0_PEOPLE: [(&[&str], &str, &str); 2] = [
+const GENERATOR_KEY: &[u8] = b"test-reg-key-not-real";
+const GENERATOR_PEOPLE: [(&[&str], &str, &str); 2] = [
     (
         &["19850101-2382", "850101-2382"],
         "198501012382",
@@ -1224,12 +1224,12 @@ const V0_PEOPLE: [(&[&str], &str, &str); 2] = [
     (&["201501012395"], "201501012395", "97567e4f9035c39b"),
 ];
 
-/// A blake2b-8 registry under the made-up key, and a dataset whose
+/// A registry of the subject code generator under the made-up key, and a dataset whose
 /// originals carry the numbers in PatientID, written several ways.
-fn v0_lab() -> (Lab, TempDir) {
+fn generator_lab() -> (Lab, TempDir) {
     let dir = TempDir::new("pseudonymize-home");
     let home = Home::new(dir.path());
-    home.keys(None).add("k", V0_KEY).unwrap();
+    home.keys(None).add("k", GENERATOR_KEY).unwrap();
     home.init(&InitOptions {
         backend: Backend::Sqlite,
         dsn: None,
@@ -1246,7 +1246,7 @@ fn v0_lab() -> (Lab, TempDir) {
     let data = TempDir::new("pseudonymize-ds");
     let originals = Path::new("derivatives/dcm-original");
     let mut n = 0;
-    for (p, (forms, _, _)) in V0_PEOPLE.iter().enumerate() {
+    for (p, (forms, _, _)) in GENERATOR_PEOPLE.iter().enumerate() {
         for (study, written) in forms.iter().enumerate() {
             n += 1;
             data.file(
@@ -1273,12 +1273,14 @@ fn anon_patient_ids(anon: &Path) -> std::collections::BTreeSet<String> {
 }
 
 #[test]
-fn a_personnummer_dataset_is_written_under_v0_code_codes() {
-    let expected: std::collections::BTreeSet<String> =
-        V0_PEOPLE.iter().map(|(_, _, c)| c.to_string()).collect();
+fn a_personnummer_dataset_is_written_under_the_generators_codes() {
+    let expected: std::collections::BTreeSet<String> = GENERATOR_PEOPLE
+        .iter()
+        .map(|(_, _, c)| c.to_string())
+        .collect();
     // by the identity rule: the originals' number is the identifier, and
     // the codes are derived from its twelve digits
-    let (lab, data) = v0_lab();
+    let (lab, data) = generator_lab();
     let mut registry = lab.home.open().unwrap();
     let mut place = declare(&mut registry, data.path(), json!({}));
     place.dataset["identity"] =
@@ -1287,6 +1289,36 @@ fn a_personnummer_dataset_is_written_under_v0_code_codes() {
     let report = pseudonymize(&settings(&place), &mut registry).unwrap();
     assert_eq!(files_of(&report), (3, 3, 0, 0, 0), "{report}");
     assert_eq!(report.subjects.new, 2);
+    // a personnummer is its own map: its subjects are not provisional
+    assert_eq!(report.subjects.provisional, 0, "{report}");
+    assert_eq!(
+        anon_patient_ids(&data.path().join("derivatives/dcm-anon")),
+        expected
+    );
+
+    // a dataset that holds what no map named still codes a personnummer:
+    // the generator is its map, so nothing is held and nothing provisional
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    let mut place = declare(&mut registry, data.path(), json!({}));
+    place.dataset["identity"] =
+        json!({"id_type": "personnummer", "from": [{"field": "PatientID"}]});
+    place.dataset["unmapped"] = json!("hold");
+    let mut dry = settings(&place);
+    dry.dry_run = true;
+    let report = pseudonymize(&dry, &mut registry).unwrap();
+    assert_eq!(files_of(&report).3, 0, "a dry run holds none: {report}");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 3, 0, 0, 0), "{report}");
+    assert_eq!(report.subjects.new, 2);
+    assert_eq!(report.subjects.provisional, 0, "{report}");
+    let provisional = registry
+        .store()
+        .query("SELECT COUNT(*) FROM subject WHERE provisional = 1", &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(provisional, 0);
     assert_eq!(
         anon_patient_ids(&data.path().join("derivatives/dcm-anon")),
         expected
@@ -1294,7 +1326,7 @@ fn a_personnummer_dataset_is_written_under_v0_code_codes() {
 
     // by a map: the numbers filed first as the canonical identifier, and
     // the dataset holding what no map named, so nothing is provisional
-    let (lab, data) = v0_lab();
+    let (lab, data) = generator_lab();
     let mut registry = lab.home.open().unwrap();
     let mut place = declare(&mut registry, data.path(), json!({}));
     place.dataset["identity"] =
@@ -1302,12 +1334,12 @@ fn a_personnummer_dataset_is_written_under_v0_code_codes() {
     {
         use nils_registry::identity_map::{self, Column, Derive, Map, Role as MapRole, Row};
         let mut store = registry.open_linkage().unwrap();
-        let keys = Subkeys::derive(V0_KEY);
+        let keys = Subkeys::derive(GENERATOR_KEY);
         let columns = [Column {
             header: "pnr".into(),
             role: MapRole::Canonical("personnummer".into()),
         }];
-        let rows: Vec<Row> = V0_PEOPLE
+        let rows: Vec<Row> = GENERATOR_PEOPLE
             .iter()
             .enumerate()
             .map(|(i, (forms, _, _))| Row {
@@ -1321,7 +1353,7 @@ fn a_personnummer_dataset_is_written_under_v0_code_codes() {
             &keys,
             Some(&Derive {
                 scheme: Scheme::Blake2b8,
-                key: V0_KEY,
+                key: GENERATOR_KEY,
                 display_length: 12,
             }),
             &Map {

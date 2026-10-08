@@ -143,6 +143,9 @@ pub struct Resolver {
     fallback: IdType,
     /// The rule reads the code itself, not an identifier to derive one from.
     verbatim: bool,
+    /// The rule files personnummer, whose codes the subject code generator
+    /// derives (record 54, D4).
+    personnummer: bool,
     /// The tree is this registry's own pseudonymised tree (record 26 §3): a
     /// value read verbatim there is one of this registry's codes, or no
     /// code at all.
@@ -180,6 +183,7 @@ impl Resolver {
             id_type,
             fallback,
             verbatim: rule.verbatim,
+            personnummer: rule.normalises(),
             own_codes: rule.own_codes,
             batch_id,
             identities: LruCache::new(cap),
@@ -223,6 +227,13 @@ impl Resolver {
     /// an identifier a code is derived from (record 26 §3).
     fn takes_verbatim(&self, ident: &Ident) -> bool {
         self.verbatim && !ident.fell_back && (!self.own_codes || self.own_shape(&ident.value))
+    }
+
+    /// Whether the subject code generator derives this file's code from its
+    /// personnummer, which is then no provisional subject's (record 54, D4):
+    /// as [`Rule::derives_by_generator`].
+    pub fn derives_by_generator(&self, ident: &Ident) -> bool {
+        self.personnummer && !self.verbatim && !ident.fell_back
     }
 
     /// The id type a file's identifier is filed under.
@@ -402,8 +413,10 @@ impl Resolver {
                 }
                 row.push(Param::Int(self.batch_id));
                 row.push(Param::from(now));
+                // a personnummer is its own map: its subject is no
+                // provisional one (record 54, D4)
                 row.push(match make {
-                    Make::Provisional => Param::Int(1),
+                    Make::Provisional if !self.derives_by_generator(w.ident) => Param::Int(1),
                     _ => Param::Null,
                 });
                 rows.push(row);

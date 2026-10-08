@@ -334,6 +334,15 @@ impl Rule {
         personnummer::is_type(&self.id_type)
     }
 
+    /// Whether a file's identifier is a personnummer whose code the subject
+    /// code generator derives (record 54, D4): the rule files personnummer,
+    /// the fallback was not taken, and the value is not read as a code. Such
+    /// a number is its own map: its subject is made under the code, never
+    /// held for want of a map and never marked provisional.
+    pub fn derives_by_generator(&self, ident: &Ident) -> bool {
+        self.normalises() && !self.verbatim && !ident.fell_back
+    }
+
     /// What a source's answer becomes: the value as read, or under a
     /// personnummer rule its twelve digits, or nothing when it is none.
     fn taken(&self, id: &str) -> Option<String> {
