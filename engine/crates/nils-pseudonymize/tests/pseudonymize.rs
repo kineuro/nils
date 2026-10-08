@@ -1648,3 +1648,185 @@ fn t5_a_new_id_type_comes_from_a_map_of_codes_and_then_every_file_is_written() {
         .collect()
     );
 }
+
+/// Wave 7a (Nima, 2026-10-08: "folder can be id type or subject code and
+/// this should be optional to user"): a dataset that writes an id type's
+/// value into PatientID may name each copy's folder by that value instead
+/// of the subject's code; a value that is no safe folder name is made one.
+#[test]
+fn the_copy_s_folder_is_the_id_type_s_value_when_the_dataset_asks() {
+    use nils_registry::identity_map::Role as MapRole;
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    {
+        let mut store = registry.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "study-id", None).unwrap();
+    }
+    import_rows(
+        &mut registry,
+        vec![
+            ("pnr", MapRole::Canonical("personnummer".into())),
+            ("study", MapRole::Identifier("study-id".into())),
+        ],
+        &[&["19850101-2382", "STUDY-A"], &["201501012395", "SITE/1"]],
+        false,
+    );
+    let mut place = personnummer_dataset(&mut registry, &data, "id-type:study-id");
+    place.dataset["folder"] = json!("id-type");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 3, 0, 0, 0), "{report}");
+    assert_eq!(
+        patient_ids_by_code(&data.path().join("derivatives/dcm-anon")),
+        [
+            ("SITE_1".to_string(), set(["SITE/1"])),
+            ("STUDY-A".to_string(), set(["STUDY-A"])),
+        ]
+        .into_iter()
+        .collect()
+    );
+    // by default the folder is the subject's code
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    {
+        let mut store = registry.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "study-id", None).unwrap();
+    }
+    import_rows(
+        &mut registry,
+        vec![
+            ("pnr", MapRole::Canonical("personnummer".into())),
+            ("study", MapRole::Identifier("study-id".into())),
+        ],
+        &[&["19850101-2382", "STUDY-A"], &["201501012395", "STUDY-B"]],
+        false,
+    );
+    let place = personnummer_dataset(&mut registry, &data, "id-type:study-id");
+    pseudonymize(&settings(&place), &mut registry).unwrap();
+    let folders: Vec<String> = patient_ids_by_code(&data.path().join("derivatives/dcm-anon"))
+        .into_keys()
+        .collect();
+    assert_eq!(folders, ["97567e4f9035c39b", "c6d36050d4d0a55b"]);
+}
+
+/// Wave 7a (Nima, 2026-10-08: "we always have to have resolved IDs"): a
+/// file is never written without its resolved ids, and a file waiting for
+/// its subject's id type value is never coded anyway: it waits for the
+/// value, and asking for it to be coded changes nothing.
+#[test]
+fn a_file_waiting_for_its_id_type_value_is_never_coded_anyway() {
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    let place = personnummer_dataset(&mut registry, &data, "id-type:site-id");
+    let anon = data.path().join("derivatives/dcm-anon");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 0, 0, 3, 0), "{report}");
+    // a person asks for them to be coded anyway, as the door would for a
+    // file whose subject is unknown: the run still writes nothing
+    registry
+        .store()
+        .execute("UPDATE pseudonym_file SET code_anyway = 1", &[])
+        .unwrap();
+    let mut held = settings(&place);
+    held.held = true;
+    let report = pseudonymize(&held, &mut registry).unwrap();
+    assert_eq!(files_of(&report).1, 0, "{report}");
+    assert!(outputs(&anon).is_empty());
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE state = 'held' AND wants_type = 'site-id'"
+        ),
+        3
+    );
+}
+
+/// Wave 7a (Nima, 2026-10-08: "we never save pn any where on registery or
+/// audit. we always use subject code to present that"): after a map of
+/// personnummer and the pseudonymiser over originals that carry them, held
+/// files included, no written form of any number is in any file of the
+/// registry's home (both stores, their journals, the key store), and every
+/// personnummer identity keeps its keyed lookup alone, nothing sealed.
+#[test]
+fn no_personnummer_is_kept_anywhere_in_the_registry() {
+    use nils_registry::identity_map::Role as MapRole;
+    let (lab, data) = generator_lab();
+    let mut registry = lab.home.open().unwrap();
+    {
+        let mut store = registry.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "study-id", None).unwrap();
+    }
+    import_rows(
+        &mut registry,
+        vec![
+            ("pnr", MapRole::Canonical("personnummer".into())),
+            ("study", MapRole::Identifier("study-id".into())),
+        ],
+        &[&["19850101-2382", "STUDY-A"]],
+        false,
+    );
+    // the second person waits for a study id: held, with its subject
+    let place = personnummer_dataset(&mut registry, &data, "id-type:study-id");
+    let report = pseudonymize(&settings(&place), &mut registry).unwrap();
+    assert_eq!(files_of(&report), (3, 2, 0, 1, 0), "{report}");
+    let mut linkage_store = registry.open_linkage().unwrap();
+    let kept = linkage_store
+        .query(
+            "SELECT COUNT(*) FROM identity i JOIN id_type t ON t.id = i.id_type_id \
+             WHERE t.name = 'personnummer' AND length(i.ciphertext) > 0",
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(kept, 0);
+    let filed = linkage_store
+        .query(
+            "SELECT COUNT(*) FROM identity i JOIN id_type t ON t.id = i.id_type_id \
+             WHERE t.name = 'personnummer'",
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(filed, 2, "both persons are known by their lookup");
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE sealed IS NOT NULL"
+        ),
+        0
+    );
+    drop(linkage_store);
+    drop(registry);
+    // every byte of every file of the home, every written form
+    let forms: Vec<String> = GENERATOR_PEOPLE
+        .iter()
+        .flat_map(|(written, twelve, _)| {
+            let mut f: Vec<String> = written.iter().map(|w| w.to_string()).collect();
+            f.push(twelve.to_string());
+            f.push(twelve[2..].to_string());
+            f
+        })
+        .collect();
+    let mut queue = vec![lab.home.dir().to_path_buf()];
+    let mut read = 0;
+    while let Some(d) = queue.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                queue.push(p);
+                continue;
+            }
+            let bytes = std::fs::read(&p).unwrap();
+            read += 1;
+            for form in &forms {
+                assert!(
+                    !bytes.windows(form.len()).any(|w| w == form.as_bytes()),
+                    "a form of a number is in {}",
+                    p.display()
+                );
+            }
+        }
+    }
+    assert!(read >= 2, "the stores were read");
+}

@@ -291,10 +291,12 @@ impl Resolver {
         self.keys.lookup(&self.type_of(ident).name, &ident.value)
     }
 
-    /// An identifier sealed under the store's encrypt key, for the one door
-    /// that reveals it.
-    pub fn seal(&self, value: &str) -> Vec<u8> {
-        self.keys.seal(value)
+    /// A file's identifier sealed under the store's encrypt key, for the one
+    /// door that reveals it; none for a personnummer, which is never kept
+    /// (Wave 7a): its held row keeps the keyed lookup and the shape alone.
+    pub fn seal(&self, ident: &Ident) -> Option<Vec<u8>> {
+        let sealed = self.keys.seal_kept(&self.type_of(ident).name, &ident.value);
+        (!sealed.is_empty()).then_some(sealed)
     }
 
     /// The subject of every file (§7.4): by the lookup of its identifier
@@ -572,7 +574,7 @@ impl Resolver {
             subject_id,
             id_type_id: ty.id,
             lookup: lookup.clone(),
-            ciphertext: self.keys.seal(&ident.value),
+            ciphertext: self.keys.seal_kept(&ty.name, &ident.value),
             source: "dicom",
             first_batch_id: Some(self.batch_id),
         });

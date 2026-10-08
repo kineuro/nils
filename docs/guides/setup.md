@@ -34,17 +34,27 @@ assistant, `assistant/`, `kvasir/` and `llama.cpp/`. A directory of DICOM the en
 read can be named here; it becomes an ingest root and a `source` place, and
 it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 
-A source place setup makes is undeclared: setup looks at the folder, says
-what it holds, and moves nothing, and nothing in it is read until you say
-how its files arrive. A folder that holds identified data is declared
-`identified`, and its files belong in `derivatives/dcm-original`; one that is
-already de-identified is declared `deidentified` (or `coded`), and its files
-belong in `derivatives/dcm-anon`, the only tree a digest reads. Where the
-files sit loose beside `derivatives/`, the declaration names them and moves
-them only when you confirm: `nils place layout source` shows what would move,
-and `nils place set <id> --arrives identified --confirm-move` declares it
-and moves them. A `derivatives/dcm-raw` from the previous prototype is
-renamed `dcm-anon` when the folder is declared.
+The source place is a root: setup explores it, and each folder under it is
+a dataset whose structure says what it is. Nothing is moved and nothing is
+read until the structure says how:
+
+| Under the dataset's folder | It is | What reads it |
+|---|---|---|
+| only `derivatives/dcm-original` | identified | the pseudonymiser, which writes `derivatives/dcm-anon` |
+| only `derivatives/dcm-anon` (or `dcm-raw`, renamed `dcm-anon`) | anonymised | the registry |
+| both | identified, with its anonymised copy | the registry reads `dcm-anon`, the pseudonymiser `dcm-original` |
+| anything else | unknown | nothing |
+
+A dataset is unknown when entries holding DICOM sit beside `derivatives/`,
+or when it has no tree at all. Say which tree those entries go into, and
+they move only then: `nils place layout source` shows each dataset and what
+would move, and `nils place set <id> --move-into originals --confirm-move`
+(identified data) or `--move-into anon --confirm-move` (already anonymised)
+moves them. An anonymised dataset also says what its PatientID holds and
+how its subjects are found, before anything reads it: `nils place set <id>
+--patient-id id-type:NAME --subjects map` (a map of subject codes to its
+ids) or `--subjects generated` (the subject code generator makes each code
+from the id). `nils place explore` finds the folders added since.
 
 A site that has places of its own names them instead, once each, with the
 role and the guarantees they really have: `--place

@@ -63,6 +63,27 @@ impl Subkeys {
         pseudonym::lookup(&self.k_lookup, id_type, value).to_vec()
     }
 
+    /// What an identity row keeps of its identifier (Wave 7a, Nima
+    /// 2026-10-08: a personnummer is never saved anywhere in the registry):
+    /// the identifier sealed, or nothing for a personnummer, whose identity
+    /// is its keyed lookup alone and whose subject is shown by its code.
+    pub fn seal_kept(&self, id_type: &str, value: &str) -> Vec<u8> {
+        if personnummer::is_type(id_type) {
+            Vec::new()
+        } else {
+            self.seal(value)
+        }
+    }
+
+    /// The identifier a row kept, opened; none where nothing was kept.
+    pub fn open_kept(&self, ciphertext: &[u8]) -> Result<Option<String>, Error> {
+        if ciphertext.is_empty() {
+            Ok(None)
+        } else {
+            self.open(ciphertext).map(Some)
+        }
+    }
+
     /// The identifier under XChaCha20-Poly1305 with a fresh nonce prefixed.
     pub fn seal(&self, value: &str) -> Vec<u8> {
         let cipher = XChaCha20Poly1305::new(&Key::from(self.k_encrypt));
@@ -343,7 +364,11 @@ pub struct Revealed {
     pub identity_id: i64,
     pub id_type: String,
     pub source: String,
+    /// The identifier, or empty where none is kept (a personnummer).
     pub value: String,
+    /// Whether the store kept the identifier at all; a personnummer is
+    /// never kept, and its subject is shown by its code.
+    pub kept: bool,
 }
 
 /// Decrypt every identifier of a subject (`nils linkage show`), writing one
@@ -392,7 +417,8 @@ pub fn reveal(
                 identity_id: r.int(0)?,
                 id_type: r.text(1)?.to_string(),
                 source: r.text(2)?.to_string(),
-                value: keys.open(r.bytes(3)?)?,
+                value: keys.open_kept(r.bytes(3)?)?.unwrap_or_default(),
+                kept: !r.bytes(3)?.is_empty(),
             })
         })
         .collect()
@@ -431,7 +457,10 @@ pub fn values_of_type(
             if out.contains_key(&subject) {
                 continue;
             }
-            out.insert(subject, keys.open(r.bytes(2)?)?);
+            let Some(value) = keys.open_kept(r.bytes(2)?)? else {
+                continue;
+            };
+            out.insert(subject, value);
             audit.push(vec![
                 Param::from(now.as_str()),
                 Param::from(actor),

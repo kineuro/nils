@@ -1721,7 +1721,9 @@ impl<'a> Writer<'a> {
                                 Param::from(HELD),
                                 Param::from(shape.as_str()),
                                 Param::Bytes(self.resolver.lookup(&p.ident)),
-                                Param::Bytes(self.resolver.seal(&p.ident.value)),
+                                self.resolver
+                                    .seal(&p.ident)
+                                    .map_or(Param::Null, Param::Bytes),
                                 Param::from(self.resolver.type_of(&p.ident).name.as_str()),
                                 Param::Int(self.batch_id),
                                 Param::from(now),

@@ -9280,10 +9280,9 @@ fn declare_in(
                     let probed = crate::places::probe(Path::new(&path));
                     match place::set(registry.store(), there.id, Some(&path), None, Some(&probed)) {
                         Ok(_) => {
-                            // Wave 7a §5.3: a dataset whose tree the new
-                            // folder has not got is undeclared there
+                            // Wave 7a: the new folder made what it is
                             if role == Role::Source {
-                                undeclared_where_moved(registry, &there, Path::new(&path), said);
+                                shape_source(registry, &there, Path::new(&path), said);
                             }
                             let _ = crate::audit(
                                 registry,
@@ -9314,47 +9313,64 @@ fn declare_in(
                 return Err(format!("the {} place could not be read: {e}", spec.name));
             }
         }
+        // what a site declared about the storage behind it; what the engine
+        // measured is the probe beside it
+        let guarantees = serde_json::json!({
+            "backup": spec.backup,
+            "snapshots": spec.snapshots,
+            "protected": spec.protected,
+            "fast": spec.fast,
+        });
+        // Wave 7a: a source place is a root, explored, each folder under it
+        // a dataset whose structure says how its files arrive; nothing is
+        // moved, and an unknown dataset is not read until a person says
+        let shaped = if role == Role::Source {
+            match crate::dataset::shape_place(
+                registry.store(),
+                &spec.name,
+                Path::new(&path),
+                &serde_json::json!({}),
+                None,
+                &guarantees,
+            ) {
+                Ok(s) => Some(s),
+                Err(r) => {
+                    return Err(format!(
+                        "the {} place was not declared: {}",
+                        spec.name, r.message
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         let made = place::add(
             registry.store(),
             &place::New {
                 name: &spec.name,
                 role,
                 path: &path,
-                // what a site declared about the storage behind it; what
-                // the engine measured is the probe beside it
-                guarantees: serde_json::json!({
-                    "backup": spec.backup,
-                    "snapshots": spec.snapshots,
-                    "protected": spec.protected,
-                    "fast": spec.fast,
-                }),
+                guarantees,
                 probed: crate::places::probe(Path::new(&path)),
                 handling: serde_json::Value::Null,
-                // Wave 7a §5.3: a source place setup declares is looked at
-                // and left undeclared, so nothing in it is read until a
-                // person says how its files arrive; nothing is moved
-                dataset: if role == Role::Source {
-                    crate::dataset::undeclared(Path::new(&path)).0
-                } else {
-                    serde_json::Value::Null
-                },
+                dataset: shaped
+                    .as_ref()
+                    .map(|(d, _)| d.dataset.clone())
+                    .unwrap_or(serde_json::Value::Null),
             },
         );
         match made {
             Ok(id) => {
-                let layout =
-                    (role == Role::Source).then(|| crate::dataset::undeclared(Path::new(&path)).1);
                 let _ = crate::audit(
                     registry,
                     nils_registry::audit::Action::PlaceAdd,
                     serde_json::json!({"place": id, "name": spec.name, "role": spec.role}),
-                    layout.as_ref().map(|l| serde_json::json!({"layout": l})),
+                    shaped
+                        .as_ref()
+                        .map(|(d, _)| serde_json::json!({"layout": d.layout})),
                 );
-                if let Some(layout) = &layout {
-                    let undeclared = place::default_dataset(None);
-                    for line in crate::dataset::layout_lines(id, &undeclared, layout) {
-                        said(format!("the {} place: {line}", spec.name));
-                    }
+                if let Some((d, found)) = &shaped {
+                    say_shaped(&spec.name, id, d, found, said);
                 }
                 declared.push(row);
             }
@@ -9367,7 +9383,11 @@ fn declare_in(
     // mounts a directory added at the desk even when it does not read the
     // registry.
     if let Ok(active) = place::active(registry.store()) {
-        for p in active.into_iter().filter(|p| p.role == Role::Source) {
+        // a dataset under a root is mounted with its root
+        for p in active
+            .into_iter()
+            .filter(|p| p.role == Role::Source && p.dataset["root"].is_null())
+        {
             if !declared.iter().any(|d| d.name == p.name) {
                 declared.push(PlaceState {
                     name: p.name,
@@ -9380,28 +9400,48 @@ fn declare_in(
     Ok(declared)
 }
 
-/// Wave 7a §5.3: a source place setup moved to another folder keeps its
-/// declaration only where the new folder holds the tree it reads; elsewhere
-/// it is undeclared, and said so.
-fn undeclared_where_moved(
+/// What setup says of a source place it made what it is (Wave 7a): the
+/// place, and each dataset found under a root.
+fn say_shaped(
+    name: &str,
+    id: i64,
+    d: &crate::dataset::Declared,
+    found: &[crate::dataset::Found],
+    said: &mut dyn FnMut(String),
+) {
+    for line in crate::dataset::layout_lines(id, &d.dataset, &d.layout) {
+        said(format!("the {name} place: {line}"));
+    }
+    for f in found {
+        for line in crate::dataset::layout_lines(f.place.id, &f.place.dataset, &f.layout) {
+            said(format!("the {} dataset: {line}", f.place.name));
+        }
+    }
+}
+
+/// Wave 7a: a source place setup moved to another folder is made what that
+/// folder is, and said so; a failure is said, not a reason to stop.
+fn shape_source(
     registry: &mut nils_registry::Registry,
     there: &nils_registry::place::Place,
     path: &Path,
     said: &mut dyn FnMut(String),
 ) {
     use nils_registry::place;
-    if place::is_undeclared(&there.dataset) {
-        return;
-    }
-    let reads = there.dataset["trees"]["anon"].as_str().unwrap_or(".");
-    if reads == "." || path.join(reads).is_dir() {
-        return;
-    }
-    let (dataset, layout) = crate::dataset::undeclared(path);
-    if place::set_dataset(registry.store(), there.id, &dataset).is_ok() {
-        for line in crate::dataset::layout_lines(there.id, &dataset, &layout) {
-            said(format!("the {} place: {line}", there.name));
+    match crate::dataset::shape_place(
+        registry.store(),
+        &there.name,
+        path,
+        &serde_json::json!({}),
+        Some(there),
+        &there.guarantees,
+    ) {
+        Ok((d, found)) => {
+            if place::set_dataset(registry.store(), there.id, &d.dataset).is_ok() {
+                say_shaped(&there.name, there.id, &d, &found, said);
+            }
         }
+        Err(r) => said(format!("the {} place: {}", there.name, r.message)),
     }
 }
 
@@ -23757,15 +23797,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Wave 7a §5.3, T4 for `nils setup`: the source place setup declares is
-    /// looked at and left undeclared, said in words; nothing in it is moved
-    /// and nothing in it is read, its originals least of all. Moved on a
-    /// rerun to a folder without the tree its declaration reads, it is
-    /// undeclared there.
+    /// Wave 7a, T4 for `nils setup`: the source place setup declares is a
+    /// root, explored: each folder under it is a dataset whose structure
+    /// says what it is, said in words. Nothing is moved; an unknown dataset
+    /// and the root itself are never read, nor any dataset's originals.
+    /// Moved on a rerun to another folder, the place is that folder's root.
     #[test]
-    fn setup_s_source_place_is_undeclared_and_never_read() {
+    fn setup_s_source_place_is_a_root_whose_datasets_say_what_they_are() {
         use nils_registry::place;
-        let dir = scratch("source-undeclared");
+        let dicom = {
+            let mut b = vec![0u8; 128];
+            b.extend_from_slice(b"DICM");
+            b
+        };
+        let dir = scratch("source-root");
         let home = Home::new(dir.join("registry"));
         home.keys(None)
             .add("nils", b"a test key, no site's")
@@ -23775,14 +23820,13 @@ mod tests {
             .init(&registry_init(&BackendChoice::Sqlite, Scheme::DEFAULT))
             .unwrap();
         let data = dir.join("data");
-        std::fs::create_dir_all(data.join("sub-1")).unwrap();
-        std::fs::write(data.join("sub-1/IM_0001"), b"not read").unwrap();
-        std::fs::create_dir_all(data.join("derivatives/dcm-original/p1")).unwrap();
-        std::fs::write(
-            data.join("derivatives/dcm-original/p1/IM_0002"),
-            b"never read",
-        )
-        .unwrap();
+        for (rel, bytes) in [
+            ("known/derivatives/dcm-original/p1/IM_0001", &dicom),
+            ("loose/sub-1/IM_0001", &dicom),
+        ] {
+            std::fs::create_dir_all(data.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(data.join(rel), bytes).unwrap();
+        }
         let spec = |path: &Path| PlaceSpec {
             name: "data".into(),
             role: "source".into(),
@@ -23793,47 +23837,57 @@ mod tests {
             fast: false,
         };
         let mut said = Vec::new();
-        declare_in(&mut registry, &[spec(&data)], &mut |l| said.push(l)).unwrap();
-        let p = place::by_name(registry.store(), "data").unwrap().unwrap();
-        assert_eq!(p.dataset["arrives"], "undeclared", "{}", p.dataset);
-        assert_eq!(p.dataset["trees"]["anon"], serde_json::Value::Null);
+        let declared = declare_in(&mut registry, &[spec(&data)], &mut |l| said.push(l)).unwrap();
+        // the root alone is mounted; its datasets are under it
+        assert_eq!(declared.len(), 1, "{declared:?}");
+        let root = place::by_name(registry.store(), "data").unwrap().unwrap();
+        assert_eq!(root.dataset["kind"], "root", "{}", root.dataset);
+        let known = place::by_name(registry.store(), "known").unwrap().unwrap();
+        assert_eq!(known.dataset["state"], "identified", "{}", known.dataset);
+        assert_eq!(known.dataset["root"], "data");
+        let loose = place::by_name(registry.store(), "loose").unwrap().unwrap();
+        assert_eq!(loose.dataset["state"], "unknown", "{}", loose.dataset);
+        assert!(
+            said.iter().any(|l| l.contains("a root: 2 dataset(s)")),
+            "{said:?}"
+        );
         assert!(
             said.iter()
-                .any(|l| l.contains("undeclared: nothing in it is read")),
+                .any(|l| l.starts_with("the loose dataset: unknown")),
             "{said:?}"
         );
-        assert!(
-            said.iter().any(|l| l.contains("nils place set")),
-            "{said:?}"
-        );
-        assert!(data.join("sub-1/IM_0001").is_file());
-        assert!(!data.join("derivatives/dcm-anon").exists());
+        assert!(said.iter().any(|l| l.contains("--move-into")), "{said:?}");
+        assert!(data.join("loose/sub-1/IM_0001").is_file());
+        assert!(!data.join("loose/derivatives").exists());
         for path in [
             data.clone(),
-            data.join("sub-1"),
-            data.join("derivatives/dcm-original"),
+            data.join("loose"),
+            data.join("loose/sub-1"),
+            data.join("known"),
+            data.join("known/derivatives/dcm-original"),
             dir.clone(),
         ] {
-            let why = crate::dataset::not_read(registry.store(), &path)
-                .unwrap_or_else(|| panic!("{} would be read", path.display()));
-            assert!(why.contains("undeclared"), "{why}");
+            assert!(
+                crate::dataset::not_read(registry.store(), &path).is_some(),
+                "{} would be read",
+                path.display()
+            );
         }
-        // declared, then moved by a rerun to a folder without its tree
-        let declared = crate::dataset::declare(
-            registry.store(),
-            &data,
-            &serde_json::json!({"arrives": "identified", "confirm_move": true}),
-            Some(&p),
-        )
-        .unwrap();
-        place::set_dataset(registry.store(), p.id, &declared.dataset).unwrap();
+        assert_eq!(
+            crate::dataset::not_read(registry.store(), &data.join("known/derivatives/dcm-anon")),
+            None
+        );
+        // moved by a rerun to an empty folder: a root with nothing under it
         let elsewhere = dir.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let mut said = Vec::new();
         declare_in(&mut registry, &[spec(&elsewhere)], &mut |l| said.push(l)).unwrap();
         let p = place::by_name(registry.store(), "data").unwrap().unwrap();
-        assert_eq!(p.dataset["arrives"], "undeclared", "{}", p.dataset);
-        assert!(said.iter().any(|l| l.contains("undeclared")), "{said:?}");
+        assert_eq!(p.dataset["kind"], "root", "{}", p.dataset);
+        assert!(
+            said.iter().any(|l| l.contains("a root: 0 dataset(s)")),
+            "{said:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

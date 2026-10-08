@@ -73,7 +73,8 @@ fn registry() -> (TempDir, TempDir) {
             &synth::part10(&MetaFields::mr(sop), &e, true),
         );
     }
-    dir.file("notes.txt", b"not a dicom file");
+    // the file the digest refuses sits in the pseudonymised tree already
+    dir.file("derivatives/dcm-anon/notes.txt", b"not a dicom file");
     let key = nils()
         .arg("--registry")
         .arg(home.path())
@@ -101,9 +102,16 @@ fn registry() -> (TempDir, TempDir) {
             dir.path().to_str().unwrap(),
             "--role",
             "source",
-            "--arrives",
-            "deidentified",
+            // Wave 7a: the studies are anonymised, so they go into dcm-anon,
+            // whose PatientID holds the patient id, and the subject code
+            // generator makes each subject's code from it
+            "--move-into",
+            "anon",
             "--confirm-move",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
             "--cohort",
             "fed",
         ],

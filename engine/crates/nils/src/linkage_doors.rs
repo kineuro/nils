@@ -274,6 +274,75 @@ fn imports(
         Need::One("data:work"),
         Detail::Sensitive,
     )?;
+    // Wave 7a (Nima, 2026-10-08): a personnummer is never saved anywhere
+    // in the registry, a job's map file included. A map with a personnummer
+    // column is imported here and now, from the request alone, and nothing
+    // of it touches the disk but what the import files: the keyed lookup.
+    let numbers = columns.iter().any(|c| {
+        c.role
+            .id_type()
+            .is_some_and(nils_registry::personnummer::is_type)
+    });
+    if numbers {
+        let (key, keys) = keys_of(registry)?;
+        let derive = Derive {
+            scheme: registry.meta().pseudonym_scheme,
+            key: &key,
+            display_length: registry.meta().display_length,
+        };
+        let mut linkage = open_linkage(registry)?;
+        let report = identity_map::import(
+            registry.store(),
+            &mut linkage,
+            &keys,
+            Some(&derive),
+            &Map {
+                columns: &columns,
+                rows: &rows,
+                dry_run: false,
+                make_types,
+                place_id: place.as_ref().map(|p| p.id),
+                actor: &caller.principal,
+                job_id: None,
+            },
+        )
+        .map_err(|e| Reply::error(400, e.to_string()))?;
+        if report.written() {
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal: &caller.principal,
+                    action: nils_registry::audit::Action::LinkageImport,
+                    scope: serde_json::json!({
+                        "rows": report.rows,
+                        "place": place.as_ref().map(|p| p.id),
+                        "held_released": report.held_released,
+                    }),
+                    policy: None,
+                    job_id: None,
+                    details: Some(serde_json::json!({ "inline": "a personnummer column" })),
+                },
+            )?;
+        }
+        registry
+            .refresh_meta()
+            .map_err(|e| Reply::error(500, e.to_string()))?;
+        let mut answer = report.as_json();
+        answer["job"] = serde_json::Value::Null;
+        answer["state"] = serde_json::json!(if report.conflicts.is_empty() {
+            "done"
+        } else {
+            "refused"
+        });
+        let status = if report.conflicts.is_empty() {
+            200
+        } else {
+            422
+        };
+        let mut reply = Reply::ok(answer);
+        reply.status = status;
+        return Ok(reply);
+    }
     let path = write_map(home, &columns, &rows).map_err(|e| Reply::error(500, e))?;
     let mut command = vec![
         "linkage".to_string(),
@@ -793,8 +862,17 @@ mod tests {
                 guarantees: serde_json::json!({}),
                 probed: serde_json::json!({}),
                 handling: serde_json::Value::Null,
-                // read in place, as these tests' datasets were declared
-                dataset: serde_json::json!({"arrives": "deidentified"}),
+                // read in place, a whole declaration: the folder is the
+                // pseudonymised tree, PatientID holds the patient id, and
+                // subjects are found through a map
+                dataset: serde_json::json!({
+                    "kind": "legacy",
+                    "arrives": "deidentified",
+                    "state": "anonymised",
+                    "trees": {"originals": null, "anon": "."},
+                    "patient_id": "id-type:patient-id",
+                    "subjects": "map",
+                }),
             },
         )
         .unwrap()
@@ -999,6 +1077,55 @@ mod tests {
             r#"{"place": "nowhere", "columns": [{"header": "pid", "role": "identifier", "id_type": "patient-id"}], "rows": []}"#,
         );
         assert_eq!(r.status, 404);
+    }
+
+    #[test]
+    fn a_file_waiting_for_an_id_type_value_is_never_coded_anyway() {
+        // Wave 7a: its subject is known; it waits for the value, which a
+        // map gives, and the door names the type it waits for
+        let dir = TempDir::new("linkage-doors-wanting");
+        let (home, mut registry) = registry(&dir);
+        let work = caller("data:work,sensitive");
+        let see = caller("data:see");
+        let place_id = a_place(&mut registry, &dir, "ward-w");
+        // the table is the pseudonymiser's: one held file makes it
+        registry
+            .store()
+            .execute(
+                "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, shape, id_type, first_seen, code_anyway, subject_id, wants_type) VALUES (?, 'w1', 0, 0, 'held', '999999999999', 'personnummer', '2026-10-08T00:00:00Z', 0, 7, 'site-id')",
+                &[Param::Int(place_id)],
+            )
+            .unwrap();
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/code",
+            r#"{"place": "ward-w"}"#,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["files"], 0, "{}", r.body);
+        assert_eq!(r.body["job"], serde_json::Value::Null, "{}", r.body);
+        let flagged = registry
+            .store()
+            .query(
+                "SELECT COUNT(*) FROM pseudonym_file WHERE code_anyway = 1",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(flagged, 0);
+        let r = call(
+            &home,
+            &mut registry,
+            &see,
+            "GET",
+            "/api/linkage/held?place=ward-w",
+            "",
+        );
+        assert_eq!(r.body[0]["waits_for"], "site-id", "{}", r.body);
     }
 
     #[test]
@@ -1278,9 +1405,12 @@ mod tests {
                 probed: serde_json::json!({}),
                 handling: serde_json::json!({}),
                 dataset: serde_json::json!({
+                    "kind": "legacy",
                     "arrives": "deidentified",
+                    "state": "anonymised",
                     "trees": {"originals": null, "anon": "."},
-                    "unmapped": "hold",
+                    "patient_id": "id-type:patient-id",
+                    "subjects": "map",
                 }),
             },
         )

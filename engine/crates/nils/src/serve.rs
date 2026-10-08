@@ -2357,6 +2357,32 @@ fn routed(
             // every active place again first.
             use nils_registry::place;
             let refresh = query.get("probe").is_some_and(|p| p == "1" || p == "true");
+            // Wave 7a: `?explore=1` makes each source place's folder what
+            // it is first: a root's datasets found and settled, a dataset
+            // settled, the moves aside, which are a person's word
+            if query
+                .get("explore")
+                .is_some_and(|p| p == "1" || p == "true")
+            {
+                let tops: Vec<place::Place> = place::active(registry.store())?
+                    .into_iter()
+                    .filter(|p| p.role == place::Role::Source && p.dataset["root"].is_null())
+                    .collect();
+                for p in tops {
+                    let path = std::path::PathBuf::from(&p.path);
+                    if let Ok((d, _)) = crate::dataset::shape_place(
+                        registry.store(),
+                        &p.name,
+                        &path,
+                        &serde_json::json!({}),
+                        Some(&p),
+                        &p.guarantees,
+                    ) {
+                        place::set(registry.store(), p.id, None, None, Some(&d.probed))?;
+                        place::set_dataset(registry.store(), p.id, &d.dataset)?;
+                    }
+                }
+            }
             let mut rows = place::list(registry.store())?;
             if refresh {
                 let mut fresh = Vec::with_capacity(rows.len());
@@ -2396,9 +2422,35 @@ fn routed(
                     // declaration would move, read from its own listing
                     if p.role == place::Role::Source && p.retired_at.is_none() {
                         let folder = std::path::Path::new(&p.path);
-                        doc["layout"] = crate::dataset::layout_doc_listed(
-                            folder,
-                            &crate::dataset::detect(folder),
+                        if p.dataset["kind"] == "root" {
+                            // a root's datasets, by name, each its own row
+                            let under: Vec<&str> = rows
+                                .iter()
+                                .filter(|c| {
+                                    c.retired_at.is_none()
+                                        && c.dataset["root"].as_str() == Some(p.name.as_str())
+                                })
+                                .map(|c| c.name.as_str())
+                                .collect();
+                            doc["layout"] = serde_json::json!({
+                                "root": true,
+                                "datasets": under.len(),
+                            });
+                            doc["datasets"] = serde_json::json!(under);
+                        } else if p.dataset["kind"] == "legacy" {
+                            doc["layout"] = serde_json::json!({
+                                "legacy": true, "state": "anonymised", "reads": ".", "question": false,
+                            });
+                        } else {
+                            doc["layout"] = crate::dataset::layout_doc_listed(
+                                folder,
+                                &crate::dataset::detect(folder),
+                            );
+                        }
+                        // what keeps it from being read, in words; null when
+                        // it is read
+                        doc["not_read"] = serde_json::json!(
+                            nils_registry::place::incomplete(&p.dataset)
                         );
                     }
                     doc["bound"] = serde_json::json!(crate::places::bound_paths(p, &configured));
@@ -2541,6 +2593,7 @@ fn routed(
                     Detail::Plain,
                 )?;
             }
+            let mut found = Vec::new();
             let (probed, dataset, layout) = if role == PlaceRole::Source {
                 if place::by_name(registry.store(), name)?.is_some() {
                     return Err(Reply::error(
@@ -2548,8 +2601,18 @@ fn routed(
                         format!("a place is already named {name}"),
                     ));
                 }
-                let d = crate::dataset::declare(registry.store(), &path, &asked, None)
-                    .map_err(declare_refused)?;
+                // Wave 7a: a root explored, its datasets settled; a dataset
+                // settled; each by its folder
+                let (d, under) = crate::dataset::shape_place(
+                    registry.store(),
+                    name,
+                    &path,
+                    &asked,
+                    None,
+                    &guarantees,
+                )
+                .map_err(declare_refused)?;
+                found = under;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2591,6 +2654,9 @@ fn routed(
                 .ok_or_else(|| Reply::error(500, format!("place {id} was not written")))?;
             let mut answer = p.as_json();
             answer["layout"] = layout;
+            if p.dataset["kind"] == "root" {
+                answer["datasets"] = crate::dataset::found_doc(&found);
+            }
             Ok(Reply::created(answer))
         }
         ["api", "places", _] if put => {
@@ -2660,13 +2726,22 @@ fn routed(
                     Detail::Plain,
                 )?;
             }
+            let mut found = Vec::new();
             let looked = current.role == place::Role::Source && (dataset_given || path.is_some());
             let (probed, declared) = if looked {
                 let folder = path
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from(&current.path));
-                let d = crate::dataset::declare(registry.store(), &folder, &asked, Some(&current))
-                    .map_err(declare_refused)?;
+                let (d, under) = crate::dataset::shape_place(
+                    registry.store(),
+                    &current.name,
+                    &folder,
+                    &asked,
+                    Some(&current),
+                    &current.guarantees,
+                )
+                .map_err(declare_refused)?;
+                found = under;
                 (Some(d.probed.clone()), Some(d))
             } else {
                 (path.as_deref().map(crate::places::probe), None)
@@ -2723,6 +2798,9 @@ fn routed(
             answer["layout"] = declared
                 .map(|d| d.layout)
                 .unwrap_or(serde_json::Value::Null);
+            if p.dataset["kind"] == "root" {
+                answer["datasets"] = crate::dataset::found_doc(&found);
+            }
             Ok(Reply::ok(answer))
         }
         ["api", "overlays"] if get => {
@@ -4120,9 +4198,6 @@ fn dataset_asked(doc: &serde_json::Value) -> serde_json::Value {
         if let Some(v) = doc.get(key) {
             asked.insert(key.to_string(), v.clone());
         }
-    }
-    if !asked.contains_key("arrives") && doc["handling"]["arrives"].is_string() {
-        asked.insert("arrives".into(), doc["handling"]["arrives"].clone());
     }
     serde_json::Value::Object(asked)
 }

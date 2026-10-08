@@ -891,6 +891,16 @@ enum PlaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Explore the source places again (Wave 7a): a root's folders found and
+    /// each settled as a dataset whose structure says how its files arrive,
+    /// a dataset settled; all the roots and datasets of no root, or the one
+    /// named
+    Explore {
+        /// A source place by its id or name
+        place: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// What a folder holds before anything reads it (Wave 7a §5.3): its
     /// trees, the loose entries beside derivatives/, and for each way its
     /// files may arrive the tree that is read and what a confirmed
@@ -915,10 +925,15 @@ enum PlaceCommand {
 /// it. A flag not given keeps what is in force, or takes its default.
 #[derive(Debug, Args, Default)]
 struct DatasetFlags {
-    /// What arrives: identified, deidentified or coded; undeclared (the
-    /// default) reads nothing until one of those is declared
-    #[arg(long, value_name = "HOW")]
+    /// No longer declared: how a dataset's files arrive is read from its
+    /// folder (Wave 7a); given, it is refused with what to do instead
+    #[arg(long, value_name = "HOW", hide = true)]
     arrives: Option<String>,
+    /// The tree an unknown dataset's entries holding DICOM go into:
+    /// originals (identified data) or anon (already anonymised); moved only
+    /// with --confirm-move
+    #[arg(long, value_name = "originals|anon")]
+    move_into: Option<String>,
     /// The identity rule its files are read under, as nils digest --identity-rule reads it
     #[arg(long, value_name = "FILE")]
     identity: Option<PathBuf>,
@@ -934,6 +949,17 @@ struct DatasetFlags {
     /// changed only before anything is pseudonymised
     #[arg(long, value_name = "subject-code|id-type:NAME")]
     patient_id: Option<String>,
+    /// How the subjects of a de-identified or coded dataset are found,
+    /// which it must say: map (a map of subject codes to its ids, given or
+    /// in the registry; a file no map names is held) or generated (the
+    /// subject code generator makes each code from the id)
+    #[arg(long, value_name = "map|generated")]
+    subjects: Option<String>,
+    /// What names each pseudonymised copy's folder: subject-code (the
+    /// default) or id-type (the value PatientID holds, with --patient-id
+    /// id-type:NAME); changed only before anything is pseudonymised
+    #[arg(long, value_name = "subject-code|id-type")]
+    folder: Option<String>,
     /// The cohort every digest of the dataset feeds
     #[arg(long, value_name = "NAME")]
     cohort: Option<String>,
@@ -952,10 +978,8 @@ struct DatasetFlags {
     /// A tag to keep out of those groups, as gggg,eeee (repeatable)
     #[arg(long, value_name = "TAG")]
     keep: Vec<String>,
-    /// Move the loose entries beside derivatives/ into the tree the arrival
-    /// reads (the originals for identified data, the pseudonymised tree
-    /// otherwise); without it a declaration that needs the move is refused
-    /// and names what would move
+    /// The person's word that the entries --move-into names may move;
+    /// without it the move is refused and names what would move
     #[arg(long)]
     confirm_move: bool,
     /// The name --confirm-move had for a de-identified or coded folder
@@ -970,6 +994,9 @@ impl DatasetFlags {
         if let Some(a) = &self.arrives {
             asked.insert("arrives".into(), serde_json::json!(a));
         }
+        if let Some(m) = &self.move_into {
+            asked.insert("move_into".into(), serde_json::json!(m));
+        }
         if let Some(file) = &self.identity {
             asked.insert(
                 "identity".into(),
@@ -983,6 +1010,12 @@ impl DatasetFlags {
         }
         if let Some(p) = &self.patient_id {
             asked.insert("patient_id".into(), serde_json::json!(p));
+        }
+        if let Some(s) = &self.subjects {
+            asked.insert("subjects".into(), serde_json::json!(s));
+        }
+        if let Some(f) = &self.folder {
+            asked.insert("folder".into(), serde_json::json!(f));
         }
         if let Some(c) = &self.cohort {
             asked.insert("cohort".into(), serde_json::json!(c));
@@ -2650,6 +2683,29 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             println!("  {line}");
         }
     };
+    // the datasets found under a root, one line each and what they say
+    let show_found = |found: &[dataset::Found]| {
+        for f in found {
+            if f.place.id == 0 {
+                println!(
+                    "  {}: not settled: {}",
+                    f.place.name,
+                    f.layout["error"].as_str().unwrap_or("")
+                );
+                continue;
+            }
+            println!(
+                "  dataset {} (place {}{}) at {}",
+                f.place.name,
+                f.place.id,
+                if f.new { ", new" } else { "" },
+                f.place.path
+            );
+            for line in dataset::layout_lines(f.place.id, &f.place.dataset, &f.layout) {
+                println!("    {line}");
+            }
+        }
+    };
     // a refused declaration names what it would move, with --json whole
     let refused = |r: dataset::Refused, json: bool| -> Exit {
         if json && let Some(layout) = &r.layout {
@@ -2758,6 +2814,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     role.name()
                 )));
             }
+            let mut found = Vec::new();
             let (probed, dataset, layout) = if role == Role::Source {
                 if place::by_name(registry.store(), &name)
                     .map_err(|e| fail(e.to_string()))?
@@ -2765,8 +2822,18 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 {
                     return Err(fail(format!("a place is already named {name}")));
                 }
-                let d = dataset::declare(registry.store(), &path, &asked, None)
-                    .map_err(|r| refused(r, json))?;
+                // Wave 7a: a root explored, a dataset settled, by its folder
+                let g = guarantees(
+                    backup.as_deref(),
+                    snapshots,
+                    protected,
+                    fast,
+                    share.as_deref(),
+                );
+                let (d, under) =
+                    dataset::shape_place(registry.store(), &name, &path, &asked, None, &g)
+                        .map_err(|r| refused(r, json))?;
+                found = under;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2808,6 +2875,9 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             if json {
                 let mut doc = p.as_json();
                 doc["layout"] = layout;
+                if p.dataset["kind"] == "root" {
+                    doc["datasets"] = dataset::found_doc(&found);
+                }
                 println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 println!(
@@ -2821,7 +2891,62 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     println!("  {line}");
                 }
                 show_layout(&p, &layout);
+                show_found(&found);
                 println!("  probed {}", p.probed);
+            }
+            Ok(())
+        }
+        PlaceCommand::Explore { place: asked, json } => {
+            // Wave 7a: each source place's folder made what it is again: a
+            // root's datasets found and settled, a dataset settled
+            let rows: Vec<place::Place> = place::active(registry.store())
+                .map_err(|e| fail(e.to_string()))?
+                .into_iter()
+                .filter(|p| p.role == Role::Source)
+                .filter(|p| match &asked {
+                    Some(a) => a == &p.name || a.parse::<i64>().ok() == Some(p.id),
+                    None => p.dataset["root"].is_null(),
+                })
+                .collect();
+            if rows.is_empty() {
+                return Err(usage(match asked {
+                    Some(a) => format!("{a} is no source place"),
+                    None => "no source places; add one with nils place add NAME DIR --role source"
+                        .into(),
+                }));
+            }
+            let mut out = Vec::new();
+            for p in rows {
+                let path = PathBuf::from(&p.path);
+                let (d, found) = dataset::shape_place(
+                    registry.store(),
+                    &p.name,
+                    &path,
+                    &serde_json::json!({}),
+                    Some(&p),
+                    &p.guarantees,
+                )
+                .map_err(|r| refused(r, json))?;
+                place::set(registry.store(), p.id, None, None, Some(&d.probed))
+                    .map_err(|e| fail(e.to_string()))?;
+                let p = place::set_dataset(registry.store(), p.id, &d.dataset)
+                    .map_err(|e| fail(e.to_string()))?;
+                if json {
+                    let mut doc = p.as_json();
+                    doc["layout"] = d.layout;
+                    doc["datasets"] = dataset::found_doc(&found);
+                    out.push(doc);
+                } else {
+                    println!("place {}: {} at {}", p.id, p.name, p.path);
+                    show_layout(&p, &d.layout);
+                    show_found(&found);
+                }
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::Value::from(out)).unwrap_or_default()
+                );
             }
             Ok(())
         }
@@ -2876,12 +3001,20 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     current.role.name()
                 )));
             }
+            let mut found = Vec::new();
             let declared = if current.role == Role::Source && (dataset_given || path.is_some()) {
                 let folder = path.clone().unwrap_or_else(|| PathBuf::from(&current.path));
-                Some(
-                    dataset::declare(registry.store(), &folder, &asked, Some(&current))
-                        .map_err(|r| refused(r, json))?,
+                let (d, under) = dataset::shape_place(
+                    registry.store(),
+                    &current.name,
+                    &folder,
+                    &asked,
+                    Some(&current),
+                    &current.guarantees,
                 )
+                .map_err(|r| refused(r, json))?;
+                found = under;
+                Some(d)
             } else {
                 None
             };
@@ -2928,6 +3061,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     println!("  {line}");
                 }
                 show_layout(&p, &layout);
+                show_found(&found);
             }
             Ok(())
         }
@@ -3016,60 +3150,85 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     (dir, None)
                 }
             };
-            let layout = dataset::layout_doc(&folder, &dataset::detect(&folder));
+            // Wave 7a: a root lists each folder under it and what its
+            // structure says; a dataset, its own layout. Nothing is written
+            let shape = dataset::shape_of(&folder);
+            let mut under = Vec::new();
+            if shape == dataset::Shape::Root {
+                let mut subs: Vec<PathBuf> = fs::read_dir(&folder)
+                    .map_err(|e| fail(format!("{}: {e}", folder.display())))?
+                    .flatten()
+                    .filter(|e| {
+                        !e.file_name().to_string_lossy().starts_with('.')
+                            && e.file_type().is_ok_and(|t| t.is_dir())
+                    })
+                    .map(|e| e.path())
+                    .collect();
+                subs.sort();
+                for sub in subs {
+                    let layout = dataset::layout_doc(&sub, &dataset::detect(&sub));
+                    under.push(serde_json::json!({
+                        "folder": sub.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "path": sub.display().to_string(),
+                        "layout": layout,
+                    }));
+                }
+            }
+            let layout = match shape {
+                dataset::Shape::Root => serde_json::json!({"root": true, "datasets": under.len()}),
+                dataset::Shape::Legacy => {
+                    serde_json::json!({"legacy": true, "state": "anonymised", "reads": ".", "question": false})
+                }
+                dataset::Shape::Dataset => dataset::layout_doc(&folder, &dataset::detect(&folder)),
+            };
             if json {
                 let doc = serde_json::json!({
                     "path": folder.display().to_string(),
                     "place": p.as_ref().map(|p| p.name.clone()),
-                    "dataset": p.as_ref().filter(|p| p.role == Role::Source).map(|p| p.dataset.clone()),
+                    "shape": match shape {
+                        dataset::Shape::Root => "root",
+                        dataset::Shape::Legacy => "legacy",
+                        dataset::Shape::Dataset => "dataset",
+                    },
                     "layout": layout,
+                    "datasets": under,
                 });
                 println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
                 return Ok(());
             }
             println!("{}", folder.display());
-            match &p {
-                Some(p) if p.role == Role::Source => {
-                    for line in dataset::layout_lines(p.id, &p.dataset, &layout) {
+            let lines_of = |layout: &serde_json::Value| {
+                let derived = serde_json::json!({
+                    "arrives": match layout["state"].as_str() {
+                        Some("identified" | "both") => "identified",
+                        Some("anonymised") => "deidentified",
+                        _ => "undeclared",
+                    },
+                    "state": layout["state"],
+                    "trees": {"originals": null, "anon": "derivatives/dcm-anon"},
+                });
+                dataset::layout_lines(p.as_ref().map_or(0, |p| p.id), &derived, layout)
+            };
+            match shape {
+                dataset::Shape::Root => {
+                    println!("  a root: each folder under it is a dataset");
+                    for d in &under {
+                        println!("  {}", d["folder"].as_str().unwrap_or(""));
+                        for line in lines_of(&d["layout"]) {
+                            println!("    {line}");
+                        }
+                    }
+                }
+                dataset::Shape::Legacy => {
+                    println!(
+                        "  legacy: names a pseudonymised tree itself, read as an anonymised dataset"
+                    );
+                }
+                dataset::Shape::Dataset => {
+                    for line in lines_of(&layout) {
                         println!("  {line}");
                     }
                 }
-                _ => {
-                    let undeclared = place::default_dataset(None);
-                    for line in dataset::layout_lines(0, &undeclared, &layout)
-                        .into_iter()
-                        .take(1)
-                    {
-                        println!(
-                            "  {}",
-                            line.replacen("undeclared: nothing in it is read. ", "", 1)
-                        );
-                    }
-                }
-            }
-            for (arrives, d) in layout["declarations"].as_object().into_iter().flatten() {
-                let moves = d["moves"].as_u64().unwrap_or(0);
-                println!(
-                    "  declared {arrives}: reads {}{}",
-                    if arrives == "identified" {
-                        "its pseudonymised tree, written by the pseudonymiser from the originals"
-                    } else {
-                        d["reads"].as_str().unwrap_or("")
-                    },
-                    match (moves, d["needed"].as_bool() == Some(true)) {
-                        (0, _) => String::new(),
-                        (n, true) => format!(
-                            "; moves {n} loose entr{} into {} once confirmed",
-                            if n == 1 { "y" } else { "ies" },
-                            d["into"].as_str().unwrap_or("")
-                        ),
-                        (n, false) => format!(
-                            "; {n} loose entr{} not read, moved into {} only with --confirm-move",
-                            if n == 1 { "y" } else { "ies" },
-                            d["into"].as_str().unwrap_or("")
-                        ),
-                    }
-                );
             }
             Ok(())
         }
@@ -4935,7 +5094,14 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             for r in &shown {
                 println!(
                     "  {:<24} {}   (identity {}, from {})",
-                    r.id_type, r.value, r.identity_id, r.source
+                    r.id_type,
+                    if r.kept {
+                        r.value.as_str()
+                    } else {
+                        "not kept; the subject's code stands for it"
+                    },
+                    r.identity_id,
+                    r.source
                 );
             }
             let links = linkage::linkages_of(&mut store, subject)?;

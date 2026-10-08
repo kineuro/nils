@@ -2536,9 +2536,13 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
             tree,
             "--role",
             "source",
-            "--arrives",
-            "deidentified",
+            "--move-into",
+            "anon",
             "--confirm-move",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
         ],
         None,
     );
@@ -2729,7 +2733,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     );
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
     loose.file("sub-9/a.dcm", &dicom("1.2.3.F", "1.2.3.F.1.1"));
-    const LIMIT: usize = 49;
+    const LIMIT: usize = 52;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -2841,11 +2845,8 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     assert_eq!(status, 400, "{refused}");
     assert!(identified.path().join("sub-1").is_dir());
 
-    // Wave 7a §5.3, T4: an identified dataset's loose entries move into the
-    // originals only on the person's word; asked without it, the door
-    // answers the question, naming the entries and the tree, and nothing
-    // is written
-    let (status, asked) = ask(
+    // Wave 7a: the arrival is the structure's, never declared
+    let (status, refused) = ask(
         "POST",
         "/api/places",
         Some(&body(
@@ -2856,6 +2857,28 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         )),
         ops,
     );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("read from its folder"),
+        "{refused}"
+    );
+    // T4: a dataset's entries move into the tree a person names only on the
+    // person's word; named without it, the door answers the question,
+    // naming the entries and the trees, and nothing is written
+    let (status, asked) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "ds",
+            "source",
+            identified.path(),
+            serde_json::json!({"move_into": "originals"}),
+        )),
+        ops,
+    );
     assert_eq!(status, 409, "{asked}");
     assert_eq!(asked["confirm"], "confirm_move", "{asked}");
     assert_eq!(
@@ -2863,8 +2886,14 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         serde_json::json!(["notes.txt", "sub-1"]),
         "{asked}"
     );
+    // the notes hold no DICOM: only the study would move
     assert_eq!(
-        asked["layout"]["declarations"]["identified"]["into"], "derivatives/dcm-original",
+        asked["layout"]["loose_dicom"],
+        serde_json::json!(["sub-1"]),
+        "{asked}"
+    );
+    assert_eq!(
+        asked["layout"]["move_into"]["trees"]["originals"], "derivatives/dcm-original",
         "{asked}"
     );
     assert!(identified.path().join("sub-1").is_dir());
@@ -2879,8 +2908,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             .any(|p| p["name"] == "ds"),
         "{none}"
     );
-    // a folder added with no arrival is undeclared: nothing moved, and no
-    // digest or bring-in of it is queued
+    // a folder without derivatives/ is a root: each folder under it a
+    // dataset, here one of unknown structure; nothing moved, and no digest
+    // or bring-in of either is queued
     let (status, undeclared) = ask(
         "POST",
         "/api/places",
@@ -2906,8 +2936,18 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         serde_json::Value::Null,
         "{undeclared}"
     );
-    assert_eq!(undeclared["layout"]["question"], true, "{undeclared}");
-    assert_eq!(undeclared["layout"]["loose"], 1, "{undeclared}");
+    assert_eq!(undeclared["dataset"]["kind"], "root", "{undeclared}");
+    assert_eq!(undeclared["layout"]["datasets"], 1, "{undeclared}");
+    let under = &undeclared["datasets"][0];
+    assert_eq!(under["name"], "sub-9", "{undeclared}");
+    assert_eq!(under["dataset"]["state"], "unknown", "{undeclared}");
+    assert_eq!(under["dataset"]["root"], "loose", "{undeclared}");
+    assert_eq!(under["layout"]["question"], true, "{undeclared}");
+    assert_eq!(
+        under["layout"]["loose_dicom"],
+        serde_json::json!(["a.dcm"]),
+        "{undeclared}"
+    );
     assert!(loose.path().join("sub-9/a.dcm").is_file());
     for command in [
         r#"["digest", "@loose"]"#,
@@ -2921,8 +2961,11 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             ops,
         );
         assert_eq!(status, 409, "{command}: {refused}");
+        let error = refused["error"].as_str().unwrap();
         assert!(
-            refused["error"].as_str().unwrap().contains("undeclared"),
+            error.contains("undeclared")
+                || error.contains("not read")
+                || error.contains("by its own name"),
             "{command}: {refused}"
         );
     }
@@ -2934,14 +2977,47 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         .find(|p| p["name"] == "loose")
         .cloned()
         .unwrap();
-    assert_eq!(
-        row["layout"]["loose_entries"],
-        serde_json::json!(["sub-9"]),
+    assert_eq!(row["layout"]["root"], true, "{row}");
+    assert_eq!(row["datasets"], serde_json::json!(["sub-9"]), "{row}");
+    assert!(row["not_read"].as_str().unwrap().contains("root"), "{row}");
+    let row = listed["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "sub-9")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["layout"]["question"], true, "{row}");
+    assert_eq!(row["layout"]["state"], "unknown", "{row}");
+    assert!(
+        row["not_read"].as_str().unwrap().contains("unknown"),
         "{row}"
     );
-    assert_eq!(row["layout"]["question"], true, "{row}");
+    // the unknown dataset's entries go into the tree the person names, at
+    // the place's door, only with the confirmation
+    let sub9 = format!("/api/places/{}", row["id"]);
+    let (status, asked) = ask("PUT", &sub9, Some(r#"{"move_into": "anon"}"#), ops);
+    assert_eq!(status, 409, "{asked}");
+    assert_eq!(asked["confirm"], "confirm_move", "{asked}");
+    assert!(loose.path().join("sub-9/a.dcm").is_file());
+    let (status, moved) = ask(
+        "PUT",
+        &sub9,
+        Some(r#"{"move_into": "anon", "confirm_move": true}"#),
+        ops,
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["dataset"]["state"], "anonymised", "{moved}");
+    assert_eq!(moved["dataset"]["root"], "loose", "{moved}");
+    assert!(
+        loose
+            .path()
+            .join("sub-9/derivatives/dcm-anon/a.dcm")
+            .is_file()
+    );
 
-    // an identified dataset: the loose entries move into the originals
+    // the person's word: the study goes into the originals, and the
+    // structure says identified
     let (status, ds) = ask(
         "POST",
         "/api/places",
@@ -2950,7 +3026,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "source",
             identified.path(),
             serde_json::json!({
-                "arrives": "identified",
+                "move_into": "originals",
                 "confirm_move": true,
                 "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]},
                 "cohort": "study-a",
@@ -2980,13 +3056,15 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         ),
         "{ds}"
     );
-    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 2, "{ds}");
+    assert_eq!(ds["dataset"]["state"], "identified", "{ds}");
+    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 1, "{ds}");
     assert_eq!(ds["dataset"]["trees"]["anon"]["files"], 0, "{ds}");
     assert_eq!(ds["layout"]["v0"], serde_json::Value::Null, "{ds}");
-    assert_eq!(ds["layout"]["loose"], 0, "{ds}");
+    // the notes stay beside derivatives/, unread
+    assert_eq!(ds["layout"]["loose"], 1, "{ds}");
     assert_eq!(
         ds["layout"]["moved"],
-        serde_json::json!({"into": "derivatives/dcm-original", "entries": 2}),
+        serde_json::json!({"into": "derivatives/dcm-original", "entries": 1}),
         "{ds}"
     );
     assert!(
@@ -2995,29 +3073,22 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             .join("derivatives/dcm-original/sub-1/ses-1/a.dcm")
             .is_file()
     );
-    assert!(
-        identified
-            .path()
-            .join("derivatives/dcm-original/notes.txt")
-            .is_file()
-    );
+    assert!(identified.path().join("notes.txt").is_file());
     assert!(identified.path().join("derivatives/dcm-anon").is_dir());
     assert!(!identified.path().join("sub-1").exists());
 
-    // a v0 cohort folder declared: dcm-raw is renamed, nothing else touched
+    // a v0 cohort folder: its structure says both, identified with its
+    // anonymised copy; dcm-raw is renamed, shown, nothing else touched
     let (status, old) = ask(
         "POST",
         "/api/places",
-        Some(&body(
-            "old",
-            "source",
-            v0.path(),
-            serde_json::json!({"arrives": "deidentified"}),
-        )),
+        Some(&body("old", "source", v0.path(), serde_json::json!({}))),
         ops,
     );
     assert_eq!(status, 201, "{old}");
-    assert_eq!(old["dataset"]["arrives"], "deidentified", "{old}");
+    assert_eq!(old["dataset"]["arrives"], "identified", "{old}");
+    assert_eq!(old["dataset"]["state"], "both", "{old}");
+    assert_eq!(old["layout"]["renamed"], true, "{old}");
     assert_eq!(
         old["layout"]["v0"],
         serde_json::json!({"original_files": 1, "raw_files": 1, "partial": false, "renamed": true}),
@@ -3040,8 +3111,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     assert!(!v0.path().join("derivatives/dcm-raw").exists());
     assert!(v0.path().join("derivatives/dcm-anon/sub-1/a.dcm").is_file());
 
-    // a de-identified folder moves into the tree when confirmed (by its
-    // name from before here); a bare one is undeclared and has no tree
+    // a folder whose entries are anonymised goes into dcm-anon when the
+    // person says so (by the move's name from before here), and the
+    // structure says anonymised; a bare folder is a root with nothing in it
     let (status, moved) = ask(
         "POST",
         "/api/places",
@@ -3049,11 +3121,12 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "plain",
             "source",
             plain.path(),
-            serde_json::json!({"arrives": "coded", "move_into_anon": true}),
+            serde_json::json!({"move_into_anon": true}),
         )),
         ops,
     );
     assert_eq!(status, 201, "{moved}");
+    assert_eq!(moved["dataset"]["state"], "anonymised", "{moved}");
     assert_eq!(
         moved["dataset"]["trees"]["originals"],
         serde_json::Value::Null,
@@ -3079,6 +3152,12 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         ops,
     );
     assert_eq!(status, 201, "{bare_place}");
+    assert_eq!(bare_place["dataset"]["kind"], "root", "{bare_place}");
+    assert_eq!(
+        bare_place["datasets"],
+        serde_json::json!([]),
+        "{bare_place}"
+    );
     assert_eq!(
         bare_place["dataset"]["arrives"], "undeclared",
         "{bare_place}"
@@ -3180,7 +3259,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     );
     assert_eq!(status, 200, "{look}");
     assert!(ends(&look["path"], "derivatives/dcm-original"), "{look}");
-    assert_eq!(look["here"]["files"]["count"], 1, "{look}");
+    assert_eq!(look["here"]["files"]["count"], 0, "{look}");
     let (_, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@ds"}"#), ops);
     assert!(ends(&look["path"], "derivatives/dcm-anon"), "{look}");
 
@@ -3194,7 +3273,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         .find(|s| s["name"] == "ds")
         .unwrap();
     assert_eq!(source["arrives"], "identified", "{doc}");
-    assert_eq!(source["trees"]["originals"]["files"], 2, "{doc}");
+    assert_eq!(source["trees"]["originals"]["files"], 1, "{doc}");
     assert_eq!(source["trees"]["anon"]["files"], 0, "{doc}");
     assert_eq!(
         source["trees"]["anon"]["last_written"],
@@ -3352,8 +3431,8 @@ fn the_originals_door_refuses_a_purge_when_an_original_changed_after_its_copy() 
             dir.path().to_str().unwrap(),
             "--role",
             "source",
-            "--arrives",
-            "identified",
+            "--move-into",
+            "originals",
             "--confirm-move",
             "--unmapped",
             "code",
@@ -4464,8 +4543,8 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
             dir.path().to_str().unwrap(),
             "--role",
             "source",
-            "--arrives",
-            "identified",
+            "--move-into",
+            "originals",
             "--confirm-move",
             "--unmapped",
             "code",

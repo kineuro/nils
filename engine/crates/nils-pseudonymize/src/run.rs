@@ -347,7 +347,7 @@ enum Answer {
     Wanting {
         subject: i64,
         lookup: Vec<u8>,
-        sealed: Vec<u8>,
+        sealed: Option<Vec<u8>>,
         id_type: String,
         wants: String,
     },
@@ -355,7 +355,7 @@ enum Answer {
     /// held with these, or would be coded in a dry run.
     Unknown {
         lookup: Vec<u8>,
-        sealed: Vec<u8>,
+        sealed: Option<Vec<u8>>,
         id_type: String,
     },
     /// The tree holds a file of this SOP instance already, read by a
@@ -405,7 +405,7 @@ pub enum Item {
         mtime: i64,
         shape: String,
         lookup: Vec<u8>,
-        sealed: Vec<u8>,
+        sealed: Option<Vec<u8>>,
         id_type: String,
         /// Of a file held for want of an id type's value: its subject and
         /// the type (Wave 7a §5.4); none of a file whose subject is unknown.
@@ -1046,7 +1046,14 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 provisional,
             } => (id, code, written, created, provisional),
         };
-        let out_rel = place(ctx, &code, &prepared.facts, prior.as_ref());
+        // the folder: the subject's code, or the id type's value where the
+        // dataset asks for it (Wave 7a)
+        let folder = if ctx.settings.folder_by_id {
+            folder_of(&written)
+        } else {
+            code.clone()
+        };
+        let out_rel = place(ctx, &folder, &prepared.facts, prior.as_ref());
         let target = ctx.settings.anon.join(&out_rel);
         if !dry && let Some(parent) = target.parent() {
             let mut dirs = ctx.dirs.lock().unwrap_or_else(|e| e.into_inner());
@@ -1125,6 +1132,26 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
 /// Where the file goes under the tree (record 26 §3): the place its facts
 /// name, with a counter when another file of this run, or one already
 /// there that is not this file's own output, holds it.
+/// A folder name made of an id value: letters, digits, `.`, `_` and `-`
+/// as they are, anything else `_`, so no value can step outside the tree.
+pub(crate) fn folder_of(value: &str) -> String {
+    let name: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() || name.chars().all(|c| c == '.') {
+        format!("id-{}", name.replace('.', "_"))
+    } else {
+        name
+    }
+}
+
 fn place(ctx: &Ctx<'_>, code: &str, facts: &Facts, prior: Option<&Prior>) -> String {
     let base = layout::relative(code, facts);
     let own = prior.and_then(|p| p.out_path.as_deref());
@@ -1447,7 +1474,7 @@ impl<'a> Recorder<'a> {
                         }
                         Answer::Unknown {
                             lookup: self.resolver.lookup(&ask.ident),
-                            sealed: self.resolver.seal(&ask.ident.value),
+                            sealed: self.resolver.seal(&ask.ident),
                             id_type: self.resolver.type_of(&ask.ident).name.clone(),
                         }
                     }
@@ -1491,7 +1518,7 @@ impl<'a> Recorder<'a> {
                                     None => Answer::Wanting {
                                         subject: id,
                                         lookup: self.resolver.lookup(&ask.ident),
-                                        sealed: self.resolver.seal(&ask.ident.value),
+                                        sealed: self.resolver.seal(&ask.ident),
                                         id_type: self.resolver.type_of(&ask.ident).name.clone(),
                                         wants: wanted.clone(),
                                     },
@@ -1738,7 +1765,7 @@ impl<'a> Recorder<'a> {
                         Param::from(state::HELD),
                         Param::from(shape.as_str()),
                         Param::Bytes(lookup.clone()),
-                        Param::Bytes(sealed.clone()),
+                        sealed.clone().map_or(Param::Null, Param::Bytes),
                         Param::from(id_type.as_str()),
                         Param::Int(batch_id),
                         Param::from(now.as_str()),
