@@ -3056,40 +3056,28 @@ fn routed(
         }
         ["api", "ingest", "probe"] if post => {
             let doc = json_body(body)?;
-            // A pre-registered location, never a path: the name and an
-            // optional relative part, resolved by the worker.
-            let location = doc["location"].as_str().ok_or_else(|| {
-                Reply::error(
-                    400,
-                    "location: a registered ingest location, as name or name/relative",
-                )
-            })?;
-            let location = location.trim().trim_start_matches('@');
-            let (name, rel) = location.split_once('/').unwrap_or((location, ""));
-            if !doors.ingest_roots.contains_key(name) {
-                return Err(Reply::error(
-                    400,
-                    format!(
-                        "location {name} is not registered; this deployment names {}",
-                        if doors.ingest_roots.is_empty() {
-                            "none".to_string()
-                        } else {
-                            doors
-                                .ingest_roots
-                                .keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
-                    ),
-                ));
-            }
-            if rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
-                return Err(Reply::error(
-                    400,
-                    "location: the relative part stays inside the location",
-                ));
-            }
+            // Wave 7a: a dataset by name, whose originals the probe reads,
+            // or a pre-registered location, never a path; one of the two.
+            let dataset = doc["dataset"]
+                .as_str()
+                .map(|d| d.trim().trim_start_matches('@'));
+            let location = doc["location"].as_str();
+            let where_to = match (dataset, location) {
+                (Some(_), Some(_)) => {
+                    return Err(Reply::error(
+                        400,
+                        "dataset or location: a probe reads one of the two, not both",
+                    ));
+                }
+                (Some(name), None) => probe_dataset(registry, caller, path, name)?,
+                (None, Some(location)) => probe_location(&doors.ingest_roots, location)?,
+                (None, None) => {
+                    return Err(Reply::error(
+                        400,
+                        "dataset or location: a dataset by name, whose originals are read, or a registered ingest location, as name or name/relative",
+                    ));
+                }
+            };
             let rules = doc["rules"]
                 .as_array()
                 .filter(|r| !r.is_empty())
@@ -3099,20 +3087,10 @@ fn routed(
                         "rules: one or more candidate identity rules, as objects",
                     )
                 })?;
-            let mut command = vec![
-                "ingest".to_string(),
-                "probe".into(),
-                format!(
-                    "@{name}{}",
-                    if rel.is_empty() {
-                        String::new()
-                    } else {
-                        format!("/{rel}")
-                    }
-                ),
-                "--sample".into(),
-                nils_digest::probe::sample_of(doc["sample"].as_i64()).to_string(),
-            ];
+            let mut command = vec!["ingest".to_string(), "probe".into()];
+            command.extend(where_to);
+            command.push("--sample".into());
+            command.push(nils_digest::probe::sample_of(doc["sample"].as_i64()).to_string());
             for (i, r) in rules.iter().enumerate() {
                 if !r.is_object() {
                     return Err(Reply::error(400, format!("rules[{i}]: an object")));
@@ -4240,6 +4218,96 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
         "ask" => "query:work",
         _ => "pipelines:work",
     }
+}
+
+/// The probe door's `location` (Wave 4c §6.6): a registered ingest
+/// location as `name` or `name/relative`, never a path, as the worker's
+/// `@name/relative` argument.
+fn probe_location(
+    roots: &std::collections::BTreeMap<String, std::path::PathBuf>,
+    location: &str,
+) -> Result<Vec<String>, Reply> {
+    let location = location.trim().trim_start_matches('@');
+    let (name, rel) = location.split_once('/').unwrap_or((location, ""));
+    if !roots.contains_key(name) {
+        return Err(Reply::error(
+            400,
+            format!(
+                "location {name} is not registered; this deployment names {}",
+                if roots.is_empty() {
+                    "none".to_string()
+                } else {
+                    roots.keys().cloned().collect::<Vec<_>>().join(", ")
+                }
+            ),
+        ));
+    }
+    if rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
+        return Err(Reply::error(
+            400,
+            "location: the relative part stays inside the location",
+        ));
+    }
+    Ok(vec![format!(
+        "@{name}{}",
+        if rel.is_empty() {
+            String::new()
+        } else {
+            format!("/{rel}")
+        }
+    )])
+}
+
+/// The probe door's `dataset` (Wave 7a; record 55 K9): a dataset by name,
+/// whose originals the probe reads, shapes only, as the worker's
+/// `--dataset name`. Its originals are identified files, and the answer
+/// names the subjects whose birth date and sex agree and whose visits
+/// overlap by their codes, which a caller below detail quasi never sees:
+/// the door needs `data:work` at detail quasi. A name that is no dataset,
+/// and a dataset with no originals, are refused before anything is queued.
+fn probe_dataset(
+    registry: &mut Registry,
+    caller: &Caller,
+    path: &str,
+    name: &str,
+) -> Result<Vec<String>, Reply> {
+    use nils_registry::place::{self, Role};
+    caller.allowed(path, Need::One("data:work"), Detail::Quasi)?;
+    if name.is_empty() || name.contains('/') {
+        return Err(Reply::error(
+            400,
+            "dataset: one name, as the sources door lists it, never a path",
+        ));
+    }
+    let found = place::by_name(registry.store(), name)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+        .filter(|p| p.role == Role::Source && p.retired_at.is_none());
+    let Some(dataset) = found else {
+        let names: Vec<String> = place::active(registry.store())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.role == Role::Source)
+            .map(|p| p.name)
+            .collect();
+        return Err(Reply::error(
+            404,
+            format!(
+                "no dataset named {name}; the datasets are {}",
+                if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(", ")
+                }
+            ),
+        ));
+    };
+    if !dataset.tree_path("originals").is_some_and(|p| p.is_dir()) {
+        return Err(Reply::error(
+            409,
+            format!("the dataset {name} has no originals to probe"),
+        ));
+    }
+    Ok(vec!["--dataset".into(), dataset.name])
 }
 
 /// What a queued job records of its caller beside the principal: the detail

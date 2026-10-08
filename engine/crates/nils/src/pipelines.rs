@@ -453,8 +453,20 @@ pub(crate) fn run_totals_only(doc: &mut Value) {
 }
 
 /// A job read below detail quasi: a pipeline run's result and error as its
-/// run's (record 49 R4, after review).
+/// run's (record 49 R4, after review), and a dataset probe's merge reading
+/// as its counts, never a subject's code (record 55 K9).
 pub(crate) fn job_totals_only(job: &mut Value) {
+    for c in job["result"]["candidates"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        if let Some(pairs) = c["alike"]["pairs"].as_array() {
+            let n = pairs.len();
+            c["alike"]["pairs"] = json!([]);
+            c["alike"]["withheld"] = json!(n);
+        }
+    }
     let a_run = job["kind"] == "pipeline" || job["result"]["run"].is_i64();
     if !a_run {
         return;
@@ -6278,6 +6290,23 @@ mod tests {
         });
         job_totals_only(&mut job);
         assert!(job["result"]["summary"]["numbers"]["checks"]["breaches"].is_null());
+        // record 55 K9: a dataset probe's alike subjects are counted, never named
+        let mut probe = json!({
+            "kind": "ingest",
+            "result": {"dataset": "ds", "candidates": [
+                {"label": "rule 1", "alike": {"pairs": [{"subjects": ["CODEA1", "CODEB2"]}], "linked": 0, "unmapped": 1}},
+                {"label": "rule 2"},
+            ]},
+        });
+        job_totals_only(&mut probe);
+        assert_eq!(
+            probe["result"]["candidates"][0]["alike"]["pairs"],
+            json!([])
+        );
+        assert_eq!(probe["result"]["candidates"][0]["alike"]["withheld"], 1);
+        assert_eq!(probe["result"]["candidates"][0]["alike"]["unmapped"], 1);
+        assert!(probe["result"]["candidates"][1]["alike"].is_null());
+        assert!(!probe.to_string().contains("CODEA1"));
         assert!(!job.to_string().contains("stack-3") && !job.to_string().contains("4.5"));
         // below detail quasi a review list says a run's items one a check
         // or a reason with its count, never one a unit

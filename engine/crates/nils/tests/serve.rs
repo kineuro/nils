@@ -1824,6 +1824,239 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
 /// Wave 4c §5.3: the trust list vectors of `contracts/suite/v3` run against
 /// the engine. Each case is minted with the key it names and presented; what
 /// happened is compared with what the vector expects.
+/// Wave 7a and record 55 K9: a dataset is probed by its name, its
+/// originals read, shapes only, at data:work and detail quasi; the probe
+/// names the subjects whose birth date and sex agree and whose visits
+/// overlap by their codes, which a caller below quasi reads as a count.
+#[test]
+fn a_dataset_is_probed_by_name_and_its_alike_subjects_are_named_at_quasi() {
+    let home = registry();
+    let data = TempDir::new("probe-ds");
+    // four people under four identifiers; the first two are one person
+    // (the same birth date, sex and days), the fourth is that person too
+    // under an identifier no map names, the third is someone else
+    let people = [
+        ("KM5101", "19580214", "F", &["20210510", "20220512"][..]),
+        ("KM5102", "19580214", "F", &["20210510", "20220512"][..]),
+        ("KM5103", "19611120", "M", &["20210510", "20220512"][..]),
+        ("KM5104", "19580214", "F", &["20220512"][..]),
+    ];
+    let mut n = 0;
+    for (id, birth, sex, days) in people {
+        for day in days {
+            n += 1;
+            let study = format!("1.2.826.9.{n}");
+            let sop = format!("{study}.1.1");
+            let mut e = synth::minimal_mr(&study, &format!("{study}.1"), &sop);
+            e.push(synth::text(tags::PATIENT_ID, VR::LO, id));
+            e.push(synth::text(tags::PATIENT_BIRTH_DATE, VR::DA, birth));
+            e.push(synth::text(tags::PATIENT_SEX, VR::CS, sex));
+            e.push(synth::text(tags::STUDY_DATE, VR::DA, day));
+            data.file(
+                &format!("derivatives/dcm-original/{id}/{day}/a.dcm"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let empty = TempDir::new("probe-ds-empty");
+    empty.file("derivatives/dcm-anon/x/a.txt", b"nothing identified here");
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds",
+            data.path().to_str().unwrap(),
+            "--role",
+            "source",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "anon-only",
+            empty.path().to_str().unwrap(),
+            "--role",
+            "source",
+        ],
+        None,
+    );
+    let map = data.path().join("map.csv");
+    std::fs::write(
+        &map,
+        "identifier,code\nKM5101,BENM01\nKM5102,BENM02\nKM5103,BENM03\n",
+    )
+    .unwrap();
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-type",
+            "patient-id",
+            "--place",
+            "ds",
+        ],
+        None,
+    );
+    std::fs::remove_file(&map).unwrap();
+
+    let server = Server::start(
+        &home,
+        12,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "a-plain-data-worker-tok=pl@lab:data:work,pipelines:see",
+            "--token",
+            "a-quasi-data-worker-tok=qu@lab:reviewer,data:work",
+        ],
+        &[],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let plain = Some("a-plain-data-worker-tok");
+    let quasi = Some("a-quasi-data-worker-tok");
+    let rules = r#"[{"id_type": "patient-id", "from": [{"field": "PatientID"}]},
+                    {"id_type": "subject-code", "code": "verbatim", "from": [{"path": {"segment": 1}, "pattern": "^(?<id>[A-Z]{2}[0-9]{4})$"}]}]"#;
+    let body = |more: &str| format!(r#"{{{more}, "sample": 100, "rules": {rules}}}"#);
+
+    // 1: below detail quasi a dataset's originals are not probed
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "ds""#)),
+        plain,
+    );
+    assert_eq!(status, 403, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("quasi"), "{doc}");
+    // 2-3: one of dataset and location, never both, never neither
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "ds", "location": "src""#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&format!(r#"{{"rules": {rules}}}"#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("dataset or location"),
+        "{doc}"
+    );
+    // 4: a name that is no dataset is refused naming the datasets
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "nowhere""#)),
+        ops,
+    );
+    assert_eq!(status, 404, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("ds"), "{doc}");
+    // 5: a path is not a dataset's name
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "ds/derivatives/dcm-original""#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    // 6: a dataset with no originals has nothing identified to probe
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "anon-only""#)),
+        ops,
+    );
+    assert_eq!(status, 409, "{doc}");
+    // 7: at quasi with data:work it is queued, and the command line names
+    // the dataset, never its path
+    let (status, queued) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "@ds""#)),
+        quasi,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    // 8
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{job}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    let argv = shown["args"]["argv"].to_string();
+    assert!(
+        argv.contains("--dataset") && argv.contains("\"ds\""),
+        "{argv}"
+    );
+    assert!(!argv.contains(&data.path().display().to_string()), "{argv}");
+
+    // the worker runs it
+    let _ = run(&home, &["jobs", "work", "--once"], None);
+    // 9: at quasi the job names the alike pair by its codes, shapes only
+    let (status, done) = server.request("GET", &format!("/api/jobs/{job}"), None, quasi);
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["state"], "done", "{done}");
+    let result = &done["result"];
+    assert_eq!(result["dataset"], "ds", "{result}");
+    assert_eq!(result["sample"]["parsed"], 7, "{result}");
+    let tag = &result["candidates"][0];
+    assert_eq!(tag["subjects"], 4, "{tag}");
+    assert_eq!(tag["sources"][0]["shapes"]["AA9999"], 7, "{tag}");
+    assert_eq!(
+        tag["alike"]["pairs"],
+        serde_json::json!([{
+            "subjects": ["BENM01", "BENM02"],
+            "agree": ["birth_date", "sex"],
+            "visits": {"shared": 2, "of": [2, 2]},
+        }]),
+        "{tag}"
+    );
+    // the fourth identifier is held, not mapped: a map names it, not a merge
+    assert_eq!(tag["alike"]["unmapped"], 2, "{tag}");
+    assert_eq!(tag["alike"]["linked"], 0, "{tag}");
+    // the folder rule reads codes verbatim that are no subject's: nothing named
+    let path = &result["candidates"][1];
+    assert_eq!(path["alike"]["pairs"], serde_json::json!([]), "{path}");
+    let text = done.to_string();
+    for value in ["KM5101", "KM5104", "19580214", "20210510", "dcm-original"] {
+        assert!(!text.contains(value), "{value} escaped: {text}");
+    }
+    assert!(!text.contains(&data.path().display().to_string()), "{text}");
+    // 10: below quasi the pair is a count
+    let (status, low) = server.request("GET", &format!("/api/jobs/{job}"), None, plain);
+    assert_eq!(status, 200, "{low}");
+    let alike = &low["result"]["candidates"][0]["alike"];
+    assert_eq!(alike["pairs"], serde_json::json!([]), "{low}");
+    assert_eq!(alike["withheld"], 1, "{low}");
+    assert!(!low.to_string().contains("BENM01"), "{low}");
+    // 11: and so is the list
+    let (status, list) = server.request("GET", "/api/jobs", None, plain);
+    assert_eq!(status, 200, "{list}");
+    assert!(!list.to_string().contains("BENM01"), "{list}");
+    // 12: the merge stays a person's act at its own door, at sensitive
+    let (status, doc) = server.request(
+        "POST",
+        "/api/linkage/merge",
+        Some(r#"{"canonical": "BENM01", "alias": "BENM02", "why": "same birth date, sex and visits"}"#),
+        quasi,
+    );
+    assert_eq!(status, 403, "{doc}");
+    server.finish();
+}
+
 #[test]
 fn the_trust_list_vectors_hold() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
