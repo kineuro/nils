@@ -202,7 +202,7 @@ mod tests {
             entities: Vec::new(),
             refused: Vec::new(),
             aslcontext: None,
-            number: None,
+            acq: Vec::new(),
         })
     }
 

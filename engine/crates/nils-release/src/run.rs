@@ -1699,14 +1699,6 @@ fn write_dataset(
     if report.routes.contains_key("unofficial") {
         ignore.push("*_localizer.*".to_string());
     }
-    // Wave 7a §8.1: the informative mode's `diff-` and plain `_<n>` are not
-    // the standard's, so the files that carry them are named here, each by
-    // its own place, and the standard's validator reads the rest of the tree.
-    if settings.naming == crate::name::Naming::Informative {
-        for d in report.decided.iter().filter(|d| !d.marks.is_empty()) {
-            ignore.push(format!("{}.*", d.name));
-        }
-    }
     if !ignore.is_empty() {
         std::fs::write(root.join(".bidsignore"), dataset::bidsignore(&ignore))?;
     }
@@ -3805,15 +3797,7 @@ fn places(
                 if first {
                     shared.names += 1;
                 }
-                settle(
-                    &group,
-                    &acquisitions,
-                    &stated,
-                    pack,
-                    naming,
-                    &mut bids,
-                    &mut shared,
-                );
+                settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
             }
             first = false;
         }
@@ -3821,7 +3805,20 @@ fn places(
 
     let mut out = HashMap::new();
     for bucket in buckets.values_mut() {
-        name::disambiguate(bucket);
+        // Wave 7a §8.1, record 55 C4: a descriptive name a measured
+        // difference separates says it in a slot of its own before any
+        // counter, from the same marks a BIDS name takes.
+        name::disambiguate_by(bucket, |stacks| {
+            let members: Vec<crate::bids::separate::Member> = stacks
+                .iter()
+                .map(|s| crate::bids::separate::Member {
+                    acquisition: acquisitions.get(s),
+                    said: stated.get(s),
+                })
+                .collect();
+            crate::bids::separate::separator(&members, &pack.bids)
+                .map(|marks| marks.into_iter().map(|m| m.map(|m| m.token)).collect())
+        });
         for n in bucket.iter() {
             let (synthetic, disposition, body_part) =
                 extra.remove(&n.stack).unwrap_or((false, None, None));
@@ -3922,7 +3919,6 @@ fn settle(
     acquisitions: &HashMap<i64, crate::bids::repeat::Acquisition>,
     stated: &HashMap<i64, BTreeMap<String, Vec<String>>>,
     pack: &nils_pack::pack::Pack,
-    naming: crate::name::Naming,
     bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
     shared: &mut Shared,
 ) {
@@ -3969,7 +3965,7 @@ fn settle(
         // A member that says nothing on the deciding axis keeps its name, and
         // is still one of the stacks a difference told apart.
         for (stack, m) in group.iter().zip(marks) {
-            record(bids, shared, *stack, m, &differs, naming);
+            record(bids, shared, *stack, m, &differs);
         }
         return;
     }
@@ -3982,7 +3978,6 @@ fn settle(
             *stack,
             Some(Mark::number(n as i64 + 1)),
             &differs,
-            naming,
         );
         shared.numbered.insert(*stack);
     }
@@ -4013,7 +4008,6 @@ fn record(
     stack: i64,
     mark: Option<crate::bids::separate::Mark>,
     differs: &[String],
-    naming: crate::name::Naming,
 ) {
     shared.separated.insert(stack);
     let d = shared.decided.entry(stack).or_default();
@@ -4024,7 +4018,7 @@ fn record(
     }
     let Some(mark) = mark else { return };
     if let Some(Ok(name)) = bids.get(&stack) {
-        let marked = name.marked(&mark, naming);
+        let marked = name.marked(&mark);
         bids.insert(stack, Ok(marked));
     }
     d.marks.push(mark);

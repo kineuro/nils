@@ -63,11 +63,6 @@ A release can be checked by hand the same way:
 tools/release-check/bids-validator.sh /path/to/the/release
 ```
 
-The informative naming mode carries a `diff-` label and a plain `_<n>`, which
-the standard does not have (Wave 7a §8.1). The structural bar exempts them in
-that mode only, and the release lists the files that carry them in the tree's
-`.bidsignore`, which is how the official validator reads the rest.
-
 Bar 2c releases a second, smaller tree, `reference --names`, in a registry of
 its own: stacks of one session that want one BIDS name, which a release now
 tells apart rather than refusing (Wave 7a §8.1). The schema it checks against is `bids-schema.json`, written by

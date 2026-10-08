@@ -13,16 +13,12 @@
 //!    measured fields [`super::repeat::differences`] compares;
 //! 4. the last fallback is a plain number, never called a run.
 //!
-//! How each naming mode spells 2 to 4 ([`Mark`]):
-//!
-//! | | BIDS mode | informative mode |
-//! |---|---|---|
-//! | an axis | its value's token, appended to `acq-` | `diff-<Axis><Value>` |
-//! | a property | a short token, appended to `acq-` (`3mm`, `TR2000`) | `diff-<Property><Value>` (`diff-SliceThickness3`) |
-//! | the fallback | the number, appended to `acq-` | `_<n>` before the suffix |
-//!
-//! Strict BIDS admits no new entity and its labels take letters and digits
-//! only, which is why the BIDS mode says everything inside `acq-`.
+//! Each is one [`Mark`]: a token and the slot it goes in (record 55 C4). In a
+//! BIDS name, in either naming mode, the token is a piece of `acq-` in its
+//! slot: an axis in the axis's own place among the pack's groups, a property
+//! after them (`3mm`, `TR2000`), the number last; strict BIDS admits no new
+//! entity. In the descriptive layout the token is a slot of its own, `_3mm`,
+//! before the plain `_<n>`.
 //!
 //! **No text makes a name.** The protocol name, the series description, the
 //! sequence name and every other free text are compared by the repeat test
@@ -55,12 +51,11 @@ pub struct Mark {
     pub property: String,
     /// The value, as the release record states it: `Distorted`, `3`, `2`.
     pub value: String,
-    /// What the BIDS mode appends to `acq-`.
+    /// What a name spells: `Distorted`, `3mm`, `TR2000`, `2`.
+    pub token: String,
+    /// Where in `acq-` it goes ([`super::name::slot_of`]).
     #[serde(skip)]
-    pub bids: String,
-    /// What the informative mode appends to `diff-`.
-    #[serde(skip)]
-    pub informative: String,
+    pub slot: usize,
 }
 
 impl Mark {
@@ -71,8 +66,8 @@ impl Mark {
             by: By::Number,
             property: "number".to_string(),
             value: n.to_string(),
-            bids: n.to_string(),
-            informative: n.to_string(),
+            token: n.to_string(),
+            slot: super::name::SLOT_NUMBER,
         }
     }
 }
@@ -98,7 +93,7 @@ pub struct Member<'a> {
 /// slice thickness first, because it is the difference a reader looks for
 /// first, then the timings, then the rest of the geometry and the counts.
 struct Property {
-    /// The DICOM-like word, which the informative mode spells.
+    /// The DICOM-like word, which the release record states.
     name: &'static str,
     /// Around the value in the BIDS mode's short token.
     prefix: &'static str,
@@ -303,8 +298,8 @@ fn by_axis(members: &[Member], map: &Mapping) -> Option<Vec<Option<Mark>>> {
                         by: By::Axis,
                         property: axis.to_string(),
                         value: values.join(","),
-                        bids: token.clone(),
-                        informative: format!("{}{token}", camel(axis)),
+                        token: token.clone(),
+                        slot: super::name::slot_of(map, axis),
                     })
                 })
                 .collect(),
@@ -314,7 +309,7 @@ fn by_axis(members: &[Member], map: &Mapping) -> Option<Vec<Option<Mark>>> {
 }
 
 fn by_property(members: &[Member]) -> Option<Vec<Option<Mark>>> {
-    for p in PROPERTIES {
+    for (at, p) in PROPERTIES.iter().enumerate() {
         let values: Vec<Option<String>> = members
             .iter()
             .map(|m| {
@@ -335,8 +330,8 @@ fn by_property(members: &[Member]) -> Option<Vec<Option<Mark>>> {
                     v.map(|value| Mark {
                         by: By::Property,
                         property: p.name.to_string(),
-                        bids: format!("{}{value}{}", p.prefix, p.unit),
-                        informative: format!("{}{value}", p.name),
+                        token: format!("{}{value}{}", p.prefix, p.unit),
+                        slot: super::name::SLOT_PROPERTY + at,
                         value,
                     })
                 })
@@ -459,8 +454,8 @@ mod tests {
         assert_eq!(marks[0], None, "the one that states nothing keeps its name");
         let m = marks[1].as_ref().unwrap();
         assert_eq!(m.by, By::Axis);
-        assert_eq!(m.bids, "Distorted");
-        assert_eq!(m.informative, "QualityDistorted");
+        assert_eq!(m.token, "Distorted");
+        assert_eq!(m.slot, 0, "in the quality group's own slot");
     }
 
     #[test]
@@ -493,12 +488,12 @@ mod tests {
             .iter()
             .map(|m| {
                 let m = m.as_ref().unwrap();
-                (m.bids.as_str(), m.informative.as_str())
+                (m.property.as_str(), m.token.as_str())
             })
             .collect();
         assert_eq!(
             spelled,
-            [("3mm", "SliceThickness3"), ("2p5mm", "SliceThickness2p5")]
+            [("SliceThickness", "3mm"), ("SliceThickness", "2p5mm")]
         );
     }
 
@@ -527,8 +522,8 @@ mod tests {
             &mapping(),
         )
         .unwrap();
-        assert_eq!(marks[0].as_ref().unwrap().bids, "TE30");
-        assert_eq!(marks[1].as_ref().unwrap().informative, "EchoTime90");
+        assert_eq!(marks[0].as_ref().unwrap().token, "TE30");
+        assert_eq!(marks[1].as_ref().unwrap().property, "EchoTime");
     }
 
     #[test]

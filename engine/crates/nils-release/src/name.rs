@@ -264,6 +264,13 @@ pub struct Named {
 /// which 6,997 pairs differ in nothing but their echo number. Naming each
 /// stack from its own measured echo leaves 448 such pairs instead of 7,451.
 pub fn disambiguate(bucket: &mut [Named]) {
+    disambiguate_first(bucket);
+    disambiguate_rest(bucket, &mut |_| None);
+}
+
+/// The echo, and a multi-stack series' own suffix: what `disambiguate` does
+/// before anything is compared.
+fn disambiguate_first(bucket: &mut [Named]) {
     // First the echo, on every stack that has one, wherever its name is not
     // its alone. A stack with no echo number keeps its name and is told apart
     // by a later pass, rather than taking the whole bucket down to a counter
@@ -288,9 +295,43 @@ pub fn disambiguate(bucket: &mut [Named]) {
             bucket[i].name = format!("{}_{suffix}", bucket[i].name);
         }
     }
+}
 
-    for members in groups(bucket).into_iter().filter(|m| m.len() > 1) {
-        // Then the inversion time, ordered, which has no measured index.
+/// What tells the stacks of a shared name apart: one token per stack, or
+/// `None` for a stack that keeps its name; `None` overall when nothing does.
+type Separate<'a> = dyn FnMut(&[i64]) -> Option<Vec<Option<String>>> + 'a;
+
+/// [`disambiguate`], with a way to say what separates the stacks a name is
+/// still shared by after the echo and the inversion time (Wave 7a §8.1,
+/// record 55 C4): `separate` is handed their stack ids and answers one token
+/// each, or `None` for a stack that keeps its name, and a token is a slot of
+/// its own. The counter is the last resort, as before.
+pub fn disambiguate_by(
+    bucket: &mut [Named],
+    mut separate: impl FnMut(&[i64]) -> Option<Vec<Option<String>>>,
+) {
+    disambiguate_first(bucket);
+    disambiguate_rest(bucket, &mut separate);
+}
+
+fn disambiguate_rest(bucket: &mut [Named], separate: &mut Separate<'_>) {
+    // Each round either numbers a group, which settles it, or adds a slot
+    // that splits it; the bound is a guard, not a rule.
+    for _ in 0..64 {
+        let shared: Vec<Vec<usize>> = groups(bucket).into_iter().filter(|m| m.len() > 1).collect();
+        if shared.is_empty() {
+            return;
+        }
+        for members in shared {
+            disambiguate_group(bucket, &members, separate);
+        }
+    }
+}
+
+fn disambiguate_group(bucket: &mut [Named], members: &[usize], separate: &mut Separate<'_>) {
+    {
+        let members = members.to_vec();
+        // The inversion time, ordered, ordered, which has no measured index.
         let times: Vec<Option<i64>> = members
             .iter()
             .map(|i| bucket[*i].inversion_time.map(|t| (t * 1000.0) as i64))
@@ -301,7 +342,18 @@ pub fn disambiguate(bucket: &mut [Named]) {
             for (n, i) in order.into_iter().enumerate() {
                 bucket[i].name = format!("{}_ti{}", bucket[i].name, n + 1);
             }
-            continue;
+            return;
+        }
+
+        // Then what a measurement separates, in a slot of its own.
+        let stacks: Vec<i64> = members.iter().map(|i| bucket[*i].stack).collect();
+        if let Some(tokens) = separate(&stacks) {
+            for (i, token) in members.iter().zip(tokens) {
+                if let Some(token) = token.filter(|t| !t.is_empty()) {
+                    bucket[*i].name = filename_safe(&format!("{}_{token}", bucket[*i].name));
+                }
+            }
+            return;
         }
 
         // And last a counter, in an order that does not depend on which rows

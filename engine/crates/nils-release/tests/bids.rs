@@ -485,9 +485,16 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
         .collect();
     assert_eq!(now.len(), before.len());
     assert_ne!(now, before, "the tree is named differently");
+    // v0's prefix for the spine (record 55 C4), and the FLAIR is said once,
+    // by its suffix.
     assert!(
-        now.iter().all(|n| n.contains("acq-Spine")),
+        now.iter().all(|n| n.contains("acq-SC+")),
         "and the new name says so: {now:?}"
+    );
+    assert!(
+        now.iter()
+            .all(|n| !n.contains("FLAIR_FLAIR") && !n.contains("+FLAIR")),
+        "{now:?}"
     );
 }
 
@@ -753,7 +760,7 @@ fn the_body_part_is_in_the_name_and_in_the_sidecar() {
         .collect();
     assert!(!sidecars.is_empty(), "the converter writes a sidecar");
     for file in &sidecars {
-        assert!(file.contains("acq-Spine"), "the name says it too: {file}");
+        assert!(file.contains("acq-SC+"), "the name says it too: {file}");
         let text = std::fs::read_to_string(out.path().join(file)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(doc["BodyPart"], serde_json::Value::from("spine"), "{file}");
@@ -1013,8 +1020,8 @@ fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
     assert_eq!(flair.len(), 2, "{written:?}");
     assert!(flair.iter().all(|f| !f.contains("_run-")), "{flair:?}");
     assert!(
-        flair.iter().any(|f| f.contains("4sl_FLAIR"))
-            && flair.iter().any(|f| f.contains("6sl_FLAIR")),
+        flair.iter().any(|f| f.contains("+4sl_FLAIR"))
+            && flair.iter().any(|f| f.contains("+6sl_FLAIR")),
         "the slice count, in acq-: {flair:?}"
     );
 
@@ -1389,8 +1396,9 @@ fn released_informative(
 fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     // Wave 7a §8.1, Nima's example: two scans of one protocol step, one cut
     // at 1 mm and one at 3 mm. Same name before; refused before; now each
-    // says its thickness, in `acq-` in the BIDS mode and as `diff-` in the
-    // informative one.
+    // says its thickness in its own slot of `acq-`, after the pack's, in
+    // both naming modes (record 55 C4), and in its own `_` slot in the
+    // descriptive layout.
     let Some(converter) = converter() else { return };
     let thin = Twin {
         acquired: Some("100500"),
@@ -1409,8 +1417,8 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
-        names.iter().any(|n| n.ends_with("1mm_T1w.nii.gz"))
-            && names.iter().any(|n| n.ends_with("3mm_T1w.nii.gz")),
+        names.iter().any(|n| n.ends_with("+1mm_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("+3mm_T1w.nii.gz")),
         "{names:?}"
     );
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
@@ -1437,26 +1445,50 @@ fn a_difference_that_is_no_axis_is_named_by_its_property_and_value() {
     let (_reg, _) = released_informative(&source, &home_dir, &out, &converter);
     let names = anat_names(out.path());
     assert!(
-        names
-            .iter()
-            .any(|n| n.ends_with("_diff-SliceThickness1_T1w.nii.gz"))
-            && names
-                .iter()
-                .any(|n| n.ends_with("_diff-SliceThickness3_T1w.nii.gz")),
+        names.iter().any(|n| n.ends_with("+1mm_T1w.nii.gz"))
+            && names.iter().any(|n| n.ends_with("+3mm_T1w.nii.gz")),
         "{names:?}"
     );
-    // The standard has no `diff-`, so the tree says which files carry it.
-    let ignore = std::fs::read_to_string(out.path().join(".bidsignore")).unwrap();
-    for n in &names {
-        let stem = n.trim_end_matches(".nii.gz");
-        assert!(ignore.contains(&format!("{stem}.*")), "{ignore}");
-    }
+    assert!(
+        !out.path().join(".bidsignore").exists(),
+        "nothing outside the standard to ignore"
+    );
+
+    // The descriptive layout: a slot of its own, `_1mm`, `_3mm`.
+    let source = twins(thin, thick);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    s.layout = Layout::Descriptive;
+    s.naming = nils_release::name::Naming::Informative;
+    run::run(&mut reg, &s).unwrap();
+    let dirs: std::collections::BTreeSet<String> = files_under(out.path())
+        .iter()
+        .filter_map(|f| {
+            f.rsplit_once('/')
+                .map(|(d, _)| d.rsplit('/').next().unwrap_or(d).to_string())
+        })
+        .filter(|d| d.contains("T1w"))
+        .collect();
+    assert!(
+        dirs.iter().any(|d| d.ends_with("_1mm")) && dirs.iter().any(|d| d.ends_with("_3mm")),
+        "{dirs:?}"
+    );
 }
 
 #[test]
 fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
     // Wave 7a §8.1: two stations of one spine prescription that nothing a
-    // name may spell separates are `_1` and `_2` in the informative mode.
+    // name may spell separates take the plain number, last in `acq-`.
     let Some(converter) = converter() else { return };
     let upper = twin("t1_mprage_sag", "T1 MPRAGE");
     let lower = Twin {
@@ -1470,8 +1502,8 @@ fn the_informative_fallback_is_a_plain_number_and_never_a_run() {
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
-        names.iter().any(|n| n.ends_with("_1_T1w.nii.gz"))
-            && names.iter().any(|n| n.ends_with("_2_T1w.nii.gz")),
+        names.iter().any(|n| before_suffix(n).ends_with("+1"))
+            && names.iter().any(|n| before_suffix(n).ends_with("+2")),
         "{names:?}"
     );
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");

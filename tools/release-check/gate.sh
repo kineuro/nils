@@ -124,6 +124,8 @@ if [[ -n "$converter" ]]; then
       --json > "$work/names-bids.json"
     "$nils" release --out "$work/names-informative" --name gate-names-informative \
       --layout bids --naming informative --json > "$work/names-informative.json"
+    "$nils" release --out "$work/names-descriptive" --name gate-names-descriptive \
+      --layout descriptive --json > "$work/names-descriptive.json"
   )
 else
   echo "gate: dcm2niix is not installed; the BIDS bars are skipped" >&2

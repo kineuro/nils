@@ -150,6 +150,39 @@ impl Mapping {
         base.and_then(|b| self.from_base.get(b))
     }
 
+    /// Which axis value [`Mapping::suffix`] took the suffix from, as
+    /// `(axis, value)`, so that a name does not say it again (record 55 C4:
+    /// no `FLAIR` in `acq-` when the suffix is `FLAIR`). The same order.
+    pub fn suffix_source<'a>(
+        &self,
+        constructs: &[&'a str],
+        technique: Option<&'a str>,
+        modifiers: &[&'a str],
+        base: Option<&'a str>,
+    ) -> Option<(&'static str, &'a str)> {
+        for c in constructs {
+            if let Some(n) = self.from_construct.get(*c)
+                && n.when_technique
+                    .as_deref()
+                    .is_none_or(|w| technique == Some(w))
+            {
+                return Some(("construct", c));
+            }
+        }
+        if let Some(t) = technique
+            && self.from_technique.contains_key(t)
+        {
+            return Some(("technique", t));
+        }
+        for m in modifiers {
+            if self.from_modifier.contains_key(*m) {
+                return Some(("modifier", m));
+            }
+        }
+        base.filter(|b| self.from_base.contains_key(*b))
+            .map(|b| ("base", b))
+    }
+
     /// The `part` label a stack's constructs give it, and the construct it
     /// came from, which is what a refused entity is spelled from (§9.2).
     pub fn part_of<'a>(&'a self, constructs: &[&'a str]) -> Option<(&'a str, &'a str)> {

@@ -101,25 +101,18 @@ def bar_reference(work: Path) -> list[str]:
 def bar_validator(work: Path) -> list[str]:
     """Every name in the raw trees, against the schema the engine carries.
 
-    Structural, and run always, in both naming modes. The informative mode's
-    `diff-` entity and its plain `_<n>` fallback are not the standard's
-    (Wave 7a section 8.1), so they are exempt there and only there; the
-    official validator, `bar_official`, reads the files that carry them as the
-    tree's `.bidsignore` says.
+    Structural, and run always, in both naming modes. A name conflict is
+    spelled inside `acq-` in both (Wave 7a section 8.1, record 55 C4), so
+    neither mode has anything to exempt.
     """
     bad = []
-    for tree, informative in (
-        ("bids", False),
-        ("bids-informative", True),
-        ("names-bids", False),
-        ("names-informative", True),
-    ):
+    for tree in ("bids", "bids-informative", "names-bids", "names-informative"):
         if (work / tree).is_dir():
-            bad.extend(structural(work, tree, informative))
+            bad.extend(structural(work, tree))
     return bad
 
 
-def structural(work: Path, tree: str, informative: bool) -> list[str]:
+def structural(work: Path, tree: str) -> list[str]:
     schema = json.loads((HERE / "bids-schema.json").read_text())
     entities = {e["name"]: e for e in schema["entities"]}
     order = [e["name"] for e in schema["entities"]]
@@ -150,18 +143,12 @@ def structural(work: Path, tree: str, informative: bool) -> list[str]:
             continue
         seen = []
         for field in fields[:-1]:
-            if informative and field.isdigit():
-                continue
             if "-" not in field:
                 bad.append(f"{tree}/{path}: {field} is not an entity")
                 continue
             key, value = field.split("-", 1)
             if key in ("sub", "ses"):
                 seen.append(key)
-                continue
-            if informative and key == "diff":
-                if not re.fullmatch(r"[0-9a-zA-Z+]+", value):
-                    bad.append(f"{tree}/{path}: diff-{value} is not a label")
                 continue
             if key not in entities:
                 bad.append(f"{tree}/{path}: {key} is not an entity of the standard")
@@ -292,7 +279,7 @@ def bar_names(work: Path) -> list[str]:
     """
     expected = tomllib.loads((HERE / "reference.toml").read_text()).get("names", {})
     bad = []
-    for tree in ("names-bids", "names-informative"):
+    for tree in ("names-bids", "names-informative", "names-descriptive"):
         root = work / tree
         if not root.is_dir():
             continue
@@ -301,15 +288,23 @@ def bar_names(work: Path) -> list[str]:
             bad.append(f"{tree}: {report['routes']['sourcedata']} stack(s) went to sourcedata")
         if report.get("nowhere"):
             bad.append(f"{tree}: stacks placed nowhere: {report['nowhere']}")
-        images = sorted(
-            re.sub(r"sub-[0-9a-z]+", "sub-X", p)
-            for p in files_under(root)
-            if p.endswith(".nii.gz")
-        )
+        if tree == "names-descriptive":
+            # a stack is a directory there, named by v0's grammar
+            images = sorted({
+                "/".join(p.split("/")[1:-1]) for p in files_under(root)
+            })
+        else:
+            images = sorted(
+                re.sub(r"sub-[0-9a-z]+", "sub-X", p)
+                for p in files_under(root)
+                if p.endswith(".nii.gz")
+            )
         want = sorted(expected.get(tree.removeprefix("names-"), []))
         for line in sorted(set(want) ^ set(images)):
             side = "missing" if line in want else "unexpected"
             bad.append(f"{tree}: {side} {line}")
+        if tree == "names-descriptive":
+            continue
         decided = report.get("decided", [])
         if len(decided) != report.get("not_repeats", -1):
             bad.append(f"{tree}: {report.get('not_repeats')} stack(s) told apart and "

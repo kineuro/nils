@@ -166,18 +166,25 @@ entities:
 #
 # A list and not a mapping, because **the order is the order the tokens are
 # joined in** and an order that depends on how a reader happens to sort its
-# keys is not an order. It is v0's naming order with what became a suffix or an
-# entity removed.
+# keys is not an order. It is v0's slot order (record 55 C4, 2026-10-08):
+# body part, orientation, base, 2D or 3D, modifiers, technique, acceleration,
+# construct, then the contrast. The engine joins the tokens with `+`, the one
+# separator a BIDS label admits, so each slot stays readable on its own; it
+# leaves out whatever the suffix already says (no `FLAIR` in `acq-` when the
+# suffix is `FLAIR`). The pack has no acceleration axis yet, so that slot is
+# empty. The quality flags have no slot in v0 and come last.
 acq:
   - from: body_part
     # Where in the body, which BIDS has no entity for and which a brain and a
-    # spine acquisition of one session need to tell them apart.
+    # spine acquisition of one session need to tell them apart. v0's prefix
+    # (record 55 C4): the brain is implicit and adds nothing, the spine is
+    # `SC`; a stack the brain separates from one that states no body part
+    # still gets `Brain` from the name-conflict rule (Wave 7a section 8.1).
     tokens:
-      brain: Brain
       'brain-neck': BrainNeck
       chest: Chest
       neck: Neck
-      spine: Spine
+      spine: SC
   - from: orientation
     # The words the fingerprint stores, which are the standard's own and not
     # the abbreviations section 9.1 renders them as: a token here is matched
@@ -188,10 +195,42 @@ acq:
       Sagittal: Sag
       Coronal: Cor
       Oblique: Obl
+  - from: base
+    modes: [informative]
+    # The suffix in the BIDS name; v0's second slot, so the informative
+    # name says it in its place (record 55 C4).
+    tokens:
+      T1w: T1w
+      T2w: T2w
+      PDw: PDw
+      T2starw: T2starw
+      T1rho: T1rho
+      T2rho: T2rho
+      DWI: DWI
+      PWI: PWI
+      SWI: SWI
+      MTw: MTw
   - from: acquisition_type
     tokens:
       '2D': 2D
       '3D': 3D
+  - from: modifier
+    tokens:
+      FLAIR: FLAIR
+      STIR: STIR
+      DIR: DIR
+      PSIR: PSIR
+      IR: IR
+      Radial: Radial
+      Spiral: Spiral
+      FatSat: FatSat
+      WaterExcitation: WaterExc
+      Dixon: Dixon
+      MT: MT
+      FlowComp: FlowComp
+      BlackBlood: BlackBlood
+      BrightBlood: BrightBlood
+      MoCo: MoCo
   - from: technique
     tokens:
       'MS-EPI': MSEPI
@@ -235,23 +274,6 @@ acq:
       'SS-GRE': SSGRE
       GRE: GRE
       EPI: EPI
-  - from: modifier
-    tokens:
-      FLAIR: FLAIR
-      STIR: STIR
-      DIR: DIR
-      PSIR: PSIR
-      IR: IR
-      Radial: Radial
-      Spiral: Spiral
-      FatSat: FatSat
-      WaterExcitation: WaterExc
-      Dixon: Dixon
-      MT: MT
-      FlowComp: FlowComp
-      BlackBlood: BlackBlood
-      BrightBlood: BrightBlood
-      MoCo: MoCo
   - from: construct
     # Deliberately not tokens here: `ND`, the four complex parts and the six
     # reconstruction kinds. The first says only that a vendor's distortion
@@ -279,16 +301,6 @@ acq:
       SyntheticPDw: SynPDw
       MyelinMap: MyelinMap
       SWI: SWI
-  - from: quality
-    # What the file says is wrong with its own image. It belongs in the name
-    # because two stacks that agree on everything else and disagree here are
-    # not interchangeable: the survey found `NAVAIL` separating 93 colliding
-    # names and `DISTORTED` 15. BIDS has no entity for it, so `acq-` is its
-    # only home, in both names.
-    tokens:
-      Distorted: Distorted
-      InputUnavailable: NoInput
-      Encrypted: Encrypted
   - from: construct
     modes: [informative]
     # The complex part and the reconstruction kinds, which the BIDS name
@@ -329,6 +341,16 @@ acq:
       ASLRecon: ASLRecon
       BOLDRecon: BOLDRecon
       Calibration: Calibration
+  - from: quality
+    # What the file says is wrong with its own image. It belongs in the name
+    # because two stacks that agree on everything else and disagree here are
+    # not interchangeable: the survey found `NAVAIL` separating 93 colliding
+    # names and `DISTORTED` 15. BIDS has no entity for it, so `acq-` is its
+    # only home, in both names.
+    tokens:
+      Distorted: Distorted
+      InputUnavailable: NoInput
+      Encrypted: Encrypted
 
 # What counts as a vendor's synthetic contrast, for the placement choice of
 # section 9.3: an image the scanner computed from a multi-parameter

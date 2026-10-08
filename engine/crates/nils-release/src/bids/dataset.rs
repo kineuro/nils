@@ -302,16 +302,10 @@ pub fn readme(
     // until this was measured two thirds of them were a different acquisition
     // wearing one name. So the tree says what its own indices are worth.
     if repeats.names > 0 {
-        let (difference, number) = match repeats.naming {
-            crate::name::Naming::Bids => (
-                "the value of the axis or the property that differs, added to `acq-`",
-                "a plain number added to `acq-`",
-            ),
-            crate::name::Naming::Informative => (
-                "a `diff-` label naming the axis or the property and its value",
-                "a plain `_<n>` before the suffix",
-            ),
-        };
+        let (difference, number) = (
+            "the value of the axis or the property that differs, in its own `+` slot of `acq-`",
+            "a plain number, the last slot of `acq-`",
+        );
         let _ = writeln!(
             out,
             "## What `run-` means here\n\n\
@@ -503,7 +497,7 @@ mod tests {
         assert!(text.contains("never a counter"), "{text}");
         // Wave 7a §8.1: nothing is refused, and the number is never a run.
         assert!(text.contains("3 are not, and each carries"), "{text}");
-        assert!(text.contains("added to `acq-`"), "{text}");
+        assert!(text.contains("slot of `acq-`"), "{text}");
         assert!(text.contains("1 of them differ in nothing"), "{text}");
     }
 

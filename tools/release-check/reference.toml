@@ -88,17 +88,34 @@ names = [
 # Amended 2026-09-28, MRI pack 0.11.0. The ADC map, made by the scanner from
 # a plain DWI, is RawRecon and no longer DTIRecon (ruling 7), so its name
 # loses `rec-DTIRecon`. Nothing else moved.
+# Amended 2026-10-08, record 55 C4. Nima found the BIDS names unreadable: every
+# axis glued into one label, the brain spelled out, the FLAIR said twice. Each
+# name now follows v0's slot order inside `acq-`, the slots joined by `+`
+# (the one separator a BIDS label admits; the official validator 3.0.2
+# accepts it), the brain implicit as in v0, and nothing the suffix or another
+# entity already says. Checked name by name:
+#
+#   * the FLAIR: `Ax`, `2D`, the technique `IRTSE`; `FLAIR` left out because
+#     it is the suffix;
+#   * the MPRAGE pair and the post-contrast MPRAGE: `Ax`, `3D`, `MPRAGE`, with
+#     `run-` and `ce-` as before;
+#   * the SWI magnitude: `Ax`, `3D`, `GRE`, `part-mag` as before;
+#   * the ADC and the trace: `Ax`, `2D`, `DWIEPI`, sharing one label, which is
+#     true of them;
+#   * the two echoes: `Ax`, `2D`, `GRE`, told apart by `echo-`.
+#
+# Only the `acq-` labels moved: no suffix, entity, route or count.
 files = [
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx2DIRTSEFLAIR_FLAIR.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-1_T1w.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-2_T1w.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DGRE_part-mag_T2starw.nii.gz",
-  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_ADC.nii.gz",
-  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_trace.nii.gz",
-  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-1_T1w.nii.gz",
-  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-2_T1w.nii.gz",
-  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx3DMPRAGE_ce-contrast_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+2D+IRTSE_FLAIR.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-1_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-2_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+GRE_part-mag_T2starw.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax+2D+DWIEPI_ADC.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax+2D+DWIEPI_trace.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+2D+GRE_echo-1_T1w.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+2D+GRE_echo-2_T1w.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+3D+MPRAGE_ce-contrast_T1w.nii.gz",
 ]
 
 [private]
@@ -131,31 +148,42 @@ edss = "4"
 edss_days = 5
 
 # Wave 7a section 8.1, record 55 C4: the names tree (`reference --names`), one
-# session of stacks that want shared BIDS names. A release is never refused
-# for a name conflict, so every stack is here, in both naming modes:
+# session of stacks that want shared names. A release is never refused for a
+# name conflict, so every stack is here, in every mode:
 #
 #   * two FLAIR series alike in everything are one acquisition made again and
-#     keep `run-`; the third, cut at 3 mm, shares their name until the slice
-#     thickness is said, and then all three say it (`5mm`, `3mm` in `acq-`
-#     in the BIDS mode, `diff-SliceThickness5`, `diff-SliceThickness3` in the
-#     informative one);
+#     keep `run-` in BIDS; the third, cut at 3 mm, shares their name until the
+#     slice thickness is said, and then all three say it: `+5mm`, `+3mm` in
+#     its own slot of `acq-` after the pack's (both BIDS naming modes), `_5mm`,
+#     `_3mm` in the descriptive layout, where the repeats then take v0's
+#     plain counter `_1`, `_2` because that layout has no runs;
 #   * two MPRAGE series differ only in the protocol name, which no name may
-#     spell, so they take the plain number: inside `acq-` in the BIDS mode and
-#     `_1`, `_2` before the suffix in the informative one, never a `run-`.
+#     spell, so they take the plain number, last: `+1`, `+2` in `acq-`, `_1`,
+#     `_2` in the descriptive layout. Never a `run-`.
 #
-# Read off a run on 2026-10-08 and checked name by name.
+# The informative BIDS names carry v0's whole slot sequence, the base and the
+# FLAIR modifier included, which the BIDS mode leaves to the suffix. The
+# descriptive names are v0's grammar exactly. Read off a run on 2026-10-08
+# and checked name by name.
 [names]
 bids = [
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR3mm_FLAIR.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR5mm_run-1_FLAIR.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR5mm_run-2_FLAIR.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE1_T1w.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE2_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+2D+IRTSE+3mm_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+2D+IRTSE+5mm_run-1_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+2D+IRTSE+5mm_run-2_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+3D+MPRAGE+1_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+3D+MPRAGE+2_T1w.nii.gz",
 ]
 informative = [
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR_diff-SliceThickness3_FLAIR.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR_run-1_diff-SliceThickness5_FLAIR.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR_run-2_diff-SliceThickness5_FLAIR.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE_1_T1w.nii.gz",
-  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE_2_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+T1w+3D+MPRAGE+1_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+T1w+3D+MPRAGE+2_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+T2w+2D+FLAIR+IRTSE+3mm_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+T2w+2D+FLAIR+IRTSE+5mm_run-1_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-Ax+T2w+2D+FLAIR+IRTSE+5mm_run-2_FLAIR.nii.gz",
+]
+descriptive = [
+  "ses-20230301/anat/Ax_T1w_3D_MPRAGE_ND_1",
+  "ses-20230301/anat/Ax_T1w_3D_MPRAGE_ND_2",
+  "ses-20230301/anat/Ax_T2w_2D_FLAIR_TIRM_ND_3mm",
+  "ses-20230301/anat/Ax_T2w_2D_FLAIR_TIRM_ND_5mm_1",
+  "ses-20230301/anat/Ax_T2w_2D_FLAIR_TIRM_ND_5mm_2",
 ]
