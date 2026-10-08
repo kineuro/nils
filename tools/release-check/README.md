@@ -37,6 +37,8 @@ four are wastes three runs.
 | | |
 |---|---|
 | 2 | every name in the raw tree, against the schema the engine carries |
+| 2b | the official BIDS validator: 0 errors on every BIDS tree, in both naming modes |
+| 2c | the names tree: no stack refused its name, and the names `[names]` expects |
 | 3 | the reference answers, in both layouts |
 | 4, 5 | every stack placed, the counts reconciling, and nothing unnamed |
 | 6 | one stack per session and role, with a margin so a tie can be seen |
@@ -47,9 +49,28 @@ four are wastes three runs.
 | 11 | the handover verifies and accounts for every file |
 | 12 | the budget, measured and printed |
 
-Bar 2 is structural and runs everywhere: the official `bids-validator` needs a
-network and a node, and a gate that only runs where those exist is a gate that
-does not run. The schema it checks against is `bids-schema.json`, written by
+Bar 2 is structural and runs everywhere. Bar 2b is the official validator,
+`bids-validator.sh` beside this file, which pins its version (3.0.2) and runs
+it under Deno from its JSR package; once Deno's cache holds it, it needs no
+network. Its errors are bars and its warnings are listed, in the run's output
+and in the job's summary in CI. Where Deno is not installed the bar says so
+and passes, unless `NILS_GATE_VALIDATOR=required`, which CI sets.
+`BIDS_VALIDATOR` names another command to run instead.
+
+A release can be checked by hand the same way:
+
+```sh
+tools/release-check/bids-validator.sh /path/to/the/release
+```
+
+The informative naming mode carries a `diff-` label and a plain `_<n>`, which
+the standard does not have (Wave 7a §8.1). The structural bar exempts them in
+that mode only, and the release lists the files that carry them in the tree's
+`.bidsignore`, which is how the official validator reads the rest.
+
+Bar 2c releases a second, smaller tree, `reference --names`, in a registry of
+its own: stacks of one session that want one BIDS name, which a release now
+tells apart rather than refusing (Wave 7a §8.1). The schema it checks against is `bids-schema.json`, written by
 `tools/bids-schema/extract.py` from the published schema, the same generator
 that writes the engine's copy, so the engine and the thing that checks the
 engine cannot drift apart.
@@ -78,6 +99,6 @@ between two things that are separately right.
 
 ## Skipping
 
-`dcm2niix` and `7z` are prerequisites of a deployment, not of a checkout. When
+`dcm2niix`, `7z` and Deno are prerequisites of a deployment, not of a checkout. When
 one is absent the gate says so and skips the bars that need it, so the tool is
 useful on a laptop and complete in CI.

@@ -129,3 +129,33 @@ edss_days = -5
 age = 42
 edss = "4"
 edss_days = 5
+
+# Wave 7a section 8.1, record 55 C4: the names tree (`reference --names`), one
+# session of stacks that want shared BIDS names. A release is never refused
+# for a name conflict, so every stack is here, in both naming modes:
+#
+#   * two FLAIR series alike in everything are one acquisition made again and
+#     keep `run-`; the third, cut at 3 mm, shares their name until the slice
+#     thickness is said, and then all three say it (`5mm`, `3mm` in `acq-`
+#     in the BIDS mode, `diff-SliceThickness5`, `diff-SliceThickness3` in the
+#     informative one);
+#   * two MPRAGE series differ only in the protocol name, which no name may
+#     spell, so they take the plain number: inside `acq-` in the BIDS mode and
+#     `_1`, `_2` before the suffix in the informative one, never a `run-`.
+#
+# Read off a run on 2026-10-08 and checked name by name.
+[names]
+bids = [
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR3mm_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR5mm_run-1_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR5mm_run-2_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE1_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE2_T1w.nii.gz",
+]
+informative = [
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR_diff-SliceThickness3_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR_run-1_diff-SliceThickness5_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx2DIRTSEFLAIR_run-2_diff-SliceThickness5_FLAIR.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE_1_T1w.nii.gz",
+  "sub-X/ses-20230301/anat/sub-X_ses-20230301_acq-BrainAx3DMPRAGE_2_T1w.nii.gz",
+]

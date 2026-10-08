@@ -101,6 +101,30 @@ if [[ -n "$converter" ]]; then
     --json > "$work/bids.json" 2> "$work/bids.time"
   "$nils" release --out "$work/bids" --name gate-bids --layout bids \
     --json > "$work/bids-again.json"
+  # Wave 7a section 8.2: the informative naming mode is a BIDS tree too, and
+  # the official validator reads both.
+  echo "gate: the BIDS layout, informative names"
+  "$nils" release --out "$work/bids-informative" --name gate-bids-informative --layout bids \
+    --naming informative --json > "$work/bids-informative.json"
+
+  # Wave 7a section 8.1: a second, smaller tree of stacks that want shared
+  # names, in a registry of its own so that no other bar counts it. Released
+  # in both naming modes; nothing in it may be refused its name.
+  echo "gate: the names tree"
+  "$engine/target/release/examples/reference" --names --out "$work/names-source" >/dev/null
+  (
+    export NILS_REGISTRY="$work/names-home"
+    mkdir -p "$NILS_REGISTRY"
+    "$nils" key add gate --from-file "$work/key.bin" >/dev/null
+    "$nils" init --key gate --backend sqlite >/dev/null
+    "$nils" digest "$work/names-source" --name names --json > "$work/names-digest.json"
+    "$nils" fingerprint --json > /dev/null
+    "$nils" classify --json > /dev/null
+    "$nils" release --out "$work/names-bids" --name gate-names --layout bids \
+      --json > "$work/names-bids.json"
+    "$nils" release --out "$work/names-informative" --name gate-names-informative \
+      --layout bids --naming informative --json > "$work/names-informative.json"
+  )
 else
   echo "gate: dcm2niix is not installed; the BIDS bars are skipped" >&2
 fi

@@ -3070,6 +3070,24 @@ fn write_bids(
             }
             let mut out = refused;
             let mut files = made.files;
+            // Wave 7a §8.2, the official validator's first finding: dcm2niix
+            // writes a `.bval` and a `.bvec` beside every image of a diffusion
+            // series, and the standard admits them beside `dwi` only. A trace
+            // or an ADC map carrying them is an error, so a file whose
+            // extension the suffix's group does not admit is not kept.
+            let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
+            if let Some(group) = crate::bids::schema::group_of(datatype, stem_suffix(&stem)) {
+                files.retain(|file| {
+                    let admitted = group
+                        .extensions
+                        .iter()
+                        .any(|ext| file.strip_prefix(stem.as_str()) == Some(*ext));
+                    if !admitted {
+                        std::fs::remove_file(into.join(file)).ok();
+                    }
+                    admitted
+                });
+            }
             // BIDS requires an `aslcontext.tsv` beside an ASL image, one row
             // per volume the converter wrote. It shares the image's stem
             // with `context.tsv` after it, so the version's state names it

@@ -18,6 +18,11 @@
 //! ```sh
 //! cargo run --release -p nils-dicom --example reference -- --out /data/working/reference
 //! ```
+//!
+//! With `--names` it writes the second, smaller tree of the gate instead
+//! (Wave 7a section 8.1): one session whose stacks want shared BIDS names,
+//! so that the official validator reads every way a release now tells them
+//! apart. Its right answers are `[names]` in the same file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -182,19 +187,90 @@ const SERIES: &[Series] = &[
     },
 ];
 
+/// Wave 7a section 8.1: one session of stacks that want shared names. Every
+/// case of the rule, in the order the rule takes them:
+///
+/// - two FLAIR series alike in everything, which are one acquisition made
+///   again and stay `run-`, beside a third cut at 3 mm instead of 5 mm,
+///   which says its thickness;
+/// - two MPRAGE series alike in everything but the protocol name, which no
+///   name may spell, so they take the plain number.
+const NAMES: &[Series] = &[
+    Series {
+        key: "flair",
+        study: "1",
+        date: "20230301",
+        description: "t2_tirm_tra_dark-fluid",
+        protocol: "T2 FLAIR",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[(0x0018, 0x0082, VR::DS, "2500")],
+    },
+    Series {
+        key: "flair-again",
+        study: "1",
+        date: "20230301",
+        description: "t2_tirm_tra_dark-fluid",
+        protocol: "T2 FLAIR",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[(0x0018, 0x0082, VR::DS, "2500")],
+    },
+    Series {
+        key: "flair-thin",
+        study: "1",
+        date: "20230301",
+        description: "t2_tirm_tra_dark-fluid",
+        protocol: "T2 FLAIR",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[
+            (0x0018, 0x0082, VR::DS, "2500"),
+            (0x0018, 0x0050, VR::DS, "3.0"),
+        ],
+    },
+    Series {
+        key: "mprage",
+        study: "1",
+        date: "20230301",
+        description: "t1_mprage_sag_p2",
+        protocol: "T1 MPRAGE",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "3D",
+        instances: 3,
+        extra: &[],
+    },
+    Series {
+        key: "mprage-other",
+        study: "1",
+        date: "20230301",
+        description: "t1_mprage_sag_p2",
+        protocol: "T1 MPRAGE B",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "3D",
+        instances: 3,
+        extra: &[],
+    },
+];
+
 fn main() {
     let mut out = PathBuf::from("reference");
+    let mut series = SERIES;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = PathBuf::from(args.next().unwrap_or_else(|| usage())),
+            "--names" => series = NAMES,
             _ => usage(),
         }
     }
     fs::create_dir_all(&out).expect("create the output directory");
 
     let mut files = 0usize;
-    for (n, s) in SERIES.iter().enumerate() {
+    for (n, s) in series.iter().enumerate() {
         for i in 1..=s.instances {
             // The multi-echo series alternates its echo number, so it splits
             // into two stacks of three the way a real one does.
@@ -212,10 +288,10 @@ fn main() {
             files += 1;
         }
     }
-    write_manifest(&out, files);
+    write_manifest(&out, series, files);
     println!(
         "reference: {} series, {files} files, under {}",
-        SERIES.len(),
+        series.len(),
         out.display()
     );
 }
@@ -275,6 +351,13 @@ fn one(s: &Series, n: usize, index: usize, sop: &str, echo: Option<(i64, f64)>) 
         ]),
         None => e.push(synth::text(tags::ECHO_TIME, VR::DS, "3")),
     }
+    // An extra element replaces the default one, so a series can be cut at
+    // another thickness.
+    e.retain(|el| {
+        !s.extra
+            .iter()
+            .any(|(g, el2, _, _)| el.tag == dicom_core::Tag(*g, *el2))
+    });
     for (group, element, vr, value) in s.extra {
         e.push(synth::text(dicom_core::Tag(*group, *element), *vr, value));
     }
@@ -296,16 +379,16 @@ fn one(s: &Series, n: usize, index: usize, sop: &str, echo: Option<(i64, f64)>) 
 /// `tools/release-check/reference.toml`, where a person can read them and a
 /// change to the pack shows up as a difference rather than moving with the
 /// code.
-fn write_manifest(out: &Path, files: usize) {
+fn write_manifest(out: &Path, series: &[Series], files: usize) {
     let mut text = String::from("{\n  \"series\": [\n");
-    for (i, s) in SERIES.iter().enumerate() {
+    for (i, s) in series.iter().enumerate() {
         text.push_str(&format!(
             "    {{\"key\": \"{}\", \"study\": \"{}\", \"date\": \"{}\", \"instances\": {}}}{}\n",
             s.key,
             s.study,
             s.date,
             s.instances,
-            if i + 1 == SERIES.len() { "" } else { "," }
+            if i + 1 == series.len() { "" } else { "," }
         ));
     }
     text.push_str(&format!(
@@ -315,6 +398,6 @@ fn write_manifest(out: &Path, files: usize) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: reference --out DIR");
+    eprintln!("usage: reference --out DIR [--names]");
     std::process::exit(2)
 }

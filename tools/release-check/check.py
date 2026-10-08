@@ -99,22 +99,34 @@ def bar_reference(work: Path) -> list[str]:
 
 
 def bar_validator(work: Path) -> list[str]:
-    """Every name in the raw tree, against the schema the engine carries.
+    """Every name in the raw trees, against the schema the engine carries.
 
-    Structural, and run always: the official validator needs a network and a
-    node, and a gate that only runs where those exist is a gate that does not
-    run. When `bids-validator` is on the path it is run too and its errors are
-    bars, with no warnings suppressed.
+    Structural, and run always, in both naming modes. The informative mode's
+    `diff-` entity and its plain `_<n>` fallback are not the standard's
+    (Wave 7a section 8.1), so they are exempt there and only there; the
+    official validator, `bar_official`, reads the files that carry them as the
+    tree's `.bidsignore` says.
     """
-    if not (work / "bids").is_dir():
-        return []
+    bad = []
+    for tree, informative in (
+        ("bids", False),
+        ("bids-informative", True),
+        ("names-bids", False),
+        ("names-informative", True),
+    ):
+        if (work / tree).is_dir():
+            bad.extend(structural(work, tree, informative))
+    return bad
+
+
+def structural(work: Path, tree: str, informative: bool) -> list[str]:
     schema = json.loads((HERE / "bids-schema.json").read_text())
     entities = {e["name"]: e for e in schema["entities"]}
     order = [e["name"] for e in schema["entities"]]
     groups = schema["groups"]
     bad = []
 
-    for path in files_under(work / "bids"):
+    for path in files_under(work / tree):
         parts = path.split("/")
         if parts[0] in ("sourcedata", "derivatives") or len(parts) < 3:
             continue
@@ -134,46 +146,174 @@ def bar_validator(work: Path) -> list[str]:
             None,
         )
         if group is None:
-            bad.append(f"{path}: {suffix} is not a {datatype} suffix")
+            bad.append(f"{tree}/{path}: {suffix} is not a {datatype} suffix")
             continue
         seen = []
         for field in fields[:-1]:
+            if informative and field.isdigit():
+                continue
             if "-" not in field:
-                bad.append(f"{path}: {field} is not an entity")
+                bad.append(f"{tree}/{path}: {field} is not an entity")
                 continue
             key, value = field.split("-", 1)
             if key in ("sub", "ses"):
                 seen.append(key)
                 continue
+            if informative and key == "diff":
+                if not re.fullmatch(r"[0-9a-zA-Z+]+", value):
+                    bad.append(f"{tree}/{path}: diff-{value} is not a label")
+                continue
             if key not in entities:
-                bad.append(f"{path}: {key} is not an entity of the standard")
+                bad.append(f"{tree}/{path}: {key} is not an entity of the standard")
                 continue
             e = entities[key]
             if e["key"] not in group["allowed"]:
-                bad.append(f"{path}: {suffix} does not take {key}")
+                bad.append(f"{tree}/{path}: {suffix} does not take {key}")
             if e["index"] and not value.isdigit():
-                bad.append(f"{path}: {key}-{value} is not an index")
+                bad.append(f"{tree}/{path}: {key}-{value} is not an index")
             if not e["index"] and not re.fullmatch(r"[0-9a-zA-Z+]+", value):
-                bad.append(f"{path}: {key}-{value} is not a label")
+                bad.append(f"{tree}/{path}: {key}-{value} is not a label")
             if e["values"] and value not in e["values"]:
-                bad.append(f"{path}: {key}-{value} is not one of {e['values']}")
+                bad.append(f"{tree}/{path}: {key}-{value} is not one of {e['values']}")
             seen.append(key)
         if seen[:1] != ["sub"]:
-            bad.append(f"{path}: a name begins with the subject")
+            bad.append(f"{tree}/{path}: a name begins with the subject")
         wanted = [k for k in order if k in seen]
         if [k for k in seen if k in order] != wanted:
-            bad.append(f"{path}: the entities are not in the standard's order")
+            bad.append(f"{tree}/{path}: the entities are not in the standard's order")
         for required in group["required"]:
             short = next(e["name"] for e in schema["entities"] if e["key"] == required)
             if short not in seen:
-                bad.append(f"{path}: {suffix} requires {short}")
+                bad.append(f"{tree}/{path}: {suffix} requires {short}")
 
     for required in ("dataset_description.json", "participants.tsv", "README"):
-        if not (work / "bids" / required).is_file():
-            bad.append(f"the dataset has no {required}")
-    description = json.loads((work / "bids" / "dataset_description.json").read_text())
+        if not (work / tree / required).is_file():
+            bad.append(f"{tree}: the dataset has no {required}")
+    description = json.loads((work / tree / "dataset_description.json").read_text())
     if description.get("BIDSVersion") != schema["bids_version"]:
-        bad.append("the dataset does not say which version of the standard it is")
+        bad.append(f"{tree}: the dataset does not say which version of the standard it is")
+    return bad
+
+
+def bar_official(work: Path) -> list[str]:
+    """The official BIDS validator, over both naming modes (Wave 7a section 8.2).
+
+    0 errors is the bar. Warnings are not bars: they are listed, in the run's
+    output and in the job's summary where CI gives one. The validator is
+    `bids-validator.sh` beside this file, which pins its version, unless
+    BIDS_VALIDATOR names another command. Where neither can run, the bar says
+    so and passes, unless NILS_GATE_VALIDATOR=required, which CI sets.
+    """
+    import shlex
+    import shutil
+    import subprocess
+
+    trees = [
+        t
+        for t in ("bids", "bids-informative", "names-bids", "names-informative")
+        if (work / t).is_dir()
+    ]
+    if not trees:
+        return []
+    command = os.environ.get("BIDS_VALIDATOR")
+    if command:
+        command = shlex.split(command)
+    elif os.environ.get("DENO") or shutil.which("deno"):
+        command = [str(HERE / "bids-validator.sh")]
+    if not command:
+        if os.environ.get("NILS_GATE_VALIDATOR") == "required":
+            return ["the official validator is required and neither deno nor BIDS_VALIDATOR is set"]
+        print("    the official validator is not installed (deno); skipped")
+        return []
+
+    bad = []
+    summary = ["## The official BIDS validator", ""]
+    for tree in trees:
+        run = subprocess.run(
+            command + ["--format", "json", str(work / tree)],
+            capture_output=True,
+            text=True,
+        )
+        (work / f"validator-{tree}.json").write_text(run.stdout)
+        (work / f"validator-{tree}.err").write_text(run.stderr)
+        try:
+            answer = json.loads(run.stdout)
+        except json.JSONDecodeError:
+            bad.append(f"{tree}: the validator gave no answer (exit {run.returncode}): "
+                       f"{run.stderr.strip()[-300:]}")
+            continue
+        issues = answer.get("issues", {}).get("issues", [])
+        messages = answer.get("issues", {}).get("codeMessages", {})
+        errors = [i for i in issues if i.get("severity") == "error"]
+        warnings = [i for i in issues if i.get("severity") == "warning"]
+        version = answer.get("summary", {}).get("schemaVersion", "?")
+        print(f"    {tree}: {len(errors)} error(s), {len(warnings)} warning(s) "
+              f"(schema {version})")
+        summary.append(f"**{tree}**: {len(errors)} error(s), {len(warnings)} warning(s), "
+                       f"schema {version}")
+        summary.append("")
+        for issue in errors:
+            bad.append(f"{tree}: {describe(issue, messages)}")
+        for code, n in count_codes(warnings).items():
+            line = f"{tree}: warning {code} x{n}"
+            print(f"      {line}")
+            summary.append(f"- {line}")
+        summary.append("")
+    step = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step:
+        with open(step, "a") as f:
+            f.write("\n".join(summary) + "\n")
+    return bad
+
+
+def describe(issue: dict, messages: dict) -> str:
+    code = issue.get("code", "?")
+    sub = issue.get("subCode")
+    where = issue.get("location") or ""
+    text = issue.get("issueMessage") or messages.get(code, "")
+    text = " ".join(str(text).split())[:200]
+    return f"{code}{'/' + sub if sub else ''} {where}: {text}"
+
+
+def count_codes(issues: list[dict]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for i in issues:
+        key = i.get("code", "?") + (("/" + i["subCode"]) if i.get("subCode") else "")
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def bar_names(work: Path) -> list[str]:
+    """No release is refused for a name conflict (Wave 7a section 8.1, T18).
+
+    The names tree, in both naming modes: every stack has a BIDS name,
+    nothing is in `sourcedata/`, and the names are the hand-verified ones in
+    `reference.toml`'s `[names]`.
+    """
+    expected = tomllib.loads((HERE / "reference.toml").read_text()).get("names", {})
+    bad = []
+    for tree in ("names-bids", "names-informative"):
+        root = work / tree
+        if not root.is_dir():
+            continue
+        report = load(work, tree) or {}
+        if report.get("routes", {}).get("sourcedata"):
+            bad.append(f"{tree}: {report['routes']['sourcedata']} stack(s) went to sourcedata")
+        if report.get("nowhere"):
+            bad.append(f"{tree}: stacks placed nowhere: {report['nowhere']}")
+        images = sorted(
+            re.sub(r"sub-[0-9a-z]+", "sub-X", p)
+            for p in files_under(root)
+            if p.endswith(".nii.gz")
+        )
+        want = sorted(expected.get(tree.removeprefix("names-"), []))
+        for line in sorted(set(want) ^ set(images)):
+            side = "missing" if line in want else "unexpected"
+            bad.append(f"{tree}: {side} {line}")
+        decided = report.get("decided", [])
+        if len(decided) != report.get("not_repeats", -1):
+            bad.append(f"{tree}: {report.get('not_repeats')} stack(s) told apart and "
+                       f"{len(decided)} in the record of names")
     return bad
 
 
@@ -677,6 +817,8 @@ def main() -> int:
     db = sqlite3.connect(work / "home" / "registry.db")
     bars = [
         ("2. the validator passes", lambda: bar_validator(work)),
+        ("2b. the official validator passes", lambda: bar_official(work)),
+        ("2c. no name is refused", lambda: bar_names(work)),
         ("3. the reference selections are right", lambda: bar_reference(work)),
         ("4, 5. every stack is placed and named", lambda: bar_placed(work, db)),
         ("6. one stack per session and role", lambda: bar_picks(work, db)),
