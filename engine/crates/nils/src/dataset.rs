@@ -546,7 +546,7 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
         }
         if place::is_undeclared(&p.dataset) {
             return Some(format!(
-                "{} {} the dataset {}, which is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Places page",
+                "{} {} the dataset {}, which is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Add a dataset",
                 path.display(),
                 if inside { "is in" } else { "holds" },
                 p.name,
@@ -579,7 +579,7 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
 pub(crate) fn undeclared_refusal(p: &Place) -> Option<String> {
     place::is_undeclared(&p.dataset).then(|| {
         format!(
-            "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Places page",
+            "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Add a dataset",
             p.name, p.id
         )
     })
