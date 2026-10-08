@@ -599,12 +599,24 @@ nils uninstall
 ```
 
 It asks what should go. Keeping your data removes the services, the
-programs, the packs, llama.cpp's build and Kvasir's directory, with the
-models Kvasir holds, their keys, its subscriptions and the assistant's key,
-and keeps the
-registry and its key, the backups, the desk's people and the assistant's
-history. Everything removes the base directory as well, and the registry's
-key cannot be recovered. `--keep-data` and `--purge` answer it.
+programs, the packs, llama.cpp's build and what building Kvasir and the
+assistant made, and keeps the registry and its key, the backups, the desk's
+people, the assistant's history, and Kvasir's models, its store with their
+keys and the sealed credentials, its seal key and pepper and the assistant's
+key. It also keeps the setup's choices: the record is copied into the base
+directory as `setup.kept.toml`, with the parts, the places, the sign-in, the
+ports, the model server and the schemas and lingering this install made.
+Everything removes the base directory as well, and the registry's key cannot
+be recovered. `--keep-data` and `--purge` answer it, and `--print` shows the
+plan, what goes and what is kept, and changes nothing.
+
+A setup into a directory that holds `setup.kept.toml`, and no setup on
+record, takes the choices kept there as its defaults, so `nils setup --dir
+<dir> --yes` installs the same thing again with nothing given twice, and the
+record it writes still names the schemas the first install made, so a later
+purge drops them. The copy goes once the new record holds it. With no record
+left, `nils uninstall` reads the copy in `~/nils`, or in the directory given
+with `--dir`.
 
 A purge removes the directory the setup record names, whatever is in it, so
 an install that stopped before it made a registry leaves no key on the disk.

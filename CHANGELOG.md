@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- `nils uninstall --keep-data` keeps everything a later setup needs. It deleted the setup record, which names the schemas this install made in a Postgres the site runs and the sign-in, place and model server choices, and the whole of Kvasir's directory, with its models, its keys and the sealed credentials. The next setup read only the record, so every choice had to be given again and a later purge left the schemas behind. Now the record's facts are kept in the base directory as `setup.kept.toml`, which the next `nils setup` in that directory takes its defaults from and carries the schemas and lingering this install made into the record it writes, so a later purge still drops them; with no record left, `nils uninstall` reads the copy (in `~/nils`, or the directory given with the new `--dir`). Kvasir's models, store, seal key, pepper and the assistant's key stay, and only what building Kvasir made goes, as for the assistant. The plan names, under `Keeping`, the kept record with the facts it holds, Kvasir's state and the models it holds.
+
 ## [1.0.0-alpha.79] - 2026-10-06
 
 The MRI pack is 1.0.1: certificate 2's rule gaps and three conventions settled by deep research, on top of the certified pack 1.0.0. 1.0.1 is not certified; it is shown by an archive replay (28 of 546,440 stacks move) and by every earlier reference read (10 settled cells fixed, none broken), and it needs a fresh read before it may claim the certificate. After updating from alpha.77 or alpha.78, a reclassify is all that is needed: no re-read and no fingerprint. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.

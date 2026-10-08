@@ -1256,19 +1256,22 @@ fn the_plan_names_llama_cpp_beside_the_assistant() {
     }
 }
 
-/// An uninstall takes Kvasir's state with NILS, where the data is kept too:
-/// the models it holds and their keys, its subscriptions, its seal key and
-/// pepper, and the assistant's key. The registry and the assistant's history
-/// stay.
+/// An uninstall that keeps the data keeps Kvasir's state with it: the models
+/// it holds, its store with their keys and the sealed credentials, its seal
+/// key and pepper, and the assistant's key. Only what building it made goes.
+/// The registry, the assistant's history and the setup's choices stay.
 #[test]
-fn an_uninstall_takes_kvasirs_state_and_keeps_the_data() {
+fn an_uninstall_that_keeps_the_data_keeps_kvasirs_state() {
     let nils = Installed::new("nils-setup-uninstall-kvasir");
     let config = TempDir::new("nils-setup-uninstall-kvasir-config");
     let base = TempDir::new("nils-setup-uninstall-kvasir-base");
     let dir = base.path().join("nils");
     let kvasir = dir.join("kvasir");
     std::fs::create_dir_all(kvasir.join("state")).unwrap();
+    std::fs::create_dir_all(kvasir.join("models")).unwrap();
+    std::fs::create_dir_all(kvasir.join("node_modules")).unwrap();
     for file in [
+        "models/weights.gguf",
         "kvasir.json",
         "kvasir.sqlite",
         "kvasir.seal",
@@ -1316,7 +1319,17 @@ fn an_uninstall_takes_kvasirs_state_and_keeps_the_data() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(stdout.contains("the models it holds"), "{stdout}");
-    assert!(!kvasir.exists(), "Kvasir's state stayed:\n{stdout}");
+    for file in [
+        "models/weights.gguf",
+        "kvasir.sqlite",
+        "kvasir.seal",
+        "kvasir.pepper",
+        "assistant.key",
+        "state/held",
+    ] {
+        assert!(kvasir.join(file).is_file(), "{file} went:\n{stdout}");
+    }
+    assert!(!kvasir.join("node_modules").exists(), "{stdout}");
     assert!(!assistant.join("dist").exists(), "{stdout}");
     assert!(
         assistant.join("assistant.sqlite").is_file(),
@@ -1324,6 +1337,7 @@ fn an_uninstall_takes_kvasirs_state_and_keeps_the_data() {
     );
     assert!(dir.join("registry").join("nils.toml").is_file());
     assert!(!record.join("setup.toml").exists());
+    assert!(dir.join("setup.kept.toml").is_file(), "{stdout}");
 }
 
 /// A purge removes the directory a setup record names, whatever is in it. An
@@ -2752,4 +2766,276 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
         "--print changed the record"
     );
     assert!(!dir.exists(), "--print made {}", dir.display());
+}
+
+/// `nils uninstall` with no terminal, a configuration directory and a home of
+/// its own.
+fn uninstall(binary: &Path, config: &Path, home: &Path, args: &[&str]) -> Out {
+    let out = output(
+        Command::new(binary)
+            .arg("uninstall")
+            .args(args)
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", config),
+    );
+    Out {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    }
+}
+
+/// An uninstall that keeps the data keeps the setup's choices with it, and
+/// the plan says so; the setup after it, given only the directory, takes the
+/// same choices again, and the kept copy goes once the record holds them.
+#[test]
+fn the_setup_after_an_uninstall_that_kept_the_data_needs_no_choice_given_again() {
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-keep-again");
+    let config = TempDir::new("nils-setup-keep-again-config");
+    let base = TempDir::new("nils-setup-keep-again-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "desk",
+            "--mode",
+            "local",
+            "--origin",
+            "https://nils.example.org",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let first = state_of(config.path());
+    let key = std::fs::read(dir.join("registry").join("keys").join("nils")).ok();
+
+    // the plan names what goes and what stays, and changes nothing
+    let plan = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--print"],
+    );
+    assert!(plan.ok, "{}", plan.stderr);
+    let (removing, keeping) = plan.stdout.split_once("Keeping").unwrap();
+    assert!(removing.contains("programs"), "{removing}");
+    assert!(removing.contains("setup record"), "{removing}");
+    for said in [
+        format!("data         {}", dir.display()),
+        "the registry".to_string(),
+        format!(
+            "the choices made, kept in {}",
+            dir.join("setup.kept.toml").display()
+        ),
+        "the parts (desk, engine)".to_string(),
+        "the local sign-in".to_string(),
+        "the address https://nils.example.org".to_string(),
+    ] {
+        assert!(keeping.contains(&said), "{said} is not in:\n{keeping}");
+    }
+    plan.says("nothing was changed");
+    assert!(!dir.join("setup.kept.toml").exists());
+
+    let gone = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--yes"],
+    );
+    assert!(gone.ok, "{}\n{}", gone.stdout, gone.stderr);
+    assert!(!config.path().join("nils").join("setup.toml").exists());
+    assert!(dir.join("setup.kept.toml").is_file(), "{}", gone.stdout);
+    assert!(!nils.path().exists(), "the program went with NILS");
+
+    // the binary again, as a site would take it, and only the directory given
+    let nils = Installed::new("nils-setup-keep-again-second");
+    let again = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(again.ok, "{}\n{}", again.stdout, again.stderr);
+    again.says("the setup kept with the data in");
+    let state = state_of(config.path());
+    assert!(state.contains("mode = \"local\""), "{state}");
+    assert!(
+        state.contains("origin = \"https://nils.example.org\""),
+        "{state}"
+    );
+    assert!(state.contains("[parts.desk]"), "{state}");
+    assert_eq!(
+        first.lines().find(|l| l.starts_with("places =")),
+        state.lines().find(|l| l.starts_with("places =")),
+        "{state}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("registry").join("keys").join("nils")).ok(),
+        key,
+        "the registry's key is the one the first install made"
+    );
+    let desk = std::fs::read_to_string(dir.join("desk").join("nils-desk.toml")).unwrap();
+    assert!(
+        desk.contains("origin = \"https://nils.example.org\""),
+        "{desk}"
+    );
+    assert!(
+        !dir.join("setup.kept.toml").exists(),
+        "the record holds what the copy did"
+    );
+}
+
+/// With no record and the copy an uninstall that kept the data left, a purge
+/// reads the copy, from the directory it is given, and removes the directory.
+#[test]
+fn a_purge_after_an_uninstall_that_kept_the_data_reads_what_it_kept() {
+    let nils = Installed::new("nils-setup-keep-purge");
+    let config = TempDir::new("nils-setup-keep-purge-config");
+    let base = TempDir::new("nils-setup-keep-purge-base");
+    let dir = base.path().join("site-nils");
+    std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+    std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+    std::fs::write(
+        dir.join("setup.kept.toml"),
+        "dir = \"/elsewhere\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n",
+    )
+    .unwrap();
+    // with no record and no directory named, the usual place is looked in,
+    // and nothing there is this install's
+    let o = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--purge", "--yes"],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("no setup is recorded");
+    assert!(dir.is_dir());
+
+    // that run took the program, as one with no record does
+    let nils = Installed::new("nils-setup-keep-purge-second");
+    let o = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--purge", "--yes", "--dir", dir.to_str().unwrap()],
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    o.says("this is the one kept with the data in");
+    assert!(!dir.exists(), "{}", o.stdout);
+    o.says("NILS and everything it made are gone from this machine");
+}
+
+/// The whole chain on a Postgres the site runs: an install that made the
+/// registry's schemas, an uninstall that keeps the data, a setup that adopts
+/// it, and a purge, which drops the schemas the first install made. Before,
+/// the setup in between wrote a record naming none, and the purge left them.
+/// Runs where a test DSN is set.
+#[test]
+fn keep_data_then_setup_then_purge_drops_the_schemas_the_first_install_made() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped");
+        return;
+    };
+    let schema = "nils_setup_keep_data";
+    let schemas_left = || {
+        let mut store = nils_registry::Store::connect_postgres(&dsn, "public").expect("connect");
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT count(*) FROM information_schema.schemata \
+                     WHERE schema_name IN ('{schema}', '{schema}_linkage')"
+                ),
+                &[],
+            )
+            .expect("the schemas");
+        rows[0].int(0).expect("a count")
+    };
+    nils_registry::Store::connect_postgres(&dsn, schema)
+        .expect("connect")
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+        ))
+        .expect("drop");
+    let nils = Installed::new("nils-setup-keep-postgres");
+    let config = TempDir::new("nils-setup-keep-postgres-config");
+    let base = TempDir::new("nils-setup-keep-postgres-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--backend",
+            "postgres",
+            "--dsn",
+            &dsn,
+            "--schema",
+            schema,
+        ],
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        state_of(config.path()).contains(&format!("registry_made = \"{schema}\"")),
+        "{}",
+        state_of(config.path())
+    );
+    assert_eq!(schemas_left(), 2);
+
+    let gone = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--yes"],
+    );
+    assert!(gone.ok, "{}\n{}", gone.stdout, gone.stderr);
+    assert_eq!(schemas_left(), 2, "the data stays");
+
+    let nils = Installed::new("nils-setup-keep-postgres-second");
+    let again = setup(
+        &nils.path(),
+        config.path(),
+        &["--yes", "--dir", dir.to_str().unwrap(), "--no-service"],
+    );
+    assert!(again.ok, "{}\n{}", again.stdout, again.stderr);
+    again.says("is already at");
+    let state = state_of(config.path());
+    assert!(
+        state.contains(&format!("registry_made = \"{schema}\"")),
+        "the adopted install forgot the schemas it made:\n{state}"
+    );
+
+    let purged = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--purge", "--yes"],
+    );
+    assert!(purged.ok, "{}\n{}", purged.stdout, purged.stderr);
+    assert_eq!(schemas_left(), 0, "{}", purged.stdout);
+    assert!(!dir.exists(), "{}", purged.stdout);
 }
