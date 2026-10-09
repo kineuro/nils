@@ -1309,7 +1309,7 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
     }
     // the place the path is in: the deepest, so a dataset under a root is
     // the dataset, not the root; else the dataset whose pseudonymised tree,
-    // a link to a folder elsewhere, holds it (b16, 2026-10-09)
+    // a link to a folder elsewhere, holds it (Wave 7a, 2026-10-09)
     let (_, p) = sources
         .iter()
         .filter(|(mine, p)| {
@@ -2295,7 +2295,7 @@ mod tests {
     }
 
     /// A dataset whose anonymised tree is a symbolic link to where the
-    /// files really are (b16, 2026-10-09: 45,395 files behind the link, and
+    /// files really are (Wave 7a, 2026-10-09: 45,395 files behind the link, and
     /// the look said "no DICOM"): the look follows the link into the tree,
     /// finds a file without a `.dcm` name by its mark, and says yes. A
     /// filled tree whose files the look cannot vouch for is "unknown",

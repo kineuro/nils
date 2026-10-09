@@ -6250,7 +6250,7 @@ fn a_dataset_behind_a_symbolic_link_lists_its_scans() {
     server.finish();
 }
 
-/// b16, 2026-10-09: a dataset added through the places door while the
+/// Wave 7a, 2026-10-09: a dataset added through the places door while the
 /// engine runs is read by its name at once, with no restart; its anonymised
 /// tree, a symbolic link to where the files are, is looked into and found
 /// to hold DICOM; and an anonymised dataset is not read until it says what
