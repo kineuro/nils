@@ -3577,6 +3577,20 @@ fn routed(
                 }
                 None => None,
             };
+            // record 55 H2 (round 4): a dataset keeps the items about its
+            // stacks, its series, its batches or its subjects, which is
+            // what the Data card's Review button opens
+            let keep = match query.get("dataset").filter(|d| !d.is_empty()) {
+                Some(name) => {
+                    let place = crate::scans::dataset_named(registry, name)?;
+                    let of = crate::certainty::items_of(registry.store(), &place, status)?;
+                    Some(match keep {
+                        Some(k) => k.intersection(&of).copied().collect(),
+                        None => of,
+                    })
+                }
+                None => keep,
+            };
             let mut rows = review_list(
                 registry.store(),
                 status,
@@ -3616,6 +3630,31 @@ fn routed(
                 return Err(Reply::error(404, format!("no cohort named {name}")));
             }
             let mut doc = nils_registry::cohort::review_summary(registry.store(), cohort)?;
+            // record 55 H2 (round 4): with a dataset, `by_kind` counts the
+            // open items about it (of the cohort too, when one is named)
+            if let Some(name) = query.get("dataset").filter(|d| !d.is_empty()) {
+                let place = crate::scans::dataset_named(registry, name)?;
+                let of = crate::certainty::items_of(registry.store(), &place, Some("open"))?;
+                let members = match cohort {
+                    Some(c) => nils_registry::cohort::open_members_of(registry.store(), c)?,
+                    None => None,
+                };
+                let mut by_kind: std::collections::BTreeMap<String, i64> =
+                    std::collections::BTreeMap::new();
+                for it in nils_registry::cohort::open_items(registry.store())? {
+                    if !of.contains(&it.id) {
+                        continue;
+                    }
+                    if let Some(m) = &members
+                        && !it.subjects.iter().any(|s| m.contains(s))
+                    {
+                        continue;
+                    }
+                    *by_kind.entry(it.kind).or_insert(0) += 1;
+                }
+                doc["by_kind"] = serde_json::json!(by_kind);
+                doc["dataset"] = serde_json::json!(place.name);
+            }
             // record 49 R4b: the open pipeline items are units; 1 to 4 held
             if !quasi {
                 crate::pipelines::hold_count(
@@ -3953,6 +3992,24 @@ fn routed(
                 serde_json::to_value(picked).unwrap_or(serde_json::Value::Null),
             ))
         }
+        // Record 55 H2 (round 4): what picking main scans found for a
+        // dataset's subjects, per role, and the last run with its report
+        ["api", "picks", "summary"] if get => {
+            let name = query
+                .get("dataset")
+                .filter(|d| !d.is_empty())
+                .ok_or_else(|| Reply::error(400, "dataset names the dataset, by name or id"))?;
+            let place = crate::scans::dataset_named(registry, name.trim_start_matches('@'))?;
+            let scheme = query
+                .get("scheme")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty());
+            Ok(Reply::ok(crate::pick_after::summary(
+                registry.store(),
+                &place,
+                scheme,
+            )?))
+        }
         // Record 55 H2: a pick run started from the desk, for a cohort's
         // members or a dataset's subjects (or the whole registry), queued
         // as a job; the button a cohort's or a dataset's page carries
@@ -4242,6 +4299,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // record 55 H2: a pick run is the pick verb queued, which is
         // Pipelines work as at the jobs door
         ("POST", ["api", "picks", "run"]) => (Need::One("pipelines:work"), Plain),
+        // record 55 H2 (round 4): counts of a dataset's picks, for its card
+        ("GET", ["api", "picks", "summary"]) => {
+            (Need::AnyOf(&["data:see", "pipelines:see"]), Plain)
+        }
         // the Review page, and the knob engine of Wave 4c §6.6; record 26
         // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
@@ -4716,6 +4777,7 @@ fn capabilities(
         "POST /api/models/{id}/retire",
         "POST /api/picks",
         "POST /api/picks/run",
+        "GET /api/picks/summary",
         "POST /api/picks/{id}/withdraw",
         "GET /api/timeline/{kind}/{id}",
         "GET /api/depends/{kind}/{id}",
@@ -5422,6 +5484,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one id",
             "Starting a pick run",
             "Started a pick run",
+        ),
+        row(
+            "GET /api/picks/summary",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading a dataset's picks",
+            "Read a dataset's picks",
         ),
         row(
             "POST /api/picks/{id}/withdraw",

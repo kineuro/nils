@@ -61,7 +61,50 @@ pub struct Picked {
     /// How many subjects `only` named.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subjects: Option<usize>,
+    /// Record 55 H2 (round 4): the datasets whose subjects `only` named,
+    /// where it was made from them (a pick run after a sort).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<String>,
+    /// Record 55 H2 (round 4): occasions whose two best candidates scored
+    /// the same, which the run reports and does not settle by row order.
+    pub tied: i64,
+    /// Record 55 H2 (round 4): the same counts for each role, so that a
+    /// page can say "T1: 112 picked, 104 clear, 8 borders".
+    pub roles: BTreeMap<String, RoleReport>,
+    /// The job the run was, which keeps this report as its result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<i64>,
     pub seconds: f64,
+}
+
+/// What a run did for one role (record 55 H2, round 4).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RoleReport {
+    /// Occasions looked at.
+    pub sessions: i64,
+    /// Picks written.
+    pub picked: i64,
+    /// Picks written with no border, no tie and no person's pick standing
+    /// over them: nothing for a person to look at.
+    pub clear: i64,
+    /// Occasions with no candidate at all.
+    pub empty: i64,
+    /// Occasions whose two best candidates scored the same.
+    pub tied: i64,
+    /// Occasions where a person's pick stands.
+    pub standing: i64,
+    /// Occasions with an open `pick.border` review item after the run.
+    pub raised: i64,
+    /// The borders, by reason.
+    pub borders: BTreeMap<String, i64>,
+}
+
+/// Whether a run's two best candidates scored the same: a tie, which the
+/// run reports and never settles by row order.
+pub fn is_tied(picked: &pick::Picked) -> bool {
+    picked.winner.is_some()
+        && picked.considered.len() >= 2
+        && picked.considered[0].1 == picked.considered[1].1
 }
 
 /// Record 55 H2: the subjects a run decides, named for the report: a
@@ -72,6 +115,9 @@ pub struct Picked {
 pub struct Only {
     pub label: String,
     pub subjects: std::collections::BTreeSet<i64>,
+    /// The datasets the subjects were found through, named in the report
+    /// (record 55 H2, round 4: a pick run after a sort); empty otherwise.
+    pub datasets: Vec<String>,
 }
 
 /// One stack, as the picks need it.
@@ -113,9 +159,17 @@ pub fn run_for(
         ..crate::job::Settings::default()
     };
     let job_id = crate::job::claim_for(registry, &settings, "pick")?;
-    let result = run_pick(registry, pack, scheme, subject, only, actor, Some(job_id));
-    let (state, error) = match &result {
-        Ok(_) => ("done", None),
+    let mut result = run_pick(registry, pack, scheme, subject, only, actor, Some(job_id));
+    let (state, error) = match &mut result {
+        Ok(report) => {
+            // record 55 H2 (round 4): the job keeps its report, which the
+            // picks summary door serves beside the picks themselves
+            report.job = Some(job_id);
+            if let Ok(doc) = serde_json::to_value(&*report) {
+                let _ = nils_registry::job::set_result(registry.store(), job_id, &doc);
+            }
+            ("done", None)
+        }
         Err(e) => ("failed", Some(e.to_string())),
     };
     let _ = crate::job::finish(registry.store(), job_id, state, error.as_deref());
@@ -136,6 +190,7 @@ fn run_pick(
     if let Some(o) = only {
         report.only = Some(o.label.clone());
         report.subjects = Some(o.subjects.len());
+        report.datasets = o.datasets.clone();
     }
     if pack.picks.is_empty() {
         return Ok(report);
@@ -327,10 +382,23 @@ fn run_one(
             }
             for (first, here) in occasions.values() {
                 report.sessions += 1;
+                report.roles.entry(role.clone()).or_default().sessions += 1;
                 let candidates = group(model, here);
                 let picked = pick::pick(model, role, &candidates, &reference);
                 for b in &picked.borders {
                     *report.borders.entry(b.name().to_string()).or_insert(0) += 1;
+                    *report
+                        .roles
+                        .entry(role.clone())
+                        .or_default()
+                        .borders
+                        .entry(b.name().to_string())
+                        .or_insert(0) += 1;
+                }
+                let tied = is_tied(&picked);
+                if tied {
+                    report.tied += 1;
+                    report.roles.entry(role.clone()).or_default().tied += 1;
                 }
                 // Record 42 S3: a person's pick on this occasion stands. The
                 // run neither replaces nor withdraws it, and asks nothing
@@ -338,6 +406,7 @@ fn run_one(
                 let standing = standing_person(store, &model.name, role, *subject, *first)?;
                 let pick_id = if picked.winner.is_none() {
                     report.empty += 1;
+                    report.roles.entry(role.clone()).or_default().empty += 1;
                     None
                 } else {
                     let id = write(
@@ -357,16 +426,23 @@ fn run_one(
                         job_id,
                     )?;
                     report.written += 1;
+                    let r = report.roles.entry(role.clone()).or_default();
+                    r.picked += 1;
+                    if picked.borders.is_empty() && !tied && standing.is_none() {
+                        r.clear += 1;
+                    }
                     Some(id)
                 };
                 if standing.is_some() {
                     report.standing += 1;
+                    report.roles.entry(role.clone()).or_default().standing += 1;
                     continue;
                 }
                 if border_item(
                     store, model, &picked, *subject, *first, pick_id, actor, job_id, &origin,
                 )? {
                     report.raised += 1;
+                    report.roles.entry(role.clone()).or_default().raised += 1;
                 }
             }
         }

@@ -1565,3 +1565,301 @@ fn a_pick_run_is_part_of_the_bring_in_and_has_a_door() {
     let listed = home.json(&["pick", "list", "--json"]);
     assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
 }
+
+/// Record 55 H2, round 4: picking main scans is a pipeline step after the
+/// sort, and the Data card says how sure the sort is. A dataset that feeds
+/// no cohort is brought in; its sort ends with `pick run --after-sort`
+/// for the subjects it judged, whose job keeps its report per role; the
+/// sources door counts the dataset's scans as sure, needing a look (by
+/// kind) or not sorted; the review doors take `dataset=`; the picks
+/// summary door answers per role; and a dataset whose picks are off is
+/// left out of the step.
+fn after_sort_round(pg: Option<(String, String)>) {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+    let home = Home {
+        dir: TempDir::new("picks-after-sort-home"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("an after-sort test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let dir = TempDir::new("picks-after-sort-ds");
+    // two subjects with a T1 each, and on the first a series no rule
+    // reads, which a sort cannot be sure of
+    for (p, patient) in ["S-ONE", "S-TWO"].iter().enumerate() {
+        let study = format!("1.2.826.0.1.3680043.8.499.{}.1", p + 1);
+        for (n, description) in ["t1 mprage", "zzqx"].iter().enumerate() {
+            if p == 1 && n == 1 {
+                continue;
+            }
+            let series = format!("{study}.{}", n + 1);
+            for instance in 1..=3u32 {
+                let sop = format!("{series}.{instance}");
+                let mut e = synth::minimal_mr(&study, &series, &sop);
+                e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+                e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+                e.push(synth::text(
+                    tags::SERIES_NUMBER,
+                    VR::IS,
+                    &(n + 1).to_string(),
+                ));
+                e.push(synth::text(
+                    tags::INSTANCE_NUMBER,
+                    VR::IS,
+                    &instance.to_string(),
+                ));
+                e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
+                dir.file(
+                    &format!("sub-{p}/s{n}/IM_{instance:04}"),
+                    &synth::part10(&MetaFields::mr(&sop), &e, true),
+                );
+            }
+        }
+    }
+    home.ok(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--move-into",
+        "anon",
+        "--confirm-move",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "generated",
+    ]);
+    // another dataset, which holds nothing yet
+    let other = TempDir::new("picks-after-sort-other");
+    std::fs::create_dir_all(other.path().join("derivatives/dcm-anon")).unwrap();
+    home.ok(&[
+        "place",
+        "add",
+        "other",
+        other.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "generated",
+    ]);
+    let server = Worked::start(&home, dir.path());
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["bring-in", "@ds", "--name", "first"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    // no cohort: the bring-in names no pick run of its own
+    assert_eq!(queued["then"].as_array().unwrap().len(), 2, "{queued}");
+    let mut job = server.over(queued["job"].as_i64().unwrap());
+    let mut sort = 0;
+    for expected in ["fingerprint", "classify", "pick"] {
+        assert_eq!(job["state"], "done", "{job}");
+        if job["kind"] == "classify" {
+            sort = job["id"].as_i64().unwrap();
+        }
+        let mut next = job["chain"]["after"].as_i64();
+        for _ in 0..600 {
+            if next.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let (_, j) = server.call("GET", &format!("/api/jobs/{}", job["id"]), None, OPS);
+            next = j["chain"]["after"].as_i64();
+        }
+        job = server.over(next.unwrap_or_else(|| panic!("no job after {job}")));
+        assert_eq!(job["kind"], expected, "{job}");
+    }
+    // the step after the sort: the subjects it judged, its report kept
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["name"], format!("sort:{sort}"), "{job}");
+    let report = &job["result"];
+    assert_eq!(report["only"], format!("sort:{sort}"), "{job}");
+    assert_eq!(report["subjects"], 2, "{job}");
+    assert_eq!(report["datasets"], serde_json::json!(["ds"]), "{job}");
+    assert_eq!(report["roles"]["t1w"]["picked"], 2, "{job}");
+    assert_eq!(report["job"], job["id"], "{job}");
+    let pick_job = job["id"].as_i64().unwrap();
+    // a sort that doubts every answer, so there are questions to count
+    let packs = packs();
+    home.ok(&[
+        "classify",
+        "--review-below",
+        "1.0",
+        "--name",
+        "doubt",
+        "--pack-dir",
+        &packs,
+    ]);
+
+    // the card: N scans, N sure, N need a look, N not sorted
+    let (status, sources) = server.call("GET", "/api/sources", None, OPS);
+    assert_eq!(status, 200, "{sources}");
+    let ds = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "ds")
+        .unwrap();
+    let totals = &ds["totals"];
+    assert_eq!(ds["picks"], "after_sort", "{sources}");
+    let n = |k: &str| {
+        totals[k]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{k}: {totals}"))
+    };
+    assert_eq!(n("stacks"), 3, "{totals}");
+    assert_eq!(n("unsorted"), 0, "{totals}");
+    assert_eq!(n("sure") + n("to_sort"), n("stacks"), "{totals}");
+    assert!(n("to_sort") >= 1, "the series no rule reads: {totals}");
+    let kinds = totals["need_a_look"].as_object().unwrap();
+    assert!(!kinds.is_empty(), "{totals}");
+    assert!(
+        kinds.values().all(|v| v.as_i64().unwrap() <= n("to_sort")),
+        "{totals}"
+    );
+    // the Review button: the dataset's open items, and only a dataset's
+    let (status, listed) = server.call("GET", "/api/review?dataset=ds&status=open", None, OPS);
+    assert_eq!(status, 200, "{listed}");
+    let (_, all) = server.call("GET", "/api/review?status=open", None, OPS);
+    assert!(listed["count"].as_i64().unwrap() >= 1, "{listed}");
+    assert_eq!(listed["count"], all["count"], "one dataset: {listed} {all}");
+    let (status, summary) = server.call("GET", "/api/review/summary?dataset=ds", None, OPS);
+    assert_eq!(status, 200, "{summary}");
+    assert_eq!(summary["dataset"], "ds", "{summary}");
+    let open: i64 = summary["by_kind"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_i64().unwrap())
+        .sum();
+    assert!(open >= 1, "{summary}");
+    let (status, other) = server.call("GET", "/api/review?dataset=other&status=open", None, OPS);
+    assert_eq!(status, 200, "{other}");
+    assert_eq!(
+        other["count"], 0,
+        "another dataset's items are not this one's: {other}"
+    );
+    let (_, other) = server.call("GET", "/api/review/summary?dataset=other", None, OPS);
+    assert_eq!(other["by_kind"], serde_json::json!({}), "{other}");
+    let (status, _) = server.call("GET", "/api/review?dataset=nowhere", None, OPS);
+    assert_eq!(status, 404);
+    let (status, _) = server.call("GET", "/api/review/summary?dataset=nowhere", None, OPS);
+    assert_eq!(status, 404);
+
+    // the picks summary: per role, with the last run and its report
+    let (status, picks) = server.call("GET", "/api/picks/summary?dataset=ds", None, OPS);
+    assert_eq!(status, 200, "{picks}");
+    assert_eq!(picks["dataset"], "ds", "{picks}");
+    let picks_id = picks["dataset_id"].as_i64().unwrap();
+    assert_eq!(picks["picks"], "after_sort", "{picks}");
+    assert_eq!(picks["subjects"], 2, "{picks}");
+    let t1 = &picks["roles"]["t1w"];
+    assert_eq!(t1["picked"], 2, "{picks}");
+    let n1 = |k: &str| t1[k].as_i64().unwrap();
+    assert!(n1("clear") <= n1("picked"), "{picks}");
+    assert!(
+        n1("clear") + n1("review_items") + n1("tied") >= 2,
+        "{picks}"
+    );
+    assert!(t1["borders"].is_object(), "{picks}");
+    assert_eq!(picks["last_run"]["job"], pick_job, "{picks}");
+    assert_eq!(
+        picks["last_run"]["report"]["roles"]["t1w"]["picked"], 2,
+        "{picks}"
+    );
+    let (status, _) = server.call("GET", "/api/picks/summary", None, OPS);
+    assert_eq!(status, 400);
+    let (status, _) = server.call("GET", "/api/picks/summary?dataset=nowhere", None, OPS);
+    assert_eq!(status, 404);
+    drop(server);
+
+    // a dataset whose picks are off is left out of the step after a sort
+    // the doubting sort judged the stacks last, so its job is the one
+    let mut store = home.store();
+    let last = store
+        .query(
+            &format!(
+                "SELECT MAX(job_id) FROM {}",
+                store.qualified("classification")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert!(last > sort, "{last} {sort}");
+    let sort = last.to_string();
+    let after = |home: &Home| {
+        home.json(&[
+            "pick",
+            "run",
+            "--after-sort",
+            &sort,
+            "--pack-dir",
+            &packs,
+            "--json",
+        ])
+    };
+    let on = after(&home);
+    assert_eq!(on["subjects"], 2, "{on}");
+    let id = picks_id.to_string();
+    home.ok(&["place", "set", &id, "--picks", "off"]);
+    let off = after(&home);
+    assert_eq!(off["subjects"], 0, "{off}");
+    assert_eq!(off["sessions"], 0, "{off}");
+    let (good, _, err) = home.run(&["place", "set", &id, "--picks", "sometimes"], None);
+    assert!(!good, "a value that is no choice is refused");
+    assert!(err.contains("after_sort"), "{err}");
+}
+
+#[test]
+fn a_sort_ends_with_picking_and_the_card_says_how_sure() {
+    after_sort_round(None);
+}
+
+#[test]
+fn a_sort_ends_with_picking_and_the_card_says_how_sure_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_picks_after_sort";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    after_sort_round(Some((dsn.clone(), schema.to_string())));
+    drop();
+}

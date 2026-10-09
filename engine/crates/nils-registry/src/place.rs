@@ -551,6 +551,18 @@ pub const SUBJECTS: [&str; 2] = ["map", "generated"];
 /// subject's code, or the id type's value PatientID holds.
 pub const FOLDERS: [&str; 2] = ["subject-code", "id-type"];
 
+/// Record 55 H2 (round 4): whether picking main scans follows a sort of
+/// the dataset as a pipeline step (`after_sort`, the default) or not
+/// (`off`).
+pub const PICKS: [&str; 2] = ["after_sort", "off"];
+
+/// Whether a dataset's sorts are followed by a pick run: true unless the
+/// dataset says `off`. A dataset stored before the field existed has none
+/// and is picked after a sort.
+pub fn picks_after_sort(dataset: &Value) -> bool {
+    dataset["picks"].as_str() != Some("off")
+}
+
 /// Why a dataset may not be read yet, where its declaration is not whole
 /// (Wave 7a): undeclared, without a tree, or arriving de-identified or
 /// coded without saying what PatientID holds and how its subjects are
@@ -848,6 +860,8 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
             .map(|c| c["originals_vault"].clone())
             .unwrap_or(Value::Null),
     };
+    // record 55 H2 (round 4): picking main scans after a sort, or not
+    let picks = pick(doc, current, "picks", &PICKS, PICKS[0])?;
     Ok(json!({
         "arrives": arrives,
         "trees": {"originals": originals, "anon": anon},
@@ -863,6 +877,7 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         "tags": tags,
         "originals_kept": originals_kept,
         "originals_vault": originals_vault,
+        "picks": picks,
     }))
 }
 
@@ -1152,9 +1167,18 @@ mod tests {
                 "tags": {"keep_demographics": true, "remove": [], "keep": []},
                 "originals_kept": "kept",
                 "originals_vault": null,
+                "picks": "after_sort",
             })
         );
         assert_eq!(dataset_of(&json!({}), None).unwrap(), default_dataset(None));
+        // record 55 H2 (round 4): picking after a sort, on unless turned off,
+        // and a document from before the field picks after a sort too
+        let off = dataset_of(&json!({"picks": "off"}), None).unwrap();
+        assert_eq!(off["picks"], "off");
+        assert!(!super::picks_after_sort(&off));
+        assert_eq!(dataset_of(&json!({}), Some(&off)).unwrap()["picks"], "off");
+        assert!(dataset_of(&json!({"picks": "sometimes"}), None).is_err());
+        assert!(super::picks_after_sort(&json!({"arrives": "identified"})));
         assert_eq!(
             dataset_of(&json!(null), None).unwrap(),
             default_dataset(None)

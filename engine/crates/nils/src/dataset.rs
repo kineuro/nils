@@ -41,7 +41,7 @@ const COUNT_FOR: Duration = Duration::from_secs(2);
 
 /// The keys a declaration may set on a dataset, beside the trees the engine
 /// sets itself.
-pub(crate) const FIELDS: [&str; 11] = [
+pub(crate) const FIELDS: [&str; 12] = [
     "arrives",
     "move_into",
     "identity",
@@ -53,6 +53,8 @@ pub(crate) const FIELDS: [&str; 11] = [
     "tags",
     "confirm_move",
     "move_into_anon",
+    // record 55 H2 (round 4): picking main scans after a sort, or not
+    "picks",
 ];
 
 /// The dataset's own fields the engine writes and a declaration may not

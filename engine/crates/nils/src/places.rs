@@ -553,6 +553,8 @@ pub fn capabilities(store: &mut Store) -> Value {
             // dataset's subjects are found, and what names a copy's folder
             "subjects": place::SUBJECTS,
             "copy_folder": place::FOLDERS,
+            // record 55 H2 (round 4): picking main scans after a sort
+            "picks": place::PICKS,
         },
     })
 }

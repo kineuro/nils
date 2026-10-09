@@ -169,7 +169,12 @@ pub(crate) fn bring_in(
     steps.push(classify);
     // record 55 H2: a dataset that feeds a cohort has its sessions' roles
     // picked as it comes in, when the pack declares picks
-    if picks && place.dataset["cohort"].is_string() {
+    // record 55 H2 (round 4): unless the dataset turned picking after a
+    // sort off
+    if picks
+        && place.dataset["cohort"].is_string()
+        && nils_registry::place::picks_after_sort(&place.dataset)
+    {
         steps.push(pick_step(place, pack));
     }
     let first = steps.remove(0);
@@ -278,6 +283,11 @@ fn recorded_access(job: &Job) -> Access {
 /// the queued job's id, or none when the chain ends here.
 pub(crate) fn continue_chain(store: &mut Store, job: &Job) -> Result<Option<i64>, String> {
     let mut then = job.then();
+    // record 55 H2 (round 4): a sort ends with picking main scans for the
+    // subjects it judged, a pipeline step of its own
+    if let Some(step) = crate::pick_after::step_after(store, job) {
+        then.insert(0, step);
+    }
     if then.is_empty() {
         return Ok(None);
     }
@@ -404,6 +414,11 @@ mod tests {
         assert_eq!(then.len(), 3, "a pack with no picks: no pick run");
         let (_, then) = bring_in(&place("identified"), Some("b"), None, false, true);
         assert_eq!(then.len(), 3, "no cohort: no pick run");
+        // record 55 H2 (round 4): a dataset whose picks are off has none
+        let mut off = fed.clone();
+        off.dataset["picks"] = json!("off");
+        let (_, then) = bring_in(&off, Some("b"), Some("mri"), false, true);
+        assert_eq!(then.len(), 3, "picks off: no pick run");
     }
 
     #[test]

@@ -32,6 +32,7 @@ mod backup;
 mod batches;
 mod browse;
 mod campaigns;
+mod certainty;
 mod chain;
 mod dataset;
 mod depends;
@@ -51,6 +52,7 @@ mod model_cli;
 mod originals;
 mod packs;
 mod pair;
+mod pick_after;
 mod pipelines;
 mod places;
 mod preflight;
@@ -1013,6 +1015,10 @@ struct DatasetFlags {
     /// Feed no cohort
     #[arg(long, conflicts_with = "cohort")]
     no_cohort: bool,
+    /// Whether picking main scans follows a sort of the dataset as a
+    /// pipeline step: after_sort (the default) or off
+    #[arg(long, value_name = "after_sort|off")]
+    picks: Option<String>,
     /// Keep sex, weight and size when pseudonymising (the default)
     #[arg(long)]
     keep_demographics: bool,
@@ -1068,6 +1074,9 @@ impl DatasetFlags {
             asked.insert("cohort".into(), serde_json::json!(c));
         } else if self.no_cohort {
             asked.insert("cohort".into(), serde_json::Value::Null);
+        }
+        if let Some(p) = &self.picks {
+            asked.insert("picks".into(), serde_json::json!(p));
         }
         let mut tags = serde_json::Map::new();
         if self.keep_demographics || self.no_keep_demographics {
@@ -1420,6 +1429,11 @@ struct PickArgs {
     /// Decide the occasions of this dataset's subjects alone, scored against the whole registry
     #[arg(long, value_name = "NAME", conflicts_with = "subject")]
     dataset: Option<String>,
+    /// Decide the occasions of the subjects the sort that was this job
+    /// judged, but those of a dataset whose picks are off: the pipeline
+    /// step a sort ends with
+    #[arg(long = "after-sort", value_name = "JOB", conflicts_with_all = ["subject", "cohort", "dataset"])]
+    after_sort: Option<i64>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -8060,6 +8074,15 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     let overlay = load_overlay(args.overlay.as_ref())?;
     let pack = nils_pack::load(&found, overlay.as_ref()).map_err(|e| fail(e.to_string()))?;
     if pack.picks.is_empty() {
+        // record 55 H2 (round 4): the step after a sort with a pack that
+        // picks nothing has nothing to do, which is not a failure
+        if args.after_sort.is_some() {
+            println!(
+                "{} declares no picks, so there is nothing to choose",
+                pack.id()
+            );
+            return Ok(());
+        }
         return Err(fail(format!(
             "{} declares no picks, so there is nothing to choose",
             pack.id()
@@ -8080,6 +8103,18 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     // record 55 H2: a run for a cohort or a dataset decides their subjects'
     // occasions, scored against the whole registry
     let only = match (&args.cohort, &args.dataset) {
+        // record 55 H2 (round 4): the subjects a sort judged, as the step
+        // after it
+        _ if args.after_sort.is_some() => {
+            let job = args.after_sort.unwrap_or_default();
+            let sorted = crate::pick_after::sorted_by(registry.store(), job)
+                .map_err(|e| fail(e.to_string()))?;
+            Some(nils_classify::picking::Only {
+                label: format!("sort:{job}"),
+                subjects: sorted.subjects,
+                datasets: sorted.datasets,
+            })
+        }
         (Some(name), _) => {
             let subjects = nils_registry::cohort::open_members_of(registry.store(), name)
                 .map_err(|e| fail(e.to_string()))?
@@ -8087,6 +8122,7 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
             Some(nils_classify::picking::Only {
                 label: format!("cohort:{name}"),
                 subjects,
+                datasets: Vec::new(),
             })
         }
         (None, Some(name)) => {
@@ -8097,6 +8133,7 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
             Some(nils_classify::picking::Only {
                 label: format!("dataset:{name}"),
                 subjects,
+                datasets: vec![name.to_string()],
             })
         }
         (None, None) => None,

@@ -127,6 +127,7 @@ fn source(
         "tags",
         "originals_kept",
         "originals_vault",
+        "picks",
     ] {
         doc[key] = doc["dataset"][key].clone();
     }
@@ -134,7 +135,10 @@ fn source(
     doc["roots"] = json!(ids.len());
     if ids.is_empty() {
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
-        doc["totals"] = json!({"subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0, "to_sort": 0});
+        doc["totals"] = json!({
+            "subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
+            "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {},
+        });
         return Ok(doc);
     }
     let sources = list(ids);
@@ -310,13 +314,9 @@ fn source(
             "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
         ),
     )?;
-    let to_sort = count(
-        store,
-        &format!(
-            "SELECT COUNT(DISTINCT rm.stack_id) FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
-             JOIN {stack} x ON x.id = rm.stack_id {of_source} AND {open}"
-        ),
-    )?;
+    // record 55 H2 (round 4): how sure the sort is, "N scans · N sure ·
+    // N need a look", with what the questions are
+    let certainty = crate::certainty::of_sources(store, &sources, stacks)?;
     doc["digests"] = json!({
         "count": digests,
         "first": first,
@@ -329,7 +329,10 @@ fn source(
         "sessions": sessions,
         "stacks": stacks,
         "refused_files": refused,
-        "to_sort": to_sort,
+        "to_sort": certainty.to_sort,
+        "sure": certainty.sure,
+        "unsorted": certainty.unsorted,
+        "need_a_look": certainty.need_a_look,
     });
     Ok(doc)
 }
