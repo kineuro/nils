@@ -126,6 +126,14 @@
 # bring-in where the dataset feeds a cohort and the pack declares picks,
 # and POST /api/picks/run starts one for a cohort, a dataset or the whole
 # registry; `pick run` at the jobs door takes `--cohort` and `--dataset`.
+#
+# Added in place, additively, on 2026-10-09 by record 55 (H2): GET
+# /api/datasets/{name}/scans lists a dataset's scans a page at a time,
+# keyset paged, read from the registry and never through a cohort, so a
+# dataset that feeds none lists its scans too. Below detail quasi the
+# subject's code, the day and a session label made from a date are
+# answered as their shapes (K7). A stack of a sample sealed now is not
+# listed.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -1272,6 +1280,19 @@ paths:
         - {name: probe, in: query, schema: {type: boolean}, description: Count every source's trees again first}
       responses:
         "200": {description: "{count, window_days, sources[{place fields, handling{arrives, on_release{uids, deface}}, handling_declared, dataset, arrives, trees{originals{path, files, bytes, last_written, partial} | null, anon{path, files, bytes, last_written, partial}}, identity, unmapped, cohort, tags{keep_demographics, remove, keep}, originals_kept, originals_vault, held{files, identifiers}, roots, digests{count, first, last, recent[{id, name, state, started_at, finished_at, job_id, files{seen, new, changed, unchanged, refused}, subjects_added, stacks_added, pseudonymised{files, changed, held, job, batch} | null, classified, to_sort}]}, totals{subjects, studies, sessions, stacks, refused_files, to_sort}}], rates{pseudonymize, digest}}"}
+  /api/datasets/{name}/scans:
+    get:
+      summary: A dataset's scans a page at a time (record 55 H2, added in place 2026-10-09; data:see)
+      description: "The scans of a dataset (a source place, named by its name or its id) are the stacks its digests created first, the stacks `totals.stacks` of GET /api/sources counts, read from the registry and never through a cohort, so a dataset that feeds none lists its scans too. Sorted by subject code, then day, then stack id; `after` is the stack id `next` gave, so a cursor carries a technical key and nothing else; at most `limit` a page (50 by default, 1 to 200). A stack of a sample sealed now is never listed, but to a holder of sealed:see (record 48), and `total` counts what this caller is listed. Each scan is {stack, subject {id, code}, session {id, label} or null where no session is built for its study, series_description, orientation, images, day}: `images` the stack's image count, `day` its study's date as filled, else as read, and `session` the session the cache holds under the window it was built with and the default scheme's label. Record 55 K7: below detail quasi the subject's code, the day and a label the scheme makes from a date are answered as their shapes (digits as 9, letters as a or A, the rest kept), as the value sampler shows them; the subject's and the session's ids are technical keys and the series description is technical, as every sequence name is. A dataset nothing has read yet (an identified one holding only its originals) answers an empty list."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+      responses:
+        "200": {description: "{dataset, dataset_id, detail, total, count, scans: [{stack, subject: {id, code}, session: {id, label} | null, series_description, orientation, images, day}], next}"}
+        "400": {description: "The limit is out of range, or `after` is no scan of the dataset this caller is listed"}
+        "403": {description: No data:see}
+        "404": {description: No dataset of that name or id}
   /api/places:
     get:
       summary: Every place with its role, its guarantees, what the engine measured and the deployment's paths bound under it (Wave 5 section 12.5, 10.2)
