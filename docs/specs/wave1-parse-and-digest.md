@@ -1107,6 +1107,10 @@ Settled while joining what only the echo number split (wave 7a, 2026-10-09):
   through two of its stacks. The run reports both, as `echo_groups_kept`.
 - **The dry run counts the same:** each `(series, key)` pair carries its echo,
   and the pairs the rule joins count once.
+- **The frames' order.** A stack is a set of files; the viewer puts its planes
+  along their normal, and planes at one place by their trigger time, temporal
+  position, echo number and instance number, as far as the files write them. A
+  cine of this kind goes by its echo numbers.
 - **A registry digested before this keeps those series as they were**, and an
   ordinary run does not change them, since it reads no unchanged file again.
   The rule reads the stack rows, not the files, and every value it needs is on
