@@ -6463,3 +6463,267 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
     assert_eq!(status, 200);
     server.finish();
 }
+
+/// Record 55 H3 (Nima's ruling of 2026-10-09): what the pack decided without
+/// asking is kept on the stack and shown at the explain and why doors; what
+/// the pack cannot rank has a door of its own for whoever tunes the pack;
+/// and the pack door says which axes matter and where a missing answer is
+/// asked.
+#[test]
+fn the_pack_decides_and_its_doors_show_what_it_decided_over() {
+    let home = TempDir::new("serve-h3-home");
+    let dir = TempDir::new("serve-h3-src");
+    let sop = "1.2.3.H.1.1";
+    let mut e = synth::minimal_mr("1.2.3.H", "1.2.3.H.1", sop);
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "sag t1 cervical cerebral"),
+        synth::text(tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+        synth::text(tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+        synth::text(tags::REPETITION_TIME, VR::DS, "600"),
+        synth::text(tags::ECHO_TIME, VR::DS, "12"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+    ]);
+    dir.file(
+        &format!("h/{sop}"),
+        &synth::part10(&MetaFields::mr(sop), &e, true),
+    );
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "h",
+            "--no-private",
+            dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    let said = run(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    assert!(said.contains("overrides"), "{said}");
+    let text = run(
+        &home,
+        &["explain", "1", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    assert!(
+        text.contains(
+            "body_part spine by body_part/spine over body_part/brain (brain), by rule order"
+        ),
+        "{text}"
+    );
+
+    let server = Server::start(&home, 5, &[], &[]);
+    // nothing the pack decided is a question
+    let (status, doc) = server.request("GET", "/api/explain/1", None, None);
+    assert_eq!(status, 200, "{doc}");
+    assert!(
+        doc["review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| !i["kind"].as_str().unwrap().ends_with(":conflict")),
+        "{doc}"
+    );
+    let o = doc["notes"]["overrides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["axis"] == "body_part")
+        .cloned()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(o["value"], "spine", "{o}");
+    assert_eq!(o["other"], "brain", "{o}");
+    assert_eq!(o["rank"], "rule_order", "{o}");
+    assert_eq!(o["by"]["rule"], "spine", "{o}");
+    assert_eq!(o["over"]["tier"], "keywords", "{o}");
+    // the auth is off, so detail is sensitive and the words show
+    assert!(!o["over"]["matched"].as_str().unwrap().is_empty(), "{o}");
+
+    // the why door gives the axis the rule it was decided over
+    let (status, why) = server.request("GET", "/api/stacks/1/why", None, None);
+    assert_eq!(status, 200, "{why}");
+    let body_part = why["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "body_part")
+        .cloned()
+        .unwrap_or_else(|| panic!("{why}"));
+    assert!(
+        body_part["overridden"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["rule"] == "brain" && v["value"] == "brain" && v["rank"] == "rule_order"),
+        "{body_part}"
+    );
+    assert!(why["unresolved"].is_array(), "{why}");
+
+    // what the pack cannot rank: nothing here
+    let (status, d) = server.request("GET", "/api/packs/mri/disagreements", None, None);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["pack"], "mri", "{d}");
+    assert_eq!(d["stacks"], 0, "{d}");
+    assert_eq!(d["pairs"], serde_json::json!([]), "{d}");
+
+    // the axes that matter, and where a missing answer is asked
+    let (status, pack) = server.request("GET", "/api/packs/mri", None, None);
+    assert_eq!(status, 200, "{pack}");
+    assert_eq!(
+        pack["review"]["asks_missing"],
+        serde_json::json!(["base", "post_contrast"]),
+        "{pack}"
+    );
+    assert_eq!(
+        pack["review"]["by_model"],
+        serde_json::json!(["body_part", "body_region"]),
+        "{pack}"
+    );
+    assert!(pack["review"]["matters"]["base"].is_array(), "{pack}");
+    assert!(
+        pack["review"]["matters"]["contrast_mix"].is_null(),
+        "{pack}"
+    );
+    let (status, review) = server.request("GET", "/api/review?status=open", None, None);
+    assert_eq!(status, 200, "{review}");
+    assert!(
+        review["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| !i["kind"].as_str().unwrap().starts_with("body_part:")),
+        "{review}"
+    );
+    server.finish();
+}
+
+/// Record 55 H3: the split note is information. A series a split left as
+/// stacks of one image each is noted on those stacks, shown on each scan of
+/// its dataset and counted on the sources door, and is never part of what
+/// needs a look.
+#[test]
+fn the_split_note_is_shown_on_the_scans_and_counted_beside_the_questions() {
+    let home = TempDir::new("serve-split-home");
+    let dir = TempDir::new("serve-split-src");
+    let write = |series: &str, echo: u32, instance: &str| {
+        let sop = format!("1.2.3.F.{series}.{echo}.{instance}");
+        let mut e = synth::minimal_mr("1.2.3.F", &format!("1.2.3.F.{series}"), &sop);
+        e.extend([
+            synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, "ax flow"),
+            synth::text(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            synth::text(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
+            synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            synth::text(tags::ECHO_TIME, VR::DS, "0.0"),
+            synth::text(tags::REPETITION_TIME, VR::DS, "30.0"),
+            synth::text(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
+        ]);
+        dir.file(
+            &format!("derivatives/dcm-anon/{series}/{echo}-{instance}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    };
+    for echo in 1..=6 {
+        write("1", echo, "1");
+        write("2", echo, "1");
+        write("2", echo, "2");
+    }
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "flow",
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file("map.csv", b"PatientID,subject_code\nP1,mapped-0001\n");
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "flow", "--no-private", "@flow"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+
+    let server = Server::start(&home, 2, &[], &[]);
+    let (status, doc) = server.request("GET", "/api/sources", None, None);
+    assert_eq!(status, 200, "{doc}");
+    let flow = doc["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "flow")
+        .cloned()
+        .unwrap_or_else(|| panic!("{doc}"));
+    let totals = &flow["totals"];
+    assert_eq!(totals["stacks"], 12, "{totals}");
+    assert_eq!(
+        totals["noted"],
+        serde_json::json!({"split:one_image_per_stack": 6}),
+        "{totals}"
+    );
+    assert!(
+        totals["need_a_look"]
+            .get("split:one_image_per_stack")
+            .is_none(),
+        "{totals}"
+    );
+    let (status, page) = server.request("GET", "/api/datasets/flow/scans", None, None);
+    assert_eq!(status, 200, "{page}");
+    let noted: Vec<&serde_json::Value> = page["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| !s["notes"].as_array().unwrap().is_empty())
+        .collect();
+    assert_eq!(noted.len(), 6, "{page}");
+    for s in &noted {
+        assert_eq!(s["notes"][0]["kind"], "split:one_image_per_stack", "{s}");
+        assert_eq!(s["notes"][0]["value"], "multi_echo", "{s}");
+        assert_eq!(s["images"], 1, "{s}");
+        assert!(
+            s["questions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|q| !q.as_str().unwrap().starts_with("split")),
+            "{s}"
+        );
+    }
+    server.finish();
+}

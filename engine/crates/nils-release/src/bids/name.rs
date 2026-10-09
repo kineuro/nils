@@ -1037,7 +1037,11 @@ mod tests {
         let mut map = mapping();
         map.acq[0].modes = vec!["full".into()];
         let with_acq = build(&t1w(), &map, Naming::Full).unwrap();
-        assert!(!with_acq.label().starts_with("sub-"), "{}", with_acq.label());
+        assert!(
+            !with_acq.label().starts_with("sub-"),
+            "{}",
+            with_acq.label()
+        );
         assert_eq!(
             format!("sub-x_ses-1_{}", with_acq.label()),
             with_acq.stem("x", "1")

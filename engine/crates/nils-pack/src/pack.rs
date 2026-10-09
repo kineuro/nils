@@ -226,9 +226,15 @@ pub struct Review {
     pub low_confidence: f64,
     /// Per-axis overrides of it.
     pub per_axis: BTreeMap<String, f64>,
-    /// The axes whose absence is itself a question. An axis not named here
-    /// simply does not apply to a stack that has no value for it.
+    /// The axes whose absence the pack called a question before record 55
+    /// H3. Read and checked, and no longer what decides: since 2026-10-09 an
+    /// axis with no answer is asked about where it matters
+    /// ([`crate::matters`]).
     pub missing: Vec<String>,
+    /// Record 55 H3 (2026-10-09): the axes an image model answers, in its own
+    /// run with its own review of what it is unsure of, about which sorting
+    /// raises no question at all. The MRI pack names the body part.
+    pub by_model: Vec<String>,
     /// Stacks nobody is asked about at all. An excluded localizer is a
     /// decided outcome, and a queue that carries it is v0's queue.
     pub silent_when: Option<Expr>,
@@ -372,6 +378,9 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
         if let Some(v) = rm.get("missing") {
             review.missing = manifest.blame(yaml::texts(v, "review.missing"))?;
+        }
+        if let Some(v) = rm.get("by_model") {
+            review.by_model = manifest.blame(yaml::texts(v, "review.by_model"))?;
         }
     }
 
@@ -806,7 +815,12 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
 
     // A threshold for an axis the pack does not decide is a name that names
     // nothing: it would sit in the file looking like policy and do nothing.
-    for axis in review.per_axis.keys().chain(review.missing.iter()) {
+    for axis in review
+        .per_axis
+        .keys()
+        .chain(review.missing.iter())
+        .chain(review.by_model.iter())
+    {
         if !axes.iter().any(|a| a.name == *axis) {
             return Err(
                 Error::at(format!("review.{axis}"), format!("no axis named {axis}"))

@@ -138,6 +138,37 @@ pub struct Classified {
     /// The stacks whose answer broke at least one of them.
     #[serde(default)]
     pub broken_stacks: i64,
+    /// Record 55 H3 (2026-10-09): the answers the pack's ranking decided
+    /// over another, by what ranked them (`rule_set_order`, `rule_order`,
+    /// `priority`). Never asked: each is kept on its stack's classification.
+    #[serde(default)]
+    pub overrides: std::collections::BTreeMap<String, i64>,
+    /// Record 55 H3: per axis, the answers below the pack's threshold. A
+    /// rule's low confidence alone is never a question; each is noted on its
+    /// stack's classification.
+    #[serde(default)]
+    pub below: std::collections::BTreeMap<String, i64>,
+    /// Per axis, the stacks no rule answered and whose axis has no default,
+    /// noted on each stack's classification.
+    #[serde(default)]
+    pub unresolved: std::collections::BTreeMap<String, i64>,
+    /// Record 55 H3: per axis, the `<axis>:missing` questions raised, on an
+    /// axis that matters with no answer once the passes ran.
+    #[serde(default)]
+    pub missing: std::collections::BTreeMap<String, i64>,
+    /// The axes where a missing answer is asked, as the engine works them
+    /// out from what reads them (`nils_pack::matters`).
+    #[serde(default)]
+    pub asks_missing: Vec<String>,
+    /// Record 55 H3: answers on one axis nothing in the pack ranks, a defect
+    /// of the pack for whoever tunes it, by rule pair: the stacks each pair
+    /// was found on. Never a question.
+    #[serde(default)]
+    pub disagreements: std::collections::BTreeMap<String, i64>,
+    /// The stacks the split note was written on: a series split into stacks
+    /// of one image each, information and no longer a question.
+    #[serde(default)]
+    pub split_notes: i64,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -165,6 +196,13 @@ impl Classified {
             diagnostics: std::collections::BTreeMap::new(),
             broken: std::collections::BTreeMap::new(),
             broken_stacks: 0,
+            overrides: std::collections::BTreeMap::new(),
+            below: std::collections::BTreeMap::new(),
+            unresolved: std::collections::BTreeMap::new(),
+            missing: std::collections::BTreeMap::new(),
+            asks_missing: Vec::new(),
+            disagreements: std::collections::BTreeMap::new(),
+            split_notes: 0,
             seconds: 0.0,
             peak_rss: None,
             cancelled: false,
@@ -241,6 +279,65 @@ impl fmt::Display for Classified {
             "  review items     {:>12}   on those stacks, as {} question(s)",
             self.review_items, self.review_groups
         )?;
+        // Record 55 H3: what the sort decided without asking, each kept on
+        // its stack's classification, and the one kind of question left.
+        let line = |m: &std::collections::BTreeMap<String, i64>| -> String {
+            let mut on: Vec<(&String, &i64)> = m.iter().collect();
+            on.sort_by_key(|(k, n)| (-**n, (*k).clone()));
+            on.iter()
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let total = |m: &std::collections::BTreeMap<String, i64>| m.values().sum::<i64>();
+        if !self.missing.is_empty() || !self.asks_missing.is_empty() {
+            writeln!(
+                f,
+                "  missing asked    {:>12}   no answer on an axis that matters ({}){}",
+                total(&self.missing),
+                self.asks_missing.join(", "),
+                if self.missing.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", line(&self.missing))
+                }
+            )?;
+        }
+        if !self.overrides.is_empty() {
+            writeln!(
+                f,
+                "  overrides        {:>12}   decided by the pack's ranking, kept as evidence: {}",
+                total(&self.overrides),
+                line(&self.overrides)
+            )?;
+        }
+        if !self.below.is_empty() {
+            writeln!(
+                f,
+                "  below threshold  {:>12}   noted, never asked: {}",
+                total(&self.below),
+                line(&self.below)
+            )?;
+        }
+        if self.split_notes > 0 {
+            writeln!(
+                f,
+                "  split noted      {:>12}   stacks of a series split into single images",
+                self.split_notes
+            )?;
+        }
+        if !self.disagreements.is_empty() {
+            writeln!(
+                f,
+                "  pack defects     {:>12}   equal-rank disagreements, by rule pair:",
+                total(&self.disagreements)
+            )?;
+            let mut pairs: Vec<(&String, &i64)> = self.disagreements.iter().collect();
+            pairs.sort_by_key(|(k, n)| (-**n, (*k).clone()));
+            for (pair, n) in pairs.iter().take(10) {
+                writeln!(f, "    {n:>6}  {pair}")?;
+            }
+        }
         if self.on_the_threshold() > 0 {
             let mut on: Vec<(&String, &i64)> = self.at_threshold.iter().collect();
             on.sort_by_key(|(axis, n)| (-**n, (*axis).clone()));

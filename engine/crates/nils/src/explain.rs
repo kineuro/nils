@@ -24,7 +24,8 @@ pub(crate) fn document(
 ) -> Result<Option<Value>, StoreError> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT pack, pack_version, contract, overlay, review_items FROM {} WHERE stack_id = {}",
+        "SELECT pack, pack_version, contract, overlay, review_items, {} FROM {} WHERE stack_id = {}",
+        crate::text_of(store, "classification", "notes"),
         store.qualified("classification"),
         d.param(1, Type::Int)
     );
@@ -36,6 +37,14 @@ pub(crate) fn document(
     let contract = m.opt_int(2)?;
     let overlay = m.opt_text(3)?.map(str::to_string);
     let review_items = m.opt_int(4)?.unwrap_or(0);
+    // Record 55 H3 (2026-10-09): what the sort decided without asking, as the
+    // classification keeps it: who beat whom, the answers below the pack's
+    // threshold, the axes no rule answered, the split note and the
+    // equal-rank disagreements. Null for a stack judged before.
+    let notes: Value = m
+        .opt_text(5)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(Value::Null);
     let labels = labels_of(pack_dir, &pack);
 
     let sql = format!(
@@ -199,6 +208,7 @@ pub(crate) fn document(
         "overlay": overlay,
         "review_items": review_items,
         "review": review,
+        "notes": notes,
         "axes": axes_doc,
         // record 48 R2: the door answers a stack read blind with this true
         // and nothing a system said; this reading is never blind
@@ -580,6 +590,73 @@ pub(crate) fn text(doc: &Value) -> String {
             out.push_str(line.trim_end());
             out.push('\n');
         }
+    }
+    // Record 55 H3: what the pack decided without asking anybody.
+    let notes = &doc["notes"];
+    for o in notes["overrides"].as_array().into_iter().flatten() {
+        let value = |v: &Value| match v.as_str() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "(nothing)".to_string(),
+        };
+        out.push_str(&format!(
+            "  {} {} by {}/{} over {}/{} ({}), by {}\n",
+            o["axis"].as_str().unwrap_or_default(),
+            value(&o["value"]),
+            o["by"]["rule_set"].as_str().unwrap_or_default(),
+            o["by"]["rule"].as_str().unwrap_or_default(),
+            o["over"]["rule_set"].as_str().unwrap_or_default(),
+            o["over"]["rule"].as_str().unwrap_or_default(),
+            value(&o["other"]),
+            o["rank"].as_str().unwrap_or_default().replace('_', " ")
+        ));
+    }
+    for b in notes["below"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "  {} {} at {:.2}, below the pack's {:.2} ({}): noted, not asked\n",
+            b["axis"].as_str().unwrap_or_default(),
+            b["value"].as_str().unwrap_or_default(),
+            b["confidence"].as_f64().unwrap_or(0.0),
+            b["below"].as_f64().unwrap_or(0.0),
+            b["tier"].as_str().unwrap_or_default()
+        ));
+    }
+    let unresolved: Vec<&str> = notes["unresolved"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !unresolved.is_empty() {
+        out.push_str(&format!("  no rule answered: {}\n", unresolved.join(", ")));
+    }
+    if let Some(sp) = notes["split"].as_object() {
+        out.push_str(&format!(
+            "  split on {}: {} stacks of {} image(s) in the series\n",
+            sp.get("value").and_then(Value::as_str).unwrap_or_default(),
+            sp.get("stacks_in_series").cloned().unwrap_or(Value::Null),
+            sp.get("n_instances").cloned().unwrap_or(Value::Null)
+        ));
+    }
+    for e in notes["equal_rank"].as_array().into_iter().flatten() {
+        let sides: Vec<String> = e["sides"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|x| {
+                format!(
+                    "{}/{}={}",
+                    x["rule_set"].as_str().unwrap_or_default(),
+                    x["rule"].as_str().unwrap_or_default(),
+                    x["value"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        out.push_str(&format!(
+            "  {}: nothing in the pack ranks {} ({}), a pack defect\n",
+            e["axis"].as_str().unwrap_or_default(),
+            sides.join(" against "),
+            e["why"].as_str().unwrap_or_default().replace('_', " ")
+        ));
     }
     let items = doc["review"].as_array().cloned().unwrap_or_default();
     if let Some(n) = doc["review_items"].as_i64()

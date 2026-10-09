@@ -300,7 +300,65 @@ impl Ctx for Evaluated<'_> {
 // decided (§6.3).
 
 use crate::rules::{AxisPhase, Clause, Rule, Tier, Which};
-use crate::verdict::{AxisVerdict, DIAGNOSTICS_MAX, Diagnostic, Evidence, Verdict, Vote};
+use crate::verdict::{
+    AxisVerdict, DIAGNOSTICS_MAX, Diagnostic, EqualRank, Evidence, Override, Ranked, Side, Verdict,
+    Vote,
+};
+
+/// Who closed an axis (Wave 4c §6.6), so that a later rule reaching it is
+/// recorded against the one that won, with where each stands in the pack's
+/// order (record 55 H3).
+#[derive(Clone)]
+struct Closer {
+    set: String,
+    set_at: usize,
+    rule: String,
+    rule_at: usize,
+    /// The value it stored, as a row stores it.
+    value: String,
+    matched: String,
+    tier: Tier,
+    confidence: f64,
+}
+
+impl Closer {
+    fn ranked(&self) -> Ranked {
+        Ranked {
+            rule_set: self.set.clone(),
+            rule: self.rule.clone(),
+            matched: self.matched.clone(),
+            tier: self.tier.name().to_string(),
+            confidence: self.confidence,
+            rule_set_at: self.set_at,
+            rule_at: self.rule_at,
+        }
+    }
+}
+
+/// One value a rule put on an axis, with the rule that put it there and
+/// where that rule stands in the pack's order.
+struct Hit {
+    value: usize,
+    fired: Fired,
+    set: String,
+    rule: String,
+    set_at: usize,
+    rule_at: usize,
+}
+
+impl Hit {
+    fn ranked(&self) -> Ranked {
+        Ranked {
+            rule_set: self.set.clone(),
+            rule: self.rule.clone(),
+            matched: self.fired.matched.clone(),
+            tier: self.fired.tier.name().to_string(),
+            confidence: self.fired.confidence,
+            rule_set_at: self.set_at,
+            rule_at: self.rule_at,
+        }
+    }
+}
 
 /// The value index a set names: the one it wrote, or the one the rule set
 /// worked out for this stack.
@@ -426,8 +484,7 @@ impl Evaluated<'_> {
             }
         }
         // Per axis: the value indices collected so far, and their evidence.
-        let mut collected: Vec<Vec<(usize, Fired, String, String)>> =
-            (0..pack.axes.len()).map(|_| Vec::new()).collect();
+        let mut collected: Vec<Vec<Hit>> = (0..pack.axes.len()).map(|_| Vec::new()).collect();
         // An axis a rule set has closed: no later set may add to it. A set
         // that collects (a multi-valued axis's own rules) never closes one,
         // which is how several modifiers accumulate while a route's construct
@@ -439,10 +496,10 @@ impl Evaluated<'_> {
         // An axis a set decided again under its `redecides`: once is enough.
         let mut redecided: Vec<bool> = vec![false; pack.axes.len()];
         // Wave 4c §6.6: who closed each axis, so that a later rule reaching
-        // it can be recorded against the one that won. Set, rule, the stored
-        // value and the citation.
-        let mut decided_by: Vec<Option<(String, String, String, String)>> =
-            vec![None; pack.axes.len()];
+        // it can be recorded against the one that won: set, rule, the stored
+        // value, the citation, and (record 55 H3) the tier, the confidence
+        // and the places in the pack's order that ranked it first.
+        let mut decided_by: Vec<Option<Closer>> = vec![None; pack.axes.len()];
         // Record 48: an axis held at a person's answer is decided before
         // anything runs, and closed, so no rule set moves it.
         for (i, pin) in pins.iter().enumerate().take(pack.axes.len()) {
@@ -454,7 +511,7 @@ impl Evaluated<'_> {
             }
         }
 
-        for set in &pack.rule_sets {
+        for (set_at, set) in pack.rule_sets.iter().enumerate() {
             if set.phase != phase {
                 continue;
             }
@@ -511,7 +568,15 @@ impl Evaluated<'_> {
                 if all_closed {
                     for sets in &rule.sets {
                         self.vote(&mut verdict.votes, set, rule, &held, sets, &derived);
-                        self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
+                        self.conflict(
+                            &mut verdict,
+                            (set, set_at),
+                            (rule, ri),
+                            &fired,
+                            sets,
+                            &derived,
+                            &decided_by,
+                        );
                     }
                     continue;
                 }
@@ -536,7 +601,15 @@ impl Evaluated<'_> {
                         self.decided.borrow_mut()[sets.axis].clear();
                     }
                     if closed[sets.axis] {
-                        self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
+                        self.conflict(
+                            &mut verdict,
+                            (set, set_at),
+                            (rule, ri),
+                            &fired,
+                            sets,
+                            &derived,
+                            &decided_by,
+                        );
                         continue;
                     }
                     for v in &sets.values {
@@ -551,9 +624,9 @@ impl Evaluated<'_> {
                             said_nothing[sets.axis] = true;
                             continue;
                         };
-                        collected[sets.axis].push((
+                        collected[sets.axis].push(Hit {
                             value,
-                            Fired {
+                            fired: Fired {
                                 tier: fired.tier,
                                 confidence: rule.confidence.unwrap_or(fired.confidence),
                                 source: fired.source.clone(),
@@ -561,21 +634,27 @@ impl Evaluated<'_> {
                                 text: fired.text,
                                 clause: fired.clause,
                             },
-                            set.name.clone(),
-                            rule.id.clone(),
-                        ));
+                            set: set.name.clone(),
+                            rule: rule.id.clone(),
+                            set_at,
+                            rule_at: ri,
+                        });
                     }
                     // A rule set that decides rather than collects decides
                     // the axis whole: a route replaces the construct list, it
                     // does not add to what an axis's own rules would say.
                     if !set.collect && !set.adds.contains(&sets.axis) {
                         closed[sets.axis] = true;
-                        decided_by[sets.axis] = Some((
-                            set.name.clone(),
-                            rule.id.clone(),
-                            self.would_store(axis, sets, &derived),
-                            fired.matched.clone(),
-                        ));
+                        decided_by[sets.axis] = Some(Closer {
+                            set: set.name.clone(),
+                            set_at,
+                            rule: rule.id.clone(),
+                            rule_at: ri,
+                            value: self.would_store(axis, sets, &derived),
+                            matched: fired.matched.clone(),
+                            tier: fired.tier,
+                            confidence: rule.confidence.unwrap_or(fired.confidence),
+                        });
                     }
                     // A later rule set reads what this one decided. The
                     // conditions are evaluated before the borrow, because
@@ -617,7 +696,7 @@ impl Evaluated<'_> {
                     // recorded across them would cite a word the winning
                     // rule never saw.
                     if fired.source == "text" && fired.text.is_some() {
-                        for later in &set.rules[ri + 1..] {
+                        for (li, later) in set.rules.iter().enumerate().skip(ri + 1) {
                             let Some(also) = self.fire(later) else {
                                 continue;
                             };
@@ -631,8 +710,8 @@ impl Evaluated<'_> {
                                 if closed[sets.axis] && decided_by[sets.axis].is_some() {
                                     self.conflict(
                                         &mut verdict,
-                                        set,
-                                        later,
+                                        (set, set_at),
+                                        (later, li),
                                         &also,
                                         sets,
                                         &derived,
@@ -692,35 +771,87 @@ impl Evaluated<'_> {
             // At most one member of an exclusion group may hold, and the
             // lower priority number wins; a tie keeps the one that comes
             // first in the axis's order, which is what v0 does.
-            let mut winner: std::collections::BTreeMap<&str, (i64, usize)> =
+            let mut winner: std::collections::BTreeMap<&str, (i64, usize, usize)> =
                 std::collections::BTreeMap::new();
-            for (v, ..) in &hits {
-                let Some(g) = axis.values[*v].group.as_deref() else {
+            for (hi, h) in hits.iter().enumerate() {
+                let Some(g) = axis.values[h.value].group.as_deref() else {
                     continue;
                 };
-                let p = axis.values[*v].priority.unwrap_or(i64::MAX);
+                let p = axis.values[h.value].priority.unwrap_or(i64::MAX);
                 match winner.get(g) {
-                    Some((wp, _)) if *wp <= p => {}
+                    Some((wp, ..)) if *wp <= p => {}
                     _ => {
-                        winner.insert(g, (p, *v));
+                        winner.insert(g, (p, h.value, hi));
                     }
                 }
             }
-            hits.retain(|(v, ..)| match axis.values[*v].group.as_deref() {
+            // Record 55 H3: what the group's priority decided over, as
+            // evidence, and a tie at the winner's own priority, which nothing
+            // in the pack ranks, as a defect of the pack.
+            for (g, (wp, wv, wi)) in &winner {
+                let won = &hits[*wi];
+                let mut tied: Vec<Side> = Vec::new();
+                for (hi, h) in hits.iter().enumerate() {
+                    if hi == *wi
+                        || h.value == *wv
+                        || axis.values[h.value].group.as_deref() != Some(*g)
+                    {
+                        continue;
+                    }
+                    let p = axis.values[h.value].priority.unwrap_or(i64::MAX);
+                    if p == *wp {
+                        tied.push(Side {
+                            value: axis.stored(h.value).to_string(),
+                            ranked: h.ranked(),
+                        });
+                    } else {
+                        verdict.overrides.push(Override {
+                            axis: axis.name.clone(),
+                            value: axis.stored(*wv).to_string(),
+                            by: won.ranked(),
+                            other: axis.stored(h.value).to_string(),
+                            over: h.ranked(),
+                            rank: "priority".to_string(),
+                        });
+                    }
+                }
+                if !tied.is_empty() {
+                    let mut sides = vec![Side {
+                        value: axis.stored(*wv).to_string(),
+                        ranked: won.ranked(),
+                    }];
+                    sides.extend(tied);
+                    verdict.equal_rank.push(EqualRank {
+                        axis: axis.name.clone(),
+                        why: "priority_tie".to_string(),
+                        sides,
+                        kept: axis.stored(*wv).to_string(),
+                    });
+                }
+            }
+            hits.retain(|h| match axis.values[h.value].group.as_deref() {
                 None => true,
-                Some(g) => winner.get(g).is_some_and(|(_, w)| w == v),
+                Some(g) => winner.get(g).is_some_and(|(_, w, _)| *w == h.value),
             });
 
             if hits.is_empty() {
                 if said_nothing[ai] {
                     continue;
                 }
-                if axis.default.is_none() && verdict.diagnostics.len() < DIAGNOSTICS_MAX {
-                    verdict.diagnostics.push(Diagnostic {
-                        kind: "axis_unresolved".into(),
-                        axis: axis.name.clone(),
-                        ..Diagnostic::default()
-                    });
+                if axis.default.is_none() {
+                    // An axis that holds several values and holds none says
+                    // "none", which is an answer; one that holds one value
+                    // and holds none was not answered.
+                    if !axis.multi {
+                        verdict.unresolved.push(axis.name.clone());
+                    }
+                    if verdict.diagnostics.len() < DIAGNOSTICS_MAX {
+                        verdict.diagnostics.push(Diagnostic {
+                            kind: "axis_unresolved".into(),
+                            axis: axis.name.clone(),
+                            ..Diagnostic::default()
+                        });
+                    }
                 }
                 if let Some(d) = &axis.default {
                     verdict.axes.push(AxisVerdict {
@@ -745,39 +876,64 @@ impl Evaluated<'_> {
                 continue;
             }
 
-            for (v, fired, set_name, rule_id) in &hits {
+            for h in &hits {
                 verdict.evidence.push(Evidence {
                     axis: axis.name.clone(),
-                    value: axis.stored(*v).to_string(),
-                    tier: fired.tier.name().to_string(),
-                    basis: fired.tier.basis().to_string(),
-                    confidence: fired.confidence,
-                    rule_set: set_name.clone(),
-                    rule: rule_id.clone(),
-                    source: fired.source.clone(),
-                    matched: fired.matched.clone(),
+                    value: axis.stored(h.value).to_string(),
+                    tier: h.fired.tier.name().to_string(),
+                    basis: h.fired.tier.basis().to_string(),
+                    confidence: h.fired.confidence,
+                    rule_set: h.set.clone(),
+                    rule: h.rule.clone(),
+                    source: h.fired.source.clone(),
+                    matched: h.fired.matched.clone(),
                 });
             }
 
             let mut values: Vec<String> = hits
                 .iter()
-                .map(|(v, ..)| axis.stored(*v).to_string())
+                .map(|h| axis.stored(h.value).to_string())
                 .collect();
             if axis.multi {
                 // v0 stores a multi-valued axis sorted and de-duplicated.
                 values.sort();
                 values.dedup();
+            } else {
+                // Record 55 H3: an axis that holds one value and was given
+                // two, by one rule whose values' conditions both held or by a
+                // set that collects: nothing in the pack ranks the one above
+                // the other. The stack keeps both, as it always did, and the
+                // pack is told.
+                let distinct: std::collections::BTreeSet<usize> =
+                    hits.iter().map(|h| h.value).collect();
+                if distinct.len() > 1 {
+                    let one_rule = hits
+                        .iter()
+                        .all(|h| h.set_at == hits[0].set_at && h.rule_at == hits[0].rule_at);
+                    verdict.equal_rank.push(EqualRank {
+                        axis: axis.name.clone(),
+                        why: if one_rule { "one_rule" } else { "collected" }.to_string(),
+                        sides: hits
+                            .iter()
+                            .map(|h| Side {
+                                value: axis.stored(h.value).to_string(),
+                                ranked: h.ranked(),
+                            })
+                            .collect(),
+                        kept: values.join(","),
+                    });
+                }
             }
             let confidence = hits
                 .iter()
-                .map(|(_, f, ..)| f.confidence)
+                .map(|h| h.fired.confidence)
                 .fold(f64::NAN, f64::max);
             verdict.axes.push(AxisVerdict {
                 axis: axis.name.clone(),
                 values,
                 confidence: if confidence.is_nan() { 0.0 } else { confidence },
-                tier: hits[0].1.tier.name().to_string(),
-                basis: hits[0].1.tier.basis().to_string(),
+                tier: hits[0].fired.tier.name().to_string(),
+                basis: hits[0].fired.tier.basis().to_string(),
             });
         }
         // Last, because it reads what was decided.
@@ -862,31 +1018,71 @@ impl Evaluated<'_> {
     }
 
     /// Wave 4c §6.6, `axis_conflict`: a rule fired for an axis an earlier
-    /// set closed, and would have stored something else. The order decided;
-    /// both are recorded. The same answer is agreement and says nothing.
+    /// set, or an earlier rule of its own set, closed, and would have stored
+    /// something else. The order decided; both are recorded. The same answer
+    /// is agreement and says nothing.
+    ///
+    /// Record 55 H3 (2026-10-09): never a question. The pack's ranking
+    /// decided it, so it is kept as evidence on the stack, uncapped, with
+    /// both rules' tiers, confidences and places in the pack's order; the
+    /// capped diagnostic still counts it per batch.
     #[allow(clippy::too_many_arguments)]
     fn conflict(
         &self,
         verdict: &mut Verdict,
-        set: &crate::rules::RuleSet,
-        rule: &Rule,
+        (set, set_at): (&crate::rules::RuleSet, usize),
+        (rule, rule_at): (&Rule, usize),
         fired: &Fired,
         sets: &crate::rules::Sets,
         derived: &[Option<usize>],
-        decided_by: &[Option<(String, String, String, String)>],
+        decided_by: &[Option<Closer>],
     ) {
-        if verdict.diagnostics.len() >= DIAGNOSTICS_MAX {
-            return;
-        }
         let axis = &self.pack.axes[sets.axis];
         let value = self.would_store(axis, sets, derived);
-        let (by_set, by_rule, by_value, by_matched) = match &decided_by[sets.axis] {
-            Some((s, r, v, m)) => (s.clone(), r.clone(), v.clone(), m.clone()),
-            None => (String::new(), String::new(), String::new(), String::new()),
-        };
+        let closer = decided_by[sets.axis].as_ref();
+        let by_value = closer.map(|c| c.value.clone()).unwrap_or_default();
         if value == by_value {
             return;
         }
+        verdict.overrides.push(Override {
+            axis: axis.name.clone(),
+            value: by_value.clone(),
+            by: match closer {
+                Some(c) => c.ranked(),
+                None => Ranked {
+                    rule_set: "answer".to_string(),
+                    rule: String::new(),
+                    matched: String::new(),
+                    tier: "answer".to_string(),
+                    confidence: 1.0,
+                    rule_set_at: 0,
+                    rule_at: 0,
+                },
+            },
+            other: value.clone(),
+            over: Ranked {
+                rule_set: set.name.clone(),
+                rule: rule.id.clone(),
+                matched: fired.matched.clone(),
+                tier: fired.tier.name().to_string(),
+                confidence: rule.confidence.unwrap_or(fired.confidence),
+                rule_set_at: set_at,
+                rule_at,
+            },
+            rank: match closer {
+                None => "answer",
+                Some(c) if c.set_at != set_at => "rule_set_order",
+                Some(_) => "rule_order",
+            }
+            .to_string(),
+        });
+        if verdict.diagnostics.len() >= DIAGNOSTICS_MAX {
+            return;
+        }
+        let (by_set, by_rule, by_matched) = match closer {
+            Some(c) => (c.set.clone(), c.rule.clone(), c.matched.clone()),
+            None => (String::new(), String::new(), String::new()),
+        };
         verdict.diagnostics.push(Diagnostic {
             kind: "axis_conflict".into(),
             axis: axis.name.clone(),

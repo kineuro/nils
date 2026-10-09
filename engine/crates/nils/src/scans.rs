@@ -331,12 +331,14 @@ pub(crate) fn with_names(
     let mut names = nils_release::run::scan_names(registry.store(), pack, &stacks)
         .map_err(|e| Reply::error(500, e.to_string()))?;
     // the open questions too, so the tree marks the scans that need a look
-    // without asking for pictures
+    // without asking for pictures, and what the sort noted
     let questions = open_questions(registry.store(), &stacks).map_err(failed)?;
+    let notes = noted(registry.store(), &stacks).map_err(failed)?;
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();
             scan["questions"] = json!(questions.get(&stack).cloned().unwrap_or_default());
+            scan["notes"] = json!(notes.get(&stack).cloned().unwrap_or_default());
             match names.remove(&stack) {
                 Some(n) => {
                     scan["name"] = json!(n.name);
@@ -389,6 +391,7 @@ pub(crate) fn with_pictures(
         .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
         .unwrap_or_default();
     let questions = open_questions(registry.store(), &stacks).map_err(failed)?;
+    let notes = noted(registry.store(), &stacks).map_err(failed)?;
     let access = &caller.access;
     let why = if !access.holds("query:see") {
         Some("pictures are pixels, which query:see opens")
@@ -471,6 +474,7 @@ pub(crate) fn with_pictures(
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();
             scan["questions"] = json!(questions.get(&stack).cloned().unwrap_or_default());
+            scan["notes"] = json!(notes.get(&stack).cloned().unwrap_or_default());
             scan["picture"] = pictures.remove(&stack).unwrap_or(Value::Null);
         }
     }
@@ -482,6 +486,44 @@ pub(crate) fn with_pictures(
         "place": working.map(|w| w.name),
     });
     Ok(())
+}
+
+/// Record 55 H3 (2026-10-09): what the sort noted on each of `stacks` that
+/// is information and not a question, as `{kind, ...}` objects: the split
+/// note, `{kind: "split:one_image_per_stack", value, stacks_in_series,
+/// n_instances}`, where the stack's series was split into stacks of one
+/// image each.
+fn noted(
+    store: &mut nils_registry::Store,
+    stacks: &[i64],
+) -> Result<HashMap<i64, Vec<Value>>, nils_registry::store::Error> {
+    let mut out: HashMap<i64, Vec<Value>> = HashMap::new();
+    if stacks.is_empty() {
+        return Ok(out);
+    }
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let t = nils_registry::schema::table("classification");
+    let notes = store.dialect().text_of(t.column("notes").expect("notes"));
+    for r in store.query(
+        &format!(
+            "SELECT stack_id, {notes} FROM {} WHERE stack_id IN ({list}) AND notes IS NOT NULL",
+            store.qualified("classification")
+        ),
+        &[],
+    )? {
+        let doc: Value = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        if doc["split"].is_object() {
+            out.entry(r.int(0)?).or_default().push(doc["split"].clone());
+        }
+    }
+    Ok(out)
 }
 
 /// The kinds of the open review questions on each of `stacks`, sorted and

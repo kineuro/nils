@@ -76,6 +76,98 @@ pub struct Diagnostic {
     pub by_matched: String,
 }
 
+/// A rule as it stands in the pack's ranking (record 55 H3, 2026-10-09):
+/// what it said, what it cited, its tier and confidence, and where it sits
+/// in the order the pack runs its rules.
+///
+/// The order is the rank. Rule sets run in the pack's `order`, and an axis a
+/// set decides is closed to every set after it; inside a set that decides,
+/// the first rule that fires decides and the set stops; inside an exclusion
+/// group the lower priority wins. A tier or a confidence never decides who
+/// wins: they are what the winner wrote.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Ranked {
+    pub rule_set: String,
+    pub rule: String,
+    /// What it cited: the flag, the keyword, or the words its condition
+    /// gives for itself.
+    pub matched: String,
+    pub tier: String,
+    pub confidence: f64,
+    /// Its rule set's place among the sets the pack runs, from 0.
+    pub rule_set_at: usize,
+    /// Its own place in that set, from 0.
+    pub rule_at: usize,
+}
+
+/// One answer the pack's ranking decided over another (record 55 H3,
+/// 2026-10-09): never a question, kept on the stack's classification as
+/// evidence of who beat whom.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Override {
+    pub axis: String,
+    /// What the winner stored.
+    pub value: String,
+    pub by: Ranked,
+    /// What the rule it was decided over would have stored.
+    pub other: String,
+    pub over: Ranked,
+    /// What ranked the one above the other: `rule_set_order` (an earlier
+    /// rule set closed the axis), `rule_order` (an earlier rule of the same
+    /// set fired first), `priority` (a lower priority of one exclusion group)
+    /// or `answer` (a person's answer held the axis).
+    pub rank: String,
+}
+
+/// One side of an equal-rank disagreement.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Side {
+    pub value: String,
+    #[serde(flatten)]
+    pub ranked: Ranked,
+}
+
+/// Two answers on one axis that nothing in the pack's ranking puts one above
+/// the other (record 55 H3, 2026-10-09): a defect of the pack, reported to
+/// whoever tunes it and never a question.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EqualRank {
+    pub axis: String,
+    /// Why nothing ranked them: `one_rule` (one rule set two values on an
+    /// axis that holds one), `collected` (rules of a set that collects wrote
+    /// two values on an axis that holds one) or `priority_tie` (two values of
+    /// one exclusion group at the same priority, where the first collected
+    /// is kept).
+    pub why: String,
+    pub sides: Vec<Side>,
+    /// What the stack carries: the values as a row stores them.
+    pub kept: String,
+}
+
+impl EqualRank {
+    /// Each pair of sides that disagree, as `axis: set/rule=value |
+    /// set/rule=value` with the two sides in a fixed order, so the same two
+    /// rules disagreeing on many stacks are one line.
+    pub fn pairs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, a) in self.sides.iter().enumerate() {
+            for b in &self.sides[i + 1..] {
+                if a.value == b.value {
+                    continue;
+                }
+                let one = format!("{}/{}={}", a.ranked.rule_set, a.ranked.rule, a.value);
+                let two = format!("{}/{}={}", b.ranked.rule_set, b.ranked.rule, b.value);
+                let (x, y) = if one <= two { (one, two) } else { (two, one) };
+                let line = format!("{}: {x} | {y}", self.axis);
+                if !out.contains(&line) {
+                    out.push(line);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// One witness on one stack (record 41, S2): a clause of a rule that held,
 /// and the value its rule says for one axis.
 ///
@@ -203,6 +295,22 @@ pub struct Verdict {
     /// with its votes. Empty otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub votes: Vec<Vote>,
+    /// Record 55 H3: every answer the ranking decided over another, uncapped,
+    /// with both rules' tiers and confidences. The `axis_conflict`
+    /// diagnostics count the same cases per batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<Override>,
+    /// Record 55 H3: the answers on one axis nothing ranked, a defect of the
+    /// pack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equal_rank: Vec<EqualRank>,
+    /// The axes of this phase that hold one value, that no rule named a
+    /// value for and that have no default, uncapped: what `axis_unresolved`
+    /// counts, less the multi-valued axes, whose empty set is the answer
+    /// "none". An axis a rule decided to be nothing is not here either; that
+    /// is an answer too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
 }
 
 impl Verdict {

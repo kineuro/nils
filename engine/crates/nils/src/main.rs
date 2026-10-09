@@ -37,6 +37,7 @@ mod chain;
 mod dataset;
 mod depends;
 mod derivatives;
+mod disagreements;
 mod door_client;
 mod explain;
 mod file_header;
@@ -4047,14 +4048,25 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         );
                     }
                 }
+                // record 55 H3: a weak answer is noted below its threshold and
+                // never asked; a missing one is asked where the axis matters
+                let asks_missing = nils_pack::matters::missing_asked(&pack);
+                let matters = nils_pack::matters::of(&pack);
                 for a in &pack.axes {
-                    let asked = if pack.review.asks_when_missing(&a.name) {
+                    let asked = if asks_missing.contains(&a.name) {
                         ", asked when missing"
+                    } else if pack.review.by_model.contains(&a.name) {
+                        ", left to its image model"
+                    } else {
+                        ""
+                    };
+                    let matters = if matters.contains(&a.name) {
+                        ", matters"
                     } else {
                         ""
                     };
                     println!(
-                        "  axis    {:20} {:3} values, asked below {:.2}{asked}",
+                        "  axis    {:20} {:3} values, weak below {:.2}{matters}{asked}",
                         a.name,
                         a.values.len(),
                         pack.review.below(&a.name)
@@ -11436,6 +11448,7 @@ pub(crate) fn pack_document(
     overlays: &[nils_registry::overlay::Overlay],
 ) -> serde_json::Value {
     use serde_json::json;
+    let asks_missing = nils_pack::matters::missing_asked(pack);
     // The site's adopted edits per list, named as the pack names it: a
     // bucket by name, a value as axis.identity whatever the overlay wrote.
     #[derive(Default)]
@@ -11512,6 +11525,12 @@ pub(crate) fn pack_document(
             },
             "missing": pack.review.missing,
             "silent_when": pack.review.silent_when.is_some(),
+            // record 55 H3 (2026-10-09): the axes left to an image model, and
+            // the axes where a missing answer is asked, each that matters
+            // with why
+            "by_model": pack.review.by_model,
+            "asks_missing": asks_missing,
+            "matters": nils_pack::matters::of(pack).axes,
         },
         "axes": pack.axes.iter().map(|a| json!({
             "axis": a.name,
@@ -11521,7 +11540,7 @@ pub(crate) fn pack_document(
             "default": a.default,
             "count": a.values.len(),
             "review_below": pack.review.below(&a.name),
-            "asks_when_missing": pack.review.asks_when_missing(&a.name),
+            "asks_when_missing": asks_missing.contains(&a.name),
             "values": a.values.iter().map(|v| {
                 let list = format!("{}.{}", a.name, v.id);
                 let amendable = pack.lists.contains(&list);

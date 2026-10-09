@@ -359,7 +359,8 @@ pub(crate) fn why(
     }
     let d = store.dialect();
     let sql = format!(
-        "SELECT pack, pack_version FROM {} WHERE stack_id = {}",
+        "SELECT pack, pack_version, {} FROM {} WHERE stack_id = {}",
+        crate::text_of(store, "classification", "notes"),
         store.qualified("classification"),
         d.param(1, Type::Int)
     );
@@ -367,6 +368,39 @@ pub(crate) fn why(
         return Ok(None);
     };
     let (pack_name, pack_version) = (m.text(0)?.to_string(), m.text(1)?.to_string());
+    // Record 55 H3 (2026-10-09): what the pack's ranking decided over, and
+    // the answers below its threshold, as the classification keeps them:
+    // evidence beside the rule that decided, never a question.
+    let notes: Value = m
+        .opt_text(2)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(Value::Null);
+    let mut overridden: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for o in notes["overrides"].as_array().into_iter().flatten() {
+        let mut v = json!({
+            "rule_set": o["over"]["rule_set"], "rule": o["over"]["rule"],
+            "value": o["other"], "tier": o["over"]["tier"],
+            "basis": nils_pack::basis_of(o["over"]["tier"].as_str().unwrap_or_default()),
+            "confidence": o["over"]["confidence"], "rank": o["rank"],
+            "by": {"rule_set": o["by"]["rule_set"], "rule": o["by"]["rule"],
+                   "tier": o["by"]["tier"], "confidence": o["by"]["confidence"]},
+        });
+        if quasi {
+            v["matched"] = o["over"]["matched"].clone();
+            v["by"]["matched"] = o["by"]["matched"].clone();
+        }
+        overridden
+            .entry(o["axis"].as_str().unwrap_or_default().to_string())
+            .or_default()
+            .push(v);
+    }
+    let mut below: BTreeMap<String, Value> = BTreeMap::new();
+    for b in notes["below"].as_array().into_iter().flatten() {
+        below.insert(
+            b["axis"].as_str().unwrap_or_default().to_string(),
+            json!({"confidence": b["confidence"], "below": b["below"], "tier": b["tier"]}),
+        );
+    }
     // the pack the reader is served, when it is the one that judged
     let pack = pack.filter(|p| p.name == pack_name);
     let same_version = pack.is_some_and(|p| p.version.to_string() == pack_version);
@@ -602,6 +636,14 @@ pub(crate) fn why(
             "disagree": said.len() > 1,
             "line": line,
         });
+        // record 55 H3: the rules this answer was decided over, and a weak
+        // answer, both noted and never asked
+        if let Some(o) = overridden.remove(axis) {
+            entry["overridden"] = json!(o);
+        }
+        if let Some(b) = below.remove(axis) {
+            entry["below"] = b;
+        }
         // System 1's word, only where it asked
         if let Some(s1) = s1 {
             entry["s1"] = json!(s1);
@@ -628,6 +670,11 @@ pub(crate) fn why(
             "candidates": ev["candidates"],
         })),
         "axes": out_axes,
+        // record 55 H3: the axes no rule answered, and what was decided over
+        // on an axis the rules decided to be nothing, which has no entry in
+        // `axes`
+        "unresolved": notes["unresolved"].as_array().cloned().unwrap_or_default(),
+        "overridden": overridden,
     })))
 }
 
