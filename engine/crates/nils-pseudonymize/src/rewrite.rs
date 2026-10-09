@@ -19,7 +19,7 @@ use nils_dicom::{Framed, QuarantineClass, Refusal};
 use nils_digest::rule::{Ident, Rule};
 use nils_pack::private::Allowed;
 use nils_release::policy::{Policy, Uids};
-use nils_release::scrub::{self, Applied, Plan};
+use nils_release::scrub::{self, Applied, Plan, Writer};
 use nils_release::tags::Category;
 
 use crate::layout::Facts;
@@ -124,10 +124,13 @@ impl<'a> Scrub<'a> {
 
     /// The plan one file is rewritten under, under the subject's `code`: the
     /// four categories, the policy that keeps the dates and the UIDs, and
-    /// the dataset's own lists. One statement of it, so that what the door
+    /// the dataset's own lists. The plan also takes the accession number and
+    /// the study id out of every file, whatever the lists keep
+    /// (`scrub::EXAMINATION_IDS`). One statement of it, so that what the door
     /// of record 28 serves and what a file meets cannot part company.
     pub fn plan<'p>(&'p self, code: &'p str) -> Plan<'p> {
         Plan {
+            writer: Writer::Pseudonymise,
             policy: &self.policy,
             categories: &CATEGORIES,
             private: self.private,
@@ -306,6 +309,8 @@ mod tests {
         e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "7"));
         e.push(synth::text(tags::INSTANCE_NUMBER, VR::IS, "42"));
         e.push(synth::text(tags::INSTITUTION_NAME, VR::LO, "Somewhere"));
+        e.push(synth::text(tags::ACCESSION_NUMBER, VR::SH, "A00000001"));
+        e.push(synth::text(tags::STUDY_ID, VR::SH, "S0001"));
         e.push(synth::text(Tag(0x0019, 0x0010), VR::LO, "A VENDOR"));
         e.push(synth::text(Tag(0x0019, 0x100C), VR::IS, "1000"));
         e.push(synth::text(Tag(0x0019, 0x1099), VR::LO, "the operator"));
@@ -333,7 +338,9 @@ mod tests {
             element: 0x0C,
             why: "a test".into(),
         }];
-        let keep = [tags::PATIENT_SEX];
+        // a dataset that names the examination's numbers to keep keeps
+        // neither (Nima's ruling of 2026-10-09)
+        let keep = [tags::PATIENT_SEX, tags::ACCESSION_NUMBER, tags::STUDY_ID];
         let scrub = Scrub::new(&allowed, &keep, &[]);
         let target = dir.path().join("out/x.dcm");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -368,6 +375,8 @@ mod tests {
         );
         assert_eq!(text(ds, tags::SOP_INSTANCE_UID).as_deref(), Some("1.2.3.3"));
         assert_eq!(text(ds, tags::INSTITUTION_NAME), None);
+        assert!(ds.get(tags::ACCESSION_NUMBER).is_none());
+        assert!(ds.get(tags::STUDY_ID).is_none());
         assert_eq!(text(ds, Tag(0x0019, 0x100C)).as_deref(), Some("1000"));
         assert_eq!(text(ds, Tag(0x0019, 0x1099)), None);
         assert_eq!(
@@ -379,6 +388,33 @@ mod tests {
             "1.2.3.3"
         );
         assert!(outcome.applied.total("removed") >= 4);
+        // the marks of spec Wave 7a §6.1: the dates, the covariates, the
+        // device serial number and the UIDs kept, and the private element
+        // the allowlist names
+        assert_eq!(
+            text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("YES")
+        );
+        assert_eq!(
+            text(ds, tags::DEIDENTIFICATION_METHOD),
+            Some(format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            text(ds, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED).as_deref(),
+            Some("UNMODIFIED")
+        );
+        let codes: Vec<String> = ds
+            .get(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|i| text(i, tags::CODE_VALUE).unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            ["113100", "113106", "113108", "113109", "113110", "113111"]
+        );
         // the pixels read back as an element of the right length
         let whole = dicom_object::OpenFileOptions::new()
             .open_file(&target)

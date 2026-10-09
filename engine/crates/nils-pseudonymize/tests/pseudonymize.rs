@@ -92,6 +92,8 @@ fn original(patient: &str, study: u32, series: u32, instance: u32, description: 
         "Somewhere General",
     ));
     e.push(synth::text(tags::STATION_NAME, VR::SH, "MR1"));
+    e.push(synth::text(tags::ACCESSION_NUMBER, VR::SH, "A00000001"));
+    e.push(synth::text(tags::STUDY_ID, VR::SH, "S0001"));
     e.push(synth::text(tags::DEVICE_SERIAL_NUMBER, VR::LO, "SN-0001"));
     e.push(synth::text(
         tags::REFERRING_PHYSICIAN_NAME,
@@ -252,7 +254,7 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
     let place = declare(
         &mut registry,
         dir.path(),
-        json!({"keep_demographics": true, "remove": ["0018,1000"], "keep": ["0008,1010"]}),
+        json!({"keep_demographics": true, "remove": ["0018,1000"], "keep": ["0008,1010", "0008,0050"]}),
     );
     let s = settings(&place);
     assert_eq!(s.originals, originals);
@@ -308,6 +310,13 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         None,
         "the dataset's keep list wins"
     );
+    for examination in ["(0008,0050)", "(0020,0010)"] {
+        assert_eq!(
+            report.tags_removed.get(examination),
+            Some(&12),
+            "{examination}: removed whatever the dataset keeps"
+        );
+    }
     assert_eq!(
         report.tags_removed.get("(0010,0040)"),
         None,
@@ -351,6 +360,50 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         assert_eq!(parts[2].len(), 3);
         assert!(parts[3].ends_with(".dcm") && parts[3].len() == 9, "{rel:?}");
         assert!(!path.with_extension("dcm.part").exists());
+    }
+    // T7 (spec Wave 7a §6.1): every copy says it was de-identified, by
+    // whom, and under the options this run's plan applies: the dates, the
+    // covariates, the station name the dataset keeps (its device identity;
+    // the serial number its own list removes), the UIDs, and the private
+    // element the allowlist keeps.
+    for path in &written {
+        let read = nils_dicom::read(path).unwrap();
+        let ds = &read.dataset;
+        // Nima's ruling of 2026-10-09: the accession number and the study id
+        // are gone from every copy, though the dataset names the first to
+        // keep, so the basic profile below is true of the file.
+        assert!(
+            ds.get(tags::ACCESSION_NUMBER).is_none(),
+            "{}",
+            path.display()
+        );
+        assert!(ds.get(tags::STUDY_ID).is_none(), "{}", path.display());
+        assert_eq!(
+            text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("YES")
+        );
+        assert_eq!(
+            text(ds, tags::DEIDENTIFICATION_METHOD),
+            Some(format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            text(ds, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED).as_deref(),
+            Some("UNMODIFIED")
+        );
+        let codes: Vec<String> = ds
+            .get(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|i| text(i, tags::CODE_VALUE).unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            ["113100", "113106", "113108", "113109", "113110", "113111"],
+            "{}",
+            path.display()
+        );
     }
     // one of them against its source: the code in, the identifiers out,
     // the dates and UIDs kept, the pixels the same bytes

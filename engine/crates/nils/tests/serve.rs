@@ -368,8 +368,31 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(policy["code"]["fate"], "replaced", "{policy}");
     assert_eq!(policy["mandatory"][0]["tag"], "0008,0016", "{policy}");
     assert_eq!(policy["mandatory"][1]["tag"], "0008,0018", "{policy}");
+    // The accession number and the study id leave every file (2026-10-09).
+    assert_eq!(policy["examination"][0]["tag"], "0008,0050", "{policy}");
+    assert_eq!(policy["examination"][1]["tag"], "0020,0010", "{policy}");
     assert_eq!(
         policy["covariates"]["opt_out"], "keep_demographics",
+        "{policy}"
+    );
+    // Wave 7a §6.2: the version a cache keys on, a reason on every row, and
+    // the marks every pseudonymised file carries, per writer.
+    assert_eq!(policy["version"], env!("CARGO_PKG_VERSION"), "{policy}");
+    assert!(
+        policy["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["reason"].is_string()),
+        "{policy}"
+    );
+    assert_eq!(policy["marks"]["tags"][0]["tag"], "0012,0062", "{policy}");
+    assert_eq!(
+        policy["marks"]["writers"][0]["writer"], "pseudonymise",
+        "{policy}"
+    );
+    assert_eq!(
+        policy["marks"]["writers"][1]["writer"], "release",
         "{policy}"
     );
 
