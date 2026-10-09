@@ -56,7 +56,10 @@ pub fn kind_of(method: &str, url: &str, bearer: Option<&str>, remote: Option<&st
     let picture = segs.next() == Some("api")
         && segs.next() == Some("instances")
         && segs.next().is_some()
-        && matches!(segs.next(), Some("tiles" | "slab" | "render" | "thumb"));
+        && matches!(
+            segs.next(),
+            Some("tiles" | "slab" | "render" | "thumb" | "preview")
+        );
     if !picture {
         return Kind::Other;
     }

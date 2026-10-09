@@ -854,7 +854,10 @@ pub fn next_queued(store: &mut Store) -> Result<Option<Job>, Error> {
 
 /// Which queued jobs a worker takes (record 49 A1): pipeline runs have a
 /// lane of their own, so a long run never holds up a digest, a classify
-/// or a release, which the main lane runs.
+/// or a release, which the main lane runs. Record 55 H2: so do the
+/// pyramids, built in the background after a sort on the pictures lane, so
+/// they never hold up a digest, a classify or a pseudonymise, and a sort
+/// never holds up a picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
     /// Every queued job, oldest first: a worker started by hand.
@@ -863,6 +866,8 @@ pub enum Lane {
     Main,
     /// Pipeline runs only.
     Pipelines,
+    /// Pyramid builds only (record 55 H2).
+    Pictures,
 }
 
 impl Lane {
@@ -871,6 +876,7 @@ impl Lane {
             Lane::All => "all",
             Lane::Main => "main",
             Lane::Pipelines => "pipelines",
+            Lane::Pictures => "pictures",
         }
     }
 
@@ -879,6 +885,7 @@ impl Lane {
             "all" => Some(Lane::All),
             "main" => Some(Lane::Main),
             "pipelines" => Some(Lane::Pipelines),
+            "pictures" => Some(Lane::Pictures),
             _ => None,
         }
     }
@@ -888,6 +895,7 @@ impl Lane {
         match self {
             Lane::All | Lane::Main => "worker",
             Lane::Pipelines => PIPELINE_WORKER,
+            Lane::Pictures => PICTURE_WORKER,
         }
     }
 }
@@ -895,19 +903,38 @@ impl Lane {
 /// The kind of the pipeline lane's worker row.
 pub const PIPELINE_WORKER: &str = "pipeline-worker";
 
+/// The kind of the pictures lane's worker row (record 55 H2).
+pub const PICTURE_WORKER: &str = "picture-worker";
+
 /// Whether a job's kind is a worker's own row, which the job lists leave
 /// out unless asked for everything.
 pub fn is_worker(kind: &str) -> bool {
-    kind == "worker" || kind == PIPELINE_WORKER
+    kind == "worker" || kind == PIPELINE_WORKER || kind == PICTURE_WORKER
+}
+
+/// The queued jobs a lane takes, oldest first, at most `limit`.
+pub fn queued_in(store: &mut Store, lane: Lane, limit: usize) -> Result<Vec<Job>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE state = 'queued'{} ORDER BY id LIMIT {limit}",
+        select_columns(store),
+        store.qualified("job"),
+        lane_filter(lane),
+    );
+    store.query(&sql, &[])?.iter().map(job_of).collect()
+}
+
+fn lane_filter(lane: Lane) -> &'static str {
+    match lane {
+        Lane::All => "",
+        Lane::Main => " AND kind NOT IN ('pipeline', 'pyramid')",
+        Lane::Pipelines => " AND kind = 'pipeline'",
+        Lane::Pictures => " AND kind = 'pyramid'",
+    }
 }
 
 /// The oldest queued job a lane takes, if any.
 pub fn next_queued_in(store: &mut Store, lane: Lane) -> Result<Option<Job>, Error> {
-    let filter = match lane {
-        Lane::All => "",
-        Lane::Main => " AND kind <> 'pipeline'",
-        Lane::Pipelines => " AND kind = 'pipeline'",
-    };
+    let filter = lane_filter(lane);
     let sql = format!(
         "SELECT {} FROM {} WHERE state = 'queued'{filter} ORDER BY id LIMIT 1",
         select_columns(store),

@@ -305,6 +305,147 @@ pub(crate) fn page(
     Ok(doc)
 }
 
+/// Record 55 H2 (E2): a page of scans with what the grid draws, so a page
+/// of fifty is one request. Each scan gains `questions`, the kinds of the
+/// open review questions on its stack (a classifier's grouped question
+/// under each of its members, and a question about the stack alone), so
+/// the desk can mark the scans that need a look; and `picture`, its own
+/// middle plane from the preview its sort made, as a data URL
+/// `{data, width, height, digest, held}`, or null where no preview is made
+/// yet (made now on a thread of the engine, never through the queue, so
+/// the page after has it). Pictures are pixels: they are shown as the
+/// instance doors show them, with query:see at detail quasi, one
+/// `instance.open` audit row a stack in the window, and the band held
+/// below detail sensitive where the stack carries burned-in annotation;
+/// below that every `picture` is null and `pictures.shown` false with why.
+pub(crate) fn with_pictures(
+    registry: &mut Registry,
+    caller: &crate::serve::Caller,
+    home: &nils_registry::home::Home,
+    doc: &mut Value,
+) -> Result<(), Reply> {
+    let stacks: Vec<i64> = doc["scans"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
+        .unwrap_or_default();
+    let questions = open_questions(registry.store(), &stacks).map_err(failed)?;
+    let access = &caller.access;
+    let why = if !access.holds("query:see") {
+        Some("pictures are pixels, which query:see opens")
+    } else if access.detail < Detail::Quasi {
+        Some("pictures are quasi-identifying; detail quasi opens them")
+    } else {
+        None
+    };
+    let working = crate::pyramid::working_place_cached(registry.store()).ok();
+    let mut pictures: HashMap<i64, Value> = HashMap::new();
+    let mut missing = Vec::new();
+    if let (None, Some(w)) = (why, &working) {
+        let root = std::path::Path::new(&w.path);
+        let plain: Vec<std::path::PathBuf> = stacks
+            .iter()
+            .map(|s| crate::preview::path(root, *s, false))
+            .collect();
+        let mut opened = crate::preview::opened_many(&plain);
+        // the band held below detail sensitive: the held file of a stack
+        // that carries burned-in annotation
+        let sensitive = access.detail >= Detail::Sensitive;
+        for (i, o) in opened.iter_mut().enumerate() {
+            if let Some(found) = o
+                && found.header.burned_in
+                && !sensitive
+            {
+                *o = crate::preview::opened(&crate::preview::path(root, stacks[i], true))
+                    .ok()
+                    .flatten();
+            }
+        }
+        for (stack, o) in stacks.iter().zip(opened) {
+            match o.as_ref().and_then(|o| o.middle("axial").map(|m| (o, m))) {
+                Some((o, (jpeg, b))) => {
+                    crate::pyramid::note_open(registry, caller, *stack, None, 0, "list")
+                        .map_err(|e| Reply::error(500, e))?;
+                    pictures.insert(
+                        *stack,
+                        json!({
+                            "data": crate::preview::data_url(jpeg),
+                            "width": b.width,
+                            "height": b.height,
+                            "digest": o.header.digest,
+                            "held": o.header.held,
+                        }),
+                    );
+                }
+                None => missing.push(*stack),
+            }
+        }
+        crate::preview::warm(home, root, &missing);
+    }
+    if let Some(scans) = doc["scans"].as_array_mut() {
+        for scan in scans {
+            let stack = scan["stack"].as_i64().unwrap_or_default();
+            scan["questions"] = json!(questions.get(&stack).cloned().unwrap_or_default());
+            scan["picture"] = pictures.remove(&stack).unwrap_or(Value::Null);
+        }
+    }
+    doc["pictures"] = json!({
+        "shown": why.is_none() && working.is_some(),
+        "why": why.or(working.is_none().then_some("no working place is bound, where previews are kept")),
+        "missing": missing.len(),
+        "place": working.map(|w| w.name),
+    });
+    Ok(())
+}
+
+/// The kinds of the open review questions on each of `stacks`, sorted and
+/// each once: grouped questions through their members, and questions
+/// about one stack through their reference.
+fn open_questions(
+    store: &mut nils_registry::Store,
+    stacks: &[i64],
+) -> Result<HashMap<i64, BTreeSet<String>>, nils_registry::store::Error> {
+    let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
+    if stacks.is_empty() {
+        return Ok(out);
+    }
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let items = store.qualified("review_item");
+    let members = store.qualified("review_member");
+    for r in store.query(
+        &format!(
+            "SELECT m.stack_id, i.kind FROM {members} m JOIN {items} i ON i.id = m.item_id \
+             WHERE i.status = 'open' AND m.stack_id IN ({list})"
+        ),
+        &[],
+    )? {
+        out.entry(r.int(0)?)
+            .or_default()
+            .insert(r.text(1)?.to_string());
+    }
+    // a question about one stack names it in its reference, which the two
+    // backends spell apart as text: read and matched here, not in SQL
+    let wanted: BTreeSet<i64> = stacks.iter().copied().collect();
+    let t = nils_registry::schema::table("review_item");
+    let reference = store.dialect().text_of(t.column("ref").expect("ref"));
+    for r in store.query(
+        &format!("SELECT kind, {reference} FROM {items} WHERE status = 'open' AND scope = 'stack'"),
+        &[],
+    )? {
+        let stack = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str::<Value>(t).ok())
+            .and_then(|v| v["stack_id"].as_i64());
+        if let Some(stack) = stack.filter(|s| wanted.contains(s)) {
+            out.entry(stack).or_default().insert(r.text(0)?.to_string());
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::shape;
