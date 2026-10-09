@@ -134,6 +134,17 @@
 # subject's code, the day and a session label made from a date are
 # answered as their shapes (K7). A stack of a sample sealed now is not
 # listed.
+#
+# Added in place, additively, on 2026-10-09 by record 55 (H2, round 4:
+# the Data card says how sure a sort is, and picking main scans is a
+# pipeline step after the sort). A source's `totals` on GET /api/sources
+# gain `sure`, `unsorted` and `need_a_look` {kind: stacks}; `to_sort` also
+# counts a stack a stack-scoped question asks about. GET /api/review and
+# GET /api/review/summary take `dataset`. A sort that ends done at the
+# worker is followed by `pick run --after-sort JOB` for the subjects it
+# judged, unless a dataset's `picks` is `off` (a new dataset field,
+# `after_sort` by default); the run's job keeps its report as its result,
+# per role. GET /api/picks/summary answers a dataset's picks per role.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -333,19 +344,21 @@ paths:
         - {name: status, in: query, schema: {type: string}}
         - {name: kind, in: query, schema: {type: string}}
         - {name: cohort, in: query, schema: {type: string}, description: A cohort's name}
+        - {name: dataset, in: query, schema: {type: string}, description: "Added in place on 2026-10-09 (record 55 H2, round 4): a dataset's name or id. Keeps the items about the dataset: a grouped item with a member stack its digests created first, an item about one of its stacks or series, about one of its batches, or about a subject alone (a pick border, an unmapped or provisional subject) whose subject has a stack of the dataset. With `cohort` too, the items of both. What the Data card's Review button opens."}
         - {name: limit, in: query, schema: {type: integer, default: 50}}
       responses:
         "200": {description: "{count, items}; each item is contracts/review-item v2"}
-        "404": {description: No cohort so named}
+        "404": {description: No cohort or dataset so named}
   /api/review/summary:
     get:
       summary: The open review items by kind and by cohort (record 26 section 10; review:see)
       description: "`by_kind` counts the open items by kind, of the cohort named when one is; `cohorts` is every cohort in force with its open items, a subject in two cohorts counted in each; `none` is the open items whose subject is in no cohort, those about no subject among them."
       parameters:
         - {name: cohort, in: query, schema: {type: string}, description: Narrow by_kind to this cohort's items}
+        - {name: dataset, in: query, schema: {type: string}, description: "Added in place on 2026-10-09 (record 55 H2, round 4): narrow by_kind to the open items about this dataset (name or id), as GET /api/review keeps them; the reply names it in `dataset`"}
       responses:
-        "200": {description: "{by_kind: {kind: count}, cohorts: [{name, open}], none}"}
-        "404": {description: No cohort so named}
+        "200": {description: "{by_kind: {kind: count}, cohorts: [{name, open}], none, dataset (with `dataset` only)}"}
+        "404": {description: No cohort or dataset so named}
   /api/review/{id}:
     get:
       summary: One review item with its members (nils review show)
@@ -527,6 +540,18 @@ paths:
         "403": {description: No pipelines:work}
         "404": {description: No such cohort, dataset or stored scheme}
         "409": {description: No pack of that name that declares picks is served}
+  /api/picks/summary:
+    get:
+      summary: What picking main scans found for a dataset's subjects, per role (record 55 H2, round 4, added in place 2026-10-09; data:see or pipelines:see)
+      description: "Picking main scans is a pipeline step after the sort: a sort that ends done at the worker is followed by `pick run --after-sort JOB`, which decides the occasions of the subjects the sort judged with the sort's pack and its `picks/main.yml`, scored against the whole registry as any run is, leaving out the subjects of a dataset whose `picks` is `off`; a chain that names its own pick run (the bring-in of a dataset that feeds a cohort) keeps it, and a pack that declares no picks ends the step done with nothing chosen. Its job, like any pick run's, keeps the run's report as its result: {sessions, written, empty, standing, raised, tied, borders{reason: n}, reference, only, subjects, datasets, roles{role: {sessions, picked, clear, empty, tied, standing, raised, borders{reason: n}}}, job, seconds}. This door counts what the picks of the dataset's subjects (those whose files a digest read from its pseudonymised tree, as `pick run --dataset` decides them) are now, per role: `picked`, the occasions with a pick that applies (a person's pick, or the run's where no person's stands); `tied`, those whose two best candidates scored the same; `review_items`, the open or staged pick.border items on the dataset's occasions, and `borders`, their reasons counted ({too_close, rare, nothing_eligible, retake, ...: n}; an occasion with nothing eligible has no pick and is counted here); `clear`, the picked occasions with no open border and no tie, nothing for a person to look at. `review_items` beside `roles` is their sum. `last_run` is the newest pick run that decided the dataset's subjects (one for the dataset, one after a sort whose report names it in `datasets`, or one for the whole registry), {job, state, finished_at, report}, or null. `picks` is the dataset's setting. With `scheme`, the picks made under that stored scheme alone. Every number is a count."
+      parameters:
+        - {name: dataset, in: query, required: true, schema: {type: string}, description: "A dataset's name (with or without @) or id"}
+        - {name: scheme, in: query, schema: {type: string}, description: A stored session scheme's name}
+      responses:
+        "200": {description: "{dataset, dataset_id, picks: after_sort | off, subjects, scheme, roles: {role: {picked, clear, tied, borders: {reason: n}, review_items}}, review_items, last_run: {job, state, finished_at, report} | null}"}
+        "400": {description: No dataset named}
+        "403": {description: Neither data:see nor pipelines:see}
+        "404": {description: No dataset of that name or id}
   /api/timeline/{kind}/{id}:
     get:
       summary: Every event on one object in order, typed, each with the object it produced (Wave 5 section 12.2)
@@ -1274,12 +1299,12 @@ paths:
   /api/sources:
     get:
       summary: Every place with the source role, the dataset it is, its digests and its totals, for the desk's Data page
-      description: "A source's roots are the ingest roots under the place's path. Its studies, sessions and stacks are the ones its digests created first, so something seen from two sources counts under the first; since version 5 its subjects are the subjects whose files the dataset's tree holds, whoever made them, since a map makes the subjects of a dataset and its digests meet them (`GET /api/batches/{id}` counts a batch's digested subjects the same way). The newest digests are given in full: the files seen, new, changed, unchanged and refused, the subjects and stacks each added, how many of those stacks are classified and how many wait for a person. Since version 5 each source carries its dataset (record 26): `arrives` (identified, deidentified, coded), `trees` (`originals` with its path and the files and bytes the last probe counted, or null for a dataset with none; `anon` with its path, files, bytes and when it was last written), `identity` (the rule's identity block or null), `unmapped` (hold, code), `cohort` (a name or null), `tags` ({keep_demographics, remove[], keep[]}), `originals_kept` (kept, vaulted, purged) and `originals_vault` (the name of the place a vault put the originals in, null where none has), both written by the acts on the originals and never by a declaration, which those doors refuse and `held` ({files, identifiers}, the files waiting for a map, held by the pseudonymiser of an identified dataset or by a digest of one read in place); each recent digest carries `pseudonymised` ({files, changed, held, job, batch}, the pseudonymise step of the same name before it), null where none precedes it, and `chain`, the jobs of its thread by stage ({pseudonymize, digest, classify[]}, `pseudonymize` null where no pseudonymise step precedes it and `classify` the runs that sorted its stacks); a pseudonymise step is not a digest and is not listed as one. The document carries `rates {pseudonymize, digest}`, each `{files_per_s, files}` or null: the last run of that step that ended done on this machine and read or wrote at least a hundred files, else the largest run there was, with the files it was measured over beside it, since a run of twenty files times the cost of starting a run rather than the machine. The tree counts are the ones the last probe kept, never a walk on every call; `?probe=1` counts the trees again first, bounded. Never a row of a person: every number is a count."
+      description: "A source's roots are the ingest roots under the place's path. Its studies, sessions and stacks are the ones its digests created first, so something seen from two sources counts under the first; since version 5 its subjects are the subjects whose files the dataset's tree holds, whoever made them, since a map makes the subjects of a dataset and its digests meet them (`GET /api/batches/{id}` counts a batch's digested subjects the same way). The newest digests are given in full: the files seen, new, changed, unchanged and refused, the subjects and stacks each added, how many of those stacks are classified and how many wait for a person. Since version 5 each source carries its dataset (record 26): `arrives` (identified, deidentified, coded), `trees` (`originals` with its path and the files and bytes the last probe counted, or null for a dataset with none; `anon` with its path, files, bytes and when it was last written), `identity` (the rule's identity block or null), `unmapped` (hold, code), `cohort` (a name or null), `tags` ({keep_demographics, remove[], keep[]}), `originals_kept` (kept, vaulted, purged) and `originals_vault` (the name of the place a vault put the originals in, null where none has), both written by the acts on the originals and never by a declaration, which those doors refuse and `held` ({files, identifiers}, the files waiting for a map, held by the pseudonymiser of an identified dataset or by a digest of one read in place); each recent digest carries `pseudonymised` ({files, changed, held, job, batch}, the pseudonymise step of the same name before it), null where none precedes it, and `chain`, the jobs of its thread by stage ({pseudonymize, digest, classify[]}, `pseudonymize` null where no pseudonymise step precedes it and `classify` the runs that sorted its stacks); a pseudonymise step is not a digest and is not listed as one. The document carries `rates {pseudonymize, digest}`, each `{files_per_s, files}` or null: the last run of that step that ended done on this machine and read or wrote at least a hundred files, else the largest run there was, with the files it was measured over beside it, since a run of twenty files times the cost of starting a run rather than the machine. The tree counts are the ones the last probe kept, never a walk on every call; `?probe=1` counts the trees again first, bounded. Never a row of a person: every number is a count. Added in place additively on 2026-10-09 (record 55 H2, round 4), how sure the sort is, for the card's line of how many scans are sure and how many need a look: `totals.to_sort` counts the stacks an open or staged review item asks about, as a member of a grouped question or, since this amendment, as the stack a stack-scoped question names (System 1's `classify.asked`); `totals.sure` the sorted stacks no such item asks about; `totals.unsorted` the stacks no sort has judged; so `stacks` is `sure + to_sort + unsorted`. `totals.need_a_look` is {kind: stacks}, the stacks that need a look by the kind of the question (`body_part:low_confidence`, `axis_conflict` and the like); a stack asked two questions counts under each, so the kinds may add up to more than `to_sort`. A pick border is about an occasion and not a stack and is not counted here (GET /api/picks/summary counts them). Each source also carries `picks`, the dataset's setting: `after_sort` (picking main scans follows a sort) or `off`."
       parameters:
         - {name: recent, in: query, schema: {type: integer, default: 12, minimum: 1, maximum: 100}}
         - {name: probe, in: query, schema: {type: boolean}, description: Count every source's trees again first}
       responses:
-        "200": {description: "{count, window_days, sources[{place fields, handling{arrives, on_release{uids, deface}}, handling_declared, dataset, arrives, trees{originals{path, files, bytes, last_written, partial} | null, anon{path, files, bytes, last_written, partial}}, identity, unmapped, cohort, tags{keep_demographics, remove, keep}, originals_kept, originals_vault, held{files, identifiers}, roots, digests{count, first, last, recent[{id, name, state, started_at, finished_at, job_id, files{seen, new, changed, unchanged, refused}, subjects_added, stacks_added, pseudonymised{files, changed, held, job, batch} | null, classified, to_sort}]}, totals{subjects, studies, sessions, stacks, refused_files, to_sort}}], rates{pseudonymize, digest}}"}
+        "200": {description: "{count, window_days, sources[{place fields, handling{arrives, on_release{uids, deface}}, handling_declared, dataset, arrives, trees{originals{path, files, bytes, last_written, partial} | null, anon{path, files, bytes, last_written, partial}}, identity, unmapped, cohort, tags{keep_demographics, remove, keep}, originals_kept, originals_vault, picks, held{files, identifiers}, roots, digests{count, first, last, recent[{id, name, state, started_at, finished_at, job_id, files{seen, new, changed, unchanged, refused}, subjects_added, stacks_added, pseudonymised{files, changed, held, job, batch} | null, classified, to_sort}]}, totals{subjects, studies, sessions, stacks, refused_files, to_sort, sure, unsorted, need_a_look{kind: count}}}], rates{pseudonymize, digest}}"}
   /api/datasets/{name}/scans:
     get:
       summary: A dataset's scans a page at a time (record 55 H2, added in place 2026-10-09; data:see)
@@ -1296,7 +1321,7 @@ paths:
   /api/places:
     get:
       summary: Every place with its role, its guarantees, what the engine measured and the deployment's paths bound under it (Wave 5 section 12.5, 10.2)
-      description: "A place is a named location with a role (source, registry, working, export, share, exchange, backup) and the guarantees behind it. `?probe=1` measures every active place again first, a source place's trees counted too. The reply carries `enforced`, true once any place is declared, and `bindings`, the verbs that take a path and the role each needs. Since version 5 a source place carries `dataset` (record 26), the same fields the sources door spreads: {arrives, trees{originals | null, anon}, identity, unmapped, cohort, tags, originals_kept, originals_vault}; null on any other role. What becomes of the originals is acted on through /api/places/{id}/originals, which sets originals_kept and originals_vault when its job succeeds. Never a row of a person."
+      description: "A place is a named location with a role (source, registry, working, export, share, exchange, backup) and the guarantees behind it. `?probe=1` measures every active place again first, a source place's trees counted too. The reply carries `enforced`, true once any place is declared, and `bindings`, the verbs that take a path and the role each needs. Since version 5 a source place carries `dataset` (record 26), the same fields the sources door spreads: {arrives, trees{originals | null, anon}, identity, unmapped, cohort, tags, originals_kept, originals_vault}; null on any other role. What becomes of the originals is acted on through /api/places/{id}/originals, which sets originals_kept and originals_vault when its job succeeds. Added in place additively on 2026-10-09 (record 55 H2, round 4): a dataset carries `picks`, `after_sort` (the default, and what a dataset stored before the field reads as) or `off`, which a declaration sets like any other field: whether picking main scans follows a sort of the dataset as a pipeline step. Never a row of a person."
       responses:
         "200": {description: "{count, enforced, places[{id, name, role, path, guarantees{backup, snapshots, protected, fast}, probed{exists, directory, writable, free_bytes, mount, snapshots_seen, trees}, probed_at, created_at, updated_at, retired_at, retired, handling{arrives, on_release{uids, deface}}, handling_declared, dataset{arrives, trees{originals{path, files, bytes, last_written, partial} | null, anon{path, files, bytes, last_written, partial}}, identity, unmapped, cohort, tags{keep_demographics, remove, keep}, originals_kept, originals_vault} | null, bound[{verb, path}], holds, must}], bindings[{verb, role}]}"}
     post:
