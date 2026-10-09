@@ -63,6 +63,11 @@ dicom-transfer-syntax-registry = { workspace = true, features = ["jpeg", "rle", 
 pure_jpegls = "2"
 openjph-core = "0.1.0"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# record 55 H2: the preview a sort writes, every plane a small JPEG; a pure
+# Rust baseline encoder, several times quicker than image's on grey planes
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+base64 = "0.22"
+lru.workspace = true
 
 [dev-dependencies]
 

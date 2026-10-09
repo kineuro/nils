@@ -103,7 +103,7 @@ fn axial() -> [f64; 6] {
 }
 
 /// The plane nearest the stack's, by the largest component of its normal.
-fn plane_of(orientation: &[f64; 6]) -> (&'static str, bool) {
+pub(crate) fn plane_of(orientation: &[f64; 6]) -> (&'static str, bool) {
     let n = normal(orientation);
     let (i, largest) = n
         .iter()
@@ -1291,7 +1291,7 @@ const PLATEAU_MOST: f64 = 0.1;
 
 /// The window the viewer opens at: the first and ninety-ninth percentiles
 /// of a sample of planes, less a plateau at the top.
-fn window(vol: &Volume) -> Window {
+pub(crate) fn window(vol: &Volume) -> Window {
     let nz = vol.shape[0] as usize;
     let step = (nz / 16).max(1);
     let mut sample: Vec<u16> = Vec::new();
@@ -2284,6 +2284,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             "--stack",
             "--select",
             "--handle",
+            "--classified",
             "--place",
             "--workers",
             "--pack",
@@ -2293,7 +2294,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
         _ => {
             return Err(Reply::error(
                 400,
-                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID) [--force] or pyramid list",
+                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID | --classified JOB) [--force] or pyramid list",
             ));
         }
     };
@@ -2320,7 +2321,10 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
         let value = it
             .next()
             .ok_or_else(|| Reply::error(400, format!("pyramid {arg} takes a value")))?;
-        if matches!(arg.as_str(), "--stack" | "--select" | "--handle") {
+        if matches!(
+            arg.as_str(),
+            "--stack" | "--select" | "--handle" | "--classified"
+        ) {
             sources += 1;
         }
         select |= arg == "--select";
@@ -2330,7 +2334,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     if verb == Some("build") && sources != 1 {
         return Err(Reply::error(
             400,
-            "pyramid build names one of --stack, --select or --handle",
+            "pyramid build names one of --stack, --select, --handle or --classified",
         ));
     }
     if select && let Some(d) = pack_dir {
@@ -2384,7 +2388,7 @@ static OPENED: std::sync::LazyLock<std::sync::Mutex<Opened>> =
 
 /// One audit row per stack opened by a person, not per tile: the first
 /// request in the window writes the row, the rest in the window do not.
-fn note_open(
+pub(crate) fn note_open(
     registry: &mut nils_registry::Registry,
     caller: &Caller,
     stack: i64,
@@ -2696,7 +2700,7 @@ fn render_cached(
 static WORKING: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Place)>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-fn working_place_cached(store: &mut Store) -> Result<Place, String> {
+pub(crate) fn working_place_cached(store: &mut Store) -> Result<Place, String> {
     if let Ok(w) = WORKING.lock()
         && let Some((at, p)) = w.as_ref()
         && at.elapsed() < std::time::Duration::from_secs(1)
@@ -2858,6 +2862,9 @@ fn on_demand(
         crate::serve::queued_by(caller),
     )
     .map_err(jerr)?;
+    // record 55 H2: the pictures lane's worker starts it now, not at its
+    // next look
+    crate::worker::wake();
     let j = nils_registry::job::show(store, id)
         .map_err(jerr)?
         .ok_or_else(|| Reply::error(500, format!("job {id} was queued and is not there")))?;

@@ -1150,10 +1150,13 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     let stop_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Record 49 A1: pipeline runs have a lane of their own beside it, so a
     // long run never holds up a digest, a classify or a release.
+    // Record 55 H2: and the pictures lane, the pyramids built in the
+    // background after a sort, at a low priority and with half the workers.
     let queue: Vec<std::thread::JoinHandle<()>> = if args.worker {
         [
             nils_registry::job::Lane::Main,
             nils_registry::job::Lane::Pipelines,
+            nils_registry::job::Lane::Pictures,
         ]
         .into_iter()
         .map(|lane| {
@@ -1163,7 +1166,11 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             // lab 26b, finding 4: a job this engine queues runs with the
             // workers the engine was started with, where the caller
             // named none
-            let workers = args.workers.max(1);
+            let workers = if lane == nils_registry::job::Lane::Pictures {
+                (args.workers / 2).max(1)
+            } else {
+                args.workers.max(1)
+            };
             std::thread::spawn(move || queue_worker(&home, &roots, workers, lane, &stop))
         })
         .collect()
@@ -1466,6 +1473,7 @@ fn health_doc(health: &Health) -> serde_json::Value {
             "cache_cap": slab_cap,
         },
         "renders": { "cache_bytes": render_bytes, "cache_cap": render_cap },
+        "previews": { "open": crate::preview::open_count(), "cap": crate::preview::OPEN_FILES },
         "trouble": {
             "accept_errors": t.accept_errors.load(Ordering::Relaxed),
             "panics": t.panics.load(Ordering::Relaxed),
@@ -1807,11 +1815,37 @@ fn handle(
         let _ = respond(request, reply);
         return;
     }
-    let reply = match caller {
+    let asked_etag = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("If-None-Match"))
+        .map(|h| h.value.as_str().to_string());
+    let mut reply = match caller {
         Ok(caller) => route(doors, registry, ask, &caller, &method, path, &query, &body),
         Err(reply) => reply,
     };
     nils_registry::actor::clear();
+    // record 55 H2: a door that wrote may have queued a job, which a worker
+    // of this process starts now rather than at its next look
+    if method != Method::Get && reply.status < 400 {
+        crate::worker::wake();
+    }
+    // record 55 H2: a picture the browser holds already, by its ETag, is
+    // answered 304 with no body
+    if reply.status == 200
+        && let Some(asked) = asked_etag
+        && let Some((_, etag)) = reply.headers.iter().find(|(k, _)| k == "ETag")
+        && asked.split(',').any(|t| t.trim() == etag)
+    {
+        let headers: Vec<(String, String)> = reply
+            .headers
+            .iter()
+            .filter(|(k, _)| matches!(k.as_str(), "ETag" | "Cache-Control"))
+            .cloned()
+            .collect();
+        reply = Reply::nothing(304);
+        reply.headers = headers;
+    }
     let _ = respond(request, reply);
 }
 
@@ -2240,6 +2274,10 @@ fn routed(
                         })?,
                 )
             };
+            // record 55 H2: the preview a sort made, beside the pyramid
+            if rest.first() == Some(&"preview") {
+                return crate::preview::door(registry, caller, stack, through, rest, query);
+            }
             crate::pyramid::door(registry, caller, stack, through, rest, query)
         }
         ["api", "backups"] if get => {
@@ -2372,13 +2410,16 @@ fn routed(
                 })?),
                 None => None,
             };
-            Ok(Reply::ok(crate::scans::page(
-                registry,
-                &caller.access,
-                &dataset,
-                limit,
-                after,
-            )?))
+            let pictures = query
+                .get("pictures")
+                .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
+            let mut doc = crate::scans::page(registry, &caller.access, &dataset, limit, after)?;
+            // record 55 H2: each scan's picture inline and its open
+            // questions, so a page of the grid is one request
+            if pictures {
+                crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
+            }
+            Ok(Reply::ok(doc))
         }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
@@ -4820,6 +4861,8 @@ fn capabilities(
         "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
         "GET /api/instances/{stack}/render/{level}/{z}",
         "GET /api/instances/{stack}/thumb",
+        "GET /api/instances/{stack}/preview",
+        "GET /api/instances/{stack}/preview/planes",
     ]
     .iter()
     .chain(crate::derivatives::DOORS.iter())
@@ -5755,6 +5798,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one small image",
             "Drawing a stack small",
             "Drew a stack small",
+        ),
+        row(
+            "GET /api/instances/{stack}/preview",
+            false,
+            false,
+            "bounded",
+            "three small images",
+            "Reading a stack's preview",
+            "Read a stack's preview",
+        ),
+        row(
+            "GET /api/instances/{stack}/preview/planes",
+            false,
+            false,
+            "bounded",
+            "every plane of one stack, small",
+            "Reading a stack's planes",
+            "Read a stack's planes",
         ),
         row(
             "GET /api/places",

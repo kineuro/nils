@@ -9,6 +9,14 @@
 //! pipeline run, and the pipeline lane runs those alone, so a run of hours
 //! never holds up a digest; `nils serve --worker` runs a worker for each, and
 //! the pipeline lane's worker also queues again a run whose engine went away.
+//!
+//! Record 55 H2: a third lane, the pictures lane, builds the pyramids. A
+//! classify that ends done queues the pyramids of the stacks it judged
+//! there, a low-priority build in the background that never holds up a
+//! digest, a classify or a pseudonymise; a picture a reader asks for while
+//! it runs is built between two of its stacks. A worker beside the doors
+//! wakes as soon as a door queues a job, and still looks at the queue every
+//! few seconds for a job another process queued.
 
 use std::collections::VecDeque;
 use std::io::{BufRead as _, Write as _};
@@ -82,6 +90,194 @@ pub(crate) fn claim(store: &mut Store, once: bool, lane: job::Lane) -> Result<i6
     )
 }
 
+/// The doors' word that a job was queued: a generation the waiting workers
+/// watch, so a worker starts a queued job at once rather than at its next
+/// look (record 55 H2; the look every few seconds stays, for jobs another
+/// process queued).
+static WAKE: std::sync::LazyLock<(std::sync::Mutex<u64>, std::sync::Condvar)> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+
+/// Wake every worker of this process that waits on an empty queue.
+pub(crate) fn wake() {
+    let (lock, cv) = &*WAKE;
+    let mut n = lock.lock().unwrap_or_else(|e| e.into_inner());
+    *n = n.wrapping_add(1);
+    cv.notify_all();
+}
+
+fn woken_at() -> u64 {
+    *WAKE.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Wait up to `secs` seconds for a wake, looking at `stop` every second.
+fn wait_for_work(secs: u64, since: u64, stop: &dyn Fn() -> bool) {
+    let (lock, cv) = &*WAKE;
+    let deadline = Instant::now() + Duration::from_secs(secs.max(1));
+    let mut n = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while *n == since && !stop() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        n = cv
+            .wait_timeout(n, left.min(Duration::from_secs(1)))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+/// The niceness a job of the pictures lane runs at: below the doors and the
+/// main lane, so a background pyramid never slows a sort.
+pub(crate) const PICTURES_NICE: i32 = 10;
+
+/// Lower this process's priority by `n`, before it starts any thread (the
+/// threads it starts inherit it). Record 55 H2: the worker passes it to a
+/// job of the pictures lane as `NILS_NICE`.
+#[allow(
+    unsafe_code,
+    reason = "setpriority on the calling process takes plain integers"
+)]
+pub(crate) fn lower_priority(n: i32) {
+    if n > 0 {
+        // SAFETY: setpriority reads its three integer arguments only
+        let _ = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, n) };
+    }
+}
+
+/// Whether a queued job is a reader's single-stack pyramid build, `pyramid
+/// build --stack N`, which the pictures lane runs before a background
+/// build: answers the stack and the place named, if any.
+fn asked_stack(job: &job::Job) -> Option<(i64, Option<String>)> {
+    let words = job.queued()?;
+    if job.kind != "pyramid" || words.first()? != "pyramid" || words.get(1)? != "build" {
+        return None;
+    }
+    let value = |flag: &str| {
+        words
+            .windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].clone())
+    };
+    let stack = value("--stack")?.parse().ok()?;
+    Some((stack, value("--place")))
+}
+
+/// The next job a lane runs: the oldest, but on the pictures lane a
+/// reader's single-stack build first.
+fn next_for(store: &mut Store, lane: job::Lane) -> Result<Option<job::Job>, job::Error> {
+    if lane != job::Lane::Pictures {
+        return job::next_queued_in(store, lane);
+    }
+    let queued = job::queued_in(store, lane, 64)?;
+    let first = queued
+        .iter()
+        .position(|j| asked_stack(j).is_some())
+        .unwrap_or(0);
+    Ok(queued.into_iter().nth(first))
+}
+
+/// Record 55 H2: the pyramids readers asked for (queued `pyramid build
+/// --stack N` jobs for this working place) built now, in this process,
+/// between two stacks of a background build; each job's row ends as the
+/// verb's would.
+pub(crate) fn build_asked_pyramids(store: &mut Store, working: &std::path::Path, workers: usize) {
+    let Ok(queued) = job::queued_in(store, job::Lane::Pictures, 16) else {
+        return;
+    };
+    let place = crate::pyramid::working_place(store, None).ok();
+    for j in queued {
+        let Some((stack, named)) = asked_stack(&j) else {
+            continue;
+        };
+        // a build for another working place is the lane's to run
+        if named.is_some() && named.as_deref() != place.as_ref().map(|p| p.name.as_str()) {
+            continue;
+        }
+        if !matches!(job::take(store, j.id), Ok(true)) {
+            continue;
+        }
+        let root = crate::pyramid::dir(working, stack);
+        let built = if matches!(crate::pyramid::manifest(&root), Ok(Some(_))) {
+            Ok(serde_json::json!({"stack": stack, "skipped": true}))
+        } else {
+            crate::pyramid::read_volume(store, stack)
+                .map_err(|why| crate::pyramid::reason_of(&why, true))
+                .and_then(|v| {
+                    crate::pyramid::build(&v, stack, &root, workers, None)
+                        .map_err(|why| crate::pyramid::reason_of(&why, false))
+                })
+                .map(|m| serde_json::json!({"stack": stack, "shape": m.shape, "levels": m.levels}))
+        };
+        match built {
+            Ok(result) => {
+                let _ = job::set_result(store, j.id, &result);
+                let _ = job::finish(store, j.id, State::Done, None);
+            }
+            Err(class) => {
+                let _ = std::fs::remove_file(root.join("manifest.json"));
+                let _ = job::finish(
+                    store,
+                    j.id,
+                    State::Failed,
+                    Some(&format!(
+                        "stack {stack}: its pyramid was not built ({class})"
+                    )),
+                );
+            }
+        }
+    }
+}
+
+/// Record 55 H2: a classify that ended done queues, on the pictures lane,
+/// the pyramids of the stacks it judged, under its own principal, grants
+/// and detail; nothing where no working place is bound, where it judged
+/// nothing, or where such a build for it is queued already.
+pub(crate) fn queue_pictures_after(store: &mut Store, ended: &job::Job) -> Option<i64> {
+    if ended.kind != "classify" || ended.state != State::Done {
+        return None;
+    }
+    let working = crate::pyramid::working_place(store, None).ok()?;
+    if crate::preview::classified_by(store, ended.id)
+        .ok()?
+        .is_empty()
+    {
+        return None;
+    }
+    let id = ended.id.to_string();
+    let queued = job::queued_in(store, job::Lane::Pictures, 500).ok()?;
+    if queued.iter().any(|j| {
+        j.queued()
+            .is_some_and(|w| w.windows(2).any(|p| p[0] == "--classified" && p[1] == id))
+    }) {
+        return None;
+    }
+    let command: Vec<String> = [
+        "pyramid",
+        "build",
+        "--classified",
+        &id,
+        "--place",
+        &working.name,
+    ]
+    .iter()
+    .map(|w| w.to_string())
+    .collect();
+    let extra = serde_json::json!({
+        "detail": ended.args["detail"],
+        "grants": ended.args["grants"],
+        "actor": ended.args["actor"],
+        "after": ended.id,
+    });
+    job::enqueue_with(
+        store,
+        &command,
+        Some(&format!("pictures after job {}", ended.id)),
+        ended.principal(),
+        extra,
+    )
+    .ok()
+}
+
 /// How a worker runs the queue.
 pub(crate) struct Options<'a> {
     /// Stop once the queue is empty, rather than wait for more.
@@ -130,7 +326,7 @@ pub(crate) fn run(
         }
         // record 49 A1: a pipeline run whose engine went away is taken up
         // again by the lane that runs pipelines
-        if opts.lane != job::Lane::Main
+        if matches!(opts.lane, job::Lane::All | job::Lane::Pipelines)
             && let Err(e) = crate::pipelines::take_up_interrupted(store)
         {
             let _ = writeln!(
@@ -138,7 +334,9 @@ pub(crate) fn run(
                 "nils: the pipeline lane could not look for runs to take up again: {e}"
             );
         }
-        let next = match job::next_queued_in(store, opts.lane) {
+        // a wake from now on is a job this look may not have seen
+        let since = woken_at();
+        let next = match next_for(store, opts.lane) {
             Ok(next) => next,
             Err(e) => break Err(err(e)),
         };
@@ -146,14 +344,10 @@ pub(crate) fn run(
             if opts.once {
                 break Ok(());
             }
-            // the stop is looked at every second of the wait, so a server
-            // that is stopping is not held up by an empty queue
-            for _ in 0..opts.every.max(1) {
-                if stop() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
+            // until a door queues a job, or the next look; the stop is
+            // looked at every second of the wait, so a server that is
+            // stopping is not held up by an empty queue
+            wait_for_work(opts.every, since, stop);
             continue;
         };
         match job::take(store, next.id) {
@@ -205,6 +399,15 @@ pub(crate) fn run(
                 },
             )
             .env("NILS_INGEST_ROOTS", &roots_env)
+            // record 55 H2: the pictures lane's jobs run below the rest
+            .env(
+                "NILS_NICE",
+                if opts.lane == job::Lane::Pictures {
+                    PICTURES_NICE.to_string()
+                } else {
+                    "0".to_string()
+                },
+            )
             .env(
                 nils_registry::actor::VAR,
                 if next.args["actor"].is_object() {
@@ -270,6 +473,18 @@ pub(crate) fn run(
         // grants do not reach ends the chain, and the job's result says so.
         match job::show(store, next.id) {
             Ok(Some(ended)) if ended.state == State::Done => {
+                // record 55 H2: after a sort, its pyramids in the background
+                if opts.lane != job::Lane::Pictures
+                    && let Some(queued) = queue_pictures_after(store, &ended)
+                {
+                    let line = format!("job {}: its pyramids queued as job {queued}", next.id);
+                    let _ = if opts.quiet {
+                        writeln!(std::io::stderr(), "nils serve: {line}")
+                    } else {
+                        writeln!(std::io::stdout(), "{line}")
+                    };
+                    wake();
+                }
                 match crate::chain::continue_chain(store, &ended) {
                     Ok(Some(queued)) => {
                         let line = format!("job {}: then queued job {queued}", next.id);

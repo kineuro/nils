@@ -56,6 +56,7 @@ mod pick_after;
 mod pipelines;
 mod places;
 mod preflight;
+mod preview;
 mod profile;
 mod pyramid;
 mod reader;
@@ -274,6 +275,11 @@ enum Command {
     Pyramid {
         #[command(subcommand)]
         command: PyramidCommand,
+    },
+    /// A stack's preview: its three middle planes and every plane small, one file a stack beside the pyramids, made when it is sorted (record 55 H2)
+    Preview {
+        #[command(subcommand)]
+        command: PreviewCommand,
     },
     /// Files made from the archive, kept in a working place and named by their digest: masks, embeddings, a pipeline's outputs (record 42)
     Derivative {
@@ -662,18 +668,48 @@ enum SettingsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum PreviewCommand {
+    /// Make the previews of stacks already sorted: each made again only when
+    /// its files changed, so a run that stopped goes on where it was
+    Build {
+        /// One stack, by its id
+        #[arg(long, value_name = "ID", conflicts_with_all = ["dataset", "all"])]
+        stack: Option<i64>,
+        /// Every stack of a dataset, by its name
+        #[arg(long, value_name = "NAME", conflicts_with = "all")]
+        dataset: Option<String>,
+        /// Every stack of the registry; previews of stacks it no longer holds are removed
+        #[arg(long)]
+        all: bool,
+        /// The working place to write under; the first working place when absent
+        #[arg(long, value_name = "NAME")]
+        place: Option<String>,
+        /// Pictures encoded at once; the machine's cores when absent
+        #[arg(long, value_name = "N")]
+        workers: Option<usize>,
+        /// Make them again even where they are current
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum PyramidCommand {
     /// Build the pyramid of one stack, or of a selection's stacks as one job that skips those built: every slice at four in-plane levels, 256 by 256 tiles, reversible HTJ2K
     Build {
         /// The stack's id in the registry
-        #[arg(long, value_name = "ID", required_unless_present_any = ["select", "handle"], conflicts_with_all = ["select", "handle"])]
+        #[arg(long, value_name = "ID", required_unless_present_any = ["select", "handle", "classified"], conflicts_with_all = ["select", "handle"])]
         stack: Option<i64>,
         /// Every stack of a saved selection, frozen now into its stacks (record 45)
         #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
         select: Option<String>,
         /// Every stack of a frozen handle, such as the one a campaign pins
-        #[arg(long, value_name = "ID")]
+        #[arg(long, value_name = "ID", conflicts_with = "classified")]
         handle: Option<i64>,
+        /// Every stack a classify job judged: the background build a sort
+        /// queues on the pictures lane (record 55 H2)
+        #[arg(long, value_name = "JOB", conflicts_with_all = ["select", "stack"])]
+        classified: Option<i64>,
         /// The pack a selection is frozen under
         #[arg(long, default_value = "mri")]
         pack: String,
@@ -770,9 +806,10 @@ enum JobsCommand {
         /// (Wave 4c section 6.6), as the serve flag names it
         #[arg(long = "ingest-root", value_name = "NAME=PATH")]
         ingest_root: Vec<String>,
-        /// Which jobs it takes: all, main (every job but a pipeline run),
-        /// or pipelines (runs only, record 49 A1); nils serve --worker runs
-        /// the two lanes side by side
+        /// Which jobs it takes: all, main (every job but a pipeline run or a
+        /// pyramid), pipelines (runs only, record 49 A1) or pictures (the
+        /// pyramids, record 55 H2); nils serve --worker runs the three
+        /// lanes side by side
         #[arg(long, default_value = "all")]
         lane: String,
     },
@@ -2054,6 +2091,14 @@ struct StatusArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // record 55 H2: a job of the pictures lane runs below the rest, from
+    // before its first thread
+    if let Some(n) = std::env::var("NILS_NICE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+    {
+        worker::lower_priority(n);
+    }
     if cli
         .unsealed_access
         .as_deref()
@@ -2124,6 +2169,7 @@ fn main() -> ExitCode {
         Command::Jobs(command) => jobs_command(&home, command),
         Command::Settings { command } => settings_command(&home, command),
         Command::Pyramid { command } => pyramid_command(&home, command),
+        Command::Preview { command } => preview_command(&home, command),
         Command::Derivative { command } => derivatives::command(&home, command),
         Command::Pipeline { command } => pipelines::command(&home, command),
         Command::Run(args) => pipelines::run_command(&home, *args),
@@ -2350,6 +2396,10 @@ struct ClassifyArgs {
     /// have replaced are removed (record 41)
     #[arg(long)]
     no_votes: bool,
+    /// Make no previews of the stacks judged (record 55 H2); `nils preview
+    /// build` makes them later
+    #[arg(long)]
+    no_previews: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -2479,6 +2529,60 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         return Err(Exit {
             code: STOPPED,
             message: "stopped: what was judged is written; run again to go on".into(),
+        });
+    }
+    // record 55 H2: the stacks judged get their previews in the same run,
+    // while the sort is still the job, so no picture waits for a queue
+    if !args.no_previews {
+        classify_previews(&mut registry, report.job_id, &cancel)?;
+    }
+    Ok(())
+}
+
+/// The preview step of a classify run (record 55 H2): the previews of the
+/// stacks the run judged, each made only where its files changed, under the
+/// first working place; none where the deployment binds no working place.
+/// What it did is said on stderr and kept in the job's result as
+/// `previews`; a stop keeps what was made.
+fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> Result<(), Exit> {
+    let store = registry.store();
+    let Ok(working) = crate::pyramid::working_place(store, None) else {
+        return Ok(());
+    };
+    let stacks = crate::preview::classified_by(store, job).map_err(fail)?;
+    if stacks.is_empty() {
+        return Ok(());
+    }
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut go_on = |_: &mut nils_registry::Store, _: &crate::preview::Many| !cancel.stop();
+    let many = crate::preview::make_many(
+        store,
+        Path::new(&working.path),
+        &stacks,
+        false,
+        workers,
+        &mut go_on,
+    );
+    let summary = many.as_json(&working.name);
+    eprintln!(
+        "previews: {} made, {} current, {} failed in {:.1} s under {}",
+        many.built.len(),
+        many.current.len(),
+        many.failed.len(),
+        many.seconds,
+        working.name
+    );
+    if let Ok(Some(row)) = nils_registry::job::show(store, job) {
+        let mut result = row.result.unwrap_or_else(|| serde_json::json!({}));
+        if result.is_object() {
+            result["previews"] = summary;
+            let _ = nils_registry::job::set_result(store, job, &result);
+        }
+    }
+    if many.stopped {
+        return Err(Exit {
+            code: STOPPED,
+            message: "stopped: what was judged and made is written; run again to go on".into(),
         });
     }
     Ok(())
@@ -4663,6 +4767,7 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             stack,
             select,
             handle,
+            classified,
             pack,
             pack_dir,
             place,
@@ -4679,7 +4784,7 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             let Some(stack) = stack else {
                 drop(registry);
                 return pyramid_many(
-                    home, select, handle, &pack, pack_dir, &working, workers, force,
+                    home, select, handle, classified, &pack, pack_dir, &working, workers, force,
                 );
             };
             let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
@@ -4768,51 +4873,72 @@ fn pyramid_many(
     home: &Home,
     select: Option<String>,
     handle: Option<i64>,
+    classified: Option<i64>,
     pack: &str,
     pack_dir: Option<std::path::PathBuf>,
     working: &nils_registry::place::Place,
     workers: usize,
     force: bool,
 ) -> Result<(), Exit> {
-    let handle = match (&select, handle) {
-        (Some(spec), _) => crate::ask_cli::freeze(
-            home,
-            spec,
-            nils_ask::ast::Grain::Stack,
-            pack_dir,
-            pack,
-            crate::ask_cli::Freeze::Whole,
-        )
-        .map(|f| f.handle)?,
-        (None, Some(h)) => h,
-        (None, None) => return Err(usage("--stack, --select or --handle")),
+    let handle = match (&select, handle, classified) {
+        (Some(spec), _, _) => Some(
+            crate::ask_cli::freeze(
+                home,
+                spec,
+                nils_ask::ast::Grain::Stack,
+                pack_dir,
+                pack,
+                crate::ask_cli::Freeze::Whole,
+            )
+            .map(|f| f.handle)?,
+        ),
+        (None, Some(h), _) => Some(h),
+        (None, None, Some(_)) => None,
+        (None, None, None) => return Err(usage("--stack, --select, --handle or --classified")),
     };
     let mut registry = open(home)?;
-    let stacks: Vec<i64> =
-        crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)
-            .map_err(crate::campaigns::rerr)?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
+    let stacks: Vec<i64> = match (handle, classified) {
+        (Some(handle), _) => {
+            crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)
+                .map_err(crate::campaigns::rerr)?
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        }
+        (None, Some(job)) => crate::preview::classified_by(registry.store(), job).map_err(fail)?,
+        (None, None) => Vec::new(),
+    };
+    let name = match (&select, classified) {
+        (Some(s), _) => s.clone(),
+        (None, Some(j)) => format!("classified by job {j}"),
+        (None, None) => "handle".to_string(),
+    };
     let job = nils_registry::job::claim(
         registry.store(),
         &nils_registry::job::Claim {
             kind: "pyramid",
-            name: select.as_deref().unwrap_or("handle"),
+            name: &name,
             args: serde_json::json!({
-                "selection": select, "handle": handle, "place": working.name,
-                "stacks": stacks.len(), "workers": workers, "force": force,
+                "selection": select, "handle": handle, "classified": classified,
+                "place": working.name, "stacks": stacks.len(), "workers": workers, "force": force,
             }),
         },
     )
     .map_err(|e| fail(e.to_string()))?;
     let total = stacks.len();
+    let root = std::path::PathBuf::from(&working.path);
     let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::pyramid::Many| {
         let done = so_far.built.len() + so_far.skipped.len() + so_far.failed.len();
         let progress = serde_json::json!({
             "done": done, "total": total, "built": so_far.built.len(),
             "skipped": so_far.skipped.len(), "failed": so_far.failed.len(),
         });
+        // record 55 H2: a picture a reader asked for while this build runs
+        // in the background is built now, between two of its stacks, rather
+        // than after all of them
+        if classified.is_some() {
+            crate::worker::build_asked_pyramids(store, &root, workers);
+        }
         !matches!(
             nils_registry::job::beat(store, job, Some(&progress)),
             Ok(nils_registry::job::Asked::Cancel)
@@ -4829,6 +4955,9 @@ fn pyramid_many(
     );
     let mut result = many.as_json(&working.name);
     result["handle"] = serde_json::json!(handle);
+    if classified.is_some() {
+        result["classified"] = serde_json::json!(classified);
+    }
     result["selection"] = serde_json::json!(select);
     let store = registry.store();
     nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
@@ -4843,6 +4972,133 @@ fn pyramid_many(
         return Err(Exit {
             code: crate::STOPPED,
             message: "stopped: what was built stays built; run it again to go on".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Record 55 H2: `nils preview build`, the previews of stacks already
+/// sorted. One stack is made at the keyboard; a dataset's or every stack is
+/// one job of kind `preview`, with its progress, that a cancel stops (what
+/// was made stays made) and whose result counts what was made, what was
+/// current and what failed with its reason class.
+fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
+    let PreviewCommand::Build {
+        stack,
+        dataset,
+        all,
+        place,
+        workers,
+        force,
+    } = command;
+    let mut registry = open(home)?;
+    let working =
+        crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
+    let root = std::path::PathBuf::from(&working.path);
+    let workers = workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
+    if let Some(stack) = stack {
+        let started = std::time::Instant::now();
+        let made = crate::preview::make(registry.store(), &root, stack, force, workers).map_err(
+            |(why, reading)| {
+                let class = crate::pyramid::reason_of(&why, reading);
+                // the reader's words can name a path: said at a terminal only
+                if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    fail(format!(
+                        "stack {stack}: its preview was not made ({class}): {why}"
+                    ))
+                } else {
+                    fail(format!("stack {stack}: its preview was not made ({class})"))
+                }
+            },
+        )?;
+        let (built, bytes) = match made {
+            crate::preview::Made::Built { bytes } => (true, bytes),
+            crate::preview::Made::Current => (false, 0),
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "stack": stack, "place": working.name, "built": built, "current": !built,
+                "bytes": bytes, "seconds": (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
+                "digest": crate::preview::digest_on_disk(&root, stack),
+            })
+        );
+        return Ok(());
+    }
+    let store = registry.store();
+    let (stacks, name) = match (&dataset, all) {
+        (Some(n), _) => {
+            let p = nils_registry::place::by_name(store, n)
+                .map_err(|e| fail(e.to_string()))?
+                .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none())
+                .ok_or_else(|| usage(format!("no dataset named {n}")))?;
+            (
+                crate::preview::dataset_stacks(store, &p).map_err(fail)?,
+                format!("dataset {n}"),
+            )
+        }
+        (None, true) => (
+            crate::preview::every_stack(store).map_err(fail)?,
+            "every stack".to_string(),
+        ),
+        (None, false) => {
+            return Err(usage(
+                "preview build names --stack ID, --dataset NAME or --all",
+            ));
+        }
+    };
+    let job = nils_registry::job::claim(
+        store,
+        &nils_registry::job::Claim {
+            kind: "preview",
+            name: &name,
+            args: serde_json::json!({
+                "dataset": dataset, "all": all, "place": working.name,
+                "stacks": stacks.len(), "workers": workers, "force": force,
+            }),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let cancel = stop_on_signal()?;
+    let total = stacks.len();
+    let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::preview::Many| {
+        let done = so_far.built.len() + so_far.current.len() + so_far.failed.len();
+        // a beat every stack is a write every stack: every tenth, and the last
+        if !done.is_multiple_of(10) && done != total {
+            return !cancel.stop();
+        }
+        let progress = serde_json::json!({
+            "done": done, "total": total, "built": so_far.built.len(),
+            "current": so_far.current.len(), "failed": so_far.failed.len(),
+        });
+        !cancel.stop()
+            && !matches!(
+                nils_registry::job::beat(store, job, Some(&progress)),
+                Ok(nils_registry::job::Asked::Cancel)
+            )
+    };
+    let mut many = crate::preview::make_many(store, &root, &stacks, force, workers, &mut go_on);
+    if all && !many.stopped {
+        let keep: std::collections::BTreeSet<i64> = stacks.iter().copied().collect();
+        many.pruned = crate::preview::prune(&root, &keep);
+    }
+    let result = many.as_json(&working.name);
+    nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
+    let state = if many.stopped {
+        nils_registry::job::State::Cancelled
+    } else {
+        nils_registry::job::State::Done
+    };
+    nils_registry::job::finish(store, job, state, None).map_err(|e| fail(e.to_string()))?;
+    println!("{result}");
+    if many.stopped {
+        return Err(Exit {
+            code: crate::STOPPED,
+            message: "stopped: what was made stays made; run it again to go on".into(),
         });
     }
     Ok(())
@@ -8801,8 +9057,11 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             ingest_root,
             lane,
         } => {
-            let lane = job::Lane::parse(&lane)
-                .ok_or_else(|| usage(format!("--lane is all, main or pipelines, not {lane}")))?;
+            let lane = job::Lane::parse(&lane).ok_or_else(|| {
+                usage(format!(
+                    "--lane is all, main, pipelines or pictures, not {lane}"
+                ))
+            })?;
             let queue = crate::worker::claim(store, once, lane).map_err(|e| match e {
                 job::Error::Busy { .. } => Exit {
                     code: BUSY,
