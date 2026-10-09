@@ -2064,6 +2064,16 @@ fn routed(
                 None => Err(Reply::error(404, format!("no pack named {name}"))),
             }
         }
+        // record 55 H3 (2026-10-09): what the pack cannot rank, for whoever
+        // tunes it, by rule pair; never a review item
+        ["api", "packs", name, "disagreements"] if get => {
+            let reads_sealed = crate::sealed::reads(&caller.access);
+            Ok(Reply::ok(crate::disagreements::document(
+                registry.store(),
+                name,
+                reads_sealed,
+            )?))
+        }
         ["api", "batches"] if get => {
             let limit = query
                 .get("limit")
@@ -2214,6 +2224,28 @@ fn routed(
                             for e in a["evidence"].as_array_mut().into_iter().flatten() {
                                 if let Some(m) = e.as_object_mut() {
                                     m.remove("matched");
+                                }
+                            }
+                        }
+                        // record 55 H3: and in what the sort noted
+                        if let Some(notes) = doc["notes"].as_object_mut() {
+                            let overrides =
+                                notes.get_mut("overrides").and_then(|o| o.as_array_mut());
+                            for o in overrides.into_iter().flatten() {
+                                for side in ["by", "over"] {
+                                    if let Some(m) = o.get_mut(side).and_then(|v| v.as_object_mut())
+                                    {
+                                        m.remove("matched");
+                                    }
+                                }
+                            }
+                            let equal = notes.get_mut("equal_rank").and_then(|o| o.as_array_mut());
+                            for e in equal.into_iter().flatten() {
+                                let sides = e.get_mut("sides").and_then(|v| v.as_array_mut());
+                                for side in sides.into_iter().flatten() {
+                                    if let Some(m) = side.as_object_mut() {
+                                        m.remove("matched");
+                                    }
                                 }
                             }
                         }
@@ -4496,7 +4528,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
         | ("GET", ["api", "review" | "overlays" | "explain", _])
-        | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
+        | ("GET", ["api", "classify", "signals"])
+        | ("GET", ["api", "packs", _, "disagreements"]) => (Need::One("review:see"), Plain),
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
         | ("POST", ["api", "picks"])
@@ -4973,6 +5006,7 @@ fn capabilities(
         "GET /api/events",
         "GET /api/packs",
         "GET /api/packs/{name}",
+        "GET /api/packs/{name}/disagreements",
         "GET /api/batches",
         "GET /api/batches/{id}",
         "GET /api/quarantine",
@@ -5799,6 +5833,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading a pack",
             "Read a pack",
+        ),
+        row(
+            "GET /api/packs/{name}/disagreements",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what a pack cannot rank",
+            "Read what a pack cannot rank",
         ),
         row(
             "GET /api/batches",

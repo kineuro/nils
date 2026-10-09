@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 84;
+pub const SCHEMA_VERSION: i64 = 85;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,7 +390,25 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 84,
         apply: a_root_s_folder_is_a_dataset_only_when_added,
     },
+    Migration {
+        version: 85,
+        apply: a_classification_notes_what_was_not_asked,
+    },
 ];
+
+/// Record 55 H3 (Nima's ruling of 2026-10-09): what the sort decided without
+/// asking anybody is kept on the stack's classification. `notes` holds who
+/// beat whom where the pack's ranking decided between two rules, the answers
+/// below the pack's threshold, the axes no rule answered, the split note and
+/// the equal-rank disagreements; `disagreements` counts the last, so that a
+/// door finds the stacks a pack cannot rank without reading every note. A
+/// registry from before gains both empty, and its next classify fills them.
+fn a_classification_notes_what_was_not_asked(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "classification", &["notes", "disagreements"])
+}
 
 /// Wave 7a (Nima, 2026-10-08: "on starting page we just need to add a
 /// root/s. then on data page when we add the folder as data"): a folder

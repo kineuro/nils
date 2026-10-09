@@ -305,7 +305,7 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         // One row per value (Wave 4a §6.1): a role arrives as rows, and an
         // axis a pick reads is joined back into the text the model matches
         // a token against.
-        if axis == "role" {
+        if axis == nils_pack::matters::PICK_CANDIDATES {
             rows[i].roles.push(value.trim().to_string());
         }
         if reads.iter().any(|n| n == axis) {

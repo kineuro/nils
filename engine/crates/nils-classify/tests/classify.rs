@@ -1162,15 +1162,19 @@ fn flow_tree() -> TempDir {
     dir
 }
 
+/// Record 55 H3 (2026-10-09): the split note is information, not a
+/// question. The six stacks the split left holding one image carry it on
+/// their classification, with the split's reason; nobody is asked.
 #[test]
-fn a_split_that_leaves_one_image_in_every_stack_is_a_question() {
+fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
     for lab in labs() {
         let name = lab.name;
         let dir = flow_tree();
         let mut reg = prepare(&lab, &dir);
-        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
-            .unwrap();
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
 
         // The split fired on both series, and the reason is the echo number.
         assert_eq!(
@@ -1191,33 +1195,45 @@ fn a_split_that_leaves_one_image_in_every_stack_is_a_question() {
             "{name}"
         );
 
-        // One question, with the six stacks of the series the split left
-        // holding one image as its members, and none of the six whose stacks
-        // hold two.
+        // No question, about the split or anything else the sort could
+        // decide alone.
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
             ),
-            1,
+            0,
             "{name}"
         );
-        assert_eq!(
-            one(
-                &mut reg,
-                "SELECT members FROM {review_item} WHERE scope = 'group' AND kind = 'split:one_image_per_stack'"
-            ),
-            6,
-            "{name}"
+        // The note, on the six stacks of the series the split left holding
+        // one image and on none of the six whose stacks hold two.
+        assert_eq!(report.split_notes, 6, "{name}");
+        let noted = rows(
+            &mut reg,
+            "SELECT c.stack_id, CAST(c.notes AS TEXT), f.n_instances FROM {classification} c \
+             JOIN {stack_fingerprint} f ON f.stack_id = c.stack_id ORDER BY c.stack_id",
         );
-        assert_eq!(
-            one(
-                &mut reg,
-                "SELECT COUNT(*) FROM {review_member} m JOIN {stack_fingerprint} f ON f.stack_id = m.stack_id WHERE f.n_instances = 1"
-            ),
-            6,
-            "{name}: the members are the stacks holding one image"
-        );
+        let mut with_note = 0;
+        for r in &noted {
+            let notes: serde_json::Value = r
+                .opt_text(1)
+                .unwrap()
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let single = r.int(2).unwrap() == 1;
+            assert_eq!(notes["split"].is_object(), single, "{name}: {notes}");
+            if single {
+                with_note += 1;
+                assert_eq!(
+                    notes["split"]["kind"], "split:one_image_per_stack",
+                    "{name}"
+                );
+                assert_eq!(notes["split"]["value"], "multi_echo", "{name}");
+                assert_eq!(notes["split"]["stacks_in_series"], 6.0, "{name}");
+                assert_eq!(notes["split"]["n_instances"], 1.0, "{name}");
+            }
+        }
+        assert_eq!(with_note, 6, "{name}");
 
         // And a zero echo time decided nothing: not one of the twelve is
         // called an anatomical T1w on the strength of it.
@@ -1320,7 +1336,10 @@ fn a_body_part_exactly_on_its_threshold_is_not_a_question_and_is_counted() {
         assert_eq!(report.at_threshold.get("body_part"), Some(&1), "{name}");
         assert!(report.on_the_threshold() >= 1, "{name}");
 
-        // The same stack, asked about one hundredth higher: now it is below.
+        // The same stack, asked about one hundredth higher: now it is below,
+        // and still no question. Record 55 H3: the body part is its image
+        // model's, so a sort asks nothing about it even where a person names
+        // a threshold; the weak answer is noted.
         let settings = nils_classify::job::Settings {
             review_below: Some(0.66),
             ..Default::default()
@@ -1329,11 +1348,31 @@ fn a_body_part_exactly_on_its_threshold_is_not_a_question_and_is_counted() {
             nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
         assert_eq!(
             asked(&mut reg, "body_part:low_confidence"),
-            1,
-            "{name}: 0.65 is below 0.66"
+            0,
+            "{name}: the body part is the model's"
         );
         assert_eq!(report.at_threshold.get("body_part"), None, "{name}");
+        assert_eq!(report.below.get("body_part"), Some(&1), "{name}");
+        let notes = notes_of(&mut reg);
+        assert!(
+            notes["below"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["axis"] == "body_part" && b["below"] == 0.66),
+            "{name}: {notes}"
+        );
     }
+}
+
+/// The one stack's classification notes (record 55 H3).
+fn notes_of(reg: &mut Registry) -> serde_json::Value {
+    let r = rows(reg, "SELECT CAST(notes AS TEXT) FROM {classification}");
+    assert_eq!(r.len(), 1, "one stack");
+    r[0].opt_text(0)
+        .unwrap()
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// The other half of the same boundary, on the axis the corpus run found 354
@@ -1373,10 +1412,12 @@ fn a_base_from_physics_exactly_on_its_threshold_is_an_answer() {
     }
 }
 
-/// And the rule on the same axis that writes one hundredth less is a
-/// question, so the boundary is the only thing between them.
+/// And the rule on the same axis that writes one hundredth less was a
+/// question. Record 55 H3 (2026-10-09): a rule's low confidence alone is
+/// never one; the answer is noted below the pack's threshold, and asked only
+/// where a person names a threshold for the run.
 #[test]
-fn a_base_one_hundredth_below_its_threshold_is_a_question() {
+fn a_base_one_hundredth_below_its_threshold_is_noted_and_not_asked() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
     for lab in labs() {
         let name = lab.name;
@@ -1402,10 +1443,38 @@ fn a_base_one_hundredth_below_its_threshold_is_a_question() {
         );
         assert_eq!(
             asked(&mut reg, "base:low_confidence"),
-            1,
-            "{name}: 0.65 is below 0.70"
+            0,
+            "{name}: 0.65 is below 0.70, and that alone is no question"
         );
         assert_eq!(report.at_threshold.get("base"), None, "{name}");
+        assert_eq!(report.below.get("base"), Some(&1), "{name}");
+        let notes = notes_of(&mut reg);
+        let below: Vec<&serde_json::Value> = notes["below"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["axis"] == "base")
+            .collect();
+        assert_eq!(below.len(), 1, "{name}: {notes}");
+        assert_eq!(below[0]["value"], "PDw", "{name}");
+        assert_eq!(below[0]["confidence"], 0.65, "{name}");
+        assert_eq!(below[0]["below"], 0.70, "{name}");
+        assert_eq!(below[0]["tier"], "physics", "{name}");
+
+        // a person's own threshold for the run still asks
+        let settings = nils_classify::job::Settings {
+            review_below: Some(0.70),
+            ..Default::default()
+        };
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:low_confidence' AND status = 'open'"
+            ),
+            1,
+            "{name}"
+        );
     }
 }
 
@@ -1476,11 +1545,11 @@ fn every_threshold_reads_the_value_on_it_as_its_own_words_do() {
 /// Wave 2 §8.2 and record 35 finding 6: evidence that disagreed reaches the
 /// stack it belongs to. Candidate D's case, as the corpus holds it: a spine
 /// whose text also names the brain. The spine rule is ordered first and
-/// decides, the set stops there, and nothing used to record that the brain
-/// rule would have fired: the run raised 719 conflicts and kept every one of
-/// them in a per-batch tally.
+/// decides, the set stops there. Record 55 H3 (2026-10-09): the pack's order
+/// did what it was written to do, so it is no question; who beat whom is
+/// kept on the stack, and the tally keeps counting it.
 #[test]
-fn a_conflict_reaches_the_stack_and_the_tally_keeps_counting() {
+fn a_conflict_is_kept_on_the_stack_and_never_asked() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
     for lab in labs() {
         let name = lab.name;
@@ -1494,8 +1563,9 @@ fn a_conflict_reaches_the_stack_and_the_tally_keeps_counting() {
             ],
         );
         let mut reg = prepare(&lab, &dir);
-        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
-            .unwrap();
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
 
         // the answer is the one the order gives, unchanged
         assert_eq!(
@@ -1504,49 +1574,43 @@ fn a_conflict_reaches_the_stack_and_the_tally_keeps_counting() {
             "{name}"
         );
 
-        // and a person reading the stack sees that it was contested
-        let items = rows(
-            &mut reg,
-            "SELECT id, scope, COALESCE(group_key, ''), COALESCE(members, 0) \
-             FROM {review_item} WHERE kind = 'body_part:conflict'",
-        );
-        assert_eq!(items.len(), 1, "{name}");
-        let id = items[0].int(0).unwrap();
-        let item = nils_registry::review::item(reg.store(), id)
-            .unwrap()
-            .expect("the item is there");
-        let evidence = item.evidence;
-        assert_eq!(evidence["axis"], "body_part", "{name}: {evidence}");
-        assert_eq!(evidence["value"], "spine", "{name}: {evidence}");
-        assert_eq!(evidence["other"], "brain", "{name}: {evidence}");
+        // no question
         assert_eq!(
-            evidence["decided_by"]["rule"], "spine",
-            "{name}: {evidence}"
-        );
-        assert_eq!(evidence["over"]["rule"], "brain", "{name}: {evidence}");
-        assert!(
-            !evidence["over"]["matched"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty(),
-            "{name}: the item names what the pre-empted rule cited: {evidence}"
-        );
-        // one question per pair of answers, with the stack as its member
-        assert_eq!(items[0].text(1).unwrap(), "group", "{name}");
-        assert_eq!(
-            items[0].text(2).unwrap(),
-            "body_part:conflict|spine over brain|",
-            "{name}"
-        );
-        assert_eq!(items[0].int(3).unwrap(), 1, "{name}");
-        assert_eq!(
-            one(&mut reg, "SELECT COUNT(*) FROM {review_member}"),
             one(
                 &mut reg,
-                "SELECT COUNT(*) FROM {review_member} m JOIN {review_item} i ON i.id = m.item_id \
-                 WHERE i.kind = 'body_part:conflict'"
+                "SELECT COUNT(*) FROM {review_item} WHERE kind LIKE '%:conflict'"
             ),
-            "{name}: the conflict's member is the stack"
+            0,
+            "{name}"
+        );
+        assert_eq!(report.overrides.get("rule_order"), Some(&1), "{name}");
+
+        // and a person reading the stack sees that it was contested, by whom
+        // and over whom, with what ranked them
+        let notes = notes_of(&mut reg);
+        let o: Vec<&serde_json::Value> = notes["overrides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["axis"] == "body_part")
+            .collect();
+        assert_eq!(o.len(), 1, "{name}: {notes}");
+        let o = o[0];
+        assert_eq!(o["value"], "spine", "{name}: {o}");
+        assert_eq!(o["other"], "brain", "{name}: {o}");
+        assert_eq!(o["rank"], "rule_order", "{name}: {o}");
+        assert_eq!(o["by"]["rule_set"], "body_part", "{name}: {o}");
+        assert_eq!(o["by"]["rule"], "spine", "{name}: {o}");
+        assert_eq!(o["over"]["rule"], "brain", "{name}: {o}");
+        assert_eq!(o["by"]["tier"], "keywords", "{name}: {o}");
+        assert_eq!(o["over"]["confidence"], 0.65, "{name}: {o}");
+        assert!(
+            o["by"]["rule_at"].as_u64() < o["over"]["rule_at"].as_u64(),
+            "{name}: the spine rule is ranked first: {o}"
+        );
+        assert!(
+            !o["over"]["matched"].as_str().unwrap_or_default().is_empty(),
+            "{name}: the note names what the pre-empted rule cited: {o}"
         );
 
         // and the tally that already counted it keeps counting it
@@ -1832,7 +1896,8 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             "{name}: and the vote answered none of them"
         );
         // What the study does say about them is unchanged: the technique is
-        // the flow sequence, and the split is one question with six members.
+        // the flow sequence, and the split is noted on the six (record 55
+        // H3: information, no longer a question).
         assert_eq!(
             one(
                 &mut reg,
@@ -1843,12 +1908,19 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             6,
             "{name}"
         );
+        let split = rows(&mut reg, "SELECT CAST(notes AS TEXT) FROM {classification}")
+            .iter()
+            .filter_map(|r| r.opt_text(0).unwrap().map(str::to_string))
+            .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(|n| n["split"]["kind"] == "split:one_image_per_stack")
+            .count();
+        assert_eq!(split, 6, "{name}");
         assert_eq!(
             one(
                 &mut reg,
-                "SELECT members FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
             ),
-            6,
+            0,
             "{name}"
         );
         // And the whole series, whose echo time is a measurement, has no
@@ -2244,5 +2316,199 @@ fn a_classification_over_a_sealed_stack_raises_no_review_item() {
             again.closed.is_empty(),
             "{name}: a second run finds nothing"
         );
+    }
+}
+
+/// The elements a case adds to a series.
+type Elements<'a> = &'a [(dicom_core::Tag, VR, &'a str)];
+
+/// Several series of one study, each built from the elements its case needs.
+fn some_stacks(series: &[(&str, Elements)]) -> TempDir {
+    let dir = TempDir::new("classify-some");
+    for (i, (description, extra)) in series.iter().enumerate() {
+        let n = i + 1;
+        let sop = format!("A.{n}.1");
+        let mut e = synth::minimal_mr("A", &format!("A.{n}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, description),
+            elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        ]);
+        for (tag, vr, value) in *extra {
+            e.push(elem(*tag, *vr, value));
+        }
+        dir.file(
+            &format!("s{n}/1"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+/// Record 55 H3, Nima's ruling of 2026-10-09: the pack decides, and a sort
+/// asks only where it is truly necessary. Over one study: a spine whose name
+/// also says the brain, decided by the pack's order (an override); a base the
+/// physics gives under the pack's threshold (a low confidence); a scan
+/// nothing weights (its base, which matters, is missing); and no body part a
+/// rule could name. The override and the weak answer are kept on the
+/// stacks and asked about nowhere, the missing base is the one question, and
+/// the body part, its image model's, is never asked about.
+#[test]
+fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(
+        nils_pack::matters::missing_asked(&pack),
+        vec!["base".to_string(), "post_contrast".to_string()],
+        "the axes where a missing answer is asked, as the engine works them out"
+    );
+    for lab in labs() {
+        let name = lab.name;
+        let dir = some_stacks(&[
+            (
+                "sag t1 cervical cerebral",
+                &[
+                    (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                    (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                    (tags::REPETITION_TIME, VR::DS, "600"),
+                    (tags::ECHO_TIME, VR::DS, "12"),
+                ],
+            ),
+            (
+                "ax se",
+                &[
+                    (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                    (tags::REPETITION_TIME, VR::DS, "3000"),
+                    (tags::ECHO_TIME, VR::DS, "12"),
+                    (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+                ],
+            ),
+            ("ax mystery", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]),
+        ]);
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        let stack_of = |reg: &mut Registry, description: &str| -> i64 {
+            one(
+                reg,
+                &format!(
+                    "SELECT stack_id FROM {{stack_fingerprint}} WHERE text_series_description = '{description}'"
+                ),
+            )
+        };
+        let (spine, weak, mystery) = (
+            stack_of(&mut reg, "sag t1 cervical cerebral"),
+            stack_of(&mut reg, "ax se"),
+            stack_of(&mut reg, "ax mystery"),
+        );
+        let notes = |reg: &mut Registry, stack: i64| -> serde_json::Value {
+            let r = rows(
+                reg,
+                &format!(
+                    "SELECT CAST(notes AS TEXT) FROM {{classification}} WHERE stack_id = {stack}"
+                ),
+            );
+            r[0].opt_text(0)
+                .unwrap()
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(serde_json::Value::Null)
+        };
+
+        // nothing the pack decided is a question, and nothing about the body
+        // part is
+        for kind in [
+            "%:conflict",
+            "%:low_confidence",
+            "split:%",
+            "body_part:%",
+            "body_region:%",
+        ] {
+            assert_eq!(
+                one(
+                    &mut reg,
+                    &format!("SELECT COUNT(*) FROM {{review_item}} WHERE kind LIKE '{kind}'")
+                ),
+                0,
+                "{name}: {kind}"
+            );
+        }
+
+        // the override is kept on its stack, with what ranked it
+        let n = notes(&mut reg, spine);
+        assert!(
+            n["overrides"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["axis"] == "body_part"
+                    && o["by"]["rule"] == "spine"
+                    && o["over"]["rule"] == "brain"
+                    && o["rank"] == "rule_order"),
+            "{name}: {n}"
+        );
+        // the weak answer is kept on its stack
+        let n = notes(&mut reg, weak);
+        assert!(
+            n["below"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["axis"] == "base" && b["value"] == "PDw"),
+            "{name}: {n}"
+        );
+
+        // the missing base is the question, on the one stack nothing weights
+        let missing = rows(
+            &mut reg,
+            "SELECT i.id, i.scope FROM {review_item} i WHERE i.kind = 'base:missing' AND i.status = 'open'",
+        );
+        assert_eq!(missing.len(), 1, "{name}: one question");
+        let members: Vec<i64> = rows(
+            &mut reg,
+            &format!(
+                "SELECT stack_id FROM {{review_member}} WHERE item_id = {}",
+                missing[0].int(0).unwrap()
+            ),
+        )
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+        assert_eq!(members, vec![mystery], "{name}");
+        assert_eq!(
+            report.missing.get("base"),
+            Some(&1),
+            "{name}: {:?}",
+            report.missing
+        );
+        let item = nils_registry::review::item(reg.store(), missing[0].int(0).unwrap())
+            .unwrap()
+            .expect("the item is there");
+        assert_eq!(item.evidence["axis"], "base", "{name}: {}", item.evidence);
+        // the stack's classification counts it, and notes the axes no rule
+        // answered, the body part among them, which is never asked
+        assert!(
+            one(
+                &mut reg,
+                &format!("SELECT review_items FROM {{classification}} WHERE stack_id = {mystery}")
+            ) >= 1,
+            "{name}"
+        );
+        let n = notes(&mut reg, mystery);
+        let unresolved: Vec<&str> = n["unresolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(unresolved.contains(&"base"), "{name}: {n}");
+        assert!(unresolved.contains(&"body_part"), "{name}: {n}");
+        assert_eq!(
+            report.unresolved.get("body_part"),
+            Some(&2),
+            "{name}: {:?}",
+            report.unresolved
+        );
+        assert_eq!(report.missing.get("body_part"), None, "{name}");
     }
 }

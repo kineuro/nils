@@ -22,6 +22,7 @@ pub mod expr;
 pub mod keywords;
 pub mod legal;
 pub mod level;
+pub mod matters;
 pub mod mcp;
 pub mod normalize;
 pub mod overlay;
@@ -45,5 +46,8 @@ pub use overlay::Overlay;
 pub use pack::{CONTRACT, Pack, THRESHOLD_TOLERANCE, at_threshold, load, load_judged, weaker_than};
 pub use rules::basis_of;
 pub use stack::Stack;
-pub use verdict::{AxisVerdict, Diagnostic, Evidence, Verdict, Vote, Voter, voters};
+pub use verdict::{
+    AxisVerdict, Diagnostic, EqualRank, Evidence, Override, Ranked, Side, Verdict, Vote, Voter,
+    voters,
+};
 pub use version::Version;

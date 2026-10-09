@@ -137,7 +137,7 @@ fn source(
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
         doc["totals"] = json!({
             "subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
-            "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {},
+            "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {}, "noted": {},
         });
         return Ok(doc);
     }
@@ -333,6 +333,7 @@ fn source(
         "sure": certainty.sure,
         "unsorted": certainty.unsorted,
         "need_a_look": certainty.need_a_look,
+        "noted": certainty.noted,
     });
     Ok(doc)
 }

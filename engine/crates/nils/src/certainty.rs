@@ -88,6 +88,11 @@ pub(crate) struct Certainty {
     /// two questions counts under each, so these may add up to more than
     /// `to_sort`.
     pub(crate) need_a_look: BTreeMap<String, i64>,
+    /// Record 55 H3 (2026-10-09): what the sort noted that is information
+    /// and not a question, by kind: the split note (a series split into
+    /// stacks of one image each), on the sorted stacks it holds for. Never
+    /// counted in `to_sort` or `need_a_look`.
+    pub(crate) noted: BTreeMap<String, i64>,
 }
 
 /// The certainty of the stacks the sources (a comma list of `source` ids)
@@ -167,11 +172,37 @@ pub(crate) fn of_sources(
         &[],
     )?[0]
         .int(0)?;
+    // the split note, by the one test the sort writes it by, over the
+    // fingerprints of the sorted stacks of a split series
+    let mut split = 0i64;
+    for r in store.query(
+        &format!(
+            "SELECT f.stacks_in_series, f.n_instances FROM {stack} x \
+             JOIN {} f ON f.stack_id = x.id {of_source} \
+             AND f.split_reason IS NOT NULL AND f.split_reason <> '' \
+             AND EXISTS (SELECT 1 FROM {class} cl WHERE cl.stack_id = x.id)",
+            store.qualified("stack_fingerprint")
+        ),
+        &[],
+    )? {
+        let n =
+            |i: usize| -> Result<Option<f64>, StoreError> { Ok(r.opt_int(i)?.map(|v| v as f64)) };
+        if let (Some(stacks_in_series), Some(images)) = (n(0)?, n(1)?)
+            && nils_classify::classify::is_split_note(stacks_in_series, images)
+        {
+            split += 1;
+        }
+    }
+    let mut noted = BTreeMap::new();
+    if split > 0 {
+        noted.insert(nils_classify::classify::SPLIT_NOTE.to_string(), split);
+    }
     Ok(Certainty {
         to_sort,
         sure: (sorted - to_sort).max(0),
         unsorted: (stacks - sorted).max(0),
         need_a_look,
+        noted,
     })
 }
 
