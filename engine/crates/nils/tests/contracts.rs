@@ -653,3 +653,33 @@ fn every_descriptor_the_repository_ships_validates_against_the_job_contract() {
         );
     }
 }
+
+/// The HTTP API contract (`contracts/openapi`), every version of it, is
+/// YAML that a strict parser reads, as anything generating a client or a
+/// page from it does: no plain scalar that holds `: `, no key twice in one
+/// mapping. Until 2026-10-10 version 7 held both and version 2 the first,
+/// and the tests that read the documents as text never noticed. Each is an
+/// OpenAPI 3.1 document that names its own version.
+#[test]
+fn every_openapi_document_is_strict_yaml() {
+    // the parser refuses both faults the documents held
+    for bad in [
+        "summary: the caps (Wave 4b section 11.5): a handle\n",
+        "responses:\n  \"404\": {description: one}\n  \"404\": {description: two}\n",
+    ] {
+        assert!(
+            serde_saphyr::from_str::<serde_json::Value>(bad).is_err(),
+            "{bad}"
+        );
+    }
+    let current = version("openapi");
+    for v in 0..=current {
+        let p = contracts().join(format!("openapi/v{v}/openapi.yaml"));
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        let doc: serde_json::Value =
+            serde_saphyr::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        assert_eq!(doc["openapi"], "3.1.0", "v{v}");
+        assert_eq!(doc["info"]["version"], v.to_string(), "v{v}");
+        assert!(doc["paths"].is_object(), "v{v}");
+    }
+}
