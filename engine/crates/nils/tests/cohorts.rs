@@ -148,6 +148,16 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     fn start(home: &TempDir, requests: usize, extra: &[&str]) -> Server {
         let mut cmd = nils();
@@ -168,13 +178,15 @@ impl Server {
             .env("HOSTNAME", "ward-3")
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = cmd.spawn().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let child = cmd.spawn().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let first = lines.next().unwrap().unwrap();
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     fn request(
@@ -216,9 +228,23 @@ impl Server {
         (status, json)
     }
 
+    /// The server exits on its own once it has served the count the test
+    /// started it with; a count that is wrong fails the test, never hangs
+    /// it, and the server is killed as the test unwinds.
     fn finish(mut self) {
-        let status = self.child.wait().unwrap();
-        assert!(status.success(), "nils serve exited {status}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            match self.child.try_wait().unwrap() {
+                Some(status) => {
+                    assert!(status.success(), "nils serve exited {status}");
+                    return;
+                }
+                None if std::time::Instant::now() > deadline => panic!(
+                    "nils serve still waiting for requests after 120 s: the test's request count is wrong"
+                ),
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 

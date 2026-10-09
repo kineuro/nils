@@ -128,6 +128,16 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     /// Start `nils serve` on a free port, serving `requests` requests.
     fn start(home: &TempDir, requests: usize, extra: &[&str], env: &[(&str, &str)]) -> Server {
@@ -152,22 +162,23 @@ impl Server {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let child = cmd.spawn().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         // A server that dies before it listens says why, never a bare unwrap.
         let Some(Ok(first)) = lines.next() else {
             let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
+            if let Some(mut e) = held.child.stderr.take() {
                 let _ = e.read_to_string(&mut err);
             }
-            let _ = child.wait();
             panic!("nils serve did not listen: {err}");
         };
         // "nils serve   127.0.0.1:PORT   auth ..."
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     fn request(
@@ -246,9 +257,23 @@ impl Server {
         (status, body.to_string())
     }
 
+    /// The server exits on its own once it has served the count the test
+    /// started it with; a count that is wrong fails the test, never hangs
+    /// it, and the server is killed as the test unwinds.
     fn finish(mut self) {
-        let status = self.child.wait().unwrap();
-        assert!(status.success(), "nils serve exited {status}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            match self.child.try_wait().unwrap() {
+                Some(status) => {
+                    assert!(status.success(), "nils serve exited {status}");
+                    return;
+                }
+                None if std::time::Instant::now() > deadline => panic!(
+                    "nils serve still waiting for requests after 120 s: the test's request count is wrong"
+                ),
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 
@@ -1572,6 +1597,31 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             .unwrap_or(0),
         "{signals}"
     );
+    // kineuro/nils#94, the rest: the text each axis the rules resolved was
+    // matched against, per value, over the same sample and under the same
+    // threshold, so the two stacks of one subject show none
+    let resolved = &signals["resolved_texts"];
+    for key in [
+        "pack",
+        "overlay",
+        "text",
+        "sample",
+        "read",
+        "complete",
+        "shown_when",
+    ] {
+        assert_eq!(resolved[key], unresolved[key], "{key}: {signals}");
+    }
+    let technique = &resolved["axes"]["technique"];
+    assert_eq!(technique["stacks"], 2, "{signals}");
+    let values = technique["values"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    assert!(!values.is_empty(), "{signals}");
+    for doc in values.values() {
+        assert_eq!(doc["texts"], serde_json::json!([]), "{signals}");
+        assert_eq!(doc["withheld"]["stacks"], doc["stacks"], "{signals}");
+    }
     // record 26: the same by value, and the origins for the scope chips
     let by_value = signals["by_value"]["technique"]
         .as_object()
@@ -1780,6 +1830,15 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         unresolved["axes"]["post_contrast"]["stacks"], 1,
         "{signals}"
     );
+    // and the stack the site's word resolved is the resolved sample's, under
+    // the value the word reached
+    let resolved = &signals["resolved_texts"];
+    assert_eq!(resolved["overlay"], "site@1.0.0", "{signals}");
+    assert_eq!(
+        resolved["axes"]["post_contrast"]["values"]["1"]["stacks"], 1,
+        "{signals}"
+    );
+    assert_eq!(resolved["axes"]["post_contrast"]["stacks"], 1, "{signals}");
     let counted: i64 = unresolved["axes"]
         .as_object()
         .unwrap()

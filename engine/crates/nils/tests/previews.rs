@@ -382,7 +382,7 @@ impl Drop for Server {
 
 impl Server {
     fn start(home: &TempDir, extra: &[&str]) -> Server {
-        let mut child = nils()
+        let child = nils()
             .arg("--registry")
             .arg(home.path())
             .args(["serve", "--bind", "127.0.0.1:0", "--workers", "4"])
@@ -394,12 +394,14 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let first = lines.next().unwrap().unwrap();
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     fn send(
