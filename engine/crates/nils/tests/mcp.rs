@@ -75,9 +75,19 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     fn start(home: &TempDir, pack_dir: &Path, extra: &[&str]) -> Server {
-        let mut child = nils()
+        let child = nils()
             .arg("--registry")
             .arg(home.path())
             .args([
@@ -99,13 +109,13 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let first = BufReader::new(stdout).lines().next().unwrap().unwrap();
         let addr = first.split_whitespace().nth(2).unwrap();
-        Server {
-            child,
-            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
-        }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     /// One request, with its status, its headers and its body.

@@ -113,7 +113,7 @@ impl Worked {
             format!("{PLACES}=pia@lab:places:see"),
         ]
         .join(",");
-        let mut child = nils()
+        let child = nils()
             .arg("--registry")
             .arg(home.dir.path())
             .args(["serve", "--bind", "127.0.0.1:0", "--workers", "2"])
@@ -129,16 +129,17 @@ impl Worked {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Worked { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = std::io::BufReader::new(stdout).lines();
         let Some(Ok(first)) = lines.next() else {
-            let _ = child.kill();
             panic!("nils serve did not listen");
         };
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
         std::thread::spawn(move || for _ in lines {});
-        Worked { child, port }
+        held
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Value) {
