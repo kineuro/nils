@@ -5846,8 +5846,9 @@ fn scans_sweep(dsn: Option<&str>) {
         e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
         e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
         e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, series));
+        // a dataset is read from its structure: its anonymised tree
         dir.file(
-            &format!("{study}/{sop}"),
+            &format!("derivatives/dcm-anon/{study}/{sop}"),
             &synth::part10(&MetaFields::mr(&sop), &e, true),
         );
     }
@@ -5891,7 +5892,35 @@ fn scans_sweep(dsn: Option<&str>) {
     };
     run(
         &home,
-        &["place", "add", "incoming", tree, "--role", "source"],
+        &[
+            "place",
+            "add",
+            "incoming",
+            tree,
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nP1,mapped-0001\nP2,mapped-0002\n",
+    );
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
         None,
     );
     run(
@@ -5903,14 +5932,12 @@ fn scans_sweep(dsn: Option<&str>) {
             only_originals.path().to_str().unwrap(),
             "--role",
             "source",
-            "--arrives",
-            "identified",
         ],
         None,
     );
     run(
         &home,
-        &["digest", "--name", "first", "--no-private", tree],
+        &["digest", "--name", "first", "--no-private", "@incoming"],
         None,
     );
     run(&home, &["fingerprint"], None);

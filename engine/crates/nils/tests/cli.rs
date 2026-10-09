@@ -4754,7 +4754,7 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
         .args(registry)
         .args(["place", "add", "out"])
         .arg(elsewhere.path())
-        .args(["--role", "export", "--arrives", "coded"])
+        .args(["--role", "export", "--subjects", "map"])
         .output()
         .unwrap();
     assert!(!refused.status.success());

@@ -1456,8 +1456,9 @@ fn a_pick_run_is_part_of_the_bring_in_and_has_a_door() {
                 &instance.to_string(),
             ));
             e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+            // a dataset is read from its structure: its anonymised tree
             dir.file(
-                &format!("sub-{p}/IM_{instance:04}"),
+                &format!("derivatives/dcm-anon/sub-{p}/IM_{instance:04}"),
                 &synth::part10(&MetaFields::mr(&sop), &e, true),
             );
         }
@@ -1469,10 +1470,25 @@ fn a_pick_run_is_part_of_the_bring_in_and_has_a_door() {
         dir.path().to_str().unwrap(),
         "--role",
         "source",
-        "--arrives",
-        "deidentified",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "map",
         "--cohort",
         "fed",
+    ]);
+    let map = home.dir.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-ONE,mapped-0001\nS-TWO,mapped-0002\n",
+    );
+    home.ok(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--id-column",
+        "PatientID",
+        "--code-column",
+        "subject_code",
     ]);
     let server = Worked::start(&home, dir.path());
     // the bring-in: digest, fingerprint, classify and the pick run
