@@ -621,7 +621,7 @@ paths:
   /api/ask/catalog:
     get:
       summary: The catalog the caller may see, every level's first page (Wave 4b section 9)
-      description: "Section 4.4 rule 15 applied to the caller's detail after any ceiling: `kinds` lists the event kinds that detail opens, a sensitive kind only at detail sensitive and marked `sensitive: true` there, so a document written from the catalog read under one ceiling validates under the same ceiling, and a kind absent from it is refused at validate as forbidden_field (kineuro/nils#100)."
+      description: "Section 4.4 rule 15 applied to the caller's detail after any ceiling: `kinds` lists the event kinds that detail opens, a sensitive kind only at detail sensitive and marked `sensitive: true` there, so a document written from the catalog read under one ceiling validates under the same ceiling, and a kind absent from it is refused at validate as forbidden_field (kineuro/nils#100). Added in place additively on 2026-10-09 (Wave 7a): the stack, session and subject levels carry the field `dataset`, technical at every detail and never federated. A stack's is the name of the dataset whose digest first read it (an active source place that is a dataset, not a root), null where no dataset holds it; a session's and a subject's are the names of the datasets their stacks are of, sorted and joined by `, `, which `=`, `<>`, `in`, `not_in` and `has` read as whether a name is among them, and which a group's key counts a row under once for each name. `datasets` lists the names of the datasets in force; a name a document compares the field with that is not among them is refused at validate as unknown_value."
       responses:
         "200": {description: The catalog document}
   /api/ask/catalog/{level}:
