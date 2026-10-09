@@ -6463,3 +6463,964 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
     assert_eq!(status, 200);
     server.finish();
 }
+
+/// The dataset viewer (2026-10-09): a dataset's subjects as the Grid's
+/// folders, one subject's visits, and one visit's scans, and the same over
+/// a cohort's members across datasets. Counts, order, filters, the search,
+/// the id type a person shows subjects by (clear only to a caller who may
+/// read identifiers), K7's shapes at plain, the sealed rule, paging, and
+/// every refusal.
+#[test]
+fn the_viewer_lists_subjects_visits_and_a_visit_s_scans() {
+    viewer_sweep(None);
+}
+
+/// The same on Postgres, where the dates are read as text and the counts
+/// come back as integers.
+#[test]
+fn the_viewer_lists_subjects_visits_and_a_visit_s_scans_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    viewer_sweep(Some(&dsn));
+    viewer_store(Some(&dsn))
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {VIEWER_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {VIEWER_SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+}
+
+const VIEWER_SCHEMA: &str = "nils_viewer_doors";
+
+fn viewer_store(dsn: Option<&str>) -> nils_registry::Store {
+    match dsn {
+        Some(dsn) => nils_registry::Store::connect_postgres(dsn, VIEWER_SCHEMA).unwrap(),
+        None => unreachable!(),
+    }
+}
+
+/// One synthetic MR file of a series: its patient, study and date, what
+/// the scanner called it, who made the scanner and its physics.
+fn viewer_file(
+    tree: &TempDir,
+    patient: &str,
+    study: &str,
+    series: &str,
+    date: &str,
+    description: &str,
+    maker: &str,
+) {
+    let sop = format!("{series}.1");
+    let mut e = synth::minimal_mr(study, series, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
+    e.push(synth::text(tags::MANUFACTURER, VR::LO, maker));
+    e.push(synth::text(tags::ECHO_TIME, VR::DS, "2.3"));
+    e.push(synth::text(tags::REPETITION_TIME, VR::DS, "2300"));
+    e.push(synth::text(tags::FLIP_ANGLE, VR::DS, "8"));
+    tree.file(
+        &format!("derivatives/dcm-anon/{study}/{sop}"),
+        &synth::part10(&MetaFields::mr(&sop), &e, true),
+    );
+}
+
+fn viewer_sweep(dsn: Option<&str>) {
+    let home = TempDir::new("viewer-home");
+    let trees = [
+        ("first", TempDir::new("viewer-first")),
+        ("second", TempDir::new("viewer-second")),
+        ("third", TempDir::new("viewer-third")),
+    ];
+    // three subjects in one dataset; the first comes back in a second one,
+    // where a fourth turns out to be the first and is merged into it; the
+    // third comes back in a third one, read after the sessions were built.
+    // A file a line: dataset, patient, study, series, date, description,
+    // maker.
+    const FILES: &str = "\
+first|S-0001|1.2.9.A|1.2.9.A.1|20260102|t1 mprage|SIEMENS
+first|S-0001|1.2.9.A|1.2.9.A.2|20260102|sc t2|SIEMENS
+first|S-0001|1.2.9.B|1.2.9.B.1|20260305|flair|SIEMENS
+first|S-0002|1.2.9.C|1.2.9.C.1|20260407|dwi|GE MEDICAL SYSTEMS
+first|S-0003|1.2.9.D|1.2.9.D.1|20260510|t1 post|Philips Medical Systems
+first|S-0003|1.2.9.D|1.2.9.D.2|20260510|symri|Philips Medical Systems
+second|S-0001|1.2.9.E|1.2.9.E.1|20260601|t2 tse|SIEMENS
+second|S-0004|1.2.9.F|1.2.9.F.1|20260601|pd tse|SIEMENS
+third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
+    for line in FILES.lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        let tree = &trees.iter().find(|(n, _)| *n == f[0]).unwrap().1;
+        viewer_file(tree, f[1], f[2], f[3], f[4], f[5], f[6]);
+    }
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    match dsn {
+        Some(dsn) => {
+            viewer_store(Some(dsn))
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {VIEWER_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {VIEWER_SCHEMA}_linkage CASCADE"
+                ))
+                .unwrap();
+            run(
+                &home,
+                &[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    VIEWER_SCHEMA,
+                    "--key",
+                    "k",
+                ],
+                None,
+            );
+        }
+        None => {
+            run(&home, &["init", "--key", "k"], None);
+        }
+    }
+    let open = || match dsn {
+        Some(_) => viewer_store(dsn),
+        None => nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    for (name, tree) in &trees {
+        run(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                tree.path().to_str().unwrap(),
+                "--role",
+                "source",
+                "--patient-id",
+                "id-type:patient-id",
+                "--subjects",
+                "map",
+            ],
+            None,
+        );
+    }
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,mapped-0001\nS-0002,mapped-0002\nS-0003,mapped-0003\nS-0004,mapped-0004\n",
+    );
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    for name in ["first", "second"] {
+        let at = format!("@{name}");
+        run(
+            &home,
+            &["digest", "--name", name, "--no-private", &at],
+            None,
+        );
+    }
+    run(&home, &["fingerprint"], None);
+    // the fourth is the first: its code becomes the first's alias
+    run(
+        &home,
+        &[
+            "linkage",
+            "merge",
+            "mapped-0001",
+            "mapped-0004",
+            "--why",
+            "one person",
+        ],
+        None,
+    );
+    run(&home, &["session", "rebuild"], None);
+    // the third dataset is read after the sessions were built: its study
+    // is a visit the cache does not hold yet
+    run(
+        &home,
+        &["digest", "--name", "third", "--no-private", "@third"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+
+    // the registry's ids, read here; the doors are asked for the rest
+    let (stack_of, subject_of, study_of) = {
+        let mut store = open();
+        let [stack, fp, subject, study] =
+            ["stack", "stack_fingerprint", "subject", "study"].map(|t| store.qualified(t));
+        let pairs = |store: &mut nils_registry::Store, sql: &str| {
+            store
+                .query(sql, &[])
+                .unwrap()
+                .iter()
+                .map(|r| (r.text(1).unwrap().to_string(), r.int(0).unwrap()))
+                .collect::<std::collections::HashMap<String, i64>>()
+        };
+        (
+            pairs(
+                &mut store,
+                &format!(
+                    "SELECT st.id, f.text_series_description FROM {stack} st \
+                     JOIN {fp} f ON f.stack_id = st.id"
+                ),
+            ),
+            pairs(&mut store, &format!("SELECT id, code FROM {subject}")),
+            pairs(
+                &mut store,
+                &format!("SELECT id, study_instance_uid FROM {study}"),
+            ),
+        )
+    };
+    assert_eq!(stack_of.len(), 9, "{stack_of:?}");
+    let st = |d: &str| stack_of[d];
+    let (s1, s2, s3) = (
+        subject_of["mapped-0001"],
+        subject_of["mapped-0002"],
+        subject_of["mapped-0003"],
+    );
+
+    // what NILS says each scan is, the questions, the picks and a cohort
+    {
+        let mut store = open();
+        let [axis, item, member, pick, pick_stack, cohort, cohort_member] = [
+            "classification_axis",
+            "review_item",
+            "review_member",
+            "pick",
+            "pick_stack",
+            "cohort",
+            "cohort_member",
+        ]
+        .map(|t| store.qualified(t));
+        for (series, name, value) in [
+            ("t1 mprage", "directory_type", "anat"),
+            ("t1 mprage", "base", "T1w"),
+            ("t1 mprage", "body_part", "brain"),
+            ("sc t2", "directory_type", "anat"),
+            ("sc t2", "base", "T2w"),
+            ("sc t2", "body_part", "spine"),
+            ("flair", "directory_type", "anat"),
+            ("flair", "base", "T2w"),
+            ("flair", "modifier", "FLAIR"),
+            ("flair", "body_part", "brain"),
+            ("flair", "post_contrast", "1"),
+            ("dwi", "directory_type", "dwi"),
+            ("dwi", "base", "DWI"),
+            ("dwi", "body_part", "brain"),
+            ("t1 post", "directory_type", "anat"),
+            ("t1 post", "base", "T1w"),
+            ("t1 post", "body_part", "brain-neck"),
+            ("symri", "directory_type", "anat"),
+            ("symri", "provenance", "SyMRI"),
+            ("symri", "body_part", "brain"),
+            ("t2 tse", "directory_type", "anat"),
+            ("t2 tse", "base", "T2w"),
+            ("t2 tse", "body_part", "brain"),
+            ("pd tse", "directory_type", "anat"),
+            ("pd tse", "base", "PDw"),
+            ("pd tse", "body_part", "brain"),
+            ("t1 late", "directory_type", "anat"),
+            ("t1 late", "base", "T1w"),
+            ("t1 late", "body_part", "brain"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {axis} (stack_id, axis, value, confidence, tier) \
+                         VALUES ({}, '{name}', '{value}', 1.0, 'rule')",
+                        st(series)
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // an open grouped question on the first T1, a staged question about
+        // the SyMRI scan alone, and an accepted one that waits for nobody
+        let mut question = |kind: &str, scope: &str, reference: &str, status: &str| {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {item} (kind, scope, ref, status, created_at) \
+                         VALUES ('{kind}', '{scope}', '{reference}', '{status}', '2026-10-09T10:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            store
+                .query(&format!("SELECT MAX(id) FROM {item}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        let grouped = question("base:low_confidence", "rule", "{}", "open");
+        let _ = question(
+            "system1:unsure",
+            "stack",
+            &format!("{{\"stack_id\": {}}}", st("symri")),
+            "staged",
+        );
+        let accepted = question("body_part:low_confidence", "rule", "{}", "accepted");
+        for (item_id, series) in [(grouped, "t1 mprage"), (accepted, "dwi")] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {member} (item_id, stack_id) VALUES ({item_id}, {})",
+                        st(series)
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // a live T1w and FLAIR of the first subject, and a withdrawn T1w of
+        // the third
+        for (role, series, subject, day, withdrawn) in [
+            ("t1w", "t1 mprage", s1, "2026-01-02", "NULL"),
+            ("flair", "flair", s1, "2026-03-05", "NULL"),
+            ("t1w", "t1 post", s3, "2026-05-10", "'2026-10-09T11:00:00Z'"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {pick} (model, role, subject_id, session_day, scheme, reference, \
+                         pack, pack_version, actor, author_kind, decided_at, withdrawn_at) \
+                         VALUES ('main', '{role}', {subject}, '{day}', 'default', 'site', 'mri', \
+                         '1.0.0', 'nils', 'agent', '2026-10-09T10:00:00Z', {withdrawn})"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let id = store
+                .query(&format!("SELECT MAX(id) FROM {pick}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {pick_stack} (pick_id, stack_id) VALUES ({id}, {})",
+                        st(series)
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // a cohort of the first and the third; the second joined and left
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {cohort} (name, owner, created_at) \
+                     VALUES ('c1', 'anna', '2026-10-09T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let c1 = store
+            .query(&format!("SELECT id FROM {cohort} WHERE name = 'c1'"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        for (subject, left) in [(s1, "NULL"), (s3, "NULL"), (s2, "'2026-10-09T10:30:00Z'")] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {cohort_member} (cohort_id, subject_id, joined_at, left_at, source) \
+                         VALUES ({c1}, {subject}, '2026-10-09T10:00:00Z', {left}, 'manual')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+
+    const LIMIT: usize = 72;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+            "--token",
+            "a-reviewer-who-works-tok=work@lab:reviewer,data:work",
+            "--token",
+            "an-operator-token-of-len=op@lab:operator",
+            "--token",
+            "a-places-token-of-length=pl@lab:places:see",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-len");
+    let works = Some("a-reviewer-who-works-tok");
+    let operator = Some("an-operator-token-of-len");
+    let places_only = Some("a-places-token-of-length");
+    let ask = |path: &str, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request("GET", path, None, token)
+    };
+    let ids = |d: &serde_json::Value| -> Vec<i64> {
+        d["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_i64().unwrap())
+            .collect()
+    };
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // ---- the subjects of a dataset, at detail quasi
+    let (status, doc) = ask("/api/datasets/first/subjects", reviewer);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["scope"]["kind"], "dataset", "{doc}");
+    assert_eq!(doc["scope"]["name"], "first", "{doc}");
+    assert_eq!(doc["detail"], "quasi", "{doc}");
+    assert_eq!(doc["show"], "code", "{doc}");
+    assert_eq!(doc["order"], "look", "{doc}");
+    assert_eq!(
+        doc["totals"],
+        serde_json::json!({"subjects": 3, "visits": 4, "scans": 6, "look": 2}),
+        "{doc}"
+    );
+    assert_eq!(doc["matched"], 3, "{doc}");
+    assert_eq!(doc["count"], 3, "{doc}");
+    assert_eq!(doc["next"], serde_json::Value::Null, "{doc}");
+    // most to look at first, then by code
+    assert_eq!(ids(&doc), vec![s1, s3, s2], "{doc}");
+    let one = &doc["subjects"][0];
+    assert_eq!(one["code"], "mapped-0001", "{doc}");
+    assert_eq!(one["label"], "mapped-0001", "{doc}");
+    assert_eq!(one["visits"], 2, "{doc}");
+    assert_eq!(one["scans"], 3, "{doc}");
+    assert_eq!(one["look"], 1, "{doc}");
+    assert_eq!(
+        one["regions"],
+        serde_json::json!(["brain", "spine"]),
+        "{doc}"
+    );
+    assert_eq!(one["makers"], serde_json::json!(["Siemens"]), "{doc}");
+    assert_eq!(one["main"], serde_json::json!(["flair", "t1w"]), "{doc}");
+    let three = &doc["subjects"][1];
+    // the staged question about one stack counts; the withdrawn pick does not
+    assert_eq!(three["look"], 1, "{doc}");
+    assert_eq!(three["main"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        three["regions"],
+        serde_json::json!(["brain", "neck"]),
+        "{doc}"
+    );
+    assert_eq!(three["makers"], serde_json::json!(["Philips"]), "{doc}");
+    // the accepted question waits for nobody
+    assert_eq!(doc["subjects"][2]["look"], 0, "{doc}");
+    assert_eq!(
+        doc["subjects"][2]["makers"],
+        serde_json::json!(["GE"]),
+        "{doc}"
+    );
+    assert_eq!(
+        names(&doc["facets"]["makers"]),
+        vec!["GE", "Philips", "Siemens"],
+        "{doc}"
+    );
+    assert_eq!(
+        doc["facets"]["regions"][0],
+        serde_json::json!({"name": "brain", "subjects": 3}),
+        "{doc}"
+    );
+    assert_eq!(
+        names(&doc["facets"]["roles"]),
+        vec!["flair", "t1w"],
+        "{doc}"
+    );
+    assert_eq!(
+        doc["facets"]["id_types"],
+        serde_json::json!([
+            {"name": "patient-id", "subjects": 3},
+            {"name": "subject-code", "subjects": 1},
+        ]),
+        "{doc}"
+    );
+
+    // every order, the ties by code
+    for (order, want) in [
+        ("code", vec![s1, s2, s3]),
+        ("visits", vec![s1, s2, s3]),
+        ("scans", vec![s1, s3, s2]),
+    ] {
+        let (status, d) = ask(
+            &format!("/api/datasets/first/subjects?order={order}"),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(ids(&d), want, "{order}: {d}");
+    }
+    // the filters: kinds all hold, values of one kind any
+    for (filter, want) in [
+        ("look", vec![s1, s3]),
+        ("visits2", vec![s1]),
+        ("main:t1w", vec![s1]),
+        ("main:flair,main:t1w", vec![s1]),
+        ("region:spine", vec![s1]),
+        ("region:neck,region:spine", vec![s1, s3]),
+        ("maker:ge", vec![s2]),
+        ("maker:Siemens,maker:philips", vec![s1, s3]),
+        ("look,maker:siemens", vec![s1]),
+    ] {
+        let (status, d) = ask(
+            &format!("/api/datasets/first/subjects?filter={filter}"),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(ids(&d), want, "{filter}: {d}");
+        assert_eq!(d["matched"], want.len(), "{filter}: {d}");
+        // the totals stay the whole dataset's
+        assert_eq!(d["totals"]["subjects"], 3, "{filter}: {d}");
+    }
+    // the search finds a code as the caller is shown it
+    let (status, d) = ask("/api/datasets/first/subjects?q=0002", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), vec![s2], "{d}");
+    // an identifier given whole finds its subject only for a caller who may
+    // read identifiers, and nothing is opened to find it
+    let (status, d) = ask("/api/datasets/first/subjects?q=S-0003", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), Vec::<i64>::new(), "{d}");
+    let (status, d) = ask("/api/datasets/first/subjects?q=S-0003", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), vec![s3], "{d}");
+    // the merged subject's identifier is the first's now
+    let (status, d) = ask("/api/datasets/first/subjects?q=S-0004", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), vec![s1], "{d}");
+
+    // shown by an id type: clear only to data:work at detail sensitive
+    let label_of = |d: &serde_json::Value, id: i64| -> serde_json::Value {
+        d["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()["label"]
+            .clone()
+    };
+    let (status, d) = ask("/api/datasets/first/subjects?show=patient-id", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["show"], "patient-id", "{d}");
+    assert_eq!(label_of(&d, s1), "S-0001", "{d}");
+    assert_eq!(label_of(&d, s3), "S-0003", "{d}");
+    for token in [reviewer, works, reader] {
+        let (status, d) = ask("/api/datasets/first/subjects?show=patient-id", token);
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(label_of(&d, s1), "A-9999", "{d}");
+        assert!(!d.to_string().contains("S-000"), "{d}");
+    }
+    // the alias a merge files is a code, shown as codes are: as it is at
+    // detail quasi, as its shape below
+    let (status, d) = ask("/api/datasets/first/subjects?show=subject-code", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(label_of(&d, s1), "mapped-0004", "{d}");
+    assert_eq!(label_of(&d, s2), serde_json::Value::Null, "{d}");
+    let (status, d) = ask("/api/datasets/first/subjects?show=subject-code", reader);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(label_of(&d, s1), "aaaaaa-9999", "{d}");
+    let (status, refused) = ask("/api/datasets/first/subjects?show=no-such-type", reviewer);
+    assert_eq!(status, 400, "{refused}");
+
+    // at plain the code is its shape, so its value is not found by it
+    let (status, plain) = ask("/api/datasets/first/subjects", reader);
+    assert_eq!(status, 200, "{plain}");
+    assert_eq!(plain["detail"], "plain", "{plain}");
+    assert!(!plain.to_string().contains("mapped-"), "{plain}");
+    assert_eq!(plain["subjects"][0]["code"], "aaaaaa-9999", "{plain}");
+    assert_eq!(ids(&plain), ids(&doc), "{plain}");
+    let (status, d) = ask("/api/datasets/first/subjects?q=0002", reader);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["matched"], 0, "{d}");
+
+    // a page at a time, the cursor a subject's id
+    let (status, page) = ask("/api/datasets/first/subjects?limit=2", reviewer);
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(ids(&page), vec![s1, s3], "{page}");
+    assert_eq!(page["next"], s3, "{page}");
+    let (status, rest) = ask(
+        &format!("/api/datasets/first/subjects?limit=2&after={s3}"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{rest}");
+    assert_eq!(ids(&rest), vec![s2], "{rest}");
+    assert_eq!(rest["next"], serde_json::Value::Null, "{rest}");
+    for bad in [
+        "limit=0",
+        "limit=201",
+        "after=x",
+        "after=999999",
+        "order=newest",
+        "filter=visits3",
+        "filter=region",
+    ] {
+        let (status, refused) = ask(&format!("/api/datasets/first/subjects?{bad}"), reviewer);
+        assert_eq!(status, 400, "{bad}: {refused}");
+    }
+    let (status, refused) = ask("/api/datasets/nowhere/subjects", reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/datasets/first/subjects", places_only);
+    assert_eq!(status, 403, "{refused}");
+
+    // ---- one subject's visits, by date, number and days from the first
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["name"], "date", "{v}");
+    assert_eq!(v["subject"]["id"], s1, "{v}");
+    assert_eq!(v["subject"]["code"], "mapped-0001", "{v}");
+    assert_eq!(
+        v["totals"],
+        serde_json::json!({"visits": 2, "scans": 3, "look": 1, "span": "62"}),
+        "{v}"
+    );
+    let visits = v["visits"].as_array().unwrap();
+    assert_eq!(visits.len(), 2, "{v}");
+    let (a, b) = (&visits[0], &visits[1]);
+    assert_eq!(a["label"], "ses-20260102", "{v}");
+    assert_eq!(a["first"], "2026-01-02", "{v}");
+    assert_eq!(a["day"], "0", "{v}");
+    assert_eq!(a["number"], 1, "{v}");
+    assert_eq!(a["scans"], 2, "{v}");
+    assert_eq!(a["look"], 1, "{v}");
+    assert_eq!(a["regions"], serde_json::json!(["brain", "spine"]), "{v}");
+    assert_eq!(
+        a["kinds"],
+        serde_json::json!([{"kind": "T1w", "scans": 1}, {"kind": "T2w", "scans": 1}]),
+        "{v}"
+    );
+    assert_eq!(a["contrast"], false, "{v}");
+    assert_eq!(a["symri"], 0, "{v}");
+    assert_eq!(a["main"][0]["role"], "t1w", "{v}");
+    assert_eq!(a["main"][0]["stack"], st("t1 mprage"), "{v}");
+    assert!(
+        a["main"][0]["name"].as_str().unwrap().contains("T1w"),
+        "{v}"
+    );
+    assert!(a["session"].as_i64().is_some(), "{v}");
+    assert_eq!(
+        a["studies"],
+        serde_json::json!([study_of["1.2.9.A"]]),
+        "{v}"
+    );
+    assert_eq!(b["label"], "ses-20260305", "{v}");
+    assert_eq!(b["day"], "62", "{v}");
+    assert_eq!(
+        b["kinds"],
+        serde_json::json!([{"kind": "FLAIR", "scans": 1}]),
+        "{v}"
+    );
+    assert_eq!(b["contrast"], true, "{v}");
+    assert_eq!(b["main"][0]["role"], "flair", "{v}");
+    let session_a = a["session"].as_i64().unwrap();
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits?name=number"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][0]["label"], "ses-01", "{v}");
+    assert_eq!(v["visits"][1]["label"], "ses-02", "{v}");
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits?name=days"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][0]["label"], "ses-d0", "{v}");
+    assert_eq!(v["visits"][1]["label"], "ses-d62", "{v}");
+    // the filters
+    for (filter, want) in [
+        ("look", vec!["ses-20260102"]),
+        ("contrast", vec!["ses-20260305"]),
+        ("region:spine", vec!["ses-20260102"]),
+        ("symri", vec![]),
+        ("look,contrast", vec![]),
+    ] {
+        let (status, v) = ask(
+            &format!("/api/datasets/first/subjects/{s1}/visits?filter={filter}"),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{v}");
+        let labels: Vec<&str> = v["visits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, want, "{filter}: {v}");
+        assert_eq!(v["totals"]["visits"], 2, "{filter}: {v}");
+    }
+    // at plain the dates and the days are shapes; the numbers are not
+    let (status, v) = ask(&format!("/api/datasets/first/subjects/{s1}/visits"), reader);
+    assert_eq!(status, 200, "{v}");
+    assert!(!v.to_string().contains("2026"), "{v}");
+    assert!(!v.to_string().contains("mapped-"), "{v}");
+    assert_eq!(v["visits"][0]["label"], "ses-99999999", "{v}");
+    assert_eq!(v["visits"][0]["first"], "9999-99-99", "{v}");
+    assert_eq!(v["visits"][1]["day"], "99", "{v}");
+    assert_eq!(v["visits"][1]["number"], 2, "{v}");
+    assert_eq!(v["totals"]["span"], "99", "{v}");
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits?name=days"),
+        reader,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][1]["label"], "ses-d99", "{v}");
+    // refusals: a subject outside the dataset, one that is no subject, and
+    // what the door does not know
+    for (path, code) in [
+        (format!("/api/datasets/second/subjects/{s2}/visits"), 404),
+        (
+            "/api/datasets/first/subjects/999999/visits".to_string(),
+            404,
+        ),
+        ("/api/datasets/first/subjects/x/visits".to_string(), 400),
+        (
+            format!("/api/datasets/first/subjects/{s1}/visits?name=month"),
+            400,
+        ),
+        (
+            format!("/api/datasets/first/subjects/{s1}/visits?filter=maker:ge"),
+            400,
+        ),
+    ] {
+        let (status, refused) = ask(&path, reviewer);
+        assert_eq!(status, code, "{path}: {refused}");
+    }
+
+    // ---- one visit's scans: a session, or the studies of a visit
+    let (status, scans) = ask(
+        &format!("/api/datasets/first/scans?session={session_a}"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["scope"]["kind"], "dataset", "{scans}");
+    assert_eq!(scans["dataset"], "first", "{scans}");
+    assert_eq!(scans["total"], 2, "{scans}");
+    let scan = |d: &serde_json::Value, series: &str| -> serde_json::Value {
+        d["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["series_description"] == series)
+            .unwrap()
+            .clone()
+    };
+    let t1 = scan(&scans, "t1 mprage");
+    assert_eq!(t1["family"], "plain", "{scans}");
+    assert_eq!(t1["te"], 2.3, "{scans}");
+    assert_eq!(t1["tr"], 2300.0, "{scans}");
+    assert_eq!(t1["ti"], serde_json::Value::Null, "{scans}");
+    assert_eq!(t1["fa"], 8.0, "{scans}");
+    assert_eq!(t1["main"], serde_json::json!(["t1w"]), "{scans}");
+    assert_eq!(t1["study"], study_of["1.2.9.A"], "{scans}");
+    assert_eq!(
+        t1["questions"],
+        serde_json::json!(["base:low_confidence"]),
+        "{scans}"
+    );
+    let spine = scan(&scans, "sc t2");
+    assert_eq!(spine["family"], "body", "{scans}");
+    assert_eq!(spine["main"], serde_json::json!([]), "{scans}");
+    let (status, scans) = ask(
+        &format!("/api/datasets/first/scans?studies={}", study_of["1.2.9.D"]),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["total"], 2, "{scans}");
+    let symri = scan(&scans, "symri");
+    assert_eq!(symri["family"], "symri", "{scans}");
+    // a staged question about one stack is a question too
+    assert_eq!(
+        symri["questions"],
+        serde_json::json!(["system1:unsure"]),
+        "{scans}"
+    );
+    let too_many = (0..101)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for bad in [
+        "session=x".to_string(),
+        "studies=1,x".to_string(),
+        format!("studies={too_many}"),
+        format!("session={session_a}&studies=1"),
+    ] {
+        let (status, refused) = ask(&format!("/api/datasets/first/scans?{bad}"), reviewer);
+        assert_eq!(status, 400, "{bad}: {refused}");
+    }
+
+    // ---- a cohort: its current members, across datasets
+    let (status, c) = ask("/api/cohorts/c1/subjects", reviewer);
+    assert_eq!(status, 200, "{c}");
+    assert_eq!(c["scope"]["kind"], "cohort", "{c}");
+    assert_eq!(c["scope"]["name"], "c1", "{c}");
+    assert_eq!(
+        c["totals"],
+        serde_json::json!({"subjects": 2, "visits": 5, "scans": 8, "look": 2}),
+        "{c}"
+    );
+    let member = |id: i64| -> serde_json::Value {
+        c["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(member(s1)["visits"], 3, "{c}");
+    assert_eq!(member(s1)["scans"], 5, "{c}");
+    assert_eq!(member(s3)["visits"], 2, "{c}");
+    let (status, v) = ask(&format!("/api/cohorts/c1/subjects/{s1}/visits"), reviewer);
+    assert_eq!(status, 200, "{v}");
+    let visits = v["visits"].as_array().unwrap();
+    assert_eq!(visits.len(), 3, "{v}");
+    // the merged subject's study of the same day is the same visit
+    let merged = &visits[2];
+    assert!(merged["session"].as_i64().is_some(), "{v}");
+    let mut both = vec![study_of["1.2.9.E"], study_of["1.2.9.F"]];
+    both.sort_unstable();
+    assert_eq!(merged["studies"], serde_json::json!(both), "{v}");
+    assert_eq!(merged["scans"], 2, "{v}");
+    assert_eq!(merged["day"], "150", "{v}");
+    let session_ef = merged["session"].as_i64().unwrap();
+    // the second dataset's view numbers that subject's visits the same way
+    let (status, v) = ask(
+        &format!("/api/datasets/second/subjects/{s1}/visits"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][0]["number"], 3, "{v}");
+    assert_eq!(v["totals"]["visits"], 1, "{v}");
+    // the third dataset's study is a visit the cache does not hold yet
+    let (status, v) = ask(&format!("/api/cohorts/c1/subjects/{s3}/visits"), reviewer);
+    assert_eq!(status, 200, "{v}");
+    let late = &v["visits"][1];
+    assert_eq!(late["session"], serde_json::Value::Null, "{v}");
+    assert_eq!(
+        late["studies"],
+        serde_json::json!([study_of["1.2.9.G"]]),
+        "{v}"
+    );
+    assert_eq!(late["label"], "ses-20260701", "{v}");
+    assert_eq!(late["number"], 2, "{v}");
+    assert_eq!(late["day"], "52", "{v}");
+    let (status, scans) = ask(
+        &format!("/api/cohorts/c1/scans?studies={}", study_of["1.2.9.G"]),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["cohort"], "c1", "{scans}");
+    assert_eq!(scans["scope"]["kind"], "cohort", "{scans}");
+    assert_eq!(scans["total"], 1, "{scans}");
+    assert_eq!(
+        scans["scans"][0]["series_description"], "t1 late",
+        "{scans}"
+    );
+    let (status, scans) = ask(
+        &format!("/api/cohorts/c1/scans?session={session_ef}"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["total"], 2, "{scans}");
+    let (status, all) = ask("/api/cohorts/c1/scans", reviewer);
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(all["total"], 8, "{all}");
+    // a member who left is no member
+    let (status, refused) = ask(&format!("/api/cohorts/c1/subjects/{s2}/visits"), reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/cohorts/nowhere/subjects", reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/cohorts/nowhere/scans", reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/cohorts/c1/subjects", places_only);
+    assert_eq!(status, 403, "{refused}");
+
+    // ---- a stack of a sample sealed now is in no scope and no count
+    {
+        let mut store = open();
+        let sealed_stack = store.qualified("sealed_stack");
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {sealed_stack} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {}, {s3}, 'anna', '2026-10-09T10:00:00Z')",
+                    st("symri")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let (status, d) = ask("/api/datasets/first/subjects", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(
+        d["totals"],
+        serde_json::json!({"subjects": 3, "visits": 4, "scans": 5, "look": 1}),
+        "{d}"
+    );
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s3}/visits"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["totals"]["scans"], 1, "{v}");
+    assert_eq!(v["visits"][0]["symri"], 0, "{v}");
+
+    // ---- the doors are listed and have their policy rows
+    let (status, caps) = ask("/api/capabilities", reader);
+    assert_eq!(status, 200, "{caps}");
+    for door in [
+        "GET /api/datasets/{name}/subjects",
+        "GET /api/datasets/{name}/subjects/{subject}/visits",
+        "GET /api/cohorts/{name}/scans",
+        "GET /api/cohorts/{name}/subjects",
+        "GET /api/cohorts/{name}/subjects/{subject}/visits",
+    ] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}: {caps}"
+        );
+        assert!(
+            caps["policy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["door"] == door && p["grant"] == "data:see"),
+            "{door}: {caps}"
+        );
+    }
+    // whatever was asked, the server ends: a miscount fails after it does
+    let made = used.get();
+    while used.get() < LIMIT {
+        let _ = ask("/api/status", reader);
+    }
+    server.finish();
+    assert_eq!(made, LIMIT, "the sweep made {made} requests");
+}

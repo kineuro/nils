@@ -178,6 +178,17 @@
 # null; `datatype` (anat, dwi, func, perf, fmap or other); `folder`, the
 # descriptive layout's folder; `axes`, every decided axis as stored;
 # `series_number`; and `questions` with or without `pictures=1`.
+# Added in place, additively, on 2026-10-09 (Wave 7a, the dataset viewer):
+# GET /api/datasets/{name}/subjects and GET /api/cohorts/{name}/subjects,
+# a dataset's or a cohort's subjects a page at a time with what the Grid
+# filters them by; GET /api/datasets/{name}/subjects/{subject}/visits and
+# its cohort twin, one subject's visits with their scan kinds and main
+# scans; GET /api/cohorts/{name}/scans, a cohort's scans as a dataset's are
+# paged; both scans doors narrow a page to one visit (`session` or
+# `studies`) and each scan carries `scope`, `study`, `family`, `te`, `tr`,
+# `ti`, `fa` and `main`. A scan needs a look while an open or staged review
+# item asks about it, the rule the sources door's certainty counts by, and
+# `questions` now names a staged question too.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -920,6 +931,54 @@ paths:
         "200": {description: "{cohort, added, already, removed, not_members, epoch}"}
         "400": {description: "Nothing to add or remove, or a code the registry does not hold: {error, unknown: [codes]}"}
         "404": {description: No cohort so named}
+  /api/cohorts/{name}/scans:
+    get:
+      summary: A cohort's scans a page at a time (Wave 7a, the dataset viewer, added in place 2026-10-09; data:see)
+      description: "A cohort's scans are every stack of a current member (an open interval), from any dataset, paged, narrowed to one visit and described as GET /api/datasets/{name}/scans pages and describes a dataset's: the same query and the same scans, the answer carrying `cohort` and `cohort_id` where a dataset's carries `dataset` and `dataset_id`. A retired cohort answers too; a stack of a sample sealed now is never listed, but to a holder of sealed:see."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: pictures, in: query, required: false, schema: {type: boolean}}
+        - {name: session, in: query, required: false, schema: {type: integer}}
+        - {name: studies, in: query, required: false, schema: {type: string}}
+      responses:
+        "200": {description: "{scope: {kind, name, id}, cohort, cohort_id, detail, total, count, scans: [as GET /api/datasets/{name}/scans], next, pictures? {shown, why, missing, partial, place}}"}
+        "400": {description: "As GET /api/datasets/{name}/scans"}
+        "403": {description: No data:see}
+        "404": {description: No cohort so named}
+  /api/cohorts/{name}/subjects:
+    get:
+      summary: A cohort's members a page at a time, with what the Grid filters them by (Wave 7a, the dataset viewer, added in place 2026-10-09; data:see)
+      description: "Every current member of the cohort, with its visits, scans, scans to look at, regions, makers and main roles counted over its scans in every dataset, a member with none of them answered with zeros; otherwise as GET /api/datasets/{name}/subjects answers a dataset's subjects, the same query and the same fields."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: q, in: query, required: false, schema: {type: string}}
+        - {name: show, in: query, required: false, schema: {type: string, default: code}}
+        - {name: order, in: query, required: false, schema: {type: string, enum: [look, code, visits, scans], default: look}}
+        - {name: filter, in: query, required: false, schema: {type: string}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 60}}
+      responses:
+        "200": {description: "As GET /api/datasets/{name}/subjects, `scope.kind` cohort"}
+        "400": {description: "As GET /api/datasets/{name}/subjects"}
+        "403": {description: No data:see}
+        "404": {description: No cohort so named}
+  /api/cohorts/{name}/subjects/{subject}/visits:
+    get:
+      summary: One member's visits, across datasets (Wave 7a, the dataset viewer, added in place 2026-10-09; data:see)
+      description: "The member's visits with a scan in any dataset, as GET /api/datasets/{name}/subjects/{subject}/visits answers a subject's in one dataset, the same query and the same fields. A subject who is no current member of the cohort is answered 404; a member with no scan to be seen, an empty list."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: subject, in: path, required: true, schema: {type: integer}}
+        - {name: name, in: query, required: false, schema: {type: string, enum: [date, number, days], default: date}}
+        - {name: show, in: query, required: false, schema: {type: string, default: code}}
+        - {name: filter, in: query, required: false, schema: {type: string}}
+      responses:
+        "200": {description: "As GET /api/datasets/{name}/subjects/{subject}/visits, `scope.kind` cohort"}
+        "400": {description: "As GET /api/datasets/{name}/subjects/{subject}/visits"}
+        "403": {description: No data:see}
+        "404": {description: "No cohort so named, or the subject is no current member of it"}
   /api/explain/{stack}:
     get:
       summary: Why one stack was judged so, as nils explain prints it (record 26 section 11; review:see)
@@ -1375,17 +1434,51 @@ paths:
   /api/datasets/{name}/scans:
     get:
       summary: A dataset's scans a page at a time (record 55 H2, added in place 2026-10-09; data:see)
-      description: "The scans of a dataset (a source place, named by its name or its id) are the stacks its digests created first, the stacks `totals.stacks` of GET /api/sources counts, read from the registry and never through a cohort, so a dataset that feeds none lists its scans too. Sorted by subject code, then day, then stack id; `after` is the stack id `next` gave, so a cursor carries a technical key and nothing else; at most `limit` a page (50 by default, 1 to 200). A stack of a sample sealed now is never listed, but to a holder of sealed:see (record 48), and `total` counts what this caller is listed. Each scan is {stack, subject {id, code}, session {id, label} or null where no session is built for its study, series_description, orientation, images, day}: `images` the stack's image count, `day` its study's date as filled, else as read, and `session` the session the cache holds under the window it was built with and the default scheme's label. Record 55 K7: below detail quasi the subject's code, the day and a label the scheme makes from a date are answered as their shapes (digits as 9, letters as a or A, the rest kept), as the value sampler shows them; the subject's and the session's ids are technical keys and the series description is technical, as every sequence name is. A dataset nothing has read yet (an identified one holding only its originals) answers an empty list. Added in place, additively, on 2026-10-09 (Wave 7a, the dataset view): each scan also carries `name`, its descriptive name (v0's grammar, as a release in the descriptive layout builds it, or null where the registry holds no fingerprint of it); `bids`, its BIDS name in the full naming style without the `sub-` and `ses-` entities (`acq-Ax+2D+FLAIR+IRTSE_T2w`, a derivative with its `desc-`), null where the standard has no name for it, for a scout or a working scan, and where the engine serves no pack; `datatype`, one of anat, dwi, func, perf, fmap and other, the BIDS name's where it has one, else the pack's intent where BIDS knows it, else other (a scout or a working scan is other); `folder`, the folder the descriptive layout puts it in (anat, anat/SyMRI, dwi, localizer, misc and the rest); `axes`, every decided axis of the stack as the registry stores it, {axis: value}, a multi-valued axis joined by commas, empty where nothing is decided; `series_number`, the series number the scanner gave it; and `questions`, the kinds of its open review questions as `pictures=1` gives them, now with or without pictures. Each name is built from the scan's own facts: a release also separates two scans of one session that build one name, which a page, holding part of a session, cannot. None of these is quasi-identifying."
+      description: "The scans of a dataset (a source place, named by its name or its id) are the stacks its digests created first, the stacks `totals.stacks` of GET /api/sources counts, read from the registry and never through a cohort, so a dataset that feeds none lists its scans too. Sorted by subject code, then day, then stack id; `after` is the stack id `next` gave, so a cursor carries a technical key and nothing else; at most `limit` a page (50 by default, 1 to 200). A stack of a sample sealed now is never listed, but to a holder of sealed:see (record 48), and `total` counts what this caller is listed. Each scan is {stack, subject {id, code}, session {id, label} or null where no session is built for its study, series_description, orientation, images, day}: `images` the stack's image count, `day` its study's date as filled, else as read, and `session` the session the cache holds under the window it was built with and the default scheme's label. Record 55 K7: below detail quasi the subject's code, the day and a label the scheme makes from a date are answered as their shapes (digits as 9, letters as a or A, the rest kept), as the value sampler shows them; the subject's and the session's ids are technical keys and the series description is technical, as every sequence name is. A dataset nothing has read yet (an identified one holding only its originals) answers an empty list. Added in place, additively, on 2026-10-09 (Wave 7a, the dataset view): each scan also carries `name`, its descriptive name (v0's grammar, as a release in the descriptive layout builds it, or null where the registry holds no fingerprint of it); `bids`, its BIDS name in the full naming style without the `sub-` and `ses-` entities (`acq-Ax+2D+FLAIR+IRTSE_T2w`, a derivative with its `desc-`), null where the standard has no name for it, for a scout or a working scan, and where the engine serves no pack; `datatype`, one of anat, dwi, func, perf, fmap and other, the BIDS name's where it has one, else the pack's intent where BIDS knows it, else other (a scout or a working scan is other); `folder`, the folder the descriptive layout puts it in (anat, anat/SyMRI, dwi, localizer, misc and the rest); `axes`, every decided axis of the stack as the registry stores it, {axis: value}, a multi-valued axis joined by commas, empty where nothing is decided; `series_number`, the series number the scanner gave it; and `questions`, the kinds of its open review questions as `pictures=1` gives them, now with or without pictures. Each name is built from the scan's own facts: a release also separates two scans of one session that build one name, which a page, holding part of a session, cannot. None of these is quasi-identifying. Added in place, additively, on 2026-10-09 (Wave 7a, the dataset viewer): the answer carries `scope` {kind: dataset, name, id}; a page narrows to one visit with `session` (a session the cache holds, by its id) or `studies` (the studies of a visit the cache does not hold, a comma list of at most 100 study ids), never both, as GET /api/datasets/{name}/subjects/{subject}/visits names them; each scan also carries `study`, its study's id (a technical key); `family`, the group the desk shows it in inside its datatype's folder: symri (provenance SyMRI), mix (EPIMix or NeuroMix), stage (STAGE), swi (SWIRecon), derived (ProjectionDerived, SubtractionDerived, or disposition reformat), body (body part spine or neck), else plain; `te`, `tr` and `ti`, its echo, repetition and inversion times in milliseconds, and `fa`, its flip angle in degrees, from its fingerprint, each null where it has none; and `main`, the roles of the live picks naming it (a pick no person withdrew or overruled), sorted, empty where none. A scan needs a look while an open or staged review item asks about it, the rule `totals.need_a_look` of GET /api/sources counts by, so `questions` now names a staged question too."
       parameters:
         - {name: name, in: path, required: true, schema: {type: string}}
         - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
         - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: session, in: query, required: false, schema: {type: integer}, description: "Added in place, additively, on 2026-10-09: only the scans of the studies the cache holds under this session"}
+        - {name: studies, in: query, required: false, schema: {type: string}, description: "Added in place, additively, on 2026-10-09: only the scans of these studies, a comma list of 1 to 100 study ids; never with `session`"}
         - {name: pictures, in: query, required: false, schema: {type: boolean}, description: "Added in place, additively, on 2026-10-09 (record 55 H2): each scan also carries `picture`, its own middle plane from its preview, {data (a data:image/jpeg;base64 URL of about 10 kB), width, height, digest, held}, or null where no preview is made yet (made then on a thread of the engine, never queued); added in place, additively, on 2026-10-09: `partial` on each picture, true for a scan with no preview yet whose middle plane was decoded from its one file within the page's budget (about a tenth of a second), the rest null and counted in `missing` and decoded on for the page asked next, and `partial` on the page's `pictures`, how many, and `questions`, the kinds of the open review questions on its stack, sorted, each once (a grouped question under each of its members, and a question about the stack alone); the page carries `pictures: {shown, why, missing, place}`. Pictures are pixels: they are shown with query:see at detail quasi, each stack audited as instance.open (purpose `list`) once in the window, with the band held below detail sensitive where the stack carries burned-in annotation; below that every `picture` is null and `shown` false with `why`"}
       responses:
-        "200": {description: "{dataset, dataset_id, detail, total, count, scans: [{stack, subject: {id, code}, session: {id, label} | null, series_description, orientation, images, day, name, bids, datatype, folder, axes {axis: value}, series_number, questions [kind], picture? {data, width, height, digest, held, partial} | null, questions? [kind]}], next, pictures? {shown, why, missing, partial, place}}"}
-        "400": {description: "The limit is out of range, or `after` is no scan of the dataset this caller is listed"}
+        "200": {description: "{scope: {kind, name, id}, dataset, dataset_id, detail, total, count, scans: [{stack, subject: {id, code}, session: {id, label} | null, study, series_description, orientation, images, day, name, bids, datatype, folder, axes {axis: value}, series_number, family, te, tr, ti, fa, main [role], questions [kind], picture? {data, width, height, digest, held, partial} | null}], next, pictures? {shown, why, missing, partial, place}}"}
+        "400": {description: "The limit is out of range, `after` is no scan of the dataset this caller is listed, `session` is no id, `studies` is not 1 to 100 ids, or both are given"}
         "403": {description: No data:see}
         "404": {description: No dataset of that name or id}
+  /api/datasets/{name}/subjects:
+    get:
+      summary: A dataset's subjects a page at a time, with what the Grid filters them by (Wave 7a, the dataset viewer, added in place 2026-10-09; data:see)
+      description: "The subjects of a dataset are the subjects of its scans, the stacks its digests created first, as GET /api/datasets/{name}/scans lists them; a stack of a sample sealed now is in no number, but to a holder of sealed:see (record 48). Each subject carries `visits`, its visits with a scan in the dataset (a session the cache holds under the window it was built with, else the day of a study the cache holds under no session yet, the studies of one day together, else the one visit with no day); `scans`; `look`, its scans an open or staged review item asks about, as a member of a grouped question or as the stack a stack-scoped question names; `regions`, the body parts of its scans (brain-neck counted as brain and neck), in the order brain, neck, spine, chest, other; `makers`, the makers of its scanners as a person names them (Siemens, Philips, GE, Canon, Hitachi, any other as written); and `main`, the roles of the live picks among its scans. `totals` and `facets` are the whole dataset's, before `q` and `filter` narrow the list: `facets.makers`, `facets.regions` and `facets.roles` each {name, subjects}, most subjects first, and `facets.id_types` the identifier types its subjects hold that keep a value, {name, subjects}, nothing opened. `show` names what `label` says: the code (the default), or the subject's value of an id type, opened for the page's subjects only with one read audit row each; the value is answered as it is to a caller holding data:work at detail sensitive (record 26), the alias a merge files (subject-code) also at detail quasi, as a code is, and as its shape to any other caller; null where the subject holds none, and always for a type whose values are not kept. `q` keeps a subject whose code, as this caller is shown it, holds the text, case aside; to a caller holding data:work at detail sensitive, also a subject holding an identifier of any type equal to the text, found by its keyed lookup with nothing opened. `filter` is a comma list whose kinds must all hold and whose values of one kind any: `look` (a scan to look at), `visits2` (more than one visit), `main:<role>` (a live pick of that role), `region:<part>`, `maker:<name>`. Sorted by `order`: look (most scans to look at first), code, visits or scans (most first), ties by code, then id; `after` is the subject id `next` gave. Record 55 K7: below detail quasi the code is answered as its shape; the order is the same at every detail."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: q, in: query, required: false, schema: {type: string}}
+        - {name: show, in: query, required: false, schema: {type: string, default: code}, description: "code, or an id type's name (study-id, subject-code and the site's own)"}
+        - {name: order, in: query, required: false, schema: {type: string, enum: [look, code, visits, scans], default: look}}
+        - {name: filter, in: query, required: false, schema: {type: string}, description: "A comma list of look, visits2, main:<role>, region:<part> and maker:<name>"}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 60}}
+      responses:
+        "200": {description: "{scope: {kind, name, id}, detail, show, order, totals: {subjects, visits, scans, look}, matched, count, subjects: [{id, code, label, visits, scans, look, regions [part], makers [name], main [role]}], next, facets: {makers: [{name, subjects}], regions: [{name, subjects}], roles: [{name, subjects}], id_types: [{name, subjects}]}}"}
+        "400": {description: "The limit is out of range, `after` is no subject of the list this caller is answered, an order, a filter or a `show` the door does not know"}
+        "403": {description: No data:see}
+        "404": {description: No dataset of that name or id}
+  /api/datasets/{name}/subjects/{subject}/visits:
+    get:
+      summary: One subject's visits in a dataset, with their scan kinds and main scans (Wave 7a, the dataset viewer, added in place 2026-10-09; data:see)
+      description: "The subject is named by its id. Its visits with a scan in the dataset, in date order, the one with no day last: each `session`, the id of the session the cache holds, null for a visit it holds none of yet; `studies`, its studies with a scan in the dataset (what GET /api/datasets/{name}/scans takes as `studies`); `label` by `name`, ses- and the first day as YYYYMMDD (date, the default), the visit's number in two digits or more (number), or d and the days from the subject's first visit (days), ses-none for a visit with no day; `first`, its first day; `day`, the days from the subject's first visit, as text; `number`, its place in the subject's whole timeline, every study of every dataset, so a visit keeps its number whichever dataset shows it; `scans`; `look`; `regions`; `kinds`, its scans by kind in a person's words, each scan once, in the order SyMRI, DWI, Perfusion, fMRI, Field map, Scout, FLAIR, SWI, T1w, T2w, PDw, T2*w, Other, {kind, scans}, a kind with none left out; `contrast`, whether a contrast agent was given for one of its scans; `symri`, its SyMRI scans; and `main`, the live picks among its scans, {role, stack, name}, the name as the scans door names the scan, else what the scanner called it. `totals` count every visit of the subject in the dataset before `filter`: {visits, scans, look, span}, `span` the days from its first visit to its last, as text. `filter` is a comma list, kinds all, values of one kind any: look, contrast, symri, region:<part>. `show` names what `subject.label` says, as the subjects door does. Record 55 K7: below detail quasi the code, `first`, `day`, `span` and a label made of a date or of days are answered as their shapes; `number` and the counts never are, and the order is the same at every detail. A stack of a sample sealed now is in no visit and no count, but to a holder of sealed:see."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: subject, in: path, required: true, schema: {type: integer}}
+        - {name: name, in: query, required: false, schema: {type: string, enum: [date, number, days], default: date}}
+        - {name: show, in: query, required: false, schema: {type: string, default: code}}
+        - {name: filter, in: query, required: false, schema: {type: string}, description: "A comma list of look, contrast, symri and region:<part>"}
+      responses:
+        "200": {description: "{scope: {kind, name, id}, detail, name, show, subject: {id, code, label}, totals: {visits, scans, look, span}, matched, visits: [{session, studies [id], label, first, day, number, scans, look, regions [part], kinds: [{kind, scans}], contrast, symri, main: [{role, stack, name}]}]}"}
+        "400": {description: "The subject is no id, or a name, a filter or a `show` the door does not know"}
+        "403": {description: No data:see}
+        "404": {description: "No dataset of that name or id, or the subject has no scan in it this caller is answered"}
   /api/places:
     get:
       summary: Every place with its role, its guarantees, what the engine measured and the deployment's paths bound under it (Wave 5 section 12.5, 10.2)

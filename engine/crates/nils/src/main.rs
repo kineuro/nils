@@ -74,6 +74,7 @@ mod tilepack;
 mod timeline;
 mod tui;
 mod update;
+mod viewer;
 mod worker;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
