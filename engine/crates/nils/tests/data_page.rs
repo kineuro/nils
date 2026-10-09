@@ -1055,6 +1055,180 @@ fn a_dataset_reads_whole_on_postgres_too() {
     drop();
 }
 
+/// Wave 7a, the pseudonymise step: a dataset's held files, two thousand
+/// over four hundred identifiers held round by round, answered one row an
+/// identifier at `GET /api/linkage/held/ids` in the order its first file
+/// was held, each with its own count and state, and identifiers chosen by
+/// their rows coded anyway and no others. The grouping is the store's, so
+/// on SQLite and on Postgres.
+fn held_ids(pg: Option<(String, String)>) {
+    use nils_registry::schema::Type;
+    use nils_registry::store::Param;
+    const IDS: i64 = 400;
+    const EACH: i64 = 5;
+    let home = Home {
+        dir: TempDir::new("held-ids-home"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a held ids test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let ward = TempDir::new("held-ids-ward");
+    std::fs::create_dir_all(ward.path().join("derivatives/dcm-original")).unwrap();
+    home.ok(&[
+        "place",
+        "add",
+        "ward",
+        ward.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    // every seventh identifier released by a map, every fifth of the rest
+    // coded anyway; an identifier's files lie four hundred rows apart
+    let released = |i: i64| i % 7 == 0;
+    let anyway = |i: i64| i % 5 == 0 && !released(i);
+    {
+        let mut store = home.store();
+        let place = store.qualified("place");
+        let id = store
+            .query(&format!("SELECT id FROM {place} WHERE name = 'ward'"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let d = store.dialect();
+        let sql = format!(
+            "INSERT INTO {} (place_id, path, size, mtime, state, shape, lookup, id_type, first_seen, released_at, code_anyway) \
+             VALUES ({}, {}, 0, 0, 'held', 'AA9999', {}, 'study-id', {}, {}, {})",
+            store.qualified("pseudonym_file"),
+            d.param(1, Type::Int),
+            d.param(2, Type::Text),
+            d.param(3, Type::Bytes),
+            d.param(4, Type::Timestamp),
+            d.param(5, Type::Timestamp),
+            d.param(6, Type::Int),
+        );
+        store.begin().unwrap();
+        for round in 0..EACH {
+            for i in 0..IDS {
+                store
+                    .execute(
+                        &sql,
+                        &[
+                            Param::Int(id),
+                            Param::from(format!("r{round}/f{i}")),
+                            Param::Bytes(format!("lookup-{i:04}").into_bytes()),
+                            Param::from("2026-10-09T00:00:00Z"),
+                            if released(i) {
+                                Param::from("2026-10-09T01:00:00Z")
+                            } else {
+                                Param::Null
+                            },
+                            Param::Int(i64::from(anyway(i))),
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        store.commit().unwrap();
+    }
+    let served = Worked::serve(&home, false);
+    let doc = served.get("/api/linkage/held/ids?place=ward", OPS);
+    assert_eq!(doc["identifiers"], IDS, "{doc}");
+    assert_eq!(doc["files"], IDS * EACH, "{doc}");
+    let ids = doc["ids"].as_array().unwrap().clone();
+    assert_eq!(ids.len() as i64, IDS);
+    let rows: Vec<i64> = ids.iter().map(|h| h["id"].as_i64().unwrap()).collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] < w[1]),
+        "in the order the first file of each was held"
+    );
+    for (i, h) in (0..IDS).zip(&ids) {
+        assert_eq!(h["files"], EACH, "identifier {i}: {h}");
+        assert_eq!(h["shape"], "AA9999", "identifier {i}: {h}");
+        let state = if released(i) {
+            "mapped"
+        } else if anyway(i) {
+            "generated"
+        } else {
+            "held"
+        };
+        assert_eq!(h["state"], state, "identifier {i}: {h}");
+    }
+    // forty that wait with no code, chosen by their rows: their files and no
+    // others are coded anyway, and nothing is queued
+    let chosen: Vec<i64> = (0..IDS)
+        .zip(&rows)
+        .filter(|&(i, _)| !released(i) && !anyway(i))
+        .take(40)
+        .map(|(_, r)| *r)
+        .collect();
+    let (status, answer) = served.call(
+        "POST",
+        "/api/linkage/held/code",
+        Some(json!({"place": "ward", "ids": chosen, "run": false})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["files"], 40 * EACH, "{answer}");
+    assert_eq!(answer["job"], Value::Null, "{answer}");
+    let doc = served.get("/api/linkage/held/ids?place=ward", OPS);
+    let generated: Vec<i64> = doc["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| h["state"] == "generated")
+        .map(|h| h["id"].as_i64().unwrap())
+        .collect();
+    let before = (0..IDS).filter(|&i| anyway(i)).count();
+    assert_eq!(generated.len(), before + 40, "{doc}");
+    assert!(chosen.iter().all(|c| generated.contains(c)));
+}
+
+#[test]
+fn a_dataset_s_held_ids_group_one_row_an_identifier() {
+    held_ids(None);
+}
+
+#[test]
+fn a_dataset_s_held_ids_group_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_held_ids";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    held_ids(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
 /// One synthetic MR file, a series of its own, where a digest of the
 /// dataset reads it.
 fn scan_file(tree: &TempDir, patient: &str, study: &str, series: &str, date: &str, what: &str) {

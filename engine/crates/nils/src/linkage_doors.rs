@@ -508,12 +508,14 @@ fn no_held_id(place: &str, id: i64) -> Reply {
     Reply::error(404, format!("{place} holds no identifier {id}"))
 }
 
-/// One held identifier of a dataset (Wave 7a): the rows that carry it, the
-/// one that stands for it (the first not yet released, else the first),
-/// its keyed lookup, its shape and type, and how it stands. Never a value.
+/// One held identifier of a dataset (Wave 7a): the row that stands for it
+/// (the first not yet released, else the first), the first row that
+/// carries it, its files, its keyed lookup, its shape and type, and how it
+/// stands. Never a value.
 pub(crate) struct HeldId {
     pub(crate) id: i64,
-    pub(crate) rows: Vec<i64>,
+    pub(crate) first: i64,
+    pub(crate) files: i64,
     pub(crate) lookup: Option<Vec<u8>>,
     pub(crate) shape: Option<String>,
     pub(crate) id_type: Option<String>,
@@ -544,56 +546,50 @@ impl HeldId {
     }
 }
 
-/// The held identifiers of a dataset, by the keyed lookup each row carries:
-/// one a row where a row carries none.
+/// The held identifiers of a dataset, ordered by the first row that
+/// carries each: the rows grouped by the keyed lookup they carry, in the
+/// store, so a dataset of millions of held files answers one row an
+/// identifier; a row that carries no lookup stands alone.
 pub(crate) fn held_identifiers(
     store: &mut Store,
     place_id: i64,
 ) -> Result<Vec<HeldId>, nils_registry::store::Error> {
     let d = store.dialect();
-    let sql = format!(
-        "SELECT id, lookup, shape, id_type, CAST(first_seen AS TEXT), batch_id, \
-         CAST(released_at AS TEXT), code_anyway, subject_id, wants_type FROM {} \
-         WHERE place_id = {} AND state = 'held' ORDER BY id",
-        store.qualified(HELD_TABLE),
-        d.param(1, Type::Int)
+    let table = store.qualified(HELD_TABLE);
+    let place = d.param(1, Type::Int);
+    let grouped = format!(
+        "SELECT MIN(id), MIN(CASE WHEN released_at IS NULL THEN id END), COUNT(*), COUNT(released_at), \
+         lookup, MIN(shape), MIN(id_type), CAST(MIN(first_seen) AS TEXT), MIN(batch_id), MAX(code_anyway), \
+         MIN(subject_id), MIN(wants_type) FROM {table} \
+         WHERE place_id = {place} AND state = 'held' AND lookup IS NOT NULL GROUP BY lookup"
     );
-    let rows = store.query(&sql, &[Param::Int(place_id)])?;
-    let mut out: Vec<HeldId> = Vec::new();
-    for r in &rows {
-        let row = r.int(0)?;
-        let lookup = r.opt_bytes(1)?.map(<[u8]>::to_vec);
-        let released = r.opt_text(6)?.is_some();
-        let at = match &lookup {
-            Some(l) => out.iter().position(|h| h.lookup.as_ref() == Some(l)),
-            None => None,
-        };
-        match at {
-            Some(i) => {
-                let h = &mut out[i];
-                h.rows.push(row);
-                // the row that stands for it is the first not yet released
-                if h.released && !released {
-                    h.id = row;
-                }
-                h.released &= released;
-                h.generated |= r.int(7)? != 0;
-            }
-            None => out.push(HeldId {
-                id: row,
-                rows: vec![row],
-                lookup,
-                shape: r.opt_text(2)?.map(str::to_string),
-                id_type: r.opt_text(3)?.map(str::to_string),
-                first_seen: r.opt_text(4)?.map(str::to_string),
-                batch: r.opt_int(5)?,
-                released,
-                generated: r.int(7)? != 0,
-                subject: r.opt_int(8)?,
-                waits_for: r.opt_text(9)?.map(str::to_string),
-            }),
+    let alone = format!(
+        "SELECT id, CASE WHEN released_at IS NULL THEN id END, 1, CASE WHEN released_at IS NULL THEN 0 ELSE 1 END, \
+         lookup, shape, id_type, CAST(first_seen AS TEXT), batch_id, code_anyway, subject_id, wants_type FROM {table} \
+         WHERE place_id = {place} AND state = 'held' AND lookup IS NULL"
+    );
+    let mut out = Vec::new();
+    for sql in [grouped, alone] {
+        for r in store.query(&sql, &[Param::Int(place_id)])? {
+            let first = r.int(0)?;
+            let files = r.int(2)?;
+            out.push(HeldId {
+                id: r.opt_int(1)?.unwrap_or(first),
+                first,
+                files,
+                released: r.int(3)? == files,
+                lookup: r.opt_bytes(4)?.map(<[u8]>::to_vec),
+                shape: r.opt_text(5)?.map(str::to_string),
+                id_type: r.opt_text(6)?.map(str::to_string),
+                first_seen: r.opt_text(7)?.map(str::to_string),
+                batch: r.opt_int(8)?,
+                generated: r.int(9)? != 0,
+                subject: r.opt_int(10)?,
+                waits_for: r.opt_text(11)?.map(str::to_string),
+            });
         }
     }
+    out.sort_by_key(|h| h.first);
     Ok(out)
 }
 
@@ -715,14 +711,14 @@ fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Re
         .filter_map(|h| h.lookup.clone())
         .collect();
     let mut linkage = open_linkage(registry)?;
-    let identities = linkage::identities_by_lookup(&mut linkage, &mapped)?;
+    let identities: HashMap<Vec<u8>, i64> = linkage::identities_by_lookup(&mut linkage, &mapped)?
+        .into_iter()
+        .map(|i| (i.lookup, i.subject_id))
+        .collect();
     let subject_of = |h: &HeldId| -> Option<i64> {
         match h.state() {
             "waits" => h.subject,
-            "mapped" => identities
-                .iter()
-                .find(|i| h.lookup.as_ref() == Some(&i.lookup))
-                .map(|i| i.subject_id),
+            "mapped" => h.lookup.as_ref().and_then(|l| identities.get(l).copied()),
             _ => None,
         }
     };
@@ -740,7 +736,7 @@ fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Re
         .into_iter()
         .collect();
     let holding = datasets_holding(registry.store(), &kept)?;
-    let files: usize = held.iter().map(|h| h.rows.len()).sum();
+    let files: i64 = held.iter().map(|h| h.files).sum();
     let ids: Vec<serde_json::Value> = held
         .iter()
         .map(|h| {
@@ -753,7 +749,7 @@ fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Re
                 "id": h.id,
                 "shape": h.shape,
                 "id_type": h.id_type,
-                "files": h.rows.len(),
+                "files": h.files,
                 "first_seen": h.first_seen,
                 "batch": h.batch,
                 "state": h.state(),
@@ -783,9 +779,9 @@ fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Re
 }
 
 /// The codes a rehearsed map gives a dataset's held identifiers (Wave 7a):
-/// each identifier it names, by the row that stands for it, with the code
-/// and the datasets that code's subject is in already; below detail quasi
-/// the code as its shape.
+/// each identifier it names whose files still wait, by the row that stands
+/// for it, with the code and the datasets that code's subject is in
+/// already; below detail quasi the code as its shape.
 fn rehearsed_ids(
     registry: &mut Registry,
     caller: &Caller,
@@ -795,11 +791,22 @@ fn rehearsed_ids(
     if codes.is_empty() || !held_table(registry)? {
         return Ok(serde_json::json!([]));
     }
-    let by_row: HashMap<i64, &str> = codes.iter().map(|c| (c.row, c.code.as_str())).collect();
+    let by_lookup: HashMap<&[u8], &str> = codes
+        .iter()
+        .map(|c| (c.lookup.as_slice(), c.code.as_str()))
+        .collect();
     let held = held_identifiers(registry.store(), p.id)?;
+    // the identifiers whose files still wait: one a map released before is
+    // mapped already, whatever another dataset still holds of it
     let named: Vec<(&HeldId, &str)> = held
         .iter()
-        .filter_map(|h| h.rows.iter().find_map(|r| by_row.get(r)).map(|c| (h, *c)))
+        .filter(|h| !h.released)
+        .filter_map(|h| {
+            h.lookup
+                .as_deref()
+                .and_then(|l| by_lookup.get(l))
+                .map(|c| (h, *c))
+        })
         .collect();
     let distinct: Vec<String> = named
         .iter()
@@ -807,26 +814,58 @@ fn rehearsed_ids(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let known = linkage::subjects_by_code(registry.store(), &distinct)?;
-    let ids: Vec<i64> = known
-        .iter()
-        .map(|s| s.merged_into.unwrap_or(s.id))
+    // a code already a subject's, by the subject it stands for now
+    let known: HashMap<String, i64> = linkage::subjects_by_code(registry.store(), &distinct)?
+        .into_iter()
+        .map(|s| (s.code, s.merged_into.unwrap_or(s.id)))
         .collect();
+    let ids: Vec<i64> = known.values().copied().collect();
     let holding = datasets_holding(registry.store(), &ids)?;
     Ok(serde_json::Value::from(
         named
             .iter()
             .map(|(h, code)| {
                 let also: Vec<&String> = known
-                    .iter()
-                    .find(|s| s.code == *code)
-                    .and_then(|s| holding.get(&s.merged_into.unwrap_or(s.id)))
+                    .get(*code)
+                    .and_then(|s| holding.get(s))
                     .map(|names| names.iter().filter(|n| **n != p.name).collect())
                     .unwrap_or_default();
                 serde_json::json!({ "id": h.id, "code": code_shown(caller, code), "also_in": also })
             })
             .collect::<Vec<_>>(),
     ))
+}
+
+/// The keyed lookups the rows named in `ids` carry, each read by its row in
+/// the store: a row that is no held row of the dataset is refused by its
+/// number, and a row with no lookup has nothing to code by.
+fn chosen_lookups(store: &mut Store, p: &place::Place, ids: &[i64]) -> Result<Vec<Vec<u8>>, Reply> {
+    let mut found: HashMap<i64, Option<Vec<u8>>> = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(nils_registry::store::SQLITE_KEY_CHUNK) {
+        // the rows are numbers the body gave as integers, set in the
+        // statement as they are
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, lookup FROM {} WHERE place_id = {} AND state = 'held' AND id IN ({list})",
+            store.qualified(HELD_TABLE),
+            store.dialect().param(1, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::Int(p.id)])? {
+            found.insert(r.int(0)?, r.opt_bytes(1)?.map(<[u8]>::to_vec));
+        }
+    }
+    let mut lookups: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for id in ids {
+        match found.get(id) {
+            None => return Err(no_held_id(&p.name, *id)),
+            Some(lookup) => lookups.extend(lookup.clone()),
+        }
+    }
+    Ok(lookups.into_iter().collect())
 }
 
 /// `POST /api/linkage/held/code {place, ids?, run?}`: code the held files
@@ -882,18 +921,7 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
     // the identifiers chosen, by the lookup each row carries
     let lookups = match &chosen {
         None => None,
-        Some(ids) => {
-            let found = held_identifiers(registry.store(), p.id)?;
-            let mut lookups = Vec::with_capacity(ids.len());
-            for id in ids {
-                let held = found
-                    .iter()
-                    .find(|h| h.rows.contains(id))
-                    .ok_or_else(|| no_held_id(&p.name, *id))?;
-                lookups.extend(held.lookup.clone());
-            }
-            Some(lookups)
-        }
+        Some(ids) => Some(chosen_lookups(registry.store(), &p, ids)?),
     };
     let store = registry.store();
     let d = store.dialect();
@@ -906,10 +934,19 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
     let n = match lookups {
         None => store.execute(&sql, &[Param::Int(p.id)])?,
         Some(lookups) => {
-            let one = format!("{sql} AND lookup = {}", d.param(2, Type::Bytes));
+            // a chunk of lookups a statement, so the dataset's held rows are
+            // read once a chunk, never once an identifier
             let mut n = 0;
-            for lookup in lookups {
-                n += store.execute(&one, &[Param::Int(p.id), Param::Bytes(lookup)])?;
+            for chunk in lookups.chunks(nils_registry::store::SQLITE_KEY_CHUNK) {
+                let marks: Vec<String> = (0..chunk.len())
+                    .map(|i| d.param(i + 2, Type::Bytes))
+                    .collect();
+                let mut params = vec![Param::Int(p.id)];
+                params.extend(chunk.iter().map(|l| Param::Bytes(l.clone())));
+                n += store.execute(
+                    &format!("{sql} AND lookup IN ({})", marks.join(", ")),
+                    &params,
+                )?;
             }
             n
         }
@@ -2015,6 +2052,215 @@ mod tests {
         );
         assert_eq!(r.status, 200, "{}", r.body);
         assert!(r.body.get("held_ids").is_none(), "{}", r.body);
+    }
+
+    /// Wave 7a, the pseudonymise step at scale: a dataset of a few thousand
+    /// held files over hundreds of identifiers, each identifier's rows far
+    /// apart and another dataset holding some of the same, is one row an
+    /// identifier in the order its first file was held, each with its own
+    /// count and state; identifiers chosen by their rows are coded anyway
+    /// and no others; and a rehearsed map fills exactly the identifiers it
+    /// names that still wait.
+    #[test]
+    fn many_held_files_group_into_their_identifiers() {
+        const IDS: i64 = 500;
+        const EACH: i64 = 6;
+        let dir = TempDir::new("linkage-doors-many");
+        let (home, mut registry) = registry(&dir);
+        let work = caller("data:see,data:work,quasi");
+        let ward = a_place(&mut registry, &dir, "ward-big");
+        let other = a_place(&mut registry, &dir, "ward-other");
+        let keys = Subkeys::derive(b"nils-fixture-key");
+        let value = |i: i64| format!("ID{i:05}");
+        // how each identifier stands: every file released, the first
+        // released and the rest held, coded anyway, or held
+        let all_released = |i: i64| i % 7 == 0;
+        let first_released = |i: i64| i % 11 == 0 && !all_released(i);
+        let anyway = |i: i64| i % 5 == 0 && !all_released(i) && !first_released(i);
+        registry.store().begin().unwrap();
+        // round by round, so an identifier's files lie IDS rows apart
+        for round in 0..EACH {
+            for i in 0..IDS {
+                let released = all_released(i) || (first_released(i) && round == 0);
+                registry
+                    .store()
+                    .execute(
+                        "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, shape, lookup, id_type, first_seen, batch_id, released_at, code_anyway) VALUES (?, ?, 0, 0, 'held', 'AA99999', ?, 'patient-id', '2026-10-09T00:00:00Z', 7, ?, ?)",
+                        &[
+                            Param::Int(ward),
+                            Param::from(format!("r{round}/f{i}")),
+                            Param::Bytes(keys.lookup("patient-id", &value(i))),
+                            if released {
+                                Param::from("2026-10-09T01:00:00Z")
+                            } else {
+                                Param::Null
+                            },
+                            Param::Int(i64::from(anyway(i))),
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        // the other dataset holds one file of every tenth identifier
+        for i in (0..IDS).step_by(10) {
+            registry
+                .store()
+                .execute(
+                    "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, shape, lookup, id_type, first_seen, code_anyway) VALUES (?, ?, 0, 0, 'held', 'AA99999', ?, 'patient-id', '2026-10-09T00:00:00Z', 0)",
+                    &[
+                        Param::Int(other),
+                        Param::from(format!("o/f{i}")),
+                        Param::Bytes(keys.lookup("patient-id", &value(i))),
+                    ],
+                )
+                .unwrap();
+        }
+        registry.store().commit().unwrap();
+        // the rows are 1..=3000 for ward-big: identifier i's file of round r
+        // is row r * IDS + i + 1
+        let row = |round: i64, i: i64| round * IDS + i + 1;
+
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "GET",
+            "/api/linkage/held/ids?place=ward-big",
+            "",
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["identifiers"], IDS);
+        assert_eq!(r.body["files"], IDS * EACH);
+        let ids = r.body["ids"].as_array().unwrap();
+        assert_eq!(ids.len() as i64, IDS);
+        for (i, h) in (0..IDS).zip(ids) {
+            assert_eq!(h["files"], EACH, "identifier {i}: {h}");
+            // the row that stands for it: the first not yet released
+            let stands = if first_released(i) {
+                row(1, i)
+            } else {
+                row(0, i)
+            };
+            assert_eq!(h["id"], stands, "identifier {i}: {h}");
+            let state = if all_released(i) {
+                "mapped"
+            } else if anyway(i) {
+                "generated"
+            } else {
+                "held"
+            };
+            assert_eq!(h["state"], state, "identifier {i}: {h}");
+        }
+
+        // fifty identifiers that wait with no code, chosen by their rows:
+        // their files and no others are coded anyway, and nothing is queued
+        let held: Vec<i64> = (0..IDS)
+            .filter(|&i| !all_released(i) && !first_released(i) && !anyway(i))
+            .take(50)
+            .collect();
+        let chosen: Vec<i64> = held.iter().map(|&i| row(0, i)).collect();
+        let flagged = |registry: &mut Registry| {
+            registry
+                .store()
+                .query(
+                    "SELECT COUNT(*) FROM pseudonym_file WHERE code_anyway = 1",
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        let before = flagged(&mut registry);
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/code",
+            &serde_json::json!({"place": "ward-big", "ids": chosen, "run": false}).to_string(),
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["files"], 50 * EACH, "{}", r.body);
+        assert_eq!(flagged(&mut registry), before + 50 * EACH);
+        assert!(
+            nils_registry::job::list(registry.store(), true, 10)
+                .unwrap()
+                .is_empty()
+        );
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "GET",
+            "/api/linkage/held/ids?place=ward-big",
+            "",
+        );
+        let generated: BTreeSet<i64> = r.body["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|h| h["state"] == "generated")
+            .map(|h| h["id"].as_i64().unwrap())
+            .collect();
+        assert!(chosen.iter().all(|c| generated.contains(c)));
+        // a row of another dataset is no identifier of this one
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/code",
+            &format!(
+                r#"{{"place": "ward-big", "ids": [{}], "run": false}}"#,
+                IDS * EACH + 1
+            ),
+        );
+        assert_eq!(r.status, 404, "{}", r.body);
+
+        // a map naming the first two hundred: the identifiers among them
+        // whose files still wait fill, each by its own row and code
+        let rows: Vec<serde_json::Value> = (0..200)
+            .map(|i| serde_json::json!([value(i), format!("code-{i:04}")]))
+            .collect();
+        let body = serde_json::json!({
+            "place": "ward-big",
+            "dry_run": true,
+            "columns": [{"header": "id", "role": "identifier", "id_type": "patient-id"}, {"header": "code", "role": "code"}],
+            "rows": rows,
+        });
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/imports",
+            &body.to_string(),
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        let filled: Vec<(i64, String)> = r.body["held_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                (
+                    h["id"].as_i64().unwrap(),
+                    h["code"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let expected: Vec<(i64, String)> = (0..200)
+            .filter(|&i| !all_released(i))
+            .map(|i| {
+                let stands = if first_released(i) {
+                    row(1, i)
+                } else {
+                    row(0, i)
+                };
+                (stands, format!("code-{i:04}"))
+            })
+            .collect();
+        assert_eq!(filled, expected);
+        assert!(!r.body.to_string().contains("ID00001"), "{}", r.body);
     }
 
     #[test]
