@@ -17,8 +17,11 @@ use nils_registry::schema::Type;
 use nils_registry::store::{Error as StoreError, Param, Store};
 use serde_json::Value;
 
-/// The statuses that still wait for a person.
-const OPEN: &str = "ri.status IN ('open', 'staged')";
+/// The statuses that still wait for a person: a stack needs a look while
+/// an item of one of these asks about it, everywhere a look is counted (the
+/// card's certainty, the scans door's questions and the dataset viewer's
+/// counts), so the numbers agree. Over a `review_item` aliased `ri`.
+pub(crate) const OPEN: &str = "ri.status IN ('open', 'staged')";
 
 fn ids_in(ids: &[i64]) -> String {
     ids.iter()
@@ -52,7 +55,7 @@ fn stacks_of_sources(
 
 /// The open or staged questions about one stack each, which name their
 /// stack in `ref` and have no member rows: (kind, stack).
-fn stack_scoped(store: &mut Store) -> Result<Vec<(String, i64)>, StoreError> {
+pub(crate) fn stack_scoped(store: &mut Store) -> Result<Vec<(String, i64)>, StoreError> {
     let sql = format!(
         "SELECT ri.kind, {} FROM {} ri WHERE ri.scope = 'stack' AND {OPEN}",
         crate::text_of(store, "review_item", "ref"),

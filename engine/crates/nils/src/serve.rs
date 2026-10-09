@@ -2422,36 +2422,44 @@ fn routed(
             // Wave 7a (record 55 H2): a dataset's scans a page at a time,
             // read from the registry, never through a cohort; quasi
             // identifying fields shaped below detail quasi (K7)
-            let dataset = crate::scans::dataset_named(registry, &decoded(segs[2]))?;
-            let limit = match query.get("limit") {
-                Some(l) => l
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|n| (1..=crate::scans::SCANS_MOST).contains(n))
-                    .ok_or_else(|| {
-                        Reply::error(400, format!("limit is 1 to {}", crate::scans::SCANS_MOST))
-                    })?,
-                None => crate::scans::SCANS_PAGE,
-            };
-            let after = match query.get("after").filter(|a| !a.is_empty()) {
-                Some(a) => Some(a.parse::<i64>().map_err(|_| {
-                    Reply::error(400, "after is a scan's stack id, as `next` gave it")
-                })?),
-                None => None,
-            };
-            let pictures = query
-                .get("pictures")
-                .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
-            let mut doc = crate::scans::page(registry, &caller.access, &dataset, limit, after)?;
-            // the dataset view: each scan's names, datatype and axes
+            let scope = crate::viewer::Scope::dataset(registry, &decoded(segs[2]))?;
+            scans_door(doors, registry, caller, &scope, query)
+        }
+        // the dataset viewer (2026-10-09): a cohort's scans, every stack of
+        // a current member from any dataset, as a dataset's are paged
+        ["api", "cohorts", _, "scans"] if get => {
+            let scope = crate::viewer::Scope::cohort(registry, &decoded(segs[2]))?;
+            scans_door(doors, registry, caller, &scope, query)
+        }
+        // the dataset viewer (2026-10-09): the subjects of a dataset or a
+        // cohort as the Grid's folders, and one subject's visits
+        ["api", kind @ ("datasets" | "cohorts"), _, "subjects"] if get => {
+            let scope = viewer_scope(registry, kind, segs[2])?;
+            Ok(Reply::ok(crate::viewer::subjects(
+                registry, caller, &scope, query,
+            )?))
+        }
+        [
+            "api",
+            kind @ ("datasets" | "cohorts"),
+            _,
+            "subjects",
+            subject,
+            "visits",
+        ] if get => {
+            let scope = viewer_scope(registry, kind, segs[2])?;
+            let subject = subject
+                .parse::<i64>()
+                .map_err(|_| Reply::error(400, "a subject is named by its id"))?;
             let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
-            crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
-            // record 55 H2: each scan's picture inline and its open
-            // questions, so a page of the grid is one request
-            if pictures {
-                crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
-            }
-            Ok(Reply::ok(doc))
+            Ok(Reply::ok(crate::viewer::visits(
+                registry,
+                caller,
+                pack.as_deref(),
+                &scope,
+                subject,
+                query,
+            )?))
         }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
@@ -4283,6 +4291,112 @@ const JOB_GRANTS: &[&str] = &[
     "release:work",
 ];
 
+/// The scope a viewer door names: a dataset by its name or id, or a
+/// cohort by its name, the segment decoded once.
+fn viewer_scope(
+    registry: &mut Registry,
+    kind: &str,
+    name: &str,
+) -> Result<crate::viewer::Scope, Reply> {
+    let name = decoded(name);
+    match kind {
+        "cohorts" => crate::viewer::Scope::cohort(registry, &name),
+        _ => crate::viewer::Scope::dataset(registry, &name),
+    }
+}
+
+/// A page of a scope's scans (record 55 H2, and the dataset viewer since
+/// 2026-10-09): `limit`, `after` and `pictures` as they were, and at most
+/// one of `session` (a session the cache holds) and `studies` (the studies
+/// of a visit it does not hold), which narrow the page to one visit. Each
+/// scan has its names, datatype and axes, the viewer's facts and its open
+/// questions; with `pictures`, its picture.
+fn scans_door(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    scope: &crate::viewer::Scope,
+    query: &HashMap<String, String>,
+) -> Result<Reply, Reply> {
+    let limit = match query.get("limit") {
+        Some(l) => l
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=crate::scans::SCANS_MOST).contains(n))
+            .ok_or_else(|| {
+                Reply::error(400, format!("limit is 1 to {}", crate::scans::SCANS_MOST))
+            })?,
+        None => crate::scans::SCANS_PAGE,
+    };
+    let after = match query.get("after").filter(|a| !a.is_empty()) {
+        Some(a) => Some(
+            a.parse::<i64>()
+                .map_err(|_| Reply::error(400, "after is a scan's stack id, as `next` gave it"))?,
+        ),
+        None => None,
+    };
+    let pictures = query
+        .get("pictures")
+        .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
+    let session = query.get("session").filter(|s| !s.is_empty());
+    let studies = query.get("studies").filter(|s| !s.is_empty());
+    let visit = match (session, studies) {
+        (Some(_), Some(_)) => {
+            return Err(Reply::error(
+                400,
+                "session or studies: one visit, named one way",
+            ));
+        }
+        (Some(s), None) => Some(crate::scans::Visit::Session(s.parse::<i64>().map_err(
+            |_| Reply::error(400, "session is a session's id, as the visits door gave it"),
+        )?)),
+        (None, Some(list)) => {
+            let ids = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<i64>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| {
+                    Reply::error(
+                        400,
+                        "studies is a comma list of study ids, as the visits door gave them",
+                    )
+                })?;
+            if ids.is_empty() || ids.len() > crate::viewer::VISIT_STUDIES_MOST {
+                return Err(Reply::error(
+                    400,
+                    format!(
+                        "studies names 1 to {} studies",
+                        crate::viewer::VISIT_STUDIES_MOST
+                    ),
+                ));
+            }
+            Some(crate::scans::Visit::Studies(ids))
+        }
+        (None, None) => None,
+    };
+    let mut doc = crate::scans::page(
+        registry,
+        &caller.access,
+        scope,
+        visit.as_ref(),
+        limit,
+        after,
+    )?;
+    // the dataset view: each scan's names, datatype and axes
+    let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
+    // the dataset viewer: its family, its physics and its main roles
+    crate::viewer::with_facts(registry, &mut doc)?;
+    // record 55 H2: each scan's picture inline and its open questions, so
+    // a page of the grid is one request
+    if pictures {
+        crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
+    }
+    Ok(Reply::ok(doc))
+}
+
 /// What a door needs (the suite contract, version 2): a grant, any of two,
 /// or two at once, and the lowest detail. A door not named here needs a
 /// grant, any grant: the capabilities, the status, the summary, the
@@ -4335,6 +4449,12 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
         // Wave 7a: a dataset's scans, read as its card is
         ("GET", ["api", "datasets", _, "scans"]) => (Need::One("data:see"), Plain),
+        // the dataset viewer (2026-10-09): a dataset's or a cohort's
+        // subjects, one subject's visits and a cohort's scans, read as a
+        // dataset's scans are, quasi-identifying fields shaped below quasi
+        ("GET", ["api", "datasets" | "cohorts", _, "subjects"])
+        | ("GET", ["api", "datasets" | "cohorts", _, "subjects", _, "visits"])
+        | ("GET", ["api", "cohorts", _, "scans"]) => (Need::One("data:see"), Plain),
         // record 26 §1: what becomes of a dataset's originals. What an act
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
@@ -4874,6 +4994,11 @@ fn capabilities(
         "POST /api/ingest/look",
         "GET /api/sources",
         "GET /api/datasets/{name}/scans",
+        "GET /api/datasets/{name}/subjects",
+        "GET /api/datasets/{name}/subjects/{subject}/visits",
+        "GET /api/cohorts/{name}/scans",
+        "GET /api/cohorts/{name}/subjects",
+        "GET /api/cohorts/{name}/subjects/{subject}/visits",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -5872,6 +5997,51 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "a page of at most 200 scans",
             "Reading a dataset's scans",
             "Read a dataset's scans",
+        ),
+        row(
+            "GET /api/datasets/{name}/subjects",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 subjects",
+            "Reading a dataset's subjects",
+            "Read a dataset's subjects",
+        ),
+        row(
+            "GET /api/datasets/{name}/subjects/{subject}/visits",
+            false,
+            false,
+            "bounded",
+            "one subject's visits",
+            "Reading a subject's visits",
+            "Read a subject's visits",
+        ),
+        row(
+            "GET /api/cohorts/{name}/scans",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 scans",
+            "Reading a cohort's scans",
+            "Read a cohort's scans",
+        ),
+        row(
+            "GET /api/cohorts/{name}/subjects",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 subjects",
+            "Reading a cohort's subjects",
+            "Read a cohort's subjects",
+        ),
+        row(
+            "GET /api/cohorts/{name}/subjects/{subject}/visits",
+            false,
+            false,
+            "bounded",
+            "one subject's visits",
+            "Reading a member's visits",
+            "Read a member's visits",
         ),
         row(
             "POST /api/places",

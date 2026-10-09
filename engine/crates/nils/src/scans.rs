@@ -7,6 +7,11 @@
 //! from the registry, never through a cohort: a dataset that feeds none
 //! still lists its scans.
 //!
+//! The dataset viewer (2026-10-09) asks the same door of a cohort, whose
+//! scans are every stack of a current member from any dataset
+//! ([`crate::viewer::Scope`]), and narrows a page to one visit: a session
+//! the cache holds, or the studies of a visit it does not hold yet.
+//!
 //! The page is keyset paged: sorted by subject code, then day, then stack
 //! id, and `after` is the last stack id of the page before, so the cursor
 //! carries nothing but a technical key. A stack of a sample sealed now is
@@ -73,39 +78,63 @@ pub(crate) fn dataset_named(registry: &mut Registry, name: &str) -> Result<Place
     }
 }
 
-/// One page of a dataset's scans, `{dataset, dataset_id, detail, total,
-/// count, scans, next}`.
+/// What a page of scans is narrowed to: one visit of the dataset viewer,
+/// a session the cache holds or the studies of a visit it does not hold.
+pub(crate) enum Visit {
+    Session(i64),
+    Studies(Vec<i64>),
+}
+
+/// One page of a scope's scans, `{scope, dataset, dataset_id | cohort,
+/// cohort_id, detail, total, count, scans, next}`: a dataset's (the stacks
+/// its digests created first) or a cohort's (every stack of a current
+/// member, from any dataset), all of them or one visit's.
 pub(crate) fn page(
     registry: &mut Registry,
     access: &Access,
-    dataset: &Place,
+    scope: &crate::viewer::Scope,
+    visit: Option<&Visit>,
     limit: usize,
     after: Option<i64>,
 ) -> Result<Value, Reply> {
     let quasi = access.detail >= Detail::Quasi;
     let empty = |total: i64| {
-        json!({
-            "dataset": dataset.name,
-            "dataset_id": dataset.id,
+        let mut doc = json!({
+            "scope": scope.as_json(),
             "detail": access.detail.name(),
             "total": total,
             "count": 0,
             "scans": [],
             "next": null,
-        })
+        });
+        let (name, id) = match scope {
+            crate::viewer::Scope::Dataset { .. } => ("dataset", "dataset_id"),
+            crate::viewer::Scope::Cohort(_) => ("cohort", "cohort_id"),
+        };
+        doc[name] = json!(scope.name());
+        doc[id] = json!(scope.id());
+        doc
     };
     let store = registry.store();
-    let ids = crate::sources::source_ids(store, dataset).map_err(failed)?;
     // an identified dataset nothing has read yet (only its originals, no
     // digest of its pseudonymised tree) holds no scans: an empty list
-    if ids.is_empty() {
+    let Some(mut filter) = scope.holds(store, access, "st", "b", "se") else {
         return Ok(empty(0));
+    };
+    match visit {
+        Some(Visit::Session(id)) => filter.push_str(&format!(
+            " AND se.study_id IN (SELECT scs.study_id FROM {} scs WHERE scs.session_id = {id})",
+            store.qualified("session_cache_study")
+        )),
+        Some(Visit::Studies(ids)) => filter.push_str(&format!(
+            " AND se.study_id IN ({})",
+            ids.iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        None => {}
     }
-    let sources = ids
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
     let d = store.dialect();
     let [
         stack,
@@ -114,7 +143,6 @@ pub(crate) fn page(
         study,
         subject,
         fp,
-        sealed,
         cached,
         cache,
         labels,
@@ -125,7 +153,6 @@ pub(crate) fn page(
         "study",
         "subject",
         "stack_fingerprint",
-        "sealed_stack",
         "session_cache_study",
         "session_cache",
         "session_label",
@@ -150,12 +177,6 @@ pub(crate) fn page(
              JOIN {subject} {su} ON {su}.id = {se}.subject_id"
         )
     };
-    let mut filter = format!("b.source_id IN ({sources})");
-    if !crate::sealed::reads(access) {
-        filter.push_str(&format!(
-            " AND NOT EXISTS (SELECT 1 FROM {sealed} sst WHERE sst.stack_id = st.id AND sst.unsealed_at IS NULL)"
-        ));
-    }
     let base = from("st", "b", "se", "sy", "su");
     let total = store
         .query(&format!("SELECT COUNT(*) FROM {base} WHERE {filter}"), &[])
@@ -184,7 +205,7 @@ pub(crate) fn page(
         if known == 0 {
             return Err(Reply::error(
                 400,
-                format!("after names no scan of {} this caller lists", dataset.name),
+                format!("after names no scan of {} this caller lists", scope.name()),
             ));
         }
         paged.push_str(&format!(
@@ -291,6 +312,9 @@ pub(crate) fn page(
                     "id": id,
                     "label": shaped(label, !quasi && dated_labels),
                 })),
+                // the study's id, a technical key: the desk keys a visit
+                // the cache holds no session for by it
+                "study": r.study,
                 "series_description": r.name,
                 "orientation": r.orientation,
                 "images": r.images,
@@ -484,9 +508,11 @@ pub(crate) fn with_pictures(
     Ok(())
 }
 
-/// The kinds of the open review questions on each of `stacks`, sorted and
-/// each once: grouped questions through their members, and questions
-/// about one stack through their reference.
+/// The kinds of the review questions that still wait for a person (open
+/// or staged, the one rule every look is counted by,
+/// [`crate::certainty::OPEN`]) on each of `stacks`, sorted and each once:
+/// grouped questions through their members, and questions about one stack
+/// through their reference.
 fn open_questions(
     store: &mut nils_registry::Store,
     stacks: &[i64],
@@ -502,10 +528,11 @@ fn open_questions(
         .join(", ");
     let items = store.qualified("review_item");
     let members = store.qualified("review_member");
+    let open = crate::certainty::OPEN;
     for r in store.query(
         &format!(
-            "SELECT m.stack_id, i.kind FROM {members} m JOIN {items} i ON i.id = m.item_id \
-             WHERE i.status = 'open' AND m.stack_id IN ({list})"
+            "SELECT m.stack_id, ri.kind FROM {members} m JOIN {items} ri ON ri.id = m.item_id \
+             WHERE {open} AND m.stack_id IN ({list})"
         ),
         &[],
     )? {
@@ -516,18 +543,9 @@ fn open_questions(
     // a question about one stack names it in its reference, which the two
     // backends spell apart as text: read and matched here, not in SQL
     let wanted: BTreeSet<i64> = stacks.iter().copied().collect();
-    let t = nils_registry::schema::table("review_item");
-    let reference = store.dialect().text_of(t.column("ref").expect("ref"));
-    for r in store.query(
-        &format!("SELECT kind, {reference} FROM {items} WHERE status = 'open' AND scope = 'stack'"),
-        &[],
-    )? {
-        let stack = r
-            .opt_text(1)?
-            .and_then(|t| serde_json::from_str::<Value>(t).ok())
-            .and_then(|v| v["stack_id"].as_i64());
-        if let Some(stack) = stack.filter(|s| wanted.contains(s)) {
-            out.entry(stack).or_default().insert(r.text(0)?.to_string());
+    for (kind, stack) in crate::certainty::stack_scoped(store)? {
+        if wanted.contains(&stack) {
+            out.entry(stack).or_default().insert(kind);
         }
     }
     Ok(out)
