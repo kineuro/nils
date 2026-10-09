@@ -66,6 +66,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # record 55 H2: the preview a sort writes, every plane a small JPEG; a pure
 # Rust baseline encoder, several times quicker than image's on grey planes
 jpeg-encoder = { version = "0.7", features = ["simd"] }
+# record 55 H2: a picture drawn small decodes JPEG 2000 at a lower
+# resolution; the same build the DICOM codecs use (no threads)
+jpeg2k = { version = "0.10", default-features = false, features = ["openjpeg-sys"] }
 base64 = "0.22"
 lru.workspace = true
 

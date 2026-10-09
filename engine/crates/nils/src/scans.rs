@@ -305,15 +305,20 @@ pub(crate) fn page(
     Ok(doc)
 }
 
+/// How long a page of scans waits for the stills of scans with no preview.
+pub const STILLS_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Record 55 H2 (E2): a page of scans with what the grid draws, so a page
 /// of fifty is one request. Each scan gains `questions`, the kinds of the
 /// open review questions on its stack (a classifier's grouped question
 /// under each of its members, and a question about the stack alone), so
 /// the desk can mark the scans that need a look; and `picture`, its own
 /// middle plane from the preview its sort made, as a data URL
-/// `{data, width, height, digest, held}`, or null where no preview is made
-/// yet (made now on a thread of the engine, never through the queue, so
-/// the page after has it). Pictures are pixels: they are shown as the
+/// `{data, width, height, digest, held, partial}`. A scan with no preview
+/// yet has its middle plane decoded from its one file (`partial` true) as
+/// long as the page's budget lasts, and null after (decoded on, and its
+/// preview made on a thread of the engine, never through the queue, so the
+/// page after has it). Pictures are pixels: they are shown as the
 /// instance doors show them, with query:see at detail quasi, one
 /// `instance.open` audit row a stack in the window, and the band held
 /// below detail sensitive where the stack carries burned-in annotation;
@@ -340,6 +345,8 @@ pub(crate) fn with_pictures(
     let working = crate::pyramid::working_place_cached(registry.store()).ok();
     let mut pictures: HashMap<i64, Value> = HashMap::new();
     let mut missing = Vec::new();
+    let mut partial = 0usize;
+    let sensitive = access.detail >= Detail::Sensitive;
     if let (None, Some(w)) = (why, &working) {
         let root = std::path::Path::new(&w.path);
         let plain: Vec<std::path::PathBuf> = stacks
@@ -349,7 +356,6 @@ pub(crate) fn with_pictures(
         let mut opened = crate::preview::opened_many(&plain);
         // the band held below detail sensitive: the held file of a stack
         // that carries burned-in annotation
-        let sensitive = access.detail >= Detail::Sensitive;
         for (i, o) in opened.iter_mut().enumerate() {
             if let Some(found) = o
                 && found.header.burned_in
@@ -373,13 +379,38 @@ pub(crate) fn with_pictures(
                             "height": b.height,
                             "digest": o.header.digest,
                             "held": o.header.held,
+                            "partial": false,
                         }),
                     );
                 }
                 None => missing.push(*stack),
             }
         }
+        // a scan with no preview yet: its middle plane from one file, as
+        // many as are decoded within the page's budget; the rest are
+        // missing for now, and decoded on for the page asked next
+        let stills = crate::preview::stills_within(registry.store(), &missing, STILLS_BUDGET);
+        for stack in &missing {
+            if let Some(s) = stills.get(stack) {
+                crate::pyramid::note_open(registry, caller, *stack, None, 0, "list")
+                    .map_err(|e| Reply::error(500, e))?;
+                let (jpeg, held) = s.picture(sensitive);
+                pictures.insert(
+                    *stack,
+                    json!({
+                        "data": crate::preview::data_url(jpeg),
+                        "width": s.width,
+                        "height": s.height,
+                        "digest": s.digest,
+                        "held": held,
+                        "partial": true,
+                    }),
+                );
+                partial += 1;
+            }
+        }
         crate::preview::warm(home, root, &missing);
+        missing.retain(|s| !stills.contains_key(s));
     }
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
@@ -392,6 +423,7 @@ pub(crate) fn with_pictures(
         "shown": why.is_none() && working.is_some(),
         "why": why.or(working.is_none().then_some("no working place is bound, where previews are kept")),
         "missing": missing.len(),
+        "partial": partial,
         "place": working.map(|w| w.name),
     });
     Ok(())

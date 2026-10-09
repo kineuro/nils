@@ -2297,7 +2297,15 @@ fn routed(
             };
             // record 55 H2: the preview a sort made, beside the pyramid
             if rest.first() == Some(&"preview") {
-                return crate::preview::door(registry, caller, stack, through, rest, query);
+                return crate::preview::door(
+                    registry,
+                    caller,
+                    &doors.home,
+                    stack,
+                    through,
+                    rest,
+                    query,
+                );
             }
             crate::pyramid::door(registry, caller, stack, through, rest, query)
         }

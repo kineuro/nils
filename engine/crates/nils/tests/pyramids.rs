@@ -1096,15 +1096,17 @@ impl Server {
 
 /// Record 55 H2, round 3: a picture is built when it is first asked for.
 /// A stack with no pyramid answers 202 with the build the door queued and
-/// a Retry-After, never 404; tiles asked meanwhile name the same build; the
-/// worker builds it and the door answers 200; a stack that cannot be read
-/// answers 422 with the reason's class and is not queued again; a stack
-/// the registry does not hold is 404 and queues nothing.
+/// a Retry-After, never 404, and `retry_after_ms` a quarter second at
+/// first; the manifest asked meanwhile is held while the build runs and
+/// answers as it ends (or names the same build); the worker builds it and
+/// the door answers 200; a stack that cannot be read answers 422 with the
+/// reason's class and is not queued again; a stack the registry does not
+/// hold is 404 and queues nothing.
 #[test]
 fn a_picture_is_built_when_it_is_first_asked_for() {
     let lab = lab("pyramids-demand");
     let server = Server::start(&lab.home);
-    let (status, headers, first) = server.headed("/api/instances/1/manifest", OPERATOR);
+    let (status, headers, first) = server.headed("/api/instances/1/tiles/0/0", OPERATOR);
     assert_eq!(status, 202, "{first}");
     assert_eq!(first["building"], true, "{first}");
     assert_eq!(first["stack"], 1, "{first}");
@@ -1113,13 +1115,21 @@ fn a_picture_is_built_when_it_is_first_asked_for() {
         first["retry_after"].as_u64().is_some_and(|s| s > 0),
         "{first}"
     );
+    assert_eq!(first["retry_after_ms"], 250, "{first}");
     assert!(headers.contains("retry-after: "), "{headers}");
     let job = first["job"].as_i64().unwrap();
-    // asked again at once, the tiles name the same build or find it built
-    let (status, again) = server.call("GET", "/api/instances/1/tiles/0/0", None, OPERATOR);
+    // the manifest asked at once is held for the same build, and answers
+    // as soon as it is built
+    let t = std::time::Instant::now();
+    let (status, again) = server.call("GET", "/api/instances/1/manifest", None, OPERATOR);
     assert!(status == 202 || status == 200, "{status} {again}");
     if status == 202 {
         assert_eq!(again["job"], job, "{again}");
+    } else {
+        eprintln!(
+            "the held manifest answered {:.0} ms after it was asked",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
     // every stack asked for: two are built by the worker, the one whose
     // files went answers 422 with the reason's class

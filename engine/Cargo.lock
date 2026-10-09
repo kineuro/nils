@@ -1715,6 +1715,7 @@ dependencies = [
  "image",
  "jiff",
  "jpeg-encoder",
+ "jpeg2k",
  "jsonwebtoken",
  "libc",
  "lru",
