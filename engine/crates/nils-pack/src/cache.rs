@@ -42,6 +42,37 @@ thread_local! {
     /// What the load running on this thread has read so far, while one is
     /// recording.
     static READ: RefCell<Option<Vec<Seen>>> = const { RefCell::new(None) };
+
+    /// Record 56 §5.5: the texts a patched load reads in place of the
+    /// files at these paths, while one runs on this thread. A pack patched
+    /// by typed operations is built by the pack's own loader from its own
+    /// directory with these files replaced or added, and never kept.
+    static SOURCES: RefCell<Option<std::collections::HashMap<PathBuf, String>>> =
+        const { RefCell::new(None) };
+}
+
+/// Run `f` with the loader reading `sources` in place of the files at
+/// those paths (and listing a new one in its folder), on this thread only.
+/// What ran before is put back however `f` ends.
+pub(crate) fn with_sources<T>(
+    sources: std::collections::HashMap<PathBuf, String>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<std::collections::HashMap<PathBuf, String>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let before = self.0.take();
+            SOURCES.with(|s| *s.borrow_mut() = before);
+        }
+    }
+    let before = SOURCES.with(|s| s.borrow_mut().replace(sources));
+    let _restore = Restore(before);
+    f()
+}
+
+/// The text a patched load reads at `path`, when one is running.
+fn sourced(path: &Path) -> Option<String> {
+    SOURCES.with(|s| s.borrow().as_ref().and_then(|m| m.get(path).cloned()))
 }
 
 fn record(seen: Seen) {
@@ -55,14 +86,34 @@ fn record(seen: Seen) {
 /// Read a file as text for the loader, noting its bytes when a load is
 /// recording.
 pub(crate) fn read_to_string(path: &Path) -> std::io::Result<String> {
+    if let Some(text) = sourced(path) {
+        return Ok(text);
+    }
     let text = std::fs::read_to_string(path)?;
     record(Seen::File(path.to_path_buf(), text.clone().into_bytes()));
     Ok(text)
 }
 
 /// The paths a folder holds, sorted, noting them when a load is recording.
+/// A patched load also lists the new files its sources add to the folder.
 pub(crate) fn read_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let names = listing(dir)?;
+    let mut names = listing(dir)?;
+    let added: Vec<PathBuf> = SOURCES.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|m| {
+                m.keys()
+                    .filter(|p| p.parent() == Some(dir) && !names.contains(p))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    if !added.is_empty() {
+        names.extend(added);
+        names.sort();
+        return Ok(names);
+    }
     record(Seen::Listing(dir.to_path_buf(), names.clone()));
     Ok(names)
 }

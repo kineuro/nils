@@ -1,0 +1,648 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/patch/v1/patch.schema.json",
+  "title": "NILS pack patch",
+  "description": "Rule edits as typed operations (record 56, section 5.5): the changes to a pack written as data, each with its scope, its reason and its evidence, so a proposal is a reviewable diff that a form, a person or the assistant writes and the engine checks before anything runs. The engine applies the operations in order to the pack's own documents and builds the result with the pack's own loader; an operation that cannot apply is refused with why, and the pack's corpus and the patch's own cases judge the result. `nils pack rehearse --ops` and POST /api/packs/{name}/rehearse answer what it does to the sorting; `nils pack apply --out` writes a patch of pack edits as the next version of the pack. Written as YAML or sent as JSON.",
+  "type": "object",
+  "required": [
+    "patch",
+    "pack",
+    "operations"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "patch": {
+      "const": 1,
+      "description": "The format this patch is written in."
+    },
+    "pack": {
+      "type": "string",
+      "description": "The pack it amends, by name."
+    },
+    "version": {
+      "type": "string",
+      "description": "The pack version it was written against; a pack at another version refuses it.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "ships": {
+      "type": "string",
+      "description": "The version a patch of pack edits ships as, a rules release (record 55, B5); the next patch version when not given.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "reason": {
+      "type": "string",
+      "description": "The reason of every operation that states none."
+    },
+    "evidence": {
+      "description": "The evidence of every operation that names none."
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/operation"
+      },
+      "description": "Applied in order: an operation reads what the ones before it wrote."
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "What the patch says it does, in the shape of a pack's corpus cases: a stack and the flags or axes expected of it, judged against the patched pack as an overlay's cases are."
+    }
+  },
+  "$defs": {
+    "scope": {
+      "description": "Where the operation applies: `pack` (every stack; a pack edit, which ships as a rules release), `site:NAME` (the datasets under one source root: a site's deliveries arrive under its root), `dataset:NAME[,NAME]`, `scanner:KEY=VALUE[,KEY=VALUE]` with a key of manufacturer, model, station or an overlay's batch (each named key equal, case aside), or `batch:ID`. Anything but pack is an overlay: it never moves a stack outside its scope. As a word, or as a mapping {site: NAME}, {dataset: NAME | [NAME]}, {scanner: {KEY: VALUE}}, {batch: ID}. pack when not given.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(pack|(site|dataset):.+|scanner:(manufacturer|model|station|batch)=.+|batch:[0-9]+)$"
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1
+        }
+      ]
+    },
+    "condition": {
+      "type": "object",
+      "description": "One condition of a rule or a silence, all of which must hold: {words, field} the words in a text (a rule reads one list of words, and only add_rule takes them); {tag, is | has | gt | ge | lt | le | eq | ne | between | present} a field of the stack (te, tr, ti and flip name the echo, repetition and inversion times and the flip angle; a condition on the acquisition's numbers is a physics window); {flag} a flag of the pack; {axis, is} a value an earlier rule set decided; {not: condition}.",
+      "minProperties": 1
+    },
+    "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "Adds words a value's rule reads: the value's own list in its axis file, every keyword clause of a longhand rule that sets it, or the bucket either reads. Narrowed to the clauses reading `field`, or to one `rule` (set/rule). Refused where no word list reaches the value (a route sets it, or it is the default) or where the lists hold every word already.",
+          "required": [
+            "op",
+            "words"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "add_words"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string",
+              "description": "By its identity, its label or an identity it had."
+            },
+            "bucket": {
+              "type": "string",
+              "description": "A bucket of the pack, in place of axis and value."
+            },
+            "words": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "The words, as the pack reads them: a substring of the text the rule reads, matched case-insensitively. A leading space is kept."
+            },
+            "field": {
+              "type": "string",
+              "description": "series_description, protocol_name, sequence_name or a text the pack derives (search_text, technique_text, ...)."
+            },
+            "rule": {
+              "type": "string",
+              "description": "set/rule"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Removes words from the same lists add_words reaches. Refused where no list holds any of them.",
+          "required": [
+            "op",
+            "words"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "remove_words"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "bucket": {
+              "type": "string"
+            },
+            "words": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "The words, as the pack reads them: a substring of the text the rule reads, matched case-insensitively. A leading space is kept."
+            },
+            "field": {
+              "type": "string"
+            },
+            "rule": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Moves a rule inside its set: a longhand rule in its set's order, or a value in its axis's order. The first rule of a set that fires decides.",
+          "required": [
+            "op",
+            "rule"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "move_rule"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "rule": {
+              "type": "string",
+              "description": "set/rule, or the rule with set"
+            },
+            "set": {
+              "type": "string"
+            },
+            "before": {
+              "type": "string",
+              "description": "Placed just before this one."
+            },
+            "after": {
+              "type": "string",
+              "description": "Placed just after this one."
+            },
+            "position": {
+              "enum": [
+                "first",
+                "last"
+              ],
+              "description": "Placed first or last."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Moves a rule set in the pack's order. A set that decides an axis closes it to every set after it.",
+          "required": [
+            "op",
+            "set"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "move_set"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "set": {
+              "type": "string"
+            },
+            "before": {
+              "type": "string",
+              "description": "Placed just before this one."
+            },
+            "after": {
+              "type": "string",
+              "description": "Placed just after this one."
+            },
+            "position": {
+              "enum": [
+                "first",
+                "last"
+              ],
+              "description": "Placed first or last."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Changes a value's priority in its exclusion group: the lower number wins.",
+          "required": [
+            "op",
+            "axis",
+            "value",
+            "priority"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set_priority"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Adds a value to an axis's vocabulary, with its label, family, description, terms, aliases, exclusion group and priority, and its BIDS name; with words, the axis's own rules try it, at its place in the axis's order (last when not said).",
+          "required": [
+            "op",
+            "axis",
+            "value"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "add_value"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "family": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "terms": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "group": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "integer"
+            },
+            "words": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "The words, as the pack reads them: a substring of the text the rule reads, matched case-insensitively. A leading space is kept."
+            },
+            "bids": {
+              "$ref": "#/$defs/bids"
+            },
+            "before": {
+              "type": "string",
+              "description": "Placed just before this one."
+            },
+            "after": {
+              "type": "string",
+              "description": "Placed just after this one."
+            },
+            "position": {
+              "enum": [
+                "first",
+                "last"
+              ],
+              "description": "Placed first or last."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Adds a rule from templates: words in a field, a tag equal to a value, a physics range, a flag, an axis value, or their combination (all must hold; words are the clause it cites and the rest its gate). It sets one value, or nothing (nothing: true). In the set named, at its place (before, after or position, required in a set that has rules), or else in the axis's own longhand set, or in a set of the rules added to the axis that runs just before what decides it.",
+          "required": [
+            "op",
+            "axis",
+            "when"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "add_rule"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "nothing": {
+              "type": "boolean"
+            },
+            "when": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/condition"
+                },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/condition"
+                  }
+                }
+              ]
+            },
+            "set": {
+              "type": "string"
+            },
+            "rule": {
+              "type": "string",
+              "description": "Its name in the set; added_N when not given."
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "why": {
+              "type": "string"
+            },
+            "before": {
+              "type": "string",
+              "description": "Placed just before this one."
+            },
+            "after": {
+              "type": "string",
+              "description": "Placed just after this one."
+            },
+            "position": {
+              "enum": [
+                "first",
+                "last"
+              ],
+              "description": "Placed first or last."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "With an axis (one that holds one value, decided before the passes): the axis says nothing and asks nothing where the conditions hold. It is decided as nothing by a set that runs after what decides the axis and what the conditions read, and each pass that writes the axis leaves those stacks out of its target (a pass writes its axes together, so it fills none of them there). Without an axis: nobody is asked about such a stack at all (the pack's review.silent_when).",
+          "required": [
+            "op",
+            "when"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "silence"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "when": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/condition"
+                },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/condition"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Hands an axis to its image model's run and that run's own review: sorting asks nothing about it, and what the rules state of it stays (the pack's review.by_model).",
+          "required": [
+            "op",
+            "axis"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "by_model"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Changes how a value is named: in the BIDS names (the new token where the mapping names it once, or {suffix, datatype}, {acq} or {entity, token}), and in the descriptive name by its label, which an axis that stores labels also stores, so every stack holding it moves.",
+          "required": [
+            "op",
+            "axis",
+            "value"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "map_name"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "axis": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "bids": {
+              "$ref": "#/$defs/bids"
+            },
+            "label": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "bids": {
+      "description": "A value's BIDS name: the new token where the mapping names the value once; {suffix, datatype} (from the construct, the technique, the modifier or the base); {acq: TOKEN} in the acq- group read from the axis; {entity: part | mt | rec, token}. A token is a BIDS label, [0-9a-zA-Z+]+.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-zA-Z+]+$"
+        },
+        {
+          "type": "object",
+          "required": [
+            "suffix"
+          ],
+          "properties": {
+            "suffix": {
+              "type": "string",
+              "pattern": "^[0-9a-zA-Z+]+$"
+            },
+            "datatype": {
+              "enum": [
+                "anat",
+                "dwi",
+                "func",
+                "fmap",
+                "perf"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "acq"
+          ],
+          "properties": {
+            "acq": {
+              "type": "string",
+              "pattern": "^[0-9a-zA-Z+]+$"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "entity",
+            "token"
+          ],
+          "properties": {
+            "entity": {
+              "enum": [
+                "part",
+                "mt",
+                "mtransfer",
+                "rec",
+                "reconstruction"
+              ]
+            },
+            "token": {
+              "type": "string",
+              "pattern": "^[0-9a-zA-Z+]+$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

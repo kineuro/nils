@@ -63,6 +63,7 @@ mod preview;
 mod profile;
 mod pyramid;
 mod reader;
+mod rehearse;
 mod releases;
 mod scans;
 mod schedule;
@@ -2748,6 +2749,62 @@ enum PackCommand {
         #[arg(long, value_name = "FILE")]
         overlay: Option<PathBuf>,
     },
+    /// What a rule change does to the sorting, before anyone decides
+    /// (record 56): the patch's typed operations applied to a copy of the
+    /// pack, the registry in scope sorted both ways without a row written
+    /// (the rules, the decisions in force, the session passes, the physics
+    /// vote, the questions, the disposition, the main-scan picks), and
+    /// what moves per axis from what to what, the names and picks that
+    /// change, the questions that appear and go, right and wrong against
+    /// the answers people settled, and what it ships as. A stack of a
+    /// sealed sample is never read
+    Rehearse {
+        /// The patch: `patch: 1`, the pack, its operations (each with its
+        /// scope, reason and evidence); or an overlay document, read as
+        /// the word edits it is
+        #[arg(long, value_name = "FILE")]
+        ops: PathBuf,
+        /// The stacks replayed and counted: pack, site:NAME,
+        /// dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE] or batch:ID;
+        /// the operations' own scopes when not given
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
+        /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// Example stacks per row of a transition table
+        #[arg(long, value_name = "N", default_value_t = 5)]
+        examples: usize,
+        /// Threads that replay; the machine's when not given
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        workers: usize,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a patch's typed operations to a pack directory and check the
+    /// result with the pack's own loader and corpus (record 56). With
+    /// --out, write the patched pack there, every changed file rewritten
+    /// where it changed so its comments stay, and the manifest naming its
+    /// new version
+    Apply {
+        /// The pack directory
+        dir: PathBuf,
+        /// The patch, or an overlay document
+        #[arg(long, value_name = "FILE")]
+        ops: PathBuf,
+        /// Write the patched pack here (a new directory); only a patch of
+        /// pack edits is written, since a scoped one is an overlay
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// The version the written pack names: the patch's `ships`, else
+        /// the next patch version
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Whether a directory is a pack directory: one that holds at least one
@@ -4193,6 +4250,147 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 n += 1;
             }
             eprintln!("{n} packets replayed through {}", pack.id());
+            Ok(())
+        }
+        PackCommand::Rehearse {
+            ops,
+            scope,
+            pack_dir: d,
+            examples,
+            workers,
+            json,
+        } => {
+            let patch = rehearse::patch_file(&ops).map_err(usage)?;
+            let root = pack_dir(home, d)?;
+            let dir = packs_in(&root)?
+                .into_iter()
+                .find(|p| p.file_name().is_some_and(|f| *f == *patch.pack))
+                .ok_or_else(|| {
+                    fail(format!(
+                        "the patch amends {}, and {} holds no pack of that name",
+                        patch.pack,
+                        root.display()
+                    ))
+                })?;
+            let scope = scope
+                .as_deref()
+                .map(nils_pack::patch::Scope::parse)
+                .transpose()
+                .map_err(usage)?;
+            let mut registry = open(home)?;
+            let settings = nils_classify::effect::Settings {
+                scope,
+                examples,
+                workers,
+            };
+            let doc =
+                rehearse::report(&mut registry, &dir, &patch, &settings).map_err(|e| match e {
+                    nils_classify::effect::Error::Refused(m) => usage(m),
+                    other => fail(other.to_string()),
+                })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc)
+                        .map_err(|e| fail(format!("will not serialize: {e}")))?
+                );
+            } else {
+                print!("{}", rehearse::text(&doc));
+            }
+            Ok(())
+        }
+        PackCommand::Apply {
+            dir,
+            ops,
+            out,
+            version,
+            json,
+        } => {
+            let patch = rehearse::patch_file(&ops).map_err(usage)?;
+            let patched = nils_pack::patch::apply(&dir, &patch, &|_| true)
+                .map_err(|e| fail(e.to_string()))?;
+            let mut doc = serde_json::json!({
+                "pack": format!("{}@{}", patched.pack.name, patched.pack.version),
+                "applied": patched.applied,
+                "files": patched.docs.changed(),
+                "cases": {
+                    "held": patched.cases.is_none(),
+                    "failures": patched.cases.as_ref().map(|e| e.to_string()),
+                },
+            });
+            if let Some(out) = &out {
+                if !patch.is_pack_edit() {
+                    return Err(usage(
+                        "a patch with a scoped operation is an overlay, not a pack edit: rehearse it, and adopt it as one",
+                    ));
+                }
+                if let Some(e) = &patched.cases {
+                    return Err(fail(format!(
+                        "the patched pack's cases do not hold, so it would not load; mend the cases or the operations first:\n{e}"
+                    )));
+                }
+                if out.exists() {
+                    return Err(usage(format!(
+                        "{} exists; a patched pack is written to a new directory",
+                        out.display()
+                    )));
+                }
+                let next = version.or_else(|| patch.ships.clone()).unwrap_or_else(|| {
+                    let mut v = patched.pack.version;
+                    v.patch += 1;
+                    v.to_string()
+                });
+                nils_pack::Version::parse(&next, "version").map_err(|e| usage(e.to_string()))?;
+                let written = patched
+                    .docs
+                    .write(out, Some(&next))
+                    .map_err(|e| fail(e.to_string()))?;
+                let loaded = nils_pack::load(out, None)
+                    .map_err(|e| fail(format!("the written pack does not load: {e}")))?;
+                doc["written"] = serde_json::json!({
+                    "dir": out.display().to_string(),
+                    "pack": loaded.id(),
+                    "files": written.iter().map(|(f, whole)| serde_json::json!({"file": f, "whole": whole})).collect::<Vec<_>>(),
+                });
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc)
+                        .map_err(|e| fail(format!("will not serialize: {e}")))?
+                );
+                return Ok(());
+            }
+            println!(
+                "{} with {} operation(s):",
+                doc["pack"].as_str().unwrap_or(""),
+                patched.applied.len()
+            );
+            for a in &patched.applied {
+                println!("  {} {} {}: {}", a.at, a.op, a.scope, a.changes.join("; "));
+            }
+            match &patched.cases {
+                None => println!("  the pack's own cases and the patch's hold"),
+                Some(e) => println!("  cases that no longer hold:\n{e}"),
+            }
+            if let Some(w) = doc.get("written") {
+                println!(
+                    "written to {} as {}",
+                    w["dir"].as_str().unwrap_or(""),
+                    w["pack"].as_str().unwrap_or("")
+                );
+                for f in w["files"].as_array().into_iter().flatten() {
+                    println!(
+                        "  {}{}",
+                        f["file"].as_str().unwrap_or(""),
+                        if f["whole"] == true {
+                            " (written whole)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
             Ok(())
         }
         PackCommand::Shape { dir, overlay, json } => {

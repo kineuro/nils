@@ -307,7 +307,52 @@ pub fn load_judged(dir: &Path, overlay: Option<&Overlay>) -> R<(Pack, Option<Err
     Ok((amended, failures))
 }
 
+/// Record 56 §5.5: the pack in `dir` with some of its files replaced or
+/// added, built by the pack's own loader as any pack is, and judged rather
+/// than refused: the pack's own corpus and `cases` (a patch's own) are run
+/// against it, and their failures come back beside it, as an overlay's
+/// rehearsal answers them. A pack that does not load at all is refused,
+/// with the loader's own why. `sources` is keyed by the path relative to
+/// `dir`; nothing is written and nothing is kept.
+pub fn load_patched(
+    dir: &Path,
+    sources: &BTreeMap<String, String>,
+    cases: &[(PathBuf, crate::corpus::Case)],
+) -> R<(Pack, Option<Error>)> {
+    let texts: HashMap<PathBuf, String> = sources
+        .iter()
+        .map(|(rel, text)| (dir.join(rel), text.clone()))
+        .collect();
+    crate::cache::with_sources(texts, || {
+        let mut pack = build_unjudged(dir, None)?;
+        let corpus = crate::corpus::read(dir)?;
+        pack.cases = corpus.len();
+        let mut failures: Vec<String> = Vec::new();
+        if let Err(e) = crate::corpus::run(&pack, &corpus, "the pack's own cases") {
+            failures.push(e.to_string());
+        }
+        if !cases.is_empty()
+            && let Err(e) = crate::corpus::run(&pack, cases, "the patch's own cases")
+        {
+            failures.push(e.to_string());
+        }
+        let failed = (!failures.is_empty()).then(|| Error::at("cases", failures.join("\n")));
+        Ok((pack, failed))
+    })
+}
+
 fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
+    let mut pack = build_unjudged(dir, overlay)?;
+    // The pack's own corpus is the last thing between it and use, and it
+    // judges the pack as its author wrote it.
+    if overlay.is_none() {
+        pack.cases = crate::corpus::check(&pack, dir)?;
+    }
+    Ok(pack)
+}
+
+/// The pack, loaded and checked in every way but its corpus.
+fn build_unjudged(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     let manifest = File::read(&dir.join("pack.yml"))?;
     let m = manifest.blame(yaml::obj(&manifest.value, "pack.yml"))?;
     let at = "pack.yml";
@@ -890,7 +935,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     // one automaton per text they search.
     let keywords = crate::keywords::Index::build(&mut rule_sets);
 
-    let mut pack = Pack {
+    let pack = Pack {
         keywords,
         derived,
         axes,
@@ -928,12 +973,6 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
 
     // Record 53: a session pass's siblings are seen by the fields it names.
     crate::session::check(&pack)?;
-
-    // The pack's own corpus is the last thing between it and use, and it
-    // judges the pack as its author wrote it.
-    if overlay.is_none() {
-        pack.cases = crate::corpus::check(&pack, dir)?;
-    }
     Ok(pack)
 }
 

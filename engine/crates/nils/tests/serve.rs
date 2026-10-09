@@ -4051,6 +4051,24 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "review-see",
             "review:work",
         ),
+        // record 56: rehearsing a rule change is the work of a reviewer
+        // or of a pipeline's operator
+        (
+            "POST",
+            "/api/packs/mri/rehearse",
+            "{}",
+            "review-work",
+            "data-work",
+            "pipelines:work, review:work",
+        ),
+        (
+            "POST",
+            "/api/packs/mri/rehearse",
+            "{}",
+            "pipelines-work",
+            "review-see",
+            "pipelines:work, review:work",
+        ),
         (
             "POST",
             "/api/overlays/999/adopt",
@@ -7688,4 +7706,130 @@ fn the_split_note_is_shown_on_the_scans_and_counted_beside_the_questions() {
         );
     }
     server.finish();
+}
+
+/// Record 56 §5.4, §5.5: a rule change's effect on the sorting, at the door
+/// and at the keyboard. The operations are applied to a copy of the pack and
+/// the registry is sorted both ways; nothing is written, and an operation
+/// that cannot apply is refused with why.
+#[test]
+fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
+    let home = registry();
+    let server = Server::start(&home, 5, &[], &[]);
+    let ops = r#"{"operations": [
+        {"op": "add_words", "axis": "post_contrast", "value": "given", "words": ["mprage"],
+         "reason": "a test word", "evidence": "this test"},
+        {"op": "silence", "when": {"axis": "technique", "is": "MRS"},
+         "reason": "a spectrum is nobody's question", "evidence": "this test"}
+    ], "examples": 3}"#;
+    let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["scope"]["stacks"], 2, "{doc}");
+    assert_eq!(doc["moved"]["stacks"], 2, "{doc}");
+    let pc = doc["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "post_contrast")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(pc["transitions"][0]["from"], "", "{doc}");
+    assert_eq!(pc["transitions"][0]["to"], "1", "{doc}");
+    assert_eq!(pc["transitions"][0]["stacks"], 2, "{doc}");
+    // the registry's stacks name no maker and no dataset, and say so
+    assert_eq!(pc["transitions"][0]["makes"]["(none)"], 2, "{doc}");
+    assert_eq!(pc["transitions"][0]["datasets"]["(none)"], 2, "{doc}");
+    assert_eq!(
+        pc["transitions"][0]["examples"].as_array().unwrap().len(),
+        2,
+        "{doc}"
+    );
+    assert_eq!(doc["names"]["descriptive"]["changed"], 2, "{doc}");
+    assert_eq!(doc["ships"]["as"], "rules release", "{doc}");
+    assert_eq!(doc["patch"]["cases"]["held"], true, "{doc}");
+    assert!(doc["review"]["by_kind"].is_array(), "{doc}");
+    assert_eq!(
+        doc["patch"]["applied"].as_array().unwrap().len(),
+        2,
+        "{doc}"
+    );
+    assert!(doc["seconds"]["total"].is_number(), "{doc}");
+    // nothing was written: the stacks are as they were
+    let (status, explain) = server.request("GET", "/api/explain/1", None, None);
+    assert_eq!(status, 200, "{explain}");
+    assert!(
+        explain["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["axis"] != "post_contrast" || a["value"] != "1"),
+        "{explain}"
+    );
+    // an operation that cannot apply says why, and a patch of another pack
+    // or a pack the engine does not serve is refused
+    let bad = r#"{"operations": [{"op": "move_set", "set": "symri", "after": "swi", "reason": "r", "evidence": "e"}]}"#;
+    let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(bad), None);
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("already runs after swi"),
+        "{doc}"
+    );
+    let other = r#"{"patch": {"patch": 1, "pack": "ct", "reason": "r", "evidence": "e", "operations": [{"op": "by_model", "axis": "base"}]}}"#;
+    let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(other), None);
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.request("POST", "/api/packs/ct/rehearse", Some(ops), None);
+    assert_eq!(status, 404, "{doc}");
+    server.finish();
+
+    // the keyboard says the same, and a pack edit is written as a diff
+    let dir = TempDir::new("rehearse-ops");
+    let file = dir.path().join("ops.yml");
+    std::fs::write(
+        &file,
+        "patch: 1\npack: mri\nreason: a test word\nevidence: this test\noperations:\n  - {op: add_words, axis: post_contrast, value: given, words: [mprage]}\n",
+    )
+    .unwrap();
+    let packs = packs();
+    let out = run(
+        &home,
+        &[
+            "pack",
+            "rehearse",
+            "--ops",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(out.contains("moved: 2 stacks"), "{out}");
+    assert!(out.contains("post_contrast: 2 moved"), "{out}");
+    assert!(out.contains("ships as a rules release: mri"), "{out}");
+    let written = dir.path().join("mri-next");
+    let out = run(
+        &home,
+        &[
+            "pack",
+            "apply",
+            packs.join("mri").to_str().unwrap(),
+            "--ops",
+            file.to_str().unwrap(),
+            "--out",
+            written.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(out.contains("written to"), "{out}");
+    assert!(out.contains("pack.yml"), "{out}");
+    let manifest = std::fs::read_to_string(written.join("pack.yml")).unwrap();
+    assert!(
+        manifest.contains("'mprage'") || manifest.contains("mprage"),
+        "the word is in"
+    );
+    assert!(
+        manifest.contains("# The order the rule sets run in."),
+        "the manifest kept its comments"
+    );
 }

@@ -121,12 +121,12 @@ pub struct Only {
 }
 
 /// One stack, as the picks need it.
-struct Row {
-    stack: i64,
-    subject: i64,
-    study: i64,
-    values: BTreeMap<String, String>,
-    roles: Vec<String>,
+pub(crate) struct Row {
+    pub(crate) stack: i64,
+    pub(crate) subject: i64,
+    pub(crate) study: i64,
+    pub(crate) values: BTreeMap<String, String>,
+    pub(crate) roles: Vec<String>,
 }
 
 /// Run every pick the pack declares.
@@ -470,7 +470,7 @@ fn short_scheme(scheme: &Scheme) -> String {
 
 /// Two stacks of one acquisition are one candidate, and the outputs of one
 /// acquisition are merged back into one after that.
-fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
+pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
     let key_of = |r: &Row, ignoring: &[String], over: Option<&str>| -> String {
         model
             .same_acquisition
@@ -603,7 +603,7 @@ fn holds(csv: &str, token: &str) -> bool {
 }
 
 /// What the population says about itself.
-fn build_reference(model: &Model, name: &str, rows: &[&Row]) -> Reference {
+pub(crate) fn build_reference(model: &Model, name: &str, rows: &[&Row]) -> Reference {
     let mut counts: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for name in model.reads() {
         let mut per: BTreeMap<String, i64> = BTreeMap::new();
