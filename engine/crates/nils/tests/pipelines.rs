@@ -4246,7 +4246,9 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
 }
 
 /// Record 49 A3: a pipeline of the bids layout that needs a T1w and a
-/// FLAIR a session, and makes an output only where it has both.
+/// FLAIR a session, and makes an output only where it has both. It finds
+/// the FLAIR as the release names it since record 55 C4, a modifier in
+/// `acq-` on the T2w suffix (`acq-Sag+2D+FLAIR+..._T2w`).
 const NEEDS_FLAIR: &str = r#"name: needs-flair
 schema-version: "0.5"
 tool-version: "1"
@@ -4259,7 +4261,7 @@ command-line: |
   src, out = sys.argv[1], sys.argv[2]
   for t in sorted(glob.glob(src + "/sub-*/ses-*/anat/*_T1w.nii.gz")):
       a = os.path.dirname(t)
-      if not glob.glob(a + "/*_FLAIR.nii.gz"):
+      if not glob.glob(a + "/*_acq-*FLAIR*_T2w.nii.gz"):
           continue
       rel = os.path.relpath(t, src)
       d = os.path.join(out, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
@@ -4279,6 +4281,17 @@ x-nils:
       columns: [{name: bytes, type: integer}]
   needs: {cores: 2, memory-gb: 3, unit-minutes: 4}
 "#;
+
+/// Whether a file the release wrote is a T2 FLAIR's image, as the release
+/// names one since record 55 C4: `FLAIR` among the `+` tokens of its
+/// `acq-`, on the T2w suffix (`sub-a_ses-b_acq-Sag+2D+FLAIR_T2w.nii.gz`).
+fn is_flair_image(name: &str) -> bool {
+    name.strip_suffix("_T2w.nii.gz").is_some_and(|stem| {
+        stem.split('_')
+            .filter_map(|e| e.strip_prefix("acq-"))
+            .any(|acq| acq.split('+').any(|t| t == "FLAIR"))
+    })
+}
 
 /// Record 49 A3's proof, the second half: the pre-flight of a selection
 /// whose one session lacks its FLAIR counts the units the run then has and
@@ -5871,7 +5884,7 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
                 let path = e.path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.to_string_lossy().ends_with("_FLAIR.nii.gz") {
+                } else if is_flair_image(&e.file_name().to_string_lossy()) {
                     n += 1;
                 }
             }

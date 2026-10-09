@@ -2152,7 +2152,8 @@ pub fn plan_picked(
 /// The BIDS suffix a pick role names, where the standard has one spelt the
 /// same but for case: `t1w` is `T1w`, `flair` is `FLAIR` (record 49 A3). A
 /// role the standard has no suffix for names none, and any stack placed in
-/// the raw tree stands for it.
+/// the raw tree stands for it. A stack stands under the suffix as
+/// [`stem_holds`] says, which is not always as its own suffix.
 pub fn role_suffix(role: &str) -> Option<&'static str> {
     crate::bids::schema::GROUPS
         .iter()
@@ -2164,6 +2165,32 @@ pub fn role_suffix(role: &str) -> Option<&'static str> {
 /// The suffix of a BIDS stem: its last `_` word.
 pub fn stem_suffix(stem: &str) -> &str {
     stem.rsplit('_').next().unwrap_or(stem)
+}
+
+/// The tokens of a BIDS stem's `acq-` label, which the release joins with
+/// `+` (record 55 C4): `Ax`, `2D`, `FLAIR` and `IRTSE` of
+/// `sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w`.
+pub fn stem_acq_tokens(stem: &str) -> impl Iterator<Item = &str> {
+    stem.split('_')
+        .filter_map(|entity| entity.strip_prefix("acq-"))
+        .flat_map(|label| label.split('+'))
+}
+
+/// The suffixes the standard defines that the release spells as a modifier
+/// inside `acq-`, beside the base contrast's suffix, and never as the
+/// suffix: record 55 C4 (Nima's ruling of 2026-10-08, "FLAIR is always a
+/// modifier") names a T2 FLAIR `acq-Ax+2D+FLAIR+IRTSE_T2w`, not `_FLAIR`.
+const SPELT_AS_MODIFIER: &[&str] = &["FLAIR"];
+
+/// Whether the stack a release names `stem` in the raw tree is there under
+/// the BIDS suffix `suffix` (a pick role's, [`role_suffix`]) for a pipeline
+/// that looks for it (record 49 A3): as its own suffix, or, for a suffix the
+/// release spells as a modifier, among its `acq-` tokens. Only those: the
+/// full style spells the base contrast in `acq-` too where it is not the
+/// suffix, and a T2w named `..._MESE` is no `_T2w` to a pipeline.
+pub fn stem_holds(stem: &str, suffix: &str) -> bool {
+    stem_suffix(stem) == suffix
+        || (SPELT_AS_MODIFIER.contains(&suffix) && stem_acq_tokens(stem).any(|t| t == suffix))
 }
 
 /// Where a stack's files go, given the route it took (§9.3).
