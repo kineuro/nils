@@ -1025,6 +1025,27 @@ pub(crate) struct Doors {
 }
 
 impl Doors {
+    /// The locations `@name` names now: those the deployment gave, then
+    /// every active source place by its own name, read from the registry
+    /// on each call, so a dataset added while the engine runs is read by
+    /// its name without a restart. A given name wins over a place's, and a
+    /// place whose folder a given location already is stays that location.
+    pub(crate) fn ingest_roots_now(
+        &self,
+        store: &mut nils_registry::store::Store,
+    ) -> std::collections::BTreeMap<String, PathBuf> {
+        let real =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let given: Vec<PathBuf> = self.ingest_roots.values().map(|p| real(p)).collect();
+        let mut roots = self.ingest_roots.clone();
+        for (name, path) in crate::dataset::place_roots(store) {
+            if !given.contains(&real(&path)) {
+                roots.entry(name).or_insert(path);
+            }
+        }
+        roots
+    }
+
     /// Record 48 R2: whether a caller's principal is an identity the engine
     /// verified (a token it holds, or a trusted issuer's subject), and not
     /// the local user name `--auth off` takes.
@@ -3136,20 +3157,16 @@ fn routed(
             })?;
             let location = location.trim().trim_start_matches('@');
             let (name, rel) = location.split_once('/').unwrap_or((location, ""));
-            if !doors.ingest_roots.contains_key(name) {
+            let known = doors.ingest_roots_now(registry.store());
+            if !known.contains_key(name) {
                 return Err(Reply::error(
                     400,
                     format!(
                         "location {name} is not registered; this deployment names {}",
-                        if doors.ingest_roots.is_empty() {
+                        if known.is_empty() {
                             "none".to_string()
                         } else {
-                            doors
-                                .ingest_roots
-                                .keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            known.keys().cloned().collect::<Vec<_>>().join(", ")
                         }
                     ),
                 ));
@@ -5154,7 +5171,8 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         verb == "digest" || (verb == "linkage" && command.get(1).is_some_and(|c| c == "import"));
     // record 26: `@name` is the dataset's pseudonymised tree, and its
     // originals, `@name/originals`, are the pseudonymiser's alone
-    let roots = crate::dataset::roots(store, &doors.ingest_roots);
+    let given = doors.ingest_roots_now(store);
+    let roots = crate::dataset::roots(store, &given);
     let digests = verb == "digest";
     // record 26 §3 and §1: the pseudonymiser reads a dataset by its name,
     // both trees at once, and an act on a dataset's originals names it the

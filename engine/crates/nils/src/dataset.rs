@@ -223,16 +223,35 @@ impl Dicom {
     }
 }
 
+/// The trees a dataset's DICOM lives in, looked at first: a dataset whose
+/// folder holds one of them is a dataset with DICOM, whatever lies beside.
+const DATASET_TREES: [&str; 3] = [ANON_TREE, RAW_TREE, ORIGINALS_TREE];
+
 /// Whether an entry holds DICOM: a file named `.dcm`, or one with the
-/// `DICM` mark at byte 128; a folder holding one. A look that runs out of
-/// its bound says it does not know.
+/// `DICM` mark at byte 128; a folder holding one. A dataset's trees
+/// (`derivatives/dcm-anon`, `dcm-raw`, `dcm-original`) are looked into
+/// first, and symbolic links are followed, since a tree is often a link to
+/// where the files really are; the look stops at the first DICOM file. A
+/// look that runs out of its bound says it does not know, and so does one
+/// that found none in a tree that is not empty: a dataset with a filled
+/// tree is never said to hold no DICOM.
 pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
     use std::io::Read as _;
     let until = Instant::now() + LOOK_FOR;
     let mut seen = 0usize;
+    let trees: Vec<PathBuf> = DATASET_TREES
+        .iter()
+        .map(|t| path.join(t))
+        .filter(|t| t.is_dir())
+        .collect();
+    // the stack is taken from its end: the trees first, then the folder
     let mut queue = vec![path.to_path_buf()];
+    queue.extend(trees.iter().rev().cloned());
+    let mut looked = std::collections::HashSet::new();
     while let Some(at) = queue.pop() {
-        let Ok(meta) = std::fs::symlink_metadata(&at) else {
+        // a link is followed to what it names; a link that names nothing is
+        // passed over
+        let Ok(meta) = std::fs::metadata(&at) else {
             continue;
         };
         seen += 1;
@@ -240,6 +259,12 @@ pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
             return Dicom::Unknown;
         }
         if meta.is_dir() {
+            // a folder met twice (a tree inside the folder, or a link back
+            // up) is read once
+            let real = std::fs::canonicalize(&at).unwrap_or_else(|_| at.clone());
+            if !looked.insert(real) {
+                continue;
+            }
             if let Ok(entries) = std::fs::read_dir(&at) {
                 queue.extend(entries.flatten().map(|e| e.path()));
             }
@@ -261,6 +286,12 @@ pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
         {
             return Dicom::Yes;
         }
+    }
+    if trees
+        .iter()
+        .any(|t| std::fs::read_dir(t).is_ok_and(|mut d| d.next().is_some()))
+    {
+        return Dicom::Unknown;
     }
     Dicom::No
 }
@@ -1228,14 +1259,20 @@ pub(crate) fn layout_lines(id: i64, dataset: &Value, layout: &Value) -> Vec<Stri
 /// inside the tree a dataset's digest reads.
 pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
     let theirs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    // a dataset's originals, whoever's, are the pseudonymiser's alone
-    let parts: Vec<_> = theirs
-        .components()
-        .map(|c| c.as_os_str().to_owned())
-        .collect();
-    if parts
-        .windows(2)
-        .any(|w| w[0] == "derivatives" && w[1] == "dcm-original")
+    // a dataset's originals, whoever's, are the pseudonymiser's alone: by
+    // the path as given and as resolved, since a tree may be a link
+    let in_originals = |at: &Path| {
+        let parts: Vec<_> = at.components().map(|c| c.as_os_str().to_owned()).collect();
+        parts
+            .windows(2)
+            .any(|w| w[0] == "derivatives" && w[1] == "dcm-original")
+    };
+    if in_originals(&theirs)
+        || in_originals(path)
+        || place::tree_holding(store, "originals", path)
+            .ok()
+            .flatten()
+            .is_some()
     {
         return Some(format!(
             "{} is in a dataset's originals (derivatives/dcm-original), which the pseudonymiser alone reads",
@@ -1271,11 +1308,22 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
         ));
     }
     // the place the path is in: the deepest, so a dataset under a root is
-    // the dataset, not the root
-    let (mine, p) = sources
+    // the dataset, not the root; else the dataset whose pseudonymised tree,
+    // a link to a folder elsewhere, holds it (b16, 2026-10-09)
+    let (_, p) = sources
         .iter()
-        .filter(|(mine, _)| theirs.starts_with(mine))
-        .max_by_key(|(mine, _)| mine.components().count())?;
+        .filter(|(mine, p)| {
+            theirs.starts_with(mine) || path.starts_with(mine) || path.starts_with(&p.path)
+        })
+        .max_by_key(|(mine, _)| mine.components().count())
+        .or_else(|| {
+            sources.iter().find(|(_, p)| {
+                p.tree_path("anon").is_some_and(|t| {
+                    let real = std::fs::canonicalize(&t).unwrap_or(t);
+                    theirs.starts_with(real)
+                })
+            })
+        })?;
     if place::is_undeclared(&p.dataset) && p.dataset["kind"] != "root" {
         return Some(format!(
             "{} is in the dataset {}, which is undeclared: its structure is unknown, and nothing in it is read until its entries are moved into derivatives/dcm-original or derivatives/dcm-anon, with nils place set {} --move-into originals|anon --confirm-move or the desk's Add a dataset",
@@ -1301,7 +1349,6 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
     let anon = p.tree_path("anon")?;
     let anon = std::fs::canonicalize(&anon).unwrap_or(anon);
     if !theirs.starts_with(&anon) {
-        let _ = mine;
         return Some(format!(
             "{} is in the folder of the dataset {}, whose digest reads its pseudonymised tree alone: digest @{}",
             path.display(),
@@ -2245,5 +2292,48 @@ mod tests {
         assert!(rule_of(&json!({"id_type": "study-id"})).is_err());
         let bad = dir.file("bad.yml", b"identity:\n  id_type: Study ID\n  from: []\n");
         assert!(identity_from_file(&bad).is_err());
+    }
+
+    /// A dataset whose anonymised tree is a symbolic link to where the
+    /// files really are (b16, 2026-10-09: 45,395 files behind the link, and
+    /// the look said "no DICOM"): the look follows the link into the tree,
+    /// finds a file without a `.dcm` name by its mark, and says yes. A
+    /// filled tree whose files the look cannot vouch for is "unknown",
+    /// never "no"; an empty folder is "no".
+    #[test]
+    fn a_dataset_whose_tree_is_a_link_holds_dicom() {
+        let real = TempDir::new("look-real");
+        real.file("sub-1/ses-1/series-1/IM0001", &dicom_bytes());
+        let ds = TempDir::new("look-linked");
+        std::fs::create_dir_all(ds.path().join("derivatives")).unwrap();
+        std::os::unix::fs::symlink(real.path(), ds.path().join(ANON_TREE)).unwrap();
+        // something beside the tree that holds no DICOM changes nothing
+        ds.file("notes.txt", b"n");
+        assert_eq!(look_for_dicom(ds.path()), Dicom::Yes);
+        // the tree looked at first: a folder with many plain files beside it
+        // still finds the tree's DICOM within the bound
+        let wide = TempDir::new("look-wide");
+        for i in 0..(LOOK_ENTRIES + 50) {
+            wide.file(&format!("aaa/{i:05}.txt"), b"x");
+        }
+        std::fs::create_dir_all(wide.path().join("derivatives")).unwrap();
+        std::os::unix::fs::symlink(real.path(), wide.path().join(ANON_TREE)).unwrap();
+        assert_eq!(look_for_dicom(wide.path()), Dicom::Yes);
+        // a filled tree of files that are not DICOM is not said to be none
+        let odd = TempDir::new("look-odd");
+        odd.file("derivatives/dcm-anon/sub-1/readme.txt", b"x");
+        assert_eq!(look_for_dicom(odd.path()), Dicom::Unknown);
+        // an empty tree and a folder of notes hold none
+        let empty = TempDir::new("look-empty");
+        std::fs::create_dir_all(empty.path().join(ANON_TREE)).unwrap();
+        empty.file("notes.txt", b"n");
+        assert_eq!(look_for_dicom(empty.path()), Dicom::No);
+        // a link back up is read once, not walked for ever
+        let looped = TempDir::new("look-loop");
+        looped.file("a/notes.txt", b"n");
+        std::os::unix::fs::symlink(looped.path(), looped.path().join("a/up")).unwrap();
+        assert_eq!(look_for_dicom(looped.path()), Dicom::No);
+        // and a dataset's layout reads the linked tree as anonymised
+        assert_eq!(detect(ds.path()).state(), State::Anonymised);
     }
 }

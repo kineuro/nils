@@ -6249,3 +6249,146 @@ fn a_dataset_behind_a_symbolic_link_lists_its_scans() {
     assert_eq!(doc["sources"].as_array().unwrap().len(), 2, "{doc}");
     server.finish();
 }
+
+/// b16, 2026-10-09: a dataset added through the places door while the
+/// engine runs is read by its name at once, with no restart; its anonymised
+/// tree, a symbolic link to where the files are, is looked into and found
+/// to hold DICOM; and an anonymised dataset is not read until it says what
+/// PatientID holds and how its subjects are found.
+#[cfg(unix)]
+#[test]
+fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
+    let home = registry();
+    let root = TempDir::new("live-root");
+    let real = TempDir::new("live-real");
+    for (i, sop) in ["1.2.3.L.1.1", "1.2.3.L.1.2"].iter().enumerate() {
+        let e = synth::minimal_mr("1.2.3.L", "1.2.3.L.1", sop);
+        // a file named as scanners name them, without `.dcm`
+        real.file(
+            &format!("sub-1/ses-1/IM{i:04}"),
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    std::fs::create_dir_all(root.path().join("study-big/derivatives")).unwrap();
+    std::os::unix::fs::symlink(
+        real.path(),
+        root.path().join("study-big/derivatives/dcm-anon"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.path().join("study-two/derivatives")).unwrap();
+    std::os::unix::fs::symlink(
+        real.path(),
+        root.path().join("study-two/derivatives/dcm-anon"),
+    )
+    .unwrap();
+    // the engine is started knowing the root alone, as an install's unit
+    // names the places it had then
+    let server = Server::start(
+        &home,
+        9,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--ingest-root",
+            &format!("data-test={}", root.path().display()),
+        ],
+        &[],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let (status, added) = server.request(
+        "POST",
+        "/api/places",
+        Some(
+            &serde_json::json!({
+                "name": "data-test",
+                "role": "source",
+                "path": root.path().display().to_string(),
+                "guarantees": {"backup": null, "snapshots": false, "protected": false, "fast": false},
+            })
+            .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{added}");
+    // the look follows the link into the tree and finds DICOM there
+    let (status, look) =
+        server.request("GET", "/api/places/data-test/folders/study-big", None, ops);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["holds_dicom"], "yes", "{look}");
+    assert_eq!(look["layout"]["state"], "anonymised", "{look}");
+    assert_eq!(
+        look["layout"]["settings"]["patient_id"]["required"], true,
+        "{look}"
+    );
+    assert_eq!(
+        look["layout"]["settings"]["subjects"]["required"], true,
+        "{look}"
+    );
+
+    // added without saying what PatientID holds: added, not read
+    let (status, two) = server.request(
+        "POST",
+        "/api/places",
+        Some(r#"{"role": "source", "root": "data-test", "folder": "study-two"}"#),
+        ops,
+    );
+    assert_eq!(status, 201, "{two}");
+    let not_read = two["not_read"].as_str().unwrap_or_default();
+    assert!(not_read.contains("PatientID"), "{two}");
+    assert!(not_read.contains("subjects"), "{two}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@study-two"]}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("not read"),
+        "{refused}"
+    );
+
+    // added with both: read by its name at once, no restart
+    let (status, big) = server.request(
+        "POST",
+        "/api/places",
+        Some(
+            r#"{"role": "source", "root": "data-test", "folder": "study-big", "patient_id": "subject-code", "subjects": "generated"}"#,
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{big}");
+    assert_eq!(big["not_read"], serde_json::Value::Null, "{big}");
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@study-big", "--name", "big"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert!(
+        queued["command"][1]
+            .as_str()
+            .is_some_and(|c| c.ends_with("study-big/derivatives/dcm-anon")),
+        "{queued}"
+    );
+    // a name that is no place is still refused, naming the new one
+    let (status, refused) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@nowhere"]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("study-big"),
+        "{refused}"
+    );
+    let (status, _) = server.request("GET", "/api/places", None, ops);
+    assert_eq!(status, 200);
+    let (status, _) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200);
+    server.finish();
+}

@@ -3773,7 +3773,13 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     // Record 26: `@name` is the dataset's pseudonymised tree and
     // `@name/originals` its originals, which a probe may read, shapes only.
     let root = if let Some(rest) = args.location.strip_prefix('@') {
-        let roots = dataset::roots(registry.store(), &ingest_roots(&args.ingest_root)?);
+        // the worker's locations, then every source place by its own name,
+        // so a dataset added since the engine started is probed by its name
+        let mut given = ingest_roots(&args.ingest_root)?;
+        for (n, p) in dataset::place_roots(registry.store()) {
+            given.entry(n).or_insert(p);
+        }
+        let roots = dataset::roots(registry.store(), &given);
         let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
         if rel.split('/').any(|s| s == "..") {
             return Err(fail("a location's relative part stays inside it"));
