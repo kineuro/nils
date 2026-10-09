@@ -1204,21 +1204,29 @@ fn force_builds_again_what_is_built() {
     let lab = lab("pyramids-force");
     let packs = packs();
     let packs = packs.to_str().unwrap();
-    let first: Value =
-        serde_json::from_str(ok(&lab.home, &["pyramid", "build", "--stack", "1"]).trim()).unwrap();
+    // the stacks take their ids in the order the digest's parsers hand in
+    // their series, so the one whose files went is any of the three: the
+    // first stack that builds is the one built again
+    let (stack, first) = (1..=3)
+        .find_map(|s: i64| {
+            let (good, out, _) = run(&lab.home, &["pyramid", "build", "--stack", &s.to_string()]);
+            good.then(|| (s, serde_json::from_str::<Value>(out.trim()).unwrap()))
+        })
+        .expect("a stack whose files are there builds");
+    let one = stack.to_string();
     assert_eq!(first["levels"], 4, "{first}");
-    let built_at = lab.manifest(1).unwrap()["built_at"].clone();
+    let built_at = lab.manifest(stack).unwrap()["built_at"].clone();
     let skipped: Value =
-        serde_json::from_str(ok(&lab.home, &["pyramid", "build", "--stack", "1"]).trim()).unwrap();
+        serde_json::from_str(ok(&lab.home, &["pyramid", "build", "--stack", &one]).trim()).unwrap();
     assert_eq!(skipped["skipped"], true, "{skipped}");
-    assert_eq!(lab.manifest(1).unwrap()["built_at"], built_at);
+    assert_eq!(lab.manifest(stack).unwrap()["built_at"], built_at);
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let again: Value = serde_json::from_str(
-        ok(&lab.home, &["pyramid", "build", "--stack", "1", "--force"]).trim(),
+        ok(&lab.home, &["pyramid", "build", "--stack", &one, "--force"]).trim(),
     )
     .unwrap();
     assert_eq!(again["levels"], 4, "{again}");
-    assert_ne!(lab.manifest(1).unwrap()["built_at"], built_at);
+    assert_ne!(lab.manifest(stack).unwrap()["built_at"], built_at);
     // a selection: what is built is skipped, and built again with --force
     let select = [
         "pyramid",
