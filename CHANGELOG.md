@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/datasets/{name}/scans?limit=&after=` lists a dataset's scans a page at a time, for the list under its card on the Data page: the stacks its digests created first (the ones `totals.stacks` counts), read from the registry and never through a cohort, so a dataset that feeds none lists its scans too. Each is `{stack, subject {id, code}, session {id, label}, series_description, orientation, images, day}`, sorted by subject code, day and stack id, 50 a page by default and 200 at most, `next` the stack id to page on from. Below detail quasi the subject's code, the day and a session label made from a date are answered as their shapes. A stack of a sample sealed now is not listed, and a dataset nothing has read answers an empty list. Under `data:see`.
+
 ## [1.0.0-alpha.79] - 2026-10-06
 
 The MRI pack is 1.0.1: certificate 2's rule gaps and three conventions settled by deep research, on top of the certified pack 1.0.0. 1.0.1 is not certified; it is shown by an archive replay (28 of 546,440 stacks move) and by every earlier reference read (10 settled cells fixed, none broken), and it needs a fresh read before it may claim the certificate. After updating from alpha.77 or alpha.78, a reclassify is all that is needed: no re-read and no fingerprint. Registry schema 79 (fingerprint revision 7), HTTP API contract 7, pack contract 8, review-item contract 4, suite contract 3 and job contract 1, as before. No desk release: installs keep desk 1.0.0-alpha.62.

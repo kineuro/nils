@@ -50,6 +50,35 @@ fn held(store: &mut Store, place_id: i64) -> Result<Value, StoreError> {
     Ok(json!({"files": row.int(0)?, "identifiers": row.int(1)?}))
 }
 
+/// Every `source` row with its canonical root.
+fn roots(store: &mut Store) -> Result<Vec<(i64, String)>, StoreError> {
+    store
+        .query(
+            &format!(
+                "SELECT id, root_canonical FROM {}",
+                store.qualified("source")
+            ),
+            &[],
+        )?
+        .iter()
+        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
+        .collect()
+}
+
+fn ids_under(p: &Place, roots: &[(i64, String)]) -> Vec<i64> {
+    roots
+        .iter()
+        .filter(|(_, root)| p.holds_path(Path::new(root)))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// A place's `source` rows: the roots under its path, as the sources door
+/// counts its totals by (Wave 7a: the scans door lists the same stacks).
+pub(crate) fn source_ids(store: &mut Store, p: &Place) -> Result<Vec<i64>, StoreError> {
+    Ok(ids_under(p, &roots(store)?))
+}
+
 /// The sources document: each active source place with its digests, the
 /// newest `recent` of them in full, and its totals.
 pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
@@ -62,24 +91,10 @@ pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreEr
         .into_iter()
         .filter(|p| p.role == Role::Source && p.retired_at.is_none())
         .collect();
-    let roots: Vec<(i64, String)> = store
-        .query(
-            &format!(
-                "SELECT id, root_canonical FROM {}",
-                store.qualified("source")
-            ),
-            &[],
-        )?
-        .iter()
-        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
-        .collect::<Result<_, StoreError>>()?;
+    let roots = roots(store)?;
     let mut sources = Vec::with_capacity(places.len());
     for p in &places {
-        let ids: Vec<i64> = roots
-            .iter()
-            .filter(|(_, root)| p.holds_path(Path::new(root)))
-            .map(|(id, _)| *id)
-            .collect();
+        let ids = ids_under(p, &roots);
         sources.push(source(store, p, &ids, window, recent)?);
     }
     // record 26 §14: what this machine does per second, from the last run

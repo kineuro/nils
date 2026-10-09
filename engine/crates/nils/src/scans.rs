@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Wave 7a (record 55 H2): a dataset's scans a page at a time, for the
+//! list under its card on the Data page. A dataset's scans are the stacks
+//! its digests created first, the ones the sources door counts as its
+//! `totals.stacks`, so the list and the count agree. They are read straight
+//! from the registry, never through a cohort: a dataset that feeds none
+//! still lists its scans.
+//!
+//! The page is keyset paged: sorted by subject code, then day, then stack
+//! id, and `after` is the last stack id of the page before, so the cursor
+//! carries nothing but a technical key. A stack of a sample sealed now is
+//! never listed to a caller who does not read sealed stacks (record 48).
+//!
+//! Record 55 K7: below detail quasi a quasi-identifying field is answered
+//! as its shape, as the value sampler shows it: the subject's code, the day
+//! and a session label the scheme makes from a date. The subject's and the
+//! session's ids are technical keys and are answered as they are, so a
+//! caller at plain still groups by subject and session. The series
+//! description is technical, as every sequence name is (record 55 K7, the
+//! ruling of 2026-10-01).
+
+use std::collections::{BTreeSet, HashMap};
+
+use nils_registry::Registry;
+use nils_registry::place::{self, Place, Role};
+use nils_registry::session::{Naming, Scheme};
+use serde_json::{Value, json};
+
+use crate::grants::{Access, Detail};
+use crate::serve::Reply;
+
+/// A page's size when none is asked for.
+pub(crate) const SCANS_PAGE: usize = 50;
+/// The most a page holds.
+pub(crate) const SCANS_MOST: usize = 200;
+
+fn failed(e: impl std::fmt::Display) -> Reply {
+    Reply::error(500, e.to_string())
+}
+
+/// The shape of a value as the value sampler shows it: digits become `9`,
+/// letters `a` or `A`, the rest stays, capped at 40 characters with `~`.
+/// The same function as `nils_ask`'s sampler (record 55 K7).
+pub(crate) fn shape(v: &str) -> String {
+    let mut out = String::new();
+    for c in v.chars().take(40) {
+        out.push(match c {
+            '0'..='9' => '9',
+            'a'..='z' => 'a',
+            'A'..='Z' => 'A',
+            other => other,
+        });
+    }
+    if v.chars().count() > 40 {
+        out.push('~');
+    }
+    out
+}
+
+/// The dataset a door names: an active source place, by its name or its id.
+pub(crate) fn dataset_named(registry: &mut Registry, name: &str) -> Result<Place, Reply> {
+    let store = registry.store();
+    let mut found = place::by_name(store, name).map_err(failed)?;
+    if found.is_none()
+        && let Ok(id) = name.parse::<i64>()
+    {
+        found = place::show(store, id).map_err(failed)?;
+    }
+    match found {
+        Some(p) if p.role == Role::Source && p.retired_at.is_none() => Ok(p),
+        _ => Err(Reply::error(404, format!("no dataset named {name}"))),
+    }
+}
+
+/// One page of a dataset's scans, `{dataset, dataset_id, detail, total,
+/// count, scans, next}`.
+pub(crate) fn page(
+    registry: &mut Registry,
+    access: &Access,
+    dataset: &Place,
+    limit: usize,
+    after: Option<i64>,
+) -> Result<Value, Reply> {
+    let quasi = access.detail >= Detail::Quasi;
+    let empty = |total: i64| {
+        json!({
+            "dataset": dataset.name,
+            "dataset_id": dataset.id,
+            "detail": access.detail.name(),
+            "total": total,
+            "count": 0,
+            "scans": [],
+            "next": null,
+        })
+    };
+    let store = registry.store();
+    let ids = crate::sources::source_ids(store, dataset).map_err(failed)?;
+    // an identified dataset nothing has read yet (only its originals, no
+    // digest of its pseudonymised tree) holds no scans: an empty list
+    if ids.is_empty() {
+        return Ok(empty(0));
+    }
+    let sources = ids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let d = store.dialect();
+    let [
+        stack,
+        batch,
+        series,
+        study,
+        subject,
+        fp,
+        sealed,
+        cached,
+        cache,
+        labels,
+    ] = [
+        "stack",
+        "ingest_batch",
+        "series",
+        "study",
+        "subject",
+        "stack_fingerprint",
+        "sealed_stack",
+        "session_cache_study",
+        "session_cache",
+        "session_label",
+    ]
+    .map(|t| store.qualified(t));
+    let study_t = nils_registry::schema::table("study");
+    let date = |alias: &str, column: &str| {
+        d.text_of_qualified(Some(alias), study_t.column(column).expect("study column"))
+    };
+    let day = |a: &str| {
+        format!(
+            "COALESCE({}, {})",
+            date(a, "date_filled"),
+            date(a, "study_date")
+        )
+    };
+    let from = |s: &str, b: &str, se: &str, sy: &str, su: &str| {
+        format!(
+            "{stack} {s} JOIN {batch} {b} ON {b}.id = {s}.first_batch_id \
+             JOIN {series} {se} ON {se}.id = {s}.series_id \
+             JOIN {study} {sy} ON {sy}.id = {se}.study_id \
+             JOIN {subject} {su} ON {su}.id = {se}.subject_id"
+        )
+    };
+    let mut filter = format!("b.source_id IN ({sources})");
+    if !crate::sealed::reads(access) {
+        filter.push_str(&format!(
+            " AND NOT EXISTS (SELECT 1 FROM {sealed} sst WHERE sst.stack_id = st.id AND sst.unsealed_at IS NULL)"
+        ));
+    }
+    let base = from("st", "b", "se", "sy", "su");
+    let total = store
+        .query(&format!("SELECT COUNT(*) FROM {base} WHERE {filter}"), &[])
+        .map_err(failed)?[0]
+        .int(0)
+        .map_err(failed)?;
+    // the order, as columns: the code, the day (none sorts first) and the id
+    let order = |su: &str, sy: &str, st: &str| {
+        format!(
+            "COALESCE({su}.code, ''), COALESCE({}, ''), {st}.id",
+            day(sy)
+        )
+    };
+    let mut paged = filter.clone();
+    if let Some(after) = after {
+        // the cursor is a stack id; where it sits in the order is read
+        // here, so no date or code ever travels in a cursor
+        let known = store
+            .query(
+                &format!("SELECT COUNT(*) FROM {base} WHERE {filter} AND st.id = {after}"),
+                &[],
+            )
+            .map_err(failed)?[0]
+            .int(0)
+            .map_err(failed)?;
+        if known == 0 {
+            return Err(Reply::error(
+                400,
+                format!("after names no scan of {} this caller lists", dataset.name),
+            ));
+        }
+        paged.push_str(&format!(
+            " AND ({}) > (SELECT {} FROM {} WHERE st2.id = {after})",
+            order("su", "sy", "st"),
+            order("su2", "sy2", "st2"),
+            from("st2", "b2", "se2", "sy2", "su2"),
+        ));
+    }
+    let rows = store
+        .query(
+            &format!(
+                "SELECT st.id, su.id, su.code, sy.id, {}, f.text_series_description, \
+                 st.orientation, st.n_instances FROM {base} \
+                 LEFT JOIN {fp} f ON f.stack_id = st.id \
+                 WHERE {paged} ORDER BY {} LIMIT {}",
+                day("sy"),
+                order("su", "sy", "st"),
+                limit + 1
+            ),
+            &[],
+        )
+        .map_err(failed)?;
+    struct Row {
+        stack: i64,
+        subject_id: i64,
+        code: Option<String>,
+        study: i64,
+        day: Option<String>,
+        name: Option<String>,
+        orientation: Option<String>,
+        images: Option<i64>,
+    }
+    let mut read = Vec::with_capacity(rows.len());
+    for r in &rows {
+        read.push(Row {
+            stack: r.int(0).map_err(failed)?,
+            subject_id: r.int(1).map_err(failed)?,
+            code: r.opt_text(2).map_err(failed)?.map(str::to_string),
+            study: r.int(3).map_err(failed)?,
+            day: r.opt_text(4).map_err(failed)?.map(str::to_string),
+            name: r.opt_text(5).map_err(failed)?.map(str::to_string),
+            orientation: r.opt_text(6).map_err(failed)?.map(str::to_string),
+            images: r.opt_int(7).map_err(failed)?,
+        });
+    }
+    let next = if read.len() > limit {
+        read.truncate(limit);
+        read.last().map(|r| r.stack)
+    } else {
+        None
+    };
+
+    // the sessions of the page's studies, under the window the cache was
+    // built with and the default scheme's labels, read once for the page
+    let scheme = Scheme::default();
+    let window = nils_registry::cohort::built_window(store)
+        .map_err(failed)?
+        .unwrap_or(scheme.window_days);
+    let digest = scheme.digest();
+    let dated_labels = matches!(scheme.naming, Naming::Date);
+    let studies: BTreeSet<i64> = read.iter().map(|r| r.study).collect();
+    let mut sessions: HashMap<(i64, i64), (i64, Option<String>)> = HashMap::new();
+    if !studies.is_empty() {
+        let list = studies
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let found = store
+            .query(
+                &format!(
+                    "SELECT scs.study_id, sc.subject_id, sc.id, sl.label FROM {cached} scs \
+                     JOIN {cache} sc ON sc.id = scs.session_id \
+                     LEFT JOIN {labels} sl ON sl.session_id = sc.id AND sl.scheme_digest = '{digest}' \
+                     WHERE scs.window_days = {window} AND scs.study_id IN ({list}) \
+                     ORDER BY sc.id"
+                ),
+                &[],
+            )
+            .map_err(failed)?;
+        for r in &found {
+            let at = (r.int(0).map_err(failed)?, r.int(1).map_err(failed)?);
+            sessions.entry(at).or_insert((
+                r.int(2).map_err(failed)?,
+                r.opt_text(3).map_err(failed)?.map(str::to_string),
+            ));
+        }
+    }
+
+    let shaped = |v: Option<String>, hide: bool| match v {
+        Some(v) if hide => Value::from(shape(&v)),
+        Some(v) => Value::from(v),
+        None => Value::Null,
+    };
+    let scans: Vec<Value> = read
+        .into_iter()
+        .map(|r| {
+            let session = sessions.get(&(r.study, r.subject_id)).cloned();
+            json!({
+                "stack": r.stack,
+                "subject": {"id": r.subject_id, "code": shaped(r.code, !quasi)},
+                "session": session.map(|(id, label)| json!({
+                    "id": id,
+                    "label": shaped(label, !quasi && dated_labels),
+                })),
+                "series_description": r.name,
+                "orientation": r.orientation,
+                "images": r.images,
+                "day": shaped(r.day, !quasi),
+            })
+        })
+        .collect();
+    let mut doc = empty(total);
+    doc["count"] = json!(scans.len());
+    doc["scans"] = json!(scans);
+    doc["next"] = json!(next);
+    Ok(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shape;
+
+    #[test]
+    fn a_shape_keeps_the_form_and_hides_the_value() {
+        assert_eq!(shape("2026-01-02"), "9999-99-99");
+        assert_eq!(shape("sub-0a1F"), "aaa-9a9A");
+        assert_eq!(shape(&"x".repeat(41)), format!("{}~", "a".repeat(40)));
+    }
+}

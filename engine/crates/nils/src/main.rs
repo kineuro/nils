@@ -58,6 +58,7 @@ mod profile;
 mod pyramid;
 mod reader;
 mod releases;
+mod scans;
 mod schedule;
 mod sealed;
 mod serve;
