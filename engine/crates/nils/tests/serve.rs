@@ -7540,12 +7540,12 @@ fn the_pack_decides_and_its_doors_show_what_it_decided_over() {
     assert_eq!(status, 200, "{pack}");
     assert_eq!(
         pack["review"]["asks_missing"],
-        serde_json::json!(["base", "post_contrast"]),
+        serde_json::json!(["base"]),
         "{pack}"
     );
     assert_eq!(
         pack["review"]["by_model"],
-        serde_json::json!(["body_part", "body_region"]),
+        serde_json::json!(["body_part", "body_region", "post_contrast"]),
         "{pack}"
     );
     assert!(pack["review"]["matters"]["base"].is_array(), "{pack}");

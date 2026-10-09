@@ -235,14 +235,25 @@ review:
   # Record 55 H3: the body part belongs to the body-part image model, its own
   # run and its own review of what it is unsure of, so sorting raises no
   # question about it, nor about the region folded from it. Nima, 2026-10-09:
-  # "the body part is not for sorting part to rule out".
-  by_model: [body_part, body_region]
+  # "the body part is not for sorting part to rule out". Record 56 section 2:
+  # post-contrast is its own operation too (F2's time rule as the label, then
+  # the post-contrast model, a step of a dataset and of a cohort), "post
+  # contrast is like body part" (Nima, 2026-10-09). What the rules state of
+  # either is kept as they state it; sorting only asks nothing about them.
+  by_model: [body_part, body_region, post_contrast]
   # And nobody is asked about a stack the pack has ruled out. A localizer or
   # a scout is excluded on purpose: every other axis is blank because there
   # is nothing to say, not because the pack failed to say it. 81,296 stacks
   # of the corpus are this, and asking about each one is exactly how v0's
-  # queue came to hold 84 percent of the archive.
-  silent_when: {axis: directory_type, is: excluded}
+  # queue came to hold 84 percent of the archive. Record 56 section 2
+  # (2026-10-09): a scout the pack reads as a localizer (provenance
+  # Localizer, so directory_type localizer) is silent too. It has no base
+  # contrast by definition, so a base the rules left empty on it is no
+  # question; what the rules state of it is kept as they state it.
+  silent_when:
+    any:
+      - {axis: directory_type, is: excluded}
+      - {axis: directory_type, is: localizer}
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the

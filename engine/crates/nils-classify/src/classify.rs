@@ -1315,7 +1315,9 @@ fn run(
                 if !verdict.silent && !empty && nils_pack::at_threshold(a.confidence, below) {
                     *report.at_threshold.entry(a.axis.clone()).or_insert(0) += 1;
                 }
-                if weak && !verdict.silent {
+                // noted whether or not the stack is one nobody is asked
+                // about: it is evidence, and the silence is about questions
+                if weak {
                     *report.below.entry(a.axis.clone()).or_insert(0) += 1;
                     notes_below.push(serde_json::json!({
                         "axis": a.axis,
