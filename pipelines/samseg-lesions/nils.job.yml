@@ -6,11 +6,16 @@
 #
 # One session's T1w and FLAIR in; a label map (FreeSurfer's aseg codes,
 # lesions 99) and a table of volumes, lesions and the intracranial volume
-# in mm3 out. The FLAIR is resampled onto the T1w's grid through the
-# scanner's world coordinates first, as v0's wrapper did, since SAMSEG
-# reads its contrasts on one grid. A session without a FLAIR picked is
-# named by the pre-flight and writes nothing here, so the run makes it a
-# pipeline:qc item.
+# in mm3 out. The FLAIR is the session's T2w with FLAIR among the `+`
+# tokens of its `acq-`, as the release names a T2 FLAIR since record 55
+# C4 (FLAIR is a modifier, never the suffix: `acq-Ax+2D+FLAIR+IRTSE_T2w`),
+# or the `_FLAIR` of a tree an older release wrote; the pre-flight judges
+# a flair pick by the same token. It is resampled onto the T1w's grid
+# through the scanner's world coordinates first, as v0's wrapper did,
+# since SAMSEG reads its contrasts on one grid. A session without a FLAIR
+# picked is named by the pre-flight and skipped by the run; one that
+# reaches this without its FLAIR writes nothing here, so the run makes it
+# a pipeline:qc item.
 #
 # The image is FreeSurfer 8.2.0 (run_samseg, surfa in fspython), pinned by
 # its registry manifest digest, resolved 2026-09-24 by a registry manifest
@@ -57,10 +62,13 @@ inputs:
 
 command-line: >-
   bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do s=$(basename "$g" .nii.gz);
+  case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;
+  case "+${q%%_*}+" in *+FLAIR+*) echo "$g"; return;; esac; done; };
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
   b=$(basename "$f" .nii.gz); b=${b%_T1w}; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
-  fl=""; for g in $a/*_FLAIR.nii.gz; do fl=$g; break; done;
+  fl=$(flair "$a");
   if [ "[LESION]" = on ]; then
   if [ -z "$fl" ]; then echo "$a holds no FLAIR, so no lesions"; rm -rf "$w"; continue; fi;
   fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).resample_like(surfa.load_volume(sys.argv[2])).save(sys.argv[3])" "$fl" "$f" "$w/flair.mgz" || { rm -rf "$w"; continue; };

@@ -13,18 +13,23 @@
 # session has a FLAIR, the WMH are segmented on it (segcsvd reslices the
 # map itself) and, resliced onto the T1w, they are the WMH prior of the
 # PVS step; without one the prior is empty and only the PVS are made. The
-# FLAIR and the T1w are taken to share the scanner's world coordinates, as
-# two series of one session do; they are not registered. segcsvd masks
-# and bias-corrects each image itself, from the label map.
+# session's FLAIR is its T2w with FLAIR among the `+` tokens of its
+# `acq-`, as the release names a T2 FLAIR since record 55 C4 (FLAIR is a
+# modifier, never the suffix: `acq-Ax+2D+FLAIR+IRTSE_T2w`), or the
+# `_FLAIR` of a tree an older release wrote. The FLAIR and the T1w are
+# taken to share the scanner's world coordinates, as two series of one
+# session do; they are not registered. segcsvd masks and bias-corrects
+# each image itself, from the label map.
 #
 # One session's T1w (and FLAIR) in; a binary mask and a probability map
-# for each target, the WMH named for the FLAIR and on its grid, the PVS
-# for the T1w and on its, and a table of the WMH and PVS volumes in mm3
-# out. The thresholds, patch sizes and gammas are the authors' (their
-# README). A unit fails, and registers nothing, when its label map is
-# missing or a step writes no mask. On one open 1 mm session (a 3D T1w and a 3D FLAIR) at 4 cores a
-# unit took 29 minutes, half of it segcsvd's own bias correction, and
-# under 2 GB of memory.
+# for each target, the WMH named for the FLAIR's stem without its suffix
+# and on its grid, the PVS for the T1w's and on its, and a table of the
+# WMH and PVS volumes in mm3 out. The thresholds, patch sizes and gammas
+# are the authors' (their README). A unit fails, and registers nothing,
+# when its label map is missing or a step writes no mask. On one open
+# 1 mm session (a 3D T1w and a 3D FLAIR) at 4 cores a unit took 29
+# minutes, half of it segcsvd's own bias correction, and under 2 GB of
+# memory.
 #
 # The image is segcsvd rc03 by AICONSlab, GPL-3.0, as its authors publish
 # it on Hugging Face (datasets/AICONSlab/segcsvd, docker/segcsvd_rc03.tar.gz,
@@ -78,6 +83,9 @@ inputs:
 command-line: >-
   bash -c 'set -u; shopt -s nullglob; cd [InputDataset]; rc=0;
   export OMP_NUM_THREADS=[THREADS] ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=[THREADS];
+  flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do s=$(basename "$g" .nii.gz);
+  case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;
+  case "+${q%%_*}+" in *+FLAIR+*) echo "$g"; return;; esac; done; };
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
   b=$(basename "$f" .nii.gz); b=${b%_T1w};
@@ -87,7 +95,7 @@ command-line: >-
   if [ -z "$s" ]; then echo "$f has no SynthSeg label map from a synthseg run: run synthseg on it first"; rc=1; continue; fi;
   echo "$f: the SynthSeg label map of run $n";
   w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mkdir -p "$w/outdir"; export MPLCONFIGDIR=$w HOME=$w;
-  fl=""; for g in $a/*_FLAIR.nii.gz; do fl=$g; break; done; c=$(basename "$fl" .nii.gz); c=${c%_FLAIR};
+  fl=$(flair "$a"); c=$(basename "$fl" .nii.gz); c=${c%_*};
   sbtResliceLike "$s" "$f" "$w/synthseg.nii.gz" 1 || { rc=1; rm -rf "$w"; continue; };
   v="";
   if [ -n "$fl" ]; then

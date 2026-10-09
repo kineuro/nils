@@ -22,9 +22,11 @@
 //! keeps in `sourcedata/` or holds is left out as the run leaves it out. A
 //! session is missing an input when no stack picked for a role the
 //! descriptor names under `x-nils.input.roles` is released under that
-//! role's own BIDS suffix (a `t1w` pick the release names `FLAIR` is no
-//! T1w), and the run skips it; a stack when the registry holds no file of
-//! it, or no derivative a typed input needs.
+//! role's own BIDS suffix, or, for a suffix the release spells as a
+//! modifier, with it in its `acq-` (a `flair` pick as
+//! `acq-Ax+2D+FLAIR+IRTSE_T2w`, record 55 C4; a `t1w` pick the release
+//! names `T2w` is no T1w), and the run skips it; a stack when the registry
+//! holds no file of it, or no derivative a typed input needs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
