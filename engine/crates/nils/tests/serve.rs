@@ -5769,3 +5769,318 @@ fn only_a_person_withdraws_a_person_s_pick() {
     }
     server.finish();
 }
+
+/// Wave 7a (record 55 H2): a dataset's scans a page at a time, read from the
+/// registry and never through a cohort. Keyset paged by stack id; below
+/// detail quasi the subject's code, the day and a date label come back as
+/// their shapes (K7), the ids and the series description as they are; a
+/// sealed stack is never listed; an identified dataset nothing has read
+/// lists nothing, and is no error.
+#[test]
+fn a_dataset_lists_its_scans_a_page_at_a_time_shaped_below_quasi() {
+    scans_sweep(None);
+}
+
+/// The same on Postgres, where the dates are cast to text and the keyset is
+/// a row comparison.
+#[test]
+fn a_dataset_lists_its_scans_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    scans_sweep(Some(&dsn));
+    scans_store(Some(&dsn))
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {SCANS_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCANS_SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+}
+
+const SCANS_SCHEMA: &str = "nils_scans_door";
+
+fn scans_store(dsn: Option<&str>) -> nils_registry::Store {
+    match dsn {
+        Some(dsn) => nils_registry::Store::connect_postgres(dsn, SCANS_SCHEMA).unwrap(),
+        None => unreachable!(),
+    }
+}
+
+fn scans_sweep(dsn: Option<&str>) {
+    let home = TempDir::new("scans-home");
+    let dir = TempDir::new("scans-src");
+    let only_originals = TempDir::new("scans-originals");
+    for (patient, study, date, series) in [
+        ("P1", "1.2.3.A", "20260102", "t1 mprage"),
+        ("P1", "1.2.3.B", "20260305", "flair"),
+        ("P2", "1.2.3.C", "20260407", "dwi"),
+    ] {
+        let sop = format!("{study}.1.1");
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, series));
+        dir.file(
+            &format!("{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    let e = synth::minimal_mr("1.2.3.Z", "1.2.3.Z.1", "1.2.3.Z.1.1");
+    only_originals.file(
+        "derivatives/dcm-original/sub-1/a.dcm",
+        &synth::part10(&MetaFields::mr("1.2.3.Z.1.1"), &e, true),
+    );
+    let tree = dir.path().to_str().unwrap();
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    match dsn {
+        Some(dsn) => {
+            scans_store(Some(dsn))
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {SCANS_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCANS_SCHEMA}_linkage CASCADE"
+                ))
+                .unwrap();
+            run(
+                &home,
+                &[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    SCANS_SCHEMA,
+                    "--key",
+                    "k",
+                ],
+                None,
+            );
+        }
+        None => {
+            run(&home, &["init", "--key", "k"], None);
+        }
+    }
+    let open = || match dsn {
+        Some(_) => scans_store(dsn),
+        None => nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    run(
+        &home,
+        &["place", "add", "incoming", tree, "--role", "source"],
+        None,
+    );
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "identified",
+            only_originals.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "first", "--no-private", tree],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(&home, &["session", "rebuild"], None);
+    let stacks: Vec<i64> = {
+        let mut store = open();
+        let stack = store.qualified("stack");
+        store
+            .query(&format!("SELECT id FROM {stack} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+    };
+    assert_eq!(stacks.len(), 3, "{stacks:?}");
+
+    const LIMIT: usize = 12;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+            "--token",
+            "a-places-token-of-length=pl@lab:places:see",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-len");
+    let places_only = Some("a-places-token-of-length");
+    let ask = |path: &str, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request("GET", path, None, token)
+    };
+
+    // at detail quasi every value as it is, sorted by code, then day
+    let (status, doc) = ask("/api/datasets/incoming/scans", reviewer);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["dataset"], "incoming", "{doc}");
+    assert_eq!(doc["detail"], "quasi", "{doc}");
+    assert_eq!(doc["total"], 3, "{doc}");
+    assert_eq!(doc["count"], 3, "{doc}");
+    assert_eq!(doc["next"], serde_json::Value::Null, "{doc}");
+    let scans = doc["scans"].as_array().unwrap();
+    let mut listed: Vec<i64> = scans.iter().map(|s| s["stack"].as_i64().unwrap()).collect();
+    listed.sort();
+    assert_eq!(listed, stacks, "{doc}");
+    let first = &scans[0];
+    for key in [
+        "stack",
+        "subject",
+        "session",
+        "series_description",
+        "orientation",
+        "images",
+        "day",
+    ] {
+        assert!(first.get(key).is_some(), "{key}: {doc}");
+    }
+    let days: Vec<&str> = scans.iter().map(|s| s["day"].as_str().unwrap()).collect();
+    let codes: Vec<&str> = scans
+        .iter()
+        .map(|s| s["subject"]["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.windows(2).all(|w| w[0] <= w[1]), "{doc}");
+    assert!(days.contains(&"2026-01-02"), "{doc}");
+    assert_eq!(first["images"], 1, "{doc}");
+    let one = scans.iter().find(|s| s["day"] == "2026-03-05").unwrap();
+    assert_eq!(one["series_description"], "flair", "{doc}");
+    assert!(one["session"]["id"].as_i64().is_some(), "{doc}");
+    assert_eq!(one["session"]["label"], "20260305", "{doc}");
+    let quasi_codes: Vec<String> = codes.iter().map(|c| c.to_string()).collect();
+
+    // at plain the code, the day and the date label are shapes; the ids and
+    // the series description are not
+    let (status, plain) = ask("/api/datasets/incoming/scans", reader);
+    assert_eq!(status, 200, "{plain}");
+    assert_eq!(plain["detail"], "plain", "{plain}");
+    let text = plain.to_string();
+    for code in &quasi_codes {
+        assert!(!text.contains(code.as_str()), "{code} at plain: {plain}");
+    }
+    assert!(!text.contains("2026-"), "{plain}");
+    assert!(!text.contains("20260305"), "{plain}");
+    let one = plain["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["series_description"] == "flair")
+        .unwrap();
+    assert_eq!(one["day"], "9999-99-99", "{plain}");
+    assert_eq!(one["session"]["label"], "99999999", "{plain}");
+    assert!(one["subject"]["id"].as_i64().is_some(), "{plain}");
+    // the same stacks in the same order, so a page reads the same either way
+    let order = |d: &serde_json::Value| -> Vec<i64> {
+        d["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["stack"].as_i64().unwrap())
+            .collect()
+    };
+    assert_eq!(order(&plain), order(&doc), "{plain}");
+
+    // a page at a time, the cursor a stack id
+    let (status, page) = ask("/api/datasets/incoming/scans?limit=2", reader);
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["count"], 2, "{page}");
+    assert_eq!(page["total"], 3, "{page}");
+    let next = page["next"].as_i64().unwrap();
+    assert_eq!(next, order(&doc)[1], "{page}");
+    let (status, rest) = ask(
+        &format!("/api/datasets/incoming/scans?limit=2&after={next}"),
+        reader,
+    );
+    assert_eq!(status, 200, "{rest}");
+    assert_eq!(order(&rest), vec![order(&doc)[2]], "{rest}");
+    assert_eq!(rest["next"], serde_json::Value::Null, "{rest}");
+
+    // the limit and the cursor are checked
+    let (status, refused) = ask("/api/datasets/incoming/scans?limit=0", reader);
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask("/api/datasets/incoming/scans?after=x", reader);
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask("/api/datasets/incoming/scans?after=999999", reader);
+    assert_eq!(status, 400, "{refused}");
+    // no such dataset, and the grant is data:see
+    let (status, refused) = ask("/api/datasets/nowhere/scans", reader);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/datasets/incoming/scans", places_only);
+    assert_eq!(status, 403, "{refused}");
+
+    // an identified dataset nothing has read: an empty list, not an error
+    let (status, empty) = ask("/api/datasets/identified/scans", reader);
+    assert_eq!(status, 200, "{empty}");
+    assert_eq!(empty["total"], 0, "{empty}");
+    assert_eq!(empty["scans"], serde_json::json!([]), "{empty}");
+    assert_eq!(empty["next"], serde_json::Value::Null, "{empty}");
+
+    // a stack of a sample sealed now is never listed
+    let sealed = order(&doc)[0];
+    {
+        let mut store = open();
+        let [stack, series, sealed_stack] =
+            ["stack", "series", "sealed_stack"].map(|t| store.qualified(t));
+        let subject = store
+            .query(
+                &format!("SELECT se.subject_id FROM {stack} st JOIN {series} se ON se.id = st.series_id WHERE st.id = {sealed}"),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {sealed_stack} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {sealed}, {subject}, 'anna', '2026-10-09T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let (status, after_seal) = ask("/api/datasets/incoming/scans", reviewer);
+    assert_eq!(status, 200, "{after_seal}");
+    assert_eq!(after_seal["total"], 2, "{after_seal}");
+    assert!(!order(&after_seal).contains(&sealed), "{after_seal}");
+
+    // the door is listed and has its policy row
+    let (status, caps) = ask("/api/capabilities", reader);
+    assert_eq!(status, 200, "{caps}");
+    assert!(
+        caps["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "GET /api/datasets/{name}/scans"),
+        "{caps}"
+    );
+    assert!(
+        caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["door"] == "GET /api/datasets/{name}/scans" && p["grant"] == "data:see"),
+        "{caps}"
+    );
+    assert_eq!(used.get(), LIMIT);
+    server.finish();
+}

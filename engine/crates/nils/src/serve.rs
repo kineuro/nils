@@ -2351,6 +2351,35 @@ fn routed(
                     .map_err(|e| Reply::error(500, e.to_string()))?,
             ))
         }
+        ["api", "datasets", _, "scans"] if get => {
+            // Wave 7a (record 55 H2): a dataset's scans a page at a time,
+            // read from the registry, never through a cohort; quasi
+            // identifying fields shaped below detail quasi (K7)
+            let dataset = crate::scans::dataset_named(registry, &decoded(segs[2]))?;
+            let limit = match query.get("limit") {
+                Some(l) => l
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=crate::scans::SCANS_MOST).contains(n))
+                    .ok_or_else(|| {
+                        Reply::error(400, format!("limit is 1 to {}", crate::scans::SCANS_MOST))
+                    })?,
+                None => crate::scans::SCANS_PAGE,
+            };
+            let after = match query.get("after").filter(|a| !a.is_empty()) {
+                Some(a) => Some(a.parse::<i64>().map_err(|_| {
+                    Reply::error(400, "after is a scan's stack id, as `next` gave it")
+                })?),
+                None => None,
+            };
+            Ok(Reply::ok(crate::scans::page(
+                registry,
+                &caller.access,
+                &dataset,
+                limit,
+                after,
+            )?))
+        }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
@@ -4178,6 +4207,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "sources" | "packs" | "batches"])
         | ("GET", ["api", "packs" | "batches", _]) => (Need::One("data:see"), Plain),
         ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
+        // Wave 7a: a dataset's scans, read as its card is
+        ("GET", ["api", "datasets", _, "scans"]) => (Need::One("data:see"), Plain),
         // record 26 §1: what becomes of a dataset's originals. What an act
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
@@ -4711,6 +4742,7 @@ fn capabilities(
         "POST /api/ingest/folders",
         "POST /api/ingest/look",
         "GET /api/sources",
+        "GET /api/datasets/{name}/scans",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -5670,6 +5702,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading the sources",
             "Read the sources",
+        ),
+        row(
+            "GET /api/datasets/{name}/scans",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 scans",
+            "Reading a dataset's scans",
+            "Read a dataset's scans",
         ),
         row(
             "POST /api/places",
