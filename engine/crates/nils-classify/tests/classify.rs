@@ -1131,14 +1131,16 @@ cases:
     }
 }
 
-/// A phase-contrast study, as the archive writes one: a series whose echo
-/// number varies per image, so every stack holds one image, and an echo time
-/// of 0.0, which is the scanner saying it has nothing to say (record 35, S4).
-/// Beside it, the same split over a series whose stacks hold two images each,
-/// which is what an ordinary multi-echo acquisition looks like.
+/// A split that leaves one image in every stack: a series of six echoes of
+/// one slice, each echo stating its echo time, so every stack holds one
+/// image; beside it the same split over two slices, whose stacks hold two
+/// images each. And the phase-contrast study as the archive writes one, whose
+/// echo number counts its frames under an echo time of 0.0, the scanner
+/// saying it has nothing to say (record 35, S4): since wave 7a the digest
+/// makes that one stack.
 fn flow_tree() -> TempDir {
     let dir = TempDir::new("classify-flow");
-    let write = |series: &str, echo: u32, instance: &str, file: &str| {
+    let write = |series: &str, echo: u32, instance: &str, te: &str, file: &str| {
         let sop = format!("A.{series}.{echo}.{instance}");
         let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
         e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
@@ -1148,16 +1150,18 @@ fn flow_tree() -> TempDir {
             elem(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
             elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
             elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
-            elem(tags::ECHO_TIME, VR::DS, "0.0"),
+            elem(tags::ECHO_TIME, VR::DS, te),
             elem(tags::REPETITION_TIME, VR::DS, "30.0"),
             elem(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
         ]);
         dir.file(file, &synth::part10(&MetaFields::mr(&sop), &e, true));
     };
     for echo in 1..=6 {
-        write("1", echo, "1", &format!("one/{echo}"));
-        write("2", echo, "1", &format!("two/{echo}-1"));
-        write("2", echo, "2", &format!("two/{echo}-2"));
+        let te = format!("{}", 2 * echo);
+        write("1", echo, "1", &te, &format!("one/{echo}"));
+        write("2", echo, "1", &te, &format!("two/{echo}-1"));
+        write("2", echo, "2", &te, &format!("two/{echo}-2"));
+        write("3", echo, "1", "0.0", &format!("flow/{echo}"));
     }
     dir
 }
@@ -1176,7 +1180,9 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
                 .unwrap();
 
-        // The split fired on both series, and the reason is the echo number.
+        // The split fired on the two series that state their echo times, and
+        // the reason is the echo; the flow study is one stack, whose echo
+        // time is a zero the file carries, not an absence.
         assert_eq!(
             one(
                 &mut reg,
@@ -1185,13 +1191,15 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             12,
             "{name}"
         );
-        // The echo time is a zero the file carries, not an absence.
         assert_eq!(
-            one(
+            rows(
                 &mut reg,
-                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE echo_time = 0"
-            ),
-            12,
+                "SELECT n_instances, stacks_in_series FROM {stack_fingerprint} WHERE echo_time = 0"
+            )
+            .iter()
+            .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+            .collect::<Vec<_>>(),
+            [(6, 1)],
             "{name}"
         );
 
@@ -1206,7 +1214,8 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             "{name}"
         );
         // The note, on the six stacks of the series the split left holding
-        // one image and on none of the six whose stacks hold two.
+        // one image, on none of the six whose stacks hold two, and not on the
+        // flow study, which is no longer split.
         assert_eq!(report.split_notes, 6, "{name}");
         let noted = rows(
             &mut reg,
@@ -1235,12 +1244,13 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
         }
         assert_eq!(with_note, 6, "{name}");
 
-        // And a zero echo time decided nothing: not one of the twelve is
-        // called an anatomical T1w on the strength of it.
+        // And a zero echo time decided nothing: the flow study is not called
+        // an anatomical T1w on the strength of it.
         assert_eq!(
             one(
                 &mut reg,
-                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base'"
+                "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
+                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.echo_time = 0"
             ),
             0,
             "{name}: a zero echo time is not a short one"
@@ -1805,10 +1815,12 @@ fn a_stack_carrying_two_items_is_one_stack_in_the_line() {
     }
 }
 
-/// The flow study as the archive holds it: the series the split broke into
-/// one-image stacks, and beside it the same protocol's series it did not,
-/// whose echo time is a measurement and which the rules therefore judge.
-/// Those judged stacks are what the vote reads as neighbours.
+/// The flow study as the archive holds it: the series whose echo number
+/// counts its frames under an echo time of zero, which the split broke into
+/// one-image stacks until the digest learned to read it as one (wave 7a), and
+/// beside it the same protocol's series whose echo time is a measurement and
+/// which the rules therefore judge. Those judged stacks are what the vote
+/// reads as neighbours.
 fn flow_with_neighbours() -> TempDir {
     let dir = TempDir::new("classify-flow-pool");
     let image = |series: &str, echo: Option<u32>, instance: u32, te: &str, file: &str| {
@@ -1854,8 +1866,7 @@ fn flow_with_neighbours() -> TempDir {
 /// the vote reads the same number through its key. A zero bins with the
 /// short echo times of gradient-echo anatomy, and the neighbours the vote
 /// found were the flow study's own whole series. A zero is a hole now, so
-/// the fragments are named by nothing and stay the question the split
-/// raised about them.
+/// the study's frames, one stack since wave 7a, are named by nothing.
 #[test]
 fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
@@ -1866,26 +1877,25 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
         nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
             .unwrap();
 
-        // The six fragments are the stacks holding one image, and they have
-        // no echo time to speak of.
+        // The six frames are one stack, and it has no echo time to speak of.
         assert_eq!(
             one(
                 &mut reg,
-                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE n_instances = 1 AND echo_time = 0"
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE n_instances = 6 AND echo_time = 0"
             ),
-            6,
+            1,
             "{name}"
         );
-        // Nothing wrote a base on any of them: not a rule, whose window the
-        // guard closes, and not the pass, whose bin no longer holds them.
+        // Nothing wrote a base on it: not a rule, whose window the guard
+        // closes, and not the pass, whose bin no longer holds it.
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
-                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.n_instances = 1"
+                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.echo_time = 0"
             ),
             0,
-            "{name}: a flow fragment is not an anatomical T1w"
+            "{name}: a flow study is not an anatomical T1w"
         );
         assert_eq!(
             one(
@@ -1895,17 +1905,16 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             0,
             "{name}: and the vote answered none of them"
         );
-        // What the study does say about them is unchanged: the technique is
-        // the flow sequence, and the split is noted on the six (record 55
-        // H3: information, no longer a question).
+        // What the study does say about it is unchanged: the technique is
+        // the flow sequence. No split is left to note.
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
                  ON f.stack_id = a.stack_id \
-                 WHERE a.axis = 'technique' AND a.value = 'PC' AND f.n_instances = 1"
+                 WHERE a.axis = 'technique' AND a.value = 'PC' AND f.echo_time = 0"
             ),
-            6,
+            1,
             "{name}"
         );
         let split = rows(&mut reg, "SELECT CAST(notes AS TEXT) FROM {classification}")
@@ -1914,7 +1923,7 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .filter(|n| n["split"]["kind"] == "split:one_image_per_stack")
             .count();
-        assert_eq!(split, 6, "{name}");
+        assert_eq!(split, 0, "{name}");
         assert_eq!(
             one(
                 &mut reg,

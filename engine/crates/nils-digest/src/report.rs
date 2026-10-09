@@ -6,7 +6,7 @@
 //! UIDs, modality and character set codes, tag keywords and the reader's error
 //! texts; the diagnostic samples are shapes.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -16,7 +16,7 @@ use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancelled;
-use crate::stack::FileStack;
+use crate::stack::{FileStack, one_echo};
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -45,8 +45,10 @@ pub struct Counts {
     studies: HashSet<u64>,
     series: HashSet<u64>,
     subjects: HashSet<u64>,
-    /// Stacks as `(series, key)` pairs (§8).
-    stacks: HashSet<u64>,
+    /// Stacks as `(series, key)` pairs (§8), each with its echo, hashed: the
+    /// series and the rest of its signature, the echo number, and the echo
+    /// time where one is stated ([`crate::stack::Echo`]).
+    stacks: HashMap<u64, (u64, u64, Option<u64>)>,
     /// Frames read, one per classic instance and one per frame of an
     /// enhanced multi-frame object (record 37, S8).
     frames: u64,
@@ -116,8 +118,16 @@ impl Counts {
         self.subjects
             .insert(hash_of(&format!("{id_type}\0{value}")));
         for s in stacks {
+            let echo = &s.signature.echo;
             self.stacks
-                .insert(hash_of(&format!("{}\0{}", x.series_uid, s.signature.key)));
+                .entry(hash_of(&format!("{}\0{}", x.series_uid, s.signature.key)))
+                .or_insert_with(|| {
+                    (
+                        hash_of(&format!("{}\0{}", x.series_uid, echo.rest)),
+                        hash_of(&echo.number),
+                        echo.time.as_deref().map(hash_of),
+                    )
+                });
         }
         self.frames += u64::from(x.frames.count.max(1));
         if stacks.len() > 1 {
@@ -262,7 +272,9 @@ impl Counts {
         self.studies.extend(other.studies);
         self.series.extend(other.series);
         self.subjects.extend(other.subjects);
-        self.stacks.extend(other.stacks);
+        for (k, v) in other.stacks {
+            self.stacks.entry(k).or_insert(v);
+        }
         merge_map(&mut self.modalities, other.modalities);
         merge_map(&mut self.sop_classes, other.sop_classes);
         merge_map(&mut self.transfer_syntaxes, other.transfer_syntaxes);
@@ -278,6 +290,23 @@ impl Counts {
                 mine.samples.insert(s);
             }
         }
+    }
+
+    /// The stacks the parsed files make (§8): their `(series, key)` pairs,
+    /// with the pairs of a series that only the echo number told apart
+    /// counted once, as the digest leaves them ([`crate::echo`]).
+    pub fn stacks(&self) -> u64 {
+        let mut by_rest: HashMap<u64, Vec<(u64, Option<u64>)>> = HashMap::new();
+        for (rest, number, time) in self.stacks.values() {
+            by_rest.entry(*rest).or_default().push((*number, *time));
+        }
+        by_rest
+            .into_values()
+            .map(|echoes| match one_echo(echoes.iter().copied()) {
+                true => 1,
+                false => echoes.len() as u64,
+            })
+            .sum()
     }
 
     /// The count of one quarantine class.
@@ -516,6 +545,16 @@ pub struct Written {
     pub empty_stacks_removed: u64,
     #[serde(default)]
     pub empty_series_removed: u64,
+    /// Stacks the run folded into another of their series at its end,
+    /// because only the echo number told them apart and the series states
+    /// no second echo time. Not counted in the created.
+    #[serde(default)]
+    pub echo_stacks_folded: u64,
+    /// Groups of such stacks left as they were, because a person or a
+    /// release named one of the stacks that would go, or one file is in
+    /// two of them.
+    #[serde(default)]
+    pub echo_groups_kept: u64,
 }
 
 /// Record 26 §8: what feeding the dataset's cohort did. Every subject the
@@ -635,7 +674,7 @@ impl Report {
             studies: counts.studies.len() as u64,
             series: counts.series.len() as u64,
             subjects: counts.subjects.len() as u64,
-            stacks: counts.stacks.len() as u64,
+            stacks: counts.stacks(),
             frames: counts.frames,
             multi_stack_files: counts.multi_stack_files,
             modalities: keyed(&counts.modalities),
@@ -810,6 +849,20 @@ impl fmt::Display for Report {
                     "  removed empty    series {}   stacks {}   (every file of theirs a duplicate held under another series)",
                     thousands(w.empty_series_removed),
                     thousands(w.empty_stacks_removed),
+                )?;
+            }
+            if w.echo_stacks_folded + w.echo_groups_kept > 0 {
+                writeln!(
+                    f,
+                    "  folded           stacks {}   (only the echo number told them apart, under one echo time){}",
+                    thousands(w.echo_stacks_folded),
+                    match w.echo_groups_kept {
+                        0 => String::new(),
+                        n => format!(
+                            "   {} group(s) left as they were: a person or a release named a stack of theirs, or one file is in two",
+                            thousands(n)
+                        ),
+                    },
                 )?;
             }
             writeln!(

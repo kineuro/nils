@@ -7627,9 +7627,10 @@ fn the_pack_decides_and_its_doors_show_what_it_decided_over() {
 }
 
 /// Record 55 H3: the split note is information. A series a split left as
-/// stacks of one image each is noted on those stacks, shown on each scan of
-/// its dataset and counted on the sources door, and is never part of what
-/// needs a look.
+/// stacks of one image each (here six echoes of one slice, each stating its
+/// echo time, which no fold joins) is noted on those stacks, shown on each
+/// scan of its dataset and counted on the sources door, and is never part of
+/// what needs a look.
 #[test]
 fn the_split_note_is_shown_on_the_scans_and_counted_beside_the_questions() {
     let home = TempDir::new("serve-split-home");
@@ -7643,7 +7644,7 @@ fn the_split_note_is_shown_on_the_scans_and_counted_beside_the_questions() {
             synth::text(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
             synth::text(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
             synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
-            synth::text(tags::ECHO_TIME, VR::DS, "0.0"),
+            synth::text(tags::ECHO_TIME, VR::DS, &(2 * echo).to_string()),
             synth::text(tags::REPETITION_TIME, VR::DS, "30.0"),
             synth::text(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
         ]);

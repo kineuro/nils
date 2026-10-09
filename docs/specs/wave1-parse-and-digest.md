@@ -906,8 +906,10 @@ next digest does not undo a purge.
 ## 8. Stacks
 
 Stack membership is decided per instance, without seeing the rest of the series,
-from the signature v0 defined (`extract/stack_utils.py`): the SeriesInstanceUID
-and fourteen values,
+from the signature v0 defined (`extract/stack_utils.py`), except that stacks of
+one series that only the echo number told apart are joined once the series is
+read (wave 7a, at the end of this section): the SeriesInstanceUID and fourteen
+values,
 
 | field | normal form in the signature |
 |---|---|
@@ -1062,6 +1064,70 @@ Settled while reading enhanced objects whole (record 37, S8):
   the archive's 1.13 million frames that is under a second of CPU in total,
   spread over the workers, on a digest that reads thousands of files a second.
   Nothing else in the file is read: the pixel data is still never touched.
+
+Settled while joining what only the echo number split (wave 7a, 2026-10-09):
+
+- **EchoNumbers is not always an echo.** Two vendors write something else into
+  (0018,0086). FONAR's 2D phase-contrast cine writes each frame's place in the
+  cycle there and in InstanceNumber, 1 to 32 at one position, with no trigger
+  time and no temporal position, and states the echo time on the first two
+  frames only, writing zero on the other 30; its series also holds a scout of
+  another plane. The key above made 33 stacks of it, 32 of one image each. GE's
+  3D SWI EPI writes 1 and 2 on alternate slices under one echo time, the odd
+  instance numbers in echo 1 and the even ones in echo 2, their positions
+  interleaved and none shared: two half volumes at twice the slice spacing.
+  Copies of such series that processing software writes back do the same. In
+  the archive (558,874 stacks) that is 546 stacks in 138 series: 9 cines of 32
+  frames and 129 SWI volumes in two halves. A real multi-echo acquisition
+  states an echo time for each echo: each of the 23,543 groups in the archive
+  whose stacks differ in the echo number and the echo time states one echo time
+  per echo number, and none states a zero.
+- **The rule.** Once a run has written its files, the stacks of every series it
+  filed a file in are read back together. Stacks that agree on every value of
+  the signature but the echo number and the echo time, carry two or more echo
+  numbers and never two echo times, are one stack. A zero or absent echo time
+  states none (record 35, S4): it is no evidence of a short echo, and none of a
+  second one. A group that states two or more echo times keeps a stack per echo,
+  one whose echo time is missing included, and the Dixon part a Philips frame
+  names stays a value of the signature, so parts are never joined.
+- **The stack that stays** is the oldest, then one that states the echo time,
+  then the one of the smallest echo number, then the smaller key: for the cine,
+  the stack of its first frame, whose row says the echo time the series states.
+  It keeps its key and takes the other stacks' instances, frame rows and counts,
+  and the first index any of them had. What was derived from the others alone
+  (fingerprint, classification, the open review items on them) goes with them,
+  and every fingerprint of the series is marked to be derived again, since it
+  counts the series' stacks. A run that reads one of the other files again
+  makes that file's own stack once more and joins it at its end; such a stack
+  is counted neither as created nor as folded.
+- **What stays as it was:** a group where a stack that would go is named by a
+  decision, a pick, a seal, a campaign, a grouped review item, a release, a
+  derivative, a measure or a review item someone answered, by the rules that
+  keep an empty stack (`nils_registry::empty`), and a group one file reaches
+  through two of its stacks. The run reports both, as `echo_groups_kept`.
+- **The dry run counts the same:** each `(series, key)` pair carries its echo,
+  and the pairs the rule joins count once.
+- **A registry digested before this keeps those series as they were**, and an
+  ordinary run does not change them, since it reads no unchanged file again.
+  The rule reads the stack rows, not the files, and every value it needs is on
+  them, so a run that reads one file of each series again joins the whole
+  series: `nils digest <root> --reread-every --reread-one`, or `--reread
+  <manufacturer> --reread-one` for the vendors above. No migration does it: a
+  migration would change stacks people may have acted on without a run that
+  reports which groups it left, and a re-read reports them. In the registries
+  this was measured on, every such group is held: by the grouped questions an
+  earlier sort raised about the very split, by the body-part model's tables and
+  scores, and a few by a seal or a campaign. Which of those may go with a stack
+  the rule joins is a ruling still to make; until then a fresh registry is the
+  one that takes the rule whole.
+- **Left as they were, on purpose:** splits on the repetition time alone (in
+  the archive five series and 48 stacks with disjoint positions, among them one
+  of 30 one-image stacks; no file of them writes a trigger, and two are one
+  volume acquired in two packages at clearly different repetition times), and
+  splits on the inversion time alone (MOLLI, 8 one-image stacks at one position
+  in each of 4 series; SyMRI, MDME and QALAS, each stack covering the same
+  positions). Whether such stacks are one is a question for a person, not for
+  this rule.
 
 ## 9. The pipeline
 

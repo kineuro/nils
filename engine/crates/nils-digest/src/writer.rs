@@ -18,7 +18,7 @@
 //! identity attached, or refused as a collision. The identity rows are filed
 //! after the registry's transaction commits (§9.3).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::time::Instant;
 
@@ -204,6 +204,9 @@ pub struct Writer<'a> {
     series: LruCache<String, SeriesEntry>,
     /// `(series id, stack key)` → stack id (§8).
     stacks: LruCache<(i64, String), i64>,
+    /// The series this run filed a file in, whose stacks are read back
+    /// together once every file is written ([`crate::echo`]).
+    touched: BTreeSet<i64>,
     subject_fields: Fields,
     study_fields: Fields,
     /// The series row alone, as the `series` table holds it.
@@ -251,6 +254,7 @@ impl<'a> Writer<'a> {
             studies: LruCache::new(cap),
             series: LruCache::new(cap),
             stacks: LruCache::new(cap),
+            touched: BTreeSet::new(),
             subject_fields: Fields::subject(),
             study_fields: Fields::study(),
             series_fields: Fields::of(&[Level::Series]),
@@ -403,6 +407,7 @@ impl<'a> Writer<'a> {
         let study_ids = self.studies(&parsed, &subject_ids, &mut tally)?;
         self.checkpoint()?;
         let series_ids = self.series(&parsed, &study_ids, &subject_ids, &mut tally)?;
+        self.touched.extend(series_ids.iter().copied());
         self.checkpoint()?;
         let stack_ids = self.stacks(&parsed, &series_ids, &mut tally)?;
         self.checkpoint()?;
@@ -1954,6 +1959,45 @@ impl Writer<'_> {
 }
 
 impl Writer<'_> {
+    /// The stacks of the series this run filed files in that only the echo
+    /// number told apart, folded into one ([`crate::echo`]), in one
+    /// transaction, which moves the epoch, once every file has been written.
+    /// What the run created and folded away is taken off what it says it
+    /// created, as an empty stack it removes is.
+    pub fn fold_echoes(&mut self) -> Result<(), HomeError> {
+        let series: Vec<i64> = std::mem::take(&mut self.touched).into_iter().collect();
+        if series.is_empty() {
+            return Ok(());
+        }
+        let store = self.registry.store();
+        store.begin()?;
+        let folded = match crate::echo::fold(store, &series, self.batch_id) {
+            Ok(f) => f,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(e.into());
+            }
+        };
+        self.written.echo_groups_kept += folded.kept.len() as u64;
+        if folded.stacks + folded.created == 0 {
+            store.rollback().ok();
+            return Ok(());
+        }
+        let epoch = match nils_registry::home::next_epoch_in(store) {
+            Ok(e) => e,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(e.into());
+            }
+        };
+        store.commit()?;
+        self.registry.refresh_meta()?;
+        self.written.epoch = epoch;
+        self.written.stacks_created = self.written.stacks_created.saturating_sub(folded.created);
+        self.written.echo_stacks_folded += folded.stacks;
+        Ok(())
+    }
+
     /// The stacks and series this run made that hold no instance: a file
     /// whose instance another file holds under another series is filed as a
     /// duplicate after its series and stack were written, and they would
@@ -2013,9 +2057,11 @@ pub fn run(
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    // Every file has been seen, so every ballot is complete.
+    // Every file has been seen, so every ballot is complete, and every series
+    // the run read holds all the stacks it will hold.
     if !writer.cancel.abort() {
         writer.settle_dates()?;
+        writer.fold_echoes()?;
         writer.sweep_empty()?;
     }
     Ok(())
