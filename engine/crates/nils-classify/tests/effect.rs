@@ -354,7 +354,7 @@ evidence: this test
 operations:
   - {op: add_words, axis: technique, value: TSE, words: [zqzq]}
   - {op: add_words, axis: post_contrast, value: given, words: [mdc]}
-  - {op: by_model, axis: post_contrast}
+  - {op: by_model, axis: base}
   - {op: silence, axis: base, when: {tag: manufacturer, is: silent co}}
 ";
 

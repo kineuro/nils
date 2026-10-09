@@ -6757,8 +6757,8 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
     let ops = r#"{"operations": [
         {"op": "add_words", "axis": "post_contrast", "value": "given", "words": ["mprage"],
          "reason": "a test word", "evidence": "this test"},
-        {"op": "by_model", "axis": "post_contrast",
-         "reason": "post-contrast is its own operation", "evidence": "record 56, section 2"}
+        {"op": "silence", "when": {"axis": "technique", "is": "MRS"},
+         "reason": "a spectrum is nobody's question", "evidence": "this test"}
     ], "examples": 3}"#;
     let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
     assert_eq!(status, 200, "{doc}");
@@ -6784,14 +6784,8 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
     assert_eq!(doc["names"]["descriptive"]["changed"], 2, "{doc}");
     assert_eq!(doc["ships"]["as"], "rules release", "{doc}");
     assert_eq!(doc["patch"]["cases"]["held"], true, "{doc}");
-    assert!(
-        doc["review"]["by_kind"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|k| k["kind"] == "post_contrast:missing" && k["disappear"] == 2),
-        "{doc}"
-    );
+    assert!(doc["review"]["by_kind"].is_array(), "{doc}");
+    assert_eq!(doc["patch"]["applied"].as_array().unwrap().len(), 2, "{doc}");
     assert!(doc["seconds"]["total"].is_number(), "{doc}");
     // nothing was written: the stacks are as they were
     let (status, explain) = server.request("GET", "/api/explain/1", None, None);

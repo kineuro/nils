@@ -105,7 +105,7 @@ fn every_kind_of_operation_applies_and_the_loader_builds_it() {
         "    position: last\n",
         "  - {op: silence, axis: base, when: {axis: directory_type, is: localizer}}\n",
         "  - {op: silence, when: {axis: technique, is: MRS}}\n",
-        "  - {op: by_model, axis: post_contrast}\n",
+        "  - {op: by_model, axis: base}\n",
         "  - {op: map_name, axis: technique, value: MPRAGE, bids: MPRAGEx}\n",
     ));
     assert_eq!(p.applied.len(), 9);
@@ -114,12 +114,7 @@ fn every_kind_of_operation_applies_and_the_loader_builds_it() {
     assert!(at("symri") > at("technique"), "{order:?}");
     // the silence runs after what decides directory_type, and decides base
     assert!(at("silence_base") > at("intent"), "{order:?}");
-    assert!(
-        p.pack
-            .review
-            .by_model
-            .contains(&"post_contrast".to_string())
-    );
+    assert!(p.pack.review.by_model.contains(&"base".to_string()));
     let pc = p
         .pack
         .rule_sets
@@ -342,7 +337,7 @@ fn a_patched_pack_is_written_as_a_diff_and_loads_where_it_is_written() {
     let p = applied(concat!(
         "  - {op: add_words, axis: post_contrast, value: given, words: [mdc]}\n",
         "  - {op: move_set, set: symri, after: technique}\n",
-        "  - {op: by_model, axis: post_contrast}\n",
+        "  - {op: by_model, axis: base}\n",
         "  - {op: silence, axis: base, when: {axis: directory_type, is: localizer}}\n",
     ));
     let out = std::env::temp_dir().join(format!("nils-patch-write-{}", std::process::id()));
