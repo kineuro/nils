@@ -180,6 +180,13 @@ pub struct Borders {
 /// is a retake when it keeps more stacks than the family's `retake_above`
 /// (v0: more than one of a Dixon's canonical construct, more than two of an
 /// MP2RAGE's).
+///
+/// The 2026-10-10 borders study, R6, after record 38's ruling on what a
+/// rescan is: a retake is full stacks **taken at different times**. Stacks
+/// of one moment of acquisition are one acquisition stored twice (a second
+/// reconstruction, a re-send) and count once, and a stack of
+/// [`FRAGMENT_IMAGES`] or fewer is never a take, so both are counted in
+/// takes ([`Candidate::acquired`]) and not in stacks.
 #[derive(Debug, Clone)]
 pub struct Retake {
     /// The slice count, a field of the fingerprint.
@@ -187,6 +194,11 @@ pub struct Retake {
     pub partial_below: f64,
     pub partial_min_slices: f64,
 }
+
+/// A stack of this many images or fewer is a fragment, never a take of an
+/// acquisition and never a candidate (the 2026-10-10 borders study, R6): a
+/// spin echo split into stacks of 2, 19 and 1 images is one take of 19.
+pub const FRAGMENT_IMAGES: f64 = 2.0;
 
 /// v0's slice-count outlier: the winner's largest slice count is strictly
 /// below the `below` quantile or strictly above the `above` quantile of the
@@ -445,6 +457,12 @@ pub struct Candidate {
     pub each: Vec<BTreeMap<String, String>>,
     /// The family whose outputs were merged into this candidate, by name.
     pub family: Option<String>,
+    /// When each stack's images were first acquired, in the order of
+    /// `stacks`, for the retake: two stacks of one moment are one
+    /// acquisition stored twice. Empty where the caller did not say, and
+    /// then, as for a stack whose moment is none, each stack is a moment of
+    /// its own.
+    pub acquired: Vec<Option<String>>,
 }
 
 impl Candidate {
@@ -468,6 +486,22 @@ impl Candidate {
         } else {
             self.each.iter().collect()
         }
+    }
+
+    /// How many takes these stacks of the candidate are: one per moment of
+    /// acquisition, a stack with no moment one of its own.
+    fn takes(&self, of: impl Iterator<Item = usize>) -> usize {
+        let mut moments = std::collections::BTreeSet::new();
+        let mut unknown = 0;
+        for i in of {
+            match self.acquired.get(i).and_then(Option::as_deref) {
+                Some(m) => {
+                    moments.insert(m);
+                }
+                None => unknown += 1,
+            }
+        }
+        moments.len() + unknown
     }
 
     /// The values of a multi-valued name as a set of tokens, where nothing is
@@ -867,57 +901,65 @@ fn more_borders(
     };
 
     // Retake. A family's candidate is judged on what the family kept; any
-    // other on its stacks, less the short ones v0 demotes first.
+    // other on its stacks, less the short ones v0 demotes first. Either is
+    // counted in takes: full stacks at different moments (R6).
     if let Some(r) = &b.retake {
         let family = winner
             .family
             .as_ref()
             .and_then(|n| model.families.iter().find(|f| &f.name == n));
+        let counted: Vec<Option<f64>> = winner
+            .stacks_values()
+            .iter()
+            .map(|v| num(v, &r.of))
+            .collect();
+        let slices: Vec<f64> = counted.iter().map(|n| n.unwrap_or(0.0)).collect();
+        // A stack with no slice count is not known to be a fragment.
+        let whole = |i: usize| counted[i].is_none_or(|n| n > FRAGMENT_IMAGES);
         match family {
             Some(f) => {
-                if winner.stacks.len() > f.retake_above {
+                let takes = winner.takes((0..slices.len()).filter(|i| whole(*i)));
+                if takes > f.retake_above {
                     borders.push(Border::Retake);
                     notes.insert(
                         "retake",
                         format!(
-                            "{}: {} stacks of its canonical output, more than {}",
-                            f.name,
-                            winner.stacks.len(),
-                            f.retake_above
+                            "{}: {takes} stacks of its canonical output taken at different times, more than {}",
+                            f.name, f.retake_above
                         ),
                     );
                 }
             }
             None => {
-                let slices: Vec<f64> = winner
-                    .stacks_values()
-                    .iter()
-                    .map(|v| num(v, &r.of).unwrap_or(0.0))
-                    .collect();
                 let largest = slices.iter().copied().fold(0.0, f64::max);
-                let (kept, short) = if slices.len() >= 2
+                let full: Vec<usize> = if slices.len() >= 2
                     && (largest >= r.partial_min_slices
                         || crate::pack::at_threshold(largest, r.partial_min_slices))
                 {
                     let cutoff = r.partial_below * largest;
-                    let kept = slices
-                        .iter()
-                        .filter(|n| **n >= cutoff || crate::pack::at_threshold(**n, cutoff))
-                        .count();
-                    (kept, slices.len() - kept)
+                    (0..slices.len())
+                        .filter(|i| {
+                            slices[*i] >= cutoff || crate::pack::at_threshold(slices[*i], cutoff)
+                        })
+                        .collect()
                 } else {
-                    (slices.len(), 0)
+                    (0..slices.len()).collect()
                 };
-                if kept > 1 {
+                let full: Vec<usize> = full.into_iter().filter(|i| whole(*i)).collect();
+                let short = slices.len() - full.len();
+                let takes = winner.takes(full.iter().copied());
+                if takes > 1 {
                     borders.push(Border::Retake);
                     notes.insert(
                         "retake",
                         if short > 0 {
                             format!(
-                                "plain: {kept} full stacks of one acquisition, {short} short one(s) set aside"
+                                "plain: {takes} full stacks of one acquisition taken at different times, {short} short one(s) set aside"
                             )
                         } else {
-                            format!("plain: {kept} stacks of one acquisition")
+                            format!(
+                                "plain: {takes} stacks of one acquisition taken at different times"
+                            )
                         },
                     );
                 }
@@ -1330,6 +1372,7 @@ mod tests {
             values,
             each: stacks.iter().map(|(_, p)| map(p)).collect(),
             family: family.map(str::to_string),
+            acquired: Vec::new(),
         }
     }
 
@@ -1393,6 +1436,90 @@ mod tests {
         // One stack is no retake.
         let one = with_each(&[(1, &[("q", "top"), ("n_instances", "176")])], None);
         assert!(pick(&m, "t1w", &[one], &r).borders.is_empty());
+    }
+
+    /// The candidate with each stack's moment of acquisition, in the order
+    /// of its stacks.
+    fn taken(mut c: Candidate, moments: &[Option<&str>]) -> Candidate {
+        c.acquired = moments.iter().map(|m| m.map(str::to_string)).collect();
+        c
+    }
+
+    #[test]
+    fn a_retake_is_two_full_stacks_taken_at_different_times() {
+        // The 2026-10-10 borders study, R6, after record 38's ruling: two
+        // stacks of one acquisition time are one acquisition stored twice (a
+        // second reconstruction, a re-send), never a retake.
+        let m = chosen(retake(), Vec::new());
+        let r = Reference::default();
+        let pair = || {
+            with_each(
+                &[
+                    (1, &[("q", "top"), ("n_instances", "192")]),
+                    (2, &[("q", "top"), ("n_instances", "168")]),
+                ],
+                None,
+            )
+        };
+        let morning = Some("2026-01-05 09:56:57.105000");
+        let later = Some("2026-01-05 10:09:12.000000");
+        let p = pick(&m, "t1w", &[taken(pair(), &[morning, morning])], &r);
+        assert!(p.borders.is_empty(), "one moment: {:?}", p.borders);
+        let p = pick(&m, "t1w", &[taken(pair(), &[morning, later])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("plain: 2"), "{:?}", p.notes);
+        // A moment nobody wrote down is a moment of its own: an absence is
+        // not a measurement, so it is never the same as another.
+        let p = pick(&m, "t1w", &[taken(pair(), &[morning, None])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        let p = pick(&m, "t1w", &[pair()], &r);
+        assert_eq!(p.borders, [Border::Retake], "no moments given");
+        // A spin echo split into fragments of 2, 19 and 1 images: the
+        // fragments are no take of their own, so one stack is left, and no
+        // retake, whatever their moments.
+        let fragments = with_each(
+            &[
+                (1, &[("q", "top"), ("n_instances", "2")]),
+                (2, &[("q", "top"), ("n_instances", "19")]),
+                (3, &[("q", "top"), ("n_instances", "1")]),
+            ],
+            None,
+        );
+        let p = pick(&m, "t1w", &[fragments], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+    }
+
+    #[test]
+    fn a_family_s_retake_is_counted_in_takes_at_different_times() {
+        // A Dixon's canonical image stored twice at one moment is one take;
+        // an MP2RAGE's run three times is a retake only where the three were
+        // taken at three times.
+        let m = chosen(retake(), vec![family("dixon", 1), family("mp2rage", 2)]);
+        let r = Reference::default();
+        let stacks = |n: i64, fam: &str| {
+            let rows: Vec<(i64, &[(&str, &str)])> =
+                (1..=n).map(|i| (i, &[("q", "top")][..])).collect();
+            with_each(&rows, Some(fam))
+        };
+        let a = Some("2026-01-05 09:00:00.000000");
+        let b = Some("2026-01-05 09:20:00.000000");
+        let c = Some("2026-01-05 09:40:00.000000");
+        let p = pick(&m, "t1w", &[taken(stacks(2, "dixon"), &[a, a])], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        let p = pick(&m, "t1w", &[taken(stacks(2, "dixon"), &[a, b])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("dixon: 2"), "{:?}", p.notes);
+        let p = pick(&m, "t1w", &[taken(stacks(3, "mp2rage"), &[a, a, a])], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        let p = pick(&m, "t1w", &[taken(stacks(3, "mp2rage"), &[a, b, b])], &r);
+        assert!(
+            p.borders.is_empty(),
+            "two takes are the family's own: {:?}",
+            p.borders
+        );
+        let p = pick(&m, "t1w", &[taken(stacks(3, "mp2rage"), &[a, b, c])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("mp2rage: 3"), "{:?}", p.notes);
     }
 
     #[test]

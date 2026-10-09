@@ -765,3 +765,122 @@ fn a_multi_frame_file_counts_its_frames_as_slices() {
 fn a_multi_frame_file_counts_its_frames_as_slices_on_postgres_too() {
     postgres("nils_borders_frames", multi_frame);
 }
+
+/// R6: one acquisition time is one scan. Two series of one MPRAGE acquired
+/// at one moment are one acquisition stored twice (record 38's ruling), so
+/// the pick names the series the scanner wrote first and asks nothing; the
+/// same MPRAGE acquired at two moments is a retake; and a stack of two
+/// images or fewer is a fragment, no candidate and no part of one.
+fn one_moment(home: &Home) {
+    let p = packs();
+    let mut store = home.store();
+    let subjects = first_studies(&mut store);
+    let at = |time: &str, number: &str| {
+        Stack::mprage()
+            .field("earliest_acquisition_date", Some("2026-01-05"))
+            .field("earliest_acquisition_time", Some(time))
+            .field("series_number", Some(number))
+    };
+    // Stored twice: a second series of the same moment.
+    let (twice, ids) = &subjects[0];
+    plant(
+        &mut store,
+        &ids[..2],
+        &[at("13:48:19.795000", "13"), at("13:48:19.795000", "11")],
+    );
+    let first_written = ids[1];
+    // Run twice: two moments.
+    let (again, ids2) = &subjects[1];
+    plant(
+        &mut store,
+        &ids2[..2],
+        &[at("13:48:19.795000", "11"), at("14:02:00.000000", "15")],
+    );
+    // A take of 176 images and two fragments of it.
+    let (fragments, ids3) = &subjects[2];
+    plant(
+        &mut store,
+        &ids3[..3],
+        &[
+            at("09:56:57.105000", "8"),
+            at("09:56:57.105000", "8").field("n_instances", Some("2")),
+            at("09:56:57.105000", "7").field("n_instances", Some("1")),
+        ],
+    );
+    // And fragments alone.
+    let (only_fragments, ids4) = &subjects[3];
+    plant(
+        &mut store,
+        &ids4[..2],
+        &[
+            at("10:10:10.000000", "2").field("n_instances", Some("1")),
+            at("10:10:11.000000", "3").field("n_instances", Some("1")),
+        ],
+    );
+    population(&mut store, &subjects[4..16]);
+
+    let report = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let (stacks, borders, _) = t1w_pick(&mut store, *twice);
+    assert_eq!(stacks, [first_written], "the series written first");
+    assert_eq!(borders, "", "one acquisition stored twice is no retake");
+    let (stacks, borders, _) = t1w_pick(&mut store, *again);
+    assert_eq!(stacks, ids2[..2]);
+    assert_eq!(borders, "retake");
+    let (stacks, borders, _) = t1w_pick(&mut store, *fragments);
+    assert_eq!(stacks, [ids3[0]], "the fragments are no part of the take");
+    assert_eq!(borders, "");
+    let none = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE subject_id = {only_fragments} AND author_kind = 'agent'",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(none, 0, "fragments alone are nothing to pick");
+    assert_eq!(report["empty"], 1, "{report}");
+    // What the planted sessions raised: the population's own are its own.
+    let planted = [*twice, *again, *fragments, *only_fragments];
+    let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
+    let raised: Vec<String> = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["status"] == "open")
+        .filter(|i| {
+            i["ref"]["subject_id"]
+                .as_i64()
+                .is_some_and(|s| planted.contains(&s))
+        })
+        .map(|i| {
+            format!(
+                "{}:{}",
+                i["ref"]["subject_id"],
+                i["evidence"]["borders"][0].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    assert_eq!(
+        raised.len(),
+        2,
+        "the retake and the fragments alone: {raised:?}"
+    );
+    assert!(raised.contains(&format!("{again}:retake")), "{raised:?}");
+    assert!(
+        raised.contains(&format!("{only_fragments}:nothing_eligible")),
+        "{raised:?}"
+    );
+}
+
+#[test]
+fn one_acquisition_time_is_one_scan() {
+    one_moment(&registry(None));
+}
+
+#[test]
+fn one_acquisition_time_is_one_scan_on_postgres_too() {
+    postgres("nils_borders_moment", one_moment);
+}

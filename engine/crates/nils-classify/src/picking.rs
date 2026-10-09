@@ -159,6 +159,15 @@ pub(crate) struct Scan {
     /// multi-frame file counted as one (R5). None where the fingerprint
     /// says nothing.
     pub(crate) images: Option<i64>,
+    /// The series it came out of, and the number the scanner gave it.
+    pub(crate) series: i64,
+    pub(crate) series_number: Option<i64>,
+    /// When its images were first acquired, the date and the time as the
+    /// fingerprint writes them (record 38 S2): one moment is one
+    /// acquisition (R6).
+    pub(crate) acquired: Option<String>,
+    /// Whether its ImageType says DERIVED rather than ORIGINAL.
+    pub(crate) derived: bool,
 }
 
 /// The SOP classes whose image is one frame by definition, the MR and CT
@@ -177,9 +186,20 @@ const SCANS_CHUNK: usize = 500;
 pub(crate) fn scans(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Scan>, StoreError> {
     let mut out: HashMap<i64, Scan> = HashMap::new();
     let mut framed: Vec<i64> = Vec::new();
+    let fp = table("stack_fingerprint");
+    let text = |column: &str| {
+        store
+            .dialect()
+            .text_of(fp.column(column).expect("a fingerprint column"))
+    };
+    let (date, time) = (
+        text("earliest_acquisition_date"),
+        text("earliest_acquisition_time"),
+    );
     for chunk in stacks.chunks(SCANS_CHUNK) {
         let sql = format!(
-            "SELECT stack_id, n_instances, sop_class_uid FROM {} WHERE stack_id IN ({})",
+            "SELECT stack_id, n_instances, sop_class_uid, series_id, series_number, {date}, {time}, \
+                    image_type FROM {} WHERE stack_id IN ({})",
             store.qualified("stack_fingerprint"),
             id_list(chunk)
         );
@@ -190,10 +210,25 @@ pub(crate) fn scans(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Sc
             {
                 framed.push(stack);
             }
+            // a time without its day is a moment still; a day without its
+            // time is none
+            let acquired = match (r.opt_text(5)?, r.opt_text(6)?) {
+                (_, None) => None,
+                (Some(day), Some(time)) => Some(format!("{day} {time}")),
+                (None, Some(time)) => Some(time.to_string()),
+            };
             out.insert(
                 stack,
                 Scan {
                     images: r.opt_int(1)?,
+                    series: r.int(3)?,
+                    series_number: r.opt_int(4)?,
+                    acquired,
+                    derived: r.opt_text(7)?.is_some_and(|t| {
+                        t.split('\\')
+                            .next()
+                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("DERIVED"))
+                    }),
                 },
             );
         }
@@ -464,8 +499,9 @@ fn run_one(
             .iter()
             .filter(|r| r.roles.iter().any(|x| x == role))
             .collect();
-        // The population is every candidate for this role, and it is named on
-        // every row it decided.
+        // The population is every stack that holds this role, a fragment no
+        // candidate is made of included, and it is named on every row it
+        // decided.
         let reference = build_reference(model, &report.reference, &mine);
 
         // Which studies are one occasion, per subject.
@@ -590,9 +626,17 @@ pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
             .join("\u{1}")
     };
 
-    // Stage one: the full key.
+    // Stage one: the full key. A fragment of a few images is no candidate
+    // and no part of one (the 2026-10-10 borders study, R6): a spin echo
+    // split into stacks of 2, 19 and 1 images is a take of 19.
     let mut groups: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
     for r in rows {
+        if r.scan
+            .images
+            .is_some_and(|n| n as f64 <= pick::FRAGMENT_IMAGES)
+        {
+            continue;
+        }
         groups.entry(key_of(r, &[], None)).or_default().push(r);
     }
 
@@ -659,15 +703,49 @@ pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
     out
 }
 
+/// R6 of the 2026-10-10 borders study, after record 38's ruling on what a
+/// rescan is: series of one candidate acquired at one moment are one
+/// acquisition stored twice, a second reconstruction or a re-send, so the
+/// candidate keeps one of them, the scanner's original image over a derived
+/// one and then the series it wrote first. The stacks of one series are its
+/// parts and stay together, and a stack whose images carry no time is a
+/// moment of its own, because an absence is not a measurement.
+fn one_series_a_moment<'a>(rows: &[&'a Row]) -> Vec<&'a Row> {
+    let mut kept: BTreeMap<&str, (bool, i64, i64)> = BTreeMap::new();
+    for r in rows {
+        let Some(moment) = r.scan.acquired.as_deref() else {
+            continue;
+        };
+        let rank = (
+            r.scan.derived,
+            r.scan.series_number.unwrap_or(i64::MAX),
+            r.scan.series,
+        );
+        kept.entry(moment)
+            .and_modify(|best| *best = (*best).min(rank))
+            .or_insert(rank);
+    }
+    rows.iter()
+        .copied()
+        .filter(|r| {
+            r.scan
+                .acquired
+                .as_deref()
+                .is_none_or(|m| kept[m].2 == r.scan.series)
+        })
+        .collect()
+}
+
 /// One candidate of the rows of one acquisition: what they agree on, each
 /// number at its largest, because a bundle's slice count is the fullest
 /// volume in it, and each stack's own values beside.
 fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
+    let kept = one_series_a_moment(kept);
     let reads = model.reads();
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     for name in &reads {
         let mut best: Option<String> = None;
-        for r in kept {
+        for r in &kept {
             let Some(v) = r.values.get(name) else {
                 continue;
             };
@@ -685,7 +763,7 @@ fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
             values.insert(name.clone(), v);
         }
     }
-    let mut each: Vec<(i64, BTreeMap<String, String>)> = kept
+    let mut each: Vec<(i64, BTreeMap<String, String>, Option<String>)> = kept
         .iter()
         .map(|r| {
             (
@@ -695,14 +773,16 @@ fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
                     .filter(|(k, _)| reads.contains(k))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
+                r.scan.acquired.clone(),
             )
         })
         .collect();
-    each.sort_by_key(|(s, _)| *s);
+    each.sort_by_key(|(s, _, _)| *s);
     Candidate {
-        stacks: each.iter().map(|(s, _)| *s).collect(),
+        stacks: each.iter().map(|(s, _, _)| *s).collect(),
         values,
-        each: each.into_iter().map(|(_, v)| v).collect(),
+        acquired: each.iter().map(|(_, _, m)| m.clone()).collect(),
+        each: each.into_iter().map(|(_, v, _)| v).collect(),
         family: family.map(str::to_string),
     }
 }
@@ -1951,17 +2031,110 @@ mod tests {
         assert_eq!(got[0].each[1]["n_instances"], "40");
     }
 
+    /// A row with what the fingerprint says of its acquisition: its images,
+    /// its series and the number the scanner gave it, the moment it was
+    /// acquired and whether its ImageType says DERIVED.
+    fn scanned(
+        mut r: Row,
+        images: i64,
+        (series, number): (i64, i64),
+        moment: Option<&str>,
+        derived: bool,
+    ) -> Row {
+        r.scan = Scan {
+            images: Some(images),
+            series,
+            series_number: Some(number),
+            acquired: moment.map(str::to_string),
+            derived,
+        };
+        r
+    }
+
+    #[test]
+    fn a_fragment_of_two_images_or_fewer_is_no_candidate() {
+        // R6 of the 2026-10-10 borders study: a spin echo split into stacks
+        // of 2, 19 and 1 images is one candidate of 19, and fragments alone
+        // are no candidate at all.
+        let m = model(None);
+        let at = Some("2026-01-05 09:56:57.105000");
+        let of = |stack, images, series| {
+            scanned(
+                row(stack, &[("technique", "SE"), ("echo_time", "15")]),
+                images,
+                (series, 8),
+                at,
+                false,
+            )
+        };
+        let (a, b, c) = (of(1, 2, 10), of(2, 19, 11), of(3, 1, 12));
+        let got = group(&m, &[&a, &b, &c]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].stacks, [2]);
+        assert!(group(&m, &[&a, &c]).is_empty());
+    }
+
+    #[test]
+    fn one_moment_of_acquisition_is_one_scan_and_its_original_series_stays() {
+        // R6, after record 38: two series of one acquisition time are one
+        // acquisition stored twice, a second reconstruction or a re-send,
+        // and the candidate keeps the scanner's original, the series it
+        // wrote first.
+        let m = model(None);
+        let at = Some("2026-01-05 13:48:19.795000");
+        let of = |stack, series: (i64, i64), moment, derived| {
+            scanned(
+                row(stack, &[("technique", "SPACE"), ("echo_time", "386")]),
+                448,
+                series,
+                moment,
+                derived,
+            )
+        };
+        let first = of(1, (20, 11), at, false);
+        let again = of(2, (21, 13), at, false);
+        let got = group(&m, &[&again, &first]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].stacks, [1], "the series written first");
+        assert_eq!(got[0].acquired, [at.map(str::to_string)]);
+        // An original image over a derived one, whatever their numbers.
+        let derived = of(3, (22, 11), at, true);
+        let original = of(4, (23, 13), at, false);
+        assert_eq!(group(&m, &[&derived, &original])[0].stacks, [4]);
+        // Two moments are two takes, both named, for the retake to judge.
+        let later = of(5, (24, 15), Some("2026-01-05 14:02:00.000000"), false);
+        let got = group(&m, &[&first, &later]);
+        assert_eq!(got[0].stacks, [1, 5]);
+        assert_eq!(got[0].acquired.len(), 2);
+        // A moment nobody wrote down is never the same as another.
+        let unknown = of(6, (25, 17), None, false);
+        assert_eq!(group(&m, &[&first, &unknown])[0].stacks, [1, 6]);
+        // And the stacks of one series are its parts, never a copy of each
+        // other.
+        let part = of(7, (20, 11), at, false);
+        assert_eq!(group(&m, &[&first, &part])[0].stacks, [1, 7]);
+    }
+
     #[test]
     fn a_stack_s_slice_count_is_its_images_where_its_files_hold_frames() {
         // R5 of the 2026-10-10 borders study: one enhanced file of 176
         // frames is a volume of 176 slices, not of one.
-        let file = row(1, &[("n_instances", "1")]).with_scan(Scan { images: Some(176) });
+        let file = row(1, &[("n_instances", "1")]).with_scan(Scan {
+            images: Some(176),
+            ..Scan::default()
+        });
         assert_eq!(file.values["n_instances"], "176");
         // A stack of single-frame images is what it was.
-        let plain = row(2, &[("n_instances", "176")]).with_scan(Scan { images: Some(176) });
+        let plain = row(2, &[("n_instances", "176")]).with_scan(Scan {
+            images: Some(176),
+            ..Scan::default()
+        });
         assert_eq!(plain.values["n_instances"], "176");
         // And a model that reads no slice count is given none.
-        let unread = row(3, &[("technique", "MPRAGE")]).with_scan(Scan { images: Some(176) });
+        let unread = row(3, &[("technique", "MPRAGE")]).with_scan(Scan {
+            images: Some(176),
+            ..Scan::default()
+        });
         assert!(!unread.values.contains_key("n_instances"));
     }
 

@@ -81,6 +81,7 @@ fn cand(stacks: &[(i64, BTreeMap<String, String>)], family: Option<&str>) -> Can
         values,
         each: stacks.iter().map(|(_, v)| v.clone()).collect(),
         family: family.map(str::to_string),
+        acquired: Vec::new(),
     }
 }
 
