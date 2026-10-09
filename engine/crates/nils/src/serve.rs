@@ -2276,8 +2276,10 @@ fn routed(
             let scope =
                 nils_classify::scope::Scope::parse(scope).map_err(|e| Reply::error(400, e))?;
             let mut doc = nils_classify::signals::signals(registry.store(), &scope)?;
-            // kineuro/nils#94: the text each unresolved axis was matched
-            // against, under the pack the engine serves, over a bounded sample
+            // kineuro/nils#94: the text each axis was matched against, under
+            // the pack the engine serves, over one bounded sample: per axis
+            // for the stacks it left unresolved, and per axis and value for
+            // the stacks the rules resolved it on
             let name = query
                 .get("pack")
                 .cloned()
@@ -2288,7 +2290,7 @@ fn routed(
                     .into_iter()
                     .find(|p| p.file_name().is_some_and(|f| *f == *name))
             });
-            doc["unresolved_texts"] = match found {
+            let (unresolved, resolved) = match found {
                 Some(dir) => {
                     let pack = nils_pack::load(&dir, None)
                         .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
@@ -2296,15 +2298,14 @@ fn routed(
                     let sample = nils_classify::rehearse::sample_of(
                         query.get("sample").and_then(|s| s.parse().ok()),
                     );
-                    nils_classify::signals::unresolved_texts(
-                        registry.store(),
-                        &pack,
-                        &scope,
-                        sample,
-                    )?
+                    let texts =
+                        nils_classify::signals::texts(registry.store(), &pack, &scope, sample)?;
+                    (texts.unresolved, texts.resolved)
                 }
-                None => serde_json::Value::Null,
+                None => (serde_json::Value::Null, serde_json::Value::Null),
             };
+            doc["unresolved_texts"] = unresolved;
+            doc["resolved_texts"] = resolved;
             Ok(Reply::ok(doc))
         }
         ["api", "classify", "try"] if post => {

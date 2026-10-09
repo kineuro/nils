@@ -1597,6 +1597,31 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             .unwrap_or(0),
         "{signals}"
     );
+    // kineuro/nils#94, the rest: the text each axis the rules resolved was
+    // matched against, per value, over the same sample and under the same
+    // threshold, so the two stacks of one subject show none
+    let resolved = &signals["resolved_texts"];
+    for key in [
+        "pack",
+        "overlay",
+        "text",
+        "sample",
+        "read",
+        "complete",
+        "shown_when",
+    ] {
+        assert_eq!(resolved[key], unresolved[key], "{key}: {signals}");
+    }
+    let technique = &resolved["axes"]["technique"];
+    assert_eq!(technique["stacks"], 2, "{signals}");
+    let values = technique["values"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    assert!(!values.is_empty(), "{signals}");
+    for doc in values.values() {
+        assert_eq!(doc["texts"], serde_json::json!([]), "{signals}");
+        assert_eq!(doc["withheld"]["stacks"], doc["stacks"], "{signals}");
+    }
     // record 26: the same by value, and the origins for the scope chips
     let by_value = signals["by_value"]["technique"]
         .as_object()
@@ -1805,6 +1830,15 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         unresolved["axes"]["post_contrast"]["stacks"], 1,
         "{signals}"
     );
+    // and the stack the site's word resolved is the resolved sample's, under
+    // the value the word reached
+    let resolved = &signals["resolved_texts"];
+    assert_eq!(resolved["overlay"], "site@1.0.0", "{signals}");
+    assert_eq!(
+        resolved["axes"]["post_contrast"]["values"]["1"]["stacks"], 1,
+        "{signals}"
+    );
+    assert_eq!(resolved["axes"]["post_contrast"]["stacks"], 1, "{signals}");
     let counted: i64 = unresolved["axes"]
         .as_object()
         .unwrap()

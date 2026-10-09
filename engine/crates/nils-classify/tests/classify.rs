@@ -2054,6 +2054,136 @@ fn the_text_an_unresolved_axis_was_matched_against_is_sampled_bounded_and_withhe
     }
 }
 
+/// kineuro/nils#94, the part that remained: the text an axis the rules
+/// resolved was matched against, per value. Stacks whose description
+/// carries a word the pack knows resolve the base by that word: per axis
+/// and value the signals fold their search texts into distinct texts with
+/// the stacks each covers and the words the rules cited in it, under the
+/// same bounds and showing threshold as the unresolved texts. A text on
+/// one subject's stacks is withheld and counted. A stack the rules left
+/// unresolved is in the unresolved sample and not in this one.
+#[test]
+fn the_text_a_resolved_axis_was_matched_against_is_sampled_by_value() {
+    let dir = TempDir::new("classify-resolved");
+    // (description, subject): one spelling of a T1w on three subjects, in
+    // two cases; a T2w on three subjects; the same T1w words with one
+    // subject's own word beside them; and one stack with no word at all
+    let mut planted: Vec<(&str, &str)> = Vec::new();
+    for who in ["P1", "P2", "P3", "P1", "P2", "P3"] {
+        planted.push(("t1 mprage", who));
+    }
+    for who in ["P1", "P2", "P3", "P1", "P2"] {
+        planted.push(("T2 TSE", who));
+    }
+    for _ in 0..6 {
+        planted.push(("t1 mprage zzzlone", "P4"));
+    }
+    planted.push(("zzzunknown", "P5"));
+    for (i, (word, who)) in planted.iter().enumerate() {
+        let study = format!("S{who}");
+        let sop = format!("{study}.{i}.1");
+        let mut e = synth::minimal_mr(&study, &format!("{study}.{i}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, who));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, word),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        ]);
+        dir.file(
+            &format!("{who}/{i}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
+        let both = nils_classify::signals::texts(reg.store(), &pack, &scope, 2_000).unwrap();
+        let resolved = &both.resolved;
+        assert_eq!(resolved["read"], planted.len(), "{name}: {resolved}");
+        assert_eq!(resolved["complete"], true, "{name}: {resolved}");
+        assert_eq!(resolved["text"], "search_text", "{name}: {resolved}");
+        assert_eq!(
+            resolved["shown_when"], both.unresolved["shown_when"],
+            "{name}: {resolved}"
+        );
+        // the base: every stack but the one with no word, which is the
+        // unresolved sample's
+        let base = &resolved["axes"]["base"];
+        assert_eq!(base["stacks"], planted.len() - 1, "{name}: {base}");
+        assert_eq!(
+            both.unresolved["axes"]["base"]["stacks"], 1,
+            "{name}: {}",
+            both.unresolved
+        );
+        // a value a word decided: its text, its stacks and the word
+        assert_eq!(
+            base["values"]["T2w"],
+            serde_json::json!({
+                "stacks": 5, "distinct": 1,
+                "texts": [{"text": "t2w tse", "stacks": 5, "words": ["t2w"]}],
+                "withheld": {"texts": 0, "stacks": 0},
+            }),
+            "{name}: {base}"
+        );
+        // folded by the normalised text, the one subject's word withheld
+        // and counted, never shown
+        let mprage = &resolved["axes"]["technique"]["values"]["MPRAGE"];
+        assert_eq!(mprage["stacks"], 12, "{name}: {mprage}");
+        assert_eq!(mprage["distinct"], 2, "{name}: {mprage}");
+        assert_eq!(
+            mprage["texts"],
+            serde_json::json!([{"text": "t1w mprage", "stacks": 6, "words": ["mprage"]}]),
+            "{name}: {mprage}"
+        );
+        assert_eq!(
+            mprage["withheld"],
+            serde_json::json!({"texts": 1, "stacks": 6}),
+            "{name}: {mprage}"
+        );
+        assert!(
+            !resolved.to_string().contains("zzzlone"),
+            "{name}: {resolved}"
+        );
+        // every word shown is one the rules cited in that text
+        for (axis, doc) in resolved["axes"].as_object().unwrap() {
+            for (value, v) in doc["values"].as_object().unwrap() {
+                for t in v["texts"].as_array().unwrap() {
+                    let text = t["text"].as_str().unwrap();
+                    for w in t["words"].as_array().unwrap() {
+                        assert!(
+                            text.contains(w.as_str().unwrap()),
+                            "{name} {axis}={value}: {t}"
+                        );
+                    }
+                }
+            }
+        }
+        // the unresolved sample reads as it did, with no words
+        assert!(
+            !both.unresolved.to_string().contains("\"words\""),
+            "{name}: {}",
+            both.unresolved
+        );
+        assert_eq!(
+            nils_classify::signals::unresolved_texts(reg.store(), &pack, &scope, 2_000).unwrap(),
+            both.unresolved,
+            "{name}"
+        );
+        assert_eq!(
+            nils_classify::signals::resolved_texts(reg.store(), &pack, &scope, 2_000).unwrap(),
+            both.resolved,
+            "{name}"
+        );
+        // a smaller sample says it did not read everything
+        let two = nils_classify::signals::texts(reg.store(), &pack, &scope, 2).unwrap();
+        assert_eq!(two.resolved["read"], 2, "{name}: {}", two.resolved);
+        assert_eq!(two.resolved["complete"], false, "{name}: {}", two.resolved);
+    }
+}
+
 /// Record 48: the rules' own answer is held to the pack's exclusions and
 /// implications, as a rater's is. A T2*-weighted turbo spin echo breaks
 /// `t2star-not-spin-echo`: the values stay as the rules decided them, one

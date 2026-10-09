@@ -269,15 +269,104 @@ pub fn unresolved_texts(
     scope: &Scope,
     sample: usize,
 ) -> Result<Value, Error> {
+    Ok(texts(store, pack, scope, sample)?.unresolved)
+}
+
+/// The text each axis the rules resolved was matched against
+/// (kineuro/nils#94, the part that remained): over the same bounded sample
+/// as [`unresolved_texts`], per axis and per value the rules resolved it
+/// to, the search texts of those stacks, folded, bounded and withheld as
+/// there, each with the words the rules cited in it for that value, none
+/// where a flag, the physics or another axis decided. An axis that fell to
+/// the pack's default is not one the rules resolved and is left out. So a
+/// reviewer tuning a value's words reads how the site writes the value,
+/// also where the header decided it and no word did, and the reader's
+/// evidence has the text beside the rule for the axes that resolved.
+/// Values are bounded as the signals by value are, the most common kept.
+pub fn resolved_texts(
+    store: &mut Store,
+    pack: &Pack,
+    scope: &Scope,
+    sample: usize,
+) -> Result<Value, Error> {
+    Ok(texts(store, pack, scope, sample)?.resolved)
+}
+
+/// Both text samples of [`unresolved_texts`] and [`resolved_texts`], from
+/// one reading of the sampled stacks.
+pub struct Texts {
+    pub unresolved: Value,
+    pub resolved: Value,
+}
+
+/// What one text covers in a sample: its stacks, the subjects they belong
+/// to, and the words the rules cited in it.
+#[derive(Default)]
+struct Cover {
+    stacks: i64,
+    subjects: BTreeSet<i64>,
+    words: BTreeSet<String>,
+}
+
+impl Cover {
+    fn add<'a>(&mut self, subject: i64, words: impl IntoIterator<Item = &'a str>) {
+        self.stacks += 1;
+        self.subjects.insert(subject);
+        for w in words {
+            if !w.is_empty() && (self.words.len() < TOP || self.words.contains(w)) {
+                self.words.insert(w.to_string());
+            }
+        }
+    }
+}
+
+/// Texts folded for showing: those that cover at least [`TEXT_MIN_STACKS`]
+/// stacks of [`TEXT_MIN_SUBJECTS`] subjects, the most common first and at
+/// most [`TEXTS_MAX`], each with the words cited in it where `words`; the
+/// rest withheld and counted.
+fn folded(by_text: BTreeMap<String, Cover>, words: bool) -> Value {
+    let stacks: i64 = by_text.values().map(|c| c.stacks).sum();
+    let distinct = by_text.len();
+    let (mut shown, withheld): (Vec<_>, Vec<_>) = by_text
+        .into_iter()
+        .partition(|(_, c)| c.stacks >= TEXT_MIN_STACKS && c.subjects.len() >= TEXT_MIN_SUBJECTS);
+    let withheld_stacks: i64 = withheld.iter().map(|(_, c)| c.stacks).sum();
+    shown.sort_by(|a, b| b.1.stacks.cmp(&a.1.stacks).then_with(|| a.0.cmp(&b.0)));
+    shown.truncate(TEXTS_MAX);
+    let listed: Vec<Value> = shown
+        .into_iter()
+        .map(|(text, c)| {
+            let mut t = json!({"text": text, "stacks": c.stacks});
+            if words {
+                t["words"] = json!(c.words);
+            }
+            t
+        })
+        .collect();
+    json!({
+        "stacks": stacks,
+        "distinct": distinct,
+        "texts": listed,
+        "withheld": {"texts": withheld.len(), "stacks": withheld_stacks},
+    })
+}
+
+/// The two text samples (kineuro/nils#94) from one reading of a bounded
+/// sample of the stacks in scope: the pack's verdict on each, its search
+/// text, and who the stack belongs to, for the showing threshold.
+pub fn texts(store: &mut Store, pack: &Pack, scope: &Scope, sample: usize) -> Result<Texts, Error> {
     let sample = sample.clamp(1, crate::rehearse::SAMPLE_MAX);
     // one past the bound, to say whether the sample read every stack
     let (sql, params) = scoped_select(store, &pack.modality, scope, sample + 1);
     let rows = store.query(&sql, &params)?;
     let complete = rows.len() <= sample;
     let read = rows.len().min(sample);
-    // axis -> text -> (stacks, subjects)
-    type Covered = (i64, BTreeSet<i64>);
-    let mut texts: BTreeMap<String, BTreeMap<String, Covered>> = BTreeMap::new();
+    // axis -> text, for the stacks the axis was left unresolved on
+    let mut unresolved: BTreeMap<String, BTreeMap<String, Cover>> = BTreeMap::new();
+    // axis -> value -> text, for the stacks the rules resolved the axis on,
+    // and how many stacks those are per axis
+    let mut resolved: BTreeMap<String, BTreeMap<String, BTreeMap<String, Cover>>> = BTreeMap::new();
+    let mut resolved_stacks: BTreeMap<String, i64> = BTreeMap::new();
     for r in rows.iter().take(sample) {
         let (_, stack, private) =
             to_stack(r, false, pack).map_err(|e| Error::Message(e.to_string()))?;
@@ -294,54 +383,77 @@ pub fn unresolved_texts(
             .map(|d| d.axis.as_str())
             .collect();
         for axis in axes {
-            let c = texts
+            unresolved
                 .entry(axis.to_string())
                 .or_default()
                 .entry(text.to_string())
-                .or_default();
-            c.0 += 1;
-            c.1.insert(subject);
+                .or_default()
+                .add(subject, std::iter::empty());
+        }
+        // a value the rules gave; the pack's default is no rule's answer
+        for a in verdict
+            .axes
+            .iter()
+            .filter(|a| !a.values.is_empty() && a.tier != "default")
+        {
+            *resolved_stacks.entry(a.axis.clone()).or_default() += 1;
+            for value in &a.values {
+                let cited = verdict
+                    .evidence
+                    .iter()
+                    .filter(|e| e.axis == a.axis && e.value == *value && e.source == "text")
+                    .map(|e| e.matched.as_str());
+                resolved
+                    .entry(a.axis.clone())
+                    .or_default()
+                    .entry(value.clone())
+                    .or_default()
+                    .entry(text.to_string())
+                    .or_default()
+                    .add(subject, cited);
+            }
         }
     }
-    let axes: BTreeMap<String, Value> = texts
+    let envelope = |axes: Value| {
+        json!({
+            "pack": format!("{}@{}", pack.name, pack.version),
+            "overlay": pack.overlay,
+            "text": "search_text",
+            "sample": sample,
+            "read": read,
+            "complete": complete,
+            "shown_when": {"stacks": TEXT_MIN_STACKS, "subjects": TEXT_MIN_SUBJECTS},
+            "axes": axes,
+        })
+    };
+    let unresolved: BTreeMap<String, Value> = unresolved
         .into_iter()
-        .map(|(axis, by_text)| {
-            let stacks: i64 = by_text.values().map(|c| c.0).sum();
-            let distinct = by_text.len();
-            let (shown, withheld): (Vec<_>, Vec<_>) =
-                by_text.into_iter().partition(|(_, (n, subjects))| {
-                    *n >= TEXT_MIN_STACKS && subjects.len() >= TEXT_MIN_SUBJECTS
-                });
-            let withheld_stacks: i64 = withheld.iter().map(|(_, c)| c.0).sum();
-            let mut listed: Vec<(String, i64)> =
-                shown.into_iter().map(|(t, (n, _))| (t, n)).collect();
-            listed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            listed.truncate(TEXTS_MAX);
-            let listed: Vec<Value> = listed
+        .map(|(axis, by_text)| (axis, folded(by_text, false)))
+        .collect();
+    let resolved: BTreeMap<String, Value> = resolved
+        .into_iter()
+        .map(|(axis, by_value)| {
+            // the values the most stacks resolved to, at most VALUES_MAX
+            let mut values: Vec<(String, BTreeMap<String, Cover>)> = by_value.into_iter().collect();
+            values.sort_by_cached_key(|(v, texts)| {
+                (
+                    std::cmp::Reverse(texts.values().map(|c| c.stacks).sum::<i64>()),
+                    v.clone(),
+                )
+            });
+            values.truncate(VALUES_MAX);
+            let values: BTreeMap<String, Value> = values
                 .into_iter()
-                .map(|(text, n)| json!({"text": text, "stacks": n}))
+                .map(|(v, texts)| (v, folded(texts, true)))
                 .collect();
-            (
-                axis,
-                json!({
-                    "stacks": stacks,
-                    "distinct": distinct,
-                    "texts": listed,
-                    "withheld": {"texts": withheld.len(), "stacks": withheld_stacks},
-                }),
-            )
+            let stacks = resolved_stacks.get(&axis).copied().unwrap_or(0);
+            (axis, json!({"stacks": stacks, "values": values}))
         })
         .collect();
-    Ok(json!({
-        "pack": format!("{}@{}", pack.name, pack.version),
-        "overlay": pack.overlay,
-        "text": "search_text",
-        "sample": sample,
-        "read": read,
-        "complete": complete,
-        "shown_when": {"stacks": TEXT_MIN_STACKS, "subjects": TEXT_MIN_SUBJECTS},
-        "axes": axes,
-    }))
+    Ok(Texts {
+        unresolved: envelope(json!(unresolved)),
+        resolved: envelope(json!(resolved)),
+    })
 }
 
 /// One axis value's signals.
