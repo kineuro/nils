@@ -1271,10 +1271,16 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
             if let Some(v) = im.get("modes") {
                 let at = format!("{at}.modes");
                 for mode in f.blame(yaml::texts(v, &at))? {
-                    if mode != "bids" && mode != "informative" {
+                    // Record 55 C4: `full` is spelled in the full naming
+                    // style, `separate` only where a name conflict needs it.
+                    // The earlier pair's words still load, and are never
+                    // spelled.
+                    if !["full", "minimal", "separate", "bids", "informative"]
+                        .contains(&mode.as_str())
+                    {
                         return Err(Error::at(
                             &at,
-                            format!("{mode} is not a naming mode: bids or informative"),
+                            format!("{mode} is not a naming mode: full, minimal or separate"),
                         )
                         .in_file(&f.path, Some(&f.source)));
                     }
@@ -1317,6 +1323,45 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
             for value in f.blame(yaml::texts(v, &at))? {
                 check(axis, &value, &at)?;
                 into_list.push(value);
+            }
+        }
+    }
+    // Record 55 C4 (2026-10-09): the folders of their own under `anat/`.
+    if let Some(v) = top.get("folders") {
+        for (name, body) in f.blame(yaml::obj(v, "bids.folders"))? {
+            let at = format!("bids.folders.{name}");
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(
+                    Error::at(&at, format!("{name} is not a folder name: [0-9a-zA-Z]+"))
+                        .in_file(&f.path, Some(&f.source)),
+                );
+            }
+            let fm = f.blame(yaml::obj(body, &at))?;
+            let mut folder = crate::bids::Folder {
+                name: name.clone(),
+                ..Default::default()
+            };
+            for (key, list) in [
+                ("provenance", &mut folder.provenance),
+                ("technique", &mut folder.technique),
+            ] {
+                let Some(v) = fm.get(key) else { continue };
+                let at = format!("{at}.{key}");
+                for value in f.blame(yaml::texts(v, &at))? {
+                    check(key, &value, &at)?;
+                    list.push(value);
+                }
+            }
+            into.folders.push(folder);
+        }
+    }
+    if let Some(v) = top.get("derivatives") {
+        let dm = f.blame(yaml::obj(v, "bids.derivatives"))?;
+        if let Some(v) = dm.get("construct") {
+            let at = "bids.derivatives.construct".to_string();
+            for value in f.blame(yaml::texts(v, &at))? {
+                check("construct", &value, &at)?;
+                into.derivative_construct.push(value);
             }
         }
     }

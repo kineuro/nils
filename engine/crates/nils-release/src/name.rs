@@ -33,40 +33,50 @@
 
 use std::collections::BTreeMap;
 
-/// Which of the two naming modes a release writes (record 37 S7).
+/// Which of the two BIDS naming styles a release writes (record 37 S7,
+/// record 55 C4, Nima's ruling of 2026-10-08: "lets minimal to have only acq
+/// type modifier and technique for acq- and full have all we have and + is
+/// ok since that is our only option here. so we get 3 way to name stacks").
 ///
-/// Not two grammars for one tree: one question, asked of every name a release
-/// writes. **BIDS** is the default and is what the standard's entities carry,
-/// with what they have no entity for in `acq-`; a validator reads it and a
-/// tool joins on it. **Informative** carries every axis the pack declares,
-/// including the ones an entity already says, for a tree a person reads: in
-/// the BIDS layout that is a longer `acq-` label, which is still a legal BIDS
-/// label because `acq-` is free-form, and in the descriptive layout it is
-/// §9.1's grammar, which has no entities to carry anything.
+/// In both, the suffix is the base contrast (or a construct suffix BIDS
+/// defines: `ADC`, `T1map`, `UNIT1`, ...), never `FLAIR`, which like STIR,
+/// DIR, PSIR and FatSat is a modifier; what has an entity goes to it (`ce-`,
+/// `rec-`, `part-`, `echo-`, `inv-`); and `acq-` joins its slots with `+`.
+/// **Full**, the default, spells in `acq-` every axis without an entity of
+/// its own, in v0's slot order: the body part (the brain is implicit), the
+/// orientation, 2D or 3D, the modifiers, the technique and the construct
+/// (`acq-Ax+2D+FLAIR+IRTSE_T2w`). **Minimal** spells 2D or 3D, the modifiers
+/// and the technique, always, and nothing else (`acq-2D+FLAIR+IRTSE_T2w`).
+/// A name conflict adds what differs to either. Every axis, the descriptive
+/// name and the acquisition details are in the sidecar's `NILS` object and
+/// the descriptive name in the `nils_name` column of `scans.tsv`.
 ///
-/// So the mode is a fact about the release and not about the run: it is
-/// recorded on the release row, reported, and a re-run under the same mode
-/// writes the same names.
+/// The third way is the descriptive layout, v0's grammar, which has no
+/// entities and spells every slot whatever is asked. The style is a fact
+/// about the release: it is recorded on the release row, and a re-run under
+/// the same style writes the same names. The words of the earlier pair,
+/// `bids` and `informative`, read as `full`, so a release recorded under
+/// them re-runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Naming {
     #[default]
-    Bids,
-    Informative,
+    Full,
+    Minimal,
 }
 
 impl Naming {
     /// The word a flag, a row and a report use.
     pub fn name(self) -> &'static str {
         match self {
-            Naming::Bids => "bids",
-            Naming::Informative => "informative",
+            Naming::Full => "full",
+            Naming::Minimal => "minimal",
         }
     }
 
     pub fn parse(text: &str) -> Option<Naming> {
         match text.trim() {
-            "bids" => Some(Naming::Bids),
-            "informative" => Some(Naming::Informative),
+            "full" | "bids" | "informative" => Some(Naming::Full),
+            "minimal" => Some(Naming::Minimal),
             _ => None,
         }
     }
@@ -264,6 +274,13 @@ pub struct Named {
 /// which 6,997 pairs differ in nothing but their echo number. Naming each
 /// stack from its own measured echo leaves 448 such pairs instead of 7,451.
 pub fn disambiguate(bucket: &mut [Named]) {
+    disambiguate_first(bucket);
+    disambiguate_rest(bucket, &mut |_| None);
+}
+
+/// The echo, and a multi-stack series' own suffix: what `disambiguate` does
+/// before anything is compared.
+fn disambiguate_first(bucket: &mut [Named]) {
     // First the echo, on every stack that has one, wherever its name is not
     // its alone. A stack with no echo number keeps its name and is told apart
     // by a later pass, rather than taking the whole bucket down to a counter
@@ -288,9 +305,43 @@ pub fn disambiguate(bucket: &mut [Named]) {
             bucket[i].name = format!("{}_{suffix}", bucket[i].name);
         }
     }
+}
 
-    for members in groups(bucket).into_iter().filter(|m| m.len() > 1) {
-        // Then the inversion time, ordered, which has no measured index.
+/// What tells the stacks of a shared name apart: one token per stack, or
+/// `None` for a stack that keeps its name; `None` overall when nothing does.
+type Separate<'a> = dyn FnMut(&[i64]) -> Option<Vec<Option<String>>> + 'a;
+
+/// [`disambiguate`], with a way to say what separates the stacks a name is
+/// still shared by after the echo and the inversion time (Wave 7a §8.1,
+/// record 55 C4): `separate` is handed their stack ids and answers one token
+/// each, or `None` for a stack that keeps its name, and a token is a slot of
+/// its own. The counter is the last resort, as before.
+pub fn disambiguate_by(
+    bucket: &mut [Named],
+    mut separate: impl FnMut(&[i64]) -> Option<Vec<Option<String>>>,
+) {
+    disambiguate_first(bucket);
+    disambiguate_rest(bucket, &mut separate);
+}
+
+fn disambiguate_rest(bucket: &mut [Named], separate: &mut Separate<'_>) {
+    // Each round either numbers a group, which settles it, or adds a slot
+    // that splits it; the bound is a guard, not a rule.
+    for _ in 0..64 {
+        let shared: Vec<Vec<usize>> = groups(bucket).into_iter().filter(|m| m.len() > 1).collect();
+        if shared.is_empty() {
+            return;
+        }
+        for members in shared {
+            disambiguate_group(bucket, &members, separate);
+        }
+    }
+}
+
+fn disambiguate_group(bucket: &mut [Named], members: &[usize], separate: &mut Separate<'_>) {
+    {
+        let members = members.to_vec();
+        // The inversion time, ordered, ordered, which has no measured index.
         let times: Vec<Option<i64>> = members
             .iter()
             .map(|i| bucket[*i].inversion_time.map(|t| (t * 1000.0) as i64))
@@ -301,7 +352,18 @@ pub fn disambiguate(bucket: &mut [Named]) {
             for (n, i) in order.into_iter().enumerate() {
                 bucket[i].name = format!("{}_ti{}", bucket[i].name, n + 1);
             }
-            continue;
+            return;
+        }
+
+        // Then what a measurement separates, in a slot of its own.
+        let stacks: Vec<i64> = members.iter().map(|i| bucket[*i].stack).collect();
+        if let Some(tokens) = separate(&stacks) {
+            for (i, token) in members.iter().zip(tokens) {
+                if let Some(token) = token.filter(|t| !t.is_empty()) {
+                    bucket[*i].name = filename_safe(&format!("{}_{token}", bucket[*i].name));
+                }
+            }
+            return;
         }
 
         // And last a counter, in an order that does not depend on which rows

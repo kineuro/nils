@@ -80,6 +80,36 @@ pub struct Name {
     /// which the release writes as the `aslcontext.tsv` beside the image.
     /// Only ever on suffix `asl`.
     pub aslcontext: Option<String>,
+    /// The pieces of the `acq-` label this name spells, each with its slot
+    /// (record 55 C4): the pack's groups in v0's order, then a refused
+    /// entity's fact, then what a name conflict added (Wave 7a §8.1). Kept
+    /// so that a difference found later goes in its own slot rather than at
+    /// the end. Empty in the minimal style until a conflict needs one.
+    pub acq: Vec<(usize, String)>,
+}
+
+/// What joins the pieces of an `acq-` label. A BIDS label is
+/// `[0-9a-zA-Z+]+` (since BIDS 1.10.1), so `+` is the one separator the
+/// standard admits, and the official validator 3.0.2 accepts it. Nima, record
+/// 55 C4, 2026-10-08: "+ is ok since that is our only option here".
+pub const ACQ_SEPARATOR: &str = "+";
+
+/// The slot of a refused entity's fact in `acq-`: after every pack group.
+pub const SLOT_REFUSED: usize = 1_000;
+/// The slot of a measured property a name conflict added.
+pub const SLOT_PROPERTY: usize = 2_000;
+/// The slot of the plain fallback number: always last.
+pub const SLOT_NUMBER: usize = 3_000;
+
+/// Join the pieces of an `acq-` label in their slots' order.
+fn join_acq(parts: &[(usize, String)]) -> String {
+    let mut sorted: Vec<&(usize, String)> = parts.iter().filter(|(_, t)| !t.is_empty()).collect();
+    sorted.sort_by_key(|(slot, _)| *slot);
+    sorted
+        .iter()
+        .map(|(_, t)| t.as_str())
+        .collect::<Vec<_>>()
+        .join(ACQ_SEPARATOR)
 }
 
 /// Why a stack has no BIDS name.
@@ -105,14 +135,6 @@ pub enum Why {
     Missing(&'static str, String),
     /// `func` requires `task`, and no rule can invent one (§9.2).
     NoTask,
-    /// Record 37 S2. Two or more stacks of one subject, session and datatype
-    /// built this same name, and they are not one acquisition done twice, so
-    /// there is no honest name here: `run-` would claim a rescan that never
-    /// happened, and a counter of ours would claim nothing at all while
-    /// looking exactly like one. `differs` is what
-    /// [`super::repeat::one_acquisition`] found between them, which is also
-    /// the evidence a pack extension would need.
-    Shared { others: usize, differs: String },
 }
 
 impl std::fmt::Display for Why {
@@ -129,11 +151,6 @@ impl std::fmt::Display for Why {
             Why::NoTask => {
                 f.write_str("func requires task and nobody has said what the subject was doing")
             }
-            Why::Shared { others, differs } => write!(
-                f,
-                "it would share one BIDS name with {others} other stack(s) of this session: \
-                 {differs}"
-            ),
         }
     }
 }
@@ -148,7 +165,6 @@ impl Why {
             Why::NotInSchema(_, _) => "not_in_schema",
             Why::Missing(_, _) => "missing_entity",
             Why::NoTask => "no_task",
-            Why::Shared { .. } => "shared_name",
         }
     }
 }
@@ -264,10 +280,16 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
         spelled.push((at.unwrap_or(usize::MAX), token(e.name, &value)));
     }
     spelled.sort();
-    let mut acq = acq_label(facts, map, naming);
-    for (_, token) in spelled {
-        acq.push_str(&token);
+    // Record 55 C4: what the suffix already says is not said again in the
+    // BIDS name. The informative name says everything, as v0's does.
+    // Record 55 C4: a token that is the suffix itself is not said twice
+    // (`MEGRE` on `_MEGRE`); one the suffix does not say stays (`TOFMRA` on
+    // `_angio`, `MP2RAGE` on `_UNIT1`).
+    let mut parts = acq_label(facts, map, naming, &named.suffix);
+    for (at, token) in spelled {
+        parts.push((SLOT_REFUSED + at.min(SLOT_REFUSED - 1), token));
     }
+    let acq = join_acq(&parts);
     if !acq.is_empty()
         && let Some(e) = schema::entity("acquisition")
         && group.allowed.contains(&e.key)
@@ -311,13 +333,14 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
         entities,
         refused,
         aslcontext: named.aslcontext.clone().filter(|_| named.suffix == "asl"),
+        acq: parts,
     })
 }
 
 /// A fact the schema refuses an entity for, as an `acq-` token.
 ///
 /// The entity's own word and its value, each with a capital, so that a reader
-/// of `acq-BrainAx2DDWIEPICeContrast` can see which entity the standard would
+/// of `acq-Ax+2D+DWIEPI+CeContrast` can see which entity the standard would
 /// not take: `ce-contrast` refused reads `CeContrast`, `part-mag` reads
 /// `PartMag`, `echo-2` reads `Echo2`. A BIDS label is `[0-9a-zA-Z+]+`, so
 /// anything else is dropped from the token rather than spelled.
@@ -350,6 +373,17 @@ impl Name {
         out.push('_');
         out.push_str(self.suffix);
         out
+    }
+
+    /// The name a derivative of this stack takes (record 55 C4): the same
+    /// entities, then `desc-<desc>`, which BIDS reserves for derivatives.
+    pub fn stem_with_desc(&self, subject: &str, session: &str, desc: &str) -> String {
+        let stem = self.stem(subject, session);
+        let label: String = desc.chars().filter(char::is_ascii_alphanumeric).collect();
+        match stem.rsplit_once('_') {
+            Some((head, suffix)) if !label.is_empty() => format!("{head}_desc-{label}_{suffix}"),
+            _ => stem,
+        }
     }
 
     /// Where in the tree it goes, under a subject and session.
@@ -385,16 +419,39 @@ impl Name {
             .collect();
         have.push(("run", n.to_string()));
         let mut out = self.clone();
-        out.entities = schema::ENTITIES
-            .iter()
-            .filter_map(|e| {
-                have.iter()
-                    .find(|(k, _)| *k == e.key)
-                    .map(|(k, v)| (*k, v.clone()))
-            })
-            .collect();
+        out.entities = ordered(have);
         Some(out)
     }
+
+    /// Carry one more thing that tells this name from the names beside it
+    /// (Wave 7a §8.1, record 55 C4): in its own slot of `acq-`, in both
+    /// naming modes, since a strict BIDS name admits no new entity.
+    pub fn marked(&self, mark: &super::separate::Mark) -> Name {
+        let mut out = self.clone();
+        out.acq.push((mark.slot, mark.token.clone()));
+        let acq = join_acq(&out.acq);
+        let mut have: Vec<(&'static str, String)> = out
+            .entities
+            .iter()
+            .filter(|(k, _)| *k != "acquisition")
+            .cloned()
+            .collect();
+        have.push(("acquisition", acq));
+        out.entities = ordered(have);
+        out
+    }
+}
+
+/// Entities in the standard's order.
+fn ordered(have: Vec<(&'static str, String)>) -> Vec<(&'static str, String)> {
+    schema::ENTITIES
+        .iter()
+        .filter_map(|e| {
+            have.iter()
+                .find(|(k, _)| *k == e.key)
+                .map(|(k, v)| (*k, v.clone()))
+        })
+        .collect()
 }
 
 /// Everything that describes the acquisition and is not a suffix or an entity,
@@ -406,20 +463,35 @@ impl Name {
 /// axis the stack is silent on contributes nothing, and a value with no token
 /// contributes nothing, which is how `ND` and `RawRecon` stay out of every
 /// filename.
-fn acq_label(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> String {
-    let mut out = String::new();
-    for group in map.acq.iter().filter(|g| g.in_mode(naming.name())) {
-        for value in facts
-            .axes
-            .get(group.from.as_str())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| group.tokens.get(*v))
-        {
-            out.push_str(value);
+fn acq_label(
+    facts: &Facts,
+    map: &Mapping,
+    naming: crate::name::Naming,
+    suffix: &str,
+) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (slot, group) in map.acq.iter().enumerate() {
+        if !group.in_mode(naming.name()) {
+            continue;
+        }
+        for value in facts.axes.get(group.from.as_str()).into_iter().flatten() {
+            if let Some(token) = group.tokens.get(*value)
+                && !token.eq_ignore_ascii_case(suffix)
+            {
+                out.push((slot, token.clone()));
+            }
         }
     }
     out
+}
+
+/// The slot of an axis in `acq-`: the first pack group that reads it, or,
+/// for an axis the pack gives no group, just before the measured properties.
+pub fn slot_of(map: &Mapping, axis: &str) -> usize {
+    map.acq
+        .iter()
+        .position(|g| g.from == axis)
+        .unwrap_or(SLOT_PROPERTY - 1)
 }
 
 #[cfg(test)]
@@ -466,22 +538,23 @@ mod tests {
         m.ceagent = "contrast".into();
         m.acq = vec![
             group("body_part", &[], &[("spine", "Spine")]),
+            // v0's slot order (record 55 C4): modifiers before the technique.
+            group("modifier", &[], &[("FatSat", "FatSat"), ("MT", "MT")]),
             group(
                 "technique",
                 &[],
                 &[("MPRAGE", "MPRAGE"), ("ME-GRE", "MEGRE")],
             ),
-            group("modifier", &[], &[("FatSat", "FatSat"), ("MT", "MT")]),
             group("quality", &[], &[("Distorted", "Distorted")]),
             // The informative name only: in a BIDS name these are `part-`
             // and `rec-`, and a name that said it twice would be a name
             // arguing with itself (record 37 S7).
             group(
                 "construct",
-                &["informative"],
+                &["separate"],
                 &[("Magnitude", "Mag"), ("MIP", "MIP")],
             ),
-            group("provenance", &["informative"], &[("DTIRecon", "DTIRecon")]),
+            group("provenance", &["separate"], &[("DTIRecon", "DTIRecon")]),
         ];
         m
     }
@@ -516,8 +589,39 @@ mod tests {
     }
 
     #[test]
+    fn a_mark_goes_in_its_own_slot_and_the_number_last() {
+        // Wave 7a §8.1, record 55 C4: a difference on an axis is spelled in
+        // that axis's place among the pack's groups, a property after them,
+        // and the plain number last, all inside `acq-`.
+        use crate::bids::separate::{By, Mark};
+        let facts = Facts {
+            intent: Some("anat"),
+            base: Some("T1w"),
+            axes: axes(&[("body_part", "spine"), ("technique", "MPRAGE")]),
+            ..Facts::default()
+        };
+        let n = build(&facts, &mapping(), Naming::Full).unwrap();
+        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-Spine+MPRAGE_T1w");
+        let mark = |by, slot, token: &str| Mark {
+            by,
+            property: String::new(),
+            value: String::new(),
+            token: token.to_string(),
+            slot,
+        };
+        let n = n
+            .marked(&mark(By::Number, SLOT_NUMBER, "2"))
+            .marked(&mark(By::Property, SLOT_PROPERTY, "3mm"))
+            .marked(&mark(By::Axis, slot_of(&mapping(), "modifier"), "FatSat"));
+        assert_eq!(
+            n.stem("x", "1"),
+            "sub-x_ses-1_acq-Spine+FatSat+MPRAGE+3mm+2_T1w"
+        );
+    }
+
+    #[test]
     fn the_simplest_name_is_the_subject_the_session_and_the_suffix() {
-        let n = build(&t1w(), &mapping(), Naming::Bids).unwrap();
+        let n = build(&t1w(), &mapping(), Naming::Full).unwrap();
         assert_eq!(n.stem("x", "M06"), "sub-x_ses-M06_T1w");
         assert_eq!(n.dir("x", "M06"), "sub-x/ses-M06/anat");
     }
@@ -543,10 +647,10 @@ mod tests {
             ]),
             ..Facts::default()
         };
-        let n = build(&facts, &mapping(), Naming::Bids).unwrap();
+        let n = build(&facts, &mapping(), Naming::Full).unwrap();
         assert_eq!(
             n.stem("x", "1"),
-            "sub-x_ses-1_acq-SpineMPRAGEFatSatMT_ce-contrast_echo-2_part-mag_T1w"
+            "sub-x_ses-1_acq-Spine+FatSat+MT+MPRAGE_ce-contrast_echo-2_part-mag_T1w"
         );
         // And `mt-` is not there, though the stack says `MT`: the schema gives
         // `mt` only to `MTR`, `MTS` and `MPM`, each computed from more than one
@@ -554,7 +658,7 @@ mod tests {
         // The fact is not lost with it: the pack puts `MT` in `acq-`, the name
         // says so, and the refusal is counted rather than passed over.
         assert!(!n.stem("x", "1").contains("mt-"));
-        assert!(n.stem("x", "1").contains("acq-SpineMPRAGEFatSatMT"));
+        assert!(n.stem("x", "1").contains("acq-Spine+FatSat+MT+MPRAGE"));
         // And the `MT` in the label is the pack's own token and not a second
         // spelling of the refusal: a fact already in the name is not said
         // twice to say it was refused.
@@ -575,18 +679,20 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            build(&facts, &mapping(), Naming::Bids),
+            build(&facts, &mapping(), Naming::Full),
             Err(Why::Missing("echo", "MEGRE".into()))
         );
         let with_echo = Facts {
             echo: Some(3),
             ..facts
         };
+        // The technique is the suffix, so `acq-` does not say it again
+        // (record 55 C4).
         assert_eq!(
-            build(&with_echo, &mapping(), Naming::Bids)
+            build(&with_echo, &mapping(), Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
-            "sub-x_ses-1_acq-MEGRE_echo-3_MEGRE"
+            "sub-x_ses-1_echo-3_MEGRE"
         );
     }
 
@@ -597,13 +703,13 @@ mod tests {
             technique: Some("BOLD-EPI"),
             ..Facts::default()
         };
-        assert_eq!(build(&facts, &mapping(), Naming::Bids), Err(Why::NoTask));
+        assert_eq!(build(&facts, &mapping(), Naming::Full), Err(Why::NoTask));
         let answered = Facts {
             task: Some("rest"),
             ..facts
         };
         assert_eq!(
-            build(&answered, &mapping(), Naming::Bids)
+            build(&answered, &mapping(), Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
             "sub-x_ses-1_task-rest_bold"
@@ -629,7 +735,7 @@ mod tests {
             constructs: vec![construct],
             ..Facts::default()
         };
-        let n = build(&of("DeltaM"), &m, Naming::Bids).unwrap();
+        let n = build(&of("DeltaM"), &m, Naming::Full).unwrap();
         assert_eq!(n.stem("x", "1"), "sub-x_ses-1_asl");
         assert_eq!(n.dir("x", "1"), "sub-x/ses-1/perf");
         assert_eq!(n.aslcontext.as_deref(), Some("deltam"));
@@ -638,17 +744,17 @@ mod tests {
             Some("deltam"),
             "a repeat keeps its volume type"
         );
-        let n = build(&of("M0"), &m, Naming::Bids).unwrap();
+        let n = build(&of("M0"), &m, Naming::Full).unwrap();
         assert_eq!((n.datatype, n.suffix), ("perf", "m0scan"));
         assert_eq!(n.aslcontext, None);
         // an sbref in `func` needs a task, as a bold does
-        assert_eq!(build(&of("SBRef"), &m, Naming::Bids), Err(Why::NoTask));
+        assert_eq!(build(&of("SBRef"), &m, Naming::Full), Err(Why::NoTask));
         let answered = Facts {
             task: Some("rest"),
             ..of("SBRef")
         };
         assert_eq!(
-            build(&answered, &m, Naming::Bids).unwrap().stem("x", "1"),
+            build(&answered, &m, Naming::Full).unwrap().stem("x", "1"),
             "sub-x_ses-1_task-rest_sbref"
         );
         // an epi reference takes its phase-encoding direction as `dir-`
@@ -656,7 +762,7 @@ mod tests {
             pe_direction: Some("PA"),
             ..of("FieldmapRef")
         };
-        let n = build(&reversed, &m, Naming::Bids).unwrap();
+        let n = build(&reversed, &m, Naming::Full).unwrap();
         assert_eq!(n.stem("x", "1"), "sub-x_ses-1_dir-PA_epi");
         assert_eq!(n.dir("x", "1"), "sub-x/ses-1/fmap");
     }
@@ -675,7 +781,7 @@ mod tests {
             axes: axes(&[("construct", "ADC"), ("construct", "Magnitude")]),
             ..Facts::default()
         };
-        let n = build(&facts, &mapping(), Naming::Bids).unwrap();
+        let n = build(&facts, &mapping(), Naming::Full).unwrap();
         assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-PartMag_ADC");
         assert_eq!(n.datatype, "dwi");
         assert_eq!(n.refused, vec!["part"]);
@@ -695,7 +801,7 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            build(&dwi, &mapping(), Naming::Bids)
+            build(&dwi, &mapping(), Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
             "sub-x_ses-1_dir-AP_dwi"
@@ -704,7 +810,7 @@ mod tests {
             pe_direction: Some("AP"),
             ..t1w()
         };
-        let n = build(&anat, &mapping(), Naming::Bids).unwrap();
+        let n = build(&anat, &mapping(), Naming::Full).unwrap();
         assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-DirAP_T1w");
         assert_eq!(n.refused, vec!["direction"]);
     }
@@ -719,7 +825,7 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            build(&facts, &mapping(), Naming::Bids)
+            build(&facts, &mapping(), Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
             "sub-x_ses-1_inv-1_MP2RAGE"
@@ -751,7 +857,7 @@ mod tests {
                 provenance: Some("RawRecon"),
                 ..Facts::default()
             };
-            let n = build(&facts, &pack.bids, Naming::Bids).unwrap();
+            let n = build(&facts, &pack.bids, Naming::Full).unwrap();
             assert_eq!(n.stem("x", "1"), want, "{stored}");
             assert_eq!(n.datatype, "anat", "{stored}");
         }
@@ -764,7 +870,7 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            build(&facts, &pack.bids, Naming::Bids)
+            build(&facts, &pack.bids, Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
             "sub-x_ses-1_T1w"
@@ -780,7 +886,7 @@ mod tests {
             base: Some("SWI"),
             ..Facts::default()
         };
-        assert_eq!(build(&swi, &mapping(), Naming::Bids), Err(Why::NoSuffix));
+        assert_eq!(build(&swi, &mapping(), Naming::Full), Err(Why::NoSuffix));
         let scout = Facts {
             intent: Some("localizer"),
             base: Some("T1w"),
@@ -792,16 +898,16 @@ mod tests {
             intent: Some("localizer"),
             ..Facts::default()
         };
-        assert!(build(&scout, &mapping(), Naming::Bids).is_ok());
+        assert!(build(&scout, &mapping(), Naming::Full).is_ok());
         assert_eq!(
-            build(&nothing, &mapping(), Naming::Bids),
+            build(&nothing, &mapping(), Naming::Full),
             Err(Why::NoDatatype("localizer".into()))
         );
     }
 
     #[test]
     fn run_is_added_only_where_the_standard_admits_it() {
-        let n = build(&t1w(), &mapping(), Naming::Bids).unwrap();
+        let n = build(&t1w(), &mapping(), Naming::Full).unwrap();
         assert_eq!(
             n.with_run(2).unwrap().stem("x", "1"),
             "sub-x_ses-1_run-2_T1w"
@@ -811,7 +917,7 @@ mod tests {
             echo: Some(1),
             ..t1w()
         };
-        let n = build(&facts, &mapping(), Naming::Bids)
+        let n = build(&facts, &mapping(), Naming::Full)
             .unwrap()
             .with_run(3)
             .unwrap();
@@ -837,7 +943,7 @@ mod tests {
             ]),
             ..Facts::default()
         };
-        let n = build(&facts, &mapping(), Naming::Bids).unwrap();
+        let n = build(&facts, &mapping(), Naming::Full).unwrap();
         assert_eq!(
             n.stem("x", "1"),
             "sub-x_ses-1_acq-MPRAGE_rec-DTIReconMIP_T1w"
@@ -860,49 +966,59 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            build(&facts, &mapping(), Naming::Bids)
+            build(&facts, &mapping(), Naming::Full)
                 .unwrap()
                 .stem("x", "1"),
-            "sub-x_ses-1_acq-MPRAGEDistorted_T1w"
+            "sub-x_ses-1_acq-MPRAGE+Distorted_T1w"
         );
     }
 
     #[test]
-    fn the_informative_name_carries_every_axis_and_the_bids_one_the_entities() {
-        // Record 37 S7: one question asked of every name. In BIDS mode the
-        // complex part is `part-` and the pipeline is `rec-`; in informative
-        // mode the pack puts both in `acq-` as well, because a tree read by
-        // people has no entities to look in.
+    fn the_minimal_style_spells_the_type_the_modifiers_and_the_technique_only() {
+        // Record 55 C4, Nima 2026-10-08: "minimal to have only acq type
+        // modifier and technique for acq- and full have all we have". The
+        // body part is a full-only group here, as in the MRI pack, and the
+        // complex part is `part-` and the pipeline `rec-` in both.
         let facts = Facts {
             intent: Some("anat"),
             base: Some("T1w"),
             technique: Some("MPRAGE"),
             provenance: Some("DTIRecon"),
             constructs: vec!["Magnitude"],
+            modifiers: vec!["FatSat"],
             axes: axes(&[
+                ("body_part", "spine"),
+                ("modifier", "FatSat"),
                 ("technique", "MPRAGE"),
                 ("construct", "Magnitude"),
                 ("provenance", "DTIRecon"),
             ]),
             ..Facts::default()
         };
+        let mut map = mapping();
+        map.acq[0].modes = vec!["full".into()];
         assert_eq!(
-            build(&facts, &mapping(), Naming::Bids)
-                .unwrap()
-                .stem("x", "1"),
-            "sub-x_ses-1_acq-MPRAGE_rec-DTIRecon_part-mag_T1w"
+            build(&facts, &map, Naming::Full).unwrap().stem("x", "1"),
+            "sub-x_ses-1_acq-Spine+FatSat+MPRAGE_rec-DTIRecon_part-mag_T1w"
         );
         assert_eq!(
-            build(&facts, &mapping(), Naming::Informative)
-                .unwrap()
-                .stem("x", "1"),
-            "sub-x_ses-1_acq-MPRAGEMagDTIRecon_rec-DTIRecon_part-mag_T1w"
+            build(&facts, &map, Naming::Minimal).unwrap().stem("x", "1"),
+            "sub-x_ses-1_acq-FatSat+MPRAGE_rec-DTIRecon_part-mag_T1w"
+        );
+    }
+
+    #[test]
+    fn a_derivative_keeps_the_name_and_adds_desc() {
+        let n = build(&t1w(), &mapping(), Naming::Full).unwrap();
+        assert_eq!(
+            n.stem_with_desc("x", "1", "MinIP"),
+            "sub-x_ses-1_desc-MinIP_T1w"
         );
     }
 
     #[test]
     fn a_session_that_is_not_named_leaves_the_entity_out() {
-        let n = build(&t1w(), &mapping(), Naming::Bids).unwrap();
+        let n = build(&t1w(), &mapping(), Naming::Full).unwrap();
         assert_eq!(n.stem("x", ""), "sub-x_T1w");
         assert_eq!(n.dir("x", ""), "sub-x/anat");
     }

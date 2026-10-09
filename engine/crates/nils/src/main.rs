@@ -429,11 +429,12 @@ struct ReleaseArgs {
     /// which names what the standard admits and routes the rest (§9)
     #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
     layout: String,
-    /// What a name carries: what the standard's entities admit, with the rest
-    /// in acq-, or every axis the pack declares, for a tree a person reads.
-    /// The default is bids in the BIDS layout, and informative in the
-    /// descriptive one, which has no entities to carry anything (record 37)
-    #[arg(long, value_name = "bids|informative")]
+    /// How a BIDS name spells what the entities do not: full puts every slot
+    /// without an entity in acq- in v0's order (the default), minimal only 2D
+    /// or 3D, the modifiers and the technique. Every axis is in the sidecar's
+    /// NILS object either way. The descriptive layout is v0's grammar
+    /// whatever this says (record 55 C4)
+    #[arg(long, value_name = "full|minimal")]
     naming: Option<String>,
     /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
     /// 22 percent of a clinical archive is one (§9.3)
@@ -443,10 +444,18 @@ struct ReleaseArgs {
         value_name = "sourcedata|datatype|anat|drop"
     )]
     localizers: String,
-    /// Where a vendor's synthetic contrast goes. The qMRI appendix permits it
-    /// in raw anat/; a purist puts every synthetic image in derivatives/
-    #[arg(long, default_value = "anat", value_name = "anat|derivatives")]
+    /// Where a vendor's synthetic contrast goes. folder (the default, record
+    /// 55 C4): SyMRI's images, its synthetic contrasts among them, together
+    /// under anat/SyMRI/, and any other synthetic contrast in raw anat/; anat:
+    /// raw anat/, no folder; derivatives: derivatives/
+    #[arg(long, default_value = "folder", value_name = "folder|anat|derivatives")]
     synthetic: String,
+    /// Which stacks a BIDS release also writes as DICOM, under
+    /// sourcedata/dicom/ at the path of each NIfTI, in a folder named after
+    /// the file: all converted stacks (the default, as v0 did), only the
+    /// stacks in a folder of their own (SyMRI), or none (record 55 C4)
+    #[arg(long, default_value = "all", value_name = "all|folders|none")]
+    dicom: String,
     /// The DICOM to NIfTI converter, a prerequisite of a BIDS release (§9.6)
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
     dcm2niix: PathBuf,
@@ -6838,12 +6847,13 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["shape"]),
             s(&e["place"])
         ),
-        // Record 37 S2: a BIDS name more than one acquisition wanted. What a
-        // person is asked is which of them it belongs to, or whether the pack
-        // needs an axis for what differs.
+        // Record 37 S2 and Wave 7a §8.1: a BIDS name more than one stack
+        // wanted where the engine sees no difference and they are not a
+        // repeat. They are named with a plain number; what a person is asked
+        // is what they are.
         "release.shared_name" => format!(
-            "{} stack(s) would share one {} name and are not repeats of one another: {}; they \
-             are in sourcedata/ under their informative names",
+            "{} stack(s) share one {} name, are not repeats of one another and differ in \
+             nothing the engine can see: {}; they carry a plain number",
             e["stacks"],
             s(&e["suffix"]),
             s(&e["why"])
@@ -10465,17 +10475,14 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // for a validator first; asked for, it is the release's own answer and is
     // recorded on the row, so a re-run writes the same names.
     let naming = match &args.naming {
-        None => match layout {
-            run::Layout::Bids => nils_release::name::Naming::Bids,
-            run::Layout::Descriptive => nils_release::name::Naming::Informative,
-        },
+        None => nils_release::name::Naming::Full,
         Some(text) => {
             let asked = nils_release::name::Naming::parse(text)
-                .ok_or_else(|| usage(format!("--naming is bids or informative, not {text}")))?;
-            if asked == nils_release::name::Naming::Bids && layout == run::Layout::Descriptive {
+                .ok_or_else(|| usage(format!("--naming is full or minimal, not {text}")))?;
+            if asked == nils_release::name::Naming::Minimal && layout == run::Layout::Descriptive {
                 return Err(usage(
-                    "--naming bids needs --layout bids: the descriptive tree has no \
-                     entities, so its names carry every axis whatever this says",
+                    "--naming minimal needs --layout bids: the descriptive tree is v0's \
+                     grammar and spells every slot",
                 ));
             }
             asked
@@ -10493,11 +10500,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         synthetic: nils_release::bids::place::Synthetic::parse(&args.synthetic).ok_or_else(
             || {
                 usage(format!(
-                    "--synthetic is anat or derivatives, not {}",
+                    "--synthetic is folder, anat or derivatives, not {}",
                     args.synthetic
                 ))
             },
         )?,
+        dicom: nils_release::bids::place::Dicom::parse(&args.dicom).ok_or_else(|| {
+            usage(format!(
+                "--dicom is all, folders or none, not {}",
+                args.dicom
+            ))
+        })?,
     };
     // §9.6. Found once, before anything is written, and recorded on the run and
     // in `GeneratedBy`. v0 discovers a missing converter per stack, in a worker
@@ -10618,8 +10631,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     println!(
         "  names            {}",
         match report.naming.as_str() {
-            "informative" => "informative: every axis the pack declares",
-            _ => "bids: the standard's entities, and the rest in acq-",
+            "minimal" => "minimal: 2D or 3D, the modifiers and the technique in acq-",
+            _ => "full: every slot without an entity in acq-, in v0's order",
         }
     );
     // record 26 section 13: what each dataset's files left under
@@ -10764,7 +10777,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         for (route, n) in &report.routes {
             let what = match route.as_str() {
                 "raw" => "in the tree, under a name the standard admits",
-                "sourcedata" => "sourcedata/, as DICOM",
+                "sourcedata" => "sourcedata/dicom/, as DICOM",
                 "derivatives" => "derivatives/nils/, which BIDS has no word for",
                 "beside" => "a directory of their own, in .bidsignore",
                 "unofficial" => "the raw tree under a suffix BIDS lacks, in .bidsignore",
@@ -10791,9 +10804,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
                 report.repeats
             );
             println!(
-                "      {:>10}   stack(s) that are not: no BIDS name, in sourcedata/ under their \
-                 informative names, each a review item",
-                report.not_repeats
+                "      {:>10}   stack(s) that are not, named by what differs",
+                report.not_repeats - report.numbered
+            );
+            println!(
+                "      {:>10}   stack(s) nothing spellable separates, named by a plain number",
+                report.numbered
             );
         }
         for (why, n) in &report.unconvertible {
