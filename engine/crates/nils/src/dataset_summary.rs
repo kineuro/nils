@@ -9,12 +9,13 @@
 //! body part, post-contrast, main scans, pictures and 3D views, each with
 //! its counts, its state and when it last ran. Body part and post-contrast
 //! are operations of their own (record 56, section 2, in `operations`), and
-//! how sure the sort is counts only the questions the sort asks. Every
-//! number is a count and nothing quasi-identifying
-//! is answered, so the door is Data reading at plain, as the sources door
-//! is. A stack of a sample sealed now is never counted by kind or region
-//! for a caller who does not read sealed stacks (record 48), as the scans
-//! door never lists it.
+//! how sure the sort is counts only the questions the sort asks, by the one
+//! definition of a look the card, the sources door, the scans doors and the
+//! Grid count by (`certainty`). Every number is a count and nothing
+//! quasi-identifying is answered, so the door is Data reading at plain, as
+//! the sources door is. A stack of a sample sealed now is never counted by
+//! kind or region for a caller who does not read sealed stacks (record 48),
+//! as the scans door never lists it.
 //!
 //! The jobs of a dataset are the ones whose command line names it (`@name`
 //! or a tree under it, `--dataset name`, `dataset:name`, `place originals
@@ -25,7 +26,7 @@
 //! pictures and the pick run after a sort. `GET /api/jobs?dataset=name`
 //! lists the same jobs, newest first.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use nils_registry::Registry;
@@ -454,7 +455,8 @@ pub(crate) fn document(
     let (mut subjects, mut studies, mut stacks, mut sessions) = (0, 0, 0, window.map(|_| 0));
     let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
     let mut refused_batch: Option<i64> = None;
-    let mut asked = crate::operations::Asked::default();
+    let mut certainty = crate::certainty::Certainty::default();
+    let mut passes = 0;
     let (mut kinds, mut regions) = (Vec::new(), Vec::new());
     let mut last_digest: Option<(String, Option<String>)> = None;
     if !ids.is_empty() {
@@ -570,10 +572,12 @@ pub(crate) fn document(
         .map_err(failed)?;
         // record 56: how sure the sort is counts what the sort asks, never
         // a question about body part or post-contrast, which are steps of
-        // their own
-        asked =
-            crate::operations::asked_by_sort(store, crate::operations::Scope::Sources(&sources))
-                .map_err(failed)?;
+        // their own; counted as the card and the sources door count it, so
+        // the two agree, and a pass's questions beside it
+        let asks = crate::certainty::Asks::sort(store).map_err(failed)?;
+        certainty = crate::certainty::of_sources(store, &asks, &sources, stacks).map_err(failed)?;
+        let holds = crate::operations::Scope::Sources(&sources).holds(store);
+        passes = crate::certainty::passes(store, &holds).map_err(failed)?;
         let sealed = (!crate::sealed::reads(access)).then(|| store.qualified("sealed_stack"));
         kinds = by_axis(store, &sources, KIND_AXIS, sealed.as_deref()).map_err(failed)?;
         regions = by_axis(store, &sources, REGION_AXIS, sealed.as_deref()).map_err(failed)?;
@@ -652,16 +656,15 @@ pub(crate) fn document(
         read_step["finished_at"] = json!(finished);
     }
     steps.push(read_step);
-    let unsorted = (stacks - classified).max(0);
-    let sure = (classified - asked.scans).max(0);
+    let unsorted = certainty.unsorted;
     let open = open_of(&["fingerprint", "classify"]);
     steps.push(step(
         "sorted",
         state_of(open, stacks > 0 && unsorted == 0),
         open.or_else(|| newest_of(&["classify"])),
         json!({
-            "scans": classified, "of": stacks, "look": asked.scans,
-            "unsorted": unsorted,
+            "scans": classified, "of": stacks, "look": certainty.to_sort,
+            "passes": passes, "unsorted": unsorted,
         }),
     ));
     // body part and post-contrast, the operations of their own, over its
@@ -751,7 +754,6 @@ pub(crate) fn document(
             })
             .collect()
     };
-    let need_a_look: BTreeMap<String, i64> = asked.kinds.clone();
     Ok(json!({
         "dataset": dataset.name,
         "dataset_id": dataset.id,
@@ -762,10 +764,10 @@ pub(crate) fn document(
         "sessions": sessions,
         "studies": studies,
         "scans": stacks,
-        "sure": sure,
-        "need_a_look": asked.scans,
+        "sure": certainty.sure,
+        "need_a_look": certainty.to_sort,
         "unsorted": unsorted,
-        "look_kinds": need_a_look,
+        "look_kinds": certainty.need_a_look,
         "kinds": pairs(kinds, "kind"),
         "body_regions": pairs(regions, "region"),
         "files": {

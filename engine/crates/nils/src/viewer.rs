@@ -14,9 +14,10 @@
 //! sample sealed now is in no scope for a caller who does not read sealed
 //! stacks (record 48): never listed and never counted.
 //!
-//! A scan needs a look while a review item that still waits for a person
-//! asks about it ([`crate::certainty::OPEN`]), the rule the Data card's
-//! certainty counts by, so every number agrees.
+//! A scan needs a look while a question the sort itself asks about it waits
+//! for a person, the one definition the Data card's certainty, the sources
+//! door and the scans doors count by ([`crate::certainty::Asks::sort`]), so
+//! every number agrees.
 //!
 //! A visit is a session the cache holds (under the window it was built
 //! with) with a scan in the scope; a study the cache holds under no session
@@ -211,9 +212,9 @@ fn window(store: &mut Store) -> Result<i64, StoreError> {
 }
 
 /// The stacks of the scope that need a look, each with its subject and
-/// study: a member of a grouped question that still waits for a person,
-/// and the stack a question about one stack names. `only` keeps one
-/// subject's.
+/// study: the stacks a question the sort asks waits on a person for, as
+/// every look is counted ([`crate::certainty::Asks::sort`]). `only` keeps
+/// one subject's.
 fn looked(
     store: &mut Store,
     holds: &str,
@@ -223,34 +224,14 @@ fn looked(
     let subject = only
         .map(|s| format!(" AND se.subject_id = {s}"))
         .unwrap_or_default();
-    let open = crate::certainty::OPEN;
+    let asks = crate::certainty::Asks::sort(store)?;
+    let scope = format!("x.id IN (SELECT st.id FROM {from} WHERE {holds}{subject})");
+    let stacks: Vec<i64> = asks.stacks_in(store, &scope)?.into_iter().collect();
     let mut out = HashMap::new();
-    for r in store.query(
-        &format!(
-            "SELECT DISTINCT st.id, se.subject_id, se.study_id FROM {from} \
-             JOIN {} rm ON rm.stack_id = st.id JOIN {} ri ON ri.id = rm.item_id \
-             WHERE {holds}{subject} AND {open}",
-            store.qualified("review_member"),
-            store.qualified("review_item"),
-        ),
-        &[],
-    )? {
-        out.insert(r.int(0)?, (r.int(1)?, r.int(2)?));
-    }
-    // a question about one stack names it in its reference, read and
-    // matched here (the two backends spell JSON apart as text), then kept
-    // where the stack is the scope's
-    let asked: BTreeSet<i64> = crate::certainty::stack_scoped(store)?
-        .into_iter()
-        .map(|(_, s)| s)
-        .filter(|s| !out.contains_key(s))
-        .collect();
-    let asked: Vec<i64> = asked.into_iter().collect();
-    for chunk in asked.chunks(IN_CHUNKS) {
+    for chunk in stacks.chunks(IN_CHUNKS) {
         for r in store.query(
             &format!(
-                "SELECT st.id, se.subject_id, se.study_id FROM {from} \
-                 WHERE {holds}{subject} AND st.id IN ({})",
+                "SELECT st.id, se.subject_id, se.study_id FROM {from} WHERE st.id IN ({})",
                 list(chunk)
             ),
             &[],

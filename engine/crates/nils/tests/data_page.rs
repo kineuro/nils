@@ -101,6 +101,11 @@ impl Drop for Worked {
 
 impl Worked {
     fn start(home: &Home) -> Worked {
+        Worked::serve(home, true)
+    }
+
+    /// A `nils serve`, with its worker or without one.
+    fn serve(home: &Home, worker: bool) -> Worked {
         use std::io::BufRead as _;
         let tokens = [
             format!("{OPS}=ops@lab:operator"),
@@ -111,14 +116,8 @@ impl Worked {
         let mut child = nils()
             .arg("--registry")
             .arg(home.dir.path())
-            .args([
-                "serve",
-                "--bind",
-                "127.0.0.1:0",
-                "--workers",
-                "2",
-                "--worker",
-            ])
+            .args(["serve", "--bind", "127.0.0.1:0", "--workers", "2"])
+            .args(if worker { &["--worker"][..] } else { &[][..] })
             .args(["--auth", "token", "--pack-dir", &packs()])
             .env("NILS_TOKENS", tokens)
             .env("NILS_PACK_DIR", packs())
@@ -1053,5 +1052,504 @@ fn a_dataset_reads_whole_on_postgres_too() {
     };
     drop();
     round(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+/// One synthetic MR file, a series of its own, where a digest of the
+/// dataset reads it.
+fn scan_file(tree: &TempDir, patient: &str, study: &str, series: &str, date: &str, what: &str) {
+    let sop = format!("{series}.1");
+    let mut e = synth::minimal_mr(study, series, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, what));
+    tree.file(
+        &format!("derivatives/dcm-anon/{study}/{sop}"),
+        &synth::part10(&MetaFields::mr(&sop), &e, true),
+    );
+}
+
+/// Record 55 H3 and record 56 (2026-10-09): "need a look" means one thing
+/// wherever it is shown, the sort's own questions that wait for a person.
+/// A registry is sorted, what the sort asked is let go, and a question of
+/// every asker is planted: the sort's (grouped, about one stack, staged,
+/// a broken constraint, System 1's, a person's decision the rules disagree
+/// with), a model's (its group about the body part, its disagreement with
+/// a person's decision), a pass's (a vote, a session answer), a pick
+/// border, an identity question, and questions nobody waits on any more.
+/// The card (the sources door's totals and its digest's line), the
+/// summary, the scans door's marks and the Grid count the same scans, by
+/// the same kinds; the body part's and the post-contrast's questions are
+/// their steps' to look at, the passes' the sorted step's `passes`, the
+/// border the main scans', and none of them a look. The same over a
+/// cohort of both subjects.
+fn looks(pg: Option<(String, String)>) {
+    use std::collections::BTreeMap;
+
+    let home = Home {
+        dir: TempDir::new("data-page-looks"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    // two subjects, two visits each, two scans a visit
+    let tree = TempDir::new("data-page-looks-ds");
+    const FILES: &str = "\
+S-0001|1.2.9.A|1.2.9.A.1|20260102|t1 mprage
+S-0001|1.2.9.A|1.2.9.A.2|20260102|flair
+S-0001|1.2.9.B|1.2.9.B.1|20260305|pd tse
+S-0001|1.2.9.B|1.2.9.B.2|20260305|swi
+S-0002|1.2.9.C|1.2.9.C.1|20260407|dwi
+S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse
+S-0002|1.2.9.D|1.2.9.D.1|20260510|t1 post
+S-0002|1.2.9.D|1.2.9.D.2|20260510|sc t2";
+    for line in FILES.lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        scan_file(&tree, f[0], f[1], f[2], f[3], f[4]);
+    }
+    home.ok(&[
+        "place",
+        "add",
+        "looks",
+        tree.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "map",
+    ]);
+    let map = home.dir.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,looks-0001\nS-0002,looks-0002\n",
+    );
+    home.ok(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--id-column",
+        "PatientID",
+        "--code-column",
+        "subject_code",
+    ]);
+    home.ok(&["digest", "--name", "looks", "--no-private", "@looks"]);
+    home.ok(&["fingerprint"]);
+    home.ok(&["classify", "--pack-dir", &packs()]);
+
+    // the registry's ids, and the questions planted
+    let (st, subjects) = {
+        let mut store = home.store();
+        let [stack, fp, subject] =
+            ["stack", "stack_fingerprint", "subject"].map(|t| store.qualified(t));
+        let stacks: BTreeMap<String, i64> = store
+            .query(
+                &format!(
+                    "SELECT st.id, f.text_series_description FROM {stack} st \
+                     JOIN {fp} f ON f.stack_id = st.id"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.text(1).unwrap().to_string(), r.int(0).unwrap()))
+            .collect();
+        let subjects: BTreeMap<String, i64> = store
+            .query(&format!("SELECT code, id FROM {subject}"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| (r.text(0).unwrap().to_string(), r.int(1).unwrap()))
+            .collect();
+        (stacks, subjects)
+    };
+    assert_eq!(st.len(), 8, "{st:?}");
+    let s = |what: &str| st[what];
+    let (one, two) = (subjects["looks-0001"], subjects["looks-0002"]);
+    {
+        let mut store = home.store();
+        let [item, member, batch, cohort, cohort_member] = [
+            "review_item",
+            "review_member",
+            "ingest_batch",
+            "cohort",
+            "cohort_member",
+        ]
+        .map(|t| store.qualified(t));
+        // what the sort asked is let go, so every question below is planted
+        store
+            .execute(
+                &format!(
+                    "UPDATE {item} SET status = 'superseded' WHERE status IN ('open', 'staged')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let first_batch = store
+            .query(&format!("SELECT MIN(id) FROM {batch}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let mut plant = |kind: &str,
+                         scope: &str,
+                         reference: String,
+                         evidence: &str,
+                         status: &str,
+                         members: &[i64]| {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {item} (kind, scope, ref, evidence, status, created_at) \
+                         VALUES ('{kind}', '{scope}', '{reference}', '{evidence}', '{status}', \
+                         '2026-10-09T10:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let id = store
+                .query(&format!("SELECT MAX(id) FROM {item}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            for m in members {
+                store
+                    .execute(
+                        &format!("INSERT INTO {member} (item_id, stack_id) VALUES ({id}, {m})"),
+                        &[],
+                    )
+                    .unwrap();
+            }
+        };
+        let group = |key: &str| format!("{{\"group\": \"{key}\"}}");
+        let on = |stack: i64| format!("{{\"stack_id\": {stack}}}");
+        // the sort's: a look
+        plant(
+            "base:missing",
+            "group",
+            group("base:missing||missing"),
+            "{}",
+            "open",
+            &[s("t1 mprage"), s("flair")],
+        );
+        plant("base:missing", "stack", on(s("flair")), "{}", "open", &[]);
+        plant(
+            "classify.excluded",
+            "group",
+            group("classify.excluded|x|constraint"),
+            "{}",
+            "open",
+            &[s("t1 mprage")],
+        );
+        plant("classify.asked", "stack", on(s("dwi")), "{}", "staged", &[]);
+        plant(
+            "base:decision",
+            "stack",
+            on(s("t2 tse")),
+            "{\"axis\": \"base\", \"rule\": \"T2w\", \"decision\": \"PDw\"}",
+            "open",
+            &[],
+        );
+        // a model's: its disagreement with a person's decision, and its
+        // body part, one group it was unsure of and one staged
+        plant(
+            "base:decision",
+            "stack",
+            on(s("pd tse")),
+            "{\"axis\": \"base\", \"source\": \"model\", \"model_id\": 1}",
+            "open",
+            &[],
+        );
+        plant(
+            "body_part:model",
+            "group",
+            group("body_part:model|run:1|below"),
+            "{}",
+            "open",
+            &[s("pd tse"), s("swi")],
+        );
+        plant(
+            "body_part:model",
+            "group",
+            group("body_part:model|run:1|p>=0.9"),
+            "{}",
+            "staged",
+            &[s("t1 post")],
+        );
+        // what an older sort asked about the post-contrast
+        plant(
+            "post_contrast:missing",
+            "stack",
+            on(s("swi")),
+            "{}",
+            "open",
+            &[],
+        );
+        // the passes'
+        plant(
+            "technique:session",
+            "stack",
+            on(s("t1 post")),
+            "{}",
+            "open",
+            &[],
+        );
+        plant(
+            "base:vote",
+            "group",
+            group("base:vote|x|vote"),
+            "{}",
+            "open",
+            &[s("t1 post"), s("sc t2")],
+        );
+        // a pick border, an identity question, and nobody's any more
+        plant(
+            "pick.border",
+            "subject",
+            format!(
+                "{{\"subject_id\": {one}, \"session_day\": \"2026-01-02\", \"role\": \"t1w\", \"model\": \"main\"}}"
+            ),
+            "{\"borders\": [\"too_close\"]}",
+            "open",
+            &[],
+        );
+        plant(
+            "identity.unmapped",
+            "batch",
+            format!("{{\"batch_id\": {first_batch}}}"),
+            "{}",
+            "open",
+            &[],
+        );
+        plant(
+            "base:missing",
+            "group",
+            group("base:missing|old|missing"),
+            "{}",
+            "accepted",
+            &[s("sc t2")],
+        );
+        plant(
+            "base:missing",
+            "stack",
+            on(s("sc t2")),
+            "{}",
+            "superseded",
+            &[],
+        );
+        plant(
+            "split:one_image_per_stack",
+            "stack",
+            on(s("sc t2")),
+            "{}",
+            "open",
+            &[],
+        );
+        // a cohort of both
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {cohort} (name, owner, created_at) \
+                     VALUES ('both', 'anna', '2026-10-09T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let both = store
+            .query(&format!("SELECT id FROM {cohort} WHERE name = 'both'"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        for subject in [one, two] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {cohort_member} (cohort_id, subject_id, joined_at, source) \
+                         VALUES ({both}, {subject}, '2026-10-09T10:00:00Z', 'manual')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+
+    // what needs a look, by the planting: the sort's questions alone
+    let marks: BTreeMap<i64, Vec<&str>> = [
+        (s("t1 mprage"), vec!["base:missing", "classify.excluded"]),
+        (s("flair"), vec!["base:missing"]),
+        (s("dwi"), vec!["classify.asked"]),
+        (s("t2 tse"), vec!["base:decision"]),
+    ]
+    .into_iter()
+    .collect();
+    let kinds = json!({
+        "base:decision": 1, "base:missing": 2, "classify.asked": 1, "classify.excluded": 1,
+    });
+    let marked = |page: &Value| -> BTreeMap<i64, Vec<String>> {
+        page["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| !x["questions"].as_array().unwrap().is_empty())
+            .map(|x| {
+                (
+                    x["stack"].as_i64().unwrap(),
+                    x["questions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|q| q.as_str().unwrap().to_string())
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let tally = |marks: &BTreeMap<i64, Vec<String>>| -> Value {
+        let mut out: BTreeMap<String, i64> = BTreeMap::new();
+        for k in marks.values().flatten() {
+            *out.entry(k.clone()).or_insert(0) += 1;
+        }
+        json!(out)
+    };
+    let expected: BTreeMap<i64, Vec<String>> = marks
+        .iter()
+        .map(|(k, v)| (*k, v.iter().map(|x| x.to_string()).collect()))
+        .collect();
+
+    let server = Worked::serve(&home, false);
+    // the card: the sources door's totals, and its digest's line
+    let sources = server.get("/api/sources", READS);
+    let ds = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "looks")
+        .cloned()
+        .unwrap_or_else(|| panic!("{sources}"));
+    let totals = &ds["totals"];
+    assert_eq!(totals["stacks"], 8, "{totals}");
+    assert_eq!(totals["to_sort"], 4, "{totals}");
+    assert_eq!(totals["sure"], 4, "{totals}");
+    assert_eq!(totals["unsorted"], 0, "{totals}");
+    assert_eq!(totals["need_a_look"], kinds, "{totals}");
+    let digests: i64 = ds["digests"]["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["to_sort"].as_i64().unwrap())
+        .sum();
+    assert_eq!(digests, 4, "{ds}");
+
+    // the summary, step by step
+    let summary = server.get("/api/datasets/looks/summary", READS);
+    assert_eq!(summary["need_a_look"], totals["to_sort"], "{summary}");
+    assert_eq!(summary["sure"], totals["sure"], "{summary}");
+    assert_eq!(summary["unsorted"], totals["unsorted"], "{summary}");
+    assert_eq!(summary["look_kinds"], kinds, "{summary}");
+    let sorted = step(&summary, "sorted");
+    assert_eq!(sorted["look"], 4, "{summary}");
+    assert_eq!(
+        sorted["passes"], 2,
+        "the vote's and the session's: {summary}"
+    );
+    let body = step(&summary, "body_part");
+    assert_eq!(body["look"], 2, "what the model was unsure of: {summary}");
+    assert_eq!(body["answered"], 1, "{summary}");
+    assert_eq!(step(&summary, "post_contrast")["look"], 1, "{summary}");
+    assert_eq!(step(&summary, "main_scans")["borders"], 1, "{summary}");
+
+    // the scans door's marks, with pictures asked for and without
+    for path in [
+        "/api/datasets/looks/scans?limit=200",
+        "/api/datasets/looks/scans?limit=200&pictures=1",
+    ] {
+        let page = server.get(path, READS);
+        assert_eq!(page["total"], 8, "{page}");
+        let got = marked(&page);
+        assert_eq!(got, expected, "{path}: {page}");
+        assert_eq!(tally(&got), kinds, "{path}");
+    }
+
+    // the Grid: each subject, each of its visits, and the filter
+    let grid = server.get("/api/datasets/looks/subjects", READS);
+    assert_eq!(grid["totals"]["look"], 4, "{grid}");
+    let mut seen = 0;
+    for subject in grid["subjects"].as_array().unwrap() {
+        let id = subject["id"].as_i64().unwrap();
+        assert_eq!(subject["look"], 2, "{grid}");
+        let visits = server.get(&format!("/api/datasets/looks/subjects/{id}/visits"), READS);
+        assert_eq!(visits["totals"]["look"], subject["look"], "{visits}");
+        let by_visit: i64 = visits["visits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["look"].as_i64().unwrap())
+            .sum();
+        assert_eq!(by_visit, 2, "{visits}");
+        seen += subject["look"].as_i64().unwrap();
+    }
+    assert_eq!(seen, 4, "{grid}");
+    let filtered = server.get("/api/datasets/looks/subjects?filter=look", READS);
+    assert_eq!(filtered["matched"], 2, "{filtered}");
+
+    // the same over the cohort of both
+    let cohort = server.get("/api/cohorts/both", READS);
+    let sorted = cohort["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["step"] == "sorted")
+        .cloned()
+        .unwrap_or_else(|| panic!("{cohort}"));
+    assert_eq!(sorted["look"], 4, "{cohort}");
+    assert_eq!(sorted["passes"], 2, "{cohort}");
+    let members = server.get("/api/cohorts/both/subjects", READS);
+    assert_eq!(members["totals"]["look"], 4, "{members}");
+    let page = server.get("/api/cohorts/both/scans?limit=200", READS);
+    assert_eq!(marked(&page), expected, "{page}");
+    drop(server);
+    drop(tree);
+}
+
+#[test]
+fn a_look_is_counted_the_same_on_the_card_the_summary_the_scans_and_the_grid() {
+    looks(None);
+}
+
+#[test]
+fn a_look_is_counted_the_same_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_looks";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    looks(Some((dsn.clone(), schema.to_string())));
     drop();
 }

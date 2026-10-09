@@ -6746,8 +6746,9 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
                 )
                 .unwrap();
         }
-        // an open grouped question on the first T1, a staged question about
-        // the SyMRI scan alone, and an accepted one that waits for nobody
+        // an open grouped question on the first T1, a staged question of
+        // System 1's about the SyMRI scan alone, and an accepted one that
+        // waits for nobody: the sort's questions, a look wherever counted
         let mut question = |kind: &str, scope: &str, reference: &str, status: &str| {
             store
                 .execute(
@@ -6766,7 +6767,7 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
         };
         let grouped = question("base:low_confidence", "rule", "{}", "open");
         let _ = question(
-            "system1:unsure",
+            "classify.asked",
             "stack",
             &format!("{{\"stack_id\": {}}}", st("symri")),
             "staged",
@@ -7259,7 +7260,7 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     // a staged question about one stack is a question too
     assert_eq!(
         symri["questions"],
-        serde_json::json!(["system1:unsure"]),
+        serde_json::json!(["classify.asked"]),
         "{scans}"
     );
     let too_many = (0..101)

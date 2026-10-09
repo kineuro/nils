@@ -3,31 +3,453 @@
 //! How sure a sort is of a dataset (record 55 H2, round 4): the card's line
 //! "120 scans · 112 sure · 8 need a look [Review 8]". A dataset's stacks
 //! are the ones its digests created first, as the sources door counts
-//! them. A stack needs a look while an open or staged review item asks
-//! about it, as a member of a grouped question or as the stack a
-//! stack-scoped question names (System 1's); it is sure once it is sorted
-//! and no such item asks about it. Every number here is a count, and the
-//! Review button opens the same items through `dataset=` on the review
-//! doors.
+//! them; a stack is sure once it is sorted and needs no look. Every number
+//! here is a count, and the Review button opens the items about the
+//! dataset through `dataset=` on the review doors.
+//!
+//! **Need a look, one definition** (record 55 H3 and record 56,
+//! 2026-10-09). A scan needs a look while a question the sort itself asks
+//! about it waits for a person, open or staged: the sort's own questions,
+//! and no other. [`asker`] says who asks a question and [`Asks`] reads the
+//! waiting questions of one asker. Every count of a look reads them through
+//! [`Asks::sort`], so the numbers agree wherever they are shown: the
+//! sources door's totals (`to_sort`, `sure`, `need_a_look`) and each recent
+//! digest's `to_sort`, which the card reads; the Data page's summary
+//! (`need_a_look`, `sure`, `look_kinds` and the sorted step's `look`) and a
+//! cohort's sorted step; the kinds the scans doors give each scan
+//! (`questions`); and the Grid's `look` on subjects and visits, with its
+//! filter and its order.
+//!
+//! Who asks what:
+//!
+//! - **the sort**: an axis that matters with no answer (`<axis>:missing`,
+//!   all a sort raises by itself since record 55 H3), a person's own
+//!   threshold (`<axis>:low_confidence`), a person's decision the rules
+//!   disagree with (`<axis>:decision`), what an engine before record 55 H3
+//!   asked of its rules (`<axis>:conflict`), a constraint of the pack the
+//!   rules' answer breaks (`classify.excluded`, `classify.implied`) and
+//!   System 1's question (`classify.asked`); never one about an axis an
+//!   operation owns;
+//! - **an operation of its own** (record 56: body part, post-contrast):
+//!   every question about an axis it owns, from its model's run, a pass or
+//!   a sort before record 56, counted as that step's `look`;
+//! - **a pass** of the sort (a neighbour vote, `<axis>:vote`, or a session
+//!   pass, `<axis>:session`) about another axis, counted as the sorted
+//!   step's `passes`, beside its `look` and never in it;
+//! - **a model's run** about another axis: its group (`<axis>:model`) and
+//!   its disagreement with a person's decision (an `<axis>:decision` whose
+//!   evidence names the model as its source), Review's alone;
+//! - **a pick run**: its borders (`pick.border`), counted under the main
+//!   scans;
+//! - anything else (an identity, a read, a release, a pipeline's check),
+//!   Review's alone.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nils_registry::place::Place;
 use nils_registry::schema::Type;
 use nils_registry::store::{Error as StoreError, Param, Store};
 use serde_json::Value;
 
-/// The statuses that still wait for a person: a stack needs a look while
-/// an item of one of these asks about it, everywhere a look is counted (the
-/// card's certainty, the scans door's questions and the dataset viewer's
-/// counts), so the numbers agree. Over a `review_item` aliased `ri`.
-pub(crate) const OPEN: &str = "ri.status IN ('open', 'staged')";
+/// The statuses of a question that still waits for a person: open, or
+/// staged and not yet committed.
+pub(crate) const WAITING: &str = "'open', 'staged'";
+
+/// The questions a sort raises where the rules' answer breaks one of the
+/// pack's constraints (record 48), one per broken constraint.
+const BROKEN: [&str; 2] = ["classify.excluded", "classify.implied"];
 
 fn ids_in(ids: &[i64]) -> String {
     ids.iter()
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn quoted(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| format!("'{}'", w.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Who asks a question, and so where it is counted (the module's
+/// documentation says where each is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asker {
+    /// The sort: its questions alone make a scan need a look.
+    Sort,
+    /// An operation of its own, by the name of its step.
+    Operation(&'static str),
+    /// A pass of the sort, about an axis no operation owns.
+    Pass,
+    /// A model's run, about an axis no operation owns.
+    Model,
+    /// A pick run's border.
+    Picks,
+    /// Anything else: an identity, a read, a release, a pipeline's check.
+    Other,
+}
+
+/// Who asks a question of this kind. `by_model` says an `<axis>:decision`
+/// came from a model's run (its evidence's `source`), which the kind alone
+/// does not tell.
+pub(crate) fn asker(kind: &str, by_model: bool) -> Asker {
+    if kind == nils_registry::review::PICK_BORDER_KIND {
+        return Asker::Picks;
+    }
+    if kind == nils_registry::asked::KIND || BROKEN.contains(&kind) {
+        return Asker::Sort;
+    }
+    let Some((axis, why)) = kind.split_once(':') else {
+        return Asker::Other;
+    };
+    if let Some(step) = crate::operations::owner(axis) {
+        return Asker::Operation(step);
+    }
+    match why {
+        "missing" | "low_confidence" | "conflict" => Asker::Sort,
+        "decision" if by_model => Asker::Model,
+        "decision" => Asker::Sort,
+        "vote" | "session" => Asker::Pass,
+        "model" => Asker::Model,
+        _ => Asker::Other,
+    }
+}
+
+/// The scans some questions ask about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Asked {
+    /// The scans one of the questions asks about.
+    pub(crate) scans: i64,
+    /// The scans by the kind of the question. A scan asked two questions
+    /// counts under each, so these may add up to more than `scans`.
+    pub(crate) kinds: BTreeMap<String, i64>,
+}
+
+/// The questions of one asker that wait for a person, as every count of
+/// them reads them: the condition that picks them out of `review_item`
+/// (aliased `ri`), and the ones about one stack, each with its stack. A
+/// grouped question asks about each of its members, a question about one
+/// stack about the stack its reference names.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Asks {
+    /// None where no question of the asker waits.
+    cond: Option<String>,
+    single: Vec<(String, i64)>,
+}
+
+impl Asks {
+    /// The sort's own questions that wait for a person: what makes a scan
+    /// need a look, everywhere.
+    pub(crate) fn sort(store: &mut Store) -> Result<Asks, StoreError> {
+        Asks::of(store, WAITING, &|a| a == Asker::Sort)
+    }
+
+    /// The questions of these statuses (a comma list of quoted words) whose
+    /// asker `keep` keeps.
+    pub(crate) fn of(
+        store: &mut Store,
+        statuses: &str,
+        keep: &dyn Fn(Asker) -> bool,
+    ) -> Result<Asks, StoreError> {
+        let item = store.qualified("review_item");
+        // the kinds that wait, each kept or not by its asker; a decision
+        // whose asker its evidence decides is read item by item
+        let mut kinds = Vec::new();
+        let mut undecided = Vec::new();
+        for r in store.query(
+            &format!("SELECT DISTINCT ri.kind FROM {item} ri WHERE ri.status IN ({statuses})"),
+            &[],
+        )? {
+            let kind = r.text(0)?.to_string();
+            let (rules, model) = (keep(asker(&kind, false)), keep(asker(&kind, true)));
+            if rules != model {
+                undecided.push(kind.clone());
+            }
+            if rules {
+                kinds.push(kind);
+            }
+        }
+        let (mut dropped, mut added) = (Vec::new(), Vec::new());
+        if !undecided.is_empty() {
+            for r in store.query(
+                &format!(
+                    "SELECT ri.id, ri.kind, {} FROM {item} ri WHERE ri.status IN ({statuses}) \
+                     AND ri.kind IN ({})",
+                    crate::text_of(store, "review_item", "evidence"),
+                    quoted(&undecided)
+                ),
+                &[],
+            )? {
+                let evidence: Value = r
+                    .opt_text(2)?
+                    .and_then(|t| serde_json::from_str(t).ok())
+                    .unwrap_or(Value::Null);
+                if evidence["source"] != "model" {
+                    continue;
+                }
+                if keep(asker(r.text(1)?, false)) {
+                    dropped.push(r.int(0)?);
+                } else {
+                    added.push(r.int(0)?);
+                }
+            }
+        }
+        let mut picks = Vec::new();
+        if !kinds.is_empty() {
+            let mut p = format!("ri.kind IN ({})", quoted(&kinds));
+            if !dropped.is_empty() {
+                p.push_str(&format!(" AND ri.id NOT IN ({})", ids_in(&dropped)));
+            }
+            picks.push(p);
+        }
+        if !added.is_empty() {
+            picks.push(format!("ri.id IN ({})", ids_in(&added)));
+        }
+        if picks.is_empty() {
+            return Ok(Asks::default());
+        }
+        let cond = format!("ri.status IN ({statuses}) AND ({})", picks.join(" OR "));
+        // a question about one stack names it in its reference, which the
+        // two backends spell apart as text: read and matched here, not in SQL
+        let mut single = Vec::new();
+        for r in store.query(
+            &format!(
+                "SELECT ri.kind, {} FROM {item} ri WHERE ri.scope = 'stack' AND {cond}",
+                crate::text_of(store, "review_item", "ref"),
+            ),
+            &[],
+        )? {
+            let reference: Value = r
+                .opt_text(1)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(Value::Null);
+            if let Some(stack) = reference["stack_id"].as_i64() {
+                single.push((r.text(0)?.to_string(), stack));
+            }
+        }
+        Ok(Asks {
+            cond: Some(cond),
+            single,
+        })
+    }
+
+    /// The scans of a scope these questions ask about, and how many by
+    /// kind: `holds` is the condition a stack aliased `x` meets to be in it.
+    pub(crate) fn count(&self, store: &mut Store, holds: &str) -> Result<Asked, StoreError> {
+        Ok(self
+            .counted(store, holds, None)?
+            .remove(&0)
+            .unwrap_or_default())
+    }
+
+    /// The same for the stacks each of `batches` created first, by batch.
+    pub(crate) fn by_first_batch(
+        &self,
+        store: &mut Store,
+        batches: &[i64],
+    ) -> Result<BTreeMap<i64, Asked>, StoreError> {
+        if batches.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        self.counted(
+            store,
+            &format!("x.first_batch_id IN ({})", ids_in(batches)),
+            Some("x.first_batch_id"),
+        )
+    }
+
+    /// The scans of a scope these questions ask about, by `key` (an
+    /// integer of the stack `x`), or all under 0.
+    fn counted(
+        &self,
+        store: &mut Store,
+        holds: &str,
+        key: Option<&str>,
+    ) -> Result<BTreeMap<i64, Asked>, StoreError> {
+        let mut out: BTreeMap<i64, Asked> = BTreeMap::new();
+        let Some(cond) = &self.cond else {
+            return Ok(out);
+        };
+        let (member, item, stack) = (
+            store.qualified("review_member"),
+            store.qualified("review_item"),
+            store.qualified("stack"),
+        );
+        let pick = key.unwrap_or("0");
+        let (by, by_kind) = match key {
+            Some(k) => (format!(" GROUP BY {k}"), format!(" GROUP BY {k}, ri.kind")),
+            None => (String::new(), " GROUP BY ri.kind".to_string()),
+        };
+        // the grouped questions, under each of their members in scope
+        let joined = format!(
+            "FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
+             JOIN {stack} x ON x.id = rm.stack_id WHERE {cond} AND {holds}"
+        );
+        for r in store.query(
+            &format!("SELECT {pick}, COUNT(DISTINCT rm.stack_id) {joined}{by}"),
+            &[],
+        )? {
+            out.entry(r.int(0)?).or_default().scans += r.int(1)?;
+        }
+        for r in store.query(
+            &format!("SELECT {pick}, ri.kind, COUNT(DISTINCT rm.stack_id) {joined}{by_kind}"),
+            &[],
+        )? {
+            *out.entry(r.int(0)?)
+                .or_default()
+                .kinds
+                .entry(r.text(1)?.to_string())
+                .or_insert(0) += r.int(2)?;
+        }
+        if self.single.is_empty() {
+            return Ok(out);
+        }
+        // the questions about one stack: the stacks in scope, under their
+        // key, and the kinds a grouped question counts them under already
+        let named: Vec<i64> = self
+            .single
+            .iter()
+            .map(|(_, s)| *s)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut inside: HashMap<i64, i64> = HashMap::new();
+        let mut grouped: HashSet<(i64, String)> = HashSet::new();
+        for chunk in named.chunks(500) {
+            for r in store.query(
+                &format!(
+                    "SELECT x.id, {pick} FROM {stack} x WHERE x.id IN ({}) AND {holds}",
+                    ids_in(chunk)
+                ),
+                &[],
+            )? {
+                inside.insert(r.int(0)?, r.int(1)?);
+            }
+            for r in store.query(
+                &format!(
+                    "SELECT DISTINCT rm.stack_id, ri.kind FROM {member} rm \
+                     JOIN {item} ri ON ri.id = rm.item_id WHERE rm.stack_id IN ({}) AND {cond}",
+                    ids_in(chunk)
+                ),
+                &[],
+            )? {
+                grouped.insert((r.int(0)?, r.text(1)?.to_string()));
+            }
+        }
+        let held: HashSet<i64> = grouped.iter().map(|(s, _)| *s).collect();
+        let (mut scans, mut kinds) = (HashSet::new(), HashSet::new());
+        for (kind, s) in &self.single {
+            let Some(k) = inside.get(s) else {
+                continue;
+            };
+            let at = out.entry(*k).or_default();
+            if !held.contains(s) && scans.insert(*s) {
+                at.scans += 1;
+            }
+            let pair = (*s, kind.clone());
+            if !grouped.contains(&pair) && kinds.insert(pair) {
+                *at.kinds.entry(kind.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The stacks of a scope these questions ask about: `holds` is the
+    /// condition a stack aliased `x` meets to be in it.
+    pub(crate) fn stacks_in(
+        &self,
+        store: &mut Store,
+        holds: &str,
+    ) -> Result<BTreeSet<i64>, StoreError> {
+        let mut out = BTreeSet::new();
+        let Some(cond) = &self.cond else {
+            return Ok(out);
+        };
+        let (member, item, stack) = (
+            store.qualified("review_member"),
+            store.qualified("review_item"),
+            store.qualified("stack"),
+        );
+        for r in store.query(
+            &format!(
+                "SELECT DISTINCT rm.stack_id FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
+                 JOIN {stack} x ON x.id = rm.stack_id WHERE {cond} AND {holds}"
+            ),
+            &[],
+        )? {
+            out.insert(r.int(0)?);
+        }
+        let named: Vec<i64> = self
+            .single
+            .iter()
+            .map(|(_, s)| *s)
+            .filter(|s| !out.contains(s))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in named.chunks(500) {
+            for r in store.query(
+                &format!(
+                    "SELECT x.id FROM {stack} x WHERE x.id IN ({}) AND {holds}",
+                    ids_in(chunk)
+                ),
+                &[],
+            )? {
+                out.insert(r.int(0)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The kinds of these questions on each of `stacks`, sorted and each
+    /// once: grouped questions through their members, and questions about
+    /// one stack through their reference.
+    pub(crate) fn of_stacks(
+        &self,
+        store: &mut Store,
+        stacks: &[i64],
+    ) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+        let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
+        let Some(cond) = &self.cond else {
+            return Ok(out);
+        };
+        let (member, item) = (
+            store.qualified("review_member"),
+            store.qualified("review_item"),
+        );
+        for chunk in stacks.chunks(500) {
+            for r in store.query(
+                &format!(
+                    "SELECT rm.stack_id, ri.kind FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
+                     WHERE {cond} AND rm.stack_id IN ({})",
+                    ids_in(chunk)
+                ),
+                &[],
+            )? {
+                out.entry(r.int(0)?)
+                    .or_default()
+                    .insert(r.text(1)?.to_string());
+            }
+        }
+        let wanted: HashSet<i64> = stacks.iter().copied().collect();
+        for (kind, s) in &self.single {
+            if wanted.contains(s) {
+                out.entry(*s).or_default().insert(kind.clone());
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The scans of a scope a pass's question waits on a person for, counted
+/// as the sorted step's `passes` and never as a look.
+pub(crate) fn passes(store: &mut Store, holds: &str) -> Result<i64, StoreError> {
+    Ok(Asks::of(store, WAITING, &|a| a == Asker::Pass)?
+        .count(store, holds)?
+        .scans)
 }
 
 /// The stacks of `stacks` that the sources (a comma list of `source`
@@ -53,40 +475,20 @@ fn stacks_of_sources(
     Ok(out)
 }
 
-/// The open or staged questions about one stack each, which name their
-/// stack in `ref` and have no member rows: (kind, stack).
-pub(crate) fn stack_scoped(store: &mut Store) -> Result<Vec<(String, i64)>, StoreError> {
-    let sql = format!(
-        "SELECT ri.kind, {} FROM {} ri WHERE ri.scope = 'stack' AND {OPEN}",
-        crate::text_of(store, "review_item", "ref"),
-        store.qualified("review_item")
-    );
-    let mut out = Vec::new();
-    for r in store.query(&sql, &[])? {
-        let reference: Value = r
-            .opt_text(1)?
-            .and_then(|t| serde_json::from_str(t).ok())
-            .unwrap_or(Value::Null);
-        if let Some(stack) = reference["stack_id"].as_i64() {
-            out.push((r.text(0)?.to_string(), stack));
-        }
-    }
-    Ok(out)
-}
-
-/// What the sources door says of a dataset's certainty.
+/// What the sources door says of a dataset's certainty, and what the Data
+/// page's summary says with it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Certainty {
-    /// Stacks an open or staged review item asks about.
+    /// The stacks that need a look: a question of the sort's waits on a
+    /// person for each.
     pub(crate) to_sort: i64,
-    /// Sorted stacks no open or staged review item asks about.
+    /// Sorted stacks that need no look.
     pub(crate) sure: i64,
     /// Stacks no sort has judged yet.
     pub(crate) unsorted: i64,
-    /// The stacks that need a look, by the kind of the question
-    /// (`body_part:low_confidence`, `axis_conflict`, ...). A stack asked
-    /// two questions counts under each, so these may add up to more than
-    /// `to_sort`.
+    /// The stacks that need a look, by the kind of the sort's question
+    /// (`base:missing`, `classify.asked`, ...). A stack asked two questions
+    /// counts under each, so these may add up to more than `to_sort`.
     pub(crate) need_a_look: BTreeMap<String, i64>,
     /// Record 55 H3 (2026-10-09): what the sort noted that is information
     /// and not a question, by kind: the split note (a series split into
@@ -96,74 +498,20 @@ pub(crate) struct Certainty {
 }
 
 /// The certainty of the stacks the sources (a comma list of `source` ids)
-/// created first, `stacks` of them in all.
+/// created first, `stacks` of them in all, with the sort's questions read
+/// once by the caller ([`Asks::sort`]).
 pub(crate) fn of_sources(
     store: &mut Store,
+    asks: &Asks,
     sources: &str,
     stacks: i64,
 ) -> Result<Certainty, StoreError> {
+    let holds = crate::operations::Scope::Sources(sources).holds(store);
+    let look = asks.count(store, &holds)?;
     let q = |t: &str| store.qualified(t);
-    let (stack, batch, member, item, class) = (
-        q("stack"),
-        q("ingest_batch"),
-        q("review_member"),
-        q("review_item"),
-        q("classification"),
-    );
+    let (stack, batch, class) = (q("stack"), q("ingest_batch"), q("classification"));
     let of_source =
         format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
-    // the members of the grouped questions, as `to_sort` always counted
-    let members = store.query(
-        &format!(
-            "SELECT COUNT(DISTINCT rm.stack_id) FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
-             JOIN {stack} x ON x.id = rm.stack_id {of_source} AND {OPEN}"
-        ),
-        &[],
-    )?[0]
-        .int(0)?;
-    let mut need_a_look: BTreeMap<String, i64> = BTreeMap::new();
-    for r in store.query(
-        &format!(
-            "SELECT ri.kind, COUNT(DISTINCT rm.stack_id) FROM {member} rm \
-             JOIN {item} ri ON ri.id = rm.item_id \
-             JOIN {stack} x ON x.id = rm.stack_id {of_source} AND {OPEN} GROUP BY ri.kind"
-        ),
-        &[],
-    )? {
-        need_a_look.insert(r.text(0)?.to_string(), r.int(1)?);
-    }
-    // the questions about one stack each, of this dataset's stacks
-    let scoped = stack_scoped(store)?;
-    let asked: Vec<i64> = scoped
-        .iter()
-        .map(|(_, s)| *s)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let mine = stacks_of_sources(store, &asked, sources)?;
-    let mut by_kind: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
-    for (kind, s) in &scoped {
-        if mine.contains(s) {
-            by_kind.entry(kind.clone()).or_default().insert(*s);
-        }
-    }
-    for (kind, on) in by_kind {
-        *need_a_look.entry(kind).or_insert(0) += on.len() as i64;
-    }
-    // of those, the stacks no grouped question holds already
-    let mine: Vec<i64> = mine.into_iter().collect();
-    let mut held: BTreeSet<i64> = BTreeSet::new();
-    for chunk in mine.chunks(500) {
-        let sql = format!(
-            "SELECT DISTINCT rm.stack_id FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
-             WHERE rm.stack_id IN ({}) AND {OPEN}",
-            ids_in(chunk)
-        );
-        for r in store.query(&sql, &[])? {
-            held.insert(r.int(0)?);
-        }
-    }
-    let to_sort = members + mine.iter().filter(|s| !held.contains(s)).count() as i64;
     let sorted = store.query(
         &format!(
             "SELECT COUNT(*) FROM {stack} x {of_source} \
@@ -198,10 +546,10 @@ pub(crate) fn of_sources(
         noted.insert(nils_classify::classify::SPLIT_NOTE.to_string(), split);
     }
     Ok(Certainty {
-        to_sort,
-        sure: (sorted - to_sort).max(0),
+        to_sort: look.scans,
+        sure: (sorted - look.scans).max(0),
         unsorted: (stacks - sorted).max(0),
-        need_a_look,
+        need_a_look: look.kinds,
         noted,
     })
 }
@@ -334,10 +682,61 @@ pub(crate) fn items_of(
 
 #[cfg(test)]
 mod tests {
-    use super::ids_in;
+    use super::{Asker, asker, ids_in};
 
     #[test]
     fn an_id_list_is_the_ids_joined() {
         assert_eq!(ids_in(&[1, 2]), "1, 2");
+    }
+
+    #[test]
+    fn a_look_is_the_sort_s_own_question_and_every_other_is_counted_where_it_belongs() {
+        for kind in [
+            "base:missing",
+            "technique:low_confidence",
+            "modifier:conflict",
+            "base:decision",
+            "classify.asked",
+            "classify.excluded",
+            "classify.implied",
+        ] {
+            assert_eq!(asker(kind, false), Asker::Sort, "{kind}");
+        }
+        // a model's disagreement with a person's decision is the model's
+        assert_eq!(asker("base:decision", true), Asker::Model);
+        assert_eq!(asker("base:model", false), Asker::Model);
+        // an operation owns every question about its axes, whoever asks it
+        for (kind, step) in [
+            ("body_part:low_confidence", "body_part"),
+            ("body_part:missing", "body_part"),
+            ("body_region:conflict", "body_part"),
+            ("body_part:model", "body_part"),
+            ("body_part:vote", "body_part"),
+            ("post_contrast:missing", "post_contrast"),
+            ("post_contrast:session", "post_contrast"),
+            ("post_contrast:decision", "post_contrast"),
+        ] {
+            assert_eq!(asker(kind, false), Asker::Operation(step), "{kind}");
+        }
+        assert_eq!(
+            asker("body_part:decision", true),
+            Asker::Operation("body_part")
+        );
+        // a pass's question about another axis is the pass's
+        assert_eq!(asker("base:vote", false), Asker::Pass);
+        assert_eq!(asker("modifier:session", false), Asker::Pass);
+        assert_eq!(asker("pick.border", false), Asker::Picks);
+        for kind in [
+            "identity.unmapped",
+            "identity.provisional",
+            "ingest.quarantine",
+            "pipeline:qc",
+            "release.no_task",
+            "split:one_image_per_stack",
+            "session.moved",
+            "system1:unsure",
+        ] {
+            assert_eq!(asker(kind, false), Asker::Other, "{kind}");
+        }
     }
 }

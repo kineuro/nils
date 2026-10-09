@@ -338,8 +338,9 @@ pub(crate) fn page(
 /// has none; `datatype`, `anat`, `dwi`, `func`, `perf`, `fmap` or `other`;
 /// `folder`, the descriptive layout's folder (`anat/SyMRI`, `localizer`,
 /// ...); `axes`, every decided axis as stored; `series_number`, the
-/// order the scanner acquired it in; and `questions`, the kinds of its open
-/// review questions, as a page with pictures gives them. Each name is built from
+/// order the scanner acquired it in; and `questions`, the kinds of the
+/// sort's questions waiting on it, the ones that make a scan need a look
+/// (`certainty`), as a page with pictures gives them. Each name is built from
 /// the scan's own facts: a release also separates two scans of a session
 /// that build one name, which a page, holding part of a session, cannot.
 /// None of it is quasi-identifying.
@@ -354,9 +355,9 @@ pub(crate) fn with_names(
         .unwrap_or_default();
     let mut names = nils_release::run::scan_names(registry.store(), pack, &stacks)
         .map_err(|e| Reply::error(500, e.to_string()))?;
-    // the open questions too, so the tree marks the scans that need a look
-    // without asking for pictures, and what the sort noted
-    let questions = open_questions(registry.store(), &stacks).map_err(failed)?;
+    // the sort's waiting questions too, so the tree marks the scans that
+    // need a look without asking for pictures, and what the sort noted
+    let questions = looks(registry.store(), &stacks).map_err(failed)?;
     let notes = noted(registry.store(), &stacks).map_err(failed)?;
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
@@ -391,9 +392,9 @@ pub const STILLS_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 
 /// Record 55 H2 (E2): a page of scans with what the grid draws, so a page
 /// of fifty is one request. Each scan gains `questions`, the kinds of the
-/// open review questions on its stack (a classifier's grouped question
-/// under each of its members, and a question about the stack alone), so
-/// the desk can mark the scans that need a look; and `picture`, its own
+/// sort's questions waiting on its stack (a grouped question under each of
+/// its members, and a question about the stack alone), so the desk can
+/// mark the scans that need a look as the card counts them; and `picture`, its own
 /// middle plane from the preview its sort made, as a data URL
 /// `{data, width, height, digest, held, partial}`. A scan with no preview
 /// yet has its middle plane decoded from its one file (`partial` true) as
@@ -414,7 +415,7 @@ pub(crate) fn with_pictures(
         .as_array()
         .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
         .unwrap_or_default();
-    let questions = open_questions(registry.store(), &stacks).map_err(failed)?;
+    let questions = looks(registry.store(), &stacks).map_err(failed)?;
     let notes = noted(registry.store(), &stacks).map_err(failed)?;
     let access = &caller.access;
     let why = if !access.holds("query:see") {
@@ -550,47 +551,17 @@ fn noted(
     Ok(out)
 }
 
-/// The kinds of the review questions that still wait for a person (open
-/// or staged, the one rule every look is counted by,
-/// [`crate::certainty::OPEN`]) on each of `stacks`, sorted and each once:
-/// grouped questions through their members, and questions about one stack
-/// through their reference.
-fn open_questions(
+/// The kinds of the sort's questions that wait for a person on each of
+/// `stacks`, sorted and each once: what makes a scan need a look, by the
+/// one definition every count of a look reads (`certainty`).
+fn looks(
     store: &mut nils_registry::Store,
     stacks: &[i64],
 ) -> Result<HashMap<i64, BTreeSet<String>>, nils_registry::store::Error> {
-    let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
     if stacks.is_empty() {
-        return Ok(out);
+        return Ok(HashMap::new());
     }
-    let list = stacks
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let items = store.qualified("review_item");
-    let members = store.qualified("review_member");
-    let open = crate::certainty::OPEN;
-    for r in store.query(
-        &format!(
-            "SELECT m.stack_id, ri.kind FROM {members} m JOIN {items} ri ON ri.id = m.item_id \
-             WHERE {open} AND m.stack_id IN ({list})"
-        ),
-        &[],
-    )? {
-        out.entry(r.int(0)?)
-            .or_default()
-            .insert(r.text(1)?.to_string());
-    }
-    // a question about one stack names it in its reference, which the two
-    // backends spell apart as text: read and matched here, not in SQL
-    let wanted: BTreeSet<i64> = stacks.iter().copied().collect();
-    for (kind, stack) in crate::certainty::stack_scoped(store)? {
-        if wanted.contains(&stack) {
-            out.entry(stack).or_default().insert(kind);
-        }
-    }
-    Ok(out)
+    crate::certainty::Asks::sort(store)?.of_stacks(store, stacks)
 }
 
 #[cfg(test)]

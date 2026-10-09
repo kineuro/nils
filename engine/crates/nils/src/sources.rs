@@ -92,10 +92,12 @@ pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreEr
         .filter(|p| p.role == Role::Source && p.retired_at.is_none())
         .collect();
     let roots = roots(store)?;
+    // what makes a scan need a look, read once for every dataset
+    let asks = crate::certainty::Asks::sort(store)?;
     let mut sources = Vec::with_capacity(places.len());
     for p in &places {
         let ids = ids_under(p, &roots);
-        sources.push(source(store, p, &ids, window, recent)?);
+        sources.push(source(store, &asks, p, &ids, window, recent)?);
     }
     // record 26 §14: what this machine does per second, from the last run
     // of each step that ended here
@@ -108,6 +110,7 @@ pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreEr
 
 fn source(
     store: &mut Store,
+    asks: &crate::certainty::Asks,
     p: &Place,
     ids: &[i64],
     window: i64,
@@ -143,21 +146,18 @@ fn source(
     }
     let sources = list(ids);
     let q = |t: &str| store.qualified(t);
-    let (batch, stack, study, subject, file, cache, member, item, class) = (
+    let (batch, stack, study, subject, file, cache, class) = (
         q("ingest_batch"),
         q("stack"),
         q("study"),
         q("subject"),
         q("source_file"),
         q("session_cache_study"),
-        q("review_member"),
-        q("review_item"),
         q("classification"),
     );
     let (instance, series) = (q("instance"), q("series"));
     let of_source =
         format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
-    let open = "ri.status IN ('open', 'staged')";
 
     // the digests: a pseudonymise step is not one, and shows on the
     // digest it shares a name with (record 26 §14)
@@ -231,7 +231,8 @@ fn source(
     let last = rows.first().map(first_last).transpose()?;
     let first = rows.last().map(first_last).transpose()?;
 
-    // what each of the recent digests has had judged, and what still waits for a person
+    // what each of the recent digests has had judged, and how many of its
+    // stacks need a look, as the card counts them
     let shown_ids: Vec<i64> = shown.iter().map(|(id, _)| *id).collect();
     if !shown_ids.is_empty() {
         let batches = list(&shown_ids);
@@ -242,14 +243,7 @@ fn source(
                  WHERE st.first_batch_id IN ({batches}) GROUP BY st.first_batch_id"
             ),
         )?;
-        let unsure = pairs(
-            store,
-            &format!(
-                "SELECT st.first_batch_id, COUNT(DISTINCT st.id) FROM {stack} st \
-                 JOIN {member} rm ON rm.stack_id = st.id JOIN {item} ri ON ri.id = rm.item_id \
-                 WHERE {open} AND st.first_batch_id IN ({batches}) GROUP BY st.first_batch_id"
-            ),
-        )?;
+        let look = asks.by_first_batch(store, &shown_ids)?;
         // the classify runs over each batch's stacks, the last stage of the
         // thread the sources door can name
         let classifiers = pairs(
@@ -269,7 +263,7 @@ fn source(
                     .unwrap_or(0)
             };
             doc["classified"] = json!(of(&classified));
-            doc["to_sort"] = json!(of(&unsure));
+            doc["to_sort"] = json!(look.get(id).map_or(0, |a| a.scans));
             doc["chain"]["classify"] = json!(
                 classifiers
                     .iter()
@@ -315,8 +309,9 @@ fn source(
         ),
     )?;
     // record 55 H2 (round 4): how sure the sort is, "N scans · N sure ·
-    // N need a look", with what the questions are
-    let certainty = crate::certainty::of_sources(store, &sources, stacks)?;
+    // N need a look", with what the questions are; a look as everywhere
+    // (record 56: the sort's own questions alone)
+    let certainty = crate::certainty::of_sources(store, asks, &sources, stacks)?;
     doc["digests"] = json!({
         "count": digests,
         "first": first,
