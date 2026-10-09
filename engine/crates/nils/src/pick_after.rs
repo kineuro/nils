@@ -130,6 +130,8 @@ struct RoleSum {
     tied: i64,
     review_items: i64,
     borders: BTreeMap<String, i64>,
+    /// The subjects with a pick that applies on at least one occasion.
+    subjects: BTreeSet<i64>,
 }
 
 /// Whether the two best of a pick's `considered` scored the same.
@@ -150,16 +152,60 @@ fn tied(considered: &Value) -> bool {
 /// dataset's subjects' occasions have a pick that applies (`picked`), how
 /// many of those nobody needs to look at (`clear`: no open border, no
 /// tie), the ties, the open `pick.border` items and their borders by
-/// reason (`nothing_eligible` among them, an occasion with no pick); the
-/// dataset's `picks` setting, and the last pick run that decided its
-/// subjects, with its report. With `scheme`, the picks made under that
-/// scheme alone.
+/// reason (`nothing_eligible` among them, an occasion with no pick), and
+/// since 2026-10-09 how many subjects have a pick on at least one occasion
+/// (`subjects`); the dataset's `picks` setting, and the last pick run that
+/// decided its subjects, with its report. With `scheme`, the picks made
+/// under that scheme alone.
 pub(crate) fn summary(
     store: &mut Store,
     dataset: &Place,
     scheme: Option<&str>,
 ) -> Result<Value, StoreError> {
     let subjects = crate::chain::dataset_subjects(store, dataset)?;
+    let (roles, review_items) = roles_of(store, &subjects, scheme)?;
+    Ok(json!({
+        "dataset": dataset.name,
+        "dataset_id": dataset.id,
+        "picks": if place::picks_after_sort(&dataset.dataset) { "after_sort" } else { "off" },
+        "subjects": subjects.len(),
+        "scheme": scheme,
+        "roles": roles,
+        "review_items": review_items,
+        "last_run": last_run(store, &format!("dataset:{}", dataset.name), Some(&dataset.name))?,
+    }))
+}
+
+/// Wave 7a, the Data page (2026-10-09): `GET /api/picks/summary?cohort=NAME`,
+/// the same for a cohort's open members, with the last pick run that
+/// decided them (one for the cohort, or one for the whole registry). None
+/// for a cohort that does not exist.
+pub(crate) fn cohort_summary(
+    store: &mut Store,
+    name: &str,
+    scheme: Option<&str>,
+) -> Result<Option<Value>, StoreError> {
+    let Some(subjects) = nils_registry::cohort::open_members_of(store, name)? else {
+        return Ok(None);
+    };
+    let (roles, review_items) = roles_of(store, &subjects, scheme)?;
+    Ok(Some(json!({
+        "cohort": name,
+        "subjects": subjects.len(),
+        "scheme": scheme,
+        "roles": roles,
+        "review_items": review_items,
+        "last_run": last_run(store, &format!("cohort:{name}"), None)?,
+    })))
+}
+
+/// The roles of the summary for these subjects, and their open
+/// `pick.border` items in all.
+fn roles_of(
+    store: &mut Store,
+    subjects: &BTreeSet<i64>,
+    scheme: Option<&str>,
+) -> Result<(serde_json::Map<String, Value>, i64), StoreError> {
     let mut roles: BTreeMap<String, RoleSum> = BTreeMap::new();
     let mut tied_on: BTreeSet<(String, i64, String)> = BTreeSet::new();
     let mut picked_on: BTreeSet<(String, i64, String)> = BTreeSet::new();
@@ -191,7 +237,9 @@ pub(crate) fn summary(
             if !picked_on.insert(key.clone()) {
                 continue;
             }
-            roles.entry(role).or_default().picked += 1;
+            let sum = roles.entry(role).or_default();
+            sum.picked += 1;
+            sum.subjects.insert(key.1);
             let considered: Value = r
                 .opt_text(4)?
                 .and_then(|t| serde_json::from_str(t).ok())
@@ -258,26 +306,19 @@ pub(crate) fn summary(
                 json!({
                     "picked": s.picked, "clear": s.clear, "tied": s.tied,
                     "borders": s.borders, "review_items": s.review_items,
+                    "subjects": s.subjects.len(),
                 }),
             )
         })
         .collect();
-    Ok(json!({
-        "dataset": dataset.name,
-        "dataset_id": dataset.id,
-        "picks": if place::picks_after_sort(&dataset.dataset) { "after_sort" } else { "off" },
-        "subjects": subjects.len(),
-        "scheme": scheme,
-        "roles": roles,
-        "review_items": review_items,
-        "last_run": last_run(store, &dataset.name)?,
-    }))
+    Ok((roles, review_items))
 }
 
-/// The newest pick run that decided the dataset's subjects, with its
-/// report: one for the dataset, one after a sort that named it, or one for
-/// the whole registry. Null when none of the newest runs did.
-fn last_run(store: &mut Store, name: &str) -> Result<Value, StoreError> {
+/// The newest pick run that decided these subjects, with its report: one
+/// for the dataset or the cohort (`label`, `dataset:NAME` or
+/// `cohort:NAME`), one after a sort that named the dataset, or one for the
+/// whole registry. Null when none of the newest runs did.
+fn last_run(store: &mut Store, label: &str, dataset: Option<&str>) -> Result<Value, StoreError> {
     let sql = format!(
         "SELECT id FROM {} WHERE kind = 'pick' ORDER BY id DESC LIMIT 25",
         store.qualified("job")
@@ -287,7 +328,6 @@ fn last_run(store: &mut Store, name: &str) -> Result<Value, StoreError> {
         .iter()
         .map(|r| r.int(0))
         .collect::<Result<_, _>>()?;
-    let label = format!("dataset:{name}");
     for id in ids {
         let Some(j) = job::show(store, id).map_err(|e| StoreError::Message(e.to_string()))? else {
             continue;
@@ -299,9 +339,11 @@ fn last_run(store: &mut Store, name: &str) -> Result<Value, StoreError> {
             None => report["reference"] == "registry",
             Some(only) => {
                 only == label
-                    || report["datasets"]
-                        .as_array()
-                        .is_some_and(|d| d.iter().any(|n| n == name))
+                    || dataset.is_some_and(|name| {
+                        report["datasets"]
+                            .as_array()
+                            .is_some_and(|d| d.iter().any(|n| n == name))
+                    })
             }
         };
         if covers {
