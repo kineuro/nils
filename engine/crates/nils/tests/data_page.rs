@@ -459,6 +459,44 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(views["state"], "done", "{s}");
     assert_eq!(views["job"], id_of("pyramid"), "{s}");
     assert_eq!(views["made"], 3, "{s}");
+    // a sort's run goes on making its pictures after its row says done, and
+    // writes them into its result at the end: until then they are being made
+    {
+        let mut store = home.store();
+        let [job, stack] = ["job", "stack"].map(|t| store.qualified(t));
+        let first = store
+            .query(&format!("SELECT MIN(id) FROM {stack}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let picture = work
+            .path()
+            .join("previews")
+            .join(format!("{:03}", first.rem_euclid(1000)))
+            .join(format!("{first}.preview"));
+        std::fs::remove_file(&picture).unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {job} SET result = NULL WHERE id = {}",
+                    id_of("classify")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let making = server.get("/api/datasets/ds/summary", READS);
+    let pictures = step(&making, "pictures");
+    assert_eq!(pictures["state"], "running", "{making}");
+    assert_eq!(pictures["made"], 2, "{making}");
+    assert_eq!(
+        pictures["progress"],
+        json!({"done": 2, "total": 3}),
+        "{making}"
+    );
+    // the sort itself is done
+    assert_eq!(step(&making, "sorted")["state"], "done", "{making}");
+
     // counts only: no subject's code, no date
     let text = s.to_string();
     assert!(
