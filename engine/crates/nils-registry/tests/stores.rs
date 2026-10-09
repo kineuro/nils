@@ -3233,3 +3233,102 @@ fn migration_79_gives_the_fingerprint_its_2026_10_03_fields_on_both_backends() {
         );
     }
 }
+
+/// Record 55 H3, migration 85, on both backends: a registry of schema 84
+/// gains what a sort decided without asking anybody on each stack's
+/// classification, `notes` and `disagreements`, empty; a classification
+/// from before reads as before until its next classify fills them; the
+/// migration run twice is run once, and one that finds the columns there
+/// leaves them and what they hold.
+#[test]
+fn migration_85_gives_a_classification_its_notes_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (c, meta) = (
+            store.qualified("classification"),
+            store.qualified("registry_meta"),
+        );
+        let notes = store
+            .dialect()
+            .text_of(table("classification").column("notes").unwrap());
+        store
+            .batch(&format!(
+                "ALTER TABLE {c} DROP COLUMN notes;\n\
+                 ALTER TABLE {c} DROP COLUMN disagreements;\n\
+                 INSERT INTO {c} (stack_id, pack, pack_version, contract, overlay, job_id, epoch, review_items) \
+                 VALUES (7, 'mri', '1.0.1', 8, NULL, 3, 2, 1);\n\
+                 UPDATE {meta} SET value = '84' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        for col in ["notes", "disagreements"] {
+            assert!(
+                !migrate::column_exists(&mut store, "classification", col).unwrap(),
+                "{name}: classification.{col}"
+            );
+        }
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [85],
+            "{name}"
+        );
+        for col in ["notes", "disagreements"] {
+            assert!(
+                migrate::column_exists(&mut store, "classification", col).unwrap(),
+                "{name}: classification.{col}"
+            );
+        }
+        let read = |store: &mut Store| {
+            let rows = store
+                .query(
+                    &format!(
+                        "SELECT stack_id, pack, pack_version, review_items, {notes}, disagreements FROM {c}"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{name}");
+            let r = &rows[0];
+            (
+                r.int(0).unwrap(),
+                r.text(1).unwrap().to_string(),
+                r.text(2).unwrap().to_string(),
+                r.int(3).unwrap(),
+                r.opt_text(4).unwrap().map(str::to_string),
+                r.opt_int(5).unwrap(),
+            )
+        };
+        assert_eq!(
+            read(&mut store),
+            (7, "mri".into(), "1.0.1".into(), 1, None, None),
+            "{name}: what the classification held reads as before, its notes empty"
+        );
+        // twice is once
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+        // the next classify fills them, and a migration that finds the
+        // columns there skips them and keeps what they hold
+        store
+            .batch(&format!(
+                "UPDATE {c} SET notes = '{{\"unresolved\": [\"contrast\"]}}', disagreements = 2;\n\
+                 UPDATE {meta} SET value = '84' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [85],
+            "{name}"
+        );
+        let (.., kept, count) = read(&mut store);
+        let kept: serde_json::Value = serde_json::from_str(&kept.unwrap()).unwrap();
+        assert_eq!(
+            kept,
+            serde_json::json!({"unresolved": ["contrast"]}),
+            "{name}"
+        );
+        assert_eq!(count, Some(2), "{name}");
+    }
+}
