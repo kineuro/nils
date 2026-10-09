@@ -322,3 +322,60 @@ fn without_contract_8(dir: &Path) {
         out.join("\n")
     });
 }
+
+/// Record 56 §5.5: the patch contract (`contracts/patch/`) is the format the
+/// engine reads. The version is `nils_pack::patch::FORMAT`; every operation
+/// the engine knows is on the schema, each with exactly the keys the engine
+/// reads, and the schema names no operation the engine does not.
+#[test]
+fn every_operation_and_key_the_engine_reads_is_on_the_patch_schema() {
+    let version: u64 = std::fs::read_to_string(contracts().join("patch/VERSION"))
+        .expect("contracts/patch/VERSION")
+        .trim()
+        .parse()
+        .expect("a version number");
+    assert_eq!(nils_pack::patch::FORMAT, version);
+    let text =
+        std::fs::read_to_string(contracts().join(format!("patch/v{version}/patch.schema.json")))
+            .expect("the patch schema of the published version exists");
+    let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema is JSON");
+    let top: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(top, nils_pack::patch::says(), "the patch's own keys");
+    assert_eq!(schema["additionalProperties"], false);
+    let ops = schema["$defs"]["operation"]["oneOf"].as_array().unwrap();
+    let mut named = Vec::new();
+    for op in ops {
+        let kind = op["properties"]["op"]["const"]
+            .as_str()
+            .expect("an op names its kind");
+        named.push(kind);
+        let keys: Vec<&str> = op["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut want = nils_pack::patch::reads(kind);
+        let mut got = keys.clone();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, want, "{kind}: the schema's keys are the engine's");
+        assert_eq!(op["additionalProperties"], false, "{kind}");
+        assert!(
+            op["description"].as_str().is_some_and(|d| !d.is_empty()),
+            "{kind} says what it does"
+        );
+    }
+    let mut kinds = nils_pack::patch::KINDS.to_vec();
+    kinds.sort_unstable();
+    named.sort_unstable();
+    assert_eq!(
+        named, kinds,
+        "the operations the schema names are the engine's"
+    );
+}
