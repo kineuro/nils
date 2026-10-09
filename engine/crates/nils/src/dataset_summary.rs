@@ -21,10 +21,11 @@
 //! or a tree under it, `--dataset name`, `dataset:name`, `place originals
 //! name`) or that carry its name and a date as the desk and a bring-in name
 //! them, the ones its digests ran under, the sorts that judged its stacks,
-//! the runs of the body-part and post-contrast models over its stacks, and
-//! every job queued after any of those: the next step of a chain, the
-//! pictures and the pick run after a sort. `GET /api/jobs?dataset=name`
-//! lists the same jobs, newest first.
+//! the runs of the body-part and post-contrast models over its stacks and
+//! the jobs a door queued for those steps (`for` dataset:name), and every
+//! job queued after any of those: the next step of a chain, the pictures
+//! and the pick run after a sort. `GET /api/jobs?dataset=name` lists the
+//! same jobs, newest first.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -268,6 +269,8 @@ pub(crate) fn jobs_of(
             folders.push(real);
         }
     }
+    // a step's run a door queued for it, before its run names its stacks
+    let queued_for = format!("dataset:{}", dataset.name);
     let mut jobs = newest(store, window)?;
     jobs.reverse();
     let mut out = Vec::new();
@@ -277,6 +280,7 @@ pub(crate) fn jobs_of(
         let mine = related.contains(&j.id)
             || names(&w, &dataset.name, &folders)
             || named_for(j.name.as_deref(), &dataset.name)
+            || j.args["for"].as_str() == Some(queued_for.as_str())
             || linked(j.args["chain_before"].as_i64())
             || linked(j.args["after"].as_i64())
             || linked(flag_id(&w, "--classified"))
@@ -422,6 +426,9 @@ pub(crate) fn document(
     access: &Access,
     dataset: &Place,
 ) -> Result<Value, Reply> {
+    // what a run of body part or post-contrast would be here, or why a door
+    // would refuse it
+    let plans = crate::operations::plans(registry).map_err(failed)?;
     let store = registry.store();
     let ids = crate::sources::source_ids(store, dataset).map_err(failed)?;
     let state = dataset.dataset["state"]
@@ -670,8 +677,14 @@ pub(crate) fn document(
     // body part and post-contrast, the operations of their own, over its
     // stacks
     steps.extend(
-        crate::operations::steps(store, crate::operations::Scope::Sources(&sources), stacks)
-            .map_err(failed)?,
+        crate::operations::steps(
+            store,
+            crate::operations::Scope::Sources(&sources),
+            &format!("dataset:{}", dataset.name),
+            stacks,
+            &plans,
+        )
+        .map_err(failed)?,
     );
     let open = open_of(&["pick"]);
     let picks_off = !place::picks_after_sort(&dataset.dataset);

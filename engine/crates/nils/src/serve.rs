@@ -2165,10 +2165,10 @@ fn routed(
                 Some(mut doc) => {
                     // Wave 7a, the Data page: its members' scans sorted, and
                     // body part and post-contrast over them (record 56)
-                    if let Some(id) = doc["id"].as_i64() {
+                    if let (Some(id), Some(named)) = (doc["id"].as_i64(), doc["name"].as_str()) {
+                        let named = named.to_string();
                         doc["steps"] = serde_json::Value::Array(crate::operations::of_cohort(
-                            registry.store(),
-                            id,
+                            registry, id, &named,
                         )?);
                     }
                     Ok(Reply::ok(doc))
@@ -2564,6 +2564,24 @@ fn routed(
                 &dataset,
             )?))
         }
+        // 2026-10-10: the body-part or post-contrast step of a dataset or a
+        // cohort run from its rail: its scans frozen into a handle and the
+        // step's pipeline queued over them for it (crate::operations)
+        [
+            "api",
+            kind @ ("datasets" | "cohorts"),
+            _,
+            "steps",
+            step,
+            "run",
+        ] if post => crate::operations::run_door(
+            doors,
+            registry,
+            caller,
+            kind,
+            &decoded(segs[2]),
+            &decoded(step),
+        ),
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
@@ -4632,6 +4650,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // record 55 H2: a pick run is the pick verb queued, which is
         // Pipelines work as at the jobs door
         ("POST", ["api", "picks", "run"]) => (Need::One("pipelines:work"), Plain),
+        // 2026-10-10: a step's run is a pipeline run queued, which reads
+        // pixels: Pipelines work at detail quasi, as `run` at the jobs door
+        ("POST", ["api", "datasets" | "cohorts", _, "steps", _, "run"]) => {
+            (Need::One("pipelines:work"), Quasi)
+        }
         // record 55 H2 (round 4): counts of a dataset's picks, for its card
         ("GET", ["api", "picks", "summary"]) => {
             (Need::AnyOf(&["data:see", "pipelines:see"]), Plain)
@@ -5153,6 +5176,8 @@ fn capabilities(
         "GET /api/cohorts/{name}/subjects",
         "GET /api/cohorts/{name}/subjects/{subject}/visits",
         "GET /api/datasets/{name}/summary",
+        "POST /api/datasets/{name}/steps/{step}/run",
+        "POST /api/cohorts/{name}/steps/{step}/run",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -6223,6 +6248,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading what a dataset holds",
             "Read what a dataset holds",
+        ),
+        row(
+            "POST /api/datasets/{name}/steps/{step}/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Running a dataset's step",
+            "Ran a dataset's step",
+        ),
+        row(
+            "POST /api/cohorts/{name}/steps/{step}/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Running a cohort's step",
+            "Ran a cohort's step",
         ),
         row(
             "POST /api/places",
