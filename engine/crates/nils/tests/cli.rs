@@ -5269,14 +5269,16 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         next = j["chain"]["after"].as_i64();
     }
     let kinds: Vec<&str> = ran.iter().map(|r| r.0.as_str()).collect();
+    // record 55 H2: the sort is followed by picking main scans, a pipeline
+    // step of its own that the chain did not name
     assert_eq!(
         kinds,
-        ["pseudonymize", "digest", "fingerprint", "classify"],
+        ["pseudonymize", "digest", "fingerprint", "classify", "pick"],
         "{listed}"
     );
     assert!(ran.iter().all(|r| r.1 == "done"), "{listed}");
     assert!(ran[0].2.is_none() && ran[0].3.is_some(), "{listed}");
-    assert!(ran[3].2.is_some() && ran[3].3.is_none(), "{listed}");
+    assert!(ran[4].2.is_some() && ran[4].3.is_none(), "{listed}");
     assert_eq!(first["then"].as_array().unwrap().len(), 3, "{first}");
 }
 

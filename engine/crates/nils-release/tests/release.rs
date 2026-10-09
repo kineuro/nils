@@ -337,7 +337,10 @@ fn tree_of(prefix: &str, patient: &str, day: &str) -> TempDir {
 }
 
 /// A source place on a folder, with the leaving policy it declares
-/// (record 26 section 13): the folder itself is its pseudonymised tree.
+/// (record 26 section 13): the folder itself is its pseudonymised tree,
+/// said in its dataset document, since a source place no longer defaults
+/// to one (Wave 7a reads the trees from the structure, and this library
+/// level test writes the document the structure would give).
 fn dataset(reg: &mut Registry, name: &str, path: &Path, on_release: serde_json::Value) -> i64 {
     nils_registry::place::add(
         reg.store(),
@@ -348,7 +351,10 @@ fn dataset(reg: &mut Registry, name: &str, path: &Path, on_release: serde_json::
             guarantees: serde_json::json!({}),
             probed: serde_json::json!({}),
             handling: serde_json::json!({"on_release": on_release}),
-            dataset: serde_json::Value::Null,
+            dataset: serde_json::json!({
+                "arrives": "deidentified",
+                "trees": {"originals": null, "anon": "."},
+            }),
         },
     )
     .unwrap()
