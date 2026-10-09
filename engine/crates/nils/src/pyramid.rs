@@ -576,6 +576,37 @@ fn frame_fragments(
 /// frame is handed over as a single-frame object of its own, so a codec
 /// never copies the file's other frames. The words say which syntax and
 /// never the file.
+/// The JPEG 2000 syntaxes, lossless and not.
+const JPEG_2000: [&str; 2] = ["1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.91"];
+
+/// How many times a picture of `long` pixels on its longer side may be
+/// halved and still be `at_least` long: at most three.
+fn reduction(long: u32, at_least: u32) -> u32 {
+    (1..=3u32)
+        .take_while(|r| (long >> r) >= at_least.max(1))
+        .last()
+        .unwrap_or(0)
+}
+
+/// One JPEG 2000 frame decoded `reduce` times halved: its width, height
+/// and samples as the codec adapter writes them, little endian, `bits`
+/// wide.
+fn decode_reduced(stream: &[u8], reduce: u32, bits: u16) -> Result<(u32, u32, Vec<u8>), String> {
+    let image =
+        jpeg2k::Image::from_bytes_with(stream, jpeg2k::DecodeParameters::new().reduce(reduce))
+            .map_err(|e| e.to_string())?;
+    let c = image
+        .components()
+        .first()
+        .ok_or("a JPEG 2000 frame with no component")?;
+    let per = (bits / 8) as usize;
+    let mut out = Vec::with_capacity(c.data().len() * per);
+    for v in c.data() {
+        out.extend_from_slice(&v.to_le_bytes()[..per]);
+    }
+    Ok((c.width(), c.height(), out))
+}
+
 fn decode_frame(header: &InMemDicomObject, ts: &str, stream: Vec<u8>) -> Result<Vec<u8>, String> {
     let failed = |e: &dyn std::fmt::Display| undecodable(ts, e);
     let mut obj = header.clone();
@@ -735,14 +766,18 @@ fn read_frames(
     file_index: usize,
     wanted: Option<&[u32]>,
     threads: usize,
+    reduce_to: Option<u32>,
 ) -> Result<Vec<Slice>, String> {
     // record 48: a file without the Part 10 preamble or meta group is read
     // as the digest reads it, a bare data set, so one such file does not
     // fail its stack's pyramid
     let (obj, ts) = nils_dicom::read_whole(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let obj = &obj;
-    let rows = int(obj, tags::ROWS).ok_or("no Rows")? as u32;
-    let cols = int(obj, tags::COLUMNS).ok_or("no Columns")? as u32;
+    let mut rows = int(obj, tags::ROWS).ok_or("no Rows")? as u32;
+    let mut cols = int(obj, tags::COLUMNS).ok_or("no Columns")? as u32;
+    // millimetres a pixel stands for, more than the file says where the
+    // planes were decoded at a lower resolution
+    let mut coarser = [1.0f64, 1.0];
     let bits = int(obj, tags::BITS_ALLOCATED).unwrap_or(16) as u16;
     if bits != 16 && bits != 8 {
         return Err(format!("{bits} bits allocated; the pyramid reads 8 and 16"));
@@ -785,7 +820,7 @@ fn read_frames(
             .collect::<Result<_, _>>()?,
     };
     let multiframe = count > 1;
-    let need = (rows * cols) as usize * (bits as usize / 8) * if colour { 3 } else { 1 };
+    let mut need = (rows * cols) as usize * (bits as usize / 8) * if colour { 3 } else { 1 };
     // the pixels of each wanted frame, in the order of `frames`
     let pixels: Vec<Vec<u8>> = if NATIVE.contains(&ts.as_str()) {
         let all = pixel_data.to_bytes().map_err(|e| e.to_string())?;
@@ -819,32 +854,53 @@ fn read_frames(
             .iter()
             .map(|&i| fragments[ranges[i as usize].clone()].concat())
             .collect();
-        let chunk = streams.len().div_ceil(threads.max(1)).max(1);
-        let (header, ts) = (&header, ts.as_str());
-        let decoded: Vec<Result<Vec<Vec<u8>>, String>> = std::thread::scope(|s| {
-            let handles: Vec<_> = streams
-                .chunks(chunk)
-                .map(|part| {
-                    s.spawn(move || {
-                        part.iter()
-                            .map(|stream| decode_frame(header, ts, stream.clone()))
-                            .collect()
+        // record 55 H2: a picture drawn small decodes a JPEG 2000 frame at
+        // a lower resolution, which skips the finest of its wavelet levels
+        let reduce = reduce_to
+            .filter(|_| !colour && JPEG_2000.contains(&ts.as_str()))
+            .map_or(0, |long| reduction(rows.max(cols), long));
+        if reduce > 0
+            && let Ok(small) = streams
+                .iter()
+                .map(|s| decode_reduced(s, reduce, bits))
+                .collect::<Result<Vec<_>, String>>()
+            && let Some((w, h)) = small.first().map(|(w, h, _)| (*w, *h))
+            && w > 0
+            && h > 0
+            && small.iter().all(|(a, b, _)| (*a, *b) == (w, h))
+        {
+            coarser = [rows as f64 / h as f64, cols as f64 / w as f64];
+            (rows, cols) = (h, w);
+            need = (rows * cols) as usize * (bits as usize / 8);
+            small.into_iter().map(|(_, _, p)| p).collect()
+        } else {
+            let chunk = streams.len().div_ceil(threads.max(1)).max(1);
+            let (header, ts) = (&header, ts.as_str());
+            let decoded: Vec<Result<Vec<Vec<u8>>, String>> = std::thread::scope(|s| {
+                let handles: Vec<_> = streams
+                    .chunks(chunk)
+                    .map(|part| {
+                        s.spawn(move || {
+                            part.iter()
+                                .map(|stream| decode_frame(header, ts, stream.clone()))
+                                .collect()
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join()
-                        .unwrap_or_else(|_| Err("a decoder panicked".to_string()))
-                })
-                .collect()
-        });
-        let mut out = Vec::with_capacity(frames.len());
-        for part in decoded {
-            out.extend(part?);
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("a decoder panicked".to_string()))
+                    })
+                    .collect()
+            });
+            let mut out = Vec::with_capacity(frames.len());
+            for part in decoded {
+                out.extend(part?);
+            }
+            out
         }
-        out
     };
     if let Some(short) = pixels.iter().find(|p| p.len() < need) {
         return Err(format!(
@@ -915,7 +971,8 @@ fn read_frames(
         let spacing = in_group(tags::PIXEL_MEASURES_SEQUENCE, tags::PIXEL_SPACING)
             .or_else(|| f64s(obj, tags::PIXEL_SPACING))
             .map(|v| [v[0], *v.get(1).unwrap_or(&v[0])])
-            .unwrap_or([1.0, 1.0]);
+            .map(|[r, c]| [r * coarser[0], c * coarser[1]])
+            .unwrap_or(coarser);
         // the first of these that is a distance: a spacing some files
         // write negative is its size
         let thickness = [
@@ -982,6 +1039,13 @@ pub const ORDER_FRAMES: &str = "frames";
 /// The planes of one stack's files, and of the frames each names, into one
 /// volume, in order.
 pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
+    read_stack_at(files, None)
+}
+
+/// As [`read_stack`], a JPEG 2000 plane decoded at the lowest resolution
+/// that keeps `reduce_to` pixels on its longer side, when one is named:
+/// for a picture drawn small, at a fraction of the decode.
+pub fn read_stack_at(files: &[StackFile], reduce_to: Option<u32>) -> Result<Volume, String> {
     // a compressed plane costs its decode, so the files are read a few at
     // a time, and the frames of a file a few at a time within it; the first
     // file that fails, in the files' order, is the error
@@ -1003,6 +1067,7 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
                             c * chunk + k,
                             f.frames.as_deref(),
                             within,
+                            reduce_to,
                         )?);
                     }
                     Ok(slices)
@@ -2981,12 +3046,29 @@ pub(crate) fn working_place_cached(store: &mut Store) -> Result<Place, String> {
     Ok(p)
 }
 
-/// How long a reader waits before it asks again for a picture being built.
-pub const RETRY_AFTER_SECS: u64 = 2;
+/// How long a reader waits before it asks again for a picture being built,
+/// in whole seconds for `Retry-After`; `retry_after_ms` says it finer.
+pub const RETRY_AFTER_SECS: u64 = 1;
 
-/// The build queued for a stack by the door, while it is not over, so many
-/// tiles asked at once queue one job and read one row (record 55 H2).
-static BUILDING: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, i64>>> =
+/// How long the manifest door holds a request for a pyramid being built:
+/// the reader's answer comes as the build ends, not at its next poll.
+pub const MANIFEST_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// When a reader asks again for a build that began `age` ago: soon at
+/// first, less often as it goes on (250 milliseconds, then 500, then a
+/// second).
+pub fn retry_after_ms(age: std::time::Duration) -> u64 {
+    match age.as_millis() {
+        0..2000 => 250,
+        2000..6000 => 500,
+        _ => 1000,
+    }
+}
+
+/// The build queued for a stack by the door, while it is not over, and
+/// when the door first saw it, so many tiles asked at once queue one job
+/// and read one row (record 55 H2).
+static BUILDING: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, (i64, std::time::Instant)>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
 
 /// Whether a job builds the one stack's pyramid: `pyramid build --stack N`.
@@ -3029,6 +3111,22 @@ fn failed_class(error: Option<&str>) -> Option<String> {
         .then(|| class.to_string())
 }
 
+/// Wait up to `limit` for a pyramid's manifest, where a place among the
+/// held requests is free; none when there is none, or the time ran out.
+fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<Manifest>, Reply> {
+    let Some(_slot) = crate::preview::hold() else {
+        return Ok(None);
+    };
+    let until = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        if let Some(m) = manifest_cached(root).map_err(|e| Reply::error(500, e))? {
+            return Ok(Some(m));
+        }
+    }
+    Ok(None)
+}
+
 /// Record 55 H2, round 3: a stack with no pyramid has its build queued when
 /// its picture is first asked for, and the door answers 202 with the job
 /// and when to ask again, never 404. One build is queued per stack: a build
@@ -3046,9 +3144,12 @@ fn on_demand(
     let jerr = |e: nils_registry::job::Error| Reply::error(500, e.to_string());
     // the build this process queued, or the newest one any process did
     let mut job = match building.get(&stack) {
-        Some(&id) => nils_registry::job::show(store, id).map_err(jerr)?,
+        Some(&(id, _)) => nils_registry::job::show(store, id).map_err(jerr)?,
         None => None,
     };
+    let since = building
+        .get(&stack)
+        .map_or_else(std::time::Instant::now, |(_, at)| *at);
     if job.is_none() {
         job = nils_registry::job::list(store, true, 500)
             .map_err(jerr)?
@@ -3056,6 +3157,7 @@ fn on_demand(
             .find(|j| builds_stack(j, stack));
     }
     let answer = |job: &nils_registry::job::Job| {
+        let ms = retry_after_ms(since.elapsed());
         let mut r = Reply::accepted(serde_json::json!({
             "stack": stack,
             "building": true,
@@ -3064,8 +3166,9 @@ fn on_demand(
             "progress": job.progress,
             "place": working.name,
             "retry_after": RETRY_AFTER_SECS,
+            "retry_after_ms": ms,
             "message": format!(
-                "the picture of stack {stack} is being built; ask again in {RETRY_AFTER_SECS} seconds"
+                "the picture of stack {stack} is being built; ask again in {ms} milliseconds"
             ),
         }));
         r.headers
@@ -3075,7 +3178,7 @@ fn on_demand(
     use nils_registry::job::State;
     match &job {
         Some(j) if matches!(j.state, State::Queued | State::Running | State::Cancelling) => {
-            building.insert(stack, j.id);
+            building.insert(stack, (j.id, since));
             return Ok(answer(j));
         }
         Some(j) if j.state == State::Failed => {
@@ -3135,7 +3238,7 @@ fn on_demand(
     let j = nils_registry::job::show(store, id)
         .map_err(jerr)?
         .ok_or_else(|| Reply::error(500, format!("job {id} was queued and is not there")))?;
-    building.insert(stack, id);
+    building.insert(stack, (id, std::time::Instant::now()));
     Ok(answer(&j))
 }
 
@@ -3162,22 +3265,34 @@ pub fn door(
         ));
     }
     let root = dir(Path::new(&working.path), stack);
-    let Some(m) = manifest_cached(&root).map_err(|e| Reply::error(500, e))? else {
-        // record 55 H2, round 3: a picture is built when it is first asked
-        // for, so no desk flow sends a person to the command line
-        if !matches!(
-            rest.first().copied(),
-            Some("manifest" | "tiles" | "slab" | "render" | "thumb")
-        ) {
-            return Err(Reply::error(
-                404,
-                format!(
-                    "GET /api/instances/{stack}/{} is not a door",
-                    rest.join("/")
-                ),
-            ));
+    let m = match manifest_cached(&root).map_err(|e| Reply::error(500, e))? {
+        Some(m) => m,
+        None => {
+            // record 55 H2, round 3: a picture is built when it is first
+            // asked for, so no desk flow sends a person to the command line
+            if !matches!(
+                rest.first().copied(),
+                Some("manifest" | "tiles" | "slab" | "render" | "thumb")
+            ) {
+                return Err(Reply::error(
+                    404,
+                    format!(
+                        "GET /api/instances/{stack}/{} is not a door",
+                        rest.join("/")
+                    ),
+                ));
+            }
+            let queued = on_demand(registry.store(), caller, stack, &working)?;
+            // the manifest is held while the build runs, so the reader has
+            // it as the build ends; the tiles are not, and a few at once
+            if rest != ["manifest"] || queued.status != 202 {
+                return Ok(queued);
+            }
+            match hold_for_manifest(&root, MANIFEST_HOLD)? {
+                Some(m) => m,
+                None => return Ok(queued),
+            }
         }
-        return on_demand(registry.store(), caller, stack, &working);
     };
     let held = m.annotation.burned_in && caller.access.detail < Detail::Sensitive;
     let level_of = |s: &str| -> Result<u32, Reply> {
@@ -3348,6 +3463,17 @@ pub fn door(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_drawn_small_halves_its_decode_at_most_three_times() {
+        assert_eq!(reduction(640, 256), 1);
+        assert_eq!(reduction(1024, 256), 2);
+        assert_eq!(reduction(1120, 256), 2);
+        assert_eq!(reduction(4096, 256), 3);
+        assert_eq!(reduction(512, 384), 0);
+        assert_eq!(reduction(256, 256), 0);
+        assert_eq!(reduction(640, 288), 1);
+    }
 
     fn key(index: u32, held: bool) -> RenderKey {
         RenderKey {

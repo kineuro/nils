@@ -528,6 +528,13 @@ fn doors_sweep(name: &str, dsn: Option<&str>) {
         2
     };
     let plain = 3 - annotated;
+    let previews_queued = |home: &TempDir| {
+        jobs(home)
+            .iter()
+            .filter(|j| words(j).contains("preview"))
+            .count()
+    };
+    let jobs_before = previews_queued(&b.home);
     let extra = tokens();
     let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
     let server = Server::start(&b.home, &extra);
@@ -720,11 +727,85 @@ fn doors_sweep(name: &str, dsn: Option<&str>) {
         t.elapsed().as_secs_f64() * 100.0
     );
 
-    // a stack with no preview yet is made in the request, never queued
+    // a stack with no preview yet: its first picture at once, the middle
+    // plane decoded from its one file, partial and never kept; the preview
+    // is made after on a thread of the engine, never queued
     std::fs::remove_file(preview_file(work, plain, false)).unwrap();
-    let (status, doc) = server.json(&base, REVIEWER);
-    assert_eq!(status, 200, "{doc}");
+    // the doors trust an open file for two seconds before they look again
+    let recheck = std::time::Duration::from_millis(2200);
+    std::thread::sleep(recheck);
+    let (status, headers, body) = server.get(&base, REVIEWER);
+    assert_eq!(status, 200);
+    let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["partial"], true, "{doc}");
     assert_eq!(doc["digest"], digest, "{doc}");
+    assert_eq!(doc["shape"], serde_json::json!([NZ, NY, NX]), "{doc}");
+    assert_eq!(doc["frames"]["count"], NZ, "{doc}");
+    assert_eq!(doc["frames"]["width"], NX, "{doc}");
+    assert!(
+        doc["middle"]["axial"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,/9j/"),
+        "{doc}"
+    );
+    assert_eq!(header(&headers, "cache-control"), Some("no-store"));
+    assert_eq!(header(&headers, "x-nils-partial"), Some("true"));
+    assert!(header(&headers, "etag").is_none());
+    // a short range of planes at once, a long one when the preview is made
+    let (status, _, frames) = server.get(&format!("{base}/planes?from=4&to=10"), REVIEWER);
+    assert_eq!(status, 200);
+    assert_eq!(
+        (
+            u32_at(&frames, 0),
+            u32_at(&frames, 4),
+            u32_at(&frames, 8),
+            u32_at(&frames, 12)
+        ),
+        (4, 6, NX, NY)
+    );
+    let (status, headers, _) = server.get(&format!("{base}/planes"), REVIEWER);
+    assert_eq!(status, 200);
+    assert_eq!(
+        header(&headers, "x-nils-planes"),
+        Some(NZ.to_string().as_str())
+    );
+    let mut whole = serde_json::Value::Null;
+    for _ in 0..100 {
+        let (_, doc) = server.json(&base, REVIEWER);
+        whole = doc;
+        if whole["partial"] == false {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(whole["partial"], false, "{whole}");
+    assert_eq!(whole["digest"], digest, "{whole}");
+    assert!(preview_file(work, plain, false).exists());
+    assert_eq!(previews_queued(&b.home), jobs_before, "no job was queued");
+    // burned-in annotation: the first picture holds the band too; and a
+    // page of scans with no previews has each a picture from its one file
+    for s in [plain, annotated] {
+        for h in [false, true] {
+            let _ = std::fs::remove_file(preview_file(work, s, h));
+        }
+    }
+    std::thread::sleep(recheck);
+    let (_, doc) = server.json(&held, REVIEWER);
+    assert_eq!(doc["partial"], true, "{doc}");
+    assert_eq!(doc["held"], true, "{doc}");
+    assert_eq!(doc["burned_in"], true, "{doc}");
+    let (status, doc) = server.json("/api/datasets/incoming/scans?pictures=1", REVIEWER);
+    assert_eq!(status, 200, "{doc}");
+    for s in doc["scans"].as_array().unwrap() {
+        assert!(
+            s["picture"]["data"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("data:image/jpeg;base64,")),
+            "{s}"
+        );
+        assert_eq!(s["picture"]["held"], s["stack"] == annotated, "{s}");
+    }
     let (status, doc) = server.json("/api/instances/4242/preview", REVIEWER);
     assert_eq!(status, 404, "{doc}");
     let (status, _) = server.json(&format!("{base}/nothing"), REVIEWER);
