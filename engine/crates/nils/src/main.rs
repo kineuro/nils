@@ -70,6 +70,7 @@ mod sources;
 mod starter;
 mod summary;
 mod supervise;
+mod tilepack;
 mod timeline;
 mod tui;
 mod update;
@@ -725,6 +726,23 @@ enum PyramidCommand {
         /// Build again the pyramids that are built; without it a stack that has one is skipped
         #[arg(long)]
         force: bool,
+    },
+    /// Pack pyramids built with a file per tile into one file per level, as new builds are written: a level at a time, safe to stop and run again, the doors serving throughout
+    Pack {
+        /// The stack whose pyramid is packed
+        #[arg(
+            long,
+            value_name = "ID",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
+        stack: Option<i64>,
+        /// Every pyramid under the working place
+        #[arg(long)]
+        all: bool,
+        /// The working place; the first working place when absent
+        #[arg(long, value_name = "NAME")]
+        place: Option<String>,
     },
     /// The pyramids a working place holds
     List {
@@ -4833,6 +4851,54 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
                 })
             );
             Ok(())
+        }
+        PyramidCommand::Pack { stack, all, place } => {
+            let working =
+                crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
+            drop(registry);
+            let base = std::path::Path::new(&working.path);
+            let stacks: Vec<i64> = match stack {
+                Some(s) => vec![s],
+                None if all => crate::pyramid::built(base).into_keys().collect(),
+                None => return Err(usage("--stack or --all")),
+            };
+            let (mut packed, mut already, mut levels, mut removed) = (0u64, 0u64, 0u64, 0u64);
+            let mut failed: Vec<i64> = Vec::new();
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            for s in &stacks {
+                match crate::pyramid::repack(&crate::pyramid::dir(base, *s)) {
+                    Ok(r) => {
+                        if r.levels_packed > 0 || r.files_removed > 0 {
+                            packed += 1;
+                        } else {
+                            already += 1;
+                        }
+                        levels += r.levels_packed as u64;
+                        removed += r.files_removed;
+                    }
+                    Err(why) => {
+                        // the words can name a path: said at a terminal only
+                        if terminal {
+                            eprintln!("stack {s}: not packed: {why}");
+                        }
+                        failed.push(*s);
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "place": working.name, "stacks": stacks.len(), "packed": packed,
+                    "already": already, "failed": failed.len(),
+                    "failures": failed.iter().take(20).collect::<Vec<_>>(),
+                    "levels_packed": levels, "tile_files_removed": removed,
+                })
+            );
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                Err(fail(format!("{} pyramid(s) were not packed", failed.len())))
+            }
         }
         PyramidCommand::List { place, json } => {
             let working =
