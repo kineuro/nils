@@ -6785,7 +6785,11 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
     assert_eq!(doc["ships"]["as"], "rules release", "{doc}");
     assert_eq!(doc["patch"]["cases"]["held"], true, "{doc}");
     assert!(doc["review"]["by_kind"].is_array(), "{doc}");
-    assert_eq!(doc["patch"]["applied"].as_array().unwrap().len(), 2, "{doc}");
+    assert_eq!(
+        doc["patch"]["applied"].as_array().unwrap().len(),
+        2,
+        "{doc}"
+    );
     assert!(doc["seconds"]["total"].is_number(), "{doc}");
     // nothing was written: the stacks are as they were
     let (status, explain) = server.request("GET", "/api/explain/1", None, None);
