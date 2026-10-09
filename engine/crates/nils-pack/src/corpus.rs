@@ -17,6 +17,7 @@ use crate::stack::{Stack, Value};
 use crate::yaml::{self, File};
 
 /// One expectation.
+#[derive(Debug, Clone)]
 pub struct Case {
     pub name: String,
     pub stack: Stack,
