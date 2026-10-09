@@ -10,7 +10,7 @@ anything runs, and it is a reviewable diff of the pack.
 
 | version | schema | since |
 |---|---|---|
-| 1 | [`v1/patch.schema.json`](v1/patch.schema.json) | 2026-10-09, record 56: `add_words`, `remove_words`, `move_rule`, `move_set`, `set_priority`, `add_value`, `add_rule`, `silence`, `by_model` and `map_name`, each scoped to the whole pack (a pack edit, shipped as a rules release) or to a site, a dataset or a scanner (an overlay) |
+| 1 | [`v1/patch.schema.json`](v1/patch.schema.json), [`v1/example.yml`](v1/example.yml) | 2026-10-09, record 56: `add_words`, `remove_words`, `move_rule`, `move_set`, `set_priority`, `add_value`, `add_rule`, `silence`, `by_model` and `map_name`, each scoped to the whole pack (a pack edit, shipped as a rules release) or to a site, a dataset or a scanner (an overlay) |
 
 **What the engine does with one.** It applies the operations in order to the
 pack's own documents (the manifest, an axis file, a rule set, the BIDS
