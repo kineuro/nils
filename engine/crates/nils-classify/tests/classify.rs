@@ -2190,7 +2190,12 @@ fn a_classification_over_a_sealed_stack_raises_no_review_item() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
     for lab in labs() {
         let name = lab.name;
-        let dir = flow_tree();
+        // record 56 section 2: a split is a note now, so the question the seal
+        // keeps back is a base the rules left empty on a scan that is no scout
+        let dir = some_stacks(&[
+            ("ax mystery", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]),
+            ("ax mystery two", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]),
+        ]);
         let mut reg = prepare(&lab, &dir);
         seal_all(&mut reg, true);
         let report =
@@ -2223,7 +2228,10 @@ fn a_classification_over_a_sealed_stack_raises_no_review_item() {
             &mut reg,
             "SELECT COUNT(*) FROM {review_item} WHERE status = 'open'",
         );
-        assert!(open > 0, "{name}: unsealed, the split is a question again");
+        assert!(
+            open > 0,
+            "{name}: unsealed, the missing base is a question again"
+        );
 
         // sealed again over what an older engine would have left open, with
         // one stack item a reading campaign holds
@@ -2346,20 +2354,24 @@ fn some_stacks(series: &[(&str, Elements)]) -> TempDir {
     dir
 }
 
-/// Record 55 H3, Nima's ruling of 2026-10-09: the pack decides, and a sort
-/// asks only where it is truly necessary. Over one study: a spine whose name
-/// also says the brain, decided by the pack's order (an override); a base the
-/// physics gives under the pack's threshold (a low confidence); a scan
-/// nothing weights (its base, which matters, is missing); and no body part a
-/// rule could name. The override and the weak answer are kept on the
-/// stacks and asked about nowhere, the missing base is the one question, and
-/// the body part, its image model's, is never asked about.
+/// Record 55 H3 and record 56 section 2, Nima's rulings of 2026-10-09: the
+/// pack decides, and a sort asks only where it is truly necessary. Over one
+/// study: a spine whose name also says the brain, decided by the pack's
+/// order (an override); a base the physics gives under the pack's threshold
+/// (a low confidence); a scan nothing weights (its base, which matters, is
+/// missing); a scout nothing weights either (a localizer has no base, and is
+/// silent); a scan whose name says contrast was given; and no body part or
+/// post-contrast a rule could name on most. The override and the weak answer
+/// are kept on the stacks and asked about nowhere, the missing base of the
+/// scan that is no scout is the one question, the scout's is not asked, and
+/// the body part and the post-contrast, each its own operation's, are never
+/// asked about, while what the rules state of them is kept.
 #[test]
 fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
     assert_eq!(
         nils_pack::matters::missing_asked(&pack),
-        vec!["base".to_string(), "post_contrast".to_string()],
+        vec!["base".to_string()],
         "the axes where a missing answer is asked, as the engine works them out"
     );
     for lab in labs() {
@@ -2384,6 +2396,15 @@ fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
                 ],
             ),
             ("ax mystery", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]),
+            ("localizer", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")]),
+            (
+                "ax t1 post gd",
+                &[
+                    (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                    (tags::REPETITION_TIME, VR::DS, "600"),
+                    (tags::ECHO_TIME, VR::DS, "12"),
+                ],
+            ),
         ]);
         let mut reg = prepare(&lab, &dir);
         let report =
@@ -2397,10 +2418,12 @@ fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
                 ),
             )
         };
-        let (spine, weak, mystery) = (
+        let (spine, weak, mystery, scout, given) = (
             stack_of(&mut reg, "sag t1 cervical cerebral"),
             stack_of(&mut reg, "ax se"),
             stack_of(&mut reg, "ax mystery"),
+            stack_of(&mut reg, "localizer"),
+            stack_of(&mut reg, "ax t1 post gd"),
         );
         let notes = |reg: &mut Registry, stack: i64| -> serde_json::Value {
             let r = rows(
@@ -2416,13 +2439,14 @@ fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
         };
 
         // nothing the pack decided is a question, and nothing about the body
-        // part is
+        // part or the post-contrast is
         for kind in [
             "%:conflict",
             "%:low_confidence",
             "split:%",
             "body_part:%",
             "body_region:%",
+            "post_contrast:%",
         ] {
             assert_eq!(
                 one(
@@ -2503,12 +2527,49 @@ fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
             .collect();
         assert!(unresolved.contains(&"base"), "{name}: {n}");
         assert!(unresolved.contains(&"body_part"), "{name}: {n}");
-        assert_eq!(
-            report.unresolved.get("body_part"),
-            Some(&2),
+        assert!(unresolved.contains(&"post_contrast"), "{name}: {n}");
+        assert!(
+            report.unresolved.get("body_part").copied().unwrap_or(0) >= 2,
             "{name}: {:?}",
             report.unresolved
         );
         assert_eq!(report.missing.get("body_part"), None, "{name}");
+        assert_eq!(report.missing.get("post_contrast"), None, "{name}");
+
+        // the scout: a localizer, silent, its empty base noted and not asked
+        let directory_type = rows(
+            &mut reg,
+            &format!(
+                "SELECT value FROM {{classification_axis}} WHERE axis = 'directory_type' AND stack_id = {scout}"
+            ),
+        );
+        assert_eq!(
+            directory_type[0].opt_text(0).unwrap(),
+            Some("localizer"),
+            "{name}"
+        );
+        assert!(!members.contains(&scout), "{name}: the scout is not asked");
+        let n = notes(&mut reg, scout);
+        assert!(
+            n["unresolved"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "base"),
+            "{name}: {n}"
+        );
+        assert_eq!(
+            report.silent, 1,
+            "{name}: the scout is the one silent stack"
+        );
+
+        // the post-contrast the rules state is kept as they state it
+        let stated = rows(
+            &mut reg,
+            &format!(
+                "SELECT value FROM {{classification_axis}} WHERE axis = 'post_contrast' AND stack_id = {given}"
+            ),
+        );
+        assert_eq!(stated[0].opt_text(0).unwrap(), Some("1"), "{name}: given");
     }
 }
