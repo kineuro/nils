@@ -550,9 +550,9 @@ pub struct Written {
     /// no second echo time. Not counted in the created.
     #[serde(default)]
     pub echo_stacks_folded: u64,
-    /// Groups of such stacks left as they were, because a person or a
-    /// release named one of the stacks that would go, or one file is in
-    /// two of them.
+    /// Groups of such stacks left as they were, because what a person or a
+    /// release did holds one of them (`nils_registry::fold`), or one file is
+    /// in two of them.
     #[serde(default)]
     pub echo_groups_kept: u64,
 }

@@ -97,6 +97,8 @@ fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
         "decision",
         "stack",
         "diagnostic",
+        "instance",
+        "series",
     ] {
         text = text.replace(&format!("{{{t}}}"), &reg.store().qualified(t));
     }
@@ -1259,6 +1261,123 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// The ruling of 2026-10-09 for the fold: the stack a fold keeps is judged
+/// anew. A registry holding the flow study as the split left it, one stack
+/// per frame, and sorted so, folds on a re-read of one of its files; the
+/// next sort judges the one stack that stays with all six frames, and notes
+/// no split on it.
+#[test]
+fn a_stack_a_fold_keeps_is_judged_anew_by_the_next_sort() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_tree();
+        let mut reg = prepare(&lab, &dir);
+        // the flow study as the split left it: a stack per frame
+        let first = one(
+            &mut reg,
+            "SELECT s.id FROM {stack} s JOIN {series} se ON se.id = s.series_id \
+             WHERE se.series_instance_uid = 'A.3'",
+        );
+        for echo in 2..=6 {
+            rows(
+                &mut reg,
+                &format!(
+                    "INSERT INTO {{stack}} (series_id, stack_index, stack_key, modality, \
+                     orientation, image_type, echo_numbers, echo_time, repetition_time, \
+                     orientation_confidence, n_instances, first_batch_id) \
+                     SELECT series_id, {index}, '{echo:016x}', modality, orientation, image_type, \
+                     '{echo}', echo_time, repetition_time, orientation_confidence, 1, first_batch_id \
+                     FROM {{stack}} WHERE id = {first}",
+                    index = 100 + echo
+                ),
+            );
+            rows(
+                &mut reg,
+                &format!(
+                    "UPDATE {{instance}} SET stack_id = \
+                     (SELECT id FROM {{stack}} WHERE stack_key = '{echo:016x}') \
+                     WHERE sop_instance_uid = 'A.3.{echo}.1'"
+                ),
+            );
+        }
+        rows(
+            &mut reg,
+            &format!("UPDATE {{stack}} SET n_instances = 1 WHERE id = {first}"),
+        );
+        rows(
+            &mut reg,
+            "UPDATE {series} SET n_stacks = 6 WHERE series_instance_uid = 'A.3'",
+        );
+        let sort = |reg: &mut Registry| {
+            nils_classify::run(reg, &nils_classify::Settings::default(), &Cancel::new()).unwrap();
+            nils_classify::classify::classify(reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap()
+        };
+        // sorted so, the six one-image stacks of the flow study carry the
+        // split note beside the six of the first series
+        assert_eq!(sort(&mut reg).split_notes, 12, "{name}");
+
+        // a re-read of one file of each series folds the flow study
+        let mut s = nils_digest::Settings::new(dir.path());
+        s.name = "t".into();
+        s.workers = 2;
+        s.walk_threads = 2;
+        s.reread_every = true;
+        s.reread_one = true;
+        let read = digest(&s, &mut reg).unwrap();
+        assert_eq!(read.written.unwrap().echo_stacks_folded, 5, "{name}");
+        // nothing the sort said of the stacks of the study is left
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT COUNT(*) FROM {{classification}} WHERE stack_id = {first}")
+            ),
+            0,
+            "{name}"
+        );
+
+        // and the next sort judges the stack that stays anew, with all its
+        // frames, and notes no split on it
+        assert_eq!(sort(&mut reg).split_notes, 6, "{name}");
+        let fingerprint = rows(
+            &mut reg,
+            &format!(
+                "SELECT n_instances, stacks_in_series FROM {{stack_fingerprint}} \
+                 WHERE stack_id = {first}"
+            ),
+        );
+        assert_eq!(
+            (
+                fingerprint[0].int(0).unwrap(),
+                fingerprint[0].int(1).unwrap()
+            ),
+            (6, 1),
+            "{name}"
+        );
+        let notes = rows(
+            &mut reg,
+            &format!("SELECT CAST(notes AS TEXT) FROM {{classification}} WHERE stack_id = {first}"),
+        );
+        assert_eq!(notes.len(), 1, "{name}");
+        let notes: serde_json::Value = notes[0]
+            .opt_text(0)
+            .unwrap()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(serde_json::Value::Null);
+        assert!(notes["split"].is_null(), "{name}: {notes}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification} c WHERE NOT EXISTS \
+                 (SELECT 1 FROM {stack} s WHERE s.id = c.stack_id)"
             ),
             0,
             "{name}"

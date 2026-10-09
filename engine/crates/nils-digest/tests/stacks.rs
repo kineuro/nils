@@ -987,6 +987,121 @@ fn the_dry_run_counts_what_only_the_echo_number_split_as_one_stack() {
     assert!(report.written.is_none());
 }
 
+/// When the rows a test writes by hand were made.
+const NOW: &str = "2026-10-09T12:00:00Z";
+
+/// A statement with `{table}` placeholders for the qualified table names.
+fn exec(reg: &mut nils_registry::Registry, sql: &str) {
+    let sql = rows_sql(reg, sql);
+    reg.store()
+        .execute(&sql, &[])
+        .unwrap_or_else(|e| panic!("{e}: {sql}"));
+}
+
+/// An insert with `{table}` placeholders, answering the new row's id.
+fn insert(reg: &mut nils_registry::Registry, sql: &str) -> i64 {
+    one(reg, &format!("{sql} RETURNING id"))
+}
+
+/// A re-read of one file of every MR series the registry holds.
+fn reread(dir: &TempDir) -> nils_digest::Settings {
+    let mut s = settings(dir);
+    s.reread_every = true;
+    s.reread_one = true;
+    s
+}
+
+/// A digested cine of [`cine`] put back as the rule before the fold left
+/// it: the first frame's stack, which the digest kept, and one for each
+/// other frame, keyed as no file keys it. Answers the frames' stacks, the
+/// first frame's first.
+fn old_shape(reg: &mut nils_registry::Registry, frames: u32) -> Vec<i64> {
+    let first = one(
+        reg,
+        &format!("SELECT id FROM {{stack}} WHERE n_instances = {frames} AND echo_numbers = '1'"),
+    );
+    let mut out = vec![first];
+    for n in 2..=frames {
+        let te = if n <= 2 { "11.6" } else { "0" };
+        let id = insert(
+            reg,
+            &format!(
+                "INSERT INTO {{stack}} (series_id, stack_index, stack_key, modality, orientation, \
+                 image_orientation_patient, image_type, echo_numbers, echo_time, \
+                 repetition_time, flip_angle, orientation_confidence, n_instances, first_batch_id) \
+                 SELECT series_id, {index}, '{n:016x}', modality, orientation, \
+                 image_orientation_patient, image_type, '{n}', {te}, \
+                 repetition_time, flip_angle, orientation_confidence, 1, first_batch_id \
+                 FROM {{stack}} WHERE id = {first}",
+                index = 100 + n
+            ),
+        );
+        exec(
+            reg,
+            &format!("UPDATE {{instance}} SET stack_id = {id} WHERE sop_instance_uid = 'C.1.{n}'"),
+        );
+        out.push(id);
+    }
+    exec(
+        reg,
+        &format!("UPDATE {{stack}} SET n_instances = 1 WHERE id = {first}"),
+    );
+    exec(
+        reg,
+        &format!("UPDATE {{series}} SET n_stacks = {}", frames + 1),
+    );
+    counts_add_up(reg, "the old shape");
+    out
+}
+
+/// A grouped question of `kind` and `status` over `stacks`.
+fn grouped(reg: &mut nils_registry::Registry, kind: &str, status: &str, stacks: &[i64]) -> i64 {
+    let item = insert(
+        reg,
+        &format!(
+            "INSERT INTO {{review_item}} (kind, scope, status, created_at, members) \
+             VALUES ('{kind}', 'group', '{status}', '{NOW}', {})",
+            stacks.len()
+        ),
+    );
+    for s in stacks {
+        exec(
+            reg,
+            &format!("INSERT INTO {{review_member}} (item_id, stack_id) VALUES ({item}, {s})"),
+        );
+    }
+    item
+}
+
+/// A stack's own question of `kind` and `status`, answered by `decision`.
+fn question(
+    reg: &mut nils_registry::Registry,
+    kind: &str,
+    status: &str,
+    stack: i64,
+    decision: Option<i64>,
+) -> i64 {
+    insert(
+        reg,
+        &format!(
+            "INSERT INTO {{review_item}} (kind, scope, ref, status, created_at, decision_id) \
+             VALUES ('{kind}', 'stack', '{{\"stack_id\": {stack}}}', '{status}', '{NOW}', {})",
+            decision.map_or("NULL".to_string(), |d| d.to_string())
+        ),
+    )
+}
+
+/// A decision on a stack's axis, by an author of `kind`.
+fn decision(reg: &mut nils_registry::Registry, stack: i64, kind: &str) -> i64 {
+    insert(
+        reg,
+        &format!(
+            "INSERT INTO {{decision}} (scope, ref, axis, value, actor, author_kind, decided_at) \
+             VALUES ('stack', '{stack}', 'base', 'PC', 'tester', '{kind}', '{NOW}')"
+        ),
+    )
+}
+
 /// A registry digested before the rule holds a cine as one stack per frame.
 /// Every value the rule reads is on the stack rows, so a run that reads one
 /// file of each series again folds them; until then, and while a person's
@@ -1000,45 +1115,7 @@ fn a_registry_digested_before_takes_the_fold_from_a_re_read_of_its_series() {
         let mut reg = lab.open();
         digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
 
-        // the registry as the rule before it left the series: the frames
-        // other than the first in stacks of their own
-        let frames = one(
-            &mut reg,
-            "SELECT id FROM {stack} WHERE n_instances = 8 AND echo_numbers = '1'",
-        );
-        for n in 2..=8 {
-            let te = if n <= 2 { "11.6" } else { "0" };
-            let sql = rows_sql(
-                &mut reg,
-                &format!(
-                    "INSERT INTO {{stack}} (series_id, stack_index, stack_key, modality, orientation, \
-                     image_orientation_patient, image_type, echo_numbers, echo_time, \
-                     repetition_time, flip_angle, orientation_confidence, n_instances, first_batch_id) \
-                     SELECT series_id, {index}, '{n:016x}', modality, orientation, \
-                     image_orientation_patient, image_type, '{n}', {te}, \
-                     repetition_time, flip_angle, orientation_confidence, 1, first_batch_id \
-                     FROM {{stack}} WHERE id = {frames}",
-                    index = 100 + n
-                ),
-            );
-            reg.store().execute(&sql, &[]).unwrap();
-            let sql = rows_sql(
-                &mut reg,
-                &format!(
-                    "UPDATE {{instance}} SET stack_id = \
-                     (SELECT id FROM {{stack}} WHERE stack_key = '{n:016x}') \
-                     WHERE sop_instance_uid = 'C.1.{n}'"
-                ),
-            );
-            reg.store().execute(&sql, &[]).unwrap();
-        }
-        for sql in [
-            format!("UPDATE {{stack}} SET n_instances = 1 WHERE id = {frames}"),
-            "UPDATE {series} SET n_stacks = 9".to_string(),
-        ] {
-            let sql = rows_sql(&mut reg, &sql);
-            reg.store().execute(&sql, &[]).unwrap();
-        }
+        let frames = old_shape(&mut reg, 8);
         counts_add_up(&mut reg, name);
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 9, "{name}");
 
@@ -1049,25 +1126,15 @@ fn a_registry_digested_before_takes_the_fold_from_a_re_read_of_its_series() {
 
         // a person decided something of the fifth frame's stack: a re-read
         // of one file of the series keeps the group as it is
-        let fifth = one(
-            &mut reg,
-            &format!("SELECT id FROM {{stack}} WHERE stack_key = '{:016x}'", 5),
-        );
-        let sql = rows_sql(
+        let fifth = frames[4];
+        exec(
             &mut reg,
             &format!(
-                "INSERT INTO decision (scope, ref, axis, value, actor, author_kind, decided_at) \
-                 VALUES ('stack', '{fifth}', 'base', 'PC', 'tester', 'person', '2026-10-09T12:00:00Z')"
+                "INSERT INTO {{decision}} (scope, ref, axis, value, actor, author_kind, decided_at) \
+                 VALUES ('stack', '{fifth}', 'base', 'PC', 'tester', 'person', '{NOW}')"
             ),
-        )
-        .replace(
-            "INTO decision",
-            &format!("INTO {}", reg.store().qualified("decision")),
         );
-        reg.store().execute(&sql, &[]).unwrap();
-        let mut again = settings(&dir);
-        again.reread_every = true;
-        again.reread_one = true;
+        let again = reread(&dir);
         let report = digest(&again, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(report.parsed, 1, "{name}");
         let w = report.written.unwrap();
@@ -1077,11 +1144,10 @@ fn a_registry_digested_before_takes_the_fold_from_a_re_read_of_its_series() {
         counts_add_up(&mut reg, name);
 
         // without it, the same re-read folds the frames into one stack
-        let sql = format!(
-            "DELETE FROM {} WHERE ref = '{fifth}'",
-            reg.store().qualified("decision")
+        exec(
+            &mut reg,
+            &format!("DELETE FROM {{decision}} WHERE ref = '{fifth}'"),
         );
-        reg.store().execute(&sql, &[]).unwrap();
         let report = digest(&again, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         let w = report.written.unwrap();
         assert_eq!((w.echo_stacks_folded, w.echo_groups_kept), (7, 0), "{name}");
@@ -1096,9 +1162,323 @@ fn a_registry_digested_before_takes_the_fold_from_a_re_read_of_its_series() {
         assert_eq!(
             one(
                 &mut reg,
-                &format!("SELECT COUNT(*) FROM {{stack}} WHERE id = {frames} AND n_instances = 8")
+                &format!(
+                    "SELECT COUNT(*) FROM {{stack}} WHERE id = {} AND n_instances = 8",
+                    frames[0]
+                )
             ),
             1,
+            "{name}"
+        );
+    }
+}
+
+/// The rows the machine made do not hold a group (the ruling of 2026-10-09
+/// for the fold): questions no person answered, grouped or a stack's own,
+/// open or superseded, go with the stacks that go, a grouped one keeping its
+/// other members; and what the sort said of the stack that stays goes too,
+/// so the next sort judges it anew.
+#[test]
+fn a_group_held_only_by_questions_no_person_answered_is_folded() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-unanswered");
+        cine(&dir, "C", "C.1", 8);
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let frames = old_shape(&mut reg, 8);
+        let scout = one(
+            &mut reg,
+            "SELECT id FROM {stack} WHERE orientation = 'Coronal'",
+        );
+        // the split asked about every frame; a superseded question over the
+        // frames and the scout; a frame's own open question
+        let split = grouped(&mut reg, "split:one_image_per_stack", "open", &frames);
+        let mut wider = frames.clone();
+        wider.push(scout);
+        let missing = grouped(&mut reg, "post_contrast:missing", "superseded", &wider);
+        question(&mut reg, "base:missing", "open", frames[2], None);
+        // what the sort said of the first frame's stack and of another
+        for s in [frames[0], frames[3]] {
+            exec(
+                &mut reg,
+                &format!(
+                    "INSERT INTO {{classification}} (stack_id, pack, pack_version, contract, \
+                     job_id, epoch, review_items) VALUES ({s}, 'mri', '1', '1', 0, 0, 0)"
+                ),
+            );
+        }
+
+        let report = digest(&reread(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.unwrap();
+        assert_eq!((w.echo_stacks_folded, w.echo_groups_kept), (7, 0), "{name}");
+        assert_eq!(
+            stacks_by_series(&mut reg),
+            [("C.1".to_string(), 8), ("C.1".to_string(), 1)],
+            "{name}"
+        );
+        counts_add_up(&mut reg, name);
+        // the split's question held only the frames, and is gone; the
+        // superseded one keeps the scout
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT COUNT(*) FROM {{review_item}} WHERE id = {split}")
+            ),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            ints(
+                &mut reg,
+                &format!("SELECT stack_id FROM {{review_member}} WHERE item_id = {missing}")
+            ),
+            [scout],
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT members FROM {{review_item}} WHERE id = {missing}")
+            ),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:missing'"
+            ),
+            0,
+            "{name}"
+        );
+        // the stack that stays is the first frame's, and nothing the sort
+        // said of it is left: the next sort judges it anew
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT n_instances FROM {{stack}} WHERE id = {}", frames[0])
+            ),
+            8,
+            "{name}"
+        );
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {classification}"),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// What a person did holds the group as it is: a question about a stack
+/// that would go that a person answered, and a seal, on a stack that would
+/// go or on the one that would stay (a sealed sample is not changed by a
+/// fold). An answer a model gave and no person put in force holds nothing,
+/// and goes with its question.
+#[test]
+fn a_group_a_person_answered_about_or_a_seal_holds_stays_as_it_was() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-held");
+        cine(&dir, "C", "C.1", 8);
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let frames = old_shape(&mut reg, 8);
+        let kept = |reg: &mut nils_registry::Registry, why: &str| {
+            let report = digest(&reread(&dir), reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let w = report.written.unwrap();
+            assert_eq!(
+                (w.echo_stacks_folded, w.echo_groups_kept),
+                (0, 1),
+                "{name}: {why}"
+            );
+            assert_eq!(one(reg, "SELECT COUNT(*) FROM {stack}"), 9, "{name}: {why}");
+        };
+
+        // a person answered a question about the fifth frame's stack
+        let answer = decision(&mut reg, frames[4], "person");
+        let item = question(
+            &mut reg,
+            "base:low_confidence",
+            "accepted",
+            frames[4],
+            Some(answer),
+        );
+        kept(&mut reg, "a person's answer");
+
+        // the same answer a model's, staged and never put in force
+        exec(
+            &mut reg,
+            &format!("UPDATE {{decision}} SET author_kind = 'model' WHERE id = {answer}"),
+        );
+        exec(
+            &mut reg,
+            &format!("UPDATE {{review_item}} SET status = 'staged' WHERE id = {item}"),
+        );
+        // a seal on the stack that would stay, then on one that would go
+        let subject = one(&mut reg, "SELECT subject_id FROM {series}");
+        exec(
+            &mut reg,
+            &format!(
+                "INSERT INTO {{sealed_stack}} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                 VALUES ('sample-1', {}, {subject}, 'tester', '{NOW}')",
+                frames[0]
+            ),
+        );
+        kept(&mut reg, "a seal on the stack that stays");
+        exec(
+            &mut reg,
+            &format!("UPDATE {{sealed_stack}} SET stack_id = {}", frames[5]),
+        );
+        kept(&mut reg, "a seal on a stack that goes");
+
+        // nothing a person did is left: the group folds, and the model's
+        // answer goes with its question
+        exec(&mut reg, "DELETE FROM {sealed_stack}");
+        let report = digest(&reread(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.unwrap();
+        assert_eq!((w.echo_stacks_folded, w.echo_groups_kept), (7, 0), "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT COUNT(*) FROM {{review_item}} WHERE id = {item}")
+            ),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT COUNT(*) FROM {{decision}} WHERE id = {answer}")
+            ),
+            0,
+            "{name}"
+        );
+        counts_add_up(&mut reg, name);
+    }
+}
+
+/// What a model made of the stacks goes with them: the score tables a run of
+/// an operation's model wrote (its pipeline proposes values for an axis),
+/// the scores read from them, its staged answer over the frames and the
+/// decision that answers it. The stack that stays keeps none of it, so the
+/// operation reads as not run for it. A pipeline's own derivative holds the
+/// group.
+#[test]
+fn model_outputs_go_with_the_group_and_a_pipeline_s_own_derivative_holds_it() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-model");
+        cine(&dir, "C", "C.1", 8);
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let frames = old_shape(&mut reg, 8);
+        let place = insert(
+            &mut reg,
+            &format!(
+                "INSERT INTO {{place}} (name, role, path, guarantees, created_at) \
+                 VALUES ('work', 'working', '/nowhere', '{{}}', '{NOW}')"
+            ),
+        );
+        let pipeline = |reg: &mut nils_registry::Registry, pipe: &str, descriptor: &str| {
+            let id = insert(
+                reg,
+                &format!(
+                    "INSERT INTO {{pipeline}} (name, version, tool_version, descriptor, \
+                     descriptor_digest, image, image_digest, layout, level, state, added_by, added_at) \
+                     VALUES ('{pipe}', '1', '1', '{descriptor}', 'sha256:{pipe}', 'img', \
+                     'sha256:img', 'stack', 'stack', 'active', 'tester', '{NOW}')"
+                ),
+            );
+            let run = insert(
+                reg,
+                &format!(
+                    "INSERT INTO {{pipeline_run}} (pipeline_id, params, runtime, runtime_version, \
+                     host, device, model_ids, status, started_at, principal) \
+                     VALUES ({id}, '{{}}', 'podman', '1', 'h', 'cpu', '[]', 'done', '{NOW}', 'tester')"
+                ),
+            );
+            (id, run)
+        };
+        let (model, model_run) = pipeline(
+            &mut reg,
+            "bodypart-infer",
+            r#"{"x-nils": {"proposals": [{"axis": "body_part"}]}}"#,
+        );
+        let (_, seg_run) = pipeline(&mut reg, "seg", "{}");
+        let derivative = |reg: &mut nils_registry::Registry, stack: i64, kind: &str, run: i64| {
+            insert(
+                reg,
+                &format!(
+                    "INSERT INTO {{derivative}} (kind, scope, stack_id, place_id, path, bytes, \
+                     sha256, media_type, run_id, created_at) VALUES ('{kind}', 'stack', {stack}, \
+                     {place}, 'd/{stack}-{kind}', 1, 'x', 'text/csv', {run}, '{NOW}')"
+                ),
+            )
+        };
+        for s in &frames {
+            let table = derivative(&mut reg, *s, "table", model_run);
+            exec(
+                &mut reg,
+                &format!(
+                    "INSERT INTO {{measure}} (run_id, pipeline_id, pipeline, derivative_id, source, \
+                     scope, stack_id, unit_id, name, type, number, created_at) VALUES ({model_run}, \
+                     {model}, 'bodypart-infer', {table}, 'scores', 'stack', {s}, 0, 'fine_brain', \
+                     'number', 0.9, '{NOW}')"
+                ),
+            );
+        }
+        let staged = grouped(&mut reg, "body_part:model", "staged", &frames);
+        let answer = insert(
+            &mut reg,
+            &format!(
+                "INSERT INTO {{decision}} (scope, ref, axis, value, actor, author_kind, decided_at, \
+                 staged_at) VALUES ('group', '{staged}', 'body_part', 'head', 'bodypart-infer', \
+                 'model', '{NOW}', '{NOW}')"
+            ),
+        );
+        exec(
+            &mut reg,
+            &format!("UPDATE {{review_item}} SET decision_id = {answer} WHERE id = {staged}"),
+        );
+        // a pipeline's own output on the seventh frame holds the group
+        let own = derivative(&mut reg, frames[6], "output", seg_run);
+        let report = digest(&reread(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.unwrap();
+        assert_eq!((w.echo_stacks_folded, w.echo_groups_kept), (0, 1), "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 9, "{name}");
+
+        // without it the group folds, and what the model made goes with it
+        exec(
+            &mut reg,
+            &format!("DELETE FROM {{derivative}} WHERE id = {own}"),
+        );
+        let report = digest(&reread(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.unwrap();
+        assert_eq!((w.echo_stacks_folded, w.echo_groups_kept), (7, 0), "{name}");
+        counts_add_up(&mut reg, name);
+        for (what, sql) in [
+            ("tables", "SELECT COUNT(*) FROM {derivative}"),
+            ("scores", "SELECT COUNT(*) FROM {measure}"),
+            (
+                "staged answers",
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'body_part:model'",
+            ),
+            ("places in them", "SELECT COUNT(*) FROM {review_member}"),
+            (
+                "a model's decisions",
+                "SELECT COUNT(*) FROM {decision} WHERE author_kind = 'model'",
+            ),
+        ] {
+            assert_eq!(one(&mut reg, sql), 0, "{name}: {what}");
+        }
+        // the stack that stays reads as not answered by the model
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT n_instances FROM {{stack}} WHERE id = {}", frames[0])
+            ),
+            8,
             "{name}"
         );
     }

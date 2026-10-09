@@ -23,11 +23,15 @@
 //! then the one of the smallest echo number, which for a cine is its first
 //! frame: its row is the one the series is described by. It takes the
 //! others' instances and frame rows, their count and the first index any of
-//! them had. What was derived from the others alone goes with them, and the
-//! fingerprints of the series are marked for the next run to derive again,
-//! since they count the series' stacks. A group one of whose stacks a person
-//! or a release named stays as it is, as an empty stack does
-//! ([`nils_registry::empty`]), and so does a group one file reaches twice.
+//! them had. What the machine made of the group's stacks goes: the questions
+//! no person answered, the answers no person put in force, what a model made
+//! of them, and what the sort said of them, so the next sort judges the
+//! stack that stays anew ([`nils_registry::fold`]); the fingerprints of the
+//! series are marked for the next run to derive again, since they count the
+//! series' stacks. A group held by what a person or a release did (a
+//! person's decision or answer, a pick, a seal, a campaign, a release, a
+//! pipeline's own derivative or measure) stays as it is, and so does a group
+//! one file reaches twice.
 //!
 //! The rule reads the stack rows, not the files, which is what lets a
 //! registry digested before it take it: a run that reads one file of a
@@ -37,7 +41,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nils_dicom::catalogue::fields_of;
 use nils_dicom::{Converter, Level, Value};
-use nils_registry::empty::{kept_stacks, remove_stacks};
+use nils_registry::empty::remove_stacks;
 use nils_registry::schema::{Column, table};
 use nils_registry::store::{Cell, Error, Store};
 
@@ -46,6 +50,8 @@ use crate::stack::{Class, Echo, one_echo};
 /// What a fold did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Folded {
+    /// Groups folded into one stack.
+    pub groups: u64,
     /// Stacks that held instances and were folded into another of their
     /// series.
     pub stacks: u64,
@@ -153,14 +159,14 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
         g.sort_by(|a, b| a.rank().cmp(&b.rank()));
     }
 
-    // what keeps a group as it is: a stack of it that would go and that
-    // someone named, or one file in two of its stacks
-    let mut others: Vec<i64> = plans
+    // what keeps a group as it is: what a person or a release did to one of
+    // its stacks, or one file in two of them
+    let others: Vec<i64> = plans
         .iter()
         .flat_map(|g| g[1..].iter().map(|m| m.id))
         .collect();
-    others.sort_unstable();
-    let (kept, items) = kept_stacks(store, &others)?;
+    let stays: Vec<i64> = plans.iter().map(|g| g[0].id).collect();
+    let held = nils_registry::fold::holds(store, &others, &stays)?;
     let twice = reached_twice(store, &plans)?;
 
     let mut moves: Vec<(i64, i64)> = Vec::new();
@@ -168,9 +174,10 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
     let mut indexes: Vec<(i64, i64)> = Vec::new();
     let mut fewer: BTreeMap<i64, i64> = BTreeMap::new();
     let mut gone: Vec<i64> = Vec::new();
+    let mut cleared: Vec<i64> = Vec::new();
     for (n, g) in plans.iter().enumerate() {
         let (stays, rest) = (&g[0], &g[1..]);
-        if let Some(why) = rest.iter().find_map(|m| kept.get(&m.id).copied()) {
+        if let Some(why) = g.iter().find_map(|m| held.get(&m.id).copied()) {
             out.kept.push((stays.series, why));
             continue;
         }
@@ -187,6 +194,8 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
         }
         *fewer.entry(stays.series).or_default() += rest.len() as i64;
         gone.extend(rest.iter().map(|m| m.id));
+        cleared.extend(g.iter().map(|m| m.id));
+        out.groups += 1;
         out.stacks += rest.iter().filter(|m| m.n_instances > 0).count() as u64;
         out.created += rest.iter().filter(|m| m.batch == batch).count() as u64;
     }
@@ -194,6 +203,7 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
         return Ok(out);
     }
     gone.sort_unstable();
+    nils_registry::fold::clear(store, &cleared)?;
     store.update_from_values(table("instance"), "stack_id = v.val", "stack_id", &moves)?;
     store.update_from_values(
         table("instance_frame"),
@@ -207,7 +217,7 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
         "id",
         &counts,
     )?;
-    remove_stacks(store, &gone, &items)?;
+    remove_stacks(store, &gone, &[])?;
     // the first index of the group is free now that its stack is gone
     store.update_from_values(table("stack"), "stack_index = v.val", "id", &indexes)?;
     let fewer: Vec<(i64, i64)> = fewer.into_iter().collect();

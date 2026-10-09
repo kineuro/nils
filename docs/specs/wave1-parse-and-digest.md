@@ -1094,17 +1094,30 @@ Settled while joining what only the echo number split (wave 7a, 2026-10-09):
   then the one of the smallest echo number, then the smaller key: for the cine,
   the stack of its first frame, whose row says the echo time the series states.
   It keeps its key and takes the other stacks' instances, frame rows and counts,
-  and the first index any of them had. What was derived from the others alone
-  (fingerprint, classification, the open review items on them) goes with them,
-  and every fingerprint of the series is marked to be derived again, since it
-  counts the series' stacks. A run that reads one of the other files again
-  makes that file's own stack once more and joins it at its end; such a stack
-  is counted neither as created nor as folded.
-- **What stays as it was:** a group where a stack that would go is named by a
-  decision, a pick, a seal, a campaign, a grouped review item, a release, a
-  derivative, a measure or a review item someone answered, by the rules that
-  keep an empty stack (`nils_registry::empty`), and a group one file reaches
-  through two of its stacks. The run reports both, as `echo_groups_kept`.
+  and the first index any of them had. A run that reads one of the other files
+  again makes that file's own stack once more and joins it at its end; such a
+  stack is counted neither as created nor as folded.
+- **What the machine made goes with the group** (`nils_registry::fold`, the
+  ruling of 2026-10-09 for the fold; the empty-stack sweep keeps its own
+  rules): on every stack of it, the one that stays included, a question no
+  person answered (open, superseded, or answered by a model or an agent and
+  never put in force by a person), a decision of a model's or an agent's no
+  person put in force, and what a model made of the stack (a derivative that
+  names a model, an embedding, what a run of a model wrote, a run that names
+  models or of a pipeline that proposes values for an axis, and the measures
+  read from them). What the sort said of the stack that stays goes too, so
+  the next sort judges it anew and asks again, and an operation whose model
+  answered it (body part, post-contrast) reads as not run for it. A grouped
+  question keeps its other members. Every fingerprint of the series is marked
+  to be derived again, since it counts the series' stacks.
+- **What holds the group as it is:** what a person or a release did. On a
+  stack that would go: a person's decision (one a person wrote or put in
+  force), a question a person answered, a pick, a seal, a campaign, a release,
+  a pipeline's own derivative or measure. On the one that would stay, what
+  fixed or was made of what it holds: a seal (a sealed sample is not changed by
+  a fold), a campaign, a release, a pipeline's own derivative or measure. And
+  one file reaching two of its stacks. The run reports such groups as
+  `echo_groups_kept`.
 - **The dry run counts the same:** each `(series, key)` pair carries its echo,
   and the pairs the rule joins count once.
 - **The frames' order.** A stack is a set of files; the viewer puts its planes
@@ -1116,14 +1129,12 @@ Settled while joining what only the echo number split (wave 7a, 2026-10-09):
   The rule reads the stack rows, not the files, and every value it needs is on
   them, so a run that reads one file of each series again joins the whole
   series: `nils digest <root> --reread-every --reread-one`, or `--reread
-  <manufacturer> --reread-one` for the vendors above. No migration does it: a
-  migration would change stacks people may have acted on without a run that
-  reports which groups it left, and a re-read reports them. In the registries
-  this was measured on, every such group is held: by the grouped questions an
-  earlier sort raised about the very split, by the body-part model's tables and
-  scores, and a few by a seal or a campaign. Which of those may go with a stack
-  the rule joins is a ruling still to make; until then a fresh registry is the
-  one that takes the rule whole.
+  <manufacturer> --reread-one` for the vendors above, then a fingerprint and a
+  sort. No migration does it: a migration would change stacks people may have
+  acted on without a run that reports which groups it left, and a re-read
+  reports them. Measured on the development registry, all 9 groups join (279
+  stacks); on the archive's, 113 of 138 groups join (323 stacks) and 25 stay as
+  they are, 24 held by a seal and 1 by a campaign.
 - **Left as they were, on purpose:** splits on the repetition time alone (in
   the archive five series and 48 stacks with disjoint positions, among them one
   of 30 one-image stacks; no file of them writes a trigger, and two are one

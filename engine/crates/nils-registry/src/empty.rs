@@ -111,16 +111,21 @@ impl Swept {
     }
 }
 
-fn ids_of(store: &mut Store, sql: &str, params: &[Param]) -> Result<Vec<i64>, Error> {
+pub(crate) fn ids_of(store: &mut Store, sql: &str, params: &[Param]) -> Result<Vec<i64>, Error> {
     store.query(sql, params)?.iter().map(|r| r.int(0)).collect()
 }
 
-fn list(ids: &[i64]) -> String {
+pub(crate) fn list(ids: &[i64]) -> String {
     ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
 }
 
 /// The ids among `ids` that `column` of `t` names.
-fn named_in(store: &mut Store, t: &str, column: &str, ids: &[i64]) -> Result<BTreeSet<i64>, Error> {
+pub(crate) fn named_in(
+    store: &mut Store,
+    t: &str,
+    column: &str,
+    ids: &[i64],
+) -> Result<BTreeSet<i64>, Error> {
     let mut out = BTreeSet::new();
     for chunk in ids.chunks(500) {
         let sql = format!(
@@ -243,7 +248,12 @@ pub fn remove_stacks(
     delete_where(store, "stack", "id", gone)
 }
 
-fn delete_where(store: &mut Store, t: &str, column: &str, ids: &[i64]) -> Result<(), Error> {
+pub(crate) fn delete_where(
+    store: &mut Store,
+    t: &str,
+    column: &str,
+    ids: &[i64],
+) -> Result<(), Error> {
     for chunk in ids.chunks(500) {
         store.execute(
             &format!(
