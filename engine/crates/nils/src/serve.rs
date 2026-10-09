@@ -2453,6 +2453,16 @@ fn routed(
             }
             Ok(Reply::ok(doc))
         }
+        ["api", "datasets", _, "summary"] if get => {
+            // Wave 7a, the Data page (2026-10-09): what a dataset holds and
+            // where it is, step by step, in counts
+            let dataset = crate::scans::dataset_named(registry, &decoded(segs[2]))?;
+            Ok(Reply::ok(crate::dataset_summary::document(
+                registry,
+                &caller.access,
+                &dataset,
+            )?))
+        }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
@@ -3251,13 +3261,39 @@ fn routed(
         }
         ["api", "jobs"] if get => {
             let all = query.get("all").is_some_and(|a| a == "1" || a == "true");
+            // Wave 7a, the Data page (2026-10-09): a dataset's jobs alone,
+            // the ones its steps ran as (crate::dataset_summary)
+            let dataset = match query.get("dataset").filter(|d| !d.is_empty()) {
+                Some(name) => Some(crate::scans::dataset_named(
+                    registry,
+                    name.trim_start_matches('@'),
+                )?),
+                None => None,
+            };
             // the queue's worker is a row of its own kind, and not a job a
             // person queued or would cancel: listed with ?all only
-            let jobs: Vec<_> = nils_registry::job::list(registry.store(), all, limit)
-                .map_err(job_err)?
-                .into_iter()
-                .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
-                .collect();
+            let jobs: Vec<_> = match dataset {
+                Some(place) => {
+                    let mut mine = Vec::new();
+                    for id in crate::dataset_summary::job_ids(registry.store(), &place)? {
+                        if mine.len() >= limit {
+                            break;
+                        }
+                        if let Some(j) =
+                            nils_registry::job::show(registry.store(), id).map_err(job_err)?
+                            && (all || !j.state.is_over())
+                        {
+                            mine.push(j);
+                        }
+                    }
+                    mine
+                }
+                None => nils_registry::job::list(registry.store(), all, limit)
+                    .map_err(job_err)?
+                    .into_iter()
+                    .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
+                    .collect(),
+            };
             let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
             // record 49 R4: a run's result below detail quasi is its totals
             if !quasi {
@@ -4064,15 +4100,28 @@ fn routed(
         // Record 55 H2 (round 4): what picking main scans found for a
         // dataset's subjects, per role, and the last run with its report
         ["api", "picks", "summary"] if get => {
-            let name = query
-                .get("dataset")
-                .filter(|d| !d.is_empty())
-                .ok_or_else(|| Reply::error(400, "dataset names the dataset, by name or id"))?;
-            let place = crate::scans::dataset_named(registry, name.trim_start_matches('@'))?;
             let scheme = query
                 .get("scheme")
                 .map(String::as_str)
                 .filter(|s| !s.is_empty());
+            // Wave 7a, the Data page (2026-10-09): a cohort's open members,
+            // in place of a dataset's subjects
+            if let Some(cohort) = query.get("cohort").filter(|c| !c.is_empty()) {
+                return match crate::pick_after::cohort_summary(registry.store(), cohort, scheme)? {
+                    Some(doc) => Ok(Reply::ok(doc)),
+                    None => Err(Reply::error(404, format!("no cohort named {cohort}"))),
+                };
+            }
+            let name = query
+                .get("dataset")
+                .filter(|d| !d.is_empty())
+                .ok_or_else(|| {
+                    Reply::error(
+                        400,
+                        "dataset names the dataset, by name or id, or cohort the cohort",
+                    )
+                })?;
+            let place = crate::scans::dataset_named(registry, name.trim_start_matches('@'))?;
             Ok(Reply::ok(crate::pick_after::summary(
                 registry.store(),
                 &place,
@@ -4333,8 +4382,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "sources" | "packs" | "batches"])
         | ("GET", ["api", "packs" | "batches", _]) => (Need::One("data:see"), Plain),
         ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
-        // Wave 7a: a dataset's scans, read as its card is
-        ("GET", ["api", "datasets", _, "scans"]) => (Need::One("data:see"), Plain),
+        // Wave 7a: a dataset's scans, read as its card is, and what it
+        // holds and where it is (2026-10-09)
+        ("GET", ["api", "datasets", _, "scans" | "summary"]) => (Need::One("data:see"), Plain),
         // record 26 §1: what becomes of a dataset's originals. What an act
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
@@ -4874,6 +4924,7 @@ fn capabilities(
         "POST /api/ingest/look",
         "GET /api/sources",
         "GET /api/datasets/{name}/scans",
+        "GET /api/datasets/{name}/summary",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -5872,6 +5923,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "a page of at most 200 scans",
             "Reading a dataset's scans",
             "Read a dataset's scans",
+        ),
+        row(
+            "GET /api/datasets/{name}/summary",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what a dataset holds",
+            "Read what a dataset holds",
         ),
         row(
             "POST /api/places",

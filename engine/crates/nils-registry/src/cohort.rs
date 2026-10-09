@@ -1025,9 +1025,11 @@ fn place_of_root(
 /// The releases whose selection named the cohort, newest first.
 fn releases_naming(store: &mut Store, name: &str) -> Result<Vec<Value>, StoreError> {
     let selection = text_of(store, "release", "selection");
+    // Wave 7a (2026-10-09): when it was made, for the cohort's timeline
+    let finished = text_of(store, "release", "finished_at");
     let sql = format!(
         "SELECT r.id, r.name, r.version, r.layout, r.subjects, {selection}, \
-                (SELECT COUNT(*) FROM {} h WHERE h.release_id = r.id) \
+                (SELECT COUNT(*) FROM {} h WHERE h.release_id = r.id), {finished} \
          FROM {} r WHERE r.finished_at IS NOT NULL AND r.withdrawn_at IS NULL ORDER BY r.id DESC",
         store.qualified("handover"),
         store.qualified("release")
@@ -1051,6 +1053,7 @@ fn releases_naming(store: &mut Store, name: &str) -> Result<Vec<Value>, StoreErr
             "layout": r.opt_text(3)?,
             "subjects": r.opt_int(4)?,
             "handed_over": r.int(6)? > 0,
+            "finished_at": r.opt_text(7)?,
         }));
     }
     Ok(out)
@@ -1328,6 +1331,138 @@ fn sources_holding(
         .collect())
 }
 
+/// Wave 7a, the Data page (2026-10-09): what brought the open members, a
+/// part each: a dataset that fed them (by the dataset of the batch that
+/// did), a query that promoted them, a hand that added them, or an
+/// import; most first. A member has one open interval, so the parts add
+/// up to its members.
+fn parts_of(
+    store: &mut Store,
+    cache: &mut HashMap<String, Option<String>>,
+    intervals: &[Interval],
+) -> Result<Vec<Value>, StoreError> {
+    let mut of_batch: HashMap<i64, Option<String>> = HashMap::new();
+    let mut by: BTreeMap<(&'static str, Option<String>), BTreeSet<i64>> = BTreeMap::new();
+    for i in intervals.iter().filter(|i| i.left_at.is_none()) {
+        let key = match i.source.as_str() {
+            "digest" => {
+                let dataset = match i.batch {
+                    Some(b) => match of_batch.get(&b) {
+                        Some(d) => d.clone(),
+                        None => {
+                            let d = dataset_of_batch(store, cache, b)?;
+                            of_batch.insert(b, d.clone());
+                            d
+                        }
+                    },
+                    None => None,
+                };
+                ("dataset", dataset)
+            }
+            "promotion" => ("query", None),
+            "manual" => ("hand", None),
+            _ => ("import", None),
+        };
+        by.entry(key).or_default().insert(i.subject);
+    }
+    let mut out: Vec<(usize, Value)> = by
+        .into_iter()
+        .map(|((from, dataset), subjects)| {
+            (
+                subjects.len(),
+                json!({"from": from, "dataset": dataset, "subjects": subjects.len()}),
+            )
+        })
+        .collect();
+    out.sort_by_key(|a| std::cmp::Reverse(a.0));
+    Ok(out.into_iter().map(|(_, v)| v).collect())
+}
+
+/// Wave 7a, the Data page (2026-10-09): the datasets holding scans of the
+/// open members, each with how many members have scans there, those scans,
+/// and whether the dataset feeds the cohort; a dataset that feeds it and
+/// holds none of them yet is named too. Most members first.
+fn holding_of(
+    store: &mut Store,
+    cache: &mut HashMap<String, Option<String>>,
+    places: &[place::Place],
+    cohort: &Cohort,
+) -> Result<Vec<Value>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT so.root_canonical, se.subject_id, COUNT(DISTINCT st.id) FROM {} m \
+         JOIN {} se ON se.subject_id = m.subject_id \
+         JOIN {} st ON st.series_id = se.id \
+         JOIN {} b ON b.id = st.first_batch_id \
+         JOIN {} so ON so.id = b.source_id \
+         WHERE m.cohort_id = {} AND m.left_at IS NULL \
+         GROUP BY so.root_canonical, se.subject_id",
+        store.qualified("cohort_member"),
+        store.qualified("series"),
+        store.qualified("stack"),
+        store.qualified("ingest_batch"),
+        store.qualified("source"),
+        d.param(1, Type::Int)
+    );
+    let rows: Vec<(String, i64, i64)> = store
+        .query(&sql, &[Param::Int(cohort.id)])?
+        .iter()
+        .map(|r| Ok((r.text(0)?.to_string(), r.int(1)?, r.int(2)?)))
+        .collect::<Result<_, StoreError>>()?;
+    let mut by: BTreeMap<String, (BTreeSet<i64>, i64)> = BTreeMap::new();
+    for (root, subject, scans) in rows {
+        if let Some(name) = place_of_root(store, cache, &root)? {
+            let held = by.entry(name).or_default();
+            held.0.insert(subject);
+            held.1 += scans;
+        }
+    }
+    let feeds = feeds_of(places, &cohort.name);
+    for name in &feeds {
+        by.entry(name.clone()).or_default();
+    }
+    let mut out: Vec<(usize, Value)> = by
+        .into_iter()
+        .map(|(name, (subjects, scans))| {
+            let fed = feeds.contains(&name);
+            (
+                subjects.len(),
+                json!({"name": name, "subjects": subjects.len(), "scans": scans, "feeds": fed}),
+            )
+        })
+        .collect();
+    out.sort_by_key(|a| std::cmp::Reverse(a.0));
+    Ok(out.into_iter().map(|(_, v)| v).collect())
+}
+
+/// Wave 7a, the Data page (2026-10-09): the open members with at least one
+/// clinical event of each kind (EDSS for 41 of them), the kinds a pack
+/// marks primary first; never a kind marked sensitive, and never a value.
+fn clinical_of(store: &mut Store, cohort_id: i64) -> Result<Vec<Value>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT ot.name, ot.is_primary, COUNT(DISTINCT e.subject_id) FROM {} e \
+         JOIN {} ot ON ot.id = e.observation_type_id \
+         WHERE e.superseded_by IS NULL AND (ot.is_sensitive IS NULL OR ot.is_sensitive = 0) \
+         AND e.subject_id IN (SELECT m.subject_id FROM {} m WHERE m.cohort_id = {} AND m.left_at IS NULL) \
+         GROUP BY ot.name, ot.is_primary",
+        store.qualified("event"),
+        store.qualified("observation_type"),
+        store.qualified("cohort_member"),
+        d.param(1, Type::Int)
+    );
+    let mut rows: Vec<(String, bool, i64)> = store
+        .query(&sql, &[Param::Int(cohort_id)])?
+        .iter()
+        .map(|r| Ok((r.text(0)?.to_string(), r.int(1)? != 0, r.int(2)?)))
+        .collect::<Result<_, StoreError>>()?;
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+    Ok(rows
+        .into_iter()
+        .map(|(kind, primary, subjects)| json!({"kind": kind, "primary": primary, "subjects": subjects}))
+        .collect())
+}
+
 /// One cohort as the list door shows it, with the detail when asked.
 fn document(
     store: &mut Store,
@@ -1367,10 +1502,24 @@ fn document(
         "last_joined": last_joined,
         "retired_at": cohort.retired_at,
     });
+    // Wave 7a, the Data page (2026-10-09): what brought its members, and
+    // the datasets holding their scans
+    doc["parts"] = Value::Array(parts_of(store, cache, &all)?);
+    doc["datasets"] = Value::Array(holding_of(store, cache, places, cohort)?);
     if detail {
-        doc["joins"] = Value::Array(joins_of(&all));
+        let mut joins = joins_of(&all);
+        // a dataset's digest names the dataset that fed it
+        for j in joins.iter_mut() {
+            if j["what"] == "digest"
+                && let Some(batch) = j["batch"].as_i64()
+            {
+                j["dataset"] = json!(dataset_of_batch(store, cache, batch)?);
+            }
+        }
+        doc["joins"] = Value::Array(joins);
         doc["sources_holding"] = Value::Array(sources_holding(store, cache, cohort.id)?);
         doc["releases"] = Value::Array(releases);
+        doc["clinical"] = Value::Array(clinical_of(store, cohort.id)?);
     }
     Ok(doc)
 }

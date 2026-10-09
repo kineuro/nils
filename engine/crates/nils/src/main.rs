@@ -35,6 +35,7 @@ mod campaigns;
 mod certainty;
 mod chain;
 mod dataset;
+mod dataset_summary;
 mod depends;
 mod derivatives;
 mod door_client;
