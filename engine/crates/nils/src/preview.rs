@@ -34,7 +34,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
-use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -690,13 +689,48 @@ fn read_header(p: &Path) -> Result<(Header, u64), String> {
     Ok((h, start))
 }
 
+/// Read into `buf` from `offset` of an open file without its cursor, so
+/// the doors share one open preview between threads: `pread` on unix.
+#[cfg(unix)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(f, buf, offset)
+}
+
+/// The same on Windows, a read at an offset, which also moves the cursor
+/// that nothing here reads.
+#[cfg(windows)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(f, buf, offset)
+}
+
+/// Fill `buf` from `offset` of an open file, as [`read_at`] reads.
+fn read_exact_at(f: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match read_at(f, buf, offset) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                ));
+            }
+            Ok(n) => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Read a header from an open file, `first` bytes at once; answers the
 /// header, where the pictures begin, and the bytes read.
 fn header_of(f: &std::fs::File, first: usize) -> Result<(Header, u64, Vec<u8>), String> {
     let mut buf = vec![0u8; first];
     let mut got = 0;
     while got < buf.len() {
-        match f.read_at(&mut buf[got..], got as u64) {
+        match read_at(f, &mut buf[got..], got as u64) {
             Ok(0) => break,
             Ok(n) => got += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -710,8 +744,7 @@ fn header_of(f: &std::fs::File, first: usize) -> Result<(Header, u64, Vec<u8>), 
     let hlen = u32::from_le_bytes(buf[8..12].try_into().expect("four bytes")) as usize;
     if buf.len() < 12 + hlen {
         let mut more = vec![0u8; 12 + hlen - buf.len()];
-        f.read_exact_at(&mut more, buf.len() as u64)
-            .map_err(|e| e.to_string())?;
+        read_exact_at(f, &mut more, buf.len() as u64).map_err(|e| e.to_string())?;
         buf.extend_from_slice(&more);
     }
     let header: Header = serde_json::from_slice(&buf[12..12 + hlen]).map_err(|e| e.to_string())?;
@@ -934,8 +967,7 @@ impl Open {
                 .unwrap_or(0);
         if (head.len() as u64) < end {
             let mut more = vec![0u8; (end - head.len() as u64) as usize];
-            file.read_exact_at(&mut more, head.len() as u64)
-                .map_err(|e| e.to_string())?;
+            read_exact_at(&file, &mut more, head.len() as u64).map_err(|e| e.to_string())?;
             head.extend_from_slice(&more);
         }
         head.truncate(end as usize);
@@ -973,9 +1005,7 @@ impl Open {
             let at = lead as u64 + f.offsets[z as usize] - a;
             out[16 + 4 * i..20 + 4 * i].copy_from_slice(&(at as u32).to_le_bytes());
         }
-        self.file
-            .read_exact_at(&mut out[lead..], self.start + a)
-            .map_err(|e| e.to_string())?;
+        read_exact_at(&self.file, &mut out[lead..], self.start + a).map_err(|e| e.to_string())?;
         Ok(out)
     }
 }

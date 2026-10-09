@@ -133,6 +133,7 @@ pub(crate) const PICTURES_NICE: i32 = 10;
 /// Lower this process's priority by `n`, before it starts any thread (the
 /// threads it starts inherit it). Record 55 H2: the worker passes it to a
 /// job of the pictures lane as `NILS_NICE`.
+#[cfg(unix)]
 #[allow(
     unsafe_code,
     reason = "setpriority on the calling process takes plain integers"
@@ -143,6 +144,11 @@ pub(crate) fn lower_priority(n: i32) {
         let _ = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, n) };
     }
 }
+
+/// Where there is no niceness (Windows has priority classes instead), a
+/// job of the pictures lane runs at the worker's own priority.
+#[cfg(not(unix))]
+pub(crate) fn lower_priority(_n: i32) {}
 
 /// Whether a queued job is a reader's single-stack pyramid build, `pyramid
 /// build --stack N`, which the pictures lane runs before a background
