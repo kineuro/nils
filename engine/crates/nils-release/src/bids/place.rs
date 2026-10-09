@@ -8,7 +8,7 @@
 //! | route | what goes there |
 //! |---|---|
 //! | the raw tree | everything with a valid datatype, suffix and entity set |
-//! | `sourcedata/` | working scans and, by default, scouts, kept as DICOM |
+//! | `sourcedata/dicom/` | working scans and, by default, scouts, kept as DICOM |
 //! | `derivatives/nils/` | what is derived and BIDS has no word for |
 //! | `anat/<folder>/` | a folder of its own the pack names: SyMRI's images |
 //! | nowhere | an acquisition BIDS cannot name, **reported, never silently dropped** |
@@ -17,8 +17,10 @@
 //! 2026-10-09, after v0's `bids-dcm` tree): each converted stack's
 //! de-identified slices under `sourcedata/dicom/`, in a folder named after
 //! its NIfTI file without the extension, at the session and datatype path
-//! the NIfTI has. `sourcedata/` is where BIDS keeps data before conversion,
-//! and the validator does not read it.
+//! the NIfTI has. Every DICOM a release writes is under `sourcedata/dicom/`,
+//! the scouts and working scans too, so that `sourcedata/` can hold other
+//! kinds of source beside it later. `sourcedata/` is where BIDS keeps data
+//! before conversion, and the validator does not read it.
 //!
 //! The line between the last two is the disposition and not the name: a
 //! reformat BIDS cannot name is a derivative, and a magnetisation-transfer
@@ -36,8 +38,8 @@ use super::name::Why;
 /// has no word for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Localizers {
-    /// `sourcedata/sub-*/ses-*/`, as DICOM. Valid BIDS, and a reader has to
-    /// know to look there.
+    /// `sourcedata/dicom/sub-*/ses-*/`, as DICOM. Valid BIDS, and a reader
+    /// has to know to look there.
     #[default]
     SourceData,
     /// Its own directory beside `anat` and `dwi`. Needs a `.bidsignore` line,
@@ -177,7 +179,7 @@ pub struct Options {
 pub enum Route {
     /// The raw tree, under its BIDS name.
     Raw,
-    /// `sourcedata/`, as DICOM under its descriptive name.
+    /// `sourcedata/dicom/`, as DICOM under its descriptive name.
     SourceData,
     /// `derivatives/nils/`, as a dataset of its own.
     Derivatives,

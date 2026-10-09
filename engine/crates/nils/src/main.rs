@@ -9895,7 +9895,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         for (route, n) in &report.routes {
             let what = match route.as_str() {
                 "raw" => "in the tree, under a name the standard admits",
-                "sourcedata" => "sourcedata/, as DICOM",
+                "sourcedata" => "sourcedata/dicom/, as DICOM",
                 "derivatives" => "derivatives/nils/, which BIDS has no word for",
                 "beside" => "a directory of their own, in .bidsignore",
                 "unofficial" => "the raw tree under a suffix BIDS lacks, in .bidsignore",

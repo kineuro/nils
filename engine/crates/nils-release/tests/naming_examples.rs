@@ -257,7 +257,7 @@ fn naming_examples() {
                     .collect::<String>(),
                 s.base.unwrap_or("")
             ),
-            (Route::SourceData, _) => "sourcedata/ (DICOM, descriptive name)".to_string(),
+            (Route::SourceData, _) => "sourcedata/dicom/ (DICOM, descriptive name)".to_string(),
             (r, n) => format!("{} {:?}", r.name(), n.as_ref().err()),
         }
     };

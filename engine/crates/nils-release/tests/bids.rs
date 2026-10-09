@@ -179,12 +179,16 @@ fn files_under(root: &Path) -> Vec<String> {
     out
 }
 
-/// A stack kept in `sourcedata/` as DICOM instead of converted: a localizer,
-/// or one the converter or the name refused. Not the DICOM export under
-/// `sourcedata/dicom/`, which every converted stack has by default (record 55
-/// C4, 2026-10-09).
+/// A stack kept as DICOM instead of converted: a localizer, or one the
+/// converter or the name refused, in a folder of its descriptive name under
+/// `sourcedata/dicom/`. Not the DICOM export beside it, whose folders are
+/// named after a NIfTI file and so begin with `sub-` (record 55 C4,
+/// 2026-10-09).
 fn kept_as_dicom(f: &str) -> bool {
-    f.starts_with("sourcedata/") && !f.starts_with("sourcedata/dicom/")
+    let parts: Vec<&str> = f.split('/').collect();
+    f.starts_with("sourcedata/dicom/")
+        && parts.len() >= 2
+        && !parts[parts.len() - 2].starts_with("sub-")
 }
 
 #[test]
@@ -326,6 +330,22 @@ fn what_the_standard_admits_gets_the_standards_name() {
             .iter()
             .any(|f| kept_as_dicom(f) && f.ends_with(".dcm")),
         "the localizer is in sourcedata as DICOM"
+    );
+    // Record 55 C4 (2026-10-09): every DICOM the release writes is under
+    // `sourcedata/dicom/`, the localizer's and the export alike.
+    let source: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.starts_with("sourcedata/"))
+        .collect();
+    assert!(
+        source.iter().all(|f| f.starts_with("sourcedata/dicom/")),
+        "{source:?}"
+    );
+    assert!(
+        source
+            .iter()
+            .any(|f| f.starts_with("sourcedata/dicom/sub-") && f.contains("/localizer/")),
+        "{source:?}"
     );
 }
 

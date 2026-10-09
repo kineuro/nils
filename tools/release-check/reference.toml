@@ -68,7 +68,7 @@ names = [
 #   * the SWI's magnitude is the acquisition's own T2*-weighted image, so it
 #     is `part-mag` of the suffix `T2starw` (MRI pack 0.9.0; the processed SWI
 #     image, which BIDS has no word for, would be a derivative);
-#   * the localizer is DICOM under `sourcedata/`, which is the default of the
+#   * the localizer is DICOM under `sourcedata/dicom/`, which is the default of the
 #     four answers a release may take.
 #
 # The functional series is not here at all, and that is the point: `func`
@@ -122,7 +122,7 @@ files = [
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+2D+GRE_echo-1_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+2D+GRE_echo-2_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+3D+MPRAGE_ce-contrast_T1w/<dicom>",
-  "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+GRE_part-mag_T2starw.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-1_T1w.nii.gz",
@@ -152,7 +152,7 @@ files = [
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-2D+GRE_echo-1_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-2D+GRE_echo-2_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-3D+MPRAGE_ce-contrast_T1w/<dicom>",
-  "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-2D+FLAIR+IRTSE_T2w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+GRE_part-mag_T2starw.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-1_T1w.nii.gz",

@@ -2191,8 +2191,9 @@ fn place_of(
         },
         // Kept as DICOM, one directory per stack, which is what a reader of
         // them wants anyway. Named by §9.1, which is most of why §9.1 names
-        // everything.
-        Route::SourceData => Place::dir(format!("sourcedata/{session}/{folder}/{stem}")),
+        // everything. Under `sourcedata/dicom/` with every other DICOM the
+        // release writes (record 55 C4, 2026-10-09).
+        Route::SourceData => Place::dir(format!("sourcedata/dicom/{session}/{folder}/{stem}")),
         // A dataset in its own right, so the tree stays valid and the data
         // stays present.
         // Record 55 C4: the name the raw tree would give it, with `desc-`,
