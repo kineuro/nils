@@ -375,6 +375,19 @@ impl Name {
         out
     }
 
+    /// The name without its `sub-` and `ses-` entities, for a list whose
+    /// tree already says them (`acq-Ax+2D+FLAIR+IRTSE_T2w`).
+    pub fn label(&self) -> String {
+        let stem = self.stem("x", "");
+        stem.strip_prefix("sub-x_").unwrap_or(&stem).to_string()
+    }
+
+    /// The same for a derivative, with its `desc-` (`acq-Ax+3D+TOFMRA_desc-MIP_angio`).
+    pub fn label_with_desc(&self, desc: &str) -> String {
+        let stem = self.stem_with_desc("x", "", desc);
+        stem.strip_prefix("sub-x_").unwrap_or(&stem).to_string()
+    }
+
     /// The name a derivative of this stack takes (record 55 C4): the same
     /// entities, then `desc-<desc>`, which BIDS reserves for derivatives.
     pub fn stem_with_desc(&self, subject: &str, session: &str, desc: &str) -> String {
@@ -1013,6 +1026,21 @@ mod tests {
         assert_eq!(
             n.stem_with_desc("x", "1", "MinIP"),
             "sub-x_ses-1_desc-MinIP_T1w"
+        );
+    }
+
+    #[test]
+    fn a_label_is_the_name_without_its_subject_and_session() {
+        let n = build(&t1w(), &mapping(), Naming::Full).unwrap();
+        assert_eq!(n.label(), "T1w");
+        assert_eq!(n.label_with_desc("MinIP"), "desc-MinIP_T1w");
+        let mut map = mapping();
+        map.acq[0].modes = vec!["full".into()];
+        let with_acq = build(&t1w(), &map, Naming::Full).unwrap();
+        assert!(!with_acq.label().starts_with("sub-"), "{}", with_acq.label());
+        assert_eq!(
+            format!("sub-x_ses-1_{}", with_acq.label()),
+            with_acq.stem("x", "1")
         );
     }
 

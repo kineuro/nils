@@ -2443,6 +2443,9 @@ fn routed(
                 .get("pictures")
                 .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
             let mut doc = crate::scans::page(registry, &caller.access, &dataset, limit, after)?;
+            // the dataset view: each scan's names, datatype and axes
+            let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+            crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
             // record 55 H2: each scan's picture inline and its open
             // questions, so a page of the grid is one request
             if pictures {

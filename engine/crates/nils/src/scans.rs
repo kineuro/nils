@@ -305,6 +305,61 @@ pub(crate) fn page(
     Ok(doc)
 }
 
+/// Wave 7a, the dataset view (2026-10-09): what each scan of a page is
+/// called and what NILS says it is, so the desk can show a dataset as a
+/// tree of subject, session, datatype and scan. Each scan gains `name`, the
+/// descriptive name (v0's grammar, as a release in the descriptive layout
+/// builds it); `bids`, its BIDS name in the full style without the `sub-`
+/// and `ses-` entities the tree already says, or null where the standard
+/// has none; `datatype`, `anat`, `dwi`, `func`, `perf`, `fmap` or `other`;
+/// `folder`, the descriptive layout's folder (`anat/SyMRI`, `localizer`,
+/// ...); `axes`, every decided axis as stored; `series_number`, the
+/// order the scanner acquired it in; and `questions`, the kinds of its open
+/// review questions, as a page with pictures gives them. Each name is built from
+/// the scan's own facts: a release also separates two scans of a session
+/// that build one name, which a page, holding part of a session, cannot.
+/// None of it is quasi-identifying.
+pub(crate) fn with_names(
+    registry: &mut Registry,
+    pack: Option<&nils_pack::Pack>,
+    doc: &mut Value,
+) -> Result<(), Reply> {
+    let stacks: Vec<i64> = doc["scans"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
+        .unwrap_or_default();
+    let mut names = nils_release::run::scan_names(registry.store(), pack, &stacks)
+        .map_err(|e| Reply::error(500, e.to_string()))?;
+    // the open questions too, so the tree marks the scans that need a look
+    // without asking for pictures
+    let questions = open_questions(registry.store(), &stacks).map_err(failed)?;
+    if let Some(scans) = doc["scans"].as_array_mut() {
+        for scan in scans {
+            let stack = scan["stack"].as_i64().unwrap_or_default();
+            scan["questions"] = json!(questions.get(&stack).cloned().unwrap_or_default());
+            match names.remove(&stack) {
+                Some(n) => {
+                    scan["name"] = json!(n.name);
+                    scan["bids"] = json!(n.bids);
+                    scan["datatype"] = json!(n.datatype);
+                    scan["folder"] = json!(n.folder);
+                    scan["axes"] = json!(n.axes);
+                    scan["series_number"] = json!(n.series_number);
+                }
+                None => {
+                    scan["name"] = Value::Null;
+                    scan["bids"] = Value::Null;
+                    scan["datatype"] = json!("other");
+                    scan["folder"] = json!("misc");
+                    scan["axes"] = json!({});
+                    scan["series_number"] = Value::Null;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// How long a page of scans waits for the stills of scans with no preview.
 pub const STILLS_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
 

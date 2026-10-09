@@ -5954,7 +5954,7 @@ fn scans_sweep(dsn: Option<&str>) {
     };
     assert_eq!(stacks.len(), 3, "{stacks:?}");
 
-    const LIMIT: usize = 12;
+    const LIMIT: usize = 13;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -6016,6 +6016,77 @@ fn scans_sweep(dsn: Option<&str>) {
     assert!(one["session"]["id"].as_i64().is_some(), "{doc}");
     assert_eq!(one["session"]["label"], "20260305", "{doc}");
     let quasi_codes: Vec<String> = codes.iter().map(|c| c.to_string()).collect();
+
+    // the dataset view (2026-10-09): each scan's names, datatype, folder,
+    // axes and series number, from its own decided axes
+    let by_series = |d: &serde_json::Value, series: &str| -> i64 {
+        d["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["series_description"] == series)
+            .unwrap()["stack"]
+            .as_i64()
+            .unwrap()
+    };
+    {
+        let mut store = open();
+        let axis = store.qualified("classification_axis");
+        let t1 = by_series(&doc, "t1 mprage");
+        let flair = by_series(&doc, "flair");
+        for (stack, name, value) in [
+            (t1, "directory_type", "anat"),
+            (t1, "base", "T1w"),
+            (t1, "technique", "MPRAGE"),
+            (flair, "directory_type", "anat"),
+            (flair, "base", "T2w"),
+            (flair, "modifier", "FLAIR"),
+            (flair, "disposition", "scout"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {axis} (stack_id, axis, value, confidence, tier) \
+                         VALUES ({stack}, '{name}', '{value}', 1.0, 'rule')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+    let (status, named) = ask("/api/datasets/incoming/scans", reviewer);
+    assert_eq!(status, 200, "{named}");
+    let scan = |series: &str| -> serde_json::Value {
+        named["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["series_description"] == series)
+            .unwrap()
+            .clone()
+    };
+    let t1 = scan("t1 mprage");
+    assert_eq!(t1["datatype"], "anat", "{named}");
+    assert_eq!(t1["folder"], "anat", "{named}");
+    let name = t1["name"].as_str().unwrap();
+    assert!(name.contains("T1w") && name.contains("MPRAGE"), "{named}");
+    let bids = t1["bids"].as_str().unwrap();
+    assert!(bids.ends_with("_T1w") && bids.contains("MPRAGE"), "{named}");
+    assert!(!bids.contains("sub-") && !bids.contains("ses-"), "{named}");
+    assert_eq!(t1["axes"]["base"], "T1w", "{named}");
+    assert!(t1.get("series_number").is_some(), "{named}");
+    // the open questions come without pictures too
+    assert!(t1["questions"].is_array(), "{named}");
+    // a scout never takes a BIDS name and is shown under other
+    let scout = scan("flair");
+    assert_eq!(scout["datatype"], "other", "{named}");
+    assert_eq!(scout["bids"], serde_json::Value::Null, "{named}");
+    assert!(scout["name"].as_str().unwrap().contains("FLAIR"), "{named}");
+    // nothing decided: a name all the same, and other
+    let bare = scan("dwi");
+    assert_eq!(bare["datatype"], "other", "{named}");
+    assert_eq!(bare["bids"], serde_json::Value::Null, "{named}");
+    assert_eq!(bare["axes"], serde_json::json!({}), "{named}");
 
     // at plain the code, the day and the date label are shapes; the ids and
     // the series description are not
