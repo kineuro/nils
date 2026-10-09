@@ -6134,3 +6134,118 @@ fn scans_sweep(dsn: Option<&str>) {
     assert_eq!(used.get(), LIMIT);
     server.finish();
 }
+
+/// A dataset whose anonymised tree, or whose own folder, is a symbolic link
+/// lists its scans and counts its stacks: the digest keeps the tree's
+/// resolved root, and the place is matched to it through its trees resolved
+/// the same way.
+#[test]
+fn a_dataset_behind_a_symbolic_link_lists_its_scans() {
+    let home = TempDir::new("symlink-home");
+    let elsewhere = TempDir::new("symlink-anon");
+    let linked_tree = TempDir::new("symlink-tree-ds");
+    let real_ds = TempDir::new("symlink-real-ds");
+    let links = TempDir::new("symlink-links");
+    let write = |dir: &TempDir, rel: &str, study: &str, patient: &str| {
+        let sop = format!("{study}.1.1");
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        dir.file(
+            &format!("{rel}{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    };
+    // one: derivatives/dcm-anon is a link to a tree elsewhere
+    write(&elsewhere, "", "1.2.3.L", "P1");
+    std::fs::create_dir_all(linked_tree.path().join("derivatives")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path(),
+        linked_tree.path().join("derivatives/dcm-anon"),
+    )
+    .unwrap();
+    // two: the dataset's folder is itself a link
+    write(&real_ds, "derivatives/dcm-anon/", "1.2.3.M", "P2");
+    let linked_ds = links.path().join("ds-two");
+    std::os::unix::fs::symlink(real_ds.path(), &linked_ds).unwrap();
+
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nP1,mapped-0001\nP2,mapped-0002\n",
+    );
+    for (name, path) in [
+        ("one", linked_tree.path().to_str().unwrap()),
+        ("two", linked_ds.to_str().unwrap()),
+    ] {
+        run(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                path,
+                "--role",
+                "source",
+                "--patient-id",
+                "id-type:patient-id",
+                "--subjects",
+                "map",
+            ],
+            None,
+        );
+    }
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    for name in ["one", "two"] {
+        run(
+            &home,
+            &[
+                "digest",
+                "--name",
+                &format!("d-{name}"),
+                "--no-private",
+                &format!("@{name}"),
+            ],
+            None,
+        );
+    }
+    let server = Server::start(
+        &home,
+        3,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    for name in ["one", "two"] {
+        let (status, doc) =
+            server.request("GET", &format!("/api/datasets/{name}/scans"), None, reader);
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["total"], 1, "{name}: {doc}");
+    }
+    let (status, doc) = server.request("GET", "/api/sources", None, reader);
+    assert_eq!(status, 200, "{doc}");
+    for source in doc["sources"].as_array().unwrap() {
+        assert_eq!(source["totals"]["stacks"], 1, "{doc}");
+    }
+    assert_eq!(doc["sources"].as_array().unwrap().len(), 2, "{doc}");
+    server.finish();
+}

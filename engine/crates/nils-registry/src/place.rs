@@ -196,12 +196,19 @@ impl Place {
         })
     }
 
-    /// Whether a path lies under this place.
+    /// Whether a path lies under this place: under its folder, or under one
+    /// of its dataset's trees, each side resolved the same way. A tree that
+    /// is a symbolic link (derivatives/dcm-anon pointing elsewhere) resolves
+    /// outside the folder, and a digest keeps that resolved root, so the
+    /// trees are matched too.
     pub fn holds_path(&self, path: &Path) -> bool {
-        let mine = Path::new(&self.path);
-        let mine = std::fs::canonicalize(mine).unwrap_or_else(|_| mine.to_path_buf());
         let theirs = canonical_prefix(path);
-        theirs.starts_with(&mine)
+        let under = |mine: &Path| theirs.starts_with(canonical_prefix(mine));
+        under(Path::new(&self.path))
+            || ["originals", "anon"]
+                .iter()
+                .filter_map(|tree| self.tree_path(tree))
+                .any(|tree| under(&tree))
     }
 }
 
