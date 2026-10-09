@@ -2102,7 +2102,17 @@ fn routed(
         ))),
         ["api", "cohorts", name] if get => {
             match nils_registry::cohort::show(registry.store(), name)? {
-                Some(doc) => Ok(Reply::ok(doc)),
+                Some(mut doc) => {
+                    // Wave 7a, the Data page: its members' scans sorted, and
+                    // body part and post-contrast over them (record 56)
+                    if let Some(id) = doc["id"].as_i64() {
+                        doc["steps"] = serde_json::Value::Array(crate::operations::of_cohort(
+                            registry.store(),
+                            id,
+                        )?);
+                    }
+                    Ok(Reply::ok(doc))
+                }
                 None => Err(Reply::error(404, format!("no cohort named {name}"))),
             }
         }

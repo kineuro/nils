@@ -50,6 +50,7 @@ mod login;
 mod mcp;
 mod measures;
 mod model_cli;
+mod operations;
 mod originals;
 mod packs;
 mod pair;

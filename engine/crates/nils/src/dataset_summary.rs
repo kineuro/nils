@@ -6,8 +6,11 @@
 //! subjects, visits and scans, how sure the sort is, the kinds of scan and
 //! the body regions the sort found, its files and the refused ones) and
 //! where it is: found, pseudonymised where it has originals, read, sorted,
-//! main scans, pictures and 3D views, each with its counts, its state and
-//! when it last ran. Every number is a count and nothing quasi-identifying
+//! body part, post-contrast, main scans, pictures and 3D views, each with
+//! its counts, its state and when it last ran. Body part and post-contrast
+//! are operations of their own (record 56, section 2, in `operations`), and
+//! how sure the sort is counts only the questions the sort asks. Every
+//! number is a count and nothing quasi-identifying
 //! is answered, so the door is Data reading at plain, as the sources door
 //! is. A stack of a sample sealed now is never counted by kind or region
 //! for a caller who does not read sealed stacks (record 48), as the scans
@@ -17,7 +20,8 @@
 //! or a tree under it, `--dataset name`, `dataset:name`, `place originals
 //! name`) or that carry its name and a date as the desk and a bring-in name
 //! them, the ones its digests ran under, the sorts that judged its stacks,
-//! and every job queued after any of those: the next step of a chain, the
+//! the runs of the body-part and post-contrast models over its stacks, and
+//! every job queued after any of those: the next step of a chain, the
 //! pictures and the pick run after a sort. `GET /api/jobs?dataset=name`
 //! lists the same jobs, newest first.
 
@@ -44,6 +48,7 @@ const KINDS: &[&str] = &[
     "pyramid",
     "preview",
     "originals",
+    "pipeline",
 ];
 
 /// How many of the newest jobs of those kinds are looked through.
@@ -205,14 +210,18 @@ fn newest(store: &mut Store, window: usize) -> Result<Vec<Light>, StoreError> {
         .collect()
 }
 
-/// The jobs a dataset's digests ran under, and the sorts that judged its
-/// stacks.
+/// The jobs a dataset's digests ran under, the sorts that judged its
+/// stacks, and the runs of the operations' models over them.
 fn seeds(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, StoreError> {
     let mut out = BTreeSet::new();
     if sources.is_empty() {
         return Ok(out);
     }
     let ids = list(sources);
+    out.extend(crate::operations::run_jobs(
+        store,
+        crate::operations::Scope::Sources(&ids),
+    )?);
     for r in store.query(
         &format!(
             "SELECT DISTINCT job_id FROM {} WHERE source_id IN ({ids}) AND job_id IS NOT NULL",
@@ -445,7 +454,7 @@ pub(crate) fn document(
     let (mut subjects, mut studies, mut stacks, mut sessions) = (0, 0, 0, window.map(|_| 0));
     let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
     let mut refused_batch: Option<i64> = None;
-    let mut certainty = crate::certainty::Certainty::default();
+    let mut asked = crate::operations::Asked::default();
     let (mut kinds, mut regions) = (Vec::new(), Vec::new());
     let mut last_digest: Option<(String, Option<String>)> = None;
     if !ids.is_empty() {
@@ -559,7 +568,12 @@ pub(crate) fn document(
             ),
         )
         .map_err(failed)?;
-        certainty = crate::certainty::of_sources(store, &sources, stacks).map_err(failed)?;
+        // record 56: how sure the sort is counts what the sort asks, never
+        // a question about body part or post-contrast, which are steps of
+        // their own
+        asked =
+            crate::operations::asked_by_sort(store, crate::operations::Scope::Sources(&sources))
+                .map_err(failed)?;
         let sealed = (!crate::sealed::reads(access)).then(|| store.qualified("sealed_stack"));
         kinds = by_axis(store, &sources, KIND_AXIS, sealed.as_deref()).map_err(failed)?;
         regions = by_axis(store, &sources, REGION_AXIS, sealed.as_deref()).map_err(failed)?;
@@ -638,16 +652,24 @@ pub(crate) fn document(
         read_step["finished_at"] = json!(finished);
     }
     steps.push(read_step);
+    let unsorted = (stacks - classified).max(0);
+    let sure = (classified - asked.scans).max(0);
     let open = open_of(&["fingerprint", "classify"]);
     steps.push(step(
         "sorted",
-        state_of(open, stacks > 0 && certainty.unsorted == 0),
+        state_of(open, stacks > 0 && unsorted == 0),
         open.or_else(|| newest_of(&["classify"])),
         json!({
-            "scans": classified, "of": stacks, "look": certainty.to_sort,
-            "unsorted": certainty.unsorted,
+            "scans": classified, "of": stacks, "look": asked.scans,
+            "unsorted": unsorted,
         }),
     ));
+    // body part and post-contrast, the operations of their own, over its
+    // stacks
+    steps.extend(
+        crate::operations::steps(store, crate::operations::Scope::Sources(&sources), stacks)
+            .map_err(failed)?,
+    );
     let open = open_of(&["pick"]);
     let picks_off = !place::picks_after_sort(&dataset.dataset);
     let mut main = step(
@@ -729,7 +751,7 @@ pub(crate) fn document(
             })
             .collect()
     };
-    let need_a_look: BTreeMap<String, i64> = certainty.need_a_look.clone();
+    let need_a_look: BTreeMap<String, i64> = asked.kinds.clone();
     Ok(json!({
         "dataset": dataset.name,
         "dataset_id": dataset.id,
@@ -740,9 +762,9 @@ pub(crate) fn document(
         "sessions": sessions,
         "studies": studies,
         "scans": stacks,
-        "sure": certainty.sure,
-        "need_a_look": certainty.to_sort,
-        "unsorted": certainty.unsorted,
+        "sure": sure,
+        "need_a_look": asked.scans,
+        "unsorted": unsorted,
         "look_kinds": need_a_look,
         "kinds": pairs(kinds, "kind"),
         "body_regions": pairs(regions, "region"),

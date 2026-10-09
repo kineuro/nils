@@ -428,9 +428,29 @@ fn round(pg: Option<(String, String)>) {
     let names: Vec<String> = steps(&s).into_iter().map(|(n, _)| n).collect();
     assert_eq!(
         names,
-        ["found", "read", "sorted", "main_scans", "pictures", "views"],
+        [
+            "found",
+            "read",
+            "sorted",
+            "body_part",
+            "post_contrast",
+            "main_scans",
+            "pictures",
+            "views"
+        ],
         "no originals, so no pseudonymised step: {s}"
     );
+    // record 56: body part and post-contrast are steps of their own after
+    // the sort, and nothing serves them yet
+    for name in ["body_part", "post_contrast"] {
+        let op = step(&s, name);
+        assert_eq!(op["state"], "off", "{name}: {s}");
+        assert_eq!(op["served"], false, "{name}: {s}");
+        assert_eq!(op["answered"], 0, "{name}: {s}");
+        assert_eq!(op["of"], 3, "{name}: {s}");
+        assert!(op["job"].is_null(), "{name}: {s}");
+        assert_eq!(op["jobs"], json!([]), "{name}: {s}");
+    }
     let found = step(&s, "found");
     assert_eq!(found["state"], "done", "{s}");
     assert_eq!(found["tree"], "anon", "{s}");
@@ -550,6 +570,278 @@ fn round(pg: Option<(String, String)>) {
     // the scans are still counted, as the card counts them
     assert_eq!(after_seal["scans"], 3, "{after_seal}");
 
+    // record 56: how sure the sort is counts only what the sort asks, and a
+    // question about body part or post-contrast waits under its own step
+    let (stack_ids, now) = {
+        let mut store = home.store();
+        let [stack, item] = ["stack", "review_item"].map(|t| store.qualified(t));
+        // what a sort asked about them before record 56 is let go, so the
+        // counts below are this test's own
+        store
+            .execute(
+                &format!(
+                    "UPDATE {item} SET status = 'superseded' \
+                     WHERE kind LIKE 'body%' OR kind LIKE 'post%'"
+                ),
+                &[],
+            )
+            .unwrap();
+        let ids: Vec<i64> = store
+            .query(&format!("SELECT id FROM {stack} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        (ids, nils_registry::time::now_iso())
+    };
+    assert_eq!(stack_ids.len(), 3, "{stack_ids:?}");
+    let before = server.get("/api/datasets/ds/summary", READS);
+    {
+        let mut store = home.store();
+        let item = store.qualified("review_item");
+        for (kind, stack) in [
+            ("body_part:low_confidence", stack_ids[0]),
+            ("post_contrast:missing", stack_ids[1]),
+            ("base:missing", stack_ids[2]),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {item} (kind, scope, ref, evidence, status, created_at) VALUES \
+                         ('{kind}', 'stack', '{{\"stack_id\": {stack}}}', '{{}}', 'open', '{now}')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+    let asked = server.get("/api/datasets/ds/summary", READS);
+    let look_kinds = |doc: &Value| doc["look_kinds"].as_object().unwrap().clone();
+    let of_kind =
+        |doc: &Value, k: &str| look_kinds(doc).get(k).and_then(Value::as_i64).unwrap_or(0);
+    assert!(
+        look_kinds(&asked)
+            .keys()
+            .all(|k| !k.starts_with("body_") && !k.starts_with("post_contrast")),
+        "{asked}"
+    );
+    assert_eq!(
+        of_kind(&asked, "base:missing"),
+        of_kind(&before, "base:missing") + 1,
+        "{asked}"
+    );
+    assert_eq!(step(&asked, "body_part")["look"], 1, "{asked}");
+    assert_eq!(step(&asked, "post_contrast")["look"], 1, "{asked}");
+    assert_eq!(
+        step(&asked, "sorted")["look"],
+        asked["need_a_look"],
+        "{asked}"
+    );
+    assert_eq!(
+        n(&asked, "sure") + n(&asked, "need_a_look") + n(&asked, "unsorted"),
+        3,
+        "{asked}"
+    );
+
+    // a pipeline in the catalog proposes the body part and a model is
+    // admitted to answer it: the step waits to be run
+    {
+        let mut store = home.store();
+        let [pipeline, model] = ["pipeline", "model"].map(|t| store.qualified(t));
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {pipeline} (name, version, tool_version, descriptor, descriptor_digest, \
+                     image, image_digest, layout, level, state, added_by, added_at) VALUES \
+                     ('bp-infer', 1, '1', \
+                     '{{\"x-nils\": {{\"proposals\": [{{\"axis\": \"body_part\"}}, {{\"axis\": \"body_region\"}}]}}}}', \
+                     'sha256:d', 'bp', 'sha256:i', 'stacks', 'stack', 'active', 'anna', '{now}')"
+                ),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {model} (name, version, kind, digest, task, slot, state, card, \
+                     registered_by, registered_at) VALUES \
+                     ('bp-head', '1', 'head', 'sha256:h', 'axis:body_part', 'site', 'admitted', '{{}}', \
+                     'anna', '{now}')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let served = server.get("/api/datasets/ds/summary", READS);
+    let bp = step(&served, "body_part");
+    assert_eq!(bp["state"], "waiting", "{served}");
+    assert_eq!(bp["served"], true, "{served}");
+    assert_eq!(
+        step(&served, "post_contrast")["state"],
+        "off",
+        "nothing serves post-contrast: {served}"
+    );
+
+    // a run of it over the dataset's scans, one unit over of three
+    let (job_id, run_id) = {
+        let mut store = home.store();
+        let [job, handle, member, pipeline, run, unit] = [
+            "job",
+            "handle",
+            "handle_member",
+            "pipeline",
+            "pipeline_run",
+            "pipeline_unit",
+        ]
+        .map(|t| store.qualified(t));
+        let newest = |store: &mut Store, t: &str| {
+            store
+                .query(&format!("SELECT MAX(id) FROM {t}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {job} (kind, name, args, state, started_at, heartbeat_at) VALUES \
+                     ('pipeline', 'bp-infer@1', '{{}}', 'running', '{now}', '{now}')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let job_id = newest(&mut store, job.as_str());
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {handle} (grain, columns, row_count, ast_version, ask, principal, \
+                     created_at, node, epoch, disclosure, truncated) VALUES \
+                     ('stack', '[]', 3, 1, '{{}}', 'anna', '{now}', 'ward-3', 0, 'plain', 0)"
+                ),
+                &[],
+            )
+            .unwrap();
+        let handle_id = newest(&mut store, handle.as_str());
+        for (i, s) in stack_ids.iter().enumerate() {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {member} (handle_id, position, key) VALUES ({handle_id}, {i}, {s})"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        let pipeline_id = newest(&mut store, pipeline.as_str());
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {run} (pipeline_id, job_id, handle_id, params, runtime, runtime_version, \
+                     host, device, model_ids, status, started_at, principal) VALUES \
+                     ({pipeline_id}, {job_id}, {handle_id}, '{{}}', 'podman', '5', 'ward-3', 'cpu', '[]', \
+                     'running', '{now}', 'anna')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let run_id = newest(&mut store, run.as_str());
+        for (i, s) in stack_ids.iter().enumerate() {
+            let state = if i == 0 { "over" } else { "queued" };
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {unit} (run_id, unit, position, state, attempts) VALUES \
+                         ({run_id}, 'stack-{s}', {i}, '{state}', 0)"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        (job_id, run_id)
+    };
+    let running = server.get("/api/datasets/ds/summary", READS);
+    let bp = step(&running, "body_part");
+    assert_eq!(bp["state"], "running", "{running}");
+    assert_eq!(bp["job"], job_id, "{running}");
+    assert_eq!(bp["run"], run_id, "{running}");
+    assert_eq!(bp["progress"], json!({"done": 1, "total": 3}), "{running}");
+    // the run's job is in the dataset's log, and in no other's
+    let log = server.get("/api/jobs?dataset=ds&all=1", OPS);
+    assert!(
+        log["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["id"] == job_id),
+        "{log}"
+    );
+    let none = server.get("/api/jobs?dataset=other&all=1", OPS);
+    assert_eq!(none["count"], 0, "{none}");
+
+    // the run over: its model answered two scans at or above its
+    // threshold and was unsure of the third, which waits on a person
+    {
+        let mut store = home.store();
+        let [job, run, unit, item, member] = [
+            "job",
+            "pipeline_run",
+            "pipeline_unit",
+            "review_item",
+            "review_member",
+        ]
+        .map(|t| store.qualified(t));
+        let later = nils_registry::time::now_iso();
+        for sql in [
+            format!("UPDATE {job} SET state = 'done', finished_at = '{later}' WHERE id = {job_id}"),
+            format!(
+                "UPDATE {run} SET status = 'done', finished_at = '{later}' WHERE id = {run_id}"
+            ),
+            format!("UPDATE {unit} SET state = 'over' WHERE run_id = {run_id}"),
+        ] {
+            store.execute(&sql, &[]).unwrap();
+        }
+        for (status, members) in [("staged", &stack_ids[..2]), ("open", &stack_ids[2..])] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {item} (kind, scope, ref, evidence, status, created_at, job_id, \
+                         members, group_key) VALUES ('body_part:model', 'group', '{{}}', '{{}}', \
+                         '{status}', '{later}', {job_id}, {}, 'run:{run_id}|body_part:model|brain|{status}|model:1')",
+                        members.len()
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let item_id = store
+                .query(&format!("SELECT MAX(id) FROM {item}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            for s in members {
+                store
+                    .execute(
+                        &format!(
+                            "INSERT INTO {member} (item_id, stack_id) VALUES ({item_id}, {s})"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    let done = server.get("/api/datasets/ds/summary", READS);
+    let bp = step(&done, "body_part");
+    assert_eq!(bp["state"], "done", "{done}");
+    assert_eq!(bp["answered"], 2, "{done}");
+    // the scan it was unsure of, and the one the sort asked about before
+    assert_eq!(bp["look"], 2, "{done}");
+    assert_eq!(bp["jobs"], json!([job_id]), "{done}");
+    assert!(bp["progress"].is_null(), "{done}");
+    assert!(bp["finished_at"].is_string(), "{done}");
+    // the model's groups are no question of the sort's
+    assert_eq!(of_kind(&done, "body_part:model"), 0, "{done}");
+    assert_eq!(done["need_a_look"], asked["need_a_look"], "{done}");
+
     // a dataset nothing has read: every step waits but the found one
     let o = server.get("/api/datasets/other/summary", READS);
     assert_eq!(o["scans"], 0, "{o}");
@@ -557,6 +849,10 @@ fn round(pg: Option<(String, String)>) {
     for name in ["read", "sorted", "main_scans", "pictures", "views"] {
         assert_eq!(step(&o, name)["state"], "waiting", "{name}: {o}");
     }
+    // the body-part model is served, and has nothing of it to answer yet
+    assert_eq!(step(&o, "body_part")["state"], "waiting", "{o}");
+    assert_eq!(step(&o, "body_part")["of"], 0, "{o}");
+    assert_eq!(step(&o, "post_contrast")["state"], "off", "{o}");
     // no such dataset, and the grant is data:see
     let (status, _) = server.call("GET", "/api/datasets/nowhere/summary", None, READS);
     assert_eq!(status, 404);
@@ -690,6 +986,31 @@ fn round(pg: Option<(String, String)>) {
     let at = shown["releases"][0]["finished_at"].as_str().unwrap();
     assert!(at.starts_with("2026-10-05"), "{shown}");
     assert_eq!(shown["parts"], cohort("fed")["parts"], "{shown}");
+    // its steps: its members' scans sorted, then body part and
+    // post-contrast over them (record 56)
+    let names: Vec<String> = steps(&shown).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["sorted", "body_part", "post_contrast"], "{shown}");
+    let sorted_step = step(&shown, "sorted");
+    assert_eq!(sorted_step["state"], "done", "{shown}");
+    assert_eq!(sorted_step["scans"], 3, "{shown}");
+    assert_eq!(sorted_step["of"], 3, "{shown}");
+    assert_eq!(sorted_step["look"], done["need_a_look"], "{shown}");
+    let bp = step(&shown, "body_part");
+    assert_eq!(bp["state"], "done", "{shown}");
+    assert_eq!(bp["answered"], 2, "{shown}");
+    assert_eq!(bp["look"], 2, "{shown}");
+    assert_eq!(bp["of"], 3, "{shown}");
+    assert_eq!(bp["job"], job_id, "{shown}");
+    let pc = step(&shown, "post_contrast");
+    assert_eq!(pc["state"], "off", "{shown}");
+    assert_eq!(pc["look"], 1, "{shown}");
+    // a cohort of one subject counts that subject's scans
+    let one = server.get("/api/cohorts/hands", READS);
+    assert_eq!(
+        step(&one, "body_part")["of"],
+        hands["datasets"][0]["scans"],
+        "{one}"
+    );
 
     // the doors are listed
     let caps = server.get("/api/capabilities", READS);
