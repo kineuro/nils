@@ -1566,7 +1566,7 @@ paths:
         - {name: step, in: path, required: true, schema: {type: string, enum: [body_part, post_contrast]}}
       responses:
         "202": {description: "{job, state: queued, step, for: dataset:NAME, scans, handle, command}: the job, how many scans the handle holds, and the command as queued"}
-        "403": {description: No pipelines:work, or a detail below quasi}
+        "403": {description: "No pipelines:work, or a detail below quasi"}
         "404": {description: "No active dataset of that name or id, or a step no door runs (reason `no_step`)"}
         "409": {description: "Refused, with its reason: `running`, a run of the step over these scans is queued or runs (the error names its job); `no_pipeline`, no active bodypart-infer-fusion in the catalog, or one whose model inputs the step does not fill; `no_model`, no model served for the step (post-contrast always, `no post-contrast model is installed`: record 55 F5 and E3 are still to come); `no_runtime`, no container runtime here (the error is the pipelines capability's own sentence); `no_place`, no working place for a run's outputs; `no_scans`, nothing to run it over yet"}
   /api/cohorts/{name}/steps/{step}/run:
@@ -1578,7 +1578,7 @@ paths:
         - {name: step, in: path, required: true, schema: {type: string, enum: [body_part, post_contrast]}}
       responses:
         "202": {description: "{job, state: queued, step, for: cohort:NAME, scans, handle, command}"}
-        "403": {description: No pipelines:work, or a detail below quasi}
+        "403": {description: "No pipelines:work, or a detail below quasi"}
         "404": {description: "No cohort so named, or a step no door runs (reason `no_step`)"}
         "409": {description: "Refused, with its reason, as for a dataset"}
   /api/places:
