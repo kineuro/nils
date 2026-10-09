@@ -68,6 +68,12 @@ impl AskState {
             let catalog = Catalog::build(registry, pack)
                 .map_err(|e| Reply::error(500, format!("the catalog: {e}")))?;
             self.catalog = Some((epoch, catalog));
+        } else if let Some((_, catalog)) = self.catalog.as_mut() {
+            // Wave 7a: a dataset is added, moved or retired without the
+            // epoch moving, and the dataset fields read the places in force
+            catalog
+                .refresh_datasets(registry.store())
+                .map_err(|e| Reply::error(500, format!("the datasets: {e}")))?;
         }
         if self.reader.is_none() {
             let r = registry

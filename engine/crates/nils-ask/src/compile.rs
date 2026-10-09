@@ -284,6 +284,30 @@ impl Sql {
     pub fn like(self, x: &str, pattern_placeholder: &str) -> String {
         format!("{x} LIKE {pattern_placeholder} ESCAPE '\\'")
     }
+
+    /// Wave 7a: whether a name is among a list of names joined by `, ` (the
+    /// datasets of a subject or a session). A dataset's name holds no
+    /// whitespace, so the separator never falls inside one; no list holds
+    /// no name.
+    pub fn member(self, list: &str, name: &str) -> String {
+        let hay = format!("', ' || COALESCE({list}, '') || ', '");
+        let needle = format!("', ' || {name} || ', '");
+        if self.is_pg() {
+            format!("(strpos({hay}, {needle}) > 0)")
+        } else {
+            format!("(instr({hay}, {needle}) > 0)")
+        }
+    }
+
+    /// Wave 7a: names as one list joined by `, `, sorted byte by byte on
+    /// both backends so the list reads the same on either; null for none.
+    pub fn name_list(self, x: &str) -> String {
+        if self.is_pg() {
+            format!("string_agg({x}, ', ' ORDER BY {x} COLLATE \"C\")")
+        } else {
+            format!("group_concat({x}, ', ' ORDER BY {x})")
+        }
+    }
 }
 
 /// Escape a literal for a LIKE pattern.
@@ -311,6 +335,11 @@ struct Term {
     /// The parameter the term binds, when it is one placeholder, so that a
     /// second use binds it again instead of naming a placeholder twice.
     param: Option<(Param, Type)>,
+    /// Wave 7a: the value is a list of names joined by `, ` (the datasets
+    /// a subject's or a session's stacks are of), so `=`, `<>`, `in`,
+    /// `not_in` and `has` ask whether a name is among them, and a group
+    /// keyed by it counts a row once under each name.
+    members: bool,
 }
 
 impl Term {
@@ -320,6 +349,7 @@ impl Term {
             prec: None,
             ci: None,
             param: None,
+            members: false,
         }
     }
 }
@@ -795,6 +825,9 @@ impl<'a> Builder<'a> {
         if c.table == "measure" {
             return self.measure_column(level, &c.column);
         }
+        if c.table == crate::validate::DATASET_TABLE {
+            return self.dataset_column(level);
+        }
         if c.table == "study" && c.column == "day" {
             return Some(Term::plain(
                 "COALESCE(sy.date_filled, sy.study_date)".into(),
@@ -808,7 +841,82 @@ impl<'a> Builder<'a> {
             prec,
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
+            members: false,
         })
+    }
+
+    /// Wave 7a: a stack's `dataset`, the name of the dataset whose digest
+    /// first read it, and a session's or a subject's, the names of the
+    /// datasets its stacks are of as one sorted list, read beside the base
+    /// relation through each stack's first batch and that batch's source.
+    /// The stacks rolled up are the ones a stack set sees: none the pack
+    /// ruled out, and none of a sample sealed now where those are withheld.
+    fn dataset_column(&self, level: &str) -> Option<Term> {
+        if !matches!(level, "stack" | "session" | "subject") {
+            return None;
+        }
+        let quote = |t: &str| format!("'{}'", t.replace('\'', "''"));
+        let mut whens = String::new();
+        let mut sources: Vec<String> = Vec::new();
+        for d in self.ctx.names.datasets() {
+            for s in &d.sources {
+                whens.push_str(&format!(" WHEN {s} THEN {}", quote(&d.name)));
+                sources.push(s.to_string());
+            }
+        }
+        let mut term = if sources.is_empty() {
+            // no dataset holds a source, so no stack is of one
+            Term::plain("CAST(NULL AS TEXT)".into())
+        } else {
+            let name = format!("CASE dsb.source_id{whens} END");
+            let (batch, stack) = (self.q("ingest_batch"), self.q("stack"));
+            if level == "stack" {
+                let first = match self.current {
+                    Some(Grain::Instance) => format!(
+                        "(SELECT dst.first_batch_id FROM {stack} dst WHERE dst.id = i.stack_id)"
+                    ),
+                    _ => "st.first_batch_id".to_string(),
+                };
+                return Some(Term::plain(format!(
+                    "(SELECT {name} FROM {batch} dsb WHERE dsb.id = {first})"
+                )));
+            }
+            let series = self.q("series");
+            // whose stack it is comes off its series (record 35 finding 1),
+            // and a session's stacks are its studies' of its own subject
+            let (from, unit) = if level == "subject" {
+                (
+                    format!("{stack} dst JOIN {series} dse ON dse.id = dst.series_id"),
+                    "dse.subject_id = su.id",
+                )
+            } else {
+                (
+                    format!(
+                        "{} dscs JOIN {series} dse ON dse.study_id = dscs.study_id \
+                         JOIN {stack} dst ON dst.series_id = dse.id",
+                        self.q("session_cache_study")
+                    ),
+                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id",
+                )
+            };
+            let mut standing = format!(
+                " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
+                 AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
+                self.q("classification_axis")
+            );
+            if let Some(sealed) = self.not_sealed("dst.id") {
+                standing.push_str(&format!(" AND {sealed}"));
+            }
+            Term::plain(format!(
+                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} \
+                 JOIN {batch} dsb ON dsb.id = dst.first_batch_id \
+                 WHERE {unit} AND dsb.source_id IN ({}){standing}) dsn)",
+                self.sql.name_list("dsn.n"),
+                sources.join(", ")
+            ))
+        };
+        term.members = level != "stack";
+        Some(term)
     }
 
     /// A run's measure of a unit (record 49 A3), `<number|text|run>:
@@ -1220,6 +1328,7 @@ impl<'a> Builder<'a> {
                             prec,
                             ci: None,
                             param: None,
+                            members: t.members,
                         },
                     ));
                 }
@@ -1240,6 +1349,7 @@ impl<'a> Builder<'a> {
                 let col = field_col(p);
                 projected.push(format!("{} AS {col}", t.sql));
                 let mut layered = Term::plain(col.clone());
+                layered.members = t.members;
                 if let Some(pc) = &t.prec {
                     let pcol = format!("{col}__prec");
                     projected.push(format!("{pc} AS {pcol}"));
@@ -1262,6 +1372,7 @@ impl<'a> Builder<'a> {
                     prec: frame.has_prec.then(|| "prec".to_string()),
                     ci: None,
                     param: None,
+                    members: false,
                 },
             ));
         }
@@ -1349,6 +1460,7 @@ impl<'a> Builder<'a> {
                     prec: expr.prec,
                     ci: None,
                     param: None,
+                    members: expr.members,
                 },
             ));
         }
@@ -1450,6 +1562,7 @@ impl<'a> Builder<'a> {
                     prec,
                     ci,
                     param: None,
+                    members: t.members,
                 },
             ));
         }
@@ -1466,6 +1579,7 @@ impl<'a> Builder<'a> {
                     prec,
                     ci: None,
                     param: None,
+                    members: false,
                 },
             ));
         }
@@ -1561,6 +1675,7 @@ impl<'a> Builder<'a> {
                                 prec: t.prec.as_ref().map(|p| format!("q.{p}")),
                                 ci: None,
                                 param: None,
+                                members: t.members,
                             },
                         )
                     })
@@ -1573,6 +1688,7 @@ impl<'a> Builder<'a> {
                             prec: t.prec.as_ref().map(|p| format!("p.{p}")),
                             ci: None,
                             param: None,
+                            members: t.members,
                         },
                     ));
                 }
@@ -1804,6 +1920,7 @@ impl<'a> Builder<'a> {
             prec,
             ci: None,
             param: None,
+            members: false,
         };
         terms.push((
             binding.to_string(),
@@ -1854,7 +1971,39 @@ impl<'a> Builder<'a> {
         for (i, c) in g.by.iter().enumerate() {
             let at = format!("{path}.group.by[{i}]");
             if c.op != "axis" {
-                by_sql.push(self.expr(c, &child_terms, "ch", &at)?.sql);
+                let key = self.expr(c, &child_terms, "ch", &at)?;
+                if !key.members {
+                    by_sql.push(key.sql);
+                    continue;
+                }
+                // Wave 7a: a subject or a session counts once under each
+                // dataset its stacks are of, as an axis read with `each`
+                // counts a stack, and under null where it has none
+                let col = format!("names_g{i}");
+                let mut names: Vec<String> = self
+                    .ctx
+                    .names
+                    .datasets()
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect();
+                names.sort();
+                if names.is_empty() {
+                    axis_cols.push(format!("CAST(NULL AS TEXT) AS {col}"));
+                } else {
+                    let alias = format!("dn{i}");
+                    let rows = names
+                        .iter()
+                        .map(|n| format!("SELECT CAST('{}' AS TEXT) AS n", n.replace('\'', "''")))
+                        .collect::<Vec<_>>()
+                        .join(" UNION ALL ");
+                    axis_joins.push(format!(
+                        "LEFT JOIN ({rows}) {alias} ON {}",
+                        self.sql.member(&key.sql, &format!("{alias}.n"))
+                    ));
+                    axis_cols.push(format!("{alias}.n AS {col}"));
+                }
+                by_sql.push(format!("ch.{col}"));
                 continue;
             }
             let child_grain = self.ask.sets.get(&g.of).map(|s| s.grain);
@@ -2121,6 +2270,7 @@ impl<'a> Builder<'a> {
             prec: t.prec.as_deref().map(dot),
             ci: t.ci.as_deref().map(dot),
             param: None,
+            members: t.members,
         })
     }
 
@@ -2186,6 +2336,7 @@ impl<'a> Builder<'a> {
             prec: None,
             ci: None,
             param: Some((param, ty)),
+            members: false,
         })
     }
 
@@ -2196,8 +2347,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn list_placeholders(&mut self, a: &Arg, at: &str) -> R<String> {
-        let items: Vec<Param> = match a {
+    /// The literals of a list, or of a list parameter's value, as
+    /// parameters, not yet bound.
+    fn list_params(&self, a: &Arg, at: &str) -> R<Vec<Param>> {
+        Ok(match a {
             Arg::List(items) => items
                 .iter()
                 .map(|i| match i {
@@ -2233,7 +2386,21 @@ impl<'a> Builder<'a> {
                 }
             }
             _ => return Err(err(at, "in takes a list or a list parameter")),
+        })
+    }
+
+    /// One item of a list, bound as its own placeholder.
+    fn item_placeholder(&mut self, i: Param) -> String {
+        let ty = match &i {
+            Param::Int(_) => Type::Int,
+            Param::Double(_) => Type::Double,
+            _ => Type::Text,
         };
+        self.p(i, ty)
+    }
+
+    fn list_placeholders(&mut self, a: &Arg, at: &str) -> R<String> {
+        let items = self.list_params(a, at)?;
         if items.is_empty() {
             return Ok("(NULL)".into());
         }
@@ -2242,12 +2409,7 @@ impl<'a> Builder<'a> {
         }
         let mut ph = Vec::with_capacity(items.len());
         for i in items {
-            let ty = match &i {
-                Param::Int(_) => Type::Int,
-                Param::Double(_) => Type::Double,
-                _ => Type::Text,
-            };
-            ph.push(self.p(i, ty));
+            ph.push(self.item_placeholder(i));
         }
         Ok(format!("({})", ph.join(", ")))
     }
@@ -2401,6 +2563,7 @@ impl<'a> Builder<'a> {
                     prec: None,
                     ci: None,
                     param: None,
+                    members: false,
                 })
             }
             "voxel" | "voxel_max" => {
@@ -2613,6 +2776,18 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
+                // Wave 7a: a subject or a session is of a dataset when one of
+                // its stacks is, so = and <> ask whether the name is among
+                // its datasets
+                if matches!(op, "=" | "<>") && a.members != b.members {
+                    let (list, name) = if a.members { (&a, &b) } else { (&b, &a) };
+                    let among = self.sql.member(&list.sql, &name.sql);
+                    return plain(if op == "=" {
+                        among
+                    } else {
+                        format!("(NOT {among})")
+                    });
+                }
                 plain(self.compare(op, a, b, strict))
             }
             "~=" => {
@@ -2653,10 +2828,36 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let list = self.list_placeholders(
-                    c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?,
-                    at,
-                )?;
+                let listed = c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?;
+                if a.members {
+                    // Wave 7a: one of the names among a subject's or a
+                    // session's datasets
+                    let items = self.list_params(listed, at)?;
+                    if items.len() > LIST_BIND_MAX {
+                        return Err(err(
+                            at,
+                            format!(
+                                "a list of more than {LIST_BIND_MAX} datasets is not one to ask for"
+                            ),
+                        ));
+                    }
+                    let mut among = Vec::with_capacity(items.len());
+                    for i in items {
+                        let ph = self.item_placeholder(i);
+                        among.push(self.sql.member(&a.sql, &ph));
+                    }
+                    let any = if among.is_empty() {
+                        "(1 = 0)".to_string()
+                    } else {
+                        format!("({})", among.join(" OR "))
+                    };
+                    return plain(if op == "in" {
+                        any
+                    } else {
+                        format!("(NOT {any})")
+                    });
+                }
+                let list = self.list_placeholders(listed, at)?;
                 plain(format!(
                     "({} {}IN {list})",
                     a.sql,
@@ -2668,7 +2869,22 @@ impl<'a> Builder<'a> {
                     return Err(err(at, "has takes an axis and a value"));
                 };
                 if l.op != "axis" {
-                    return Err(err(at, "has takes an axis"));
+                    // Wave 7a: the datasets of a subject or a session are
+                    // many names, read as an axis of many values is
+                    let list = self.expr(l, terms, alias, at)?;
+                    if !list.members {
+                        return Err(err(
+                            at,
+                            "has takes an axis, or a field of several names: a subject's or a session's dataset",
+                        ));
+                    }
+                    let v = self.arg(
+                        c.args.get(1).ok_or_else(|| err(at, "has needs a value"))?,
+                        terms,
+                        alias,
+                        at,
+                    )?;
+                    return plain(self.sql.member(&list.sql, &v.sql));
                 }
                 let axis = l.ref_name().unwrap_or("");
                 let ax = self.p(Param::from(axis), Type::Text);
@@ -3022,6 +3238,7 @@ impl<'a> Builder<'a> {
                     prec: None,
                     ci: None,
                     param: None,
+                    members: false,
                 })
             }
             "share" => {
