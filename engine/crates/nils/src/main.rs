@@ -434,11 +434,18 @@ struct ReleaseArgs {
         value_name = "sourcedata|datatype|anat|drop"
     )]
     localizers: String,
-    /// Where a vendor's synthetic contrast goes. The qMRI appendix permits it
-    /// in raw anat/; derivatives/ is the default since record 55 C4, after
-    /// the naming research: a synthetic contrast is computed, not acquired
-    #[arg(long, default_value = "derivatives", value_name = "anat|derivatives")]
+    /// Where a vendor's synthetic contrast goes. folder (the default, record
+    /// 55 C4): SyMRI's images, its synthetic contrasts among them, together
+    /// under anat/SyMRI/, and any other synthetic contrast in raw anat/; anat:
+    /// raw anat/, no folder; derivatives: derivatives/
+    #[arg(long, default_value = "folder", value_name = "folder|anat|derivatives")]
     synthetic: String,
+    /// Which stacks a BIDS release also writes as DICOM, under
+    /// sourcedata/dicom/ at the path of each NIfTI, in a folder named after
+    /// the file: all converted stacks (the default, as v0 did), only the
+    /// stacks in a folder of their own (SyMRI), or none (record 55 C4)
+    #[arg(long, default_value = "all", value_name = "all|folders|none")]
+    dicom: String,
     /// The DICOM to NIfTI converter, a prerequisite of a BIDS release (§9.6)
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
     dcm2niix: PathBuf,
@@ -9611,11 +9618,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         synthetic: nils_release::bids::place::Synthetic::parse(&args.synthetic).ok_or_else(
             || {
                 usage(format!(
-                    "--synthetic is anat or derivatives, not {}",
+                    "--synthetic is folder, anat or derivatives, not {}",
                     args.synthetic
                 ))
             },
         )?,
+        dicom: nils_release::bids::place::Dicom::parse(&args.dicom).ok_or_else(|| {
+            usage(format!(
+                "--dicom is all, folders or none, not {}",
+                args.dicom
+            ))
+        })?,
     };
     // §9.6. Found once, before anything is written, and recorded on the run and
     // in `GeneratedBy`. v0 discovers a missing converter per stack, in a worker

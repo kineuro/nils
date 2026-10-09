@@ -183,6 +183,9 @@ pub struct Report {
     pub decided: Vec<DecidedName>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
+    /// The folders of their own under `anat/` this version wrote into
+    /// (record 55 C4, 2026-10-09: SyMRI), each a `.bidsignore` line.
+    pub folders: std::collections::BTreeSet<String>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
     pub nowhere: BTreeMap<String, i64>,
     /// How many stacks those are, in one number (lab 26b, finding 5): a tree
@@ -372,6 +375,9 @@ struct Job {
     fallback: Place,
     /// Which of §9.3's routes it took. In the descriptive layout there is one.
     route: String,
+    /// Whether its slices go into the DICOM export as well (record 55 C4,
+    /// 2026-10-09).
+    dicom: bool,
     content: String,
     change: crate::version::Change,
     /// What the state said, when the stack was there.
@@ -400,6 +406,12 @@ struct State {
     extensions: Vec<String>,
 }
 
+/// The entry in a converted stack's `extensions` that says its slices are
+/// in the DICOM export too (record 55 C4, 2026-10-09). Not a suffix of the
+/// stem: the export is a directory of its own under `sourcedata/dicom/`,
+/// which [`crate::bids::place::dicom_dir`] names from the place.
+pub(crate) const DICOM_EXPORT: &str = "@dicom";
+
 impl State {
     /// The files this state describes, as far as the state knows them.
     fn files(&self) -> Files {
@@ -407,18 +419,27 @@ impl State {
             Some(stem) => Files::Named(
                 self.extensions
                     .iter()
+                    .filter(|e| *e != DICOM_EXPORT)
                     .map(|e| format!("{}/{stem}{e}", self.place.dir))
                     .collect(),
+                self.has_dicom()
+                    .then(|| crate::bids::place::dicom_dir(&self.place.dir, stem)),
             ),
             None => Files::Directory(self.place.dir.clone()),
         }
     }
+
+    /// Whether the DICOM export holds this stack's slices.
+    fn has_dicom(&self) -> bool {
+        self.extensions.iter().any(|e| e == DICOM_EXPORT)
+    }
 }
 
-/// What a stack's files are on disk: a directory it owns, or named files.
+/// What a stack's files are on disk: a directory it owns, or named files
+/// and, where the DICOM export carries it, the export's directory.
 enum Files {
     Directory(String),
-    Named(Vec<String>),
+    Named(Vec<String>, Option<String>),
 }
 
 /// What one version knows about the version before it.
@@ -597,6 +618,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         placements.insert(
             "synthetic".to_string(),
             settings.places.synthetic.name().to_string(),
+        );
+        placements.insert(
+            "dicom".to_string(),
+            settings.places.dicom.name().to_string(),
         );
     }
     let mut report = Report {
@@ -883,6 +908,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 place = planned.fallback.clone();
             }
             *report.routes.entry(route.clone()).or_insert(0) += 1;
+            if route == "folder"
+                && let Some((_, name)) = place.dir.rsplit_once('/')
+            {
+                report.folders.insert(name.to_string());
+            }
             let key = place.key();
             let mut change = crate::version::compare(
                 was.as_ref()
@@ -918,16 +948,26 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             if let (true, Some(w)) = (
                 !change.is_work() || change == crate::version::Change::Moved,
                 was.as_ref(),
-            ) && !place_on_disk(settings.root, &w.place)
+            ) && (!place_on_disk(settings.root, &w.place) || !export_on_disk(settings.root, w))
             {
                 change = crate::version::Change::Rewritten;
                 report.restored += 1;
+            }
+            // Record 55 C4 (2026-10-09): a stack whose DICOM export the last
+            // version wrote and this one does not, or the other way round,
+            // is written again, because its files are not the same files.
+            let dicom = settings.layout == Layout::Bids && settings.places.dicom.carries(&route);
+            if (!change.is_work() || change == crate::version::Change::Moved)
+                && was.as_ref().is_some_and(|w| w.has_dicom() != dicom)
+            {
+                change = crate::version::Change::Rewritten;
             }
             jobs.push(Job {
                 stack: planned.stack,
                 place,
                 fallback: planned.fallback,
                 route,
+                dicom,
                 content: planned.content,
                 change,
                 was,
@@ -1405,8 +1445,13 @@ fn roll_up(job: &Job, wrote: &[Wrote]) -> State {
     let mut extensions: Vec<String> = Vec::new();
     if let Some(stem) = &job.place.stem {
         let prefix = format!("{}/{stem}", job.place.dir);
+        let export = format!("{}/", crate::bids::place::dicom_dir(&job.place.dir, stem));
         for w in &sorted {
-            if let Some(ext) = w.path.strip_prefix(&prefix)
+            if w.path.starts_with(&export) {
+                if !extensions.iter().any(|e| e == DICOM_EXPORT) {
+                    extensions.push(DICOM_EXPORT.to_string());
+                }
+            } else if let Some(ext) = w.path.strip_prefix(&prefix)
                 && !extensions.iter().any(|e| e == ext)
             {
                 extensions.push(ext.to_string());
@@ -1443,6 +1488,17 @@ fn place_on_disk(root: &Path, place: &Place) -> bool {
                 .flatten()
                 .any(|e| e.file_name().to_string_lossy().starts_with(stem.as_str()))
         }),
+    }
+}
+
+/// Whether a stack's DICOM export, where the last version wrote one, is
+/// still on the disk (record 55 C4, 2026-10-09).
+fn export_on_disk(root: &Path, state: &State) -> bool {
+    match (&state.place.stem, state.has_dicom()) {
+        (Some(stem), true) => root
+            .join(crate::bids::place::dicom_dir(&state.place.dir, stem))
+            .is_dir(),
+        _ => true,
     }
 }
 
@@ -1708,10 +1764,16 @@ fn write_dataset(
     // own choices need.
     let mut ignore: Vec<String> = Vec::new();
     if report.routes.contains_key("beside") {
-        ignore.push("*/*/localizer/".to_string());
+        ignore.push("*/*/localizer".to_string());
     }
     if report.routes.contains_key("unofficial") {
         ignore.push("*_localizer.*".to_string());
+    }
+    // Record 55 C4 (2026-10-09): a folder of its own under `anat/` (SyMRI).
+    // Without a trailing slash: the official validator (3.0.2) matches a
+    // directory line only so.
+    for name in &report.folders {
+        ignore.push(format!("*/*/anat/{name}"));
     }
     if !ignore.is_empty() {
         std::fs::write(root.join(".bidsignore"), dataset::bidsignore(&ignore))?;
@@ -1899,6 +1961,7 @@ impl Planner<'_> {
                 placed.and_then(|p| p.disposition.as_deref()),
                 placed.is_some_and(|p| p.synthetic),
                 placed.is_some_and(|p| p.derived),
+                placed.and_then(|p| p.folder.as_deref()),
                 &placed
                     .map(|p| p.bids.clone())
                     .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
@@ -1908,16 +1971,42 @@ impl Planner<'_> {
         if let crate::bids::place::Route::Nowhere(why) = route {
             return Decision::Nowhere { unjudged, why };
         }
-        let place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
-        let fallback = place_of(
-            &crate::bids::place::Route::SourceData,
-            self.layout,
-            code,
-            &label,
-            &folder,
-            &stem,
-            placed,
-        );
+        let mut place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
+        // Record 55 C4 (2026-10-09): the working scan of a stack set in a
+        // folder of its own, SyMRI's multi-dynamic multi-echo acquisition,
+        // is not an image to convert and is what SyMRI's pipeline reads. It
+        // is kept as DICOM where the export puts the rest of SyMRI.
+        if route == crate::bids::place::Route::SourceData
+            && self.options.synthetic == crate::bids::place::Synthetic::Folder
+            && placed.and_then(|p| p.disposition.as_deref()) == Some("working_scan")
+            && let Some(name) = placed.and_then(|p| p.folder.as_deref())
+        {
+            // By its descriptive name, which §9.1 made unique in the
+            // session: a working scan takes no part in a BIDS name conflict.
+            place = Place::dir(crate::bids::place::dicom_dir(
+                &format!("sub-{code}/ses-{label}/anat/{name}"),
+                &unofficial(code, &label, &stem),
+            ));
+        }
+        let fallback = match (&route, &place.stem) {
+            // Record 55 C4 (2026-10-09): a stack in a folder of its own that
+            // the converter refuses is DICOM where the export would have put
+            // it, so SyMRI's slices are in one place whether or not they
+            // converted.
+            (crate::bids::place::Route::Folder(_), Some(name)) => {
+                Place::dir(crate::bids::place::dicom_dir(&place.dir, name))
+            }
+            (crate::bids::place::Route::SourceData, None) => place.clone(),
+            _ => place_of(
+                &crate::bids::place::Route::SourceData,
+                self.layout,
+                code,
+                &label,
+                &folder,
+                &stem,
+                placed,
+            ),
+        };
         Decision::Placed {
             unjudged,
             label,
@@ -2122,6 +2211,14 @@ fn place_of(
                 ),
             }
         }
+        // Record 55 C4 (2026-10-09): under `anat/`, in the folder of its own
+        // the pack names, by its BIDS name where it has one; the folder is
+        // outside the standard, so one it cannot name keeps its descriptive
+        // name in `acq-`, its base contrast as the suffix.
+        Route::Folder(name) => Place::file(
+            format!("{session}/anat/{name}"),
+            folder_stem(code, label, stem, placed),
+        ),
         // Outside the standard, so the entity set is ours and a `.bidsignore`
         // line says the standard does not know it.
         Route::Beside(what) => Place::file(
@@ -2135,6 +2232,28 @@ fn place_of(
         // Never reached: a stack routed nowhere is out of the version before
         // a place is asked for.
         Route::Nowhere(_) => Place::dir(format!("{session}/{folder}/{stem}")),
+    }
+}
+
+/// The name of a stack in a folder of its own (record 55 C4, 2026-10-09):
+/// its BIDS name where it has one; the folder is outside the standard, so
+/// one it cannot name keeps its descriptive name in `acq-`, its base
+/// contrast as the suffix.
+fn folder_stem(code: &str, label: &str, stem: &str, placed: Option<&Placed>) -> String {
+    match placed.and_then(|p| p.bids.as_ref().ok()) {
+        Some(n) => n.stem(code, label),
+        None => {
+            let base: String = placed
+                .and_then(|p| p.base.as_deref())
+                .unwrap_or("")
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect();
+            match base.is_empty() {
+                true => unofficial(code, label, stem),
+                false => format!("{}_{base}", unofficial(code, label, stem)),
+            }
+        }
     }
 }
 
@@ -2394,13 +2513,13 @@ fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
         let Some(was) = &job.was else { continue };
         let pairs: Vec<(PathBuf, PathBuf)> = match (was.files(), &job.place.stem) {
             (Files::Directory(dir), _) => vec![(root.join(dir), root.join(&job.place.dir))],
-            (Files::Named(paths), Some(stem)) => {
+            (Files::Named(paths, export), Some(stem)) => {
                 let old = format!(
                     "{}/{}",
                     was.place.dir,
                     was.place.stem.clone().unwrap_or_default()
                 );
-                paths
+                let mut pairs: Vec<(PathBuf, PathBuf)> = paths
                     .iter()
                     .map(|p| {
                         let ext = p.strip_prefix(&old).unwrap_or("");
@@ -2409,9 +2528,17 @@ fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
                             root.join(format!("{}/{stem}{ext}", job.place.dir)),
                         )
                     })
-                    .collect()
+                    .collect();
+                // The DICOM export moves with the file it is named after.
+                if let Some(export) = export {
+                    pairs.push((
+                        root.join(export),
+                        root.join(crate::bids::place::dicom_dir(&job.place.dir, stem)),
+                    ));
+                }
+                pairs
             }
-            (Files::Named(_), None) => Vec::new(),
+            (Files::Named(..), None) => Vec::new(),
         };
         let mut mine = Vec::new();
         let mut whole = !pairs.is_empty();
@@ -2471,10 +2598,15 @@ fn drop_files(root: &Path, files: &Files) {
             std::fs::remove_dir_all(&full).ok();
             prune(root, full.parent());
         }
-        Files::Named(paths) => {
+        Files::Named(paths, export) => {
             for p in paths {
                 let full = root.join(p);
                 std::fs::remove_file(&full).ok();
+                prune(root, full.parent());
+            }
+            if let Some(export) = export {
+                let full = root.join(export);
+                std::fs::remove_dir_all(&full).ok();
                 prune(root, full.parent());
             }
         }
@@ -3096,6 +3228,18 @@ fn write_bids(
     );
     match made {
         Ok(made) => {
+            // Record 55 C4 (2026-10-09), after v0's `bids-dcm` tree: the
+            // slices the converter read, already scrubbed, in a folder named
+            // after the file they made. Moved out of the staging directory
+            // rather than written again.
+            let exported = match job.dicom {
+                true => export_dicom(
+                    &staged,
+                    root,
+                    &crate::bids::place::dicom_dir(&job.place.dir, &stem),
+                ),
+                false => Vec::new(),
+            };
             std::fs::remove_dir_all(&staging).ok();
             // §9.2 with record 37 S6: where in the body, in the slot the
             // standard keeps it in. `dcm2niix` writes the sidecar from the
@@ -3115,6 +3259,7 @@ fn write_bids(
                 add_to_sidecar(&into.join(format!("{stem}.json")), "NILS", card.clone());
             }
             let mut out = refused;
+            out.extend(exported);
             let mut files = made.files;
             // Wave 7a §8.2, the official validator's first finding: dcm2niix
             // writes a `.bval` and a `.bvec` beside every image of a diffusion
@@ -3187,6 +3332,41 @@ fn write_bids(
             out
         }
     }
+}
+
+/// The DICOM export of one converted stack (record 55 C4, 2026-10-09): its
+/// staged, scrubbed slices moved into `dir`, one file per slice under the
+/// name it was staged with.
+fn export_dicom(staged: &[PathBuf], root: &Path, dir: &str) -> Vec<Result<Written, String>> {
+    let into = root.join(dir);
+    std::fs::remove_dir_all(&into).ok();
+    if std::fs::create_dir_all(&into).is_err() {
+        return vec![Err("no directory for the DICOM export".to_string())];
+    }
+    staged
+        .iter()
+        .map(|from| {
+            let name = from
+                .file_name()
+                .ok_or_else(|| "a staged slice without a name".to_string())?;
+            let relative = PathBuf::from(dir).join(name);
+            let target = root.join(&relative);
+            if std::fs::rename(from, &target).is_err() {
+                std::fs::copy(from, &target)
+                    .map_err(|_| "could not be put in the DICOM export".to_string())?;
+            }
+            let bytes =
+                std::fs::read(&target).map_err(|_| "unreadable in the DICOM export".to_string())?;
+            Ok(Written {
+                wrote: Wrote {
+                    path: relative.display().to_string(),
+                    digest: hex::encode(digest_of(&bytes)),
+                    bytes: bytes.len() as i64,
+                },
+                applied: scrub::Applied::default(),
+            })
+        })
+        .collect()
 }
 
 /// Scrub one instance into the staging directory, ready to convert.
@@ -3705,6 +3885,10 @@ fn places(
             })
             .or_else(|| construct_ids.iter().find(|c| **c != "ND").copied())
             .map(str::to_string);
+        let own_folder = pack
+            .bids
+            .folder_of(provenance.as_deref(), technique.as_deref())
+            .map(str::to_string);
         extra.insert(
             stack,
             (
@@ -3714,6 +3898,7 @@ fn places(
                 derived_by.is_some(),
                 desc,
                 base.clone(),
+                own_folder,
             ),
         );
         let acquired_date = r.opt_text(45)?.map(str::to_string);
@@ -3915,9 +4100,9 @@ fn places(
                 .map(|marks| marks.into_iter().map(|m| m.map(|m| m.token)).collect())
         });
         for n in bucket.iter() {
-            let (synthetic, disposition, body_part, derived, desc, base) = extra
+            let (synthetic, disposition, body_part, derived, desc, base, own_folder) = extra
                 .remove(&n.stack)
-                .unwrap_or((false, None, None, false, None, None));
+                .unwrap_or((false, None, None, false, None, None, None));
             out.insert(
                 n.stack,
                 Placed {
@@ -3934,6 +4119,7 @@ fn places(
                     synthetic,
                     derived,
                     desc,
+                    folder: own_folder,
                     base,
                     disposition,
                     body_part,
@@ -3955,6 +4141,7 @@ type Extra = (
     Option<String>,
     Option<String>,
     bool,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -4172,6 +4359,9 @@ struct Placed {
     derived: bool,
     /// The `desc-` its name takes in `derivatives/`.
     desc: Option<String>,
+    /// The folder of its own the pack gives it under `anat/` (record 55 C4,
+    /// 2026-10-09: SyMRI).
+    folder: Option<String>,
     /// Its base contrast, the suffix of a derivative the standard has no
     /// name for.
     base: Option<String>,
@@ -4559,6 +4749,7 @@ mod tests {
             place: Place::dir(dir.to_string()),
             fallback: Place::dir(dir.to_string()),
             route: "raw".to_string(),
+            dicom: false,
             content: "same".to_string(),
             change: crate::version::Change::Moved,
             was: Some(state(Place::dir(was.to_string()), &[])),
@@ -4728,7 +4919,13 @@ mod tests {
         ));
         assert!(matches!(
             state(Place::file("a/b".into(), "c".into()), &[".nii.gz", ".json"]).files(),
-            Files::Named(v) if v == vec!["a/b/c.nii.gz".to_string(), "a/b/c.json".to_string()]
+            Files::Named(v, None) if v == vec!["a/b/c.nii.gz".to_string(), "a/b/c.json".to_string()]
+        ));
+        // Record 55 C4 (2026-10-09): the DICOM export is the stack's too.
+        assert!(matches!(
+            state(Place::file("a/b".into(), "c".into()), &[".nii.gz", DICOM_EXPORT]).files(),
+            Files::Named(v, Some(d)) if v == vec!["a/b/c.nii.gz".to_string()]
+                && d == "sourcedata/dicom/a/b/c"
         ));
         assert_eq!(Place::dir("a/b".into()).key(), "a/b");
         assert_eq!(Place::file("a/b".into(), "c".into()).key(), "a/b/c");

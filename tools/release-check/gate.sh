@@ -127,6 +127,26 @@ if [[ -n "$converter" ]]; then
     "$nils" release --out "$work/names-descriptive" --name gate-names-descriptive \
       --layout descriptive --json > "$work/names-descriptive.json"
   )
+
+  # Record 55 C4 (2026-10-09): SyMRI under anat/SyMRI/ and the DICOM export
+  # under sourcedata/dicom/, in a registry of its own, in both naming styles.
+  echo "gate: the SyMRI tree"
+  "$engine/target/release/examples/reference" --symri --out "$work/symri-source" >/dev/null
+  (
+    export NILS_REGISTRY="$work/symri-home"
+    mkdir -p "$NILS_REGISTRY"
+    "$nils" key add gate --from-file "$work/key.bin" >/dev/null
+    "$nils" init --key gate --backend sqlite >/dev/null
+    "$nils" digest "$work/symri-source" --name symri --json > "$work/symri-digest.json"
+    "$nils" fingerprint --json > /dev/null
+    "$nils" classify --json > /dev/null
+    "$nils" release --out "$work/symri-bids" --name gate-symri --layout bids \
+      --json > "$work/symri-bids.json"
+    "$nils" release --out "$work/symri-bids" --name gate-symri --layout bids \
+      --json > "$work/symri-bids-again.json"
+    "$nils" release --out "$work/symri-minimal" --name gate-symri-minimal \
+      --layout bids --naming minimal --json > "$work/symri-minimal.json"
+  )
 else
   echo "gate: dcm2niix is not installed; the BIDS bars are skipped" >&2
 fi

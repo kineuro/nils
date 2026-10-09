@@ -108,7 +108,8 @@ def bar_validator(work: Path) -> list[str]:
     neither mode has anything to exempt.
     """
     bad = []
-    for tree in ("bids", "bids-minimal", "names-bids", "names-minimal"):
+    for tree in ("bids", "bids-minimal", "names-bids", "names-minimal", "symri-bids",
+                 "symri-minimal"):
         if (work / tree).is_dir():
             bad.extend(structural(work, tree))
     return bad
@@ -124,6 +125,10 @@ def structural(work: Path, tree: str) -> list[str]:
     for path in files_under(work / tree):
         parts = path.split("/")
         if parts[0] in ("sourcedata", "derivatives") or len(parts) < 3:
+            continue
+        # A folder of its own under a datatype (record 55 C4: `anat/SyMRI/`)
+        # is outside the standard and listed in `.bidsignore`.
+        if len(parts) > 4 and parts[0].startswith("sub-") and parts[1].startswith("ses-"):
             continue
         name = parts[-1]
         datatype = parts[-2]
@@ -199,7 +204,8 @@ def bar_official(work: Path) -> list[str]:
 
     trees = [
         t
-        for t in ("bids", "bids-minimal", "names-bids", "names-minimal")
+        for t in ("bids", "bids-minimal", "names-bids", "names-minimal", "symri-bids",
+                  "symri-minimal")
         if (work / t).is_dir()
     ]
     if not trees:
@@ -270,6 +276,46 @@ def count_codes(issues: list[dict]) -> dict[str, int]:
         key = i.get("code", "?") + (("/" + i["subCode"]) if i.get("subCode") else "")
         out[key] = out.get(key, 0) + 1
     return dict(sorted(out.items()))
+
+
+def bar_symri(work: Path) -> list[str]:
+    """SyMRI in its own folder and the DICOM export (record 55 C4, 2026-10-09).
+
+    In both naming styles: both synthetic contrasts are NIfTI under
+    `anat/SyMRI/`, the multi-dynamic multi-echo acquisition is DICOM in
+    SyMRI's folder of the export, every NIfTI has its slices under
+    `sourcedata/dicom/` in a folder named after the file, `.bidsignore`
+    lists the folder, and a second release writes nothing.
+    """
+    bad = []
+    for tree in ("symri-bids", "symri-minimal"):
+        root = work / tree
+        if not root.is_dir():
+            continue
+        files = files_under(root)
+        niftis = [p for p in files if p.startswith("sub-") and p.endswith(".nii.gz")]
+        symri = [p for p in niftis if "/anat/SyMRI/" in p]
+        if len(symri) != 2:
+            bad.append(f"{tree}: {len(symri)} NIfTI under anat/SyMRI/, not 2: {niftis}")
+        for p in niftis:
+            export = "sourcedata/dicom/" + re.sub(r"\.nii(\.gz)?$", "", p) + "/"
+            slices = [f for f in files if f.startswith(export) and f.endswith(".dcm")]
+            if len(slices) != 3:
+                bad.append(f"{tree}: {export} holds {len(slices)} slices, not 3")
+        folders = {
+            "/".join(p.split("/")[:-1])
+            for p in files
+            if p.startswith("sourcedata/dicom/") and "/anat/SyMRI/" in p
+        }
+        if len(folders) != 3:
+            bad.append(f"{tree}: {len(folders)} SyMRI folders in the DICOM export, not 3")
+        ignore = (root / ".bidsignore").read_text() if (root / ".bidsignore").is_file() else ""
+        if "*/*/anat/SyMRI" not in ignore.splitlines():
+            bad.append(f"{tree}: .bidsignore does not list the folder under anat/")
+    again = load(work, "symri-bids-again")
+    if again is not None and again.get("written", 0) != 0:
+        bad.append(f"symri-bids: the second release wrote {again['written']} file(s)")
+    return bad
 
 
 def bar_names(work: Path) -> list[str]:
@@ -816,6 +862,7 @@ def main() -> int:
         ("2. the validator passes", lambda: bar_validator(work)),
         ("2b. the official validator passes", lambda: bar_official(work)),
         ("2c. no name is refused", lambda: bar_names(work)),
+        ("2d. SyMRI in its folder, and the DICOM export", lambda: bar_symri(work)),
         ("3. the reference selections are right", lambda: bar_reference(work)),
         ("4, 5. every stack is placed and named", lambda: bar_placed(work, db)),
         ("6. one stack per session and role", lambda: bar_picks(work, db)),

@@ -18,7 +18,7 @@ use nils_digest::digest;
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::session::Scheme as SessionScheme;
 use nils_registry::{Backend, Registry, Scheme};
-use nils_release::bids::place::{Localizers, Options, Synthetic};
+use nils_release::bids::place::{Dicom, Localizers, Options, Synthetic};
 use nils_release::policy::Policy;
 use nils_release::run::{self, Layout, Selection};
 use nils_release::tags as categories;
@@ -179,6 +179,14 @@ fn files_under(root: &Path) -> Vec<String> {
     out
 }
 
+/// A stack kept in `sourcedata/` as DICOM instead of converted: a localizer,
+/// or one the converter or the name refused. Not the DICOM export under
+/// `sourcedata/dicom/`, which every converted stack has by default (record 55
+/// C4, 2026-10-09).
+fn kept_as_dicom(f: &str) -> bool {
+    f.starts_with("sourcedata/") && !f.starts_with("sourcedata/dicom/")
+}
+
 #[test]
 fn a_bids_release_needs_a_converter_and_says_so_before_it_starts() {
     // §9.6. A converter is not a thing to discover halfway through an archive,
@@ -316,7 +324,7 @@ fn what_the_standard_admits_gets_the_standards_name() {
     assert!(
         files_under(out.path())
             .iter()
-            .any(|f| f.starts_with("sourcedata/") && f.ends_with(".dcm")),
+            .any(|f| kept_as_dicom(f) && f.ends_with(".dcm")),
         "the localizer is in sourcedata as DICOM"
     );
 }
@@ -342,6 +350,7 @@ fn a_localizer_goes_where_the_release_said() {
         let places = Options {
             localizers: choice,
             synthetic: Synthetic::Anat,
+            ..Options::default()
         };
         let report = run::run(
             &mut reg,
@@ -369,6 +378,7 @@ fn a_localizer_goes_where_the_release_said() {
     let places = Options {
         localizers: Localizers::Drop,
         synthetic: Synthetic::Anat,
+        ..Options::default()
     };
     let report = run::run(
         &mut reg,
@@ -501,6 +511,304 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
         "and the new name says so: {now:?}"
     );
     assert!(now.iter().all(|n| !n.ends_with("_FLAIR.nii.gz")), "{now:?}");
+    // Record 55 C4 (2026-10-09): the DICOM export moved with its file, and
+    // nothing of it stayed under the old name.
+    let all = files_under(out.path());
+    for n in &now {
+        let export = export_of(n);
+        let slices = all
+            .iter()
+            .filter(|f| f.starts_with(&format!("{export}/")))
+            .count();
+        assert!(slices > 0, "{export} holds the slices: {all:?}");
+    }
+    for n in &before {
+        let export = export_of(n);
+        assert!(
+            !all.iter().any(|f| f.starts_with(&format!("{export}/"))),
+            "{export} is gone: {all:?}"
+        );
+    }
+}
+
+/// Where the DICOM export keeps a NIfTI's slices (record 55 C4, 2026-10-09).
+fn export_of(nifti: &str) -> String {
+    let stem = nifti.trim_end_matches(".nii.gz").trim_end_matches(".nii");
+    format!("sourcedata/dicom/{stem}")
+}
+
+/// One session with a T1w MPRAGE and three SyMRI series: the multi-dynamic
+/// multi-echo acquisition and two synthetic contrasts made from it.
+fn symri_tree() -> TempDir {
+    let dir = TempDir::new("bids-symri");
+    let series: [(&str, &str, &str, &str, &str); 4] = [
+        (
+            "1",
+            "t1_mprage_sag",
+            "MPRAGE",
+            "ORIGINAL\\PRIMARY\\M\\ND",
+            "3D",
+        ),
+        ("2", "SyMRI MDME", "SyMRI", "ORIGINAL\\PRIMARY\\M\\ND", "2D"),
+        (
+            "3",
+            "SyMRI T1W synthetic",
+            "SyMRI",
+            "DERIVED\\PRIMARY\\T1W_SYNTHETIC",
+            "2D",
+        ),
+        (
+            "4",
+            "SyMRI T2W synthetic",
+            "SyMRI",
+            "DERIVED\\PRIMARY\\T2W_SYNTHETIC",
+            "2D",
+        ),
+    ];
+    for (n, description, protocol, image_type, acquisition) in series {
+        for slice in 1..=4 {
+            let sop = format!("1.2.3.{n}.{slice}");
+            let mut e = synth::minimal_mr(&format!("1.2.3.{n}"), &format!("1.2.3.{n}.0"), &sop);
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "19800101-1234"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+                synth::text(tags::SERIES_TIME, VR::TM, &format!("0314{n}5")),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, description),
+                synth::text(tags::PROTOCOL_NAME, VR::LO, protocol),
+                synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, acquisition),
+                synth::text(tags::IMAGE_TYPE, VR::CS, image_type),
+                synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+                synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+                synth::us(tags::ROWS, 16),
+                synth::us(tags::COLUMNS, 16),
+                synth::us(tags::BITS_ALLOCATED, 16),
+                synth::us(tags::BITS_STORED, 12),
+                synth::us(tags::HIGH_BIT, 11),
+                synth::us(tags::PIXEL_REPRESENTATION, 0),
+                synth::us(tags::SAMPLES_PER_PIXEL, 1),
+                synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
+                synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
+                synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
+                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
+                synth::text(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    &format!("0\\0\\{slice}"),
+                ),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
+                synth::bytes(tags::PIXEL_DATA, VR::OW, vec![0x40u8; 16 * 16 * 2]),
+            ]);
+            if protocol == "SyMRI" && image_type.starts_with("ORIGINAL") {
+                e.push(synth::text(tags::SEQUENCE_NAME, VR::SH, "*mdme2d"));
+            }
+            dir.file(
+                &format!("{n}/{slice}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    dir
+}
+
+#[test]
+fn symri_is_anatomical_in_its_own_folder_and_its_dicom_is_exported() {
+    // Record 55 C4 (2026-10-09), Nima: "we treat symri as anat but since
+    // their pipeline make sense with having the dcm, we have them under anat
+    // in their own folder but release should have a bids export in DCIOM
+    // folder too". v0 wrote `anat/SyMRI/` and a DICOM tree of every stack,
+    // a folder per stack named after its file.
+    let Some(converter) = converter() else { return };
+    let source = symri_tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    let report = run::run(&mut reg, &s).unwrap();
+    let written = files_under(out.path());
+    assert_eq!(
+        report.placements.get("synthetic").map(String::as_str),
+        Some("folder")
+    );
+    assert_eq!(
+        report.placements.get("dicom").map(String::as_str),
+        Some("all")
+    );
+
+    // Both synthetic contrasts are NIfTI in `anat/SyMRI/`; the MPRAGE is in
+    // `anat/` as before.
+    let symri: Vec<&String> = written
+        .iter()
+        .filter(|f| f.contains("/anat/SyMRI/") && f.ends_with(".nii.gz") && f.starts_with("sub-"))
+        .collect();
+    assert_eq!(symri.len(), 2, "{written:?}");
+    assert!(
+        written
+            .iter()
+            .any(|f| f.starts_with("sub-") && f.ends_with("_T1w.nii.gz") && !f.contains("/SyMRI/")),
+        "{written:?}"
+    );
+    assert!(
+        !written.iter().any(|f| f.starts_with("derivatives/")),
+        "{written:?}"
+    );
+    assert_eq!(report.routes.get("folder"), Some(&2), "{report:?}");
+    // The multi-dynamic multi-echo acquisition is a working scan, not an
+    // image to convert, and it is what SyMRI's pipeline reads: its slices are
+    // DICOM in SyMRI's folder of the export, never in the descriptive
+    // `sourcedata/` tree.
+    let acquisition: Vec<&String> = written
+        .iter()
+        .filter(|f| {
+            f.starts_with("sourcedata/dicom/")
+                && f.contains("/anat/SyMRI/")
+                && f.contains("MDMEND/")
+        })
+        .collect();
+    assert_eq!(acquisition.len(), 4, "{written:?}");
+    assert!(!written.iter().any(|f| kept_as_dicom(f)), "{written:?}");
+
+    // The DICOM export: each NIfTI's file name, without the extension, is a
+    // folder under `sourcedata/dicom/` at the NIfTI's path, holding its four
+    // slices.
+    for nifti in written
+        .iter()
+        .filter(|f| f.starts_with("sub-") && f.ends_with(".nii.gz"))
+    {
+        let export = export_of(nifti);
+        let slices: Vec<&String> = written
+            .iter()
+            .filter(|f| f.starts_with(&format!("{export}/")))
+            .collect();
+        assert_eq!(slices.len(), 4, "{export}: {written:?}");
+        assert!(slices.iter().all(|f| f.ends_with(".dcm")), "{slices:?}");
+    }
+    // The slices are the release's, de-identified: the patient ID is gone.
+    let one = written
+        .iter()
+        .find(|f| f.starts_with("sourcedata/dicom/") && f.contains("/anat/SyMRI/"))
+        .unwrap();
+    let bytes = std::fs::read(out.path().join(one)).unwrap();
+    assert!(
+        !bytes.windows(13).any(|w| w == b"19800101-1234"),
+        "the export is scrubbed"
+    );
+    // The folder is outside the standard, and the tree says so.
+    let ignore = std::fs::read_to_string(out.path().join(".bidsignore")).unwrap();
+    assert!(ignore.lines().any(|l| l == "*/*/anat/SyMRI"), "{ignore}");
+    let readme = std::fs::read_to_string(out.path().join("README")).unwrap();
+    assert!(readme.contains("sourcedata/dicom/"), "{readme}");
+
+    // A re-run writes nothing.
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!(again.written, 0, "{again:?}");
+    assert_eq!(files_under(out.path()), written);
+    // And an export somebody removed is written again, as a NIfTI would be.
+    let mprage = written
+        .iter()
+        .find(|f| f.starts_with("sub-") && f.ends_with("MPRAGE_T1w.nii.gz"))
+        .unwrap();
+    std::fs::remove_dir_all(out.path().join(export_of(mprage))).unwrap();
+    let restored = run::run(&mut reg, &s).unwrap();
+    assert_eq!(restored.restored, 1, "{restored:?}");
+    assert_eq!(files_under(out.path()), written);
+
+    // `folders`: only SyMRI's slices are exported, and the MPRAGE's export
+    // leaves the tree.
+    let folders = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options {
+            dicom: Dicom::Folders,
+            ..Options::default()
+        },
+        Some(&converter),
+    );
+    run::run(&mut reg, &folders).unwrap();
+    let now = files_under(out.path());
+    let exported: Vec<&String> = now
+        .iter()
+        .filter(|f| f.starts_with("sourcedata/dicom/"))
+        .collect();
+    // Both synthetic contrasts and the acquisition.
+    assert_eq!(exported.len(), 12, "{now:?}");
+    assert!(
+        exported.iter().all(|f| f.contains("/anat/SyMRI/")),
+        "{exported:?}"
+    );
+
+    // `none`: no export of the converted stacks; the acquisition is DICOM
+    // in SyMRI's folder whatever the export, because it is DICOM only.
+    let none = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options {
+            dicom: Dicom::None,
+            ..Options::default()
+        },
+        Some(&converter),
+    );
+    run::run(&mut reg, &none).unwrap();
+    let now = files_under(out.path());
+    assert!(
+        now.iter()
+            .filter(|f| f.starts_with("sourcedata/"))
+            .all(|f| f.contains("MDMEND/")),
+        "{now:?}"
+    );
+    assert_eq!(
+        now.iter()
+            .filter(|f| f.contains("/anat/SyMRI/") && f.ends_with(".nii.gz"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn the_earlier_synthetic_choices_still_place_symri_without_a_folder() {
+    let Some(converter) = converter() else { return };
+    let source = symri_tree();
+    let home_dir = TempDir::new("bids-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    for (choice, synthetic_in) in [
+        (Synthetic::Anat, "sub-"),
+        (Synthetic::Derivatives, "derivatives/nils/"),
+    ] {
+        let out = TempDir::new("bids-out");
+        let s = settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options {
+                synthetic: choice,
+                ..Options::default()
+            },
+            Some(&converter),
+        );
+        run::run(&mut reg, &s).unwrap();
+        let written = files_under(out.path());
+        assert!(
+            !written.iter().any(|f| f.contains("/SyMRI/")),
+            "{written:?}"
+        );
+        assert!(
+            written.iter().any(|f| f.starts_with(synthetic_in)
+                && f.ends_with(".nii.gz")
+                && f.contains("rec-SyMRI")),
+            "{choice:?}: {written:?}"
+        );
+    }
 }
 
 #[test]
@@ -1088,7 +1396,7 @@ fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
     assert!(
         !written
             .iter()
-            .any(|f| f.contains("FLAIR") && f.starts_with("sourcedata/")),
+            .any(|f| f.contains("FLAIR") && kept_as_dicom(f)),
         "nothing is refused its name: {written:?}"
     );
     let flair: Vec<&String> = written
@@ -1327,7 +1635,7 @@ fn numbered_with(one: Twin, two: Twin, differs: serde_json::Value, asked: bool) 
     assert!(names.iter().all(|n| !n.contains("_run-")), "{names:?}");
     let written = files_under(out.path());
     assert!(
-        written.iter().all(|f| !f.starts_with("sourcedata/")),
+        written.iter().all(|f| !kept_as_dicom(f)),
         "nothing is refused: {written:?}"
     );
     assert!(

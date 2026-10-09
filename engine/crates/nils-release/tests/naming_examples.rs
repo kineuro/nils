@@ -241,6 +241,7 @@ fn naming_examples() {
     let place = |r: &Route, n: &Result<Name, String>, s: &S, desc: &str, d: &str| -> String {
         match (r, n) {
             (Route::Raw, Ok(n)) => format!("{}/{}", n.datatype, n.stem("01", "01")),
+            (Route::Folder(f), Ok(n)) => format!("anat/{f}/{}", n.stem("01", "01")),
             (Route::Derivatives, Ok(n)) => {
                 format!(
                     "derivatives/nils/{}/{}",
@@ -280,6 +281,7 @@ fn naming_examples() {
             Some(s.disposition),
             synthetic,
             derived_by.is_some(),
+            pack.bids.folder_of(s.provenance, s.technique),
             &named_ok,
             Options::default(),
         );

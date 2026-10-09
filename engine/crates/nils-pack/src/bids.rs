@@ -75,6 +75,16 @@ impl Tokens {
 }
 
 /// The whole mapping.
+/// A folder of its own under `anat/`, and the stacks it holds: those of one
+/// of its provenances, or acquired with one of its techniques (SyMRI's
+/// acquisition keeps `RawRecon` and is told by its technique).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Folder {
+    pub name: String,
+    pub provenance: Vec<String>,
+    pub technique: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mapping {
     /// Our intent to the BIDS datatype. An intent absent here has no datatype,
@@ -111,6 +121,11 @@ pub struct Mapping {
     /// `UNIT1` among derived images, so these go to `derivatives/` with
     /// `desc-` naming the construct.
     pub derivative_construct: Vec<String>,
+    /// Stacks that go under `anat/` in a folder of their own (record 55 C4,
+    /// 2026-10-09): SyMRI's images, whose pipeline reads them together and
+    /// as DICOM. In the order the pack lists them; the first that claims a
+    /// stack names its folder.
+    pub folders: Vec<Folder>,
     /// What a person may answer when asked what the subject was doing, and
     /// why each is on the list.
     pub task: BTreeMap<String, String>,
@@ -214,6 +229,18 @@ impl Mapping {
             .copied()
     }
 
+    /// The folder of its own a stack goes into under `anat/`, if the pack
+    /// gives it one ([`Mapping::folders`]).
+    pub fn folder_of(&self, provenance: Option<&str>, technique: Option<&str>) -> Option<&str> {
+        self.folders
+            .iter()
+            .find(|f| {
+                provenance.is_some_and(|p| f.provenance.iter().any(|v| v == p))
+                    || technique.is_some_and(|t| f.technique.iter().any(|v| v == t))
+            })
+            .map(|f| f.name.as_str())
+    }
+
     /// Whether a stack is a vendor's synthetic contrast (§9.3).
     pub fn is_synthetic(&self, provenance: Option<&str>, constructs: &[&str]) -> bool {
         provenance.is_some_and(|p| self.synthetic_provenance.iter().any(|s| s == p))
@@ -310,6 +337,22 @@ mod tests {
         let m = mapping();
         assert!(m.suffix(&["SWI"], None, &[], Some("SWI")).is_none());
         assert!(m.suffix(&[], None, &[], None).is_none());
+    }
+
+    #[test]
+    fn a_folder_claims_a_stack_by_provenance_or_by_technique() {
+        let m = Mapping {
+            folders: vec![Folder {
+                name: "SyMRI".into(),
+                provenance: vec!["SyMRI".into()],
+                technique: vec!["MDME".into(), "QALAS".into()],
+            }],
+            ..Mapping::default()
+        };
+        assert_eq!(m.folder_of(Some("SyMRI"), None), Some("SyMRI"));
+        assert_eq!(m.folder_of(Some("RawRecon"), Some("QALAS")), Some("SyMRI"));
+        assert_eq!(m.folder_of(Some("RawRecon"), Some("TSE")), None);
+        assert_eq!(m.folder_of(None, None), None);
     }
 
     #[test]

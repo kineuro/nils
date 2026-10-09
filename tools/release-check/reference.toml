@@ -49,6 +49,10 @@ names = [
 # what separates 22 otherwise identical pairs, and BIDS also carries it in the
 # sidecar as `BodyPart`.
 [bids]
+# Amended 2026-10-09, record 55 C4. Every converted stack's DICOM export is in
+# `sourcedata/dicom/`, at its NIfTI's path, in a folder named after the NIfTI
+# file without the extension, one line per stack below. Read off the gate run
+# and checked one at a time: one folder per NIfTI, nothing else moved.
 # The subject code is masked for the same reason. Six things are being
 # asserted here at once, and each is worth naming:
 #
@@ -109,6 +113,15 @@ names = [
 # Nothing else moved: no route and no count.
 
 files = [
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+2D+FLAIR+IRTSE_T2w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+GRE_part-mag_T2starw/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-1_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-2_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax+2D+DWIEPI_ADC/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax+2D+DWIEPI_trace/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+2D+GRE_echo-1_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+2D+GRE_echo-2_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+3D+MPRAGE_ce-contrast_T1w/<dicom>",
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+GRE_part-mag_T2starw.nii.gz",
@@ -130,6 +143,15 @@ files = [
 # on 2026-10-08.
 [bids_minimal]
 files = [
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-2D+FLAIR+IRTSE_T2w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+GRE_part-mag_T2starw/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-1_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-2_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-2D+DWIEPI_ADC/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-2D+DWIEPI_trace/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-2D+GRE_echo-1_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-2D+GRE_echo-2_T1w/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-3D+MPRAGE_ce-contrast_T1w/<dicom>",
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-2D+FLAIR+IRTSE_T2w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+GRE_part-mag_T2starw.nii.gz",

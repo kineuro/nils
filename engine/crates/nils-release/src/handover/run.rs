@@ -400,6 +400,14 @@ fn files_of(
             Some(stem) => {
                 let extensions = r.opt_text(3)?.unwrap_or("").to_string();
                 for ext in extensions.split(',').filter(|e| !e.is_empty()) {
+                    // Record 55 C4 (2026-10-09): the stack's DICOM export, a
+                    // directory of its own under `sourcedata/dicom/`.
+                    if ext == crate::run::DICOM_EXPORT {
+                        let export = crate::bids::place::dicom_dir(&dir, stem);
+                        walk(root, &root.join(&export), &mut present);
+                        owned.push(format!("{export}/"));
+                        continue;
+                    }
                     let path = format!("{dir}/{stem}{ext}");
                     match std::fs::metadata(root.join(&path)) {
                         Ok(m) if m.is_file() => present.push((path, m.len() as i64)),

@@ -1326,6 +1326,35 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
             }
         }
     }
+    // Record 55 C4 (2026-10-09): the folders of their own under `anat/`.
+    if let Some(v) = top.get("folders") {
+        for (name, body) in f.blame(yaml::obj(v, "bids.folders"))? {
+            let at = format!("bids.folders.{name}");
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(
+                    Error::at(&at, format!("{name} is not a folder name: [0-9a-zA-Z]+"))
+                        .in_file(&f.path, Some(&f.source)),
+                );
+            }
+            let fm = f.blame(yaml::obj(body, &at))?;
+            let mut folder = crate::bids::Folder {
+                name: name.clone(),
+                ..Default::default()
+            };
+            for (key, list) in [
+                ("provenance", &mut folder.provenance),
+                ("technique", &mut folder.technique),
+            ] {
+                let Some(v) = fm.get(key) else { continue };
+                let at = format!("{at}.{key}");
+                for value in f.blame(yaml::texts(v, &at))? {
+                    check(key, &value, &at)?;
+                    list.push(value);
+                }
+            }
+            into.folders.push(folder);
+        }
+    }
     if let Some(v) = top.get("derivatives") {
         let dm = f.blame(yaml::obj(v, "bids.derivatives"))?;
         if let Some(v) = dm.get("construct") {

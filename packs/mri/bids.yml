@@ -365,12 +365,24 @@ acq:
 # defensible, so a release chooses and this says which stacks the choice is
 # about.
 #
-# Record 55 C4: the synthetic contrasts only, not every SyMRI image, so that
-# its quantitative maps (`T1map`, `PDmap`, ...) stay in raw `anat/` as BIDS
-# permits, and the synthetic contrasts go to `derivatives/` by default.
+# Record 55 C4: the synthetic contrasts only, not every SyMRI image. A
+# release that asks for `--synthetic derivatives` sends these there; by
+# default SyMRI's synthetic contrasts go with the rest of SyMRI, below.
 synthetic:
   construct:
     [SyntheticT1w, SyntheticT2w, SyntheticFLAIR, SyntheticPDw, SyntheticSTIR, SyntheticDIR, SyntheticPSIR]
+
+# Stacks that go under `anat/` in a folder of their own (record 55 C4,
+# 2026-10-09). SyMRI's images are anatomical, and its pipeline reads them
+# together and as DICOM, so they stay together as v0 kept them
+# (`anat/SyMRI/`), and the release's DICOM export puts their slices in a
+# folder named after each file. Its maps and synthetic contrasts carry the
+# SyMRI provenance; its acquisition keeps RawRecon and is told by technique.
+# The folder is not a BIDS place, so the release lists it in `.bidsignore`.
+folders:
+  SyMRI:
+    provenance: [SyMRI]
+    technique: [MDME, QALAS]
 
 # Constructs whose stacks are derivatives whatever a release chooses, named
 # there with `desc-<construct>` (record 55 C4, after the 2026-10-08 naming

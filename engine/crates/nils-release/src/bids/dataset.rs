@@ -350,6 +350,25 @@ pub fn readme(
          run reports anything it could place nowhere. The files here are NIfTI and their\n\
          sidecars, so there are fewer of them than the DICOM a descriptive tree holds.\n",
     );
+    // Record 55 C4 (2026-10-09), after v0's DICOM tree.
+    if let Some(which) = made_by
+        .placements
+        .get("dicom")
+        .filter(|w| w.as_str() != "none")
+    {
+        let _ = writeln!(
+            out,
+            "\n## The DICOM export\n\n\
+             `sourcedata/dicom/` holds the de-identified DICOM of {}, at the path its NIfTI \
+             file has, in a folder named after that file without its extension, one file \
+             per slice. SyMRI's images are under `anat/SyMRI/`, because its pipeline reads \
+             them together and as DICOM.",
+            match which.as_str() {
+                "folders" => "each stack in a folder of its own",
+                _ => "every converted stack",
+            }
+        );
+    }
     out
 }
 

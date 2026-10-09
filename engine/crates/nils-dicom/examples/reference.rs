@@ -23,6 +23,11 @@
 //! (Wave 7a section 8.1): one session whose stacks want shared BIDS names,
 //! so that the official validator reads every way a release now tells them
 //! apart. Its right answers are `[names]` in the same file.
+//!
+//! With `--symri` it writes the third (record 55 C4, 2026-10-09): one session
+//! with an MPRAGE and a SyMRI exam, its multi-dynamic multi-echo acquisition
+//! and two synthetic contrasts, which a BIDS release puts under
+//! `anat/SyMRI/` and in its DICOM export.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -256,6 +261,54 @@ const NAMES: &[Series] = &[
     },
 ];
 
+/// Record 55 C4 (2026-10-09): one session with an MPRAGE beside a SyMRI exam.
+const SYMRI: &[Series] = &[
+    Series {
+        key: "mprage",
+        study: "1",
+        date: "20230301",
+        description: "t1_mprage_sag_p2",
+        protocol: "T1 MPRAGE",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "3D",
+        instances: 3,
+        extra: &[],
+    },
+    Series {
+        key: "symri-mdme",
+        study: "1",
+        date: "20230301",
+        description: "SyMRI MDME",
+        protocol: "SyMRI",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[(0x0018, 0x0024, VR::SH, "*mdme2d")],
+    },
+    Series {
+        key: "symri-t1w",
+        study: "1",
+        date: "20230301",
+        description: "SyMRI T1W synthetic",
+        protocol: "SyMRI",
+        image_type: "DERIVED\\PRIMARY\\T1W_SYNTHETIC",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[],
+    },
+    Series {
+        key: "symri-t2w",
+        study: "1",
+        date: "20230301",
+        description: "SyMRI T2W synthetic",
+        protocol: "SyMRI",
+        image_type: "DERIVED\\PRIMARY\\T2W_SYNTHETIC",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[],
+    },
+];
+
 fn main() {
     let mut out = PathBuf::from("reference");
     let mut series = SERIES;
@@ -264,6 +317,7 @@ fn main() {
         match arg.as_str() {
             "--out" => out = PathBuf::from(args.next().unwrap_or_else(|| usage())),
             "--names" => series = NAMES,
+            "--symri" => series = SYMRI,
             _ => usage(),
         }
     }
@@ -398,6 +452,6 @@ fn write_manifest(out: &Path, series: &[Series], files: usize) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: reference --out DIR [--names]");
+    eprintln!("usage: reference --out DIR [--names | --symri]");
     std::process::exit(2)
 }

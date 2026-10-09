@@ -39,6 +39,7 @@ four are wastes three runs.
 | 2 | every name in the raw tree, against the schema the engine carries |
 | 2b | the official BIDS validator: 0 errors on every BIDS tree, in both naming styles (full, minimal) |
 | 2c | the names tree: no stack refused its name, and the names `[names]` expects |
+| 2d | the SyMRI tree: SyMRI under `anat/SyMRI/`, every NIfTI's DICOM export under `sourcedata/dicom/`, the folder in `.bidsignore`, a re-run writes nothing |
 | 3 | the reference answers, in both layouts |
 | 4, 5 | every stack placed, the counts reconciling, and nothing unnamed |
 | 6 | one stack per session and role, with a margin so a tie can be seen |
@@ -69,6 +70,11 @@ tells apart rather than refusing (Wave 7a §8.1). The schema it checks against i
 `tools/bids-schema/extract.py` from the published schema, the same generator
 that writes the engine's copy, so the engine and the thing that checks the
 engine cannot drift apart.
+
+Bar 2d releases a third tree, `reference --symri`, in a registry of its own: an
+MPRAGE beside a SyMRI exam (its multi-dynamic multi-echo acquisition and two
+synthetic contrasts), in both naming styles, and the official validator reads
+both (record 55 C4, 2026-10-09).
 
 Bar 8 reads bytes rather than tags, because the claim is about what leaves: no
 value the source carried appears in anything released, wherever it might have
