@@ -80,9 +80,18 @@ fn the_mri_pack_s_axes_that_matter_and_where_a_missing_one_is_asked() {
         assert!(!names.contains(&axis), "{axis} does not matter: {names:?}");
     }
     // a missing answer is asked only on an axis that holds one value, has
-    // no default and is not the body-part model's
+    // no default and is not its own operation's (the body part and the
+    // post-contrast, record 56 section 2)
+    assert_eq!(
+        pack.review.by_model,
+        vec![
+            "body_part".to_string(),
+            "body_region".to_string(),
+            "post_contrast".to_string()
+        ]
+    );
     assert_eq!(
         nils_pack::matters::missing_asked(&pack),
-        vec!["base".to_string(), "post_contrast".to_string()]
+        vec!["base".to_string()]
     );
 }
