@@ -683,3 +683,148 @@ fn every_openapi_document_is_strict_yaml() {
         assert!(doc["paths"].is_object(), "v{v}");
     }
 }
+
+/// The current version of the HTTP API contract reads as it is written. In
+/// a flow mapping a comma ends a plain value, so `{description: No such
+/// campaign, or not one of the caller's}` is the description "No such
+/// campaign" and a key "or not one of the caller's" with no value: until
+/// 2026-10-10, 82 of version 7's descriptions lost the rest of their
+/// sentence so, and a value with a comma inside braces is quoted. Every
+/// door also declares each parameter its path names, and a parameter and a
+/// response hold only what OpenAPI 3.1 gives them.
+#[test]
+fn the_openapi_document_reads_as_it_is_written() {
+    /// Every key with no value, which a contract only means as a default,
+    /// an example or a constant: anything else is text a comma split.
+    fn split(v: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    let here = format!("{at}{k} > ");
+                    if x.is_null() && !["default", "example", "const"].contains(&k.as_str()) {
+                        out.push(here.trim_end_matches(" > ").to_string());
+                    }
+                    split(x, &here, out);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for (i, x) in a.iter().enumerate() {
+                    split(x, &format!("{at}{i} > "), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // what the check looks for: the rest of the sentence as a key
+    let sample: serde_json::Value = serde_saphyr::from_str(
+        "\"404\": {description: No such campaign, or not one of the caller's}\n",
+    )
+    .unwrap();
+    assert_eq!(sample["404"]["description"], "No such campaign", "{sample}");
+    let mut found = Vec::new();
+    split(&sample, "", &mut found);
+    assert_eq!(found, ["404 > or not one of the caller's"]);
+
+    let v = version("openapi");
+    let p = contracts().join(format!("openapi/v{v}/openapi.yaml"));
+    let doc: serde_json::Value = serde_saphyr::from_str(&std::fs::read_to_string(&p).unwrap())
+        .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    let mut found = Vec::new();
+    split(&doc, "", &mut found);
+    assert!(
+        found.is_empty(),
+        "text a comma inside braces split into keys with no value; quote the value: {found:#?}"
+    );
+
+    let methods = [
+        "get", "put", "post", "delete", "patch", "head", "options", "trace",
+    ];
+    let parameter = [
+        "name",
+        "in",
+        "description",
+        "required",
+        "deprecated",
+        "allowEmptyValue",
+        "style",
+        "explode",
+        "allowReserved",
+        "schema",
+        "example",
+        "examples",
+        "content",
+    ];
+    let response = ["description", "headers", "content", "links"];
+    let named = regex::Regex::new(r"\{([^}/]+)\}").unwrap();
+    let status = regex::Regex::new(r"^([1-5][0-9][0-9]|[1-5]XX|default)$").unwrap();
+    let mut wrong = Vec::new();
+    let paths = doc["paths"].as_object().unwrap();
+    assert!(paths.len() > 100, "{}", paths.len());
+    for (path, item) in paths {
+        let shared = item["parameters"].as_array().cloned().unwrap_or_default();
+        for (method, op) in item.as_object().unwrap() {
+            if !methods.contains(&method.as_str()) {
+                assert!(
+                    ["parameters", "summary", "description"].contains(&method.as_str()),
+                    "{path}: {method}"
+                );
+                continue;
+            }
+            let door = format!("{} {path}", method.to_uppercase());
+            let own = op["parameters"].as_array().cloned().unwrap_or_default();
+            let params: Vec<&serde_json::Value> = shared.iter().chain(&own).collect();
+            for p in &params {
+                let keys = p.as_object().unwrap();
+                if let Some(k) = keys.keys().find(|k| !parameter.contains(&k.as_str())) {
+                    wrong.push(format!("{door}: a parameter holds {k}"));
+                }
+                if !p["name"].is_string()
+                    || !["path", "query", "header", "cookie"]
+                        .contains(&p["in"].as_str().unwrap_or(""))
+                {
+                    wrong.push(format!(
+                        "{door}: a parameter without a name or a place: {p}"
+                    ));
+                }
+                if p["in"] == "path" && p["required"] != true {
+                    wrong.push(format!(
+                        "{door}: the path parameter {} is not required",
+                        p["name"]
+                    ));
+                }
+            }
+            for name in named.captures_iter(path) {
+                if !params
+                    .iter()
+                    .any(|p| p["in"] == "path" && p["name"] == name[1])
+                {
+                    wrong.push(format!(
+                        "{door}: the path names {} and the door does not",
+                        &name[1]
+                    ));
+                }
+            }
+            let responses = op["responses"].as_object();
+            if responses.is_none_or(|r| r.is_empty()) {
+                wrong.push(format!("{door}: no responses"));
+            }
+            for (code, r) in responses.into_iter().flatten() {
+                if !status.is_match(code) {
+                    wrong.push(format!("{door}: {code} is not a status"));
+                }
+                if !r["description"].is_string() {
+                    wrong.push(format!("{door}: {code} has no description"));
+                }
+                if let Some(k) = r
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|o| o.keys())
+                    .find(|k| !response.contains(&k.as_str()))
+                {
+                    wrong.push(format!("{door}: {code} holds {k}"));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
