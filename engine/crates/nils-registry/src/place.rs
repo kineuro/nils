@@ -202,14 +202,100 @@ impl Place {
     /// outside the folder, and a digest keeps that resolved root, so the
     /// trees are matched too.
     pub fn holds_path(&self, path: &Path) -> bool {
-        let theirs = canonical_prefix(path);
-        let under = |mine: &Path| theirs.starts_with(canonical_prefix(mine));
-        under(Path::new(&self.path))
-            || ["originals", "anon"]
-                .iter()
-                .filter_map(|tree| self.tree_path(tree))
-                .any(|tree| under(&tree))
+        self.depth_holding(&canonical_prefix(path)).is_some()
     }
+
+    /// How closely this place holds a path already resolved: the depth of
+    /// the deepest of its folder and its trees the path lies under, none
+    /// where it lies under neither. [`Place::holds_path`] asks the same.
+    fn depth_holding(&self, theirs: &Path) -> Option<usize> {
+        std::iter::once(Path::new(&self.path).to_path_buf())
+            .chain(
+                ["originals", "anon"]
+                    .iter()
+                    .filter_map(|tree| self.tree_path(tree)),
+            )
+            .map(|mine| canonical_prefix(&mine))
+            .filter(|mine| theirs.starts_with(mine))
+            .map(|mine| mine.components().count())
+            .max()
+    }
+}
+
+/// A dataset a stack can be of (Wave 7a): an active source place that is a
+/// dataset, not a root, with the `source` rows (the roots its digests read)
+/// that are its own. The ask reads a stack's dataset from these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetSources {
+    pub id: i64,
+    pub name: String,
+    pub sources: Vec<i64>,
+}
+
+/// Every active dataset with its `source` rows, in the order of their ids.
+/// A root (each folder under it a dataset of its own) is none. A `source`
+/// row two datasets hold is the one's that holds it most closely (the
+/// deeper folder, then the lower id), so a row is of one dataset at most,
+/// and a row no dataset holds is of none.
+pub fn dataset_sources(store: &mut Store) -> Result<Vec<DatasetSources>, Error> {
+    let places: Vec<Place> = active(store)?
+        .into_iter()
+        .filter(|p| p.role == Role::Source && !is_root(&p.dataset))
+        .collect();
+    let mut out: Vec<DatasetSources> = places
+        .iter()
+        .map(|p| DatasetSources {
+            id: p.id,
+            name: p.name.clone(),
+            sources: Vec::new(),
+        })
+        .collect();
+    if places.is_empty() {
+        return Ok(out);
+    }
+    let sql = format!(
+        "SELECT id, root_canonical FROM {} ORDER BY id",
+        store.qualified("source")
+    );
+    for r in &store.query(&sql, &[])? {
+        let theirs = canonical_prefix(Path::new(r.text(1)?));
+        let mut best: Option<(usize, usize)> = None;
+        for (i, p) in places.iter().enumerate() {
+            if let Some(depth) = p.depth_holding(&theirs)
+                && best.is_none_or(|(d, _)| depth > d)
+            {
+                best = Some((depth, i));
+            }
+        }
+        if let Some((_, i)) = best {
+            out[i].sources.push(r.int(0)?);
+        }
+    }
+    Ok(out)
+}
+
+/// What [`dataset_sources`] reads, as one text that changes whenever its
+/// answer could: each source place's id, name, path, retirement and
+/// dataset, and how many `source` rows there are up to which id. A place
+/// changes without the epoch moving, and comparing this is cheaper than
+/// resolving every root under every place again.
+pub fn dataset_stamp(store: &mut Store) -> Result<String, Error> {
+    let mut out = String::new();
+    for p in list(store)? {
+        if p.role == Role::Source {
+            out.push_str(&format!(
+                "{}|{}|{}|{:?}|{}\n",
+                p.id, p.name, p.path, p.retired_at, p.dataset
+            ));
+        }
+    }
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM {}",
+        store.qualified("source")
+    );
+    let r = &store.query(&sql, &[])?[0];
+    out.push_str(&format!("{}|{}", r.int(0)?, r.int(1)?));
+    Ok(out)
 }
 
 /// The longest existing prefix of a path, canonicalised, with the rest
@@ -626,6 +712,12 @@ pub fn is_undeclared(dataset: &Value) -> bool {
     dataset_of(dataset, None)
         .map(|d| d["arrives"] == UNDECLARED)
         .unwrap_or(true)
+}
+
+/// Whether a source place's document says it is a root, each folder under
+/// it a dataset of its own (Wave 7a), rather than a dataset.
+pub fn is_root(dataset: &Value) -> bool {
+    dataset_of(dataset, None).is_ok_and(|d| d["kind"] == "root")
 }
 
 /// How what comes in through a place is handled, as the operator declares it:
@@ -1151,7 +1243,7 @@ pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Erro
 mod tests {
     use super::{
         ANON_TREE, ORIGINALS_TREE, PatientId, SUBJECTS, UNDECLARED, dataset_of, default_dataset,
-        default_handling, handling_of, incomplete, is_undeclared,
+        default_handling, handling_of, incomplete, is_root, is_undeclared,
     };
     use serde_json::json;
 
@@ -1256,6 +1348,16 @@ mod tests {
                 .unwrap()
                 .contains("root")
         );
+        // a root is no dataset of its own; a dataset, a legacy place and a
+        // document nobody declared are
+        assert!(is_root(&json!({"kind": "root"})));
+        for d in [
+            json!({"kind": "dataset"}),
+            json!({"kind": "legacy"}),
+            json!(null),
+        ] {
+            assert!(!is_root(&d), "{d}");
+        }
         // a legacy place reads the pseudonymised tree it names, once whole
         assert_eq!(
             incomplete(

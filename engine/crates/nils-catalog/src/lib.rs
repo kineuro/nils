@@ -22,11 +22,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use nils_ask::ast::Grain;
 use nils_ask::hash::Locale;
 use nils_ask::validate::{
-    Class, ColumnRef, DerivedInfo, FieldInfo, KindInfo, LevelSpec, Names, Scope,
+    Class, ColumnRef, DATASET_TABLE, Dataset, DerivedInfo, FieldInfo, KindInfo, LevelSpec, Names,
+    Scope,
 };
 use nils_dicom::catalogue::{self, Level as CatalogueLevel, Sensitivity};
 use nils_pack::pack::{Pack, Visibility};
 use nils_registry::clinical;
+use nils_registry::place::{self, DatasetSources};
 use nils_registry::schema::{Type, table};
 use nils_registry::session::Scheme;
 use nils_registry::time::now_iso;
@@ -225,6 +227,11 @@ pub struct Catalog {
     pub selections: BTreeMap<String, u64>,
     pub handles: BTreeMap<String, Grain>,
     pub uploads: BTreeSet<String>,
+    /// Wave 7a: the datasets a stack can be of, each with the `source` rows
+    /// that are its own, which the `dataset` fields read, and the stamp
+    /// they were read at ([`place::dataset_stamp`]).
+    pub datasets: Vec<DatasetSources>,
+    pub datasets_stamp: String,
     /// The registry's reading of dates (Wave 5 section 12.6).
     pub locale: Locale,
     pub caps: Caps,
@@ -268,6 +275,9 @@ fn fixed_fields() -> Vec<Field> {
              provenance: &'static str,
              description: &str| {
         let (table, column): (&str, &str) = match (level, path) {
+            // Wave 7a: the name of a source place, through a stack's first
+            // digest and its source
+            (_, "dataset") => (DATASET_TABLE, "name"),
             ("cohort", _) => ("cohort", path),
             ("subject", _) => ("subject", path),
             ("session", _) => ("session_cache", path),
@@ -359,6 +369,16 @@ fn fixed_fields() -> Vec<Field> {
             false,
             "registry",
             "the pseudonym the registry knows the subject by",
+        ),
+        f(
+            "subject",
+            "dataset",
+            "text",
+            Technical,
+            false,
+            false,
+            "registry",
+            "the datasets the subject's stacks came from, by name; = and in ask whether one is among them",
         ),
         f(
             "subject",
@@ -471,6 +491,16 @@ fn fixed_fields() -> Vec<Field> {
             "whether any study of the session holds an original primary",
         ),
         f(
+            "session",
+            "dataset",
+            "text",
+            Technical,
+            false,
+            false,
+            "registry",
+            "the datasets the session's stacks came from, by name; = and in ask whether one is among them",
+        ),
+        f(
             "study",
             "id",
             "integer",
@@ -559,6 +589,16 @@ fn fixed_fields() -> Vec<Field> {
             true,
             "registry",
             "how many instances the stack holds",
+        ),
+        f(
+            "stack",
+            "dataset",
+            "text",
+            Technical,
+            false,
+            false,
+            "registry",
+            "the dataset the stack came from, by name: the source place whose digest first read it",
         ),
         f(
             "stack",
@@ -1732,6 +1772,8 @@ impl Catalog {
         )? {
             uploads.insert(r.text(0)?.to_string());
         }
+        let datasets_stamp = place::dataset_stamp(store)?;
+        let datasets = place::dataset_sources(store)?;
         Ok(Catalog {
             epoch,
             locale,
@@ -1753,9 +1795,24 @@ impl Catalog {
             selections,
             handles,
             uploads,
+            datasets,
+            datasets_stamp,
             caps: Caps::default(),
             schema_digest: nils_ask::schema::digest(),
         })
+    }
+
+    /// Wave 7a: read the datasets again where a place or a source changed
+    /// since. Places are added, changed and retired without the epoch
+    /// moving, and a catalog kept at an epoch would still name a retired
+    /// dataset or miss a new one's sources.
+    pub fn refresh_datasets(&mut self, store: &mut Store) -> Result<(), Error> {
+        let stamp = place::dataset_stamp(store)?;
+        if stamp != self.datasets_stamp {
+            self.datasets = place::dataset_sources(store)?;
+            self.datasets_stamp = stamp;
+        }
+        Ok(())
     }
 
     /// Whether a principal may see a field at all (rule 15): never an
@@ -1854,6 +1911,7 @@ impl Catalog {
             "diseases": self.diseases,
             "namespaces": self.namespaces,
             "cohorts": self.cohorts,
+            "datasets": self.datasets.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
             "schemes": self.schemes,
             "roles": self.roles,
             "pick_models": self.pick_models,
@@ -2030,6 +2088,16 @@ impl Names for Catalog {
                         params: d.params.iter().map(|(k, _)| k.clone()).collect(),
                     },
                 )
+            })
+            .collect()
+    }
+
+    fn datasets(&self) -> Vec<Dataset> {
+        self.datasets
+            .iter()
+            .map(|d| Dataset {
+                name: d.name.clone(),
+                sources: d.sources.clone(),
             })
             .collect()
     }

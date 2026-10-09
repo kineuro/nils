@@ -63,6 +63,27 @@ pub struct ColumnRef {
     pub ci: Option<String>,
 }
 
+/// A dataset a stack can be of (Wave 7a): its name, and the `source` rows
+/// (the roots its digests read) that are its own. A stack is of the
+/// dataset whose source its first digest read; a subject or a session is
+/// of every dataset one of its stacks is of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dataset {
+    pub name: String,
+    pub sources: Vec<i64>,
+}
+
+/// The table a `dataset` field names in the catalog (Wave 7a): the name is
+/// the place's, read through the stack's first digest and its source.
+pub const DATASET_TABLE: &str = "place";
+
+/// Whether a path reads a `dataset` field: its own (`dataset`) or a carried
+/// level's or a named set's (`subject.dataset`, `visits.dataset`). A
+/// measure's path is never one.
+pub fn is_dataset_path(path: &str) -> bool {
+    path == "dataset" || (path.ends_with(".dataset") && !is_measure_path(path))
+}
+
 /// What validation asks the catalog (§9).
 pub trait Names {
     /// A field of a level (`subject`, `study`, `series`, `session`, `stack`,
@@ -127,6 +148,12 @@ pub trait Names {
     }
     /// Every derived field.
     fn derived_fields(&self) -> Vec<(String, DerivedInfo)> {
+        Vec::new()
+    }
+    /// The datasets a stack can be of (Wave 7a), for the compiler and for
+    /// checking a name a document compares a `dataset` field with. A
+    /// fixture knows none.
+    fn datasets(&self) -> Vec<Dataset> {
         Vec::new()
     }
 }
@@ -1417,6 +1444,48 @@ fn check_clause(
                         path,
                         format!("{v} is not a value of axis {axis}"),
                         format!("GET /api/ask/catalog for the values of {axis}"),
+                    ));
+                }
+            }
+        }
+    }
+    // Wave 7a: a dataset named by its literal is one the registry holds, so
+    // a misspelt name is refused rather than answered with nothing
+    for cl in &all {
+        if matches!(cl.op.as_str(), "=" | "<>" | "in" | "not_in" | "has")
+            && let (Some(Arg::Clause(l)), Some(r)) = (cl.args.first(), cl.args.get(1))
+            && l.op == "field"
+            && let Some(p) = l.ref_name()
+            && is_dataset_path(p)
+            && matches!(
+                resolve_field(p, set, set_name, ask, so_far, exposed, names, 0),
+                Ok(Some(_))
+            )
+        {
+            let literals: Vec<&str> = match r {
+                Arg::Text(t) => vec![t.as_str()],
+                Arg::List(items) => items.iter().filter_map(Arg::as_text).collect(),
+                _ => Vec::new(),
+            };
+            let known: Vec<String> = names.datasets().into_iter().map(|d| d.name).collect();
+            for v in literals {
+                if !known.iter().any(|k| k == v) {
+                    let listed = if known.is_empty() {
+                        "this registry holds none".to_string()
+                    } else if known.len() > 12 {
+                        format!(
+                            "the datasets are {} and {} more",
+                            known[..12].join(", "),
+                            known.len() - 12
+                        )
+                    } else {
+                        format!("the datasets are {}", known.join(", "))
+                    };
+                    issues.push(issue(
+                        Code::UnknownValue,
+                        path,
+                        format!("{v} is not a dataset of this registry; {listed}"),
+                        "GET /api/ask/catalog for the datasets",
                     ));
                 }
             }
