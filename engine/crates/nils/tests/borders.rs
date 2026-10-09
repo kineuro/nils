@@ -222,7 +222,13 @@ fn plant(store: &mut Store, ids: &[i64], stacks: &[Stack]) {
             .map(|(k, v)| {
                 let number = !matches!(
                     *k,
-                    "mr_acquisition_type" | "image_orientation_patient" | "orientation"
+                    "mr_acquisition_type"
+                        | "image_orientation_patient"
+                        | "orientation"
+                        | "sop_class_uid"
+                        | "image_type"
+                        | "earliest_acquisition_date"
+                        | "earliest_acquisition_time"
                 );
                 format!("{k} = {}", literal(v, number))
             })
@@ -590,4 +596,172 @@ fn an_mp2rage_keeps_its_denoised_uniform_image_and_a_true_retake_borders() {
 #[test]
 fn an_mp2rage_keeps_its_denoised_uniform_image_on_postgres_too() {
     postgres("nils_borders_mp2rage", mp2rage);
+}
+
+// ------------------------------------------------- the 2026-10-10 borders
+//
+// The study of the 59 pick borders of a real corpus: two engine changes
+// that follow standing rulings. The stacks are synthetic and their values
+// invented, as above.
+
+/// The SOP class of an enhanced MR image: one file that holds every frame
+/// of a volume.
+const ENHANCED_MR: &str = "1.2.840.10008.5.1.4.1.1.4.1";
+
+/// The run's T1w pick of a subject's occasion: its stacks, its borders and
+/// what its slice count part saw.
+fn t1w_pick(store: &mut Store, subject: i64) -> (Vec<i64>, String, String) {
+    let rows = store
+        .query(
+            &format!(
+                "SELECT p.borders, p.parts, ps.stack_id FROM {} p JOIN {} ps ON ps.pick_id = p.id \
+                 WHERE p.subject_id = {subject} AND p.role = 't1w' AND p.author_kind = 'agent' \
+                 ORDER BY ps.stack_id",
+                store.qualified("pick"),
+                store.qualified("pick_stack")
+            ),
+            &[],
+        )
+        .unwrap();
+    assert!(!rows.is_empty(), "a pick of subject {subject}");
+    let parts: serde_json::Value = serde_json::from_str(rows[0].text(1).unwrap()).unwrap();
+    let slices = parts["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "slices")
+        .map(|p| p["saw"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    (
+        rows.iter().map(|r| r.int(2).unwrap()).collect(),
+        rows[0].opt_text(0).unwrap().unwrap_or_default().to_string(),
+        slices,
+    )
+}
+
+/// One file of `frames` frames for the stack, as the digest files an
+/// enhanced multi-frame image: one instance, naming the stack.
+fn one_file_of_frames(store: &mut Store, stack: i64, frames: i64) {
+    let rows = store
+        .query(
+            &format!(
+                "SELECT series_id, first_batch_id FROM {} WHERE id = {stack}",
+                store.qualified("stack")
+            ),
+            &[],
+        )
+        .unwrap();
+    let (series, batch) = (rows[0].int(0).unwrap(), rows[0].int(1).unwrap());
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {} (sop_instance_uid, series_id, stack_id, number_of_frames, first_batch_id) \
+                 VALUES ('2.25.{stack}', {series}, {stack}, {frames}, {batch})",
+                store.qualified("instance")
+            ),
+            &[],
+        )
+        .unwrap();
+}
+
+/// One file of `frames` frames split over `stacks` in equal parts (record
+/// 37 S8): its instance names the first stack, and `instance_frame` gives
+/// each stack its frames.
+fn one_file_split(store: &mut Store, stacks: &[i64], frames: i64) {
+    one_file_of_frames(store, stacks[0], frames);
+    let instance = store
+        .query(
+            &format!(
+                "SELECT id, first_batch_id FROM {} WHERE sop_instance_uid = '2.25.{}'",
+                store.qualified("instance"),
+                stacks[0]
+            ),
+            &[],
+        )
+        .unwrap();
+    let (id, batch) = (instance[0].int(0).unwrap(), instance[0].int(1).unwrap());
+    let each = frames / stacks.len() as i64;
+    for (i, stack) in stacks.iter().enumerate() {
+        let first = 1 + i as i64 * each;
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {} (instance_id, stack_id, n_frames, first_frame, frames, first_batch_id) \
+                     VALUES ({id}, {stack}, {each}, {first}, '{first}-{}', {batch})",
+                    store.qualified("instance_frame"),
+                    first + each - 1
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+}
+
+/// A population beside the planted sessions: one ordinary MPRAGE a
+/// session, the slice counts spread as a cohort's are.
+fn population(store: &mut Store, subjects: &[(i64, Vec<i64>)]) {
+    let spread = ["160", "168", "176", "176", "176", "184", "192"];
+    for (i, (_, ids)) in subjects.iter().enumerate() {
+        plant(
+            store,
+            &ids[..1],
+            &[Stack::mprage().field("n_instances", Some(spread[i % spread.len()]))],
+        );
+    }
+}
+
+/// R5: a multi-frame file counts its frames as slices. An MPRAGE stored as
+/// one enhanced file of 176 frames is one instance, and the pick read it as
+/// a volume of one slice: below every percentile of the population, so a
+/// slice-count outlier and a poor score. It is 176 slices.
+fn multi_frame(home: &Home) {
+    let p = packs();
+    let mut store = home.store();
+    let subjects = first_studies(&mut store);
+    let (one, ids) = &subjects[0];
+    plant(
+        &mut store,
+        &ids[..1],
+        &[Stack::mprage()
+            .field("n_instances", Some("1"))
+            .field("sop_class_uid", Some(ENHANCED_MR))],
+    );
+    one_file_of_frames(&mut store, ids[0], 176);
+    // And one file of 352 frames whose frames were split over two stacks,
+    // the MPRAGE and another image: the MPRAGE is its own 176.
+    let (two, ids2) = &subjects[1];
+    plant(
+        &mut store,
+        &ids2[..2],
+        &[
+            Stack::mprage()
+                .field("n_instances", Some("1"))
+                .field("sop_class_uid", Some(ENHANCED_MR)),
+            Stack::mprage()
+                .field("n_instances", Some("1"))
+                .field("sop_class_uid", Some(ENHANCED_MR))
+                .axis("role", None),
+        ],
+    );
+    one_file_split(&mut store, &ids2[..2], 352);
+    population(&mut store, &subjects[2..14]);
+    home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let (stacks, borders, slices) = t1w_pick(&mut store, *one);
+    assert_eq!(stacks, [ids[0]]);
+    assert_eq!(borders, "", "an ordinary MPRAGE of 176 frames: {slices}");
+    assert!(slices.starts_with("176 in slices:3D"), "{slices}");
+    let (stacks, borders, slices) = t1w_pick(&mut store, *two);
+    assert_eq!(stacks, [ids2[0]]);
+    assert_eq!(borders, "", "the frames of its own part: {slices}");
+    assert!(slices.starts_with("176 in slices:3D"), "{slices}");
+}
+
+#[test]
+fn a_multi_frame_file_counts_its_frames_as_slices() {
+    multi_frame(&registry(None));
+}
+
+#[test]
+fn a_multi_frame_file_counts_its_frames_as_slices_on_postgres_too() {
+    postgres("nils_borders_frames", multi_frame);
 }

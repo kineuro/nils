@@ -1521,6 +1521,21 @@ fn picks(
         }
     }
     let _ = sealed;
+    // what a pick reads of a stack beside the model's names, for every stack
+    // that holds a role on either side
+    let holds_a_role = |a: &BTreeMap<String, String>| {
+        a.get(nils_pack::matters::PICK_CANDIDATES)
+            .is_some_and(|r| !split(r).is_empty())
+    };
+    let holding: Vec<i64> = place
+        .keys()
+        .copied()
+        .filter(|id| match finals.get(id) {
+            Some(m) => holds_a_role(&m[0]) || holds_a_role(&m[1]),
+            None => outside.get(id).is_some_and(holds_a_role),
+        })
+        .collect();
+    let scans = crate::picking::scans(store, &holding)?;
     let mut models = Vec::new();
     let mut changed_total = 0i64;
     let mut occasions_total = 0i64;
@@ -1574,13 +1589,15 @@ fn picks(
                     values.insert(n.clone(), v.clone());
                 }
             }
-            Some(crate::picking::Row {
+            let row = crate::picking::Row {
                 stack: id,
                 subject: p.subject,
                 study: p.study,
                 values,
                 roles,
-            })
+                scan: Default::default(),
+            };
+            Some(row.with_scan(scans.get(&id).cloned().unwrap_or_default()))
         };
         // a stack of the scope holding a role on either side kept its final
         // axes; one outside the scope is read as stored

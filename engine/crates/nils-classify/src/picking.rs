@@ -127,6 +127,106 @@ pub(crate) struct Row {
     pub(crate) study: i64,
     pub(crate) values: BTreeMap<String, String>,
     pub(crate) roles: Vec<String>,
+    pub(crate) scan: Scan,
+}
+
+impl Row {
+    /// The stack with what [`scans`] read of it. The 2026-10-10 borders
+    /// study, R5: the pick reads a stack's `n_instances` as the images it
+    /// holds, so an enhanced multi-frame file, one instance of many frames,
+    /// is the volume of its frames and not a volume of one slice. Where the
+    /// stack holds no more images than instances, nothing changes.
+    pub(crate) fn with_scan(mut self, scan: Scan) -> Row {
+        if let Some(images) = scan.images
+            && let Some(n) = self
+                .values
+                .get("n_instances")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+            && images as f64 > n
+        {
+            self.values
+                .insert("n_instances".to_string(), images.to_string());
+        }
+        self.scan = scan;
+        self
+    }
+}
+
+/// What the picks read of a stack beside the names the pack's model reads.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Scan {
+    /// How many images it holds: its instances, each frame of an enhanced
+    /// multi-frame file counted as one (R5). None where the fingerprint
+    /// says nothing.
+    pub(crate) images: Option<i64>,
+}
+
+/// The SOP classes whose image is one frame by definition, the MR and CT
+/// images a scanner writes by default: a stack of them holds as many images
+/// as instances, and its files are not read for frames.
+const ONE_FRAME: &[&str] = &["1.2.840.10008.5.1.4.1.1.4", "1.2.840.10008.5.1.4.1.1.2"];
+
+/// How many stacks one query of [`scans`] names.
+const SCANS_CHUNK: usize = 500;
+
+/// A [`Scan`] of each of `stacks` that has a fingerprint. The images of a
+/// stack whose SOP class may hold several frames are counted from its
+/// files: every frame of an instance that names the stack, and where one
+/// file's frames were split over several stacks (record 37 S8), the frames
+/// `instance_frame` gives each.
+pub(crate) fn scans(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Scan>, StoreError> {
+    let mut out: HashMap<i64, Scan> = HashMap::new();
+    let mut framed: Vec<i64> = Vec::new();
+    for chunk in stacks.chunks(SCANS_CHUNK) {
+        let sql = format!(
+            "SELECT stack_id, n_instances, sop_class_uid FROM {} WHERE stack_id IN ({})",
+            store.qualified("stack_fingerprint"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            let stack = r.int(0)?;
+            if r.opt_text(2)?
+                .is_none_or(|class| !ONE_FRAME.contains(&class.trim()))
+            {
+                framed.push(stack);
+            }
+            out.insert(
+                stack,
+                Scan {
+                    images: r.opt_int(1)?,
+                },
+            );
+        }
+    }
+    for chunk in framed.chunks(SCANS_CHUNK) {
+        let list = id_list(chunk);
+        let sql = format!(
+            "SELECT stack_id, CAST(SUM(n) AS BIGINT) FROM (\
+               SELECT i.stack_id AS stack_id, COALESCE(i.number_of_frames, 1) AS n FROM {i} i \
+                WHERE i.stack_id IN ({list}) \
+                  AND NOT EXISTS (SELECT 1 FROM {fr} fr WHERE fr.instance_id = i.id) \
+               UNION ALL \
+               SELECT fr.stack_id AS stack_id, fr.n_frames AS n FROM {fr} fr \
+                WHERE fr.stack_id IN ({list})\
+             ) t GROUP BY stack_id",
+            i = store.qualified("instance"),
+            fr = store.qualified("instance_frame"),
+        );
+        for r in store.query(&sql, &[])? {
+            let (stack, frames) = (r.int(0)?, r.opt_int(1)?);
+            if let (Some(scan), Some(frames)) = (out.get_mut(&stack), frames) {
+                scan.images = Some(scan.images.map_or(frames, |n| n.max(frames)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Run every pick the pack declares.
@@ -282,6 +382,7 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
             study: r.int(2)?,
             values,
             roles: Vec::new(),
+            scan: Scan::default(),
         });
     }
 
@@ -320,7 +421,15 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         }
     }
     rows.retain(|r| !r.roles.is_empty());
-    Ok(rows)
+    let ids: Vec<i64> = rows.iter().map(|r| r.stack).collect();
+    let mut scans = scans(store, &ids)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let scan = scans.remove(&r.stack).unwrap_or_default();
+            r.with_scan(scan)
+        })
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1637,6 +1746,7 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
             roles: vec!["t1w".into()],
+            scan: Scan::default(),
         }
     }
 
@@ -1839,6 +1949,20 @@ mod tests {
         assert_eq!(got[0].each.len(), 2);
         assert_eq!(got[0].each[0]["n_instances"], "176");
         assert_eq!(got[0].each[1]["n_instances"], "40");
+    }
+
+    #[test]
+    fn a_stack_s_slice_count_is_its_images_where_its_files_hold_frames() {
+        // R5 of the 2026-10-10 borders study: one enhanced file of 176
+        // frames is a volume of 176 slices, not of one.
+        let file = row(1, &[("n_instances", "1")]).with_scan(Scan { images: Some(176) });
+        assert_eq!(file.values["n_instances"], "176");
+        // A stack of single-frame images is what it was.
+        let plain = row(2, &[("n_instances", "176")]).with_scan(Scan { images: Some(176) });
+        assert_eq!(plain.values["n_instances"], "176");
+        // And a model that reads no slice count is given none.
+        let unread = row(3, &[("technique", "MPRAGE")]).with_scan(Scan { images: Some(176) });
+        assert!(!unread.values.contains_key("n_instances"));
     }
 
     #[test]
