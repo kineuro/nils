@@ -1052,7 +1052,7 @@ paths:
                 dry_run: {type: boolean, default: false}
                 make_types: {type: boolean, default: false, description: Make the types the columns name that the store has not got; a conflict otherwise}
       responses:
-        "200": {description: "The dry run's report: {rows, subjects: {named, known, new}, identifiers: {filed, known, new, types_new}, held_released, held_released_by: [{type, held_as, files}], merges: [{alias, canonical}], conflicts: [{row, why}], dry_run: true, written: false}"}
+        "200": {description: "The dry run's report: {rows, subjects: {named, known, new}, identifiers: {filed, known, new, types_new}, held_released, held_released_by: [{type, held_as, files}], merges: [{alias, canonical}], conflicts: [{row, why}], dry_run: true, written: false}. Added in place additively on 2026-10-09 (Wave 7a, the pseudonymise step): rehearsed for a dataset (`place`), also `held_ids: [{id, code, also_in}]`, each held identifier of that dataset the map names, by the row GET /api/linkage/held/ids gives it, with the code the map gives it (below detail quasi, as its shape) and the datasets that code's subject is in already"}
         "202": {description: "{job, state: queued, rows}; the job's result is the same report, written: true, or with the conflicts and the job failed"}
         "400": {description: A column without a role or a type, a header named twice, more cells than columns, or a map with no identifier column}
         "403": {description: The caller does not hold data:work, or applies the map below detail sensitive}
@@ -1068,21 +1068,34 @@ paths:
         "200": {description: "[{shape, id_type, files, first_seen, batch}]"}
         "400": {description: No place named}
         "404": {description: No place of that name}
+  /api/linkage/held/ids:
+    get:
+      summary: The held identifiers of a dataset, one row each, by shape (data:see)
+      description: "Added in place additively on 2026-10-09 for the pseudonymise step of a dataset (Wave 7a). Every identifier the dataset holds files for, one row each, by the first held row that carries it (`id`, the first not yet released, a technical key the code and reveal doors name it by), with its shape (digits as 9, capitals as A, small letters as a), its type, its files, when it was first seen and its batch, and how it stands (`state`): `held` with no code yet, `mapped` once a map named it (its files wait for the next run, `code` the code the map gave), `generated` to be coded anyway at the next run, or `waits` where its subject is known and has no value of the type PatientID gets (`code` the subject's, `waits_for` the type). A code comes with the datasets its subject is in already (`also_in`: one subject wherever the data came from, by the read that brought each study first and by the identified datasets whose pseudonymised files carry it); below detail quasi a code is answered as its shape, as the scans door answers it. Beside them, the subjects the dataset's pseudonymised files carry (`subjects.coded`) and how many of those were coded without a map (`subjects.generated`). Never a value. Empty until a run has held something."
+      parameters:
+        - {name: place, in: query, required: true, schema: {type: string}, description: The dataset's name}
+      responses:
+        "200": {description: "{place, files, identifiers, ids: [{id, shape, id_type, files, first_seen, batch, state: held | mapped | generated | waits, code, also_in: [dataset], waits_for}], subjects: {coded, generated}}"}
+        "400": {description: No place named}
+        "404": {description: No place of that name}
   /api/linkage/held/code:
     post:
       summary: Code the held files of a dataset anyway on its next run (data:work)
-      description: "Every held file of the dataset is marked code_anyway; the next run of the verb that holds them, the pseudonymiser for a dataset that arrives identified and the digest for one read in place, derives a code from the identifier under the key and marks the subject provisional (the review item identity.provisional), until a map names the identifier and a merge folds it in."
-      requestBody: {content: {application/json: {schema: {type: object, required: [place], properties: {place: {type: string}}}}}}
+      description: "Every held file of the dataset is marked code_anyway; the next run of the verb that holds them, the pseudonymiser for a dataset that arrives identified and the digest for one read in place, derives a code from the identifier under the key and marks the subject provisional (the review item identity.provisional), until a map names the identifier and a merge folds it in. Wave 7a section 5.4: the run that codes them is queued and named; a file held for want of its subject's value of an id type is never coded anyway. Added in place additively on 2026-10-09 (Wave 7a, the pseudonymise step): `ids` codes only the identifiers named, each by the row GET /api/linkage/held/ids gives it, and `run: false` marks them and queues nothing, for the dataset's next run of its own to code them."
+      requestBody: {content: {application/json: {schema: {type: object, required: [place], properties: {place: {type: string}, ids: {type: array, items: {type: integer}, description: "The held identifiers to code, by their rows; every one of the dataset where it is left out"}, run: {type: boolean, default: true, description: "Queue the run that codes them; false marks them only"}}}}}}
       responses:
-        "200": {description: "{place, files}: how many were marked now"}
-        "404": {description: No place of that name}
+        "200": {description: "{place, files: 0, job: null, state: nothing new to code} where nothing new was marked, or {place, files, job: null, state: marked} with run false"}
+        "202": {description: "{place, files, job, state: queued, command}: the run that codes them"}
+        "400": {description: "ids not a list of rows, or run not a boolean"}
+        "404": {description: "No place of that name, or no held identifier with a row named in ids"}
+        "409": {description: The dataset is undeclared}
   /api/linkage/held/reveal:
     post:
       summary: The held identifiers of a dataset themselves, by shape (data:work, detail sensitive, audited)
       description: "Opens the sealed identifier of every held file and answers the distinct identifiers under each shape and type with the files each holds. One read_audit row per identifier revealed, why held reveal, the held row's id where an identity's would stand; and one linkage.reveal row in the registry's audit with the count."
       requestBody: {content: {application/json: {schema: {type: object, required: [place], properties: {place: {type: string}}}}}}
       responses:
-        "200": {description: "[{shape, id_type, files, identifiers: [{value, files}]}]"}
+        "200": {description: "[{shape, id_type, files, identifiers: [{id, value, files}]}]; added in place additively on 2026-10-09 (Wave 7a), each identifier's `id`, the row GET /api/linkage/held/ids gives it"}
         "403": {description: The caller does not hold data:work at detail sensitive}
         "404": {description: No place of that name}
   /api/linkage/merge:

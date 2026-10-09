@@ -9,8 +9,18 @@
 //! `data:see`. The grants are in the door table of `serve`, like every
 //! other door's; the apply checks its detail here, since the same door
 //! answers a dry run at plain.
+//!
+//! Wave 7a, the pseudonymise step of a dataset (2026-10-09): the held
+//! identifiers one row each, by shape and never by value, with their files
+//! and how each stands (no code yet, a code a map gave, a code to be
+//! generated, a subject waiting for a value), so a page lists them and
+//! fills each with its code as a map is rehearsed; the codes a rehearsal
+//! for a dataset gives its held identifiers; chosen identifiers coded
+//! anyway, with or without the run queued; and the reveal naming each
+//! identifier by the same row. A row's id stands for its identifier: the
+//! first held row of the dataset that carries it, a technical key.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,6 +40,7 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/linkage/types",
     "POST /api/linkage/imports",
     "GET /api/linkage/held",
+    "GET /api/linkage/held/ids",
     "POST /api/linkage/held/code",
     "POST /api/linkage/held/reveal",
     "POST /api/linkage/merge",
@@ -65,6 +76,9 @@ pub(crate) fn route(
         ["api", "linkage", "types"] if post => add_type(registry, body),
         ["api", "linkage", "imports"] if post => imports(home, registry, caller, body),
         ["api", "linkage", "held"] if get => held(registry, query.get("place").map(String::as_str)),
+        ["api", "linkage", "held", "ids"] if get => {
+            held_ids(registry, caller, query.get("place").map(String::as_str))
+        }
         ["api", "linkage", "held", "code"] if post => held_code(registry, caller, body),
         ["api", "linkage", "held", "reveal"] if post => held_reveal(registry, caller, body),
         ["api", "linkage", "merge"] if post => merge(registry, caller, body),
@@ -266,7 +280,13 @@ fn imports(
             },
         )
         .map_err(|e| Reply::error(400, e.to_string()))?;
-        return Ok(Reply::ok(report.as_json()));
+        let mut answer = report.as_json();
+        // Wave 7a: rehearsed for a dataset, the codes its held identifiers
+        // would get, each by the row that stands for it
+        if let Some(p) = &place {
+            answer["held_ids"] = rehearsed_ids(registry, caller, p, &report.held_codes)?;
+        }
+        return Ok(Reply::ok(answer));
     }
     // the map is read by the job: sensitive, as record 25 set for jobs
     caller.allowed(
@@ -480,14 +500,348 @@ fn held(registry: &mut Registry, place: Option<&str>) -> Result<Reply, Reply> {
     Ok(Reply::ok(serde_json::Value::from(out)))
 }
 
-/// `POST /api/linkage/held/code {place}`: code the held files anyway, and
-/// queue the run that does (Wave 7a §5.4): the pseudonymise of the held
-/// files of an identified dataset, the digest of a dataset read in place.
-/// The answer names the job, `{place, files, job, state}`; with nothing new
-/// to code, no job is queued and `job` is null, so a second press queues no
-/// second run. A file held for want of its
-/// subject's id type value is not coded anyway: its subject is known, and
-/// it waits for the value, which a map gives.
+/// What `ids` is, said when a body gives it otherwise.
+const IDS_ARE: &str =
+    "ids: the held identifiers, each by the id the held ids door gives it; leave it out for all";
+
+fn no_held_id(place: &str, id: i64) -> Reply {
+    Reply::error(404, format!("{place} holds no identifier {id}"))
+}
+
+/// One held identifier of a dataset (Wave 7a): the rows that carry it, the
+/// one that stands for it (the first not yet released, else the first),
+/// its keyed lookup, its shape and type, and how it stands. Never a value.
+pub(crate) struct HeldId {
+    pub(crate) id: i64,
+    pub(crate) rows: Vec<i64>,
+    pub(crate) lookup: Option<Vec<u8>>,
+    pub(crate) shape: Option<String>,
+    pub(crate) id_type: Option<String>,
+    pub(crate) first_seen: Option<String>,
+    pub(crate) batch: Option<i64>,
+    /// A map named it: its files go at the next run, under the map's code.
+    pub(crate) released: bool,
+    /// A person asked for it to be coded anyway at the next run.
+    pub(crate) generated: bool,
+    /// Its subject is known and has no value of this type yet.
+    pub(crate) subject: Option<i64>,
+    pub(crate) waits_for: Option<String>,
+}
+
+impl HeldId {
+    /// How it stands, in one word: waits (for a value), mapped, generated,
+    /// or held (no code yet).
+    fn state(&self) -> &'static str {
+        if self.waits_for.is_some() {
+            "waits"
+        } else if self.released {
+            "mapped"
+        } else if self.generated {
+            "generated"
+        } else {
+            "held"
+        }
+    }
+}
+
+/// The held identifiers of a dataset, by the keyed lookup each row carries:
+/// one a row where a row carries none.
+pub(crate) fn held_identifiers(
+    store: &mut Store,
+    place_id: i64,
+) -> Result<Vec<HeldId>, nils_registry::store::Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, lookup, shape, id_type, CAST(first_seen AS TEXT), batch_id, \
+         CAST(released_at AS TEXT), code_anyway, subject_id, wants_type FROM {} \
+         WHERE place_id = {} AND state = 'held' ORDER BY id",
+        store.qualified(HELD_TABLE),
+        d.param(1, Type::Int)
+    );
+    let rows = store.query(&sql, &[Param::Int(place_id)])?;
+    let mut out: Vec<HeldId> = Vec::new();
+    for r in &rows {
+        let row = r.int(0)?;
+        let lookup = r.opt_bytes(1)?.map(<[u8]>::to_vec);
+        let released = r.opt_text(6)?.is_some();
+        let at = match &lookup {
+            Some(l) => out.iter().position(|h| h.lookup.as_ref() == Some(l)),
+            None => None,
+        };
+        match at {
+            Some(i) => {
+                let h = &mut out[i];
+                h.rows.push(row);
+                // the row that stands for it is the first not yet released
+                if h.released && !released {
+                    h.id = row;
+                }
+                h.released &= released;
+                h.generated |= r.int(7)? != 0;
+            }
+            None => out.push(HeldId {
+                id: row,
+                rows: vec![row],
+                lookup,
+                shape: r.opt_text(2)?.map(str::to_string),
+                id_type: r.opt_text(3)?.map(str::to_string),
+                first_seen: r.opt_text(4)?.map(str::to_string),
+                batch: r.opt_int(5)?,
+                released,
+                generated: r.int(7)? != 0,
+                subject: r.opt_int(8)?,
+                waits_for: r.opt_text(9)?.map(str::to_string),
+            }),
+        }
+    }
+    Ok(out)
+}
+
+/// The codes of subjects by id, a merged subject answered by the one it
+/// went into.
+fn codes_of(
+    registry: &mut Registry,
+    ids: &[i64],
+) -> Result<HashMap<i64, (i64, String)>, nils_registry::store::Error> {
+    let found = linkage::subjects_by_id(registry.store(), ids)?;
+    let into: Vec<i64> = found.iter().filter_map(|s| s.merged_into).collect();
+    let canon = linkage::subjects_by_id(registry.store(), &into)?;
+    Ok(found
+        .into_iter()
+        .map(|s| {
+            let kept = s
+                .merged_into
+                .and_then(|m| canon.iter().find(|c| c.id == m))
+                .unwrap_or(&s);
+            (s.id, (kept.id, kept.code.clone()))
+        })
+        .collect())
+}
+
+/// The datasets each subject is in already (Wave 7a): the source places
+/// whose roots hold a study of the subject, counted under the read that
+/// brought the study first as the sources door counts it, and the
+/// identified datasets whose pseudonymised files carry it. One subject
+/// wherever the data came from.
+fn datasets_holding(
+    store: &mut Store,
+    subjects: &[i64],
+) -> Result<HashMap<i64, BTreeSet<String>>, nils_registry::store::Error> {
+    let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
+    if subjects.is_empty() {
+        return Ok(out);
+    }
+    let ids = subjects
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let places: Vec<place::Place> = place::list(store)?
+        .into_iter()
+        .filter(|p| p.role == place::Role::Source && p.retired_at.is_none())
+        .collect();
+    let mut by_source: HashMap<i64, Vec<String>> = HashMap::new();
+    for p in &places {
+        for s in crate::sources::source_ids(store, p)? {
+            by_source.entry(s).or_default().push(p.name.clone());
+        }
+    }
+    let sql = format!(
+        "SELECT DISTINCT s.subject_id, b.source_id FROM {} s JOIN {} b ON b.id = s.first_batch_id \
+         WHERE s.subject_id IN ({ids})",
+        store.qualified("study"),
+        store.qualified("ingest_batch"),
+    );
+    for r in store.query(&sql, &[])? {
+        let names = by_source.get(&r.int(1)?).cloned().unwrap_or_default();
+        out.entry(r.int(0)?).or_default().extend(names);
+    }
+    let sql = format!(
+        "SELECT DISTINCT subject_id, place_id FROM {} WHERE subject_id IN ({ids}) \
+         AND state IN ('written', 'unchanged')",
+        store.qualified(HELD_TABLE),
+    );
+    for r in store.query(&sql, &[])? {
+        let place = r.int(1)?;
+        if let Some(p) = places.iter().find(|p| p.id == place) {
+            out.entry(r.int(0)?).or_default().insert(p.name.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// A subject's code as a caller may read it: below detail quasi, its shape,
+/// as the scans door answers it (record 55 K7).
+fn code_shown(caller: &Caller, code: &str) -> serde_json::Value {
+    if caller.access.detail >= Detail::Quasi {
+        serde_json::Value::from(code)
+    } else {
+        serde_json::Value::from(crate::scans::shape(code))
+    }
+}
+
+/// `GET /api/linkage/held/ids?place=` (Wave 7a, the pseudonymise step): the
+/// held identifiers of a dataset one row each, by the row that stands for
+/// it, with its shape, its type, its files, when it was first seen and how
+/// it stands: `held` with no code yet, `mapped` with the code a map gave it
+/// and its files waiting for the next run, `generated` to be coded anyway at
+/// the next run, or `waits` with its subject's code and the type it waits
+/// for a value of. A code is answered with the datasets its subject is in
+/// already (`also_in`); below detail quasi as its shape. Beside them, the
+/// subjects the dataset's pseudonymised files carry and how many of those
+/// were coded without a map. Never a value, so `data:see` at plain.
+fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Result<Reply, Reply> {
+    let name = place
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| Reply::error(400, "place: the dataset's name"))?;
+    let p = place_named(registry, name)?;
+    let mut doc = serde_json::json!({
+        "place": p.name,
+        "files": 0,
+        "identifiers": 0,
+        "ids": [],
+        "subjects": {"coded": 0, "generated": 0},
+    });
+    if !held_table(registry)? {
+        return Ok(Reply::ok(doc));
+    }
+    let held = held_identifiers(registry.store(), p.id)?;
+    // the codes: a mapped identifier's through the identity the map filed,
+    // a waiting one's through its subject
+    let mapped: Vec<Vec<u8>> = held
+        .iter()
+        .filter(|h| h.state() == "mapped")
+        .filter_map(|h| h.lookup.clone())
+        .collect();
+    let mut linkage = open_linkage(registry)?;
+    let identities = linkage::identities_by_lookup(&mut linkage, &mapped)?;
+    let subject_of = |h: &HeldId| -> Option<i64> {
+        match h.state() {
+            "waits" => h.subject,
+            "mapped" => identities
+                .iter()
+                .find(|i| h.lookup.as_ref() == Some(&i.lookup))
+                .map(|i| i.subject_id),
+            _ => None,
+        }
+    };
+    let subjects: Vec<i64> = held
+        .iter()
+        .filter_map(subject_of)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let codes = codes_of(registry, &subjects)?;
+    let kept: Vec<i64> = codes
+        .values()
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let holding = datasets_holding(registry.store(), &kept)?;
+    let files: usize = held.iter().map(|h| h.rows.len()).sum();
+    let ids: Vec<serde_json::Value> = held
+        .iter()
+        .map(|h| {
+            let code = subject_of(h).and_then(|s| codes.get(&s));
+            let also: Vec<&String> = code
+                .and_then(|(s, _)| holding.get(s))
+                .map(|names| names.iter().filter(|n| **n != p.name).collect())
+                .unwrap_or_default();
+            serde_json::json!({
+                "id": h.id,
+                "shape": h.shape,
+                "id_type": h.id_type,
+                "files": h.rows.len(),
+                "first_seen": h.first_seen,
+                "batch": h.batch,
+                "state": h.state(),
+                "code": code.map(|(_, c)| code_shown(caller, c)),
+                "also_in": also,
+                "waits_for": h.waits_for,
+            })
+        })
+        .collect();
+    // the subjects its pseudonymised files carry, and how many of them were
+    // coded without a map
+    let store = registry.store();
+    let sql = format!(
+        "SELECT COUNT(DISTINCT f.subject_id), COUNT(DISTINCT CASE WHEN s.provisional = 1 THEN f.subject_id END) \
+         FROM {} f JOIN {} s ON s.id = f.subject_id \
+         WHERE f.place_id = {} AND f.state IN ('written', 'unchanged')",
+        store.qualified(HELD_TABLE),
+        store.qualified("subject"),
+        store.dialect().param(1, Type::Int)
+    );
+    let row = &store.query(&sql, &[Param::Int(p.id)])?[0];
+    doc["files"] = serde_json::json!(files);
+    doc["identifiers"] = serde_json::json!(held.len());
+    doc["ids"] = serde_json::Value::from(ids);
+    doc["subjects"] = serde_json::json!({"coded": row.int(0)?, "generated": row.int(1)?});
+    Ok(Reply::ok(doc))
+}
+
+/// The codes a rehearsed map gives a dataset's held identifiers (Wave 7a):
+/// each identifier it names, by the row that stands for it, with the code
+/// and the datasets that code's subject is in already; below detail quasi
+/// the code as its shape.
+fn rehearsed_ids(
+    registry: &mut Registry,
+    caller: &Caller,
+    p: &place::Place,
+    codes: &[identity_map::HeldCode],
+) -> Result<serde_json::Value, Reply> {
+    if codes.is_empty() || !held_table(registry)? {
+        return Ok(serde_json::json!([]));
+    }
+    let by_row: HashMap<i64, &str> = codes.iter().map(|c| (c.row, c.code.as_str())).collect();
+    let held = held_identifiers(registry.store(), p.id)?;
+    let named: Vec<(&HeldId, &str)> = held
+        .iter()
+        .filter_map(|h| h.rows.iter().find_map(|r| by_row.get(r)).map(|c| (h, *c)))
+        .collect();
+    let distinct: Vec<String> = named
+        .iter()
+        .map(|(_, c)| c.to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let known = linkage::subjects_by_code(registry.store(), &distinct)?;
+    let ids: Vec<i64> = known
+        .iter()
+        .map(|s| s.merged_into.unwrap_or(s.id))
+        .collect();
+    let holding = datasets_holding(registry.store(), &ids)?;
+    Ok(serde_json::Value::from(
+        named
+            .iter()
+            .map(|(h, code)| {
+                let also: Vec<&String> = known
+                    .iter()
+                    .find(|s| s.code == *code)
+                    .and_then(|s| holding.get(&s.merged_into.unwrap_or(s.id)))
+                    .map(|names| names.iter().filter(|n| **n != p.name).collect())
+                    .unwrap_or_default();
+                serde_json::json!({ "id": h.id, "code": code_shown(caller, code), "also_in": also })
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// `POST /api/linkage/held/code {place, ids?, run?}`: code the held files
+/// anyway, and queue the run that does (Wave 7a §5.4): the pseudonymise of
+/// the held files of an identified dataset, the digest of a dataset read in
+/// place. The answer names the job, `{place, files, job, state}`; with
+/// nothing new to code, no job is queued and `job` is null, so a second
+/// press queues no second run. A file held for want of its subject's id
+/// type value is not coded anyway: its subject is known, and it waits for
+/// the value, which a map gives.
+///
+/// Wave 7a, the pseudonymise step: `ids` names the identifiers to code by
+/// the rows the held ids door gives them, every one of the dataset where it
+/// is left out; and `run: false` marks them and queues nothing, for the
+/// next run of the dataset's own to code them (`state` marked).
 fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let name = doc["place"]
@@ -495,6 +849,21 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .ok_or_else(|| Reply::error(400, "place: the dataset's name"))?;
+    let chosen: Option<Vec<i64>> = match &doc["ids"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(list) if !list.is_empty() => Some(
+            list.iter()
+                .map(serde_json::Value::as_i64)
+                .collect::<Option<Vec<i64>>>()
+                .ok_or_else(|| Reply::error(400, IDS_ARE))?,
+        ),
+        _ => return Err(Reply::error(400, IDS_ARE)),
+    };
+    let run = match &doc["run"] {
+        serde_json::Value::Null => true,
+        serde_json::Value::Bool(b) => *b,
+        _ => return Err(Reply::error(400, "run: true or false")),
+    };
     let p = place_named(registry, name)?;
     if let Some(why) = crate::dataset::undeclared_refusal(&p) {
         return Err(Reply::error(409, why));
@@ -505,8 +874,27 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
         })))
     };
     if !held_table(registry)? {
-        return nothing();
+        return match chosen {
+            Some(ids) => Err(no_held_id(&p.name, ids[0])),
+            None => nothing(),
+        };
     }
+    // the identifiers chosen, by the lookup each row carries
+    let lookups = match &chosen {
+        None => None,
+        Some(ids) => {
+            let found = held_identifiers(registry.store(), p.id)?;
+            let mut lookups = Vec::with_capacity(ids.len());
+            for id in ids {
+                let held = found
+                    .iter()
+                    .find(|h| h.rows.contains(id))
+                    .ok_or_else(|| no_held_id(&p.name, *id))?;
+                lookups.extend(held.lookup.clone());
+            }
+            Some(lookups)
+        }
+    };
     let store = registry.store();
     let d = store.dialect();
     let sql = format!(
@@ -515,9 +903,24 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
         store.qualified(HELD_TABLE),
         d.param(1, Type::Int)
     );
-    let n = store.execute(&sql, &[Param::Int(p.id)])?;
+    let n = match lookups {
+        None => store.execute(&sql, &[Param::Int(p.id)])?,
+        Some(lookups) => {
+            let one = format!("{sql} AND lookup = {}", d.param(2, Type::Bytes));
+            let mut n = 0;
+            for lookup in lookups {
+                n += store.execute(&one, &[Param::Int(p.id), Param::Bytes(lookup)])?;
+            }
+            n
+        }
+    };
     if n == 0 {
         return nothing();
+    }
+    if !run {
+        return Ok(Reply::ok(serde_json::json!({
+            "place": p.name, "files": n, "job": null, "state": "marked",
+        })));
     }
     let at = format!("@{}", p.name);
     let command: Vec<String> = if p.dataset["arrives"].as_str() == Some("identified") {
@@ -659,11 +1062,13 @@ fn held_reveal(registry: &mut Registry, caller: &Caller, body: &str) -> Result<R
         .into_iter()
         .map(|g| {
             let files: i64 = g.values.iter().map(|v| v.files).sum();
+            // Wave 7a: each identifier by the row the held ids door gives it,
+            // so a page shows the value in that row's place
             serde_json::json!({
                 "shape": g.shape,
                 "id_type": g.id_type,
                 "files": files,
-                "identifiers": g.values.iter().map(|v| serde_json::json!({ "value": v.value, "files": v.files })).collect::<Vec<_>>(),
+                "identifiers": g.values.iter().map(|v| serde_json::json!({ "id": v.row, "value": v.value, "files": v.files })).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -746,6 +1151,10 @@ mod tests {
         );
         assert_eq!(
             need("GET", "/api/linkage/held"),
+            ("the data:see grant".to_string(), Detail::Plain)
+        );
+        assert_eq!(
+            need("GET", "/api/linkage/held/ids"),
             ("the data:see grant".to_string(), Detail::Plain)
         );
         assert_eq!(
@@ -1269,13 +1678,29 @@ mod tests {
             r#"{"place": "ward-b"}"#,
         );
         assert_eq!(r.status, 200, "{}", r.body);
+        // Wave 7a: each identifier by the row the held ids door names it by
         assert_eq!(
             r.body,
             serde_json::json!([
-                {"shape": "999999999999", "id_type": "patient-id", "files": 1, "identifiers": [{"value": "199001011234", "files": 1}]},
-                {"shape": "A9", "id_type": "patient-id", "files": 3, "identifiers": [{"value": "P1", "files": 2}, {"value": "P2", "files": 1}]},
+                {"shape": "999999999999", "id_type": "patient-id", "files": 1, "identifiers": [{"id": 4, "value": "199001011234", "files": 1}]},
+                {"shape": "A9", "id_type": "patient-id", "files": 3, "identifiers": [{"id": 1, "value": "P1", "files": 2}, {"id": 3, "value": "P2", "files": 1}]},
             ])
         );
+        let listed = call(
+            &home,
+            &mut registry,
+            &see,
+            "GET",
+            "/api/linkage/held/ids?place=ward-b",
+            "",
+        );
+        let rows: Vec<i64> = listed.body["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(rows, [1, 3, 4], "{}", listed.body);
         let mut linkage = registry.open_linkage().unwrap();
         let audit = linkage
             .query(
@@ -1299,6 +1724,297 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].scope["identifiers"], 3);
         assert_eq!(rows[0].scope["held"], true);
+    }
+
+    /// Wave 7a, the pseudonymise step: a dataset's held identifiers one row
+    /// each, by shape and never by value; a rehearsed map fills them with
+    /// the codes it gives, naming the datasets a code's subject is in
+    /// already; one of them coded anyway on its own and without a run; and
+    /// a code is a shape below detail quasi.
+    #[test]
+    fn the_held_ids_are_one_row_each_and_fill_with_codes() {
+        let dir = TempDir::new("linkage-doors-ids");
+        let (home, mut registry) = registry(&dir);
+        let plain = caller("data:see,data:work");
+        let quasi = caller("data:see,data:work,quasi");
+        let ward_a = a_place(&mut registry, &dir, "ward-a");
+        let ward_b = a_place(&mut registry, &dir, "ward-b");
+        // before the pseudonymiser's table exists: nothing held, nothing coded
+        let r = call(
+            &home,
+            &mut registry,
+            &plain,
+            "GET",
+            "/api/linkage/held/ids?place=ward-b",
+            "",
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["ids"], serde_json::json!([]));
+        assert_eq!(r.body["subjects"]["coded"], 0);
+        let keys = Subkeys::derive(b"nils-fixture-key");
+        registry
+            .store()
+            .execute(
+                "INSERT INTO subject (id, code, created_at, provisional) VALUES (1, 'sub-one', 't', 0), (2, 'sub-two', 't', 1), (7, 'sub-seven', 't', 0)",
+                &[],
+            )
+            .unwrap();
+        let mut n = 0;
+        let mut file = |registry: &mut Registry,
+                        place: i64,
+                        value: Option<&str>,
+                        state: &str,
+                        subject: Option<i64>,
+                        wants: Option<&str>| {
+            n += 1;
+            registry
+                .store()
+                .execute(
+                    "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, shape, lookup, sealed, id_type, first_seen, batch_id, code_anyway, subject_id, wants_type) VALUES (?, ?, 0, 0, ?, ?, ?, ?, 'patient-id', ?, 5, 0, ?, ?)",
+                    &[
+                        Param::Int(place),
+                        Param::from(format!("f{n}")),
+                        Param::from(state),
+                        value.map_or(Param::Null, |v| Param::from(nils_dicom::diagnostic::shape(v))),
+                        value.map_or(Param::Null, |v| Param::Bytes(keys.lookup("patient-id", v))),
+                        value.map_or(Param::Null, |v| Param::Bytes(keys.seal(v))),
+                        Param::from(format!("2026-10-0{}T00:00:00Z", n.min(9))),
+                        subject.map_or(Param::Null, Param::Int),
+                        wants.map_or(Param::Null, Param::from),
+                    ],
+                )
+                .unwrap();
+        };
+        // ward-b holds four identifiers and a file waiting for a value;
+        // ward-a holds sub-one already, and ward-b's copies carry two subjects
+        for (value, state) in [
+            ("AB123", "held"),
+            ("AB123", "held"),
+            ("AB456", "held"),
+            ("CD789", "held"),
+            ("EF012", "held"),
+        ] {
+            file(&mut registry, ward_b, Some(value), state, None, None);
+        }
+        file(
+            &mut registry,
+            ward_b,
+            None,
+            "held",
+            Some(7),
+            Some("site-id"),
+        );
+        file(&mut registry, ward_b, None, "written", Some(1), None);
+        file(&mut registry, ward_b, None, "written", Some(2), None);
+        file(&mut registry, ward_a, None, "written", Some(1), None);
+
+        // a map names CD789 as sub-one, filed: its files are released
+        let Ok((key, subkeys)) = keys_of(&registry) else {
+            panic!("the registry's key")
+        };
+        let derive = Derive {
+            scheme: registry.meta().pseudonym_scheme,
+            key: &key,
+            display_length: registry.meta().display_length,
+        };
+        let mut linkage = registry.open_linkage().unwrap();
+        let columns = [
+            Column {
+                header: "id".into(),
+                role: Role::Identifier("patient-id".into()),
+            },
+            Column {
+                header: "code".into(),
+                role: Role::Code,
+            },
+        ];
+        let filed = identity_map::import(
+            registry.store(),
+            &mut linkage,
+            &subkeys,
+            Some(&derive),
+            &Map {
+                columns: &columns,
+                rows: &[Row {
+                    line: 2,
+                    cells: vec!["CD789".into(), "sub-one".into()],
+                }],
+                dry_run: false,
+                make_types: false,
+                place_id: Some(ward_b),
+                actor: "anna@lab",
+                job_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(filed.held_released, 1);
+        drop(linkage);
+
+        // EF012 coded anyway on its own, marked and no run queued
+        let ids = call(
+            &home,
+            &mut registry,
+            &plain,
+            "GET",
+            "/api/linkage/held/ids?place=ward-b",
+            "",
+        );
+        let row_of = |doc: &serde_json::Value, shape: &str, files: i64| -> i64 {
+            doc["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["shape"] == shape && h["files"] == files)
+                .unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        };
+        let ef012 = ids.body["ids"][3]["id"].as_i64().unwrap();
+        let r = call(
+            &home,
+            &mut registry,
+            &plain,
+            "POST",
+            "/api/linkage/held/code",
+            &format!(r#"{{"place": "ward-b", "ids": [{ef012}], "run": false}}"#),
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["files"], 1, "{}", r.body);
+        assert_eq!(r.body["state"], "marked", "{}", r.body);
+        assert_eq!(r.body["job"], serde_json::Value::Null);
+        assert!(
+            nils_registry::job::list(registry.store(), true, 10)
+                .unwrap()
+                .is_empty()
+        );
+        for (body, status) in [
+            (r#"{"place": "ward-b", "ids": []}"#, 400),
+            (r#"{"place": "ward-b", "ids": ["x"]}"#, 400),
+            (r#"{"place": "ward-b", "ids": [999]}"#, 404),
+            (r#"{"place": "ward-b", "run": "no"}"#, 400),
+        ] {
+            let r = call(
+                &home,
+                &mut registry,
+                &plain,
+                "POST",
+                "/api/linkage/held/code",
+                body,
+            );
+            assert_eq!(r.status, status, "{body}: {}", r.body);
+        }
+
+        // one row each, by shape, with how it stands and never a value
+        let r = call(
+            &home,
+            &mut registry,
+            &quasi,
+            "GET",
+            "/api/linkage/held/ids?place=ward-b",
+            "",
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        for value in ["AB123", "AB456", "CD789", "EF012"] {
+            assert!(!r.body.to_string().contains(value), "{}", r.body);
+        }
+        assert_eq!(r.body["place"], "ward-b");
+        assert_eq!(r.body["identifiers"], 5, "{}", r.body);
+        assert_eq!(r.body["files"], 6, "{}", r.body);
+        let states: Vec<(&str, i64, &str)> = r.body["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                (
+                    h["shape"].as_str().unwrap_or(""),
+                    h["files"].as_i64().unwrap(),
+                    h["state"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("AA999", 2, "held"),
+                ("AA999", 1, "held"),
+                ("AA999", 1, "mapped"),
+                ("AA999", 1, "generated"),
+                ("", 1, "waits"),
+            ]
+        );
+        let mapped = &r.body["ids"][2];
+        assert_eq!(mapped["code"], "sub-one", "{}", r.body);
+        assert_eq!(mapped["also_in"], serde_json::json!(["ward-a"]));
+        let waits = &r.body["ids"][4];
+        assert_eq!(waits["code"], "sub-seven");
+        assert_eq!(waits["waits_for"], "site-id");
+        assert_eq!(r.body["ids"][0]["code"], serde_json::Value::Null);
+        assert_eq!(r.body["ids"][0]["first_seen"], "2026-10-01T00:00:00Z");
+        assert_eq!(r.body["ids"][0]["batch"], 5);
+        assert_eq!(
+            r.body["subjects"],
+            serde_json::json!({"coded": 2, "generated": 1})
+        );
+        // below detail quasi a code is its shape
+        let r = call(
+            &home,
+            &mut registry,
+            &plain,
+            "GET",
+            "/api/linkage/held/ids?place=ward-b",
+            "",
+        );
+        assert_eq!(r.body["ids"][2]["code"], "aaa-aaa", "{}", r.body);
+        assert!(!r.body.to_string().contains("sub-one"), "{}", r.body);
+
+        // a map rehearsed for ward-b fills the identifiers it names, each by
+        // its row, a known subject's with the datasets it is in already
+        let ab123 = row_of(&r.body, "AA999", 2);
+        let ab456 = r.body["ids"][1]["id"].as_i64().unwrap();
+        let body = r#"{"place": "ward-b", "dry_run": true,
+            "columns": [{"header": "ID", "role": "identifier", "id_type": "patient-id"}, {"header": "subject code", "role": "code"}],
+            "rows": [["AB123", "sub-one"], ["AB456", "sub-new"], ["ZZ000", "sub-other"]]}"#;
+        let r = call(
+            &home,
+            &mut registry,
+            &quasi,
+            "POST",
+            "/api/linkage/imports",
+            body,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["held_released"], 3, "{}", r.body);
+        assert_eq!(
+            r.body["held_ids"],
+            serde_json::json!([
+                {"id": ab123, "code": "sub-one", "also_in": ["ward-a"]},
+                {"id": ab456, "code": "sub-new", "also_in": []},
+            ]),
+            "{}",
+            r.body
+        );
+        assert!(!r.body.to_string().contains("AB123"), "{}", r.body);
+        // at plain, the codes as their shapes
+        let r = call(
+            &home,
+            &mut registry,
+            &plain,
+            "POST",
+            "/api/linkage/imports",
+            body,
+        );
+        assert_eq!(r.body["held_ids"][0]["code"], "aaa-aaa", "{}", r.body);
+        // rehearsed for no dataset, no rows to fill
+        let r = call(
+            &home,
+            &mut registry,
+            &plain,
+            "POST",
+            "/api/linkage/imports",
+            &body.replace(r#""place": "ward-b", "#, ""),
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(r.body.get("held_ids").is_none(), "{}", r.body);
     }
 
     #[test]

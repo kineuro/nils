@@ -245,6 +245,17 @@ impl Released {
     }
 }
 
+/// A held file the map names, by its row, and the code the map gives its
+/// identifier (Wave 7a, the pseudonymise step): what lets a dataset's held
+/// identifiers fill with their codes as a map is rehearsed, never a value.
+/// One a file, so it stays out of the report a door or a job answers; the
+/// door that rehearses a map for a dataset gathers it by identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCode {
+    pub row: i64,
+    pub code: String,
+}
+
 /// What the map will do, or did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -255,6 +266,8 @@ pub struct Report {
     pub held_released: u64,
     /// The same, by the type that named them and the type they were held as.
     pub held_released_by: Vec<Released>,
+    /// The same, each file with the code the map gives it.
+    pub held_codes: Vec<HeldCode>,
     pub merges: Vec<Merge>,
     pub conflicts: Vec<Conflict>,
     pub dry_run: bool,
@@ -654,8 +667,9 @@ pub fn import(
     let mut codes_ok: BTreeSet<String> = BTreeSet::new();
     let mut digests: HashMap<String, Vec<u8>> = HashMap::new();
     // every identifier of a row that stands, as (type, value), for the held
-    // files the map releases
+    // files the map releases, and the code each gives by its lookup
     let mut named: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut code_by_lookup: HashMap<Vec<u8>, String> = HashMap::new();
     'rows: for r in resolved {
         if let Some(s) = by_code.get(&r.code)
             && let Some(into) = s.merged_into
@@ -707,6 +721,7 @@ pub fn import(
         codes_ok.insert(r.code.clone());
         for i in r.idents {
             named.insert((i.id_type.clone(), i.value.clone()));
+            code_by_lookup.insert(i.lookup.clone(), r.code.clone());
             if let Some(e) = existing.get(&i.lookup) {
                 known.insert(i.lookup.clone());
                 let holder = code_of(&subjects, e.subject_id);
@@ -762,6 +777,17 @@ pub fn import(
     let matches = held_matches(registry, keys, &named)?;
     report.held_released = matches.len() as u64;
     report.held_released_by = released_by(&matches);
+    // a match's lookup is the value's under the type the map named it as,
+    // which is the lookup its row filed
+    report.held_codes = matches
+        .iter()
+        .filter_map(|m| {
+            code_by_lookup.get(&m.lookup).map(|code| HeldCode {
+                row: m.row,
+                code: code.clone(),
+            })
+        })
+        .collect();
     if map.dry_run {
         return Ok(report);
     }
@@ -1607,6 +1633,25 @@ mod tests {
             false,
         );
         assert_eq!(dry.held_released, 2);
+        // Wave 7a: each held file the rehearsal names, with the code the
+        // map gives it, and none of it in the report a door answers
+        let mut codes = dry.held_codes.clone();
+        codes.sort_by_key(|c| c.row);
+        assert_eq!(
+            codes,
+            vec![
+                HeldCode {
+                    row: 1,
+                    code: "sub-one".into()
+                },
+                HeldCode {
+                    row: 2,
+                    code: "sub-one".into()
+                },
+            ]
+        );
+        assert!(dry.as_json().get("held_codes").is_none());
+        assert!(!dry.as_json().to_string().contains("P1"));
         assert_eq!(
             count(
                 &mut registry,
