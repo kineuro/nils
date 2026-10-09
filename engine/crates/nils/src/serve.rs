@@ -4571,7 +4571,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // and shapes; the map applied, the held reveal and the merge read
         // identifiers. The imports door answers a dry run at plain and
         // checks sensitive itself for the apply.
-        ("GET", ["api", "linkage", "types" | "held"]) => (Need::One("data:see"), Plain),
+        ("GET", ["api", "linkage", "types" | "held"])
+        | ("GET", ["api", "linkage", "held", "ids"]) => (Need::One("data:see"), Plain),
         ("POST", ["api", "linkage", "types" | "imports"])
         | ("POST", ["api", "linkage", "held", "code"]) => (Need::One("data:work"), Plain),
         ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
@@ -6227,6 +6228,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one dataset's shapes",
             "Reading the held files",
             "Read the held files",
+        ),
+        row(
+            "GET /api/linkage/held/ids",
+            false,
+            false,
+            "bounded",
+            "one dataset's identifiers, by shape",
+            "Reading the held identifiers",
+            "Read the held identifiers",
         ),
         row(
             "POST /api/linkage/held/code",

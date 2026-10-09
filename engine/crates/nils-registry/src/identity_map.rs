@@ -16,7 +16,7 @@
 //! The first shape, one identifier column and one code column
 //! ([`crate::linkage::import`]), runs through here.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use crate::linkage::{self, Identity, NewIdentity, Subject, Subkeys};
@@ -245,6 +245,18 @@ impl Released {
     }
 }
 
+/// A held identifier the map names, by the keyed lookup its held rows carry,
+/// and the code the map gives it (Wave 7a, the pseudonymise step): what lets
+/// a dataset's held identifiers fill with their codes as a map is
+/// rehearsed, never a value. One an identifier however many files hold it,
+/// and kept out of the report a door or a job answers; the door that
+/// rehearses a map for a dataset finds the dataset's own among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCode {
+    pub lookup: Vec<u8>,
+    pub code: String,
+}
+
 /// What the map will do, or did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -255,6 +267,8 @@ pub struct Report {
     pub held_released: u64,
     /// The same, by the type that named them and the type they were held as.
     pub held_released_by: Vec<Released>,
+    /// The held identifiers it names, each with the code the map gives it.
+    pub held_codes: Vec<HeldCode>,
     pub merges: Vec<Merge>,
     pub conflicts: Vec<Conflict>,
     pub dry_run: bool,
@@ -654,8 +668,9 @@ pub fn import(
     let mut codes_ok: BTreeSet<String> = BTreeSet::new();
     let mut digests: HashMap<String, Vec<u8>> = HashMap::new();
     // every identifier of a row that stands, as (type, value), for the held
-    // files the map releases
+    // files the map releases, and the code each gives by its lookup
     let mut named: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut code_by_lookup: HashMap<Vec<u8>, String> = HashMap::new();
     'rows: for r in resolved {
         if let Some(s) = by_code.get(&r.code)
             && let Some(into) = s.merged_into
@@ -707,6 +722,7 @@ pub fn import(
         codes_ok.insert(r.code.clone());
         for i in r.idents {
             named.insert((i.id_type.clone(), i.value.clone()));
+            code_by_lookup.insert(i.lookup.clone(), r.code.clone());
             if let Some(e) = existing.get(&i.lookup) {
                 known.insert(i.lookup.clone());
                 let holder = code_of(&subjects, e.subject_id);
@@ -762,6 +778,21 @@ pub fn import(
     let matches = held_matches(registry, keys, &named)?;
     report.held_released = matches.len() as u64;
     report.held_released_by = released_by(&matches);
+    // a match's lookup is the value's under the type the map named it as,
+    // which is the lookup its row filed; gathered by the lookup the held
+    // rows carry, one an identifier
+    let mut held_codes: BTreeMap<Vec<u8>, String> = BTreeMap::new();
+    for m in &matches {
+        if let Some(code) = code_by_lookup.get(&m.lookup) {
+            held_codes
+                .entry(m.held_lookup.clone())
+                .or_insert_with(|| code.clone());
+        }
+    }
+    report.held_codes = held_codes
+        .into_iter()
+        .map(|(lookup, code)| HeldCode { lookup, code })
+        .collect();
     if map.dry_run {
         return Ok(report);
     }
@@ -906,14 +937,15 @@ fn apply(
 const HELD_TABLE: &str = "pseudonym_file";
 
 /// One held file the map names: the row, the type the map named the
-/// value under with the lookup under that type, and the type the
-/// pseudonymiser held it as.
+/// value under with the lookup under that type, the type the pseudonymiser
+/// held it as, and the lookup the row carries under that type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldMatch {
     pub row: i64,
     pub id_type: String,
     pub held_as: String,
     pub lookup: Vec<u8>,
+    pub held_lookup: Vec<u8>,
 }
 
 /// The held files whose identifier the map names, matched by value: the
@@ -989,6 +1021,7 @@ pub fn held_matches(
                 id_type: id_type.clone(),
                 held_as: r.opt_text(2)?.unwrap_or("").to_string(),
                 lookup: keys.lookup(id_type, value),
+                held_lookup: lookup,
             });
         }
     }
@@ -1607,6 +1640,18 @@ mod tests {
             false,
         );
         assert_eq!(dry.held_released, 2);
+        // Wave 7a: each held identifier the rehearsal names, once however
+        // many files hold it, with the code the map gives it, and none of it
+        // in the report a door answers
+        assert_eq!(
+            dry.held_codes,
+            vec![HeldCode {
+                lookup: keys.lookup("patient-id", "P1"),
+                code: "sub-one".into()
+            }]
+        );
+        assert!(dry.as_json().get("held_codes").is_none());
+        assert!(!dry.as_json().to_string().contains("P1"));
         assert_eq!(
             count(
                 &mut registry,
