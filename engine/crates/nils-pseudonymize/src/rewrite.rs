@@ -124,7 +124,9 @@ impl<'a> Scrub<'a> {
 
     /// The plan one file is rewritten under, under the subject's `code`: the
     /// four categories, the policy that keeps the dates and the UIDs, and
-    /// the dataset's own lists. One statement of it, so that what the door
+    /// the dataset's own lists. The plan also takes the accession number and
+    /// the study id out of every file, whatever the lists keep
+    /// (`scrub::EXAMINATION_IDS`). One statement of it, so that what the door
     /// of record 28 serves and what a file meets cannot part company.
     pub fn plan<'p>(&'p self, code: &'p str) -> Plan<'p> {
         Plan {
@@ -307,6 +309,8 @@ mod tests {
         e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "7"));
         e.push(synth::text(tags::INSTANCE_NUMBER, VR::IS, "42"));
         e.push(synth::text(tags::INSTITUTION_NAME, VR::LO, "Somewhere"));
+        e.push(synth::text(tags::ACCESSION_NUMBER, VR::SH, "A00000001"));
+        e.push(synth::text(tags::STUDY_ID, VR::SH, "S0001"));
         e.push(synth::text(Tag(0x0019, 0x0010), VR::LO, "A VENDOR"));
         e.push(synth::text(Tag(0x0019, 0x100C), VR::IS, "1000"));
         e.push(synth::text(Tag(0x0019, 0x1099), VR::LO, "the operator"));
@@ -334,7 +338,9 @@ mod tests {
             element: 0x0C,
             why: "a test".into(),
         }];
-        let keep = [tags::PATIENT_SEX];
+        // a dataset that names the examination's numbers to keep keeps
+        // neither (Nima's ruling of 2026-10-09)
+        let keep = [tags::PATIENT_SEX, tags::ACCESSION_NUMBER, tags::STUDY_ID];
         let scrub = Scrub::new(&allowed, &keep, &[]);
         let target = dir.path().join("out/x.dcm");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -369,6 +375,8 @@ mod tests {
         );
         assert_eq!(text(ds, tags::SOP_INSTANCE_UID).as_deref(), Some("1.2.3.3"));
         assert_eq!(text(ds, tags::INSTITUTION_NAME), None);
+        assert!(ds.get(tags::ACCESSION_NUMBER).is_none());
+        assert!(ds.get(tags::STUDY_ID).is_none());
         assert_eq!(text(ds, Tag(0x0019, 0x100C)).as_deref(), Some("1000"));
         assert_eq!(text(ds, Tag(0x0019, 0x1099)), None);
         assert_eq!(

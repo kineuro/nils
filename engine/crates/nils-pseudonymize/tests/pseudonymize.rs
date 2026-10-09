@@ -92,6 +92,8 @@ fn original(patient: &str, study: u32, series: u32, instance: u32, description: 
         "Somewhere General",
     ));
     e.push(synth::text(tags::STATION_NAME, VR::SH, "MR1"));
+    e.push(synth::text(tags::ACCESSION_NUMBER, VR::SH, "A00000001"));
+    e.push(synth::text(tags::STUDY_ID, VR::SH, "S0001"));
     e.push(synth::text(tags::DEVICE_SERIAL_NUMBER, VR::LO, "SN-0001"));
     e.push(synth::text(
         tags::REFERRING_PHYSICIAN_NAME,
@@ -252,7 +254,7 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
     let place = declare(
         &mut registry,
         dir.path(),
-        json!({"keep_demographics": true, "remove": ["0018,1000"], "keep": ["0008,1010"]}),
+        json!({"keep_demographics": true, "remove": ["0018,1000"], "keep": ["0008,1010", "0008,0050"]}),
     );
     let s = settings(&place);
     assert_eq!(s.originals, originals);
@@ -308,6 +310,13 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         None,
         "the dataset's keep list wins"
     );
+    for examination in ["(0008,0050)", "(0020,0010)"] {
+        assert_eq!(
+            report.tags_removed.get(examination),
+            Some(&12),
+            "{examination}: removed whatever the dataset keeps"
+        );
+    }
     assert_eq!(
         report.tags_removed.get("(0010,0040)"),
         None,
@@ -360,6 +369,15 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
     for path in &written {
         let read = nils_dicom::read(path).unwrap();
         let ds = &read.dataset;
+        // Nima's ruling of 2026-10-09: the accession number and the study id
+        // are gone from every copy, though the dataset names the first to
+        // keep, so the basic profile below is true of the file.
+        assert!(
+            ds.get(tags::ACCESSION_NUMBER).is_none(),
+            "{}",
+            path.display()
+        );
+        assert!(ds.get(tags::STUDY_ID).is_none(), "{}", path.display());
         assert_eq!(
             text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
             Some("YES")

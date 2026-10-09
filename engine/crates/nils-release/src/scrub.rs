@@ -204,14 +204,31 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
     done
 }
 
-/// The elements a plan removes: the declared categories and the named
-/// removals, less what makes a file a file, less the age (written, not
-/// removed) and the code's element, and less what is named to keep. One
-/// statement of it, so that what `apply` removes and what the marks say was
-/// kept cannot part company.
+/// The numbers the hospital's systems put on the examination, the accession
+/// number and the study id, which every writer removes from every file it
+/// writes, whatever its categories and whatever a dataset names to keep
+/// (Nima's ruling of 2026-10-09). Whoever holds either and can reach the
+/// hospital's systems is back at the person, so a file that kept one could
+/// not say it was de-identified under the basic profile, and every file
+/// says so.
+///
+/// Removed, as their peers are: the basic profile's action for both is to
+/// write them empty, since the study module calls them type 2, and every
+/// other type 2 identifier a category holds (the patient's name, the
+/// referring physician) is removed rather than emptied, so the two are not
+/// treated otherwise.
+pub const EXAMINATION_IDS: [Tag; 2] = [tags::ACCESSION_NUMBER, tags::STUDY_ID];
+
+/// The elements a plan removes: the declared categories, the named removals
+/// and the examination's numbers, less what makes a file a file, less the
+/// age (written, not removed) and the code's element, and less what is named
+/// to keep, which never holds the examination's numbers. One statement of
+/// it, so that what `apply` removes and what the marks say was kept cannot
+/// part company.
 pub fn removals(plan: &Plan) -> Vec<Tag> {
     let mut out = crate::tags::tags_of(plan.categories);
     out.extend_from_slice(plan.remove);
+    out.extend_from_slice(&EXAMINATION_IDS);
     out.sort_unstable();
     out.dedup();
     out.retain(|tag| {
@@ -221,7 +238,7 @@ pub fn removals(plan: &Plan) -> Vec<Tag> {
         !MANDATORY.iter().any(|(g, e)| Tag(*g, *e) == *tag)
             && *tag != tags::PATIENT_AGE
             && *tag != tags::PATIENT_ID
-            && !plan.keep.contains(tag)
+            && (EXAMINATION_IDS.contains(tag) || !plan.keep.contains(tag))
     });
     out
 }
@@ -242,7 +259,7 @@ pub const DEID_SCHEME: &str = "DCM";
 pub const BASIC_PROFILE: Deid = Deid {
     code: "113100",
     meaning: "Basic Application Confidentiality Profile",
-    when: "always",
+    when: "always: beside its categories, every writer removes the accession number and the study id from every file",
 };
 pub const FULL_DATES: Deid = Deid {
     code: "113106",
@@ -316,7 +333,13 @@ const INSTITUTION: [Tag; 2] = [tags::INSTITUTION_NAME, tags::INSTITUTION_ADDRESS
 pub fn options(plan: &Plan) -> Vec<Deid> {
     let gone = removals(plan);
     let kept = |list: &[Tag]| list.iter().any(|t| !gone.contains(t));
-    let mut out = vec![BASIC_PROFILE];
+    let mut out = Vec::new();
+    // Never claimed by a plan that leaves the examination's numbers in the
+    // file; `removals` always takes them, so this is every plan, and a change
+    // that let one through would show here and not only in a file.
+    if EXAMINATION_IDS.iter().all(|t| gone.contains(t)) {
+        out.push(BASIC_PROFILE);
+    }
     if DATES.iter().all(|t| !gone.contains(t)) {
         out.push(FULL_DATES);
     }
@@ -862,6 +885,61 @@ mod tests {
         let mut o = identified();
         apply(&mut o, &p);
         assert_eq!(codes(&o), ["113100", "113106", "113108", "113110"]);
+    }
+
+    #[test]
+    fn the_examination_s_numbers_go_from_every_file_whatever_is_kept() {
+        // Nima's ruling of 2026-10-09: the accession number and the study id
+        // are removed whenever a file is de-identified. The pseudonymiser's
+        // four categories hold neither, and a dataset's `keep` naming both
+        // keeps neither; the file still says the basic profile, and now it
+        // is true.
+        let policy = Policy::default();
+        let four = [
+            Category::Patient,
+            Category::Trial,
+            Category::Provider,
+            Category::Institution,
+        ];
+        let keep = [tags::ACCESSION_NUMBER, tags::STUDY_ID, tags::PATIENT_SEX];
+        for keep in [&keep[..], &[][..]] {
+            let p = Plan {
+                writer: Writer::Pseudonymise,
+                categories: &four,
+                keep,
+                ..plan(&policy, None)
+            };
+            let mut o = identified();
+            o.put(DataElement::new(
+                tags::ACCESSION_NUMBER,
+                VR::SH,
+                PrimitiveValue::from("A00000001"),
+            ));
+            o.put(DataElement::new(
+                tags::STUDY_ID,
+                VR::SH,
+                PrimitiveValue::from("S0001"),
+            ));
+            let done = apply(&mut o, &p);
+            for tag in EXAMINATION_IDS {
+                assert!(o.element_opt(tag).unwrap().is_none(), "{tag:?}");
+            }
+            for named in ["(0008,0050)", "(0020,0010)"] {
+                assert_eq!(
+                    done.changes.get(&(named.to_string(), "removed")),
+                    Some(&1),
+                    "{named}"
+                );
+            }
+            assert_eq!(codes(&o)[0], "113100");
+        }
+        // And for a release whatever categories it picks.
+        let p = Plan {
+            categories: &[Category::Times],
+            ..plan(&policy, None)
+        };
+        assert!(EXAMINATION_IDS.iter().all(|t| removals(&p).contains(t)));
+        assert_eq!(options(&p)[0], BASIC_PROFILE);
     }
 
     #[test]

@@ -15,6 +15,11 @@
 //! A dataset's own `keep` and `remove` lists are that dataset's, and are
 //! served with the dataset rather than here.
 //!
+//! The examination's numbers, the accession number and the study id, are
+//! removed from every file whatever the categories and a dataset's lists say
+//! (Nima's ruling of 2026-10-09); they are served on their own rows, since
+//! no category the pseudonymiser removes holds them.
+//!
 //! Spec Wave 7a §6.2 mends the five findings record 28 made by using the
 //! door: every row carries the reason for its fate, so a covariate is named
 //! rather than inferred from `kept`; the mandatory rows say a release remaps
@@ -28,7 +33,7 @@
 use dicom_core::Tag;
 use dicom_dictionary_std::tags;
 use nils_release::policy::{Policy, Uids};
-use nils_release::scrub::{self, Writer};
+use nils_release::scrub::{self, EXAMINATION_IDS, Writer};
 use nils_release::tags::{Category, MANDATORY};
 use nils_release::uid::{Remap, Root};
 use serde_json::{Value, json};
@@ -58,8 +63,16 @@ fn meaning(fate: &str) -> &'static str {
 /// finding 1): `category`, removed because its category is removed;
 /// `computed`, the age, written from two dates; `covariate`, kept unless the
 /// dataset opts out; `code`, the subject's code; `mandatory`, what makes a
-/// file a file.
-pub const REASONS: [&str; 5] = ["category", "computed", "covariate", "code", "mandatory"];
+/// file a file; `examination`, the accession number and the study id,
+/// removed from every file whatever a category or a dataset's list says.
+pub const REASONS: [&str; 6] = [
+    "category",
+    "computed",
+    "covariate",
+    "code",
+    "mandatory",
+    "examination",
+];
 
 /// A tag as a dataset's own lists are written, `gggg,eeee`.
 fn text(tag: Tag) -> String {
@@ -189,6 +202,16 @@ pub fn document() -> Value {
                 let tag = Tag(*g, *e);
                 json!({"tag": text(tag), "fate": "kept", "reason": "mandatory", "why": never(tag)})
             })
+            .collect::<Vec<_>>(),
+        "examination": EXAMINATION_IDS
+            .iter()
+            .map(|tag| json!({
+                "tag": text(*tag),
+                "category": Category::Ids.name(),
+                "fate": "removed",
+                "reason": "examination",
+                "why": "a number the hospital's systems put on the examination, which leads back to the person; removed from every file, whatever a dataset names to keep",
+            }))
             .collect::<Vec<_>>(),
         "covariates": {
             "fate": "kept",
@@ -344,6 +367,10 @@ mod tests {
             96
         );
         assert_eq!(doc["code"]["reason"], "code");
+        for row in list(&doc, "examination") {
+            assert_eq!(row["reason"], "examination", "{row}");
+            assert!(reasons.contains(&"examination"));
+        }
         // 2. the mandatory rows say what a release does to them
         let mandatory = list(&doc, "mandatory");
         assert!(mandatory.iter().all(|r| r["reason"] == "mandatory"));
@@ -442,6 +469,13 @@ mod tests {
                 put(tag, VR::LO, "something identifying");
             }
         }
+        for row in doc["examination"].as_array().unwrap() {
+            put(
+                parse_tag(row["tag"].as_str().unwrap()).unwrap(),
+                VR::SH,
+                "E0001",
+            );
+        }
         put(tags::PATIENT_ID, VR::LO, "19800615-1234");
         put(tags::STUDY_DATE, VR::DA, "20220115");
         put(tags::SOP_CLASS_UID, VR::UI, "1.2.840.10008.5.1.4.1.1.4");
@@ -476,7 +510,33 @@ mod tests {
                 other => panic!("{other} is not a fate of the pseudonymiser: {row}"),
             }
         }
-        assert_eq!(applied.total("removed"), 96);
+        // Nima's ruling of 2026-10-09: the accession number and the study
+        // id leave every file, though no category of the pseudonymiser holds
+        // them, so the basic profile the marks name holds.
+        let examination: Vec<&str> = doc["examination"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["tag"].as_str().unwrap())
+            .collect();
+        assert_eq!(examination, ["0008,0050", "0020,0010"]);
+        for row in doc["examination"].as_array().unwrap() {
+            assert_eq!(row["fate"], "removed", "{row}");
+            let tag = parse_tag(row["tag"].as_str().unwrap()).unwrap();
+            assert!(
+                object.element_opt(tag).ok().flatten().is_none(),
+                "{row} is still in the file"
+            );
+            assert!(
+                !doc["tags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["tag"] == row["tag"]),
+                "{row} is served twice"
+            );
+        }
+        assert_eq!(applied.total("removed"), 98);
         assert_eq!(value(&object, tags::PATIENT_AGE).as_deref(), Some("041Y"));
         assert_eq!(
             value(&object, tags::PATIENT_ID).as_deref(),

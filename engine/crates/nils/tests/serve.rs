@@ -368,6 +368,9 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(policy["code"]["fate"], "replaced", "{policy}");
     assert_eq!(policy["mandatory"][0]["tag"], "0008,0016", "{policy}");
     assert_eq!(policy["mandatory"][1]["tag"], "0008,0018", "{policy}");
+    // The accession number and the study id leave every file (2026-10-09).
+    assert_eq!(policy["examination"][0]["tag"], "0008,0050", "{policy}");
+    assert_eq!(policy["examination"][1]["tag"], "0020,0010", "{policy}");
     assert_eq!(
         policy["covariates"]["opt_out"], "keep_demographics",
         "{policy}"
