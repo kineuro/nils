@@ -795,8 +795,29 @@ fn doors_sweep(name: &str, dsn: Option<&str>) {
     assert_eq!(doc["partial"], true, "{doc}");
     assert_eq!(doc["held"], true, "{doc}");
     assert_eq!(doc["burned_in"], true, "{doc}");
-    let (status, doc) = server.json("/api/datasets/incoming/scans?pictures=1", REVIEWER);
-    assert_eq!(status, 200, "{doc}");
+    // a page takes the stills decoded within its budget (100 ms) and counts
+    // the rest missing, whose threads go on and keep them for the page
+    // asked next: under load the first page may lack one, so the page is
+    // asked again until each scan has its picture, in a generous time
+    let asked = std::time::Instant::now();
+    let doc = loop {
+        let (status, doc) = server.json("/api/datasets/incoming/scans?pictures=1", REVIEWER);
+        assert_eq!(status, 200, "{doc}");
+        let scans = doc["scans"].as_array().unwrap();
+        let lacking = scans.iter().filter(|s| s["picture"].is_null()).count();
+        assert_eq!(
+            doc["pictures"]["missing"], lacking,
+            "a scan without its picture yet is counted: {doc}"
+        );
+        if lacking == 0 {
+            break doc;
+        }
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(30),
+            "the stills were never kept for the next page: {doc}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     for s in doc["scans"].as_array().unwrap() {
         assert!(
             s["picture"]["data"]
