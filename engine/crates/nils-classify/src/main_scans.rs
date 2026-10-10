@@ -261,38 +261,43 @@ fn stored(store: &mut Store, ask: &Ask<'_>) -> Result<HashMap<(i64, String), Sto
     Ok(out)
 }
 
+/// The populations of one registry, by pick and role, each with the marker
+/// of the stacks and axes it was built from: kept by whoever serves that
+/// registry, never shared between registries.
+#[derive(Debug, Default)]
+pub struct References(Mutex<HashMap<(String, String), (String, Reference)>>);
+
 /// The registry's population for a role, which a pick within a kind is
-/// scored against, kept between asks until a job runs or a stack is added.
-pub fn reference(store: &mut Store, model: &Model, role: &str) -> Result<Reference, Error> {
-    type Cache = Mutex<HashMap<(String, String), (String, Reference)>>;
-    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+/// scored against, kept in `cache` until the registry's stacks or axes
+/// change (their counts, their ids and their values' lengths).
+pub fn reference(
+    store: &mut Store,
+    model: &Model,
+    role: &str,
+    cache: &References,
+) -> Result<Reference, Error> {
     let r = &store.query(
         &format!(
-            "SELECT (SELECT COUNT(*) FROM {}), (SELECT COALESCE(MAX(id), 0) FROM {})",
-            store.qualified("stack_fingerprint"),
-            store.qualified("job")
+            "SELECT (SELECT COUNT(*) FROM {f}), (SELECT COALESCE(SUM(stack_id), 0) FROM {f}), \
+                    (SELECT COUNT(*) FROM {a}), (SELECT COALESCE(SUM(stack_id + LENGTH(value)), 0) FROM {a})",
+            f = store.qualified("stack_fingerprint"),
+            a = store.qualified("classification_axis"),
         ),
         &[],
     )?[0];
-    let signature = format!(
-        "{}|{}|{}",
-        r.int(0)?,
-        r.int(1)?,
-        store.schema().unwrap_or("")
-    );
+    let marker = format!("{}|{}|{}|{}", r.int(0)?, r.int(1)?, r.int(2)?, r.int(3)?);
     let key = (model.name.clone(), role.to_string());
-    let cache = CACHE.get_or_init(Default::default);
-    if let Ok(held) = cache.lock()
-        && let Some((sig, reference)) = held.get(&key)
-        && *sig == signature
+    if let Ok(held) = cache.0.lock()
+        && let Some((m, reference)) = held.get(&key)
+        && *m == marker
     {
         return Ok(reference.clone());
     }
     let rows = picking::read_named(store, &model.reads(), None, None)?;
     let mine = picking::of_role(model, role, &rows);
     let reference = picking::build_reference(model, "registry", &mine);
-    if let Ok(mut held) = cache.lock() {
-        held.insert(key, (signature, reference.clone()));
+    if let Ok(mut held) = cache.0.lock() {
+        held.insert(key, (marker, reference.clone()));
     }
     Ok(reference)
 }
@@ -827,7 +832,7 @@ pub fn subjects(
     let total = found.len();
     let page_of: Vec<Value> = found
         .iter()
-        .skip(page * per_page)
+        .skip(page.saturating_mul(per_page))
         .take(per_page)
         .map(|(si, _, _)| {
             let s = &read.subjects[*si];

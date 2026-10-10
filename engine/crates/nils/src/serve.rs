@@ -1022,6 +1022,10 @@ pub(crate) struct Doors {
     pub(crate) ingest_roots: std::collections::BTreeMap<String, PathBuf>,
     /// Wave 4c §6.5: where the backup job writes.
     pub(crate) backup_dir: Option<PathBuf>,
+    /// Record 55, decision 6: the registry's populations the Main scans map
+    /// scores a pick within a kind against, kept between asks of this
+    /// server's registry until its stacks or axes change.
+    pub(crate) pick_references: nils_classify::main_scans::References,
 }
 
 impl Doors {
@@ -1163,6 +1167,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             roots
         },
         backup_dir: args.backup_dir.clone(),
+        pick_references: Default::default(),
     });
     let limit = args.requests;
     // A job a door queues runs without anyone starting a worker by hand. A
@@ -2255,14 +2260,45 @@ fn routed(
             registry
                 .refresh_meta()
                 .map_err(|e| Reply::error(500, e.to_string()))?;
-            Ok(Reply::ok(serde_json::json!({
+            let mut out = serde_json::json!({
                 "cohort": name,
                 "added": done.added,
                 "already": done.already,
                 "removed": done.removed,
                 "not_members": done.not_members,
                 "epoch": registry.meta().epoch,
-            })))
+            });
+            // record 55, decision 6: a cohort with rules of its own gets its
+            // picks for the members it gained, by a run of its rules
+            let changed = |v: &serde_json::Value| {
+                v.as_array().is_some_and(|a| !a.is_empty()) || v.as_i64().is_some_and(|n| n > 0)
+            };
+            if (changed(&out["added"]) || changed(&out["removed"]))
+                && let Some(scope) =
+                    nils_registry::pick_rules::Scope::cohort(registry.store(), name)?
+                && nils_registry::pick_rules::latest(registry.store(), &scope)?.is_some()
+            {
+                let command = vec![
+                    "pick".to_string(),
+                    "run".to_string(),
+                    "--cohort".to_string(),
+                    scope.name.clone(),
+                    "--own-rules".to_string(),
+                    "--pack".to_string(),
+                    doors.ask_pack.clone(),
+                ];
+                let command = located(doors, registry.store(), command)?;
+                let id = nils_registry::job::enqueue_with(
+                    registry.store(),
+                    &command,
+                    Some(&scope.label()),
+                    Some(principal),
+                    queued_by(caller),
+                )
+                .map_err(job_err)?;
+                out["pick_run"] = serde_json::Value::from(id);
+            }
+            Ok(Reply::ok(out))
         }
         // record 26 §11: why one stack was judged so, as `nils explain` says it
         ["api", "explain", _] if get => {

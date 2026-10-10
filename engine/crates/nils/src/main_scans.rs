@@ -461,9 +461,10 @@ pub(crate) fn map(
     // the scan within a kind is scored against the registry's population,
     // which a map needs where it names scans
     let reference = match (door, draft.is_some()) {
-        (Door::Subjects, _) | (Door::Map, true) => {
-            Some(main_scans::reference(registry.store(), model, role).map_err(failed)?)
-        }
+        (Door::Subjects, _) | (Door::Map, true) => Some(
+            main_scans::reference(registry.store(), model, role, &doors.pick_references)
+                .map_err(failed)?,
+        ),
         _ => None,
     };
     let cmp = Compare::new(&read, model, role, saved, draft, reference.as_ref());

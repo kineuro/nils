@@ -294,7 +294,7 @@ impl Rules {
                 },
                 derived_series_scores: derived,
                 near_tie_within_percent: round6(model.borders.runner_up_within * 100.0),
-                near_tie_goes_to: TieKey::ALL.to_vec(),
+                near_tie_goes_to: tie_order(model),
             },
         }
     }
@@ -477,6 +477,69 @@ impl Rules {
         );
         out
     }
+}
+
+/// Version 1's tie order: the pick's own `near_tie` where it states one,
+/// each step read as the tie key it is (the plane, the slice thickness, the
+/// reconstruction, the moment of acquisition, the series number), a step no
+/// key is (the dimension, equal within a kind) left out; else R8's order
+/// with R7.
+fn tie_order(model: &Model) -> Vec<TieKey> {
+    let mut out: Vec<TieKey> = Vec::new();
+    for o in &model.near_tie {
+        let of = o.of.as_str();
+        let key = match of {
+            "orientation" => Some(TieKey::AxialCoronalSagittal),
+            "slice_thickness" | "spacing_between_slices" => Some(TieKey::ThinnerSlices),
+            "construct" | "image_type" => Some(TieKey::DefaultReconstruction),
+            "series_number" => Some(TieKey::EarlierSeries),
+            _ if of.contains("later_full_repeat") || of.contains("acquisition_time") => {
+                Some(TieKey::LaterFullRepeat)
+            }
+            _ => None,
+        };
+        if let Some(k) = key
+            && !out.contains(&k)
+        {
+            out.push(k);
+        }
+    }
+    if out.is_empty() {
+        TieKey::ALL.to_vec()
+    } else {
+        out
+    }
+}
+
+/// A moment of acquisition as a number that sorts: its day's digits and the
+/// seconds of its time (`20240101 101500.5`, `2026-01-05 14:02:00.000000`).
+fn moment(m: &str) -> Option<(i64, f64)> {
+    let mut parts = m.split_whitespace();
+    let (day, time) = match (parts.next(), parts.next()) {
+        (Some(d), Some(t)) => (Some(d), t),
+        (Some(t), None) => (None, t),
+        _ => return None,
+    };
+    let day: i64 = match day {
+        Some(d) => d
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()?,
+        None => 0,
+    };
+    let clock: String = time.chars().filter(|c| *c != ':').collect();
+    let (whole, fraction) = clock.split_once('.').unwrap_or((&clock, ""));
+    if whole.len() < 6 || !whole.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| whole[r].parse::<f64>().ok();
+    let seconds = n(0..2)? * 3600.0
+        + n(2..4)? * 60.0
+        + n(4..whole.len())?
+        + format!("0.{fraction}").parse::<f64>().unwrap_or(0.0);
+    Some((day, seconds))
 }
 
 fn round6(x: f64) -> f64 {
@@ -1194,7 +1257,12 @@ impl<'a> Chooser<'a> {
                         _ => true,
                     };
                 match (&a.moment, &b.moment) {
-                    (Some(x), Some(y)) if a.group == b.group && x != y && full(a, b) => y.cmp(x),
+                    (Some(x), Some(y)) if a.group == b.group && x != y && full(a, b) => {
+                        match (moment(x), moment(y)) {
+                            (Some(p), Some(q)) => q.0.cmp(&p.0).then_with(|| q.1.total_cmp(&p.1)),
+                            _ => y.cmp(x),
+                        }
+                    }
                     _ => Ordering::Equal,
                 }
             }
@@ -1281,7 +1349,10 @@ fn merged(each: &[BTreeMap<String, String>]) -> BTreeMap<String, String> {
 /// Section 3, step 2: the kind each visit takes, from the kinds each allows,
 /// by the way of keeping alike, `rank` saying where a kind stands in the
 /// rules' order (the lower, the better). A visit allowing nothing takes
-/// nothing and is no visit of the subject's for the counting.
+/// nothing and is no visit of the subject's for the counting: it does not
+/// count toward "covers every visit" (balanced) nor toward "most of its
+/// visits" (within each subject), so one visit without a T1w does not
+/// break a subject's kind for the others (main-scans study, section 3).
 pub fn keep_alike<R: Ord>(
     way: KeepAlike,
     visits: &[Vec<String>],
@@ -1499,6 +1570,41 @@ mod tests {
         order.sort(&mut held);
         assert_eq!(held, kinds(&["2D SE", "Unknown", "3D GRE", "2D EPI"]));
         assert!(order.is_new("3D GRE") && !order.is_new("2D SE"));
+    }
+
+    #[test]
+    fn version_one_takes_the_pick_s_near_tie_and_a_moment_is_a_time() {
+        use crate::pick::{Order, Rank};
+        let mut m = model();
+        m.near_tie = vec![
+            Order {
+                of: "mr_acquisition_type".into(),
+                roles: Vec::new(),
+                rank: Rank::Prefer(vec!["3D".into()]),
+            },
+            Order {
+                of: "slice_thickness".into(),
+                roles: Vec::new(),
+                rank: Rank::Lowest,
+            },
+            Order {
+                of: "orientation".into(),
+                roles: Vec::new(),
+                rank: Rank::Prefer(vec!["Axial".into()]),
+            },
+        ];
+        assert_eq!(
+            Rules::defaults(&m).within.near_tie_goes_to,
+            [TieKey::ThinnerSlices, TieKey::AxialCoronalSagittal]
+        );
+        assert_eq!(moment("20240101 101500.5"), Some((20240101, 36900.5)));
+        assert_eq!(
+            moment("2026-01-05 14:02:00.000000"),
+            Some((20260105, 50520.0))
+        );
+        assert!(moment("9:5").is_none());
+        // 9 o'clock is before 10, whatever the text sorts as
+        assert!(moment("20240101 090000").unwrap().1 < moment("20240101 100000").unwrap().1);
     }
 
     #[test]
