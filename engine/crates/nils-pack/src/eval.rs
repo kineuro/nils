@@ -619,9 +619,24 @@ impl Evaluated<'_> {
                             continue;
                         }
                         let Some(value) = which(v.value, &derived) else {
-                            // Decided, and the answer is nothing.
+                            // Decided, and the answer is nothing. A set that
+                            // collects closes no axis by itself, so the rule
+                            // that said nothing is named here, for a later
+                            // rule it stops to be ranked against.
                             closed[sets.axis] = true;
                             said_nothing[sets.axis] = true;
+                            if decided_by[sets.axis].is_none() {
+                                decided_by[sets.axis] = Some(Closer {
+                                    set: set.name.clone(),
+                                    set_at,
+                                    rule: rule.id.clone(),
+                                    rule_at: ri,
+                                    value: String::new(),
+                                    matched: fired.matched.clone(),
+                                    tier: fired.tier,
+                                    confidence: rule.confidence.unwrap_or(fired.confidence),
+                                });
+                            }
                             continue;
                         };
                         collected[sets.axis].push(Hit {

@@ -3775,139 +3775,160 @@ pub fn scan_names(
     let empty = BTreeMap::new();
     for r in store.query(&sql, &[])? {
         let stack = r.int(0)?;
-        let a = axes.get(&stack).unwrap_or(&empty);
-        let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
-        let id_of = |axis: &str, stored: &str| -> Option<String> {
-            pack?
-                .axes
-                .iter()
-                .find(|x| x.name == axis)
-                .and_then(|x| x.id_of_stored(stored))
-                .map(str::to_string)
-        };
-        let ids_of = |axis: &str, stored: Option<&str>| -> Vec<String> {
-            stored
-                .into_iter()
-                .flat_map(|v| v.split(','))
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .filter_map(|v| id_of(axis, v))
-                .collect()
-        };
-        let orientation = r.opt_text(2)?;
-        let acquisition_type = r.opt_text(4)?;
-        let pe_direction = r.opt_text(5)?;
-        // without a pack the stored value says it, as v0's column did
-        let contrast = match pack {
-            Some(_) => {
-                get("post_contrast")
-                    .and_then(|v| id_of("post_contrast", v))
-                    .as_deref()
-                    == Some("given")
-            }
-            None => get("post_contrast") == Some("1"),
-        };
-        let fields = name::Fields {
-            body_part: get("body_part"),
-            spinal_cord: get("body_part") == Some("spine"),
-            orientation,
-            base: get("base"),
-            acquisition_type,
-            modifier: get("modifier"),
-            technique: get("technique"),
-            acceleration: get("acceleration"),
-            construct: get("construct"),
-            post_contrast: contrast,
-            datatype: get("directory_type"),
+        let facts = nils_classify::effect::NameFacts {
+            stacks_in_series: r.opt_int(1)?,
+            orientation: r.opt_text(2)?.map(str::to_string),
+            echo_numbers: r.opt_text(3)?.map(str::to_string),
+            mr_acquisition_type: r.opt_text(4)?.map(str::to_string),
+            dwi_pe_direction: r.opt_text(5)?.map(str::to_string),
             dwi_b_value: r.double(6).ok(),
-            dwi_pe_direction: pe_direction,
             dwi_directions: r.opt_int(7)?,
-        };
-        let descriptive = name::describe(&fields, true, true);
-        let folder = folder_of(get("directory_type"), get("provenance"));
-        let built = match pack {
-            Some(pack) => {
-                let constructs = ids_of("construct", get("construct"));
-                let modifiers = ids_of("modifier", get("modifier"));
-                let technique = get("technique").and_then(|v| id_of("technique", v));
-                let base = get("base").and_then(|v| id_of("base", v));
-                let provenance = get("provenance").and_then(|v| id_of("provenance", v));
-                let mut said: BTreeMap<String, Vec<String>> = BTreeMap::new();
-                for (axis, stored) in a {
-                    let ids = ids_of(axis, Some(stored.as_str()));
-                    if !ids.is_empty() {
-                        said.insert(axis.clone(), ids);
-                    }
-                }
-                for (field, value) in [
-                    ("orientation", orientation),
-                    ("acquisition_type", acquisition_type),
-                ] {
-                    if let Some(v) = value.filter(|v| !v.is_empty()) {
-                        said.insert(field.to_string(), vec![v.to_string()]);
-                    }
-                }
-                let facts = crate::bids::name::Facts {
-                    intent: get("directory_type"),
-                    constructs: constructs.iter().map(String::as_str).collect(),
-                    technique: technique.as_deref(),
-                    modifiers: modifiers.iter().map(String::as_str).collect(),
-                    base: base.as_deref(),
-                    provenance: provenance.as_deref(),
-                    axes: said
-                        .iter()
-                        .map(|(axis, values)| {
-                            (axis.as_str(), values.iter().map(String::as_str).collect())
-                        })
-                        .collect(),
-                    post_contrast: contrast,
-                    task: get("task"),
-                    echo: match r.opt_int(1)?.unwrap_or(1) > 1 {
-                        true => r.opt_text(3)?.and_then(first_int),
-                        false => None,
-                    },
-                    pe_direction,
-                };
-                // a derivative takes the raw tree's name with `desc-`, as a
-                // release writes it under `derivatives/nils/`; one the
-                // standard has no name for has none here either
-                let construct_ids: Vec<&str> = constructs.iter().map(String::as_str).collect();
-                let derived_by = pack.bids.derived_by(&construct_ids);
-                let derived = get("disposition") == Some("reformat") || derived_by.is_some();
-                let desc = derived_by
-                    .or_else(|| construct_ids.iter().find(|c| **c != "ND").copied())
-                    .map(str::to_string);
-                // a scout or a working scan never takes its BIDS name
-                match get("disposition") {
-                    Some("scout" | "working_scan") => None,
-                    _ => crate::bids::name::build(&facts, &pack.bids, name::Naming::Full)
-                        .ok()
-                        .and_then(|n| match (derived, &desc) {
-                            (false, _) => Some((n.datatype, n.label())),
-                            (true, Some(d)) => Some((n.datatype, n.label_with_desc(d))),
-                            (true, None) => None,
-                        }),
-                }
-            }
-            None => None,
-        };
-        let datatype = match get("disposition") {
-            Some("scout" | "working_scan") => "other",
-            _ => datatype_of(built.as_ref().map(|(d, _)| *d), get("directory_type")),
+            series_number: r.opt_int(8)?,
         };
         out.insert(
             stack,
-            ScanName {
-                name: descriptive,
-                bids: built.map(|(_, label)| label),
-                datatype,
-                folder,
-                axes: a.clone(),
-                series_number: r.opt_int(8)?,
-            },
+            name_of(pack, axes.get(&stack).unwrap_or(&empty), &facts),
         );
     }
     Ok(out)
+}
+
+/// What a scan is called from its axes as the registry stores them and the
+/// fingerprint's facts, with no registry at hand: the one grammar
+/// [`scan_names`] reads the registry for, and record 56's effect report
+/// asks of a stack before and after a rule change.
+pub fn name_of(
+    pack: Option<&nils_pack::pack::Pack>,
+    a: &BTreeMap<String, String>,
+    facts: &nils_classify::effect::NameFacts,
+) -> ScanName {
+    let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
+    let id_of = |axis: &str, stored: &str| -> Option<String> {
+        pack?
+            .axes
+            .iter()
+            .find(|x| x.name == axis)
+            .and_then(|x| x.id_of_stored(stored))
+            .map(str::to_string)
+    };
+    let ids_of = |axis: &str, stored: Option<&str>| -> Vec<String> {
+        stored
+            .into_iter()
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .filter_map(|v| id_of(axis, v))
+            .collect()
+    };
+    let orientation = facts.orientation.as_deref();
+    let acquisition_type = facts.mr_acquisition_type.as_deref();
+    let pe_direction = facts.dwi_pe_direction.as_deref();
+    // without a pack the stored value says it, as v0's column did
+    let contrast = match pack {
+        Some(_) => {
+            get("post_contrast")
+                .and_then(|v| id_of("post_contrast", v))
+                .as_deref()
+                == Some("given")
+        }
+        None => get("post_contrast") == Some("1"),
+    };
+    let fields = name::Fields {
+        body_part: get("body_part"),
+        spinal_cord: get("body_part") == Some("spine"),
+        orientation,
+        base: get("base"),
+        acquisition_type,
+        modifier: get("modifier"),
+        technique: get("technique"),
+        acceleration: get("acceleration"),
+        construct: get("construct"),
+        post_contrast: contrast,
+        datatype: get("directory_type"),
+        dwi_b_value: facts.dwi_b_value,
+        dwi_pe_direction: pe_direction,
+        dwi_directions: facts.dwi_directions,
+    };
+    let descriptive = name::describe(&fields, true, true);
+    let folder = folder_of(get("directory_type"), get("provenance"));
+    let built = match pack {
+        Some(pack) => {
+            let constructs = ids_of("construct", get("construct"));
+            let modifiers = ids_of("modifier", get("modifier"));
+            let technique = get("technique").and_then(|v| id_of("technique", v));
+            let base = get("base").and_then(|v| id_of("base", v));
+            let provenance = get("provenance").and_then(|v| id_of("provenance", v));
+            let mut said: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (axis, stored) in a {
+                let ids = ids_of(axis, Some(stored.as_str()));
+                if !ids.is_empty() {
+                    said.insert(axis.clone(), ids);
+                }
+            }
+            for (field, value) in [
+                ("orientation", orientation),
+                ("acquisition_type", acquisition_type),
+            ] {
+                if let Some(v) = value.filter(|v| !v.is_empty()) {
+                    said.insert(field.to_string(), vec![v.to_string()]);
+                }
+            }
+            let facts = crate::bids::name::Facts {
+                intent: get("directory_type"),
+                constructs: constructs.iter().map(String::as_str).collect(),
+                technique: technique.as_deref(),
+                modifiers: modifiers.iter().map(String::as_str).collect(),
+                base: base.as_deref(),
+                provenance: provenance.as_deref(),
+                axes: said
+                    .iter()
+                    .map(|(axis, values)| {
+                        (axis.as_str(), values.iter().map(String::as_str).collect())
+                    })
+                    .collect(),
+                post_contrast: contrast,
+                task: get("task"),
+                echo: match facts.stacks_in_series.unwrap_or(1) > 1 {
+                    true => facts.echo_numbers.as_deref().and_then(first_int),
+                    false => None,
+                },
+                pe_direction,
+            };
+            // a derivative takes the raw tree's name with `desc-`, as a
+            // release writes it under `derivatives/nils/`; one the
+            // standard has no name for has none here either
+            let construct_ids: Vec<&str> = constructs.iter().map(String::as_str).collect();
+            let derived_by = pack.bids.derived_by(&construct_ids);
+            let derived = get("disposition") == Some("reformat") || derived_by.is_some();
+            let desc = derived_by
+                .or_else(|| construct_ids.iter().find(|c| **c != "ND").copied())
+                .map(str::to_string);
+            // a scout or a working scan never takes its BIDS name
+            match get("disposition") {
+                Some("scout" | "working_scan") => None,
+                _ => crate::bids::name::build(&facts, &pack.bids, name::Naming::Full)
+                    .ok()
+                    .and_then(|n| match (derived, &desc) {
+                        (false, _) => Some((n.datatype, n.label())),
+                        (true, Some(d)) => Some((n.datatype, n.label_with_desc(d))),
+                        (true, None) => None,
+                    }),
+            }
+        }
+        None => None,
+    };
+    let datatype = match get("disposition") {
+        Some("scout" | "working_scan") => "other",
+        _ => datatype_of(built.as_ref().map(|(d, _)| *d), get("directory_type")),
+    };
+    ScanName {
+        name: descriptive,
+        bids: built.map(|(_, label)| label),
+        datatype,
+        folder,
+        axes: a.clone(),
+        series_number: facts.series_number,
+    }
 }
 
 /// Where every stack in the registry goes, in both layouts (§9).

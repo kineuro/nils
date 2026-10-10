@@ -203,6 +203,19 @@
 # `look`, a pass's question about another axis the sorted step's new
 # `passes`, a pick border the main scans' `borders`, and a model's question
 # about another axis Review's alone; none of them is a look.
+# Added in place, additively, on 2026-10-09 by record 56 (5.4 and 5.5, the
+# rules decide and the loop improves them): POST /api/packs/{name}/rehearse
+# answers what a rule change does to the sorting before anyone decides. The
+# body carries typed operations (contracts/patch/v1), a whole patch or an
+# overlay document read as the word edits it is; they are applied to a copy
+# of the pack and checked by the pack's own loader and corpus, the registry
+# in scope is sorted both ways and nothing is written. The answer is the
+# transition table per axis with each row's datasets, sites, makes,
+# scanners and example stacks, the names and the main-scan picks that
+# change, the Review questions that appear and go by kind, right to wrong
+# and wrong to right against a person's decisions in force, the scope and
+# what the change ships as. A stack of a sample sealed now is never read.
+# pipelines:work or review:work, the grant that proposes an overlay.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -892,6 +905,18 @@ paths:
       responses:
         "200": {description: "{pack, stacks, pairs: [{pair, axis, why[], sides: [{rule_set, rule, value, tier, confidence}], stacks, examples[stack], versions[]}]}"}
         "403": {description: Without review:see}
+  /api/packs/{name}/rehearse:
+    post:
+      summary: What a rule change does to the sorting, before anyone decides (record 56, added in place 2026-10-09; pipelines:work or review:work)
+      description: "Record 56 sections 5.4 and 5.5, Nima, 2026-10-09: the change in a rule shows how it affects the sorting, how many stacks and to what. The body names typed operations (the patch contract, contracts/patch/v1): `operations`, a list of them for this pack, with `reason`, `evidence`, `version`, `ships` and `cases` beside it as a patch says them; or `patch`, a whole patch; or `overlay`, an overlay document (pack contract 5), read as the word edits it is. Each operation carries its scope: the whole pack (a pack edit, shipped as a rules release), `site:NAME` (the datasets under one source root), `dataset:NAME[,NAME]` or `scanner:KEY=VALUE[,KEY=VALUE]` (manufacturer, model, station or an overlay's batch), which is an overlay. The operations are applied in order to a copy of the pack's own documents and the pack's loader builds the result: an operation that cannot apply, or a result the loader refuses, is answered 400 with why. The pack's corpus and the patch's own cases judge the result, and their failures are part of the answer. The registry in `scope` (the operations' own scopes when not given) is sorted twice from what it holds, by the pack and by the patched pack, each stack after by the pack with the pack-wide operations and those whose scope holds it, and nothing is written: the rules, the decisions in force, the session passes, the physics vote (its pool outside the scope as stored), the questions a sort asks, the disposition and the main-scan picks under the default session scheme. A stack of a sample sealed now is never read, by any caller: it is in no count, pool, session or answer set. Below detail quasi a scanner's station name is answered as its shape."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {operations: {type: array, items: {type: object}, description: "Typed operations, contracts/patch/v1 #/$defs/operation"}, patch: {type: object, description: "A whole patch, contracts/patch/v1"}, overlay: {type: object, description: "An overlay document, contracts/pack/v8/overlay.schema.json, read as word edits scoped to its origin"}, reason: {type: string}, evidence: {}, version: {type: string}, ships: {type: string}, cases: {type: array}, scope: {type: string, description: "pack, site:NAME, dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE] or batch:ID: the stacks replayed and counted"}, examples: {type: integer, minimum: 1, maximum: 50, default: 5, description: "Example stacks per transition row"}}}}}}
+      responses:
+        "200": {description: "{pack, patch{operations[as written, each with its scope, reason and evidence], applied[{at, op, scope, changes[], files[]}], files[], cases{held, failures}}, ships{as: rules release, pack, version, from | as: overlay, pack, on, scopes[], with_pack_edits}, scope{replayed, stacks, sealed_left_out, by_operation[{at, op, scope, stacks}]}, replay, moved{stacks}, axes[{axis, moved, held_by_decision, transitions[{from, to, stacks, datasets{name: n}, sites{name: n}, makes{name: n}, scanners{station: n}, examples[{stack, names{before{name, bids}, after{name, bids}}}]}]}], names{descriptive{changed}, bids{changed}, examples[{stack, before{name, bids}, after{name, bids}}]}, picks{scheme, occasions, kept, changed, removed, added, moved, held_by_a_person, borders{raised, settled, still}, models[{model, the same counts, by_role{role: {the same counts}}, examples[{role, subject, session, before, after, borders{before[], after[]}}]}] | models[], why}, review{stacks_asked{before, after}, by_kind[{kind, appear, disappear}]}, answers{measured_on, sets[{name, holds, answers, sealed_left_out}], fixes, breaks, net, by_axis{axis: {answers, right_to_wrong, wrong_to_right, unanswered_to_right, unanswered_to_wrong, right_to_unanswered, wrong_to_unanswered, wrong_to_wrong, unchanged}}, right_to_wrong[{stack, axis, answer, before, after}], wrong_to_right[...]}, seconds{patch, packs, read, rules, passes, dispose, picks, answers, total}}. A transition's from or to is the axis as stored, comma-joined for an axis that holds several values, empty for none; `held_by_decision` counts the stacks whose rules' answer moved under a decision that holds the axis both ways. The answers are a person's decisions in force (Review answers and a campaign's close land there), measured on the rules' own answer before any decision, pass or vote. Amended in place on 2026-10-10 (the study of the pick borders): each side's picks are scored by its own pack's pick, so an operation on the pick file shows its effect; per pick and role, `kept` a pick both ways naming the same stacks, `changed` a pick both ways naming others, `removed` and `added` a pick one way only, `moved` the three together, `held_by_a_person` an occasion a person's pick stands on where the run's would move, and `borders` the occasions whose borders are `raised`, `settled` or `still` there."}
+        "400": {description: "The operations, the patch or the scope are refused, and the answer says why"}
+        "403": {description: "Without pipelines:work or review:work"}
+        "404": {description: No such pack}
   /api/batches:
     get:
       summary: The ingest batches, newest first (Wave 4c section 6.5)

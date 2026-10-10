@@ -2074,6 +2074,56 @@ fn routed(
                 reads_sealed,
             )?))
         }
+        // record 56 §5.4, §5.5 (2026-10-09): what a rule change does to the
+        // sorting, before anyone decides; nothing is written
+        ["api", "packs", name, "rehearse"] if post => {
+            let doc = json_body(body)?;
+            let dir = doors
+                .pack_dir
+                .as_ref()
+                .map(|d| d.join(name))
+                .filter(|d| d.join("pack.yml").is_file())
+                .ok_or_else(|| Reply::error(404, format!("no pack named {name}")))?;
+            let patch = crate::rehearse::patch_of("the body", Some(name), &doc)
+                .map_err(|e| Reply::error(400, e))?;
+            if patch.pack != *name {
+                return Err(Reply::error(
+                    400,
+                    format!(
+                        "the operations amend {}, and this door is {name}'s",
+                        patch.pack
+                    ),
+                ));
+            }
+            let scope = match doc.get("scope").filter(|v| !v.is_null()) {
+                None => None,
+                Some(v) => Some(nils_pack::patch::Scope::of(v).map_err(|e| Reply::error(400, e))?),
+            };
+            let examples = doc["examples"]
+                .as_u64()
+                .map(|n| (n as usize).clamp(1, 50))
+                .unwrap_or(5);
+            // the replay shares the machine with the doors that serve: half
+            // its threads at most
+            let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+            let settings = nils_classify::effect::Settings {
+                scope,
+                examples,
+                workers,
+            };
+            match crate::rehearse::report(registry, &dir, &patch, &settings) {
+                Ok(mut answer) => {
+                    // record 55 K7: a station name is quasi-identifying, and
+                    // below detail quasi a scanner is answered as its shape
+                    if caller.access.detail < crate::grants::Detail::Quasi {
+                        crate::rehearse::shape_scanners(&mut answer);
+                    }
+                    Ok(Reply::ok(answer))
+                }
+                Err(nils_classify::effect::Error::Refused(m)) => Err(Reply::error(400, m)),
+                Err(e) => Err(Reply::error(500, e.to_string())),
+            }
+        }
         ["api", "batches"] if get => {
             let limit = query
                 .get("limit")
@@ -4592,6 +4642,12 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("GET", ["api", "review" | "overlays" | "explain", _])
         | ("GET", ["api", "classify", "signals"])
         | ("GET", ["api", "packs", _, "disagreements"]) => (Need::One("review:see"), Plain),
+        // record 56 §5.4: rehearsing a rule change writes nothing; it is the
+        // work of whoever proposes one, a pipeline's operator or the
+        // reviewer an overlay is proposed by
+        ("POST", ["api", "packs", _, "rehearse"]) => {
+            (Need::AnyOf(&["pipelines:work", "review:work"]), Plain)
+        }
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
         | ("POST", ["api", "picks"])
@@ -5069,6 +5125,7 @@ fn capabilities(
         "GET /api/packs",
         "GET /api/packs/{name}",
         "GET /api/packs/{name}/disagreements",
+        "POST /api/packs/{name}/rehearse",
         "GET /api/batches",
         "GET /api/batches/{id}",
         "GET /api/quarantine",
@@ -5905,6 +5962,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading what a pack cannot rank",
             "Read what a pack cannot rank",
+        ),
+        row(
+            "POST /api/packs/{name}/rehearse",
+            false,
+            false,
+            "bounded",
+            "one report",
+            "Rehearsing a rule change",
+            "Rehearsed a rule change",
         ),
         row(
             "GET /api/batches",

@@ -539,8 +539,8 @@ pub struct Author {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Ids {
     pub(crate) stack: i64,
-    series: i64,
-    subject: i64,
+    pub(crate) series: i64,
+    pub(crate) subject: i64,
 }
 
 /// The fields that name an origin, and the fingerprint field each one
@@ -560,7 +560,7 @@ impl Decisions {
     /// staged waits). Where two hold the same key, the higher rank wins
     /// (C15: a person over an agent over a model) and among equals the
     /// later one, which is the order they are read in.
-    fn load(store: &mut Store) -> Result<Decisions, Error> {
+    pub(crate) fn load(store: &mut Store) -> Result<Decisions, Error> {
         let sql = format!(
             "SELECT scope, ref, axis, value, actor, author_kind, author_version, id, model_id, campaign_id FROM {} \
              WHERE withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) \
@@ -636,11 +636,11 @@ impl Decisions {
 
     /// Whether any decision reaches past a single stack, which is what makes
     /// the run pay for the join that says which series and subject a stack is.
-    fn needs_ids(&self) -> bool {
+    pub(crate) fn needs_ids(&self) -> bool {
         !self.by_series.is_empty() || !self.by_subject.is_empty()
     }
 
-    fn any(&self) -> bool {
+    pub(crate) fn any(&self) -> bool {
         !self.by_stack.is_empty()
             || !self.by_group.is_empty()
             || !self.by_series.is_empty()
@@ -654,7 +654,7 @@ impl Decisions {
     /// person's call about a scanner beats an agent's about the stack), and
     /// among equals the narrowest scope, which is where somebody looked
     /// closest.
-    fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Decided> {
+    pub(crate) fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Decided> {
         let key = |id: i64| (id, axis.to_string());
         // (rank, narrowness, the decision)
         let mut candidates: Vec<(u8, u8, &Decided)> = Vec::new();
