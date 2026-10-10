@@ -437,10 +437,12 @@ fn the_same_everywhere_id_type_is_built_in(store: &mut Store, kind: Kind) -> Res
 /// study, series and instance UIDs are an instance the registry holds is a
 /// location of that instance, and a dataset holds every scan its tree has a
 /// file of, whoever read the scan first. `source_file` gains when a file was
-/// first seen, filled from when it was last seen on a row from before; and
+/// first seen, filled from when it was last seen on a row from before;
 /// `source_stack`, which sources hold a file of each stack, is filled from
-/// the files a registry from before recorded, its instances' own files and
-/// their copies alike. No file is touched.
+/// the instances' own files a registry from before recorded; and a copy it
+/// filed by its instance UID alone is marked `unchecked`, so that the next
+/// read of its source compares its subject, study and series and records it
+/// as a copy or holds it. No file is touched.
 fn a_scan_is_held_wherever_its_files_are(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry || !table_exists(store, "source_file")? {
         return Ok(());
@@ -458,6 +460,14 @@ fn a_scan_is_held_wherever_its_files_are(store: &mut Store, kind: Kind) -> Resul
     if fresh && table_exists(store, "instance")? && table_exists(store, "instance_frame")? {
         crate::location::backfill(store)?;
     }
+    // a copy filed by its instance UID alone is compared on its next read
+    store.execute(
+        &format!(
+            "UPDATE {} SET reason = 'unchecked' WHERE status = 'duplicate' AND reason IS NULL",
+            store.qualified("source_file")
+        ),
+        &[],
+    )?;
     Ok(())
 }
 

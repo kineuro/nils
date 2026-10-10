@@ -322,3 +322,75 @@ fn the_same_instance_uid_in_another_series_is_held() {
         );
     }
 }
+
+/// A registry from before filed a copy by its instance UID alone; migration
+/// 87 marks it `unchecked` and records no location of it. The next read of
+/// its root compares it: a copy of the same subject's instance becomes a
+/// location, and a file that names another subject is held and asked about.
+#[test]
+fn a_copy_filed_before_the_policy_is_compared_on_its_next_read() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        let p1 = [birth("19800101"), sex("M"), description("Brain")];
+        let other = TempDir::new("copies-before");
+        other.file(
+            "y/IM_0002",
+            &fs::read(dir.path().join("sub1/IM_0002")).unwrap(),
+        );
+        other.file("y/IM_0001", &mr("A", "A.1", "A.1.1", "P9", &p1));
+        let r = digest(&settings(&other), &mut reg).unwrap();
+        let second = source_of(&mut reg, r.written.unwrap().batch_id);
+        // as a registry from before holds them, migrated
+        let instance = one(
+            &mut reg,
+            "SELECT id FROM {instance} WHERE sop_instance_uid = 'A.1.1'",
+        );
+        for sql in [
+            format!(
+                "UPDATE {{source_file}} SET status = 'duplicate', reason = 'unchecked', detail = NULL, \
+                 instance_id = {instance} WHERE path = 'y/IM_0001'"
+            ),
+            "UPDATE {source_file} SET reason = 'unchecked' WHERE path = 'y/IM_0002'".to_string(),
+            format!("DELETE FROM {{source_stack}} WHERE source_id = {second}"),
+            format!("DELETE FROM {{review_item}} WHERE kind = '{SAME_INSTANCE_KIND}'"),
+        ] {
+            let sql = rows_sql(&mut reg, &sql);
+            reg.store().execute(&sql, &[]).unwrap();
+        }
+
+        let r = digest(&settings(&other), &mut reg).unwrap();
+        assert_eq!(r.parsed, 2, "{name}: both read again");
+        let w = r.written.unwrap();
+        assert_eq!((w.duplicate, w.known, w.same_instance), (1, 1, 1), "{name}");
+        assert_eq!(
+            ints(
+                &mut reg,
+                &format!("SELECT stack_id FROM {{source_stack}} WHERE source_id = {second}")
+            ),
+            [stack_of(&mut reg, "A.1.2")],
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {source_file} WHERE reason = 'unchecked'"
+            ),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            texts(
+                &mut reg,
+                &format!("SELECT status FROM {{review_item}} WHERE kind = '{SAME_INSTANCE_KIND}'")
+            ),
+            ["open"],
+            "{name}"
+        );
+        // and a further run reads the copy no more
+        let r = digest(&settings(&other), &mut reg).unwrap();
+        assert_eq!(r.parsed, 1, "{name}: only the held file");
+    }
+}

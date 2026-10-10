@@ -3244,9 +3244,11 @@ fn migration_79_gives_the_fingerprint_its_2026_10_03_fields_on_both_backends() {
 /// Record 55 (Nima's duplicate policy, 2026-10-10), migration 87, on both
 /// backends: a registry of schema 86 gains when each file was first seen,
 /// filled from when it was last seen, and which sources hold a file of each
-/// stack, filled from its files: an instance's own file and a copy of it
-/// alike, a file whose frames are in two stacks holding both, and neither a
-/// file that is gone nor one held. The migration run twice is run once.
+/// stack, filled from the instances' own files, a file whose frames are in
+/// two stacks holding both, and neither a file that is gone nor one held;
+/// a copy filed by its instance UID alone holds nothing yet and is marked
+/// `unchecked`, for its next read to compare. The migration run twice is
+/// run once.
 #[test]
 fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
     for (name, _guard, mut store) in stores() {
@@ -3313,7 +3315,32 @@ fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
         };
         assert_eq!(
             held(&mut store),
-            [(1, 100), (1, 101), (1, 102), (1, 103), (2, 100)],
+            [(1, 100), (1, 101), (1, 102), (1, 103)],
+            "{name}"
+        );
+        let reasons = store
+            .query(
+                &format!("SELECT status, reason FROM {f} WHERE reason IS NOT NULL ORDER BY path"),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    r.text(1).unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [
+                ("duplicate".to_string(), "unchecked".to_string()),
+                (
+                    "quarantined".to_string(),
+                    "unsupported_sop_class".to_string()
+                )
+            ],
             "{name}"
         );
         let count =
@@ -3338,7 +3365,7 @@ fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
         // and one that finds the table there leaves what it holds
         store
             .batch(&format!(
-                "DELETE FROM {ss} WHERE source_id = 2;\n\
+                "DELETE FROM {ss} WHERE stack_id = 103;\n\
                  UPDATE {meta} SET value = '86' WHERE key = 'schema_version'"
             ))
             .unwrap();
@@ -3347,11 +3374,7 @@ fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
             [87],
             "{name}"
         );
-        assert_eq!(
-            held(&mut store),
-            [(1, 100), (1, 101), (1, 102), (1, 103)],
-            "{name}"
-        );
+        assert_eq!(held(&mut store), [(1, 100), (1, 101), (1, 102)], "{name}");
     }
 }
 

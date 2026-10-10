@@ -82,9 +82,11 @@ pub fn follow(store: &mut Store, moves: &[(i64, i64)]) -> Result<(), Error> {
 }
 
 /// Fill `source_stack` from the files a registry from before recorded:
-/// every source that has a file, its instance's own or a copy, in a stack,
-/// first seen when the earliest of them was last seen (the row kept no
-/// earlier sighting). A file whose frames are in several stacks holds each.
+/// every source that has an instance's own file in a stack, first seen when
+/// the earliest of them was last seen (the row kept no earlier sighting). A
+/// file whose frames are in several stacks holds each. A copy a registry
+/// from before filed by its instance UID alone holds nothing yet: the next
+/// read of its source compares it, and records it if it is one.
 pub fn backfill(store: &mut Store) -> Result<(), Error> {
     let (ss, file, instance, frame) = (
         store.qualified("source_stack"),
@@ -98,11 +100,11 @@ pub fn backfill(store: &mut Store) -> Result<(), Error> {
              SELECT u.source_id, u.stack_id, MIN(u.seen) FROM (\
                SELECT f.source_id AS source_id, i.stack_id AS stack_id, f.seen_at AS seen \
                FROM {file} f JOIN {instance} i ON i.id = f.instance_id \
-               WHERE f.status IN ('ingested', 'duplicate') AND i.stack_id IS NOT NULL \
+               WHERE f.status = 'ingested' AND i.stack_id IS NOT NULL \
                UNION ALL \
                SELECT f.source_id, fr.stack_id, f.seen_at \
                FROM {file} f JOIN {frame} fr ON fr.instance_id = f.instance_id \
-               WHERE f.status IN ('ingested', 'duplicate')\
+               WHERE f.status = 'ingested'\
              ) u GROUP BY u.source_id, u.stack_id"
         ),
         &[],

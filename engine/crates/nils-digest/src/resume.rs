@@ -42,6 +42,12 @@ pub mod status {
     pub const SKIPPED: &str = "skipped";
     pub const GONE: &str = "gone";
 
+    /// Record 55 (2026-10-10): the reason a copy filed before Nima's
+    /// duplicate policy carries, by its instance UID alone, so that the next
+    /// run reads it again and compares its subject, study and series with
+    /// the instance's (migration 87 sets it).
+    pub const UNCHECKED: &str = "unchecked";
+
     /// The static name of a status read back, if it is one.
     pub fn of(text: &str) -> Option<&'static str> {
         [INGESTED, DUPLICATE, QUARANTINED, SKIPPED, GONE]
@@ -71,6 +77,10 @@ pub struct Recorded {
     /// instance UID under another subject, study or series (record 55,
     /// `identity.same_instance`), which a merge of the two subjects releases.
     pub held: bool,
+    /// A copy filed by its instance UID alone, before record 55 compared a
+    /// copy's subject, study and series ([`status::UNCHECKED`]): read again
+    /// once, whatever the run was asked.
+    pub unchecked: bool,
 }
 
 /// What to do with a file, given its record.
@@ -115,6 +125,7 @@ pub fn decide(
             instance_id: Some(id),
             changed: false,
         })),
+        status::DUPLICATE if same && r.unchecked => Decision::Parse(None),
         status::INGESTED | status::DUPLICATE if same => Decision::Unchanged {
             id: r.id,
             quarantined: false,
@@ -164,14 +175,16 @@ impl Records {
         let batch = store.qualified("ingest_batch");
         let sql = format!(
             "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id, \
-             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason IN ('{held}', '{same}') \
+             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason IN ('{held}', '{same}'), \
+             f.reason = '{unchecked}' \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
              LEFT JOIN {batch} AS b ON b.id = f.batch_id \
              WHERE f.source_id = {} AND f.dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text),
             held = nils_registry::review::UNMAPPED_KIND,
-            same = nils_registry::review::SAME_INSTANCE_KIND
+            same = nils_registry::review::SAME_INSTANCE_KIND,
+            unchecked = status::UNCHECKED
         );
         Ok(Records {
             store,
@@ -212,6 +225,7 @@ impl Records {
                         own: flag(5),
                         reparse: flag(7),
                         held: flag(8),
+                        unchecked: flag(9),
                     },
                 );
             }
@@ -350,6 +364,7 @@ mod tests {
             own: instance.is_some(),
             reparse: false,
             held: false,
+            unchecked: false,
         }
     }
 
@@ -391,6 +406,16 @@ mod tests {
         };
         assert_eq!(
             decide(Some(&held), 10, 5, false, false),
+            Decision::Parse(None)
+        );
+        // a copy filed by its instance UID alone, before record 55, is read
+        // again once to compare its subject, study and series
+        let unchecked = Recorded {
+            unchecked: true,
+            ..rec(status::DUPLICATE, Some(7))
+        };
+        assert_eq!(
+            decide(Some(&unchecked), 10, 5, false, false),
             Decision::Parse(None)
         );
         assert_eq!(
@@ -558,6 +583,7 @@ mod tests {
                 own: true,
                 reparse: false,
                 held: false,
+                unchecked: false,
             })
         );
         // the failed batch's last second is read again, the one before not
