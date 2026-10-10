@@ -652,7 +652,8 @@ On GitHub the releases are found in the repository's listing by their tags.
 A channel of a deployment's own lays each out as GitHub does, under
 `download/pack-mri-v<version>/`, and names its newest in
 `latest/download/pack-mri.VERSION`; `NILS_RULES_RELEASES` names a channel for
-the rules alone. An engine in a container reads the packs its image carries,
+the rules alone. Where the engine's own release cannot be read, a pack's own
+releases are measured against the pack in place, never below it. An engine in a container reads the packs its image carries,
 so rules releases reach it with the engine's next image.
 
 ### A model server for the stations
