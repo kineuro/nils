@@ -529,13 +529,12 @@ impl Compare {
     }
 }
 
+/// The named columns and how many visits each holds.
+type Counted = Vec<(String, i64)>;
+
 /// The column of every visit under the shown side, the named ones and the
 /// rest as one.
-fn columns(
-    read: &Read,
-    cmp: &Compare,
-    by: Columns,
-) -> (Vec<Vec<(String, String)>>, Vec<(String, i64)>) {
+fn columns(read: &Read, cmp: &Compare, by: Columns) -> (Vec<Vec<(String, String)>>, Counted) {
     let shown = cmp.shown();
     let raw: Vec<Vec<(String, String)>> = read
         .subjects

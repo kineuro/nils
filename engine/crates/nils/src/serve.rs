@@ -4351,7 +4351,7 @@ fn routed(
             // record 55, decision 6: a pick made for a dataset or a cohort
             // belongs to the scope whose picks it reads; one of no stack
             // names its occasion
-            let named = crate::main_scans::named_scope(registry, &query, Some(&doc))?;
+            let named = crate::main_scans::named_scope(registry, query, Some(&doc))?;
             let reading = match &named {
                 Some(s) => nils_registry::pick_rules::reading(registry.store(), s)?,
                 None => None,
@@ -4386,14 +4386,12 @@ fn routed(
         }
         // Record 55, decision 6: a dataset's or a cohort's own main-scan
         // rules, read, as text and saved; saving queues the scope's run
-        ["api", "picks", "rules"] if get => crate::main_scans::rules(doors, registry, &query),
-        ["api", "picks", "rules", "text"] if get => {
-            crate::main_scans::text(doors, registry, &query)
-        }
+        ["api", "picks", "rules"] if get => crate::main_scans::rules(doors, registry, query),
+        ["api", "picks", "rules", "text"] if get => crate::main_scans::text(doors, registry, query),
         ["api", "picks", "rules"] if post => {
             let doc = json_body(body)?;
             let (version, scope, pack) =
-                crate::main_scans::save(doors, registry, &query, &doc, principal)?;
+                crate::main_scans::save(doors, registry, query, &doc, principal)?;
             let command = vec![
                 "pick".to_string(),
                 "run".to_string(),
@@ -4557,7 +4555,7 @@ fn routed(
             let doc = json_body(body)?;
             // record 55, decision 6: named, the pick must be of the scope
             // the person is looking at
-            let named = crate::main_scans::named_scope(registry, &query, Some(&doc))?;
+            let named = crate::main_scans::named_scope(registry, query, Some(&doc))?;
             let reading = match &named {
                 Some(s) => nils_registry::pick_rules::reading(registry.store(), s)?,
                 None => None,
