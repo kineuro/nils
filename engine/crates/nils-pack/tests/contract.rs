@@ -55,6 +55,7 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
         "mcp",
         "excludes",
         "hints",
+        "engine",
     ];
     let version: u32 = std::fs::read_to_string(contracts().join("pack/VERSION"))
         .unwrap()
@@ -261,6 +262,104 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
         !pack.lists.iter().any(|l| l == "provenance.RawRecon"),
         "the default is reached by no word"
     );
+}
+
+/// A copy of the MRI pack in a directory of its own, to change.
+fn mri_copy(name: &str) -> std::path::PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.is_dir() {
+                copy(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let to = std::env::temp_dir().join(format!("nils-contract-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&to);
+    copy(&mri, &to);
+    to
+}
+
+/// The copy's manifest declaring `contract`, with `engine` naming a range
+/// where one is given.
+fn declare(dir: &Path, contract: u32, engine: Option<&str>) {
+    let manifest = std::fs::read_to_string(dir.join("pack.yml")).unwrap();
+    let mut out = String::new();
+    for line in manifest.lines() {
+        if line.starts_with("engine:") {
+            continue;
+        }
+        if line.starts_with("contract:") {
+            out.push_str(&format!("contract: {contract}\n"));
+            if let Some(range) = engine {
+                out.push_str(&format!("engine: \"{range}\"\n"));
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    std::fs::write(dir.join("pack.yml"), out).unwrap();
+}
+
+/// Pack contract 10 (record 55 B5): a pack may name the engines it works
+/// with. One this engine is inside loads; one this engine is outside is
+/// refused with the range and this engine's version named, which is what a
+/// rules release made for a later engine meets in an earlier one; and the
+/// key in a pack that declares less is refused, since an engine of that
+/// contract would load the pack without reading it.
+#[test]
+fn a_pack_names_the_engines_it_works_with_from_contract_10() {
+    let engine = nils_pack::engines::ENGINE_VERSION;
+    let dir = mri_copy("engine-range");
+
+    declare(&dir, 10, Some(&format!(">={engine}, <99.0.0")));
+    let pack = nils_pack::load(&dir, None).expect("a range this engine is in loads");
+    assert_eq!(pack.contract, 10);
+    assert_eq!(
+        pack.engine.as_ref().map(|r| r.text().to_string()),
+        Some(format!(">={engine}, <99.0.0"))
+    );
+
+    declare(&dir, 10, Some(">=98.0.0, <99.0.0"));
+    let e = nils_pack::load(&dir, None)
+        .err()
+        .expect("a range this engine is outside is refused")
+        .to_string();
+    assert!(
+        e.contains(&format!(
+            "the pack works with engines >=98.0.0, <99.0.0, and this engine is {engine}"
+        )),
+        "{e}"
+    );
+
+    declare(&dir, 10, Some("<0.0.1"));
+    assert!(
+        nils_pack::load(&dir, None).is_err(),
+        "an upper bound refuses too"
+    );
+
+    declare(&dir, 10, Some("a later one"));
+    let e = nils_pack::load(&dir, None).err().unwrap().to_string();
+    assert!(e.contains("is not a range of engine versions"), "{e}");
+
+    declare(&dir, 9, Some(&format!(">={engine}")));
+    let e = nils_pack::load(&dir, None).err().unwrap().to_string();
+    assert!(
+        e.contains("engine is pack contract 10's; this pack declares contract 9"),
+        "{e}"
+    );
+
+    // and without the key, contract 10 changes nothing a pack says
+    declare(&dir, 10, None);
+    let pack = nils_pack::load(&dir, None).expect("a contract-10 pack without a range loads");
+    assert!(pack.engine.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
