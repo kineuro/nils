@@ -1246,7 +1246,8 @@ impl<'a> Builder<'a> {
                 }
                 let role = self.p(Param::from(r.as_str()), Type::Text);
                 from.push_str(&format!(
-                    " JOIN {} ps ON ps.stack_id = st.id JOIN {} p ON p.id = ps.pick_id AND p.role = {role} AND p.withdrawn_at IS NULL",
+                    " JOIN {} ps ON ps.stack_id = st.id JOIN {} p ON p.id = ps.pick_id AND p.role = {role} AND p.withdrawn_at IS NULL \
+                     AND p.rules_scope_kind IS NULL",
                     self.q("pick_stack"),
                     self.q("pick")
                 ));
@@ -3089,7 +3090,7 @@ impl<'a> Builder<'a> {
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
                 let mut sql = format!(
                     "EXISTS (SELECT 1 FROM {} p JOIN {} ps ON ps.pick_id = p.id WHERE ps.stack_id = {} AND p.role = {role} \
-                     AND p.withdrawn_at IS NULL AND p.scheme_digest = {digest}",
+                     AND p.withdrawn_at IS NULL AND p.rules_scope_kind IS NULL AND p.scheme_digest = {digest}",
                     self.q("pick"),
                     self.q("pick_stack"),
                     dot("k")

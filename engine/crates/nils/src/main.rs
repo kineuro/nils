@@ -48,6 +48,7 @@ mod grants;
 mod intake;
 mod linkage_doors;
 mod login;
+mod main_scans;
 mod mcp;
 mod measures;
 mod model_cli;
@@ -56,6 +57,7 @@ mod originals;
 mod packs;
 mod pair;
 mod pick_after;
+mod pick_scopes;
 mod pipelines;
 mod places;
 mod preflight;
@@ -1512,6 +1514,10 @@ struct PickArgs {
     /// step a sort ends with
     #[arg(long = "after-sort", value_name = "JOB", conflicts_with_all = ["subject", "cohort", "dataset"])]
     after_sort: Option<i64>,
+    /// Decide the cohort's or the dataset's picks with its own saved rules
+    /// alone, and nothing of the pack's: the run saving rules queues
+    #[arg(long = "own-rules", conflicts_with_all = ["subject", "after_sort"])]
+    own_rules: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -8734,6 +8740,8 @@ fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
             actor: &who,
             campaign: None,
             occasion: None,
+            scope: None,
+            made_in: None,
         },
     )
     .map_err(|e| match e {
@@ -8778,11 +8786,12 @@ fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
 /// Record 42 S3: `nils pick withdraw`, a person's pick withdrawn.
 fn pick_withdraw(home: &Home, id: i64, why: Option<String>, json: bool) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let done = nils_classify::picking::withdraw_person(&mut registry, id, &actor(), why.as_deref())
-        .map_err(|e| match e {
-            nils_classify::picking::PersonError::Refused(m) => usage(m),
-            other => fail(other.to_string()),
-        })?;
+    let done =
+        nils_classify::picking::withdraw_person(&mut registry, id, &actor(), why.as_deref(), None)
+            .map_err(|e| match e {
+                nils_classify::picking::PersonError::Refused(m) => usage(m),
+                other => fail(other.to_string()),
+            })?;
     if json {
         println!(
             "{}",
@@ -8871,12 +8880,26 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
         }
         (None, None) => None,
     };
-    let report = nils_classify::picking::run_for(
+    // record 55, decision 6: the scopes the run decides
+    let scopes = crate::pick_scopes::of_run(
+        registry.store(),
+        args.own_rules,
+        args.cohort.as_deref(),
+        args.dataset.as_deref().map(|d| d.trim_start_matches('@')),
+        only.as_ref().map(|o| &o.subjects),
+        args.subject.as_deref(),
+    )
+    .map_err(|e| match e {
+        crate::pick_scopes::Error::Usage(m) => usage(m),
+        crate::pick_scopes::Error::Store(e) => fail(e.to_string()),
+    })?;
+    let report = nils_classify::picking::run_scopes(
         &mut registry,
         &pack,
         &scheme,
         args.subject.as_deref(),
         only.as_ref(),
+        &scopes,
         &format!("pick:{}", pack.id()),
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -8901,6 +8924,25 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     for (why, n) in &report.borders {
         println!("  {why:<16} {n:>12}   worth a person's eye");
     }
+    for r in &report.rules {
+        let scope = r.scope.as_ref().map_or("the pack's".to_string(), |s| {
+            format!(
+                "{} {}",
+                s["kind"].as_str().unwrap_or(""),
+                s["name"].as_str().unwrap_or("")
+            )
+        });
+        println!(
+            "  rules            {scope}, version {}: {} picked of {} occasions",
+            r.version, r.written, r.sessions
+        );
+    }
+    if report.settled > 0 {
+        println!(
+            "  {:<16} {:>12}   settled by the rules",
+            "borders closed", report.settled
+        );
+    }
     println!("  {:.1} s", report.seconds);
     Ok(())
 }
@@ -8914,7 +8956,12 @@ fn pick_list(
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let store = registry.store();
-    let mut where_parts = vec!["p.withdrawn_at IS NULL".to_string()];
+    // record 55, decision 6: the pack's picks, as every reader but a
+    // scope's own reads them
+    let mut where_parts = vec![
+        "p.withdrawn_at IS NULL".to_string(),
+        "p.rules_scope_kind IS NULL".to_string(),
+    ];
     if let Some(r) = &role {
         where_parts.push(format!("p.role = '{}'", r.replace('\'', "''")));
     }

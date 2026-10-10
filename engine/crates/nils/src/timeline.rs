@@ -789,7 +789,8 @@ fn stack(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
     // picked
     let pick_at = text_of(store, "pick", "decided_at");
     let sql = format!(
-        "SELECT p.id, p.role, p.actor, {pick_at} FROM {} ps JOIN {} p ON p.id = ps.pick_id \
+        "SELECT p.id, p.role, p.actor, {pick_at}, p.rules_scope_kind, p.rules_scope_id, \
+                p.rules_version FROM {} ps JOIN {} p ON p.id = ps.pick_id \
          WHERE ps.stack_id = {} ORDER BY p.id",
         store.qualified("pick_stack"),
         store.qualified("pick"),
@@ -801,7 +802,18 @@ fn stack(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
             r.opt_text(3).map_err(err)?.unwrap_or_default(),
             "picked",
             r.opt_text(2).map_err(err)?,
-            format!("picked as {}", r.opt_text(1).map_err(err)?.unwrap_or("?")),
+            // record 55, decision 6: whose picks it is among
+            format!(
+                "picked as {}{}",
+                r.opt_text(1).map_err(err)?.unwrap_or("?"),
+                match (r.opt_text(4).map_err(err)?, r.opt_int(5).map_err(err)?) {
+                    (Some(kind), Some(scope)) => format!(
+                        " for {kind} {scope} under its rules, version {}",
+                        r.opt_int(6).map_err(err)?.unwrap_or(0)
+                    ),
+                    _ => " for the pack".to_string(),
+                }
+            ),
             produced("pick", pick),
             "pick",
         ));

@@ -99,6 +99,25 @@ impl Scope {
         })
     }
 
+    /// The scope whose picks the viewer reads: this dataset's or cohort's
+    /// when it has main-scan rules of its own, else none, the pack's
+    /// (record 55, decision 6).
+    pub(crate) fn pick_scope(
+        &self,
+        store: &mut Store,
+    ) -> Result<Option<nils_registry::pick_rules::Reading>, StoreError> {
+        use nils_registry::pick_rules::{Scope as Rules, ScopeKind};
+        let mine = Rules {
+            kind: match self {
+                Scope::Dataset { .. } => ScopeKind::Dataset,
+                Scope::Cohort(_) => ScopeKind::Cohort,
+            },
+            id: self.id(),
+            name: self.name().to_string(),
+        };
+        nils_registry::pick_rules::reading(store, &mine)
+    }
+
     /// The cohort a door names, retired or not.
     pub(crate) fn cohort(registry: &mut Registry, name: &str) -> Result<Scope, Reply> {
         match nils_registry::cohort::by_name(registry.store(), name).map_err(failed)? {
@@ -432,14 +451,25 @@ fn axes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Axes>, Stor
 }
 
 /// The roles of the live picks naming each of these stacks: a pick no
-/// person withdrew or overruled.
-fn picked(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+/// person withdrew or overruled, of the scope the viewer was opened from
+/// when it has main-scan rules of its own, else the pack's (record 55,
+/// decision 6).
+fn picked(
+    store: &mut Store,
+    stacks: &[i64],
+    scope: Option<&Scope>,
+) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+    let reading = match scope {
+        Some(s) => s.pick_scope(store)?,
+        None => None,
+    };
+    let filter = nils_registry::pick_rules::reading_filter("p", reading.as_ref());
     let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
     for chunk in stacks.chunks(IN_CHUNKS) {
         for r in store.query(
             &format!(
                 "SELECT ps.stack_id, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-                 WHERE p.withdrawn_at IS NULL AND ps.stack_id IN ({})",
+                 WHERE p.withdrawn_at IS NULL AND {filter} AND ps.stack_id IN ({})",
                 store.qualified("pick_stack"),
                 store.qualified("pick"),
                 list(chunk)
@@ -838,14 +868,17 @@ pub(crate) fn subjects(
                 f.makers.insert(m);
             }
         }
-        // the roles of the live picks among the scope's scans
+        // the roles of the live picks among the scope's scans, the scope's
+        // own where it has main-scan rules (record 55, decision 6)
+        let reading = scope.pick_scope(store).map_err(failed)?;
+        let filter = nils_registry::pick_rules::reading_filter("p", reading.as_ref());
         for r in store
             .query(
                 &format!(
                     "SELECT DISTINCT se.subject_id, p.role FROM {from} \
                      JOIN {pick_stack} ps ON ps.stack_id = st.id \
                      JOIN {pick} p ON p.id = ps.pick_id \
-                     WHERE {holds} AND p.withdrawn_at IS NULL"
+                     WHERE {holds} AND p.withdrawn_at IS NULL AND {filter}"
                 ),
                 &[],
             )
@@ -1132,7 +1165,7 @@ pub(crate) fn visits(
             .collect(),
         None => HashSet::new(),
     };
-    let picks = picked(store, &ids).map_err(failed)?;
+    let picks = picked(store, &ids, Some(scope)).map_err(failed)?;
     let mains: Vec<i64> = {
         let mut m: Vec<i64> = picks.keys().copied().collect();
         m.sort_unstable();
@@ -1290,7 +1323,11 @@ pub(crate) fn visits(
 /// the echo, repetition and inversion times (milliseconds) and the flip
 /// angle (degrees) from its fingerprint, or null; and `main`, the roles of
 /// the live picks naming it. None of it is quasi-identifying.
-pub(crate) fn with_facts(registry: &mut Registry, doc: &mut Value) -> Result<(), Reply> {
+pub(crate) fn with_facts(
+    registry: &mut Registry,
+    doc: &mut Value,
+    scope: &Scope,
+) -> Result<(), Reply> {
     let stacks: Vec<i64> = doc["scans"]
         .as_array()
         .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
@@ -1321,7 +1358,7 @@ pub(crate) fn with_facts(registry: &mut Registry, doc: &mut Value) -> Result<(),
             );
         }
     }
-    let picks = picked(store, &stacks).map_err(failed)?;
+    let picks = picked(store, &stacks, Some(scope)).map_err(failed)?;
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();

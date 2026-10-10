@@ -800,8 +800,10 @@ fn a_change_to_the_pick_file_is_scored_by_the_patched_pick_and_equals_two_pick_r
         // has no pick
         assert_eq!(want.get("changed"), Some(&1), "{name}: {want:?}");
         assert_eq!(want.get("removed"), Some(&1), "{name}: {want:?}");
-        // and the Siemens one written twice is a retake both ways
-        assert_eq!(want.get("still"), Some(&1), "{name}: {want:?}");
+        // and the Siemens one written twice asks nothing either way: under
+        // the rules (record 55, decision 6) the later full repeat settles it
+        assert_eq!(want.get("still"), None, "{name}: {want:?}");
+        assert_eq!(want.get("raised"), None, "{name}: {want:?}");
         assert_eq!(
             picks["moved"].as_i64().unwrap(),
             picks["changed"].as_i64().unwrap()

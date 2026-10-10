@@ -3701,7 +3701,8 @@ fn candidates(
         let t = nils_registry::schema::table("pick");
         let sql = format!(
             "SELECT id, author_kind, actor, score, margin, borders, {}, model FROM {} \
-             WHERE role = {} AND subject_id = {} AND {} = {} AND withdrawn_at IS NULL ORDER BY id",
+             WHERE role = {} AND subject_id = {} AND {} = {} AND withdrawn_at IS NULL \
+               AND rules_scope_kind IS NULL ORDER BY id",
             d.text_of(t.column("considered").expect("considered")),
             store.qualified("pick"),
             d.param(1, Type::Text),
@@ -4519,6 +4520,8 @@ fn pick_writer(
                 actor: ask.who,
                 campaign: Some(ask.campaign),
                 occasion: Some((ask.subject_id, ask.session_day)),
+                scope: None,
+                made_in: None,
             },
         )
         .map(|picked| picked.id)
