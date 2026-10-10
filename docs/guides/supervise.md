@@ -146,8 +146,11 @@ install and acts on it, from the setup record of the account it runs as
   started, so a folder added as a source needs this.
 - `POST /api/supervise/update-all` runs `nils update --all`, or with
   `{"part": "desk"}` `nils update --part desk`, one part against its own
-  releases. `GET /api/supervise/install` says each part beside its own newest
-  release in `release.parts`, and which are behind in `release.behind`.
+  releases; `{"part": "rules"}` takes each first-party pack's own newest
+  release with no engine release. `GET /api/supervise/install` says each part
+  beside its own newest release in `release.parts`, a row per pack with
+  releases of its own among them (`part: rules`), and which are behind in
+  `release.behind`.
 - `POST /api/supervise/look` says what a folder holds before it is added:
   each folder inside with its files, how many of a sample are DICOM, and
   their modalities and scanners.

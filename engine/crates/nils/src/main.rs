@@ -74,6 +74,7 @@ mod reader;
 mod rehearse;
 mod releases;
 mod requirements;
+mod rules;
 mod scans;
 mod schedule;
 mod sealed;
@@ -12120,6 +12121,7 @@ pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
         match nils_pack::load(&p, None) {
             Ok(pack) => packs.push(serde_json::json!({
                 "name": pack.name, "version": pack.version.to_string(), "contract": pack.contract,
+                "engine": pack.engine.as_ref().map(|r| r.text().to_string()),
                 "modality": pack.modality, "cases": pack.cases,
                 "lists": pack.lists.len(), "buckets": pack.buckets.len(),
             })),

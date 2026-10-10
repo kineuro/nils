@@ -44,7 +44,7 @@ pub(crate) struct UpdateArgs {
     #[arg(long)]
     all: bool,
     /// Update only this part, against its own newest release; repeatable
-    /// (engine, desk, assistant, kvasir)
+    /// (engine, desk, assistant, kvasir, rules)
     #[arg(long = "part", value_name = "PART")]
     parts: Vec<String>,
 }
@@ -95,62 +95,12 @@ pub(crate) fn host_target() -> String {
     format!("{}-{arch}", std::env::consts::OS)
 }
 
-/// A version as numbers and, when it is a pre-release, what follows the hyphen.
-fn parts(v: &str) -> (Vec<u64>, Option<String>) {
-    let v = v.trim().trim_start_matches('v');
-    let (core, pre) = match v.split_once('-') {
-        Some((core, pre)) => (core, Some(pre.to_string())),
-        None => (v, None),
-    };
-    (
-        core.split('.').map(|p| p.parse().unwrap_or(0)).collect(),
-        pre,
-    )
-}
-
-/// One pre-release identifier against another: numbers as numbers, the rest
-/// as text, and the longer list wins when it agrees so far (`alpha.2` over
-/// `alpha`).
-fn pre_order(a: &str, b: &str) -> std::cmp::Ordering {
-    let (mut left, mut right) = (a.split('.'), b.split('.'));
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(x), Some(y)) => {
-                let order = match (x.parse::<u64>(), y.parse::<u64>()) {
-                    (Ok(x), Ok(y)) => x.cmp(&y),
-                    _ => x.cmp(y),
-                };
-                if order != std::cmp::Ordering::Equal {
-                    return order;
-                }
-            }
-        }
-    }
-}
-
 /// Whether `candidate` is a later version than `than`: the numbers left to
-/// right, and then a release ahead of the pre-releases that led to it.
+/// right, and then a release ahead of the pre-releases that led to it. The
+/// order is the pack crate's, which reads a pack's range of engines by it
+/// (pack contract 10), so a release and a range never disagree.
 pub(crate) fn newer(candidate: &str, than: &str) -> bool {
-    let (a, a_pre) = parts(candidate);
-    let (b, b_pre) = parts(than);
-    for i in 0..a.len().max(b.len()) {
-        let (x, y) = (
-            a.get(i).copied().unwrap_or(0),
-            b.get(i).copied().unwrap_or(0),
-        );
-        if x != y {
-            return x > y;
-        }
-    }
-    match (a_pre, b_pre) {
-        (None, None) => false,
-        (None, Some(_)) => true,
-        (Some(_), None) => false,
-        (Some(x), Some(y)) => pre_order(&x, &y) == std::cmp::Ordering::Greater,
-    }
+    nils_pack::engines::newer(candidate, than)
 }
 
 /// The checksum a `SHA256SUMS` file gives one name, in either of the two
@@ -189,9 +139,10 @@ pub(crate) fn desk_base(channel: Option<&str>) -> String {
     base.trim_end_matches('/').to_string()
 }
 
-/// A file of one release: `<base>/download/v<version>/<file>`.
-fn asset(base: &str, version: &str, file: &str) -> String {
-    format!("{base}/download/v{version}/{file}")
+/// A file of the release a tag names: `<base>/download/<tag>/<file>`. The
+/// engine's tags are `v<version>`; a pack's own are `pack-<name>-v<version>`.
+pub(crate) fn asset_at(base: &str, tag: &str, file: &str) -> String {
+    format!("{base}/download/{tag}/{file}")
 }
 
 /// The version the newest release names.
@@ -239,6 +190,48 @@ pub(crate) fn versions(base: &str) -> Result<Vec<String>, Exit> {
         }
     }
     version_file(base).map(|v| vec![v])
+}
+
+/// Every release of one kind a GitHub base lists, newest first: the versions
+/// of the tags that start with `prefix` (`pack-mri-v` for the MRI pack's own
+/// releases). `None` for a channel of a deployment's own, which has no
+/// listing; a refusal is said as one.
+pub(crate) fn tagged(base: &str, prefix: &str) -> Option<Result<Vec<String>, String>> {
+    let repo = github_repo(base)?;
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+    Some(match ask(&url) {
+        Ok(answer) if answer.refused() => Err(answer.refusal(&url)),
+        Ok(answer) => Ok(listed_as(&answer.body, Some(prefix))),
+        Err(e) => Err(format!("the release listing could not be read: {e}")),
+    })
+}
+
+/// A file a channel may or may not have: `Ok(None)` where it answers that
+/// there is no such file, which is a channel that publishes none, and an
+/// error only where it could not be asked.
+pub(crate) fn fetch_if_there(url: &str) -> Result<Option<Vec<u8>>, String> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{url}: {e}")),
+        };
+    }
+    let response = ureq::get(url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(|e| format!("{url}: {e}"))?;
+    match response.status().as_u16() {
+        404 => Ok(None),
+        status if (200..300).contains(&status) => response
+            .into_body()
+            .read_to_vec()
+            .map(Some)
+            .map_err(|e| format!("{url}: {e}")),
+        status => Err(format!("{url}: http status {status}")),
+    }
 }
 
 /// The version the one line `VERSION` file of the newest release names.
@@ -421,11 +414,22 @@ fn newest_of(listing: &str) -> Option<String> {
 }
 
 /// The releases a listing names, drafts left out, newest first by version
-/// rather than in the order GitHub gave them.
+/// rather than in the order GitHub gave them. Only the engine's and the
+/// desk's own tags are versions here (`v1.0.0-alpha.80`): a pack released
+/// on its own (`pack-mri-v1.0.2`) shares the engine's repository, and is
+/// never taken for an engine.
 fn listed(listing: &str) -> Vec<String> {
+    listed_as(listing, None)
+}
+
+/// The releases a listing names under one kind of tag, newest first: the
+/// versions of the engine's own tags where `prefix` is `None`, and of a
+/// pack's own (`pack-mri-v`) where it names that pack's.
+fn listed_as(listing: &str, prefix: Option<&str>) -> Vec<String> {
     let Ok(releases) = serde_json::from_str::<serde_json::Value>(listing) else {
         return Vec::new();
     };
+    let versioned = |v: &str| v.starts_with(|c: char| c.is_ascii_digit());
     let mut out: Vec<String> = releases
         .as_array()
         .map(|a| a.as_slice())
@@ -433,8 +437,12 @@ fn listed(listing: &str) -> Vec<String> {
         .iter()
         .filter(|r| !r["draft"].as_bool().unwrap_or(false))
         .filter_map(|r| r["tag_name"].as_str())
-        .map(|tag| tag.trim_start_matches('v').to_string())
-        .filter(|tag| !tag.is_empty())
+        .filter_map(|tag| match prefix {
+            None => Some(tag.trim_start_matches('v')),
+            Some(p) => tag.strip_prefix(p),
+        })
+        .filter(|v| versioned(v))
+        .map(str::to_string)
         .collect();
     out.sort_by(|a, b| {
         if newer(a, b) {
@@ -451,15 +459,22 @@ fn listed(listing: &str) -> Vec<String> {
 
 /// Fetch one file of a release and check it against that release's sums.
 pub(crate) fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec<u8>, Exit> {
-    let sums = fetch(&asset(base, version, "SHA256SUMS"))
+    fetch_checked_at(base, &format!("v{version}"), file)
+}
+
+/// Fetch one file of the release a tag names, checked against its sums.
+pub(crate) fn fetch_checked_at(base: &str, tag: &str, file: &str) -> Result<Vec<u8>, Exit> {
+    let sums = fetch(&asset_at(base, tag, "SHA256SUMS"))
         .map_err(|e| fail(format!("the release names no checksums: {e}")))?;
     let sums = String::from_utf8_lossy(&sums).to_string();
-    let want = sum_for(&sums, file).ok_or_else(|| {
-        fail(format!(
+    let want = sum_for(&sums, file).ok_or_else(|| match tag.strip_prefix('v') {
+        // an engine release names a binary for each platform it was built for
+        Some(version) => fail(format!(
             "the release {version} has no {file}: this platform is not one it was built for"
-        ))
+        )),
+        None => fail(format!("the release {tag} names no {file} in its sums")),
     })?;
-    let bytes = fetch(&asset(base, version, file)).map_err(|e| fail(e.to_string()))?;
+    let bytes = fetch(&asset_at(base, tag, file)).map_err(|e| fail(e.to_string()))?;
     let got = sha256_hex(&bytes);
     if got != want {
         return Err(fail(format!(
@@ -614,27 +629,62 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
         .filter_map(|r| r.to_take().map(|n| format!("{} {n}", r.part)))
         .collect();
     // The packs beside the engine's release: the one an update takes, or the
-    // one installed where the engine is at its newest.
-    if args.parts.is_empty() || args.parts.iter().any(|p| p == "engine") {
+    // one installed where the engine is at its newest; and beside each
+    // first-party pack's own releases, which an update takes with no engine
+    // release (record 55 B5).
+    let asks = |part: &str| args.parts.is_empty() || args.parts.iter().any(|p| p == part);
+    let (packs, rules) = (asks("engine"), asks(crate::rules::PART));
+    if packs || rules {
         let engine_row = rows.iter().find(|r| r.part == "engine");
         let release = engine_row
             .and_then(|r| r.to_take().map(str::to_string))
             .or_else(|| crate::setup::engine_version(&state));
-        if let (Some(dir), Some(release)) = (crate::setup::engine_pack_dir(&state), release) {
-            match crate::packs::status(base, &release, &dir) {
-                Ok(status) => {
-                    for line in status.lines() {
-                        println!("  {line}");
+        let dir = crate::setup::engine_pack_dir(&state);
+        match (dir, release) {
+            (Some(dir), Some(release)) => match crate::packs::bundled(base, &release) {
+                Ok(carried) => {
+                    let carried_packs: Vec<crate::packs::Pack> =
+                        carried.iter().map(|o| o.pack.clone()).collect();
+                    let engine = crate::packs::Engine::of_release(&release, &carried_packs);
+                    let found = if rules {
+                        crate::rules::find_all(&crate::rules::base(channel), &carried, &engine)
+                    } else {
+                        Vec::new()
+                    };
+                    let plan = crate::packs::plan(
+                        &dir,
+                        &release,
+                        carried,
+                        crate::rules::takes(&found),
+                        &engine,
+                    );
+                    if packs {
+                        for line in plan.status.lines() {
+                            println!("  {line}");
+                        }
+                        if plan.status.behind() {
+                            behind.push(format!(
+                                "packs of {release} ({})",
+                                plan.status.stale.join(", ")
+                            ));
+                        }
                     }
-                    if status.behind() {
-                        behind.push(format!("packs of {release} ({})", status.stale.join(", ")));
+                    for row in crate::rules::rows(&plan, &found) {
+                        println!("  {}", row.line());
+                        if let Some(version) = &row.takes {
+                            behind.push(format!("{} {} {version}", crate::rules::PART, row.pack));
+                        }
                     }
                 }
                 Err(why) => println!(
                     "  packs in {}: the ones engine {release} was released with could not be read: {why}",
                     dir.display()
                 ),
-            }
+            },
+            (None, _) if rules && !args.parts.is_empty() => println!(
+                "  rules: this install's engine runs in a container, whose image carries its packs"
+            ),
+            _ => {}
         }
     }
     if behind.is_empty() {
@@ -706,7 +756,13 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
         // Parts named without the engine leave its binary where it is.
         if !args.takes_engine() {
             if crate::setup::update_all(args.channel.as_deref(), &only)? {
-                crate::setup::restart_after_update(args.channel.as_deref());
+                if only.iter().all(|p| p == crate::rules::PART) {
+                    // The engine reads a pack again whenever its files have
+                    // changed, so new rules need nothing started again.
+                    println!("the engine reads the new rules from its next look at them");
+                } else {
+                    crate::setup::restart_after_update(args.channel.as_deref());
+                }
             }
             return Ok(());
         }
@@ -768,6 +824,7 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
                 Ok(said) => println!("{said}"),
                 Err(why) => println!("the packs were left alone: {why}"),
             }
+            crate::setup::record_rules(&packs);
         }
         None => match crate::pack_dir(home, None) {
             Ok(packs) => match crate::packs::refresh(&base, &wanted, &packs) {
@@ -844,6 +901,42 @@ mod tests {
             ]
         );
         assert_eq!(listed(with_draft), ["1.0.0-alpha.11"]);
+    }
+
+    /// Record 55 B5: a pack's own releases share the engine's repository,
+    /// and its listing. The engine's lookups never take one for an engine,
+    /// and a pack's lookup finds its own by their tag.
+    #[test]
+    fn a_packs_own_release_is_never_taken_for_an_engine_and_is_found_by_its_tag() {
+        let listing = r#"[
+            {"tag_name": "pack-mri-v1.0.3", "draft": false},
+            {"tag_name": "v1.0.0-alpha.80", "draft": false},
+            {"tag_name": "pack-mri-v1.0.2", "draft": false},
+            {"tag_name": "pack-ct-v0.1.0", "draft": false},
+            {"tag_name": "pack-mri-v1.0.4", "draft": true},
+            {"tag_name": "vendor-x", "draft": false}
+        ]"#;
+        assert_eq!(listed(listing), ["1.0.0-alpha.80"]);
+        assert_eq!(newest_of(listing).as_deref(), Some("1.0.0-alpha.80"));
+        assert_eq!(listed_as(listing, Some("pack-mri-v")), ["1.0.3", "1.0.2"]);
+        assert_eq!(listed_as(listing, Some("pack-ct-v")), ["0.1.0"]);
+        assert!(listed_as(listing, Some("pack-pet-v")).is_empty());
+        assert_eq!(
+            tagged("file:///nowhere", "pack-mri-v"),
+            None,
+            "a channel of its own has no listing"
+        );
+    }
+
+    #[test]
+    fn a_file_a_channel_does_not_have_is_none_and_not_an_error() {
+        let root = std::env::temp_dir().join(format!("nils-if-there-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("here"), "1.0.2\n").unwrap();
+        let url = |name: &str| format!("file://{}", root.join(name).display());
+        assert_eq!(fetch_if_there(&url("here")), Ok(Some(b"1.0.2\n".to_vec())));
+        assert_eq!(fetch_if_there(&url("gone")), Ok(None));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

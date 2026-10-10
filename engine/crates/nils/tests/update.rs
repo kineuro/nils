@@ -337,6 +337,7 @@ impl Install {
             .env("XDG_DATA_HOME", self.base.path().join("data"))
             .env("NILS_RELEASES", engine.url())
             .env("NILS_DESK_RELEASES", format!("file://{}", desk.display()))
+            .env_remove("NILS_RULES_RELEASES")
             .env_remove("NILS_UPDATE_HANDED_OVER")
             .output()
             .expect("nils runs");
@@ -653,6 +654,340 @@ fn a_part_without_releases_of_its_own_is_refused_by_name() {
     assert!(!o.ok, "{}", o.stdout);
     assert!(
         o.stderr.contains("engine, desk, assistant, kvasir"),
+        "{}",
+        o.stderr
+    );
+}
+
+// ------------------------------------------------- rules releases (record 55 B5)
+
+/// A tarball holding `packs/<name>/pack.yml` for each pack given, the shape
+/// both the engine's `packs.tar.gz` and a pack's own release carry.
+fn packs_tarball(packs: &[(&str, &str)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (name, manifest) in packs {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("packs/{name}/pack.yml"),
+            manifest.as_bytes(),
+        )
+        .unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+impl Releases {
+    /// Publish one engine version carrying the packs given.
+    fn publish_with_packs(&self, version: &str, packs: &[(&str, &str)]) {
+        self.publish(version, false);
+        let into = self.dir.path().join("download").join(format!("v{version}"));
+        let tar = packs_tarball(packs);
+        std::fs::write(into.join("packs.tar.gz"), &tar).unwrap();
+        let sums = std::fs::read_to_string(into.join("SHA256SUMS")).unwrap();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!("{sums}{}  packs.tar.gz\n", sha256_hex(&tar)),
+        )
+        .unwrap();
+    }
+
+    /// Publish a pack's own release, as the rules release workflow lays one
+    /// out: its tarball, its version file and their sums under its tag, and
+    /// the channel's pointer to its newest.
+    fn publish_rules(&self, pack: &str, version: &str, manifest: &str) {
+        let tag = format!("pack-{pack}-v{version}");
+        let into = self.dir.path().join("download").join(&tag);
+        std::fs::create_dir_all(&into).unwrap();
+        let tar = packs_tarball(&[(pack, manifest)]);
+        let tarball = format!("pack-{pack}.tar.gz");
+        let pointer = format!("pack-{pack}.VERSION");
+        std::fs::write(into.join(&tarball), &tar).unwrap();
+        std::fs::write(into.join(&pointer), format!("{version}\n")).unwrap();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!(
+                "{}  {tarball}\n{}  {pointer}\n",
+                sha256_hex(&tar),
+                sha256_hex(format!("{version}\n").as_bytes())
+            ),
+        )
+        .unwrap();
+        let latest = self.dir.path().join("latest").join("download");
+        std::fs::create_dir_all(&latest).unwrap();
+        std::fs::write(latest.join(&pointer), format!("{version}\n")).unwrap();
+    }
+}
+
+impl Install {
+    /// The directory the engine reads its packs from, named in the record
+    /// as a site names it, with the packs given in it.
+    fn with_packs(&self, packs: &[(&str, &str)]) -> PathBuf {
+        let dir = self.base.path().join("engine").join("packs");
+        for (name, manifest) in packs {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("pack.yml"), manifest).unwrap();
+        }
+        let record = self.config.path().join("nils").join("setup.toml");
+        let mut text = std::fs::read_to_string(&record).unwrap();
+        text.push_str(&format!("\n[site]\npack_dir = \"{}\"\n", dir.display()));
+        std::fs::write(&record, text).unwrap();
+        dir
+    }
+
+    /// The engine's binary as the record names it, which no update here
+    /// may touch.
+    fn engine_line(&self) -> Option<String> {
+        self.record()
+            .lines()
+            .skip_while(|l| *l != "[parts.engine]")
+            .find(|l| l.starts_with("version = "))
+            .map(str::to_string)
+    }
+}
+
+/// Every absolute path a run names is inside the test's own directories: the
+/// update reads and writes nowhere else, and a setup record, units or a purge
+/// of the machine's own is never reached.
+fn only_inside(said: &str, roots: &[&Path]) {
+    for word in said.split_whitespace() {
+        let word = word.trim_start_matches("file://");
+        let word = word.trim_matches(|c: char| ",;:()'\"".contains(c));
+        if !word.starts_with('/') {
+            continue;
+        }
+        assert!(
+            roots.iter().any(|r| Path::new(word).starts_with(r)),
+            "{word} is outside the test's own directories:\n{said}"
+        );
+    }
+}
+
+const MRI_1_0_1: &str = "pack: mri\nversion: 1.0.1\ncontract: 8\nmodality: MR\n";
+const MRI_1_0_2: &str = "pack: mri\nversion: 1.0.2\ncontract: 8\nmodality: MR\n# a rules fix\n";
+
+/// T9, the first half: a rules release reaches an install with no engine
+/// release beside it. The check offers it, `--part rules` takes it and
+/// leaves the engine's binary and its record where they were, the pack it
+/// replaced is kept one update deep, and the record notes the rules in use.
+/// An engine update after it keeps the newer rules over the older copy the
+/// engine's release carries.
+#[test]
+fn a_rules_release_reaches_the_install_with_no_engine_release() {
+    let engine = Releases::new();
+    engine.publish_with_packs(ENGINE, &[("mri", MRI_1_0_1)]);
+    engine.publish_rules("mri", "1.0.2", MRI_1_0_2);
+    let desk = TempDir::new("nils-desk-releases-rules");
+    publish_desk(desk.path(), ENGINE, None);
+    let install = Install::new(ENGINE, ENGINE);
+    let packs = install.with_packs(&[("mri", MRI_1_0_1)]);
+    let roots = [
+        install.base.path(),
+        install.config.path(),
+        engine.dir.path(),
+        desk.path(),
+    ];
+    let mri = || std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap();
+    let engine_before = install.engine_line();
+
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains(&format!("nils {ENGINE} is the newest release")),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("rules mri 1.0.1: 1.0.2 is out"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("nils update --all would take rules mri 1.0.2"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(mri(), MRI_1_0_1, "--check changed the packs");
+    only_inside(&o.stdout, &roots);
+
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_2, "{}", o.stdout);
+    assert!(
+        o.stdout
+            .contains("mri 1.0.1 to mri 1.0.2, its own release pack-mri-v1.0.2"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("the engine reads the new rules"),
+        "nothing is restarted for new rules: {}",
+        o.stdout
+    );
+    only_inside(&o.stdout, &roots);
+    // the engine stays as it was, on disk and on record
+    assert_eq!(install.engine_line(), engine_before);
+    assert!(!install.base.path().join("bin").join("nils").exists());
+    // the pack replaced, one update deep
+    let previous = install.base.path().join("engine").join("packs.previous");
+    assert_eq!(
+        std::fs::read_to_string(previous.join("mri/pack.yml")).unwrap(),
+        MRI_1_0_1
+    );
+    // and the record says which rules are in use, and where they came from
+    let record = install.record();
+    assert!(record.contains("[rules.mri]"), "{record}");
+    assert!(record.contains("version = \"1.0.2\""), "{record}");
+    assert!(record.contains("from = \"pack-mri-v1.0.2\""), "{record}");
+
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(
+        o.stdout.contains("rules mri 1.0.2: the newest release"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+
+    // an update of every part keeps the newer rules over the engine's copy
+    let o = install.run(&["update", "--all"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_2, "{}", o.stdout);
+    assert!(
+        o.stdout.contains(&format!(
+            "packs: the ones engine {ENGINE} was released with"
+        )),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("mri kept over the copy engine"),
+        "{}",
+        o.stdout
+    );
+    only_inside(&o.stdout, &roots);
+
+    // a later fix replaces it, and the one before is the one kept aside
+    engine.publish_rules("mri", "1.0.3", &MRI_1_0_2.replace("1.0.2", "1.0.3"));
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(mri().contains("version: 1.0.3"), "{}", o.stdout);
+    assert!(
+        std::fs::read_to_string(previous.join("mri/pack.yml"))
+            .unwrap()
+            .contains("version: 1.0.2"),
+        "one update deep"
+    );
+    assert!(install.record().contains("version = \"1.0.3\""));
+}
+
+/// T9, the second half: a rules release this engine would refuse waits and
+/// is never installed, whether it needs a pack contract the engine does not
+/// implement or names engines this one is not among; and once a release the
+/// engine reads is out beside it, that one is taken.
+#[test]
+fn a_rules_release_this_engine_would_refuse_waits_and_is_never_installed() {
+    let engine = Releases::new();
+    engine.publish_with_packs(ENGINE, &[("mri", MRI_1_0_1)]);
+    let desk = TempDir::new("nils-desk-releases-rules-refused");
+    publish_desk(desk.path(), ENGINE, None);
+    let install = Install::new(ENGINE, ENGINE);
+    let packs = install.with_packs(&[("mri", MRI_1_0_1)]);
+    let roots = [
+        install.base.path(),
+        install.config.path(),
+        engine.dir.path(),
+        desk.path(),
+    ];
+    let mri = || std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap();
+
+    // a contract no engine implements yet
+    engine.publish_rules(
+        "mri",
+        "1.0.2",
+        "pack: mri\nversion: 1.0.2\ncontract: 999\nmodality: MR\n",
+    );
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("rules mri 1.0.1: 1.0.2 is out and waits"),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("needs pack contract 999"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains("rules: mri 1.0.1: 1.0.2 is out and waits"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        mri(),
+        MRI_1_0_1,
+        "a release the engine refuses was installed"
+    );
+    only_inside(&o.stdout, &roots);
+
+    // engines this one is not among
+    engine.publish_rules(
+        "mri",
+        "1.0.3",
+        "pack: mri\nversion: 1.0.3\ncontract: 10\nengine: \">=99.0.0, <100.0.0\"\nmodality: MR\n",
+    );
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains(&format!(
+            "works with engines >=99.0.0, <100.0.0, and this engine is {ENGINE}"
+        )),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(
+        mri(),
+        MRI_1_0_1,
+        "a release the engine refuses was installed"
+    );
+    assert!(!install.record().contains("version = \"1.0.3\""));
+
+    // and one this engine is among is taken
+    engine.publish_rules(
+        "mri",
+        "1.0.4",
+        &format!(
+            "pack: mri\nversion: 1.0.4\ncontract: 10\nengine: \">={ENGINE}, <99.0.0\"\nmodality: MR\n"
+        ),
+    );
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(mri().contains("version: 1.0.4"), "{}", o.stdout);
+    assert!(install.record().contains("version = \"1.0.4\""));
+    only_inside(&o.stdout, &roots);
+}
+
+#[test]
+fn rules_are_a_part_with_releases_of_their_own() {
+    let o = run(&["update", "--part", "postgres", "--check"]);
+    assert!(
+        o.stderr.contains("engine, desk, assistant, kvasir, rules"),
         "{}",
         o.stderr
     );
