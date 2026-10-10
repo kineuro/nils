@@ -22,6 +22,7 @@ order:
   - encrypted
   - not_an_image
   - ruled_out
+  - display_composite
   - scout
   - calibration
   - secondary_reformat
@@ -55,6 +56,16 @@ rules:
     clauses:
       - {when: {axis: directory_type, is: excluded}, cite: excluded, source: directory_type}
     set: {disposition: excluded, convertible: 'no'}
+
+  # MRI pack 1.0.3 (record 55 C3): a picture made to be looked at
+  # (rules/display.yml). An image, and convertible, and no material for an
+  # analysis: a release leaves it out unless it is asked for it, and no role
+  # takes it (rules/role.yml). Before the SyMRI rules and the reformats, so
+  # neither calls it a product or a workstation's copy.
+  display_composite:
+    clauses:
+      - {when: {axis: construct, is: DisplayComposite}, cite: DisplayComposite, source: construct}
+    set: {disposition: display_composite, convertible: 'yes'}
 
   # A planning scan. An image, and convertible, and not raw material.
   # MRI pack 0.13.0: and a GE calibration scan (ASSET, `3D Calibration`),

@@ -225,7 +225,9 @@ cases:
 
   # --- PhotometricInterpretation
 
-  - name: a SyMRI map saved in colour is a display composite, read as its screenshot is
+  # MRI pack 1.0.3 (record 55 C3): read as its screenshot is until 1.0.2,
+  # and a display composite of its own since (corpus/axes-103.yml).
+  - name: a SyMRI map saved in colour is a display composite
     stack:
       image_type: 'DERIVED\PRIMARY\QMAP\T1'
       manufacturer: SyntheticMR
@@ -235,8 +237,9 @@ cases:
     flags:
       symri_colour_display: true
     axes:
-      directory_type: excluded
-      construct: ''
+      directory_type: anat
+      construct: DisplayComposite
+      disposition: display_composite
 
   - name: guard, the same map in grey levels is a T1 map
     stack:

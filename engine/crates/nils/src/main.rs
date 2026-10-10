@@ -412,7 +412,10 @@ struct ReleaseArgs {
     /// any identifier the registry resolves
     #[arg(long, value_name = "FILE")]
     select: Option<String>,
-    /// Only stacks of these dispositions; by default everything but excluded
+    /// Only stacks of these dispositions. By default everything but what the
+    /// pack ruled out (excluded) and the display composites
+    /// (display_composite, pictures made to be looked at), which a release
+    /// takes only where this, or --axis disposition=..., names them
     #[arg(long, value_name = "KIND")]
     disposition: Vec<String>,
     /// Only stacks holding one of these roles
@@ -11085,6 +11088,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             "  left out         {:>12}   stacks the layout has no name for",
             report.left_out
         );
+    }
+    // Record 55 C3: what the selection reached and the default left out, so
+    // a display composite missing from the tree is never a silent absence.
+    for (disposition, n) in &report.left_out_unless_asked {
+        let what = match disposition.as_str() {
+            "display_composite" => {
+                "display composites, pictures made to be looked at; --disposition names them"
+            }
+            "excluded" => "stacks the pack ruled out; --disposition names them",
+            other => other,
+        };
+        println!("  not asked for    {n:>12}   {what}");
     }
     println!(
         "  files            {:>12}{}",

@@ -38,5 +38,10 @@ values:
   working_scan: {}
   # A planning scan.
   scout: {}
+  # MRI pack 1.0.3 (record 55 C3): a picture made to be looked at, a map or a
+  # segmentation saved in colour over a synthetic image. An image of a person,
+  # classified and found like any other, and no material for an analysis: a
+  # release leaves it out unless its selection names this disposition.
+  display_composite: {}
   # Not an image at all: a screen capture, an error map, a report.
   excluded: {}

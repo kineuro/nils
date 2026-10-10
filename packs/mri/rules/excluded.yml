@@ -19,7 +19,10 @@ decides: [directory_type, base, technique, modifier, construct, quality, provena
 # (rules/disposition.yml), which is what a pipeline reads to skip it. Ruling
 # it out left every axis of 193 of dev-1's 900 stacks empty, the largest
 # error group of that reference (890 cells).
-order: [screenshot, symri_colour_display, error_map]
+# MRI pack 1.0.3 (record 55 C3): a SyMRI stack saved in colour is no longer
+# read here as its screenshot is. It is a display composite, classified by
+# rules/display.yml and left out of a release by its disposition.
+order: [screenshot, error_map]
 
 rules:
 
@@ -38,14 +41,6 @@ rules:
       provenance: null
       body_part: null
       post_contrast: null
-
-  # The fingerprint's 2026-10-03 fields: a SyMRI stack saved in colour is a
-  # display composite of the viewer, read as its screenshot is (record 48,
-  # D4; research round 6, question 3; flags.yml, section 26g).
-  symri_colour_display:
-    clauses:
-      - {flag: symri_colour_display, tier: exclusive}
-    set: *blank
 
   error_map:
     clauses:

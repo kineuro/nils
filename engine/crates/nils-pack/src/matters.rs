@@ -63,7 +63,7 @@ pub const RELEASE_READS: &[(&str, &str)] = &[
     ),
     (
         "disposition",
-        "what a release does with a stack: an acquisition, a derivative, a scout or a working scan (nils-release run.rs)",
+        "what a release does with a stack: an acquisition, a derivative, a scout, a working scan, or one it leaves out unless asked, a display composite (nils-release run.rs)",
     ),
     (
         "modifier",

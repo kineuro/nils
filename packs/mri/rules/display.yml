@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# A picture made to be looked at: MRI pack 1.0.3 (record 55 C3).
+#
+# SyMRI's viewer saves a stack as it shows it, with the viewport's windowing,
+# contrast and colour settings: by default a segmentation or a map drawn in
+# colour over a synthetic contrast-weighted image (research round 6, question
+# 3, from the SyMRI manual). Saved in colour (PhotometricInterpretation RGB or
+# a YBR form, or three samples a pixel; `symri_colour_display` in flags.yml,
+# section 26g), it is a display composite: an image of a person, and neither
+# a map a measurement can read nor a weighting.
+#
+# From MRI pack 0.25.0 to 1.0.2 these stacks were read as the SyMRI
+# screenshot is (rules/excluded.yml): out on every axis, directory type
+# excluded, so nobody was asked about them and no ask could find them (the
+# ask's stack sets read no excluded stack). 1,117 stacks of a production
+# archive were this. The ruling of 2026-10-08 (record 55 C3): they get a
+# value of their own, stay classified and findable, and a release leaves
+# them out unless it is asked for them.
+#
+# Where the value lives follows the stacks a release already treats apart.
+# What a stack is, is said by the class phase (a scout is provenance
+# Localizer, a projection construct MIP, a quantitative map construct T1map),
+# and what to do with it by the disposition, which is what a release reads (a
+# scout is `scout`, a projection `reformat`, a map `scanner_derived`). So a
+# display composite is construct DisplayComposite here, and the disposition
+# rules make it `display_composite`, which a release leaves out by default.
+#
+# This set decides what the picture is and nothing more: no base and no
+# modifier, since it is not a weighting; the technique of the SyMRI
+# acquisition it was made from, as the SyMRI route gives every product; and
+# the anatomy folder SyMRI's images go to. Every other axis (the provenance,
+# the body part, the post-contrast, the quality) is read by its own rules, as
+# for any stack. It runs straight after the screenshots and before every
+# route, so no route reads the picture as the map it shows.
+
+rule_set: display
+decides: [construct, base, base_basis, contrast_mix, modifier, technique, directory_type]
+tiers: {exclusive: 0.95}
+
+derive:
+  # As the SyMRI route works it out (rules/symri.yml).
+  symri_technique:
+    axis: technique
+    cases:
+      - {when: is_qalas, value: QALAS}
+      - {value: MDME}
+
+order: [symri_colour_display]
+
+rules:
+
+  symri_colour_display:
+    clauses:
+      - {flag: symri_colour_display, tier: exclusive}
+    set: {construct: [DisplayComposite], base: null, base_basis: null, contrast_mix: null, modifier: null, technique: {from: symri_technique}, directory_type: anat}
+    why: 'a SyMRI stack saved in colour is a picture of a map or a segmentation over a synthetic image, made for viewing'

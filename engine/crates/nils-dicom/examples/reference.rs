@@ -27,7 +27,9 @@
 //! With `--symri` it writes the third (record 55 C4, 2026-10-09): one session
 //! with an MPRAGE and a SyMRI exam, its multi-dynamic multi-echo acquisition
 //! and two synthetic contrasts, which a BIDS release puts under
-//! `anat/SyMRI/` and in its DICOM export.
+//! `anat/SyMRI/` and in its DICOM export; and (record 55 C3) a map as the
+//! SyMRI viewer saves it in colour, a display composite, which a release
+//! leaves out unless it is asked for.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -307,6 +309,19 @@ const SYMRI: &[Series] = &[
         instances: 3,
         extra: &[],
     },
+    // Record 55 C3: a T1 map as the viewer saves it, in colour (RGB), a
+    // display composite. Its pixels are written in `one`.
+    Series {
+        key: "symri-colour",
+        study: "1",
+        date: "20230301",
+        description: "SyMRI T1 map",
+        protocol: "SyMRI",
+        image_type: "DERIVED\\PRIMARY\\QMAP\\T1",
+        acquisition: "2D",
+        instances: 3,
+        extra: &[],
+    },
 ];
 
 fn main() {
@@ -419,10 +434,31 @@ fn one(s: &Series, n: usize, index: usize, sop: &str, echo: Option<(i64, f64)>) 
     if s.key == "dwi" {
         e.push(synth::num(dicom_core::Tag(0x0018, 0x9087), VR::FD, 1000.0));
     }
+    // Record 55 C3: a colour picture holds three 8-bit samples a pixel, red,
+    // green and blue side by side.
+    let colour = s.key == "symri-colour";
+    if colour {
+        let grey = [
+            tags::SAMPLES_PER_PIXEL,
+            tags::PHOTOMETRIC_INTERPRETATION,
+            tags::BITS_ALLOCATED,
+            tags::BITS_STORED,
+            tags::HIGH_BIT,
+        ];
+        e.retain(|el| !grey.contains(&el.tag));
+        e.extend([
+            synth::us(tags::SAMPLES_PER_PIXEL, 3),
+            synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "RGB"),
+            synth::us(tags::PLANAR_CONFIGURATION, 0),
+            synth::us(tags::BITS_ALLOCATED, 8),
+            synth::us(tags::BITS_STORED, 8),
+            synth::us(tags::HIGH_BIT, 7),
+        ]);
+    }
     e.push(synth::bytes(
         tags::PIXEL_DATA,
-        VR::OW,
-        vec![0x40u8; 16 * 16 * 2],
+        if colour { VR::OB } else { VR::OW },
+        vec![0x40u8; if colour { 16 * 16 * 3 } else { 16 * 16 * 2 }],
     ));
     synth::part10(&MetaFields::mr(sop), &e, true)
 }

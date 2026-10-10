@@ -4450,6 +4450,12 @@ flags:
   # such runs carry AngioFlag N, and all are Dixon, so they stay DCE. Rule 2
   # (spatial MIP or subtraction children in the study) is the session's, and
   # the archive holds none.
+  #
+  # Rule 2 waits for a real case (record 55 C3, the ruling of 2026-10-08).
+  # It needs an engine change, since a session pass cannot replace the DCE
+  # that `twist_vibe_dynamic` above decides, and the archive holds no case to
+  # check it on. It is written once a TWIST-VIBE run whose study holds its
+  # MIP or subtraction appears, with that case in the corpus.
   twist_angio_evidence:
     any:
       - angio_flag_y
@@ -4513,7 +4519,10 @@ flags:
   # YBR form, or three samples a pixel): a display composite of the viewer's
   # settings, a map coloured over a synthetic image, not a map (research
   # round 6, question 3, from the SyMRI manual). Read as the SyMRI
-  # screenshot is (record 48, D4): no axis of an image of a person.
+  # screenshot is (record 48, D4) up to MRI pack 1.0.2, and from 1.0.3 a
+  # display composite of its own, construct DisplayComposite and disposition
+  # display_composite, classified and found like any stack and left out of a
+  # release unless asked for (record 55 C3, rules/display.yml).
   colour_pixels:
     any:
       - {text: photometric_interpretation, matches: '^\s*(rgb|ybr)'}

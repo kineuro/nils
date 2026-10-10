@@ -1133,3 +1133,158 @@ fn the_keyboard_reads_every_class_and_audits_each_run() {
         .unwrap();
     assert_eq!(audited[0].int(0).unwrap(), 1);
 }
+
+/// Record 55 C3 and T17: a SyMRI map saved in colour, sorted by the MRI pack,
+/// is a display composite, and the ask finds it by its construct and by its
+/// disposition, and among every stack. Up to MRI pack 1.0.2 it was excluded,
+/// and no stack set reads an excluded stack. A release at the keyboard
+/// leaves it out by default, says so, and takes it when asked.
+#[test]
+fn the_ask_finds_a_display_composite_and_a_release_takes_it_when_asked() {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+
+    let p = packs();
+    let p = p.to_str().unwrap();
+    let home = TempDir::new("ask-display-home");
+    run(&home, &["key", "add", "k"], Some("an ask cli test key\n")).ok("key add");
+    run(&home, &["init", "--key", "k"], None).ok("init");
+    // A SyMRI T1 map in grey levels and the same map saved in colour.
+    let tree = TempDir::new("ask-display-tree");
+    for (uid, photometric, samples) in [("E.1.1", "MONOCHROME2", 1), ("E.1.2", "RGB", 3)] {
+        for n in 1..=2 {
+            let sop = format!("{uid}.{n}");
+            let mut e = synth::minimal_mr("E.1", uid, &sop);
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "ask-display-subject"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20230301"),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, "SyMRI T1 map"),
+                synth::text(tags::IMAGE_TYPE, VR::CS, "DERIVED\\PRIMARY\\QMAP\\T1"),
+                synth::text(tags::MANUFACTURER, VR::LO, "SyntheticMR"),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &n.to_string()),
+                synth::us(tags::SAMPLES_PER_PIXEL, samples),
+                synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, photometric),
+            ]);
+            tree.file(
+                &format!("{uid}/{n}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let t = tree.path().to_str().unwrap();
+    run(&home, &["digest", "--name", "t", t], None).ok("digest");
+    run(&home, &["fingerprint"], None).ok("fingerprint");
+    run(&home, &["classify", "--pack-dir", p], None).ok("classify");
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let colour = store
+        .query(
+            "SELECT k.id FROM stack k JOIN series s ON s.id = k.series_id \
+             WHERE s.series_instance_uid = 'E.1.2'",
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap()
+        .to_string();
+    drop(store);
+
+    let stacks_where = |name: &str, clause: &str| {
+        document(
+            &home,
+            &format!("{name}.ask.yml"),
+            &format!(
+                "ast_version: 1\nname: {name}\nscheme: default\n\
+                 sets:\n  s:\n    grain: stack\n    where:\n      - {clause}\n\
+                 keep: [s]\nout: {{set: s, level: record}}\n"
+            ),
+        )
+    };
+    for (name, clause) in [
+        (
+            "by-construct",
+            r#"["has", {}, ["axis", {}, "construct"], "DisplayComposite"]"#,
+        ),
+        (
+            "by-disposition",
+            r#"["=", {}, ["axis", {}, "disposition"], "display_composite"]"#,
+        ),
+    ] {
+        let rows = answer(&home, &stacks_where(name, clause), p);
+        assert_eq!(rows.len(), 1, "{name}: {rows:?}");
+        assert_eq!(rows[0][0], colour, "{name}: the colour map");
+    }
+    // The grey map is a T1 map, and the composite is none.
+    let rows = answer(
+        &home,
+        &stacks_where(
+            "t1-maps",
+            r#"["has", {}, ["axis", {}, "construct"], "T1map"]"#,
+        ),
+        p,
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_ne!(rows[0][0], colour);
+    // And every stack holds both: no standing predicate hides a composite.
+    let all = document(&home, "all.ask.yml", STACKS_RECORD);
+    assert_eq!(answer(&home, &all, p).len(), 2);
+
+    // A release by default leaves it out and says so.
+    let out = TempDir::new("ask-display-default");
+    let o = out.path().to_str().unwrap();
+    let release = |name: &str, out: &str, extra: &[&str]| -> serde_json::Value {
+        let mut args = vec!["release", "--name", name, "--pack-dir", p, "--out", out];
+        args.extend_from_slice(extra);
+        let printed = run(&home, &args, None);
+        let text = printed.ok("release").to_string();
+        // the same release again, read as its report: a version that wrote
+        // nothing counts what the first did
+        args.push("--json");
+        let again = run(&home, &args, None);
+        let report: serde_json::Value = serde_json::from_str(again.ok("release --json")).unwrap();
+        serde_json::json!({"text": text, "report": report})
+    };
+    // what a tree holds, by the names of its folders and files
+    let holds = |root: &std::path::Path, what: &str| -> bool {
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(dir) = todo.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                if e.file_name().to_string_lossy().contains(what) {
+                    return true;
+                }
+                if e.path().is_dir() {
+                    todo.push(e.path());
+                }
+            }
+        }
+        false
+    };
+    let default = release("display-default", o, &[]);
+    assert!(holds(out.path(), "T1map") && !holds(out.path(), "DisplayComposite"));
+    let text = default["text"].as_str().unwrap();
+    assert!(
+        text.contains("not asked for") && text.contains("display composites"),
+        "{text}"
+    );
+    assert_eq!(default["report"]["stacks"], 1, "{default}");
+    assert_eq!(
+        default["report"]["left_out_unless_asked"],
+        serde_json::json!({"display_composite": 1}),
+        "{default}"
+    );
+    // Asked for, it is released, and it alone.
+    let out = TempDir::new("ask-display-asked");
+    let asked = release(
+        "display-asked",
+        out.path().to_str().unwrap(),
+        &["--disposition", "display_composite"],
+    );
+    assert!(holds(out.path(), "DisplayComposite") && !holds(out.path(), "T1map"));
+    assert_eq!(asked["report"]["stacks"], 1, "{asked}");
+    assert_eq!(
+        asked["report"]["left_out_unless_asked"],
+        serde_json::json!({}),
+        "{asked}"
+    );
+    assert!(!asked["text"].as_str().unwrap().contains("not asked for"));
+}

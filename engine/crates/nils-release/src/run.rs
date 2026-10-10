@@ -51,7 +51,9 @@ pub struct Selection {
     /// Stacks, by id. The narrowest grain, and the one a query returns.
     pub stacks: Vec<i64>,
     /// Stacks holding this value on the disposition axis. Empty means the
-    /// release's default, which is everything that is not `excluded`.
+    /// release's default, which is everything but what
+    /// [`LEFT_OUT_UNLESS_ASKED`] names, unless an axis item on the
+    /// disposition axis names the dispositions instead.
     pub dispositions: Vec<String>,
     /// Stacks holding one of these roles.
     pub roles: Vec<String>,
@@ -89,7 +91,29 @@ impl Selection {
     pub fn is_everything(&self) -> bool {
         self == &Selection::default()
     }
+
+    /// Whether the selection says which dispositions it takes, by
+    /// `dispositions` (`--disposition`) or by an axis item on the
+    /// disposition axis (`--axis disposition=...`, a door's `axes`). A
+    /// selection that says none takes every stack but what
+    /// [`LEFT_OUT_UNLESS_ASKED`] names.
+    pub fn names_dispositions(&self) -> bool {
+        !self.dispositions.is_empty() || self.axes.iter().any(|(axis, _)| axis == "disposition")
+    }
 }
+
+/// The dispositions a release leaves out unless its selection names them.
+///
+/// What the pack ruled out is no image of a person (a screen capture, an
+/// error map), and saying so as a default rather than as a flag is what keeps
+/// a release from carrying screenshots. Record 55 C3 (2026-10-08): a
+/// display composite, a picture made to be looked at (SyMRI's maps saved in
+/// colour), stays classified and findable, and is left out of a release the
+/// same way: it is no material for an analysis. A selection that names a
+/// disposition takes it ([`Selection::names_dispositions`]), and a release
+/// counts what this left out (`Report::left_out_unless_asked`), so a missing
+/// composite is never a silent one.
+pub const LEFT_OUT_UNLESS_ASKED: &[&str] = &["excluded", "display_composite"];
 
 /// What a run says when it is done.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -194,6 +218,11 @@ pub struct Report {
     /// standard admits and writes them as NIfTI, so neither its stack count
     /// nor its file count is a descriptive tree's.
     pub left_out: i64,
+    /// Record 55 C3: the stacks of the selection a release leaves out unless
+    /// it is asked for them, by disposition ([`LEFT_OUT_UNLESS_ASKED`]): the
+    /// ones the pack ruled out and the display composites. Empty where the
+    /// selection named the dispositions it takes.
+    pub left_out_unless_asked: BTreeMap<String, i64>,
     /// Stacks written as DICOM because the converter would not convert them.
     /// v0 carries a hard-coded list of vendors instead, so a stack it could
     /// have converted is skipped and one it cannot is a failure.
@@ -641,6 +670,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             .map(|c| c.name().to_string())
             .collect(),
         on_unknown: settings.on_unknown.name().to_string(),
+        left_out_unless_asked: left_out_unless_asked(registry.store(), &settings.selection)?,
         // Record 37 S2. Only a BIDS run spells a `run-`, so only a BIDS run
         // reports on one: the descriptive layout names every stack and needs
         // no index at all.
@@ -2673,6 +2703,13 @@ fn prune(root: &Path, from: Option<&Path>) {
 /// The `WHERE` of a selection over the joined tables `i`, `k`, `se`, `su`,
 /// `sf`, `so`, shared by the three readers below so they cannot disagree.
 fn selection_where(store: &mut Store, selection: &Selection) -> String {
+    filter_of(store, selection, true)
+}
+
+/// [`selection_where`], with or without the default that leaves out what
+/// [`LEFT_OUT_UNLESS_ASKED`] names, so a release can count what the default
+/// left out by the same filter it reads with.
+fn filter_of(store: &mut Store, selection: &Selection, by_default: bool) -> String {
     let mut wheres: Vec<String> = Vec::new();
     if !selection.subjects.is_empty() {
         wheres.push(format!(
@@ -2728,14 +2765,18 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
                 .join(", ")
         ));
     }
-    // A stack the pack ruled out is not written, and saying so as a default
-    // rather than as a flag is what keeps a release from carrying screenshots.
-    if selection.dispositions.is_empty() {
-        wheres.push(format!(
-            "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'disposition' \
-             AND a.value = 'excluded')"
-        ));
-    } else {
+    // A stack the pack ruled out is not written, nor (record 55 C3) a display
+    // composite, unless the selection names the dispositions it takes, here
+    // or by an axis item on the disposition axis, which the loop above reads.
+    if !selection.names_dispositions() {
+        if by_default {
+            wheres.push(format!(
+                "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id \
+                 AND a.axis = 'disposition' AND a.value IN ({}))",
+                quoted(LEFT_OUT_UNLESS_ASKED)
+            ));
+        }
+    } else if !selection.dispositions.is_empty() {
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'disposition' \
              AND a.value IN ({}))",
@@ -2788,6 +2829,41 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         true => String::new(),
         false => format!(" AND {}", wheres.join(" AND ")),
     }
+}
+
+/// Values as an SQL list of quoted literals.
+fn quoted(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The stacks the selection reaches that its default leaves out, by
+/// disposition (record 55 C3): nothing when the selection names the
+/// dispositions it takes, since then nothing is left out by default.
+fn left_out_unless_asked(
+    store: &mut Store,
+    selection: &Selection,
+) -> Result<BTreeMap<String, i64>, Error> {
+    let mut out = BTreeMap::new();
+    if selection.names_dispositions() {
+        return Ok(out);
+    }
+    let from = selection_from(store);
+    let filter = filter_of(store, selection, false);
+    let sql = format!(
+        "SELECT a.value, COUNT(DISTINCT k.id) {from} \
+         JOIN {} a ON a.stack_id = k.id AND a.axis = 'disposition' \
+         WHERE a.value IN ({}){filter} GROUP BY a.value ORDER BY a.value",
+        store.qualified("classification_axis"),
+        quoted(LEFT_OUT_UNLESS_ASKED)
+    );
+    for r in store.query(&sql, &[])? {
+        out.insert(r.text(0)?.to_string(), r.int(1)?);
+    }
+    Ok(out)
 }
 
 /// The sources whose root lies under one of the named datasets'

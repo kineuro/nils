@@ -1,0 +1,149 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 1.0.3: the display composite (record 55 C3, the ruling of
+# 2026-10-08; rules/display.yml). A SyMRI stack saved in colour is a picture
+# made to be looked at: construct DisplayComposite with no base and no
+# modifier, the technique of its SyMRI acquisition, and disposition
+# display_composite, which a release leaves out unless it is asked for. The
+# cases after it keep the rule from reaching what it must not: the same map
+# in grey levels, a colour image that is no SyMRI stack, and a screenshot.
+# Every stack here is invented from the pattern; none is a real header.
+
+cases:
+
+  # --- a display composite, whatever the picture shows
+
+  - name: a SyMRI T1 map saved as RGB is a display composite, not a T1 map
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T1'
+      manufacturer: SyntheticMR
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_series_description: 'SyMRI T1 map'
+      image_role: derived
+    flags:
+      symri_colour_display: true
+    axes:
+      provenance: SyMRI
+      construct: DisplayComposite
+      base: ''
+      modifier: ''
+      technique: MDME
+      directory_type: anat
+      disposition: display_composite
+      convertible: 'yes'
+      role: ''
+
+  - name: a synthetic T2-weighted image saved as YBR is a display composite with no base
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2\SYNTHETIC'
+      manufacturer: GE MEDICAL SYSTEMS
+      photometric_interpretation: YBR_FULL_422
+      samples_per_pixel: 3
+      text_series_description: 'MAGiC T2W'
+      image_role: derived
+    flags:
+      symri_colour_display: true
+    axes:
+      construct: DisplayComposite
+      base: ''
+      modifier: ''
+      technique: MDME
+      disposition: display_composite
+
+  - name: a synthetic FLAIR saved in colour takes no FLAIR modifier
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2FLAIR\SYNTHETIC'
+      manufacturer: SyntheticMR
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_series_description: 'SyMRI T2W FLAIR synthetic'
+      image_role: derived
+    axes:
+      construct: DisplayComposite
+      base: ''
+      modifier: ''
+      disposition: display_composite
+
+  - name: a myelin map saved with three samples a pixel is a display composite
+    stack:
+      image_type: 'DERIVED\PRIMARY\MYC'
+      manufacturer: SyntheticMR
+      samples_per_pixel: 3
+      text_series_description: 'SyMRI myelin'
+      image_role: derived
+    flags:
+      symri_colour_display: true
+    axes:
+      construct: DisplayComposite
+      disposition: display_composite
+
+  - name: a colour composite of a QALAS acquisition keeps QALAS as its technique
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T1'
+      manufacturer: SIEMENS
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_sequence_name: 'qalas3d'
+      text_series_description: 'SyMRI 3D T1 map'
+      image_role: derived
+    axes:
+      construct: DisplayComposite
+      technique: QALAS
+      disposition: display_composite
+
+  - name: a colour composite exported by a workstation is still a display composite, not a reformat
+    stack:
+      image_type: 'DERIVED\SECONDARY\QMAP\T1'
+      manufacturer: SyntheticMR
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_series_description: 'SyMRI T1 map'
+      image_role: derived
+    axes:
+      construct: DisplayComposite
+      disposition: display_composite
+
+  # --- what the rule must not reach
+
+  - name: guard, the same map in grey levels is a T1 map and a scanner-derived image
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T1'
+      manufacturer: SyntheticMR
+      photometric_interpretation: MONOCHROME2
+      samples_per_pixel: 1
+      text_series_description: 'SyMRI T1 map'
+      image_role: derived
+    flags:
+      symri_colour_display: false
+    axes:
+      provenance: SyMRI
+      construct: T1map
+      technique: MDME
+      disposition: scanner_derived
+
+  - name: guard, a colour image that is no SyMRI stack is no display composite
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIFFUSION\FA'
+      manufacturer: SIEMENS
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_series_description: 'ep2d_diff_ColFA'
+      image_role: derived
+    flags:
+      symri_colour_display: false
+    axes:
+      disposition: scanner_derived
+
+  - name: guard, a SyMRI screenshot saved in colour stays excluded
+    stack:
+      image_type: 'DERIVED\SECONDARY\SCREEN SAVE'
+      manufacturer: SyntheticMR
+      photometric_interpretation: RGB
+      samples_per_pixel: 3
+      text_series_description: 'SyMRI report'
+      image_role: not_an_image
+    axes:
+      directory_type: excluded
+      construct: ''
+      disposition: excluded

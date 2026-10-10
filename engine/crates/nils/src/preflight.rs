@@ -347,7 +347,7 @@ fn bids_units(
             for s in picked.iter().filter(|s| !planned.contains(s)) {
                 left.push((
                     *s,
-                    "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into(),
+                    "the release leaves it out: the registry holds no file of it to write, or its disposition is one a release takes only when asked (excluded, display_composite)".into(),
                 ));
             }
             for p in &plan {
