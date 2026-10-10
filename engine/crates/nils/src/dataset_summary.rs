@@ -400,6 +400,18 @@ fn state_of(open: Option<&Light>, done: bool) -> &'static str {
     }
 }
 
+/// A step of the dataset's chain (pseudonymise, read, sort, main scans):
+/// the open job's state, else `failed` where the step's newest job failed,
+/// so a run that stopped says so (2026-10-10: a pseudonymise run that failed
+/// at once left the page as if nothing had happened), else done or waiting.
+/// The job's own words are the jobs door's, never the summary's.
+fn chain_state(open: Option<&Light>, newest: Option<&Light>, done: bool) -> &'static str {
+    if open.is_none() && newest.is_some_and(|j| j.state == "failed") {
+        return "failed";
+    }
+    state_of(open, done)
+}
+
 /// One step: its name, state and counts, and the job that ran it last (or
 /// runs it now) with its times and its progress while it runs.
 fn step(name: &str, state: &str, job: Option<&Light>, counts: Value) -> Value {
@@ -644,7 +656,7 @@ pub(crate) fn document(
         let open = open_of(&["pseudonymize"]);
         steps.push(step(
             "pseudonymised",
-            state_of(open, copied > 0 && waiting == 0),
+            chain_state(open, newest_of(&["pseudonymize"]), copied > 0 && waiting == 0),
             open.or_else(|| newest_of(&["pseudonymize"])),
             json!({"files": copied, "waiting": waiting, "held": held}),
         ));
@@ -652,7 +664,7 @@ pub(crate) fn document(
     let open = open_of(&["digest", "ingest"]);
     let mut read_step = step(
         "read",
-        state_of(open, reads > 0),
+        chain_state(open, newest_of(&["digest", "ingest"]), reads > 0),
         open.or_else(|| newest_of(&["digest", "ingest"])),
         json!({"files": read, "refused": refused, "reads": reads}),
     );
@@ -665,10 +677,15 @@ pub(crate) fn document(
     steps.push(read_step);
     let unsorted = certainty.unsorted;
     let open = open_of(&["fingerprint", "classify"]);
+    let sort_failed = newest_of(&["fingerprint", "classify"]).filter(|j| j.state == "failed");
     steps.push(step(
         "sorted",
-        state_of(open, stacks > 0 && unsorted == 0),
-        open.or_else(|| newest_of(&["classify"])),
+        chain_state(
+            open,
+            newest_of(&["fingerprint", "classify"]),
+            stacks > 0 && unsorted == 0,
+        ),
+        open.or(sort_failed).or_else(|| newest_of(&["classify"])),
         json!({
             "scans": classified, "of": stacks, "look": certainty.to_sort,
             "passes": passes, "unsorted": unsorted,
@@ -696,7 +713,11 @@ pub(crate) fn document(
         if picks_off && open.is_none() {
             "off"
         } else {
-            state_of(open, picked > 0 || !picks["last_run"].is_null())
+            chain_state(
+                open,
+                newest_of(&["pick"]),
+                picked > 0 || !picks["last_run"].is_null(),
+            )
         },
         open.or_else(|| newest_of(&["pick"])),
         json!({"picked": picked, "borders": borders}),
@@ -801,7 +822,7 @@ pub(crate) fn document(
 
 #[cfg(test)]
 mod tests {
-    use super::{flag_id, named_for, names};
+    use super::{Light, chain_state, flag_id, named_for, names};
 
     fn w(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
@@ -853,5 +874,37 @@ mod tests {
         );
         assert_eq!(flag_id(&w("pick run --after-sort x"), "--after-sort"), None);
         assert_eq!(flag_id(&w("pick run"), "--after-sort"), None);
+    }
+
+    /// A job of a step as the summary reads it, in one state.
+    fn light(id: i64, state: &str) -> Light {
+        Light {
+            id,
+            kind: "pseudonymize".into(),
+            name: None,
+            state: state.into(),
+            started_at: None,
+            finished_at: None,
+            args: serde_json::json!({}),
+            progress: None,
+        }
+    }
+
+    /// 2026-10-10: a pseudonymise run that failed at once left the step
+    /// waiting, as if nothing had happened; the chain's step says failed.
+    #[test]
+    fn a_chain_step_whose_newest_job_failed_says_so() {
+        let failed = light(154, "failed");
+        let done = light(150, "done");
+        let running = light(155, "running");
+        assert_eq!(chain_state(None, Some(&failed), false), "failed");
+        // a failure is said even where an earlier run had done the step
+        assert_eq!(chain_state(None, Some(&failed), true), "failed");
+        // a run of it going again is what the step is
+        assert_eq!(chain_state(Some(&running), Some(&running), false), "running");
+        // the newest that ended well, or none, is done or waiting as before
+        assert_eq!(chain_state(None, Some(&done), true), "done");
+        assert_eq!(chain_state(None, Some(&done), false), "waiting");
+        assert_eq!(chain_state(None, None, false), "waiting");
     }
 }
