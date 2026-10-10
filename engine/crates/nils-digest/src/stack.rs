@@ -8,9 +8,12 @@
 //! normal form of §8 (a float rounded to its decimals, an integer, a text, or
 //! the orientation class), a null as the empty string; the stack key is the
 //! unkeyed BLAKE2b-8 of their canonical string. Two instances of a series
-//! with the same key share a stack.
+//! with the same key share a stack, and stacks of a series that only the
+//! echo number told apart are one ([`Echo`], [`one_echo`]).
 
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::hash::Hash;
 
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
@@ -40,6 +43,16 @@ impl Class {
             Class::Sagittal => "Sagittal",
         }
     }
+
+    /// The class a name of [`Class::name`] names.
+    pub fn of_name(name: &str) -> Option<Class> {
+        match name {
+            "Axial" => Some(Class::Axial),
+            "Coronal" => Some(Class::Coronal),
+            "Sagittal" => Some(Class::Sagittal),
+            _ => None,
+        }
+    }
 }
 
 /// The orientation of an image plane: its class and how well the normal
@@ -66,23 +79,87 @@ impl Orientation {
     }
 }
 
-/// The signature of one instance: the key of the stack it belongs to and its
-/// orientation.
+/// The signature of one instance: the key of the stack it belongs to, what
+/// its echo adds to that key, and its orientation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
     /// Sixteen hex characters: BLAKE2b-8 of the canonical string.
     pub key: String,
+    pub echo: Echo,
     pub orientation: Orientation,
 }
 
 impl Signature {
     pub fn of(x: &Extracted) -> Signature {
         let orientation = orientation(iop(x));
+        let v = |column: &str| x.value(Level::Stack, column);
         Signature {
-            key: key_of(&canonical_with(x, orientation.class)),
+            key: key_of(&canonical_of(v, orientation.class)),
+            echo: Echo::of(v, orientation.class),
             orientation,
         }
     }
+}
+
+/// What the echo adds to a stack's signature (wave 7a). A file cannot say
+/// what its EchoNumbers (0018,0086) counts, and not every vendor writes an
+/// echo there: one writes the frame of a cine, another the turn of a slice.
+/// Its series can say, once every file of it is in ([`one_echo`]), and this
+/// is what that takes of each stack: the key of its signature without the
+/// echo number and the echo time, and those two in their normal form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Echo {
+    /// The key of the other twelve values and the orientation class, with
+    /// the Dixon part a Philips frame names, which the key carries where a
+    /// file's frames disagree on it.
+    pub rest: String,
+    /// The echo number as read; empty where the file writes none.
+    pub number: String,
+    /// The echo time rounded as the key rounds it, or none where that is
+    /// zero or the file writes none: a zero echo time is not evidence of a
+    /// short one (record 35, S4), and states no echo time at all.
+    pub time: Option<String>,
+}
+
+impl Echo {
+    /// The echo of anything that has the stack-level columns, as the
+    /// signature is computed: a file, a group of an enhanced object's frames,
+    /// or a stack row read back.
+    pub fn of<'a>(v: impl Fn(&str) -> Option<&'a Value>, class: Class) -> Echo {
+        let mut rest = canonical_of(
+            |column| match column {
+                "echo_numbers" | "echo_time" => None,
+                _ => v(column),
+            },
+            class,
+        );
+        rest.push('|');
+        rest.push_str(dixon_part_of(v(FRAME_IMAGE_TYPE)).unwrap_or_default());
+        let time = rounded(v("echo_time"), 2);
+        Echo {
+            rest: key_of(&rest),
+            number: as_read(v("echo_numbers")).into_owned(),
+            time: (!time.is_empty() && time != "0.00").then(|| time.into_owned()),
+        }
+    }
+}
+
+/// Whether stacks of one series that agree on all of their signature but the
+/// echo (one [`Echo::rest`]) are one echo the echo number split: two or more
+/// echo numbers, and never two echo times. A real multi-echo acquisition
+/// states an echo time for each echo, and keeps a stack per echo; a series
+/// that states one echo time, or none, for all of its echo numbers is
+/// counting something else with them, and its stacks are one.
+pub fn one_echo<N: Eq + Hash, T: Eq + Hash>(
+    echoes: impl IntoIterator<Item = (N, Option<T>)>,
+) -> bool {
+    let mut numbers = HashSet::new();
+    let mut times = HashSet::new();
+    for (number, time) in echoes {
+        numbers.insert(number);
+        times.extend(time);
+    }
+    numbers.len() > 1 && times.len() < 2
 }
 
 /// The canonical string of a file's signature: the fourteen values of §8 in
@@ -226,13 +303,15 @@ pub fn stacks_of(x: &Extracted) -> Vec<FileStack> {
     let mut out: Vec<FileStack> = Vec::new();
     for g in &x.frames.groups {
         let orientation = orientation(text_of(g.value("image_orientation_patient")));
-        let mut canonical = canonical_of(|c| g.value(c), orientation.class);
+        let v = |c: &str| g.value(c);
+        let mut canonical = canonical_of(v, orientation.class);
         if parts {
             canonical.push('|');
             canonical.push_str(part(g).unwrap_or_default());
         }
         let signature = Signature {
             key: key_of(&canonical),
+            echo: Echo::of(v, orientation.class),
             orientation,
         };
         match out.iter_mut().find(|s| s.signature.key == signature.key) {
@@ -499,6 +578,69 @@ mod tests {
         assert_eq!(Signature::of(&x).orientation, Orientation::UNKNOWN);
     }
 
+    /// Stacks the echo number split are one where no two of them state
+    /// different echo times, and a zero or absent time states none.
+    #[test]
+    fn an_echo_number_is_an_echo_only_where_the_echo_time_moves_with_it() {
+        let stated = |t: &'static str| Some(t);
+        // a cine: 32 echo numbers, the time stated on two of them
+        let cine: Vec<(String, Option<&str>)> = (1..=32)
+            .map(|n| (n.to_string(), if n <= 2 { stated("11.60") } else { None }))
+            .collect();
+        assert!(one_echo(cine.iter().map(|(n, t)| (n.as_str(), *t))));
+        // slices taking turns under one echo time, and no time at all
+        assert!(one_echo([("1", stated("25.50")), ("2", stated("25.50"))]));
+        assert!(one_echo([("1", None::<&str>), ("2", None)]));
+        // a dual echo; three echoes, two of them stated; and a stated time
+        // beside one the file left out
+        assert!(!one_echo([("1", stated("10.00")), ("2", stated("80.00"))]));
+        assert!(!one_echo([
+            ("1", stated("10.00")),
+            ("2", stated("20.00")),
+            ("3", None)
+        ]));
+        assert!(one_echo([("1", stated("10.00")), ("2", None)]));
+        // one echo number is nothing to fold
+        assert!(!one_echo([("1", stated("10.00")), ("1", None)]));
+        assert!(!one_echo(std::iter::empty::<(&str, Option<&str>)>()));
+    }
+
+    /// The echo of a file: the key of its signature without the echo number
+    /// and the echo time, and those two as the key reads them.
+    #[test]
+    fn the_echo_of_a_file() {
+        use dicom_core::VR;
+        use dicom_dictionary_std::tags;
+        use nils_dicom::synth::{MetaFields, TempDir, minimal_mr, part10, text};
+
+        let dir = TempDir::new("stack-echo");
+        let file = |name: &str, te: &str, en: &str, tr: &str| {
+            let mut elems = minimal_mr("1.2.3", "1.2.3.4", name);
+            elems.push(text(tags::ECHO_TIME, VR::DS, te));
+            elems.push(text(tags::ECHO_NUMBERS, VR::IS, en));
+            elems.push(text(tags::REPETITION_TIME, VR::DS, tr));
+            elems.push(text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M"));
+            let path = dir.file(name, &part10(&MetaFields::mr(name), &elems, true));
+            Signature::of(&nils_dicom::extract(&path).unwrap())
+        };
+        let first = file("1.2.3.4.1", "11.604", "1", "40.9");
+        let fifth = file("1.2.3.4.5", "0", "5", "40.9");
+        let other = file("1.2.3.4.6", "-0.001", "5", "150");
+        assert_ne!(first.key, fifth.key);
+        assert_eq!(first.echo.rest, fifth.echo.rest);
+        assert_ne!(first.echo.rest, other.echo.rest);
+        assert_eq!(first.echo.number, "1");
+        assert_eq!(first.echo.time.as_deref(), Some("11.60"));
+        assert_eq!(fifth.echo.number, "5");
+        assert_eq!(fifth.echo.time, None);
+        assert_eq!(other.echo.time, None);
+        // the rest is the key of the signature with both left empty
+        assert_eq!(
+            first.echo.rest,
+            key_of("||||40.9||||||||Axial|ORIGINAL\\\\PRIMARY\\\\M|")
+        );
+    }
+
     /// An enhanced MR object: the top-level ImageType of a Philips Dixon
     /// object, which names no part, and one per-frame item per frame, each
     /// with its orientation and, where given, a private per-frame sequence
@@ -649,6 +791,12 @@ mod tests {
         }
         // the first stack is the first frame's, which the file is filed under
         assert_eq!(stacks[0].first_frame(), 1);
+        // and a part's echo is never another part's, so no fold joins them
+        let rests: HashSet<&str> = stacks
+            .iter()
+            .map(|s| s.signature.echo.rest.as_str())
+            .collect();
+        assert_eq!(rests.len(), 4);
     }
 
     /// A Philips enhanced object whose frames differ in their (2005,140F)
