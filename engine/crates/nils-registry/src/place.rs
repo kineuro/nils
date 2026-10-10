@@ -378,7 +378,7 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
             "a place's name is one word without a slash".into(),
         ));
     }
-    if by_name(store, p.name)?.is_some() {
+    if name_in_use(store, p.name)? {
         return Err(Error::Message(format!(
             "a place is already named {}",
             p.name
@@ -407,6 +407,8 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
     } else {
         dataset_of(&p.dataset, None).map_err(Error::Message)?
     };
+    // a retired place gives its name up for this one (2026-10-10)
+    free_retired_name(store, p.name)?;
     let now = now_iso();
     let rows = store.insert(
         &Insert::new(
@@ -569,6 +571,8 @@ pub const PATIENT_ID_CODE: &str = "subject-code";
 
 /// The declaration's prefix for an id type.
 pub const PATIENT_ID_TYPE: &str = "id-type:";
+/// The id type of PatientID as written, trimmed: the linkage store's first.
+pub const AS_WRITTEN: &str = "patient-id";
 
 impl PatientId {
     /// The declaration as written: `subject-code` or `id-type:<name>`. An
@@ -951,6 +955,19 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         Some(other) => return Err(format!("root is a place's name or null, not {other}")),
         None => current.map(|c| c["root"].clone()).unwrap_or(Value::Null),
     };
+    // 2026-10-10, found trying the desk: an identified dataset whose
+    // PatientID holds an ID that is the same everywhere never writes
+    // PatientID as written into its copy, since that is the ID itself
+    if arrives == "identified"
+        && identity["id_type"]
+            .as_str()
+            .is_some_and(crate::personnummer::is_type)
+        && patient_id.as_str() == Some(&format!("{PATIENT_ID_TYPE}{AS_WRITTEN}"))
+    {
+        return Err(format!(
+            "patient_id: this dataset's PatientID holds an ID that is the same everywhere, so the pseudonymised copy never gets PatientID as written ({AS_WRITTEN}); write the subject code"
+        ));
+    }
     // the folder of each pseudonymised copy: the subject's code, or the id
     // type's value PatientID holds
     let folder = pick(doc, current, "copy_folder", &FOLDERS, FOLDERS[0])?;
@@ -1135,6 +1152,22 @@ pub fn set_dataset(store: &mut Store, id: i64, dataset: &Value) -> Result<Place,
         )));
     }
     let checked = dataset_of(dataset, None).map_err(Error::Message)?;
+    // 2026-10-10, found trying the desk: a held file is filed under the
+    // setting it was held under, and an unchanged file is never read again,
+    // so a changed identity rule or unmapped setting has the dataset's held
+    // files read again on its next run
+    let was = &current.dataset;
+    if was["identity"] != checked["identity"] || was["unmapped"] != checked["unmapped"] {
+        let d = store.dialect();
+        store.execute(
+            &format!(
+                "UPDATE {} SET mtime = -1 WHERE place_id = {} AND state = 'held'",
+                store.qualified("pseudonym_file"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(id)],
+        )?;
+    }
     set_json(store, id, "dataset", &checked)
 }
 
@@ -1282,6 +1315,42 @@ pub fn show(store: &mut Store, id: i64) -> Result<Option<Place>, Error> {
     }
 }
 
+/// Whether a place in force holds the name. A retired place's name is free
+/// for a new place (2026-10-10: a folder added again after its dataset was
+/// removed came back under another name, the root's before it).
+pub fn name_in_use(store: &mut Store, name: &str) -> Result<bool, Error> {
+    Ok(by_name(store, name)?.is_some_and(|p| p.retired_at.is_none()))
+}
+
+/// The name a retired place keeps once a new place takes its own: the old
+/// name with the place's id, so its row keeps its id, path and history.
+pub fn retired_name(name: &str, id: i64) -> String {
+    format!("{name}.retired-{id}")
+}
+
+/// A retired place that holds a name gives it up: its row is renamed to
+/// [`retired_name`], and nothing else of it changes.
+fn free_retired_name(store: &mut Store, name: &str) -> Result<(), Error> {
+    let Some(p) = by_name(store, name)? else {
+        return Ok(());
+    };
+    if p.retired_at.is_none() {
+        return Ok(());
+    }
+    let freed = retired_name(&p.name, p.id);
+    let d = store.dialect();
+    store.execute(
+        &format!(
+            "UPDATE {} SET name = {} WHERE id = {}",
+            store.qualified("place"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int)
+        ),
+        &[Param::from(freed.as_str()), Param::Int(p.id)],
+    )?;
+    Ok(())
+}
+
 pub fn by_name(store: &mut Store, name: &str) -> Result<Option<Place>, Error> {
     let d = store.dialect();
     let sql = select_sql(store, &format!(" WHERE name = {}", d.param(1, Type::Text)));
@@ -1395,6 +1464,30 @@ mod tests {
     /// Wave 7a §5.4: a dataset declares what PatientID holds; an identified
     /// one writes the subject's code unless it says another; a personnummer
     /// is never what it holds.
+    #[test]
+    fn an_identified_dataset_never_writes_an_id_the_same_everywhere_into_its_copy() {
+        // 2026-10-10: a dataset declared with its originals holding an ID
+        // that is the same everywhere and its copy getting PatientID as written
+        let same = json!({"id_type": "personnummer", "from": [{"field": "PatientID"}]});
+        let err = dataset_of(
+            &json!({"arrives": "identified", "identity": same, "patient_id": "id-type:patient-id"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("same everywhere"), "{err}");
+        // the subject code is what it writes
+        let d = dataset_of(&json!({"arrives": "identified", "identity": same}), None).unwrap();
+        assert_eq!(d["patient_id"], "subject-code");
+        // a hospital or study ID read from PatientID may be written back, as the person chose
+        let hospital = json!({"id_type": "patient-id", "from": [{"field": "PatientID"}]});
+        let d = dataset_of(
+            &json!({"arrives": "identified", "identity": hospital, "patient_id": "id-type:patient-id"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["patient_id"], "id-type:patient-id");
+    }
+
     #[test]
     fn a_dataset_declares_what_patient_id_holds() {
         let d = dataset_of(&json!({"arrives": "identified"}), None).unwrap();

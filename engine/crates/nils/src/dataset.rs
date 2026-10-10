@@ -1256,14 +1256,15 @@ pub(crate) fn add_dataset(
     }
     let name = match name {
         Some(n) => {
-            if place::by_name(store, n).map_err(failed)?.is_some() {
+            if place::name_in_use(store, n).map_err(failed)? {
                 return Err(conflict(format!("a place is already named {n}")));
             }
             n.to_string()
         }
         None => {
             let base = dataset_name(&path);
-            if base != root.name && place::by_name(store, &base).map_err(failed)?.is_none() {
+            // a removed dataset's name is free again (2026-10-10)
+            if base != root.name && !place::name_in_use(store, &base).map_err(failed)? {
                 base
             } else {
                 format!("{}-{base}", root.name)

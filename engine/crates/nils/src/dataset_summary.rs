@@ -271,10 +271,29 @@ pub(crate) fn jobs_of(
     }
     // a step's run a door queued for it, before its run names its stacks
     let queued_for = format!("dataset:{}", dataset.name);
+    // a folder added again after its dataset was removed (2026-10-10): the
+    // removed dataset's runs are its own, never the new one's, so where the
+    // folder held a dataset before, only the runs since this one was added
+    // are this one's
+    let added_again = was_a_dataset_before(store, dataset, &folders)?;
     let mut jobs = newest(store, window)?;
     jobs.reverse();
     let mut out = Vec::new();
     for j in jobs {
+        // a run made for another dataset is that one's, whatever folder it read
+        if j.args["place_id"]
+            .as_i64()
+            .is_some_and(|id| id != dataset.id)
+        {
+            continue;
+        }
+        if added_again
+            && j.started_at
+                .as_deref()
+                .is_some_and(|t| t < dataset.created_at.as_str())
+        {
+            continue;
+        }
         let w = words(&j.args);
         let linked = |id: Option<i64>| id.is_some_and(|id| related.contains(&id));
         let mine = related.contains(&j.id)
@@ -292,6 +311,30 @@ pub(crate) fn jobs_of(
     }
     out.reverse();
     Ok(out)
+}
+
+/// Whether the dataset's folder or its name was another dataset's, removed
+/// before this one was added: a source place retired on the same folder, as
+/// declared or as the disk resolves it, or one that gave its name up to
+/// this one (`place::retired_name`), whose runs name it still.
+fn was_a_dataset_before(
+    store: &mut Store,
+    dataset: &Place,
+    folders: &[String],
+) -> Result<bool, StoreError> {
+    let same = |path: &str| {
+        let declared = path.trim_end_matches('/').to_string();
+        let real = std::fs::canonicalize(path)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| declared.clone());
+        folders.contains(&declared) || folders.contains(&real)
+    };
+    Ok(place::list(store)?.into_iter().any(|p| {
+        p.id != dataset.id
+            && p.role == place::Role::Source
+            && p.retired_at.is_some()
+            && (same(&p.path) || p.name == place::retired_name(&dataset.name, p.id))
+    }))
 }
 
 /// The ids of a dataset's jobs, newest first, for the jobs door.
