@@ -2336,6 +2336,292 @@ pub fn close_provisional(
     )
 }
 
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a file whose instance
+/// UID the registry holds under another subject, study or series is neither
+/// a copy of that instance nor a new one. The digest holds it, quarantined
+/// under this reason, reads it again on every run, and asks once per source
+/// and pair of subjects: `ref` is `{subject_id, code, holder_id,
+/// holder_code}`, the subject the file names and the one the registry holds
+/// the instance under, and `evidence` `{files, differs, first_seen,
+/// batch_id, place_id, place}`, the files by what differs (`subject`,
+/// `study`, `series`), never an identifier. A merge of the two subjects
+/// answers it: the next read files the held files as copies, finds nothing
+/// held under the pair and closes the item as `superseded`.
+pub const SAME_INSTANCE_KIND: &str = "identity.same_instance";
+
+/// What groups the open `identity.same_instance` item of a source and pair.
+pub fn same_instance_key(source_id: i64, subject_id: i64, holder_id: i64) -> String {
+    format!("source:{source_id}|subject:{subject_id}|holder:{holder_id}")
+}
+
+/// The files of one source held under one pair of subjects.
+#[derive(Debug, Clone)]
+pub struct SameInstance<'a> {
+    pub source_id: i64,
+    pub subject_id: i64,
+    pub code: &'a str,
+    pub holder_id: i64,
+    pub holder_code: &'a str,
+    pub files: i64,
+    /// The files by what differs: `{subject: n, study: n, series: n}`.
+    pub differs: &'a serde_json::Value,
+    /// When the first of them was held.
+    pub first_seen: &'a str,
+    pub place_id: Option<i64>,
+    pub place: Option<&'a str>,
+    pub batch_id: Option<i64>,
+    pub job_id: Option<i64>,
+}
+
+/// Open, or bring up to date, the one `identity.same_instance` item of a
+/// source and pair of subjects. Answers the item's id.
+pub fn raise_same_instance(
+    store: &mut Store,
+    s: &SameInstance<'_>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = same_instance_key(s.source_id, s.subject_id, s.holder_id);
+    let reference = serde_json::json!({
+        "subject_id": s.subject_id, "code": s.code,
+        "holder_id": s.holder_id, "holder_code": s.holder_code,
+    });
+    let evidence = serde_json::json!({
+        "files": s.files,
+        "differs": s.differs,
+        "first_seen": s.first_seen,
+        "batch_id": s.batch_id,
+        "place_id": s.place_id,
+        "place": s.place,
+    });
+    if let Some((id, _)) = open_item(store, SAME_INSTANCE_KIND, &key)? {
+        refresh_item(store, id, &evidence, s.files, s.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        SAME_INSTANCE_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        s.files,
+        s.job_id,
+        now,
+    )
+}
+
+/// The group keys of the open `identity.same_instance` items of a source.
+pub fn open_same_instance_keys(
+    store: &mut Store,
+    source_id: i64,
+) -> Result<Vec<String>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT group_key FROM {} WHERE kind = {} AND status = 'open' AND group_key LIKE {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    store
+        .query(
+            &sql,
+            &[
+                Param::from(SAME_INSTANCE_KIND),
+                Param::from(format!("source:{source_id}|%")),
+            ],
+        )?
+        .iter()
+        .map(|r| r.text(0).map(str::to_string))
+        .collect()
+}
+
+/// Close the open `identity.same_instance` item under a group key, once a
+/// run of its source holds nothing under the pair: a merge, or files that
+/// changed, answered it. Answers whether one was open.
+pub fn close_same_instance(store: &mut Store, key: &str, now: &str) -> Result<bool, StoreError> {
+    let Some((id, _)) = open_item(store, SAME_INSTANCE_KIND, key)? else {
+        return Ok(false);
+    };
+    store.update_by_id(
+        table("review_item"),
+        &[
+            ("status", Param::from(RESOLVED)),
+            ("decided_at", Param::from(now)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(true)
+}
+
+/// The reason a held file carries once a person let it go as another
+/// location of its instance: the next read files it as a copy.
+pub const SAME_INSTANCE_KEEP: &str = "identity.same_instance.keep";
+
+/// The reason a held file carries once a person let it go out of the read:
+/// it stays quarantined, and no run reads it again unless the file changes.
+pub const SAME_INSTANCE_DROP: &str = "identity.same_instance.drop";
+
+/// Why a let-go was refused.
+#[derive(Debug)]
+pub enum LetGoError {
+    /// No such item.
+    Missing(String),
+    /// The item is not one a let-go answers.
+    Refused(String),
+    Store(StoreError),
+}
+
+impl From<StoreError> for LetGoError {
+    fn from(e: StoreError) -> Self {
+        LetGoError::Store(e)
+    }
+}
+
+/// What a let-go did: the item it closed and the files it let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LetGo {
+    pub item: i64,
+    pub files: i64,
+    pub keep: bool,
+}
+
+/// The subject a merge left `id` as: the one its `merged_into` leads to.
+fn canonical_subject(store: &mut Store, mut id: i64) -> Result<i64, StoreError> {
+    let t = table("subject");
+    let cols = [
+        t.column("id").expect("subject.id"),
+        t.column("merged_into").expect("subject.merged_into"),
+    ];
+    for _ in 0..8 {
+        let rows = store.select_by_ids(t, &cols, "id", &[id])?;
+        match rows.first().map(|r| r.opt_int(1)).transpose()?.flatten() {
+            Some(into) => id = into,
+            None => break,
+        }
+    }
+    Ok(id)
+}
+
+/// Record 55, the duplicate policy's defaults (Nima, 2026-10-10, "agreed"):
+/// the files of one subject held because the registry files their instance
+/// UID under another study or series of that subject are let go by a person,
+/// kept as another location of their instance or left out of the read. A
+/// merge cannot answer that question, so this does: the held files' rows say
+/// the choice ([`SAME_INSTANCE_KEEP`], [`SAME_INSTANCE_DROP`]), the next read
+/// honours it, and the item closes as accepted with the choice in its
+/// evidence. Refused for an item whose two subjects differ, which a merge of
+/// the two answers. The caller holds no transaction and writes the audit row.
+pub fn let_go(
+    store: &mut Store,
+    id: i64,
+    keep: bool,
+    who: &str,
+    now: &str,
+) -> Result<LetGo, LetGoError> {
+    let d = store.dialect();
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT kind, status, group_key, {}, {} FROM {} WHERE id = {}",
+        d.text_of(t.column("ref").expect("ref")),
+        d.text_of(t.column("evidence").expect("evidence")),
+        store.qualified("review_item"),
+        d.param(1, Type::Int),
+    );
+    let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Err(LetGoError::Missing(format!("no review item {id}")));
+    };
+    let kind = row.text(0)?.to_string();
+    let status = row.text(1)?.to_string();
+    let key = row.opt_text(2)?.unwrap_or_default().to_string();
+    let reference: serde_json::Value = row
+        .opt_text(3)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let mut evidence: serde_json::Value = row
+        .opt_text(4)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if kind != SAME_INSTANCE_KIND {
+        return Err(LetGoError::Refused(format!(
+            "review item {id} is a {kind}; only a question about a scan read under another study or series is let go"
+        )));
+    }
+    if status != "open" {
+        return Err(LetGoError::Refused(format!(
+            "review item {id} is already {status}"
+        )));
+    }
+    let field = |name: &str| {
+        key.split('|')
+            .find_map(|part| part.strip_prefix(name))
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    let (Some(source_id), Some(subject), Some(holder)) =
+        (field("source:"), field("subject:"), field("holder:"))
+    else {
+        return Err(LetGoError::Refused(format!(
+            "review item {id} names no source and pair of subjects"
+        )));
+    };
+    if canonical_subject(store, subject)? != canonical_subject(store, holder)? {
+        let (a, b) = (
+            reference["code"].as_str().unwrap_or("one subject"),
+            reference["holder_code"].as_str().unwrap_or("another"),
+        );
+        return Err(LetGoError::Refused(format!(
+            "review item {id} is a scan of subject {b} read under subject {a}; a merge of the two subjects answers it, not a let-go"
+        )));
+    }
+    let reason = if keep {
+        SAME_INSTANCE_KEEP
+    } else {
+        SAME_INSTANCE_DROP
+    };
+    let files = store.execute(
+        &format!(
+            "UPDATE {} SET reason = {} WHERE source_id = {} AND status = 'quarantined' \
+             AND reason = {} AND detail LIKE {}",
+            store.qualified("source_file"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int),
+            d.param(3, Type::Text),
+            d.param(4, Type::Text),
+        ),
+        &[
+            Param::from(reason),
+            Param::Int(source_id),
+            Param::from(SAME_INSTANCE_KIND),
+            Param::from(format!("subject:{subject}|holder:{holder}|%")),
+        ],
+    )? as i64;
+    evidence["let_go"] = serde_json::json!({ "keep": keep, "files": files });
+    let close = format!(
+        "UPDATE {} SET status = 'accepted', accepted_by = {}, accepted_at = {}, decided_at = {}, evidence = {} WHERE id = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Timestamp),
+        d.param(4, Type::Json),
+        d.param(5, Type::Int),
+    );
+    store.execute(
+        &close,
+        &[
+            Param::from(who),
+            Param::from(now),
+            Param::from(now),
+            Param::from(evidence.to_string()),
+            Param::Int(id),
+        ],
+    )?;
+    Ok(LetGo {
+        item: id,
+        files,
+        keep,
+    })
+}
+
 /// A study row that holds no series. The row is a fact in a file, so it
 /// stays; what stops is the session made from it, and this says that the
 /// row is there and empty. v0 kept an ingest-conflict table and v1 kept the

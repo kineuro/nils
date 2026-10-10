@@ -84,21 +84,48 @@ fn title(step: &str) -> &str {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Scope<'a> {
     /// A dataset's: the stacks its sources (a comma list of `source` ids)
-    /// created first; none where the list is empty.
+    /// hold a file of, whoever read them first (record 55, 2026-10-10);
+    /// none where the list is empty.
     Sources(&'a str),
     /// A cohort's: the stacks of its open members.
     Cohort(i64),
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): the condition a stack
+/// aliased `alias` meets when one of the sources (a comma list of `source`
+/// ids) holds a file of it, its instance's own or a copy, whoever read the
+/// stack first. Every door that counts or lists a dataset's scans asks it,
+/// so a dataset holds what its tree holds.
+pub(crate) fn held_by(store: &Store, alias: &str, sources: &str) -> String {
+    if sources.trim().is_empty() {
+        return "1 = 0".to_string();
+    }
+    format!(
+        "{alias}.id IN (SELECT ss.stack_id FROM {} ss WHERE ss.source_id IN ({sources}))",
+        store.qualified("source_stack")
+    )
+}
+
+/// The condition a study aliased `alias` meets when one of the sources
+/// holds a file of a stack of it ([`held_by`]).
+pub(crate) fn studies_held_by(store: &Store, alias: &str, sources: &str) -> String {
+    if sources.trim().is_empty() {
+        return "1 = 0".to_string();
+    }
+    format!(
+        "{alias}.id IN (SELECT hse.study_id FROM {} hse JOIN {} hst ON hst.series_id = hse.id \
+         JOIN {} hss ON hss.stack_id = hst.id WHERE hss.source_id IN ({sources}))",
+        store.qualified("series"),
+        store.qualified("stack"),
+        store.qualified("source_stack")
+    )
 }
 
 impl Scope<'_> {
     /// The condition a stack aliased `x` meets to be in scope.
     pub(crate) fn holds(&self, store: &Store) -> String {
         match self {
-            Scope::Sources(ids) if ids.trim().is_empty() => "1 = 0".to_string(),
-            Scope::Sources(ids) => format!(
-                "x.first_batch_id IN (SELECT b.id FROM {} b WHERE b.source_id IN ({ids}))",
-                store.qualified("ingest_batch")
-            ),
+            Scope::Sources(ids) => held_by(store, "x", ids),
             Scope::Cohort(id) => format!(
                 "x.series_id IN (SELECT se.id FROM {} se JOIN {} m ON m.subject_id = se.subject_id \
                  WHERE m.cohort_id = {id} AND m.left_at IS NULL)",

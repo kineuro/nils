@@ -1945,3 +1945,305 @@ fn a_removed_dataset_s_name_is_free_for_its_folder_again() {
     );
     assert_eq!(status, 409, "{taken}");
 }
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a dataset holds every
+/// scan its tree has a file of, whoever read it first. A second dataset
+/// holding copies of one subject's scans (one of them twice) and a file
+/// whose instance UID the registry holds under the other subject counts and
+/// lists the copied scans as its own, on the card, in the summary, at the
+/// scans door and in the Grid; its read says how many files were copies of
+/// what another dataset read, how many it holds twice, and how many are
+/// held for the question it raises; and the first dataset is as it was.
+fn copies(pg: Option<(String, String)>) {
+    let home = Home {
+        dir: TempDir::new("data-page-copies"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let map = home.dir.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,copies-0001\nS-0002,copies-0002\n",
+    );
+    home.ok(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--id-column",
+        "PatientID",
+        "--code-column",
+        "subject_code",
+    ]);
+    let add = |name: &str, tree: &TempDir| {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            tree.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    };
+
+    // the first dataset: two subjects, two scans each
+    let first = TempDir::new("data-page-copies-first");
+    const FILES: &str = "\
+S-0001|1.2.9.A|1.2.9.A.1|20260102|t1 mprage
+S-0001|1.2.9.A|1.2.9.A.2|20260102|flair
+S-0002|1.2.9.C|1.2.9.C.1|20260407|dwi
+S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
+    for line in FILES.lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        scan_file(&first, f[0], f[1], f[2], f[3], f[4]);
+    }
+    add("first", &first);
+
+    // the second: the first subject's two scans, one of them twice, and a
+    // file of the second subject's scan that names the first subject
+    let second = TempDir::new("data-page-copies-second");
+    let copy = |from: &str, to: &str| {
+        let bytes = std::fs::read(first.path().join(from)).unwrap();
+        second.file(to, &bytes);
+    };
+    copy(
+        "derivatives/dcm-anon/1.2.9.A/1.2.9.A.1.1",
+        "derivatives/dcm-anon/a/one.dcm",
+    );
+    copy(
+        "derivatives/dcm-anon/1.2.9.A/1.2.9.A.1.1",
+        "derivatives/dcm-anon/a/one-again.dcm",
+    );
+    copy(
+        "derivatives/dcm-anon/1.2.9.A/1.2.9.A.2.1",
+        "derivatives/dcm-anon/a/two.dcm",
+    );
+    scan_file(&second, "S-0001", "1.2.9.C", "1.2.9.C.1", "20260407", "dwi");
+    // and a file of the first subject's first scan, its instance UID, filed
+    // under another series of the same subject: no merge answers that, a
+    // person lets it go (the duplicate policy's defaults, 2026-10-10)
+    {
+        let sop = "1.2.9.A.1.1";
+        let mut e = synth::minimal_mr("1.2.9.A", "1.2.9.A.7", sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, "S-0001"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        second.file(
+            "derivatives/dcm-anon/a/other-series.dcm",
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    add("second", &second);
+
+    let server = Worked::serve(&home, false);
+    let sources = server.get("/api/sources", OPS);
+    let card = |name: &str| -> Value {
+        sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no source {name}: {sources}"))
+    };
+    let (one, two) = (card("first"), card("second"));
+    assert_eq!(one["totals"]["stacks"], 4, "{one}");
+    assert_eq!(one["totals"]["subjects"], 2, "{one}");
+    assert_eq!(two["totals"]["stacks"], 2, "the copied scans: {two}");
+    assert_eq!(two["totals"]["subjects"], 1, "{two}");
+    assert_eq!(two["totals"]["studies"], 1, "{two}");
+    assert_eq!(two["totals"]["refused_files"], 0, "{two}");
+    assert_eq!(two["totals"]["same_instance_files"], 2, "{two}");
+    let files = &two["digests"]["recent"][0]["files"];
+    assert_eq!(
+        (
+            files["new"].as_i64(),
+            files["known"].as_i64(),
+            files["twice"].as_i64(),
+            files["same_instance"].as_i64()
+        ),
+        (Some(0), Some(2), Some(1), Some(2)),
+        "{two}"
+    );
+
+    let summary = server.get("/api/datasets/second/summary", READS);
+    assert_eq!(summary["scans"], 2, "{summary}");
+    assert_eq!(summary["subjects"], 1, "{summary}");
+    let read = step(&summary, "read");
+    assert_eq!(
+        (
+            read["new"].as_i64(),
+            read["known"].as_i64(),
+            read["twice"].as_i64(),
+            read["same_instance"].as_i64(),
+            read["refused"].as_i64()
+        ),
+        (Some(0), Some(2), Some(1), Some(2), Some(0)),
+        "{summary}"
+    );
+    assert_eq!(summary["files"]["known"], 2, "{summary}");
+    assert_eq!(summary["identity_questions"], 2, "{summary}");
+    assert_eq!(
+        (
+            summary["files"]["left_out"].as_i64(),
+            summary["files"]["gone"].as_i64()
+        ),
+        (Some(0), Some(0)),
+        "{summary}"
+    );
+    let page = server.get("/api/datasets/second/scans?limit=200", READS);
+    assert_eq!(page["total"], 2, "{page}");
+    let grid = server.get("/api/datasets/second/subjects", READS);
+    assert_eq!(grid["subjects"].as_array().unwrap().len(), 1, "{grid}");
+    // the first dataset is as it was
+    let summary = server.get("/api/datasets/first/summary", READS);
+    assert_eq!(summary["scans"], 4, "{summary}");
+    assert_eq!(step(&summary, "read")["new"], 4, "{summary}");
+
+    // one question about the file the registry holds under another subject
+    let mut store = home.store();
+    let item = store.qualified("review_item");
+    let open = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {item} WHERE kind = 'identity.same_instance' AND status = 'open'"
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(open, 2);
+
+    // the dataset's Review lists both, as its summary counts them
+    let listed = server.get("/api/review?dataset=second&status=open", OPS);
+    let same: Vec<&Value> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "identity.same_instance")
+        .collect();
+    assert_eq!(same.len(), 2, "{listed}");
+    let by_kind = server.get("/api/review/summary?dataset=second", OPS);
+    assert_eq!(by_kind["by_kind"]["identity.same_instance"], 2, "{by_kind}");
+    // a scan under another subject is a merge's, not a let-go's
+    let of = |differs: &str| -> i64 {
+        same.iter()
+            .find(|i| i["evidence"]["differs"][differs].is_i64())
+            .and_then(|i| i["id"].as_i64())
+            .unwrap_or_else(|| panic!("no item differing by {differs}: {listed}"))
+    };
+    let (by_subject, by_series) = (of("subject"), of("series"));
+    let (status, refused) = server.call(
+        "POST",
+        &format!("/api/review/{by_subject}/let-go"),
+        Some(serde_json::json!({"keep": true, "why": "the same scan"})),
+        OPS,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap_or("").contains("merge"),
+        "{refused}"
+    );
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/review/{by_series}/let-go"),
+        Some(serde_json::json!({"keep": true})),
+        OPS,
+    );
+    assert_eq!(status, 400, "a let-go says why");
+    let (status, done) = server.call(
+        "POST",
+        &format!("/api/review/{by_series}/let-go"),
+        Some(serde_json::json!({"keep": true, "why": "a resend of the same scan"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(
+        (done["files"].as_i64(), done["keep"].as_bool()),
+        (Some(1), Some(true)),
+        "{done}"
+    );
+    // the next read files it as a copy; the other question stays
+    let before = step(&server.get("/api/datasets/second/summary", READS), "read");
+    drop(server);
+    home.ok(&["digest", "--name", "second", "--no-private", "@second"]);
+    let server = Worked::serve(&home, false);
+    let summary = server.get("/api/datasets/second/summary", READS);
+    let read = step(&summary, "read");
+    assert_eq!(read["same_instance"], 1, "{summary}");
+    assert_eq!(
+        read["twice"].as_i64().unwrap() + read["known"].as_i64().unwrap(),
+        before["twice"].as_i64().unwrap() + before["known"].as_i64().unwrap() + 1,
+        "{summary}"
+    );
+    assert_eq!(summary["identity_questions"], 1, "{summary}");
+    let mut store = home.store();
+    let audit = store.qualified("audit");
+    let acts = store
+        .query(
+            &format!("SELECT COUNT(*) FROM {audit} WHERE action = 'review.let_go'"),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(acts, 1);
+    drop(server);
+}
+
+#[test]
+fn a_dataset_holds_the_scans_its_tree_has_a_file_of() {
+    copies(None);
+}
+
+#[test]
+fn a_dataset_holds_the_scans_its_tree_has_a_file_of_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_copies";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    copies(Some((dsn.clone(), schema.to_string())));
+    drop();
+}

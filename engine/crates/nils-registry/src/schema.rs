@@ -352,12 +352,37 @@ fn build_registry() -> Vec<Table> {
                 col("detail", Type::Text),
                 col("instance_id", Type::Int),
                 req("seen_at", Type::Timestamp),
+                // Record 55 (Nima, 2026-10-10): a file is a location of its
+                // instance, the instance's own or another copy of it, and
+                // says when it was first seen as well as when last
+                // (`seen_at`). Null on a row from before, which migration 87
+                // fills from `seen_at`.
+                col("first_seen_at", Type::Timestamp),
             ],
         )
         .unique(&["source_id", "path"])
         .index(&["source_id", "dir"])
         .index(&["batch_id", "status"])
         .index(&["instance_id"]),
+        // Record 55 (Nima's duplicate policy, 2026-10-10): the stacks a
+        // source holds a file of, whoever read the stack first. A file whose
+        // subject, study, series and instance UIDs are an instance the
+        // registry holds is that instance's location and not a new one, so
+        // a dataset holds every scan its tree has a file of, and counts and
+        // lists it as its own; one row per source and stack, written by the
+        // digest as it files a file, moved by an echo fold with the
+        // instances and removed with the stack.
+        Table::new(
+            "source_stack",
+            vec![
+                col("id", Type::Id),
+                req("source_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("first_seen_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["source_id", "stack_id"])
+        .index(&["stack_id"]),
         // `code_digest` and `first_batch_id` are null for a subject that
         // `nils linkage import` created: its code came from outside, not from
         // the scheme, and no batch made it (§7.4).

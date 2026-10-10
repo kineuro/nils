@@ -217,6 +217,9 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
         "id",
         &counts,
     )?;
+    // the sources that held a file of a stack that goes hold one of the
+    // stack that stays (record 55, 2026-10-10)
+    nils_registry::location::follow(store, &moves)?;
     remove_stacks(store, &gone, &[])?;
     // the first index of the group is free now that its stack is gone
     store.update_from_values(table("stack"), "stack_index = v.val", "id", &indexes)?;

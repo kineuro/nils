@@ -118,7 +118,7 @@ pub(crate) fn page(
     let store = registry.store();
     // an identified dataset nothing has read yet (only its originals, no
     // digest of its pseudonymised tree) holds no scans: an empty list
-    let Some(mut filter) = scope.holds(store, access, "st", "b", "se") else {
+    let Some(mut filter) = scope.holds(store, access, "st", "se") else {
         return Ok(empty(0));
     };
     // A visit is one subject's: a study two patients' files name is filed

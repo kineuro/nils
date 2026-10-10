@@ -453,19 +453,18 @@ pub(crate) fn passes(store: &mut Store, holds: &str) -> Result<i64, StoreError> 
 }
 
 /// The stacks of `stacks` that the sources (a comma list of `source`
-/// ids) created first.
+/// ids) hold a file of (record 55, 2026-10-10).
 fn stacks_of_sources(
     store: &mut Store,
     stacks: &[i64],
     sources: &str,
 ) -> Result<BTreeSet<i64>, StoreError> {
     let mut out = BTreeSet::new();
+    let held = crate::operations::held_by(store, "x", sources);
     for chunk in stacks.chunks(500) {
         let sql = format!(
-            "SELECT x.id FROM {} x JOIN {} b ON b.id = x.first_batch_id \
-             WHERE x.id IN ({}) AND b.source_id IN ({sources})",
+            "SELECT x.id FROM {} x WHERE x.id IN ({}) AND {held}",
             store.qualified("stack"),
-            store.qualified("ingest_batch"),
             ids_in(chunk)
         );
         for r in store.query(&sql, &[])? {
@@ -498,7 +497,7 @@ pub(crate) struct Certainty {
 }
 
 /// The certainty of the stacks the sources (a comma list of `source` ids)
-/// created first, `stacks` of them in all, with the sort's questions read
+/// hold a file of, `stacks` of them in all, with the sort's questions read
 /// once by the caller ([`Asks::sort`]).
 pub(crate) fn of_sources(
     store: &mut Store,
@@ -509,9 +508,8 @@ pub(crate) fn of_sources(
     let holds = crate::operations::Scope::Sources(sources).holds(store);
     let look = asks.count(store, &holds)?;
     let q = |t: &str| store.qualified(t);
-    let (stack, batch, class) = (q("stack"), q("ingest_batch"), q("classification"));
-    let of_source =
-        format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
+    let (stack, class) = (q("stack"), q("classification"));
+    let of_source = format!("WHERE {holds}");
     let sorted = store.query(
         &format!(
             "SELECT COUNT(*) FROM {stack} x {of_source} \
@@ -556,7 +554,7 @@ pub(crate) fn of_sources(
 
 /// The review items about a dataset (record 55 H2, round 4: the card's
 /// Review button), of one status or of every status: an item with a
-/// member stack the dataset's digests created first; an item about one
+/// member stack the dataset holds a file of; an item about one
 /// stack, or one series, of the dataset; an item about a batch of the
 /// dataset; and an item about a subject alone (a pick border, an unmapped
 /// or provisional subject) whose subject has a stack of the dataset.
@@ -587,15 +585,40 @@ pub(crate) fn items_of(
         q("review_item"),
         q("series"),
     );
+    let held = crate::operations::held_by(store, "x", &sources);
     for r in store.query(
         &format!(
             "SELECT DISTINCT rm.item_id FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
-             JOIN {stack} x ON x.id = rm.stack_id JOIN {batch} b ON b.id = x.first_batch_id \
-             WHERE b.source_id IN ({sources}){filter}"
+             JOIN {stack} x ON x.id = rm.stack_id WHERE {held}{filter}"
         ),
         &params,
     )? {
         out.insert(r.int(0)?);
+    }
+    // record 55 (the duplicate policy, 2026-10-10): a question about the
+    // dataset's held files names its source in the group key; those files
+    // are held, so no stack of the dataset is about them
+    let status_on = |at: usize| match status {
+        Some(_) => format!(" AND ri.status = {}", d.param(at, Type::Text)),
+        None => String::new(),
+    };
+    for source in &ids {
+        let sql = format!(
+            "SELECT ri.id FROM {item} ri WHERE ri.kind = {} AND ri.group_key LIKE {}{}",
+            d.param(1, Type::Text),
+            d.param(2, Type::Text),
+            status_on(3),
+        );
+        let mut p = vec![
+            Param::from(nils_registry::review::SAME_INSTANCE_KIND),
+            Param::from(format!("source:{source}|%")),
+        ];
+        if let Some(s) = status {
+            p.push(Param::from(s));
+        }
+        for r in store.query(&sql, &p)? {
+            out.insert(r.int(0)?);
+        }
     }
     // the items that are no group, by what their `ref` names
     let rows = store.query(
@@ -630,8 +653,7 @@ pub(crate) fn items_of(
     let serieses: Vec<i64> = serieses.into_iter().collect();
     for chunk in serieses.chunks(500) {
         let sql = format!(
-            "SELECT DISTINCT x.series_id FROM {stack} x JOIN {batch} b ON b.id = x.first_batch_id \
-             WHERE x.series_id IN ({}) AND b.source_id IN ({sources})",
+            "SELECT DISTINCT x.series_id FROM {stack} x WHERE x.series_id IN ({}) AND {held}",
             ids_in(chunk)
         );
         for r in store.query(&sql, &[])? {
@@ -653,7 +675,7 @@ pub(crate) fn items_of(
     if subjects_asked {
         let sql = format!(
             "SELECT DISTINCT se.subject_id FROM {stack} x JOIN {series} se ON se.id = x.series_id \
-             JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})"
+             WHERE {held}"
         );
         for r in store.query(&sql, &[])? {
             if let Some(s) = r.opt_int(0)? {

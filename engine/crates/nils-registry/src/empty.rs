@@ -36,12 +36,18 @@ pub enum Row {
     /// Checked on its own before anything is swept (the instance rows,
     /// the stack rows of a series).
     Holds,
+    /// Follows the stack's instances: an echo fold gives it to the stack
+    /// that stays with them, and a sweep removes it with an empty stack,
+    /// which holds no file.
+    Follows,
 }
 
 /// Every table with a `stack_id` column, and what a sweep does to it.
 pub const STACK_TABLES: &[(&str, Row)] = &[
     ("instance", Row::Holds),
     ("instance_frame", Row::Holds),
+    // which sources hold a file of the stack (record 55, 2026-10-10)
+    ("source_stack", Row::Follows),
     ("stack_fingerprint", Row::Goes),
     ("classification", Row::Goes),
     ("classification_axis", Row::Goes),
@@ -241,7 +247,7 @@ pub fn remove_stacks(
         .collect();
     delete_where(store, "review_item", "id", &open_items)?;
     for (t, row) in STACK_TABLES {
-        if *row == Row::Goes {
+        if matches!(row, Row::Goes | Row::Follows) {
             delete_where(store, t, "stack_id", gone)?;
         }
     }

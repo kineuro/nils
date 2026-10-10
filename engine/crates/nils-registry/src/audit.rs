@@ -22,6 +22,10 @@ use crate::time::now_iso;
 pub enum Action {
     Decision,
     ReviewAccept,
+    /// A person let go the files of an `identity.same_instance` item: kept as
+    /// another location of their instance, or left out of the read (record
+    /// 55, the duplicate policy's defaults, 2026-10-10).
+    ReviewLetGo,
     ClinicalImport,
     VocabularyLoad,
     LinkageImport,
@@ -161,6 +165,7 @@ impl Action {
         match self {
             Action::Decision => "decision",
             Action::ReviewAccept => "review.accept",
+            Action::ReviewLetGo => "review.let_go",
             Action::ClinicalImport => "clinical.import",
             Action::VocabularyLoad => "vocabulary.load",
             Action::LinkageImport => "linkage.import",
