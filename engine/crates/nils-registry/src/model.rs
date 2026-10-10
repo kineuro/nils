@@ -15,6 +15,10 @@
 //! A model's answer is a decision with `author_kind` model and this model's
 //! id ([`crate::review::apply`]), refused unless the model is admitted or
 //! promoted, and staged until a person commits it (record 42 R6).
+//!
+//! A cascade (record 55 E2, the ruling of 2026-10-10) is one model whose
+//! card names its parts, each a registered model by digest under the name of
+//! the pipeline input it fills (`parts`); promoting it retires none of them.
 
 use serde_json::{Value, json};
 
@@ -578,6 +582,8 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
     // given beside the list it is one of them.
     let encoders = encoders_of(store, card, &kind)?;
     let encoder = encoders.first().copied();
+    // record 55 E2: a cascade's parts are registered models, none retired
+    parts_of(store, card)?;
     let trained_on = card["trained_on"]["label_set"].as_str().map(str::to_string);
     // Record 40 R3 and 42 S7: the labels a model was fitted on are a label
     // set this registry wrote, and none drawn from a sealed certification
@@ -732,6 +738,87 @@ fn encoders_of(store: &mut Store, card: &Value, kind: &str) -> Result<Vec<i64>, 
     Ok(out)
 }
 
+/// The most parts a cascade's card names.
+const MOST_PARTS: usize = 16;
+
+/// Whether a text names a pipeline input, as a descriptor's input ids do:
+/// a lowercase letter, then lowercase letters, digits and underscores.
+fn part_name_ok(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The parts a card names (record 55 E2), in the card's order: each the
+/// name of the pipeline input it fills and a registered model that is not
+/// retired. Refused for a `parts` that is not an object of such names and
+/// digests, a part that is not registered or is retired, and more than
+/// [`MOST_PARTS`]. None for a card without parts.
+fn parts_of(store: &mut Store, card: &Value) -> Result<Vec<(String, Model)>, Error> {
+    let parts = match card.get("parts") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Object(map)) if !map.is_empty() && map.len() <= MOST_PARTS => map,
+        Some(_) => {
+            return Err(invalid(format!(
+                "parts is an object of at most {MOST_PARTS} parts, each the pipeline input it fills and the digest of a registered model"
+            )));
+        }
+    };
+    let own = card["digest"].as_str().unwrap_or("");
+    let mut out = Vec::with_capacity(parts.len());
+    for (name, digest) in parts {
+        if !part_name_ok(name) {
+            return Err(invalid(format!(
+                "{name} is not a part's name: the pipeline input it fills, such as head"
+            )));
+        }
+        let d = digest.as_str().unwrap_or("");
+        if !is_digest(d) {
+            return Err(invalid(format!(
+                "the part {name} is named by its digest: sha256: and 64 lowercase hex digits"
+            )));
+        }
+        if d == own {
+            return Err(invalid(format!("the part {name} is the model itself")));
+        }
+        let Some(m) = by_digest(store, d)? else {
+            return Err(Error::Unknown(format!(
+                "the part {name}, {d}, is not registered; register it first"
+            )));
+        };
+        if m.state == "retired" {
+            return Err(refused(format!(
+                "the part {name} is model {} ({}), which is retired",
+                m.id,
+                m.label()
+            )));
+        }
+        out.push((name.clone(), m));
+    }
+    Ok(out)
+}
+
+/// The parts a registered model's card names (record 55 E2): each the name
+/// of the pipeline input it fills and the model, as they are now (a part
+/// may have been retired since). Empty for a model that is no cascade.
+pub fn parts(store: &mut Store, m: &Model) -> Result<Vec<(String, Model)>, StoreError> {
+    let Some(map) = m.card.get("parts").and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(map.len());
+    for (name, digest) in map {
+        if let Some(part) = digest
+            .as_str()
+            .map(|d| by_digest(store, d))
+            .transpose()?
+            .flatten()
+        {
+            out.push((name.clone(), part));
+        }
+    }
+    Ok(out)
+}
+
 /// Check a check against `contracts/model/v1/lifecycle.schema.json`: a
 /// suite, a verdict and the checks behind it, which must agree.
 fn checked_check(check: &Value) -> Result<bool, Error> {
@@ -867,7 +954,8 @@ pub struct Promoted {
 
 /// Promote a model: refused unless it was admitted by a check that passed.
 /// The model promoted before it in the same task and slot is retired, so a
-/// slot has at most one promoted model.
+/// slot has at most one promoted model, unless it is one of the promoted
+/// model's parts: a cascade retires none of its parts (record 55 E2).
 pub fn promote(
     registry: &mut Registry,
     id: i64,
@@ -909,6 +997,8 @@ pub fn promote(
         d.param(2, Type::Text),
         d.param(3, Type::Int),
     );
+    // record 55 E2: a cascade's promotion retires none of its parts
+    let own: Vec<i64> = parts(store, &m)?.iter().map(|(_, p)| p.id).collect();
     let before: Vec<i64> = store
         .query(
             &sql,
@@ -920,7 +1010,10 @@ pub fn promote(
         )?
         .iter()
         .map(|r| r.int(0))
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<i64>, _>>()?
+        .into_iter()
+        .filter(|old| !own.contains(old))
+        .collect();
     let now = now_iso();
     in_transaction(store, |store| {
         for old in &before {
@@ -1083,5 +1176,15 @@ mod tests {
         assert!(name_ok("bodypart-head_v1.2"));
         assert!(!name_ok("-x"));
         assert!(!name_ok("a b"));
+    }
+
+    #[test]
+    fn a_part_is_named_as_a_pipeline_input() {
+        for ok in ["head", "coarse", "student", "deferral", "stage_2"] {
+            assert!(part_name_ok(ok), "{ok}");
+        }
+        for bad in ["", "Head", "2nd", "a-b", "a b", "head:x"] {
+            assert!(!part_name_ok(bad), "{bad}");
+        }
     }
 }

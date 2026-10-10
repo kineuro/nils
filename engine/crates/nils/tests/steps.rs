@@ -792,6 +792,131 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(bp["answered"], 3, "what ran before stays: {s}");
     drop(server);
 
+    // record 55 E2: a cascade served, one model naming its parts: the
+    // step gives each input its part, the cascade's own coarse mode, and
+    // the cascade itself, in the descriptor's order
+    let cascade_descriptor = work.file(
+        "bodypart-infer-fusion-2.yml",
+        stand_in()
+            .replace(
+                "    - {id: coarse, type: model, optional: true}\n",
+                "    - {id: coarse, type: model, optional: true}\n    - {id: student, type: model, optional: true}\n    - {id: deferral, type: model, optional: true}\n    - {id: cascade, type: model, optional: true}\n",
+            )
+            .replace(
+                r#"assert list(ids) == ["encoder", "head", "coarse"], ids"#,
+                r#"assert list(ids)[:3] == ["encoder", "head", "coarse"], ids"#,
+            )
+            .as_bytes(),
+    );
+    let added = home.json(&[
+        "pipeline",
+        "add",
+        cascade_descriptor.to_str().unwrap(),
+        "--json",
+    ]);
+    std::fs::remove_file(&cascade_descriptor).unwrap();
+    let pipeline2 = added["label"].as_str().unwrap().to_string();
+    assert_eq!(pipeline2, "bodypart-infer-fusion@2", "{added}");
+    let (student, student_digest) = register(
+        &home,
+        &files,
+        json!({"name": "bp-student", "version": "t1", "kind": "encoder", "task": "features:bodypart_slice"}),
+        b"a student's weights",
+    );
+    let (deferral, deferral_digest) = register(
+        &home,
+        &files,
+        json!({"name": "bp-deferral", "version": "t1", "kind": "head", "task": "cascade:body_part",
+               "encoder": {"digest": student_digest}}),
+        b"a deferral model",
+    );
+    let (cascade, cascade_digest) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade", "version": "t1", "kind": "head", "task": "axis:body_part",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "parts": {"encoder": encoder_digest, "head": head_digest, "student": student_digest,
+                         "deferral": deferral_digest}}),
+        b"a cascade",
+    );
+    let (cascade_coarse, _) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade-coarse", "version": "t1", "kind": "head", "task": "axis:body_region",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "params": {"head": {"digest": cascade_digest}}}),
+        b"the cascade's coarse mode",
+    );
+    for m in [cascade, cascade_coarse] {
+        home.ok(&[
+            "model",
+            "admit",
+            &m.to_string(),
+            "--check",
+            check.to_str().unwrap(),
+        ]);
+    }
+    let server = Served::start(&home, &path, false, &logged);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let words: Vec<String> = started["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(words[1], pipeline2, "{started}");
+    let models: Vec<String> = words
+        .windows(2)
+        .filter(|w| w[0] == "--model")
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(
+        models,
+        [encoder, head, cascade_coarse, student, deferral, cascade].map(|m| m.to_string()),
+        "a cascade's parts, its own coarse mode and itself: {started}"
+    );
+    let cascade_job = started["job"].as_i64().unwrap();
+    let (status, dropped) = server.call(
+        "POST",
+        &format!("/api/jobs/{cascade_job}/cancel"),
+        None,
+        OPS,
+    );
+    assert_eq!(status, 200, "{dropped}");
+    // the plain head keeps its run on the first descriptor's inputs: a
+    // cascade's inputs are optional and left out without one
+    home.ok(&[
+        "model",
+        "retire",
+        &cascade.to_string(),
+        "--why",
+        "back to the certified path",
+    ]);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let words: Vec<String> = started["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_string())
+        .collect();
+    let models: Vec<String> = words
+        .windows(2)
+        .filter(|w| w[0] == "--model")
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(
+        models,
+        [encoder, head, coarse].map(|m| m.to_string()),
+        "without a cascade, the head's own parts: {started}"
+    );
+    let plain_job = started["job"].as_i64().unwrap();
+    let (status, dropped) =
+        server.call("POST", &format!("/api/jobs/{plain_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
+    drop(server);
+
     // a machine with no container runtime: the door still answers, and says why
     let nothing = TempDir::new("steps-no-path");
     let server = Served::start(&home, nothing.path().as_os_str(), false, &logged);

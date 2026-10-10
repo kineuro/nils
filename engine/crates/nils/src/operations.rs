@@ -214,7 +214,11 @@ fn served(store: &mut Store, task: &str, reads: Option<i64>) -> Result<Vec<Model
 /// descriptor declares them: the encoder the head names, the head that
 /// answers `body_part`, and the coarse mode that answers `body_region`
 /// from the same encoder, its card naming the head where one does, which
-/// the run goes without where none is served.
+/// the run goes without where none is served. Where the served model is a
+/// cascade (record 55 E2), each input its card names a part for gets that
+/// part, the input `cascade` gets the cascade, and the coarse mode is one
+/// naming the cascade or else its part; an optional input nothing fills is
+/// left out.
 fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let refused =
         |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
@@ -238,6 +242,25 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let Some(head) = served(store, "axis:body_part", None)?.into_iter().next() else {
         return refused("no_model", "no body-part model is installed".into());
     };
+    // record 55 E2: a cascade names its parts, each by the input it fills,
+    // and fills the input `cascade` itself
+    let parts = model::parts(store, &head)?;
+    if let Some((name, gone)) = parts.iter().find(|(_, m)| m.state == "retired") {
+        return refused(
+            "no_model",
+            format!(
+                "{} reads its part {name}, {}, which is retired",
+                head.label(),
+                gone.label()
+            ),
+        );
+    }
+    let part = |input: &str| {
+        parts
+            .iter()
+            .find(|(name, _)| name == input)
+            .map(|(_, m)| m.id)
+    };
     let encoder = match head.encoder_model_id {
         Some(id) => model::get(store, id)?.filter(|m| m.state != "retired"),
         None => None,
@@ -252,26 +275,38 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     // head first, else one of the same encoder (the image refuses a mode
     // file of another head)
     let modes = served(store, "axis:body_region", Some(encoder.id))?;
-    let coarse = modes
+    // a cascade's own coarse mode first (one naming it), then its part, as
+    // a head's own mode comes before any of its encoder's
+    let named = modes
         .iter()
         .find(|m| m.card.to_string().contains(&head.digest))
-        .or(modes.first());
+        .map(|m| m.id);
+    let coarse = if parts.is_empty() {
+        named.or(modes.first().map(|m| m.id))
+    } else {
+        named.or(part("coarse"))
+    };
     let mut models = Vec::new();
     let mut skipped: Option<&str> = None;
     for t in d.inputs.iter().filter(|t| t.ty == "model") {
         let given = match t.id.as_str() {
-            "encoder" => Some(encoder.id),
-            "head" => Some(head.id),
-            "coarse" => coarse.map(|m| m.id),
-            other => {
-                return refused(
-                    "no_pipeline",
-                    format!(
-                        "{} reads a model input {other} the body-part step does not fill",
-                        p.label()
-                    ),
-                );
-            }
+            "encoder" => part("encoder").or(Some(encoder.id)),
+            "head" => part("head").or(Some(head.id)),
+            "coarse" => coarse,
+            "cascade" => (!parts.is_empty()).then_some(head.id),
+            other => match part(other) {
+                Some(id) => Some(id),
+                None if t.optional => None,
+                None => {
+                    return refused(
+                        "no_pipeline",
+                        format!(
+                            "{} reads a model input {other} the body-part step does not fill",
+                            p.label()
+                        ),
+                    );
+                }
+            },
         };
         // models are given in the order of the inputs, so one left out
         // can only be the last
