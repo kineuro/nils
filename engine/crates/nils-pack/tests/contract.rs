@@ -214,10 +214,12 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
     let _ = std::fs::remove_dir_all(&dir);
     let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
     let pack = nils_pack::load(&mri, None).expect("the MRI pack loads");
-    assert_eq!(
-        pack.contract,
-        nils_pack::CONTRACT,
-        "the shipped pack writes exclusions and hints"
+    // Contract 9 added only pick keys the shipped pack does not write yet,
+    // so it declares 8, which writes exclusions and hints.
+    assert!(
+        (8..=nils_pack::CONTRACT).contains(&pack.contract),
+        "the shipped pack writes exclusions and hints: {}",
+        pack.contract
     );
     assert!(!pack.excludes.is_empty() && !pack.hints.is_empty());
     assert!(

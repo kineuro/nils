@@ -48,8 +48,13 @@ use crate::yaml::{self, File};
 /// session; a pick's `fallback` border may name several values; and a
 /// private file may list the ingested elements a reader is shown
 /// (`shown`). Each is refused in a pack that declares less, so an engine
-/// at 7 refuses such a pack instead of reading it without them.
-pub const CONTRACT: u32 = 8;
+/// at 7 refuses such a pack instead of reading it without them. Version 9
+/// (the 2026-10-10 study of the pick borders) changes no manifest key: a
+/// pick may say which stacks holding a role compete for it (`candidates`)
+/// and how a near tie is decided (`near_tie`), each refused in a pack that
+/// declares less, so an engine at 8 refuses such a pack instead of picking
+/// without them.
+pub const CONTRACT: u32 = 9;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -3644,6 +3649,183 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         )));
     }
 
+    // Pack contract 9: which stacks of a role compete, and how a near tie is
+    // decided. Refused in a pack that declares less, so an engine at 8,
+    // which would pick without them, refuses the pack instead.
+    let needs_9 = |key: &str| -> R<()> {
+        if contract < 9 {
+            return Err(here(Error::at(
+                format!("{at}.{key}"),
+                format!(
+                    "{key} is pack contract 9's; this pack declares contract {contract}, \
+                     and an engine of {contract} would pick without it"
+                ),
+            )));
+        }
+        Ok(())
+    };
+    let role_named = |r: &str, at: &str| -> R<String> {
+        if roles.iter().any(|x| x == r) {
+            return Ok(r.to_string());
+        }
+        Err(here(Error::at(
+            at,
+            format!(
+                "{r} is not a role this pick picks for; it picks {}",
+                roles.join(", ")
+            ),
+        )))
+    };
+    // A value as the stacks hold it: for an axis, one of its values, by its
+    // identity, label or alias, as the axis stores it; for a field, as
+    // written.
+    let value_of = |of: &str, v: &str, at: &str| -> R<String> {
+        let Some(axis) = axes.iter().find(|a| a.name == of) else {
+            return Ok(v.to_string());
+        };
+        let i = axis
+            .value_index(v)
+            .or_else(|| axis.values.iter().position(|x| x.label == v))
+            .ok_or_else(|| {
+                here(Error::at(
+                    at,
+                    format!(
+                        "{v} is not a value of the axis {of}; it has {}",
+                        axis.values
+                            .iter()
+                            .map(|x| x.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ))
+            })?;
+        Ok(axis.stored(i).to_string())
+    };
+    let values_of = |of: &str, v: &Value, at: &str| -> R<Vec<String>> {
+        let list = f.blame(yaml::texts(v, at))?;
+        if list.is_empty() {
+            return Err(here(Error::at(at, "names no value")));
+        }
+        list.iter().map(|x| value_of(of, x, at)).collect()
+    };
+    let condition = |v: &Value, at: &str| -> R<crate::pick::Condition> {
+        use crate::expr::NumOp;
+        let cm = f.blame(yaml::obj(v, at))?;
+        let of = f.blame(named(cm, "of", at))?;
+        let said: Vec<&String> = cm.keys().filter(|k| k.as_str() != "of").collect();
+        match said.as_slice() {
+            [k] if k.as_str() == "any" => Ok(crate::pick::Condition::Holds {
+                any: values_of(&of, &cm["any"], at)?,
+                of,
+            }),
+            [k] if matches!(k.as_str(), "lt" | "le" | "gt" | "ge") => {
+                Ok(crate::pick::Condition::Number {
+                    op: NumOp::parse(k).expect("a comparison"),
+                    value: f.blame(yaml::number(&cm[k.as_str()], at))?,
+                    of,
+                })
+            }
+            _ => Err(here(Error::at(
+                at,
+                "a condition is {of, any: [values]} or {of, lt | le | gt | ge: number}",
+            ))),
+        }
+    };
+    let mut candidates = BTreeMap::new();
+    if let Some(v) = m.get("candidates") {
+        needs_9("candidates")?;
+        for (role, c) in f.blame(yaml::obj(v, &format!("{at}.candidates")))? {
+            let cat = format!("{at}.candidates.{role}");
+            let role = role_named(role, &cat)?;
+            let cm = f.blame(yaml::obj(c, &cat))?;
+            if let Some(k) = cm.keys().find(|k| !matches!(k.as_str(), "when" | "unless")) {
+                return Err(here(Error::at(
+                    &cat,
+                    format!("{k} is not what a role's candidates say; they say when and unless"),
+                )));
+            }
+            let list = |key: &str| -> R<Vec<crate::pick::Condition>> {
+                match cm.get(key) {
+                    None => Ok(Vec::new()),
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| condition(x, &format!("{cat}.{key}[{i}]")))
+                        .collect(),
+                    Some(_) => Err(here(Error::at(
+                        format!("{cat}.{key}"),
+                        "is a list of conditions",
+                    ))),
+                }
+            };
+            let candidacy = crate::pick::Candidacy {
+                when: list("when")?,
+                unless: list("unless")?,
+            };
+            if candidacy.when.is_empty() && candidacy.unless.is_empty() {
+                return Err(here(Error::at(
+                    &cat,
+                    "names no condition: a role every stack holding it competes for needs no entry",
+                )));
+            }
+            candidates.insert(role, candidacy);
+        }
+    }
+    let mut near_tie = Vec::new();
+    if let Some(v) = m.get("near_tie") {
+        needs_9("near_tie")?;
+        let list = v
+            .as_array()
+            .ok_or_else(|| here(Error::at(format!("{at}.near_tie"), "is a list of steps")))?;
+        if list.is_empty() {
+            return Err(here(Error::at(
+                format!("{at}.near_tie"),
+                "names no step: a pick with no near-tie order leaves the key out",
+            )));
+        }
+        for (i, step) in list.iter().enumerate() {
+            let sat = format!("{at}.near_tie[{i}]");
+            let sm = f.blame(yaml::obj(step, &sat))?;
+            let of = f.blame(named(sm, "of", &sat))?;
+            let mut step_roles = Vec::new();
+            if let Some(r) = sm.get("roles") {
+                for r in f.blame(yaml::texts(r, &sat))? {
+                    step_roles.push(role_named(&r, &sat)?);
+                }
+            }
+            let said: Vec<&String> = sm
+                .keys()
+                .filter(|k| !matches!(k.as_str(), "of" | "roles"))
+                .collect();
+            let rank = match said.as_slice() {
+                [k] if k.as_str() == "prefer" => {
+                    crate::pick::Rank::Prefer(values_of(&of, &sm["prefer"], &sat)?)
+                }
+                [k] if k.as_str() == "avoid" => {
+                    crate::pick::Rank::Avoid(values_of(&of, &sm["avoid"], &sat)?)
+                }
+                [k] if k.as_str() == "lowest" && sm["lowest"] == Value::Bool(true) => {
+                    crate::pick::Rank::Lowest
+                }
+                [k] if k.as_str() == "highest" && sm["highest"] == Value::Bool(true) => {
+                    crate::pick::Rank::Highest
+                }
+                _ => {
+                    return Err(here(Error::at(
+                        &sat,
+                        "a step is {of, prefer: [values]}, {of, avoid: [values]}, \
+                         {of, lowest: true} or {of, highest: true}, with roles if it orders some",
+                    )));
+                }
+            };
+            near_tie.push(crate::pick::Order {
+                of,
+                roles: step_roles,
+                rank,
+            });
+        }
+    }
+
     Ok(Model {
         name,
         roles,
@@ -3652,6 +3834,8 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         borders,
         same_acquisition,
         families,
+        candidates,
+        near_tie,
     })
 }
 

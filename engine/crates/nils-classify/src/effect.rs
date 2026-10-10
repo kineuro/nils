@@ -1622,10 +1622,7 @@ fn picks(
         let mut result: [Occasions; 2] = Default::default();
         for si in 0..2 {
             for role in &model.roles {
-                let mine: Vec<&crate::picking::Row> = sides[si]
-                    .iter()
-                    .filter(|r| r.roles.iter().any(|x| x == role))
-                    .collect();
+                let mine = crate::picking::of_role(model, role, &sides[si]);
                 let reference = crate::picking::build_reference(model, "registry", &mine);
                 let mut occasions: BTreeMap<(i64, i64), Vec<&crate::picking::Row>> =
                     BTreeMap::new();

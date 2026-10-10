@@ -884,3 +884,123 @@ fn one_acquisition_time_is_one_scan() {
 fn one_acquisition_time_is_one_scan_on_postgres_too() {
     postgres("nils_borders_moment", one_moment);
 }
+
+/// The MRI pack, copied under `home` and raised to pack contract 9, with
+/// `keys` added to its pick file. Answers the pack directory to pass.
+fn pack_at_9(home: &Home, keys: &str) -> String {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.path().is_dir() {
+                copy(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let dir = home.dir.path().join("packs");
+    let mri = dir.join("mri");
+    copy(&std::path::Path::new(&packs()).join("mri"), &mri);
+    let manifest = std::fs::read_to_string(mri.join("pack.yml")).unwrap();
+    std::fs::write(
+        mri.join("pack.yml"),
+        manifest.replace("\ncontract: 8\n", "\ncontract: 9\n"),
+    )
+    .unwrap();
+    let main = std::fs::read_to_string(mri.join("picks/main.yml")).unwrap();
+    std::fs::write(mri.join("picks/main.yml"), format!("{main}\n{keys}")).unwrap();
+    dir.to_str().unwrap().to_string()
+}
+
+/// Pack contract 9: a pick may say which stacks of a role compete (the
+/// borders study's R1, the brain roles not a spine's) and how a near tie is
+/// decided (an order like R8's), and a pick run does what it says.
+fn contract_9(home: &Home) {
+    let p = pack_at_9(
+        home,
+        "candidates:\n  t1w:\n    unless:\n      - {of: body_part, any: [spine, neck, chest, other]}\n\
+         near_tie:\n  - {of: orientation, prefer: [Axial, Coronal, Sagittal]}\n",
+    );
+    let mut store = home.store();
+    let subjects = first_studies(&mut store);
+    // A brain MPRAGE and a spine one that would outscore it.
+    let (both, ids) = &subjects[0];
+    plant(
+        &mut store,
+        &ids[..2],
+        &[
+            Stack::mprage().field("n_instances", Some("160")),
+            Stack::mprage()
+                .field("n_instances", Some("192"))
+                .field("echo_time", Some("3.1"))
+                .axis("body_part", Some("spine")),
+        ],
+    );
+    // A spine MPRAGE alone.
+    let (spine, ids2) = &subjects[1];
+    plant(
+        &mut store,
+        &ids2[..1],
+        &[Stack::mprage().axis("body_part", Some("spine"))],
+    );
+    // Two MPRAGEs alike but for the plane: a near tie the order decides.
+    let (alike, ids3) = &subjects[2];
+    plant(
+        &mut store,
+        &ids3[..2],
+        &[
+            Stack::mprage(),
+            Stack::mprage().field("orientation", Some("Axial")),
+        ],
+    );
+    population(&mut store, &subjects[3..15]);
+    let report = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let (stacks, borders, _) = t1w_pick(&mut store, *both);
+    assert_eq!(
+        stacks,
+        [ids[0]],
+        "the brain one: the spine one is no candidate"
+    );
+    assert_eq!(borders, "");
+    let none = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE subject_id = {spine}",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(none, 0, "a spine alone is no T1w occasion");
+    let (stacks, borders, _) = t1w_pick(&mut store, *alike);
+    assert_eq!(stacks, [ids3[1]], "the axial one, by the order");
+    assert_eq!(borders, "", "a near tie the order decided asks nothing");
+    assert_eq!(report["tied"], 0, "{report}");
+    let row = store
+        .query(
+            &format!(
+                "SELECT parts FROM {} WHERE subject_id = {alike} AND author_kind = 'agent'",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap();
+    let parts: serde_json::Value = serde_json::from_str(row[0].text(0).unwrap()).unwrap();
+    assert_eq!(
+        parts["notes"]["near_tie"], "orientation: Axial over Sagittal",
+        "{parts}"
+    );
+}
+
+#[test]
+fn a_pack_at_contract_9_says_which_stacks_compete_and_how_a_near_tie_is_decided() {
+    contract_9(&registry(None));
+}
+
+#[test]
+fn a_pack_at_contract_9_says_which_stacks_compete_on_postgres_too() {
+    postgres("nils_borders_contract_9", contract_9);
+}

@@ -103,8 +103,18 @@ pub struct RoleReport {
 /// run reports and never settles by row order.
 pub fn is_tied(picked: &pick::Picked) -> bool {
     picked.winner.is_some()
+        && picked.decided.is_none()
         && picked.considered.len() >= 2
         && picked.considered[0].1 == picked.considered[1].1
+}
+
+/// The stacks of a role: those holding it that the pick's candidacy for it
+/// admits (pack contract 9). They are its candidates and the population it
+/// is scored against.
+pub(crate) fn of_role<'a>(model: &Model, role: &str, rows: &'a [Row]) -> Vec<&'a Row> {
+    rows.iter()
+        .filter(|r| r.roles.iter().any(|x| x == role) && model.admits(role, &r.values))
+        .collect()
 }
 
 /// Record 55 H2: the subjects a run decides, named for the report: a
@@ -495,11 +505,8 @@ fn run_one(
     };
 
     for role in &model.roles {
-        let mine: Vec<&Row> = rows
-            .iter()
-            .filter(|r| r.roles.iter().any(|x| x == role))
-            .collect();
-        // The population is every stack that holds this role, a fragment no
+        let mine: Vec<&Row> = of_role(model, role, rows);
+        // The population is every stack of this role, a fragment no
         // candidate is made of included, and it is named on every row it
         // decided.
         let reference = build_reference(model, &report.reference, &mine);
@@ -1857,6 +1864,8 @@ mod tests {
                 "echo_time".into(),
             ],
             families: family.into_iter().collect(),
+            candidates: BTreeMap::new(),
+            near_tie: Vec::new(),
         }
     }
 
