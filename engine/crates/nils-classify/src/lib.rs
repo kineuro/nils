@@ -18,6 +18,7 @@ pub mod effect;
 pub mod fingerprint;
 pub mod fold;
 pub mod job;
+pub mod main_scans;
 pub mod passes;
 pub mod picking;
 pub mod rehearse;

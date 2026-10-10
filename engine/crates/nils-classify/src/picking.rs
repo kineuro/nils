@@ -1490,8 +1490,12 @@ pub fn set_person(
 ) -> Result<PersonPicked, PersonError> {
     // Record 51 R2: a pick of no stack is written only by Keep on a border
     // where the run picked nothing, never by naming stacks.
-    if p.stacks.is_empty() {
-        return Err(refused("a pick names at least one stack"));
+    // Record 55, decision 6: or none, "nothing for this role", on the
+    // occasion it names
+    if p.stacks.is_empty() && p.occasion.is_none() {
+        return Err(refused(
+            "a pick names at least one stack, or, for nothing standing for the role, its subject and day",
+        ));
     }
     if p.why.trim().is_empty() {
         return Err(refused(
@@ -1536,6 +1540,35 @@ pub fn set_person(
             )));
         }
     };
+
+    if p.stacks.is_empty() {
+        let (subject, day) = p.occasion.expect("checked above");
+        let day = day[..day.len().min(10)].to_string();
+        if Day::parse(&day).is_none() {
+            return Err(refused(format!("{day} is not a day of an occasion")));
+        }
+        let scheme_json = serde_json::to_value(scheme).unwrap_or(serde_json::Value::Null);
+        return write_person(
+            registry,
+            &PersonRow {
+                model: &model.name,
+                role: p.role,
+                subject,
+                day: &day,
+                scheme_name: &short_scheme(scheme),
+                scheme_digest: &scheme.digest(),
+                scheme: &scheme_json,
+                pack: &pack.name,
+                pack_version: &pack.version.to_string(),
+                stacks: &[],
+                why: p.why,
+                actor: p.actor,
+                campaign: p.campaign,
+                kept: None,
+                scope: p.scope,
+            },
+        );
+    }
 
     // Where each stack sits: its subject and its study, and through the
     // scheme the occasion the study belongs to.
