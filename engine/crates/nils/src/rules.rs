@@ -20,6 +20,8 @@
 //! update takes; a newer one it would refuse waits and says why, as a desk
 //! that needs a newer engine waits. The engine's own release stays the
 //! floor ([`crate::packs::plan`]).
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::packs::{Engine, Offer, Pack, Plan};
@@ -106,6 +108,10 @@ pub(crate) struct Found {
     pub(crate) takes: Option<Offer>,
     /// Why the releases could not be read.
     pub(crate) error: Option<String>,
+    /// The version the install pins it to, where it does: only that one is
+    /// taken, from its own release, or left to the engine's copy where that
+    /// is the version.
+    pub(crate) pinned: Option<String>,
 }
 
 impl Found {
@@ -160,15 +166,68 @@ pub(crate) fn find(base: &str, pack: &str, engine: &Engine, floor: Option<&str>)
     found
 }
 
+/// A pack pinned to one version (record 55 B5, 2026-10-10): its own
+/// release of that version is the one offered, whatever is newer, and the
+/// newest is still named so a check can say what the pin holds back. Where
+/// the engine's copy is that version (`bundled`), nothing need be fetched.
+pub(crate) fn find_pinned(
+    base: &str,
+    pack: &str,
+    engine: &Engine,
+    pin: &str,
+    bundled: Option<&str>,
+) -> Found {
+    let mut found = Found {
+        pack: pack.to_string(),
+        pinned: Some(pin.to_string()),
+        ..Found::default()
+    };
+    match versions(base, pack) {
+        Ok(listed) => found.newest = listed.first().cloned(),
+        Err(e) => found.error = Some(e),
+    }
+    if bundled == Some(pin) {
+        return found;
+    }
+    match offer(base, pack, pin) {
+        Ok(offer) => match engine.refusal(&offer.pack) {
+            Some(why) => {
+                found.error = Some(format!(
+                    "it is pinned at {pin}, which this engine refuses: {why}"
+                ));
+            }
+            None => {
+                found.error = None;
+                found.takes = Some(offer);
+            }
+        },
+        Err(e) => {
+            found.error = Some(format!(
+                "it is pinned at {pin}, whose release could not be read: {e}"
+            ));
+        }
+    }
+    found
+}
+
 /// Each pack given that states a version, beside its own releases at
 /// `base`: the packs the engine's release carries, or where that cannot be
 /// read, the first-party packs in place ([`crate::packs::first_party_in`]),
-/// each version the floor of its walk.
-pub(crate) fn find_all(base: &str, packs: &[Pack], engine: &Engine) -> Vec<Found> {
+/// each version the floor of its walk. A pack `pins` names is looked for at
+/// its pinned version alone ([`find_pinned`]).
+pub(crate) fn find_all(
+    base: &str,
+    packs: &[Pack],
+    engine: &Engine,
+    pins: &BTreeMap<String, String>,
+) -> Vec<Found> {
     packs
         .iter()
         .filter(|p| p.version.is_some())
-        .map(|p| find(base, &p.name, engine, p.version.as_deref()))
+        .map(|p| match pins.get(&p.name) {
+            Some(pin) => find_pinned(base, &p.name, engine, pin, p.version.as_deref()),
+            None => find(base, &p.name, engine, p.version.as_deref()),
+        })
         .collect()
 }
 
@@ -193,6 +252,8 @@ pub(crate) struct Row {
     /// Whether a change made on this machine keeps the pack as it is.
     pub(crate) edited: bool,
     pub(crate) error: Option<String>,
+    /// The version the install pins it to (record 55 B5).
+    pub(crate) pinned: Option<String>,
 }
 
 impl Row {
@@ -209,6 +270,18 @@ impl Row {
             return format!("{name}: its own releases could not be read: {e}");
         }
         let newest = self.newest.as_deref().unwrap_or("a release");
+        if let Some(pin) = &self.pinned {
+            let lift = format!("`nils update --unpin {}` lifts it", self.pack);
+            return match &self.takes {
+                Some(t) => format!("{name}: pinned at {pin}; its release of {t} goes in ({lift})"),
+                None => match &self.newest {
+                    Some(n) if n != pin => {
+                        format!("{name}: pinned at {pin}, kept (its newest release is {n}; {lift})")
+                    }
+                    _ => format!("{name}: pinned at {pin}, kept ({lift})"),
+                },
+            };
+        }
         match (&self.takes, &self.held) {
             (Some(t), Some(why)) => {
                 format!("{name}: {t} is out ({newest} is newer and waits: {why})")
@@ -236,6 +309,7 @@ impl Row {
     pub(crate) fn update_line(&self) -> Option<String> {
         let said = self.line();
         let shown = self.error.is_some()
+            || self.pinned.is_some()
             || (self.held.is_some() && self.takes.is_none())
             || (self.edited && self.newest.is_some());
         shown.then(|| said.trim_start_matches(&format!("{PART} ")).to_string())
@@ -256,9 +330,87 @@ impl Row {
             "follows": Value::Null,
             "edited": self.edited,
             "error": self.error,
+            "pinned": self.pinned,
             "command": format!("nils update --part {PART}"),
         })
     }
+}
+
+/// Write the pins asked for where the recorded engine reads its packs
+/// (record 55 B5, 2026-10-10), and note them in the setup record. A pin
+/// names a first-party pack and a version that is there to be put in place:
+/// the one in the directory, the pack's own release of it, or the copy the
+/// engine's release carries. Nothing is written where one is not.
+pub(crate) fn set_pins(
+    pin: &[String],
+    unpin: &[String],
+    channel: Option<&str>,
+) -> Result<(), crate::Exit> {
+    crate::setup::setup_recorded()?;
+    let state = crate::setup::read_state().ok_or_else(|| {
+        crate::fail("no setup is recorded on this machine, so there is nothing to pin")
+    })?;
+    let dir = crate::setup::engine_pack_dir(&state).ok_or_else(|| {
+        crate::fail("this install's engine runs in a container, whose image carries its packs: a pin needs the packs a machine install keeps")
+    })?;
+    let first_party = |pack: &str| -> Result<(), crate::Exit> {
+        if crate::setup::FIRST_PARTY_PACKS.contains(&pack) {
+            Ok(())
+        } else {
+            Err(crate::usage(format!(
+                "{pack}: a pin names a first-party pack, one of {}",
+                crate::setup::FIRST_PARTY_PACKS.join(", ")
+            )))
+        }
+    };
+    let mut asked: Vec<(String, String)> = Vec::new();
+    for p in pin {
+        let Some((pack, version)) = p.split_once('@') else {
+            return Err(crate::usage(format!(
+                "--pin {p}: a pin is PACK@VERSION, for example mri@1.0.0"
+            )));
+        };
+        let (pack, version) = (pack.trim(), version.trim().trim_start_matches('v'));
+        first_party(pack)?;
+        nils_pack::Version::parse(version, "--pin").map_err(|e| crate::usage(e.to_string()))?;
+        asked.push((pack.to_string(), version.to_string()));
+    }
+    for pack in unpin {
+        first_party(pack.trim())?;
+    }
+    // every pin checked before any is written
+    for (pack, version) in &asked {
+        let in_place = crate::packs::on_disk(&dir)
+            .iter()
+            .any(|p| &p.name == pack && p.version.as_deref() == Some(version.as_str()));
+        if in_place || offer(&base(channel), pack, version).is_ok() {
+            continue;
+        }
+        let carried = crate::setup::engine_version(&state)
+            .and_then(|release| crate::packs::bundled(&update::engine_base(channel), &release).ok())
+            .unwrap_or_default();
+        if carried
+            .iter()
+            .any(|o| &o.pack.name == pack && o.pack.version.as_deref() == Some(version.as_str()))
+        {
+            continue;
+        }
+        return Err(crate::fail(format!(
+            "{pack} {version} is neither in place nor a release this install can read, so nothing was pinned"
+        )));
+    }
+    for pack in unpin {
+        crate::packs::set_pin(&dir, pack.trim(), None).map_err(crate::fail)?;
+        println!("{PART} {}: the pin is lifted", pack.trim());
+    }
+    for (pack, version) in &asked {
+        crate::packs::set_pin(&dir, pack, Some(version)).map_err(crate::fail)?;
+        println!(
+            "{PART} {pack}: pinned at {version}; every update keeps that version until the pin is lifted"
+        );
+    }
+    crate::setup::record_rules(&dir);
+    Ok(())
 }
 
 /// The rows of what was found, as a plan would leave each pack: what an
@@ -292,6 +444,7 @@ pub(crate) fn rows(plan: &Plan, found: &[Found]) -> Vec<Row> {
                 takes,
                 edited: plan.status.edited.contains(&f.pack),
                 error: f.error.clone(),
+                pinned: f.pinned.clone(),
             }
         })
         .collect()
@@ -487,6 +640,7 @@ mod tests {
             held: Some("mri 1.0.3 needs pack contract 11".to_string()),
             takes: Some(own[0].clone()),
             error: None,
+            pinned: None,
         };
         let engine = Engine::this();
         let p = plan(

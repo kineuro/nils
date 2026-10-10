@@ -892,6 +892,107 @@ fn a_rules_release_reaches_the_install_with_no_engine_release() {
     assert!(install.record().contains("version = \"1.0.3\""));
 }
 
+const MRI_1_0_0: &str =
+    "pack: mri\nversion: 1.0.0\ncontract: 8\nmodality: MR\n# the paper's rules\n";
+
+/// Record 55 B5 (2026-10-10): an install pinned to one rules version, as one
+/// that reproduces the paper's rules 1.0.0 is. `--pin` puts that version in
+/// place from its own release, older though it is, and notes the pin in the
+/// record; a check says what the pin holds back and offers nothing; neither
+/// a rules update nor an update of every part replaces it; and `--unpin`
+/// lifts it and takes the newest release this engine reads. A pin of a
+/// version there is nowhere to take from writes nothing.
+#[test]
+fn a_pin_keeps_one_rules_version_until_it_is_lifted() {
+    let engine = Releases::new();
+    engine.publish_with_packs(ENGINE, &[("mri", MRI_1_0_1)]);
+    engine.publish_rules("mri", "1.0.0", MRI_1_0_0);
+    engine.publish_rules("mri", "1.0.2", MRI_1_0_2);
+    let desk = TempDir::new("nils-desk-releases-pin");
+    publish_desk(desk.path(), ENGINE, None);
+    let install = Install::new(ENGINE, ENGINE);
+    let packs = install.with_packs(&[("mri", MRI_1_0_1)]);
+    let roots = [
+        install.base.path(),
+        install.config.path(),
+        engine.dir.path(),
+        desk.path(),
+    ];
+    let mri = || std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap();
+    let engine_before = install.engine_line();
+
+    // a version there is nowhere to take from: nothing pinned, nothing changed
+    let o = install.run(&["update", "--pin", "mri@1.0.9"], &engine, desk.path());
+    assert!(!o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(o.stderr.contains("nothing was pinned"), "{}", o.stderr);
+    assert_eq!(mri(), MRI_1_0_1);
+    assert!(
+        !install.record().contains("pinned = "),
+        "{}",
+        install.record()
+    );
+
+    // pinned at the paper's version: its own release goes in
+    let o = install.run(&["update", "--pin", "mri@1.0.0"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_0, "{}", o.stdout);
+    assert!(
+        o.stdout.contains("rules mri: pinned at 1.0.0"),
+        "{}",
+        o.stdout
+    );
+    let record = install.record();
+    assert!(record.contains("[rules.mri]"), "{record}");
+    assert!(record.contains("version = \"1.0.0\""), "{record}");
+    assert!(record.contains("pinned = \"1.0.0\""), "{record}");
+    assert_eq!(install.engine_line(), engine_before);
+    only_inside(&o.stdout, &roots);
+
+    // a check says what the pin holds back, and offers nothing
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains("rules mri 1.0.0: pinned at 1.0.0, kept (its newest release is 1.0.2"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains("every part is at its newest release"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(mri(), MRI_1_0_0, "--check changed the packs");
+    only_inside(&o.stdout, &roots);
+
+    // neither a rules update nor an update of every part replaces it
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_0, "{}", o.stdout);
+    let o = install.run(&["update", "--all"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_0, "{}", o.stdout);
+    only_inside(&o.stdout, &roots);
+
+    // lifted: the newest release this engine reads goes in, and the record
+    // no longer names a pin
+    let o = install.run(&["update", "--unpin", "mri"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("rules mri: the pin is lifted"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(mri(), MRI_1_0_2, "{}", o.stdout);
+    assert!(
+        !install.record().contains("pinned = "),
+        "{}",
+        install.record()
+    );
+    assert_eq!(install.engine_line(), engine_before);
+    only_inside(&o.stdout, &roots);
+}
+
 /// T9, the second half: a rules release this engine would refuse waits and
 /// is never installed, whether it needs a pack contract the engine does not
 /// implement or names engines this one is not among; and once a release the
