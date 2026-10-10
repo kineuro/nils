@@ -48,7 +48,7 @@ fn lab(name: &'static str, backend: Backend, dsn: Option<String>) -> Lab {
             backend,
             dsn,
             schema: (backend == Backend::Postgres).then(|| SCHEMA.to_string()),
-            scheme: nils_registry::Scheme::DEFAULT,
+            scheme: nils_registry::Scheme::Blake2b32,
             key: "k".to_string(),
             display_length: 12,
             session_scheme: None,

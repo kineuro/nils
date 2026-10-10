@@ -22,11 +22,13 @@ pub mod expr;
 pub mod keywords;
 pub mod legal;
 pub mod level;
+pub mod matters;
 pub mod mcp;
 pub mod normalize;
 pub mod overlay;
 pub mod pack;
 pub mod pass;
+pub mod patch;
 pub mod pick;
 pub mod private;
 pub mod reads;
@@ -38,12 +40,18 @@ pub mod stack;
 pub mod verdict;
 pub mod version;
 mod yaml;
+mod yaml_edit;
 
 pub use error::Error;
 pub use eval::Evaluated;
 pub use overlay::Overlay;
-pub use pack::{CONTRACT, Pack, THRESHOLD_TOLERANCE, at_threshold, load, load_judged, weaker_than};
+pub use pack::{
+    CONTRACT, Pack, THRESHOLD_TOLERANCE, at_threshold, load, load_judged, load_patched, weaker_than,
+};
 pub use rules::basis_of;
 pub use stack::Stack;
-pub use verdict::{AxisVerdict, Diagnostic, Evidence, Verdict, Vote, Voter, voters};
+pub use verdict::{
+    AxisVerdict, Diagnostic, EqualRank, Evidence, Override, Ranked, Side, Verdict, Vote, Voter,
+    voters,
+};
 pub use version::Version;

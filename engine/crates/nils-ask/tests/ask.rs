@@ -951,3 +951,219 @@ out: {set: people, level: count}
     );
     accepted(serde_json::to_value(&ask).unwrap());
 }
+
+/// Record 55 K7 (spec §7.1, T13): below detail quasi, a column that reads a
+/// quasi identifying field is answered as its shape, whether it projects the
+/// field, a binding or a group's key made from it, or a value computed from
+/// it; a filter, an order, a comparison and a count read it freely; the
+/// series description is technical and never shaped; at detail quasi and
+/// above nothing is.
+#[test]
+fn a_quasi_identifying_column_is_shaped_below_detail_quasi() {
+    let plain = Scope::default();
+    let quasi = Scope {
+        classes: [Class::QuasiIdentifying].into_iter().collect(),
+        ..Scope::default()
+    };
+    let sensitive = Scope {
+        classes: [Class::QuasiIdentifying, Class::Sensitive]
+            .into_iter()
+            .collect(),
+        ..Scope::default()
+    };
+    let doc = json!({
+        "ast_version": 1,
+        "name": "k7",
+        "sets": {
+            "people": {
+                "grain": "subject",
+                "bind": {
+                    "born": ["field", {}, "birth_date"],
+                    "born_year": ["part", {"unit": "year"}, ["field", {}, "born"]],
+                    "n": ["count", {"set": "visits"}],
+                    "latest": ["max", {"set": "visits"}, ["field", {}, "first"]]
+                },
+                "where": [["not_null", {}, ["field", {}, "deceased_at"]]]
+            },
+            "visits": {"grain": "session"}
+        },
+        "out": {
+            "set": "people",
+            "level": "record",
+            "columns": [
+                ["field", {}, "id"],
+                ["field", {}, "code"],
+                ["field", {}, "born_year"],
+                ["field", {}, "n"],
+                ["field", {}, "latest"],
+                ["=", {}, ["field", {}, "sex"], "F"],
+                ["field", {}, "sex"]
+            ],
+            "order": [[["field", {}, "birth_date"], "asc"]]
+        }
+    })
+    .to_string();
+    let shaped = |scope: &Scope| -> Vec<usize> {
+        prepare(parse(&doc).unwrap(), &Fixture, scope)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .validated
+            .shaped
+            .into_iter()
+            .collect()
+    };
+    // the code, the year of birth, the latest session's day; not the id, the
+    // count, the comparison or the technical sex
+    assert_eq!(shaped(&plain), vec![1, 2, 4]);
+    assert!(shaped(&quasi).is_empty());
+    assert!(shaped(&sensitive).is_empty());
+
+    // a group's key made from a quasi field is shaped, its count is not, and
+    // the series description is technical at every detail
+    let grouped = json!({
+        "ast_version": 1,
+        "name": "k7 groups",
+        "sets": {
+            "s": {"grain": "stack"},
+            "g": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "station_name"]]}},
+            "d": {"grain": "group", "group": {"of": "s", "by": [["field", {}, "series.series_description"]]}}
+        },
+        "out": {
+            "set": "g",
+            "level": "record",
+            "columns": [["field", {}, "station_name"], ["field", {}, "_rows"]]
+        }
+    });
+    let prepared = prepare(parse(&grouped.to_string()).unwrap(), &Fixture, &plain).unwrap();
+    assert_eq!(
+        prepared.validated.shaped.into_iter().collect::<Vec<_>>(),
+        vec![0]
+    );
+    let mut by_description = grouped.clone();
+    by_description["out"] = json!({
+        "set": "d",
+        "level": "record",
+        "columns": [["field", {}, "series.series_description"], ["field", {}, "_rows"]]
+    });
+    let prepared = prepare(
+        parse(&by_description.to_string()).unwrap(),
+        &Fixture,
+        &plain,
+    )
+    .unwrap();
+    assert!(prepared.validated.shaped.is_empty());
+
+    // a measure over a shaped column would read the raw values: refused below
+    // quasi, answered at quasi
+    let mut measured: Value = serde_json::from_str(&doc).unwrap();
+    measured["out"]["measures"] = json!([{"median": {"of": "latest"}}]);
+    let text = measured.to_string();
+    let refused = prepare(parse(&text).unwrap(), &Fixture, &plain).unwrap_err();
+    assert!(refused.to_string().contains("forbidden_field"), "{refused}");
+    prepare(parse(&text).unwrap(), &Fixture, &quasi).unwrap();
+
+    // the shape itself, as the values sampler shows it
+    assert_eq!(nils_ask::validate::shape("Scanner-01 b"), "Aaaaaaa-99 a");
+    assert_eq!(
+        nils_ask::validate::shape(&"x".repeat(41)),
+        format!("{}~", "a".repeat(40))
+    );
+}
+
+/// Record 55 K7, review of 2026-10-10: the shapes check traces a value
+/// through every level of clauses, so a quasi identifying field wrapped in
+/// thirteen coalesces, which it once gave up on, is shaped, and one wrapped
+/// deeper than the bound is refused at validate, never answered unshaped.
+#[test]
+fn a_quasi_column_nested_past_the_bound_is_refused_not_answered_unshaped() {
+    let wrapped = |levels: usize| {
+        let mut c = json!(["field", {}, "code"]);
+        for _ in 0..levels {
+            c = json!(["coalesce", {}, c, "none"]);
+        }
+        json!({
+            "ast_version": 1,
+            "name": "deep",
+            "sets": {"people": {"grain": "subject"}},
+            "out": {"set": "people", "level": "record", "columns": [c]}
+        })
+        .to_string()
+    };
+    let plain = Scope::default();
+    for levels in [10, 13, 40] {
+        let within = prepare(parse(&wrapped(levels)).unwrap(), &Fixture, &plain)
+            .unwrap_or_else(|e| panic!("{levels}: {e}"));
+        assert_eq!(
+            within.validated.shaped.into_iter().collect::<Vec<_>>(),
+            vec![0],
+            "{levels} coalesces"
+        );
+    }
+    let refused = prepare(parse(&wrapped(70)).unwrap(), &Fixture, &plain).unwrap_err();
+    let text = refused.to_string();
+    assert!(
+        text.contains("not_compilable") && text.contains("nest"),
+        "{text}"
+    );
+}
+
+/// Wave 7a: a value of an axis is named by its identity, an identity it had
+/// before a rename, or its label; a row may hold any of them for it, a
+/// group's key holds the one the pack stores, and a name that is another
+/// value's is never read as this one.
+#[test]
+fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
+    use nils_ask::validate::{AxisNames, AxisValueNames};
+    let v = |id: &str, label: &str, aliases: &[&str]| AxisValueNames {
+        id: id.into(),
+        label: label.into(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+    };
+    let id_of = |a: &AxisNames, t: &str| a.named(t).map(|x| x.id.clone());
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    // base stores the label: T2*w is what a row holds for T2starw
+    let base = AxisNames {
+        stores_label: true,
+        values: vec![v("T2starw", "T2*w", &[]), v("T2w", "T2w", &[])],
+    };
+    assert_eq!(id_of(&base, "T2*w").as_deref(), Some("T2starw"));
+    assert_eq!(id_of(&base, "T2starw").as_deref(), Some("T2starw"));
+    assert_eq!(id_of(&base, "T2"), None);
+    assert_eq!(base.held(&base.values[0]), vec!["T2*w", "T2starw"]);
+    assert_eq!(base.held(&base.values[1]), vec!["T2w"]);
+    assert_eq!(base.synonyms(), vec![pair("T2starw", "T2*w")]);
+    // a former identity names its value, and a row may hold it
+    let technique = AxisNames {
+        stores_label: true,
+        values: vec![v("ASL", "ASL", &["ASL-EPI"]), v("3D-TSE", "SPACE", &[])],
+    };
+    assert_eq!(id_of(&technique, "ASL-EPI").as_deref(), Some("ASL"));
+    assert_eq!(technique.held(&technique.values[0]), vec!["ASL", "ASL-EPI"]);
+    assert_eq!(
+        technique.synonyms(),
+        vec![pair("ASL-EPI", "ASL"), pair("3D-TSE", "SPACE")]
+    );
+    // an axis that stores the identity reads a label as it
+    let ids = AxisNames {
+        stores_label: false,
+        values: vec![v("given", "1", &[]), v("not_given", "0", &[])],
+    };
+    assert_eq!(ids.held(&ids.values[0]), vec!["given", "1"]);
+    assert_eq!(
+        ids.synonyms(),
+        vec![pair("1", "given"), pair("0", "not_given")]
+    );
+    // a label that is another value's identity names that value, and is
+    // never held for this one
+    let clash = AxisNames {
+        stores_label: false,
+        values: vec![v("a", "b", &[]), v("b", "c", &[])],
+    };
+    assert_eq!(id_of(&clash, "b").as_deref(), Some("b"));
+    assert_eq!(clash.held(&clash.values[0]), vec!["a"]);
+    assert_eq!(clash.synonyms(), vec![pair("c", "b")]);
+    // a catalog that knows identities alone names a value by its identity
+    let fixture = Fixture.axis_names("base").unwrap();
+    assert!(!fixture.stores_label);
+    assert_eq!(id_of(&fixture, "T1w").as_deref(), Some("T1w"));
+    assert!(fixture.synonyms().is_empty());
+}

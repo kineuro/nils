@@ -162,7 +162,13 @@ pub fn run(
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
-    let corpus = read_corpus(store, pack, settings.modality.as_deref())?;
+    // The stacks of the pack's own modality, and no other: a pack that does
+    // not judge a modality says nothing of its stacks (a CT stack is never
+    // misc and never a review item), and before 2026-10-09 the MRI pack's
+    // vote filled a base and a technique on CT stacks from the MR pool
+    // (record 56's effect report found 5 on record 34).
+    let modality = settings.modality.as_deref().unwrap_or(&pack.modality);
+    let corpus = read_corpus(store, pack, Some(modality))?;
     let mut out = Vec::new();
     // Record 53: what a session pass wrote in this run, which a vote read
     // from the corpus before it must not fill again.

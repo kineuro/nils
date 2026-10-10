@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 79;
+pub const SCHEMA_VERSION: i64 = 85;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +370,290 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 79,
         apply: a_fingerprint_reads_the_2026_10_03_fields,
     },
+    Migration {
+        version: 80,
+        apply: a_source_place_nobody_declared_is_undeclared,
+    },
+    Migration {
+        version: 81,
+        apply: a_held_file_may_wait_for_its_subject_s_id_type,
+    },
+    Migration {
+        version: 82,
+        apply: a_personnummer_is_never_kept,
+    },
+    Migration {
+        version: 83,
+        apply: a_dataset_s_declaration_is_its_structure,
+    },
+    Migration {
+        version: 84,
+        apply: a_root_s_folder_is_a_dataset_only_when_added,
+    },
+    Migration {
+        version: 85,
+        apply: a_classification_notes_what_was_not_asked,
+    },
 ];
+
+/// Record 55 H3 (Nima's ruling of 2026-10-09): what the sort decided without
+/// asking anybody is kept on the stack's classification. `notes` holds who
+/// beat whom where the pack's ranking decided between two rules, the answers
+/// below the pack's threshold, the axes no rule answered, the split note and
+/// the equal-rank disagreements; `disagreements` counts the last, so that a
+/// door finds the stacks a pack cannot rank without reading every note. A
+/// registry from before gains both empty, and its next classify fills them.
+fn a_classification_notes_what_was_not_asked(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "classification", &["notes", "disagreements"])
+}
+
+/// Wave 7a (Nima, 2026-10-08: "on starting page we just need to add a
+/// root/s. then on data page when we add the folder as data"): a folder
+/// under a root is a dataset only when a person adds it. The datasets a
+/// development build made of every folder under a root, and that nothing
+/// has read since (no digest of its tree, nothing pseudonymised), are
+/// removed, their folders plain folders again; one that was read stays a
+/// dataset. No file is touched.
+fn a_root_s_folder_is_a_dataset_only_when_added(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "place")? {
+        return Ok(());
+    }
+    let t = schema::table("place");
+    let dataset = store
+        .dialect()
+        .text_of(t.column("dataset").expect("place.dataset"));
+    let rows = store.query(
+        &format!(
+            "SELECT id, {dataset}, path FROM {} WHERE role = 'source' ORDER BY id",
+            store.qualified("place")
+        ),
+        &[],
+    )?;
+    let read: Vec<std::path::PathBuf> = if table_exists(store, "source")? {
+        store
+            .query(
+                &format!("SELECT root_canonical FROM {}", store.qualified("source")),
+                &[],
+            )?
+            .iter()
+            .filter_map(|r| r.opt_text(0).ok().flatten().map(std::path::PathBuf::from))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let held = table_exists(store, "pseudonym_file")?;
+    for r in &rows {
+        let doc: serde_json::Value = r
+            .opt_text(1)?
+            .and_then(|d| serde_json::from_str(d).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if doc["root"].is_null() {
+            continue;
+        }
+        let id = r.int(0)?;
+        let path = std::path::Path::new(r.text(2)?);
+        if read.iter().any(|s| s.starts_with(path)) {
+            continue;
+        }
+        if held {
+            let n = store
+                .query(
+                    &format!(
+                        "SELECT COUNT(*) FROM {} WHERE place_id = {}",
+                        store.qualified("pseudonym_file"),
+                        store.dialect().param(1, schema::Type::Int)
+                    ),
+                    &[Param::Int(id)],
+                )?
+                .first()
+                .map(|r| r.int(0))
+                .transpose()?
+                .unwrap_or(0);
+            if n > 0 {
+                continue;
+            }
+        }
+        store.execute(
+            &format!(
+                "DELETE FROM {} WHERE id = {}",
+                store.qualified("place"),
+                store.dialect().param(1, schema::Type::Int)
+            ),
+            &[Param::Int(id)],
+        )?;
+    }
+    Ok(())
+}
+
+/// Wave 7a: schema 80's step again, for a store a development build
+/// migrated under its earlier form, before a dataset's state was read from
+/// its structure: every source place without a whole, current declaration
+/// undeclared, a place on a dataset's pseudonymised tree legacy. On a store
+/// schema 80 already brought there it changes nothing.
+fn a_dataset_s_declaration_is_its_structure(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    a_source_place_nobody_declared_is_undeclared(store, kind)
+}
+
+/// Wave 7a §5.4: a dataset may write an id type's value into PatientID,
+/// and a file whose subject has none is held with its subject and the type
+/// it waits for. A registry from before gains both columns empty.
+fn a_held_file_may_wait_for_its_subject_s_id_type(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pseudonym_file", &["subject_id", "wants_type"])
+}
+
+/// Wave 7a §5.3 (Nima, 2026-10-08: "when we have production i add each
+/// data one by one and decide how we treat them"): a source place without
+/// a whole, current declaration is `undeclared`, and nothing in it is read
+/// until a person says how its files arrive. That is a place `nils setup`
+/// made with no dataset, which every reader took as a de-identified folder
+/// read whole; one declared only by the old default to read its folder
+/// itself; and one arriving de-identified or coded that does not say what
+/// PatientID holds and how its subjects are found. The rest of each
+/// dataset (its rule, cohort and tag lists, what became of its originals)
+/// is kept. A whole declaration is kept as it is. A place that names a
+/// dataset's pseudonymised tree itself (a path ending in
+/// `derivatives/dcm-raw` or `derivatives/dcm-anon`) is a `legacy` place:
+/// it keeps reading that tree as an anonymised dataset, once it says what
+/// PatientID holds and how its subjects are found. Which of the rest are
+/// roots is the folder's to say, and the next exploration of the place
+/// says it. No file is touched.
+fn a_source_place_nobody_declared_is_undeclared(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "place")? {
+        return Ok(());
+    }
+    let t = schema::table("place");
+    let dataset = store
+        .dialect()
+        .text_of(t.column("dataset").expect("place.dataset"));
+    let rows = store.query(
+        &format!(
+            "SELECT id, {dataset}, path FROM {} WHERE role = 'source' ORDER BY id",
+            store.qualified("place")
+        ),
+        &[],
+    )?;
+    for r in &rows {
+        let current: serde_json::Value = r
+            .opt_text(1)?
+            .and_then(|d| serde_json::from_str(d).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let path = std::path::Path::new(r.text(2)?);
+        let names_a_tree = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|p| p == "derivatives")
+            && path
+                .file_name()
+                .is_some_and(|n| n == "dcm-raw" || n == "dcm-anon");
+        let kept = crate::place::dataset_of(&current, None).ok();
+        if names_a_tree {
+            let legacy = crate::place::dataset_of(
+                &serde_json::json!({
+                    "kind": "legacy",
+                    "arrives": "deidentified",
+                    "state": "anonymised",
+                    "trees": {"originals": null, "anon": "."},
+                }),
+                kept.as_ref(),
+            )
+            .map_err(Error::Message)?;
+            if Some(&legacy) != kept.as_ref() || current.is_null() {
+                store.update_by_id(
+                    t,
+                    &[("dataset", Param::from(legacy.to_string()))],
+                    "id",
+                    r.int(0)?,
+                )?;
+            }
+            continue;
+        }
+        if crate::place::incomplete(&current).is_none() {
+            continue;
+        }
+        let undeclared = crate::place::dataset_of(
+            &serde_json::json!({"arrives": crate::place::UNDECLARED}),
+            kept.as_ref(),
+        )
+        .unwrap_or_else(|_| crate::place::default_dataset(None));
+        if Some(&undeclared) == kept.as_ref() && !current.is_null() {
+            continue;
+        }
+        store.update_by_id(
+            t,
+            &[("dataset", Param::from(undeclared.to_string()))],
+            "id",
+            r.int(0)?,
+        )?;
+    }
+    Ok(())
+}
+
+/// Wave 7a (Nima, 2026-10-08: "we never save pn any where on registery or
+/// audit"): no personnummer is kept, not even sealed. The linkage store
+/// keeps a personnummer identity as its keyed lookup alone, and a held
+/// file's row keeps its shape and lookup; what a store from before sealed
+/// of one is dropped. The subject's code stands for the person.
+///
+/// A gap, written down after the review of Wave 7a's merge (2026-10-10):
+/// before Wave 7a a personnummer was filed under the keyed lookup of the
+/// number as written, and lookups now take its twelve digits, so a number
+/// filed as `850101-2382` is not found again as `198501012382`, and with its
+/// sealed value dropped here its lookup cannot be derived again. Deriving it
+/// needs the registry's key, which a migration does not hold. Only a
+/// registry that read personnummer before Wave 7a holds such identities:
+/// the pre-production one is archived for research as migrated and never
+/// read into again (record 55 B1, and the ruling of 2026-10-09), and
+/// production starts empty. A store that must go on reading personnummer
+/// would be keyed again with its key before it migrates; no tool does that
+/// yet.
+fn a_personnummer_is_never_kept(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    let d = store.dialect();
+    match kind {
+        Kind::Linkage => {
+            let Some(id) = crate::linkage::id_type_id(store, crate::personnummer::ID_TYPE)? else {
+                return Ok(());
+            };
+            store.execute(
+                &format!(
+                    "UPDATE {} SET ciphertext = {} WHERE id_type_id = {}",
+                    store.qualified("identity"),
+                    d.param(1, schema::Type::Bytes),
+                    d.param(2, schema::Type::Int)
+                ),
+                &[Param::Bytes(Vec::new()), Param::Int(id)],
+            )?;
+        }
+        Kind::Registry => {
+            if !table_exists(store, "pseudonym_file")? {
+                return Ok(());
+            }
+            store.execute(
+                &format!(
+                    "UPDATE {} SET sealed = NULL WHERE id_type = {}",
+                    store.qualified("pseudonym_file"),
+                    d.param(1, schema::Type::Text)
+                ),
+                &[Param::from(crate::personnummer::ID_TYPE)],
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// The 2026-10-03 fingerprint fields: a series gains how it stores its
 /// pixels (PhotometricInterpretation and SamplesPerPixel), an MR series the
@@ -1165,7 +1448,16 @@ fn a_source_place_is_a_dataset(store: &mut Store, kind: Kind) -> Result<(), Erro
             .opt_text(1)?
             .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
             .and_then(|h| h["arrives"].as_str().map(str::to_string));
-        let dataset = crate::place::default_dataset(arrives.as_deref());
+        // what a dataset was by default when this migration was written: the
+        // arrival its handling named, else de-identified, reading its folder
+        let dataset = crate::place::dataset_of(
+            &serde_json::json!({
+                "arrives": arrives.as_deref().filter(|a| *a != crate::place::UNDECLARED).unwrap_or("deidentified"),
+                "trees": {"originals": null, "anon": "."},
+            }),
+            None,
+        )
+        .map_err(Error::Message)?;
         store.update_by_id(
             t,
             &[("dataset", Param::from(dataset.to_string()))],
@@ -2619,6 +2911,247 @@ mod column_migration {
         let places = crate::place::list(&mut store).unwrap();
         let plain = places.iter().find(|p| p.name == "plain").unwrap();
         assert_eq!(plain.dataset["arrives"], "coded");
+    }
+
+    /// Wave 7a §5.3: a source place without a whole, current declaration
+    /// becomes undeclared: one setup made with no dataset, one the old
+    /// default had read its folder itself, and a de-identified one that does
+    /// not say what PatientID holds and how its subjects are found. It keeps
+    /// its cohort. A whole declaration stays; a place of another role keeps
+    /// none. Twice is the same as once.
+    #[test]
+    fn a_source_place_nobody_declared_becomes_undeclared() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 79) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        let folder = r#"{"arrives": "deidentified", "trees": {"originals": null, "anon": "."}, "cohort": "ms"}"#;
+        let half = r#"{"arrives": "deidentified", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let whole = r#"{"arrives": "deidentified", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}, "patient_id": "id-type:site-id", "subjects": "map"}"#;
+        let identified = r#"{"arrives": "identified", "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"}}"#;
+        let row = |name: &str, role: &str, dataset: Option<&str>| {
+            vec![
+                Param::from(name),
+                Param::from(role),
+                Param::from(if name == "raw" {
+                    "/data/study/derivatives/dcm-raw".to_string()
+                } else {
+                    format!("/data/{name}")
+                }),
+                Param::from("{}"),
+                Param::from("2026-10-01T00:00:00Z"),
+                dataset.map_or(Param::Null, Param::from),
+            ]
+        };
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "dataset",
+            ],
+        );
+        store
+            .insert(
+                &spec,
+                &[
+                    row("setup", "source", None),
+                    row("folder", "source", Some(folder)),
+                    row("half", "source", Some(half)),
+                    row("whole", "source", Some(whole)),
+                    row("identified", "source", Some(identified)),
+                    row(
+                        "raw",
+                        "source",
+                        Some(r#"{"arrives": "deidentified", "cohort": "ms"}"#),
+                    ),
+                    row("out", "export", None),
+                ],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            a_source_place_nobody_declared_is_undeclared(&mut store, Kind::Registry).unwrap();
+            let places = crate::place::list(&mut store).unwrap();
+            let of = |name: &str| {
+                places
+                    .iter()
+                    .find(|p| p.name == name)
+                    .unwrap()
+                    .dataset
+                    .clone()
+            };
+            assert_eq!(of("setup")["arrives"], "undeclared");
+            assert_eq!(
+                of("setup")["trees"],
+                serde_json::json!({"originals": null, "anon": null})
+            );
+            assert_eq!(of("folder")["arrives"], "undeclared");
+            assert_eq!(of("folder")["trees"]["anon"], serde_json::Value::Null);
+            assert_eq!(of("folder")["cohort"], "ms");
+            assert_eq!(of("half")["arrives"], "undeclared");
+            assert_eq!(of("whole")["arrives"], "deidentified");
+            assert_eq!(of("whole")["subjects"], "map");
+            assert_eq!(of("identified")["arrives"], "identified");
+            // a place on a dataset's pseudonymised tree reads it, as legacy
+            assert_eq!(of("raw")["kind"], "legacy");
+            assert_eq!(of("raw")["state"], "anonymised");
+            assert_eq!(of("raw")["trees"]["anon"], ".");
+            assert_eq!(of("raw")["cohort"], "ms");
+            assert!(of("out").is_null());
+        }
+    }
+
+    /// Wave 7a: a dataset a development build made of a root's folder and
+    /// that nothing read is removed; one a digest read, or the
+    /// pseudonymiser wrote, stays; a dataset of no root and the root stay.
+    #[test]
+    fn a_root_s_unread_folders_are_plain_folders_again() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 83) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        let under = r#"{"kind": "dataset", "root": "src", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let alone = r#"{"kind": "dataset", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let root = r#"{"kind": "root", "arrives": "undeclared"}"#;
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "dataset",
+            ],
+        );
+        let row = |name: &str, path: &str, dataset: &str| {
+            vec![
+                Param::from(name),
+                Param::from("source"),
+                Param::from(path),
+                Param::from("{}"),
+                Param::from("2026-10-08T00:00:00Z"),
+                Param::from(dataset),
+            ]
+        };
+        store
+            .insert(
+                &spec,
+                &[
+                    row("src", "/data/src", root),
+                    row("unread", "/data/src/unread", under),
+                    row("digested", "/data/src/digested", under),
+                    row("written", "/data/src/written", under),
+                    row("alone", "/data/alone", alone),
+                ],
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO source (root, root_canonical, first_seen_at) VALUES ('x', '/data/src/digested/derivatives/dcm-anon', '2026-10-08T00:00:00Z')",
+                &[],
+            )
+            .unwrap();
+        let written = store
+            .query("SELECT id FROM place WHERE name = 'written'", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!("INSERT INTO pseudonym_file (place_id, path, size, mtime, state, first_seen, code_anyway) VALUES ({written}, 'a', 1, 1, 'written', '2026-10-08T00:00:00Z', 0)"),
+                &[],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            a_root_s_folder_is_a_dataset_only_when_added(&mut store, Kind::Registry).unwrap();
+        }
+        let mut names: Vec<String> = crate::place::list(&mut store)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["alone", "digested", "src", "written"]);
+    }
+
+    /// Wave 7a: what a store from before sealed of a personnummer is
+    /// dropped, in the linkage store and in a held file's row; every other
+    /// identifier stays sealed.
+    #[test]
+    fn a_personnummer_kept_before_is_dropped() {
+        let keys = crate::linkage::Subkeys::derive(b"a test key");
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        migrate(&mut linkage, Kind::Linkage).unwrap();
+        let pnr = crate::linkage::add_id_type(&mut linkage, "personnummer", None)
+            .unwrap()
+            .id;
+        let other = crate::linkage::id_type_id(&mut linkage, "patient-id")
+            .unwrap()
+            .unwrap();
+        crate::linkage::insert_identities(
+            &mut linkage,
+            &[
+                crate::linkage::NewIdentity {
+                    subject_id: 1,
+                    id_type_id: pnr,
+                    lookup: vec![1],
+                    ciphertext: keys.seal("198501012382"),
+                    source: "dicom",
+                    first_batch_id: None,
+                },
+                crate::linkage::NewIdentity {
+                    subject_id: 1,
+                    id_type_id: other,
+                    lookup: vec![2],
+                    ciphertext: keys.seal("P1"),
+                    source: "dicom",
+                    first_batch_id: None,
+                },
+            ],
+        )
+        .unwrap();
+        for _ in 0..2 {
+            a_personnummer_is_never_kept(&mut linkage, Kind::Linkage).unwrap();
+        }
+        let shown = crate::linkage::reveal(&mut linkage, &keys, 1, "tester", None).unwrap();
+        let kept: Vec<(String, bool, String)> = shown
+            .into_iter()
+            .map(|r| (r.id_type, r.kept, r.value))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("personnummer".to_string(), false, String::new()),
+                ("patient-id".to_string(), true, "P1".to_string()),
+            ]
+        );
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        migrate(&mut registry, Kind::Registry).unwrap();
+        registry
+            .execute(
+                "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, sealed, id_type, first_seen, code_anyway) \
+                 VALUES (1, 'a', 1, 1, 'held', x'0102', 'personnummer', '2026-10-08T00:00:00Z', 0), \
+                        (1, 'b', 1, 1, 'held', x'0102', 'study-id', '2026-10-08T00:00:00Z', 0)",
+                &[],
+            )
+            .unwrap();
+        a_personnummer_is_never_kept(&mut registry, Kind::Registry).unwrap();
+        let rows = registry
+            .query(
+                "SELECT path FROM pseudonym_file WHERE sealed IS NOT NULL",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text(0).unwrap(), "b");
     }
 
     /// Record 38 S3: a registry and a linkage store from before open with

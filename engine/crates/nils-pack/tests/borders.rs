@@ -81,6 +81,7 @@ fn cand(stacks: &[(i64, BTreeMap<String, String>)], family: Option<&str>) -> Can
         values,
         each: stacks.iter().map(|(_, v)| v.clone()).collect(),
         family: family.map(str::to_string),
+        acquired: Vec::new(),
     }
 }
 
@@ -758,6 +759,117 @@ fn a_border_this_engine_does_not_know_is_refused_and_so_are_bad_numbers() {
         });
         let e = refused(&dir, want);
         assert!(e.contains(want), "{want}: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ------------------------------------------------------ pack contract 9
+//
+// The 2026-10-10 study of the pick borders: a pick may say which stacks of
+// a role compete for it, and how a near tie is decided.
+
+/// R1 and an R8-like order, as a pack would write them.
+const CONTRACT_9_KEYS: &str = "
+candidates:
+  t1w:
+    unless:
+      - {of: body_part, any: [spine, neck, chest, other]}
+  t2w:
+    when:
+      - {of: fov_x, ge: 175}
+    unless:
+      - {of: body_part, any: [spine, neck, chest, other]}
+near_tie:
+  - {of: mr_acquisition_type, prefer: ['3D']}
+  - {of: orientation, prefer: [Axial, Coronal, Sagittal]}
+  - {of: post_contrast, avoid: [given], roles: [t1w]}
+  - {of: slice_thickness, lowest: true}
+  - {of: series_number, lowest: true}
+";
+
+#[test]
+fn which_stacks_compete_and_how_a_near_tie_is_decided_are_contract_9_s() {
+    let dir = edited(9, |main| format!("{main}{CONTRACT_9_KEYS}"));
+    let pack = nils_pack::load(&dir, None).unwrap_or_else(|e| panic!("{e}"));
+    let m = pack.picks.iter().find(|m| m.name == "main").unwrap();
+    assert_eq!(m.candidates.len(), 2);
+    let t1w = &m.candidates["t1w"];
+    assert!(t1w.when.is_empty());
+    assert_eq!(
+        t1w.unless,
+        [pick::Condition::Holds {
+            of: "body_part".into(),
+            any: vec![
+                "spine".into(),
+                "neck".into(),
+                "chest".into(),
+                "other".into()
+            ],
+        }]
+    );
+    assert_eq!(m.candidates["t2w"].when.len(), 1);
+    assert_eq!(m.near_tie.len(), 5);
+    // A value of an axis that stores labels is read as it is stored.
+    assert_eq!(
+        m.near_tie[2].rank,
+        pick::Rank::Avoid(vec!["1".into()]),
+        "{:?}",
+        m.near_tie[2]
+    );
+    assert_eq!(m.near_tie[2].roles, ["t1w"]);
+    assert_eq!(m.near_tie[3].rank, pick::Rank::Lowest);
+    for name in ["body_part", "fov_x", "series_number", "slice_thickness"] {
+        assert!(m.reads().contains(&name.to_string()), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // A pack that declares 8 is refused them, rather than picked without.
+    let dir = edited(8, |main| format!("{main}{CONTRACT_9_KEYS}"));
+    let e = refused(&dir, "contract 9's keys at 8");
+    assert!(
+        e.contains("candidates is pack contract 9's; this pack declares contract 8"),
+        "{e}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_candidacy_or_a_near_tie_order_the_engine_cannot_read_is_refused() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "candidates: {t3w: {unless: [{of: body_part, any: [spine]}]}}",
+            "t3w is not a role this pick picks for",
+        ),
+        (
+            "candidates: {t1w: {unless: [{of: body_part, any: [knee]}]}}",
+            "knee is not a value of the axis body_part",
+        ),
+        (
+            "candidates: {t1w: {unless: [{of: bodypart, any: [spine]}]}}",
+            "bodypart is neither an axis of this pack nor a field of the fingerprint",
+        ),
+        ("candidates: {t1w: {}}", "names no condition"),
+        (
+            "candidates: {t1w: {unless: [{of: body_part, is: spine}]}}",
+            "a condition is {of, any: [values]}",
+        ),
+        (
+            "candidates: {t1w: {except: [{of: body_part, any: [spine]}]}}",
+            "except is not what a role's candidates say",
+        ),
+        ("near_tie: []", "names no step"),
+        (
+            "near_tie: [{of: mr_acquisition_type, first: ['3D']}]",
+            "a step is {of, prefer: [values]}",
+        ),
+        (
+            "near_tie: [{of: slice_thickness, lowest: true, roles: [t9w]}]",
+            "t9w is not a role this pick picks for",
+        ),
+    ];
+    for (text, want) in cases {
+        let dir = edited(9, |main| format!("{main}\n{text}\n"));
+        let e = refused(&dir, want);
+        assert!(e.contains(want), "{text}: {e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

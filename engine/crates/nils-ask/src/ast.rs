@@ -239,6 +239,20 @@ impl<'de> Deserialize<'de> for Arg {
     }
 }
 
+/// How deep clauses nest anywhere in a document's JSON: a clause whose
+/// arguments hold no clause is 1, a list literal adds nothing, and an
+/// object (a set, the out block) is the deepest of its values.
+pub fn clause_depth(v: &Value) -> usize {
+    match v {
+        Value::Array(items) if looks_like_clause(v) => {
+            1 + items.iter().skip(2).map(clause_depth).max().unwrap_or(0)
+        }
+        Value::Array(items) => items.iter().map(clause_depth).max().unwrap_or(0),
+        Value::Object(map) => map.values().map(clause_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// A JSON array whose first element is a string and second an object is a
 /// clause; every other array is a list literal.
 fn looks_like_clause(v: &Value) -> bool {

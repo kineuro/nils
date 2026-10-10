@@ -34,6 +34,33 @@ assistant, `assistant/`, `kvasir/` and `llama.cpp/`. A directory of DICOM the en
 read can be named here; it becomes an ingest root and a `source` place, and
 it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 
+The source place is a root, and setup adds the root alone. A folder under
+it becomes a dataset only when you add it, and only then is its structure
+read; nothing else is assumed, since a folder may hold no data at all.
+`nils place folders source --search NAME` finds folders by name, a page at
+a time, `nils place folder source FOLDER` shows whether one holds DICOM and
+`derivatives/` and what it would be, and `nils place add-dataset source
+FOLDER` adds it.
+What a dataset is, its structure says:
+
+| Under the dataset's folder | It is | What reads it |
+|---|---|---|
+| only `derivatives/dcm-original` | identified | the pseudonymiser, which writes `derivatives/dcm-anon` |
+| only `derivatives/dcm-anon` (or `dcm-raw`, renamed `dcm-anon`) | anonymised | the registry |
+| both | identified, with its anonymised copy | the registry reads `dcm-anon`, the pseudonymiser `dcm-original` |
+| anything else | unknown | nothing |
+
+A dataset is unknown when entries holding DICOM sit beside `derivatives/`,
+or when it has no tree at all. Say which tree those entries go into, and
+they move only then: the answer of `add-dataset` says what would move, and `nils place set <id> --move-into originals --confirm-move`
+(identified data) or `--move-into anon --confirm-move` (already anonymised)
+moves them. An anonymised dataset also says what its PatientID holds and
+how its subjects are found, before anything reads it: `nils place set <id>
+--patient-id id-type:NAME --subjects map` (a map of subject codes to its
+ids) or `--subjects generated` (the subject code generator makes each code
+from the id). `nils place explore` reads each dataset's structure again and
+adds nothing.
+
 A site that has places of its own names them instead, once each, with the
 role and the guarantees they really have: `--place
 archives=/data/archives,role=backup,snapshots,protected`. After the name and
@@ -70,6 +97,24 @@ Where there is no terminal to ask on and no `--key-file`, a passphrase is
 made from the machine's own randomness and written to `<dir>/key.passphrase`
 readable by nobody else. Move it into your password manager and delete the
 file.
+
+A new registry is made with the scheme of the subject code generator,
+`blake2b-8`: a person's code is the keyed 8-byte BLAKE2b of their identifier
+(of a personnummer, its twelve digits) under the site's own constant key, as
+16 hex characters. Every site has its own key, so its codes are its own.
+`--scheme subject-code-generator` names the same scheme.
+`--scheme blake2b-32` makes one with a 32-byte digest and a shorter display
+code instead. A registry keeps the scheme it was made with: a rerun over an
+existing registry that names another scheme is refused.
+
+Where a site already derives codes with a key of its own, give that key with
+`--reg-key-file FILE` instead of a passphrase, so that the registry gives
+every person the code the key has always given them. The file holds one
+line, `REG_KEY=<value>` or the value alone, and the value is the key byte for
+byte: it is not trimmed, so a value that begins or ends with a space is
+refused, as is an empty one or one longer than 64 bytes. The file must be
+readable by its owner only (`chmod 600 FILE`); setup refuses it otherwise,
+before anything is written. The key is never shown, only its fingerprint.
 
 **5. Who may sign in.** Three answers, and each one sets both parts at once:
 
@@ -599,12 +644,24 @@ nils uninstall
 ```
 
 It asks what should go. Keeping your data removes the services, the
-programs, the packs, llama.cpp's build and Kvasir's directory, with the
-models Kvasir holds, their keys, its subscriptions and the assistant's key,
-and keeps the
-registry and its key, the backups, the desk's people and the assistant's
-history. Everything removes the base directory as well, and the registry's
-key cannot be recovered. `--keep-data` and `--purge` answer it.
+programs, the packs, llama.cpp's build and what building Kvasir and the
+assistant made, and keeps the registry and its key, the backups, the desk's
+people, the assistant's history, and Kvasir's models, its store with their
+keys and the sealed credentials, its seal key and pepper and the assistant's
+key. It also keeps the setup's choices: the record is copied into the base
+directory as `setup.kept.toml`, with the parts, the places, the sign-in, the
+ports, the model server and the schemas and lingering this install made.
+Everything removes the base directory as well, and the registry's key cannot
+be recovered. `--keep-data` and `--purge` answer it, and `--print` shows the
+plan, what goes and what is kept, and changes nothing.
+
+A setup into a directory that holds `setup.kept.toml`, and no setup on
+record, takes the choices kept there as its defaults, so `nils setup --dir
+<dir> --yes` installs the same thing again with nothing given twice, and the
+record it writes still names the schemas the first install made, so a later
+purge drops them. The copy goes once the new record holds it. With no record
+left, `nils uninstall` reads the copy in `~/nils`, or in the directory given
+with `--dir`.
 
 A purge removes the directory the setup record names, whatever is in it, so
 an install that stopped before it made a registry leaves no key on the disk.
@@ -646,6 +703,8 @@ directory is NILS's.
 | `--pack-dir DIR` | Where the engine reads its rule packs |
 | `--workers N` | How many requests the engine answers at once |
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |
+| `--reg-key-file FILE` | The registry's key from a site's key file (`REG_KEY=<value>`, mode 600), instead of a passphrase |
+| `--scheme blake2b-8\|blake2b-32` | The pseudonym scheme of a new registry; `blake2b-8`, the subject code generator, by default |
 | `--service`, `--no-service` | Write and start services, or do not |
 | `--system` | Write the services of this machine, in `/etc/systemd/system`; root's to do |
 | `--account PART=ACCOUNT` | With `--system`: the account a part runs as; `supervisor=` is required, and must be nobody else's |

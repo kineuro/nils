@@ -86,6 +86,23 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
         .collect();
     assert_eq!(required, ["pack", "version", "contract", "modality"]);
     assert_eq!(schema["additionalProperties"], false);
+    // The review block, key by key: the loader reads these four, and the
+    // schema closes the block on them.
+    let mut review: Vec<&str> = schema["properties"]["review"]["properties"]
+        .as_object()
+        .expect("review's properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    review.sort_unstable();
+    assert_eq!(
+        review,
+        ["by_model", "low_confidence", "missing", "silent_when"]
+    );
+    assert_eq!(
+        schema["properties"]["review"]["additionalProperties"],
+        false
+    );
     // Every property says what it is for: the description is what a reader
     // and an agent get.
     for (key, p) in properties {
@@ -214,10 +231,13 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
     let _ = std::fs::remove_dir_all(&dir);
     let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
     let pack = nils_pack::load(&mri, None).expect("the MRI pack loads");
-    assert_eq!(
-        pack.contract,
-        nils_pack::CONTRACT,
-        "the shipped pack writes exclusions and hints"
+    // The shipped pack declares 9 since 1.0.2, whose review block names the
+    // axes an operation of their own answers (`review.by_model`); it writes
+    // exclusions and hints, which 6 added.
+    assert!(
+        (9..=nils_pack::CONTRACT).contains(&pack.contract),
+        "the shipped pack writes exclusions and hints: {}",
+        pack.contract
     );
     assert!(!pack.excludes.is_empty() && !pack.hints.is_empty());
     assert!(
@@ -285,6 +305,47 @@ fn the_mri_pack_s_manifest_keeps_to_the_contract() {
             "packs/mri/pack.yml lacks {key}"
         );
     }
+    // And below the top: every key of an object the schema closes
+    // (`additionalProperties: false`) is one of its properties, at every
+    // depth the schema spells out. `review.by_model` was read by the engine
+    // and refused by the schema until 2026-10-10.
+    let value: serde_json::Value = serde_saphyr::from_str(&manifest).expect("pack.yml is YAML");
+    let mut stray = Vec::new();
+    keys_keep_to(&schema, &value, "", &mut stray);
+    assert!(
+        stray.is_empty(),
+        "packs/mri/pack.yml has keys its contract does not: {stray:?}"
+    );
+}
+
+/// Every key of `value` that `schema` closes with `additionalProperties:
+/// false` is one of its properties, at every depth the schema describes
+/// inline; what it names a stray is pushed to `out`.
+fn keys_keep_to(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    at: &str,
+    out: &mut Vec<String>,
+) {
+    let (Some(object), Some(properties)) = (
+        value.as_object(),
+        schema.get("properties").and_then(|p| p.as_object()),
+    ) else {
+        return;
+    };
+    let closed = schema.get("additionalProperties") == Some(&serde_json::Value::Bool(false));
+    for (key, v) in object {
+        let here = if at.is_empty() {
+            key.clone()
+        } else {
+            format!("{at}.{key}")
+        };
+        match properties.get(key) {
+            Some(s) => keys_keep_to(s, v, &here, out),
+            None if closed => out.push(here),
+            None => {}
+        }
+    }
 }
 
 /// Record 53: the MRI pack without what pack contract 8 added (its session
@@ -321,4 +382,78 @@ fn without_contract_8(dir: &Path) {
         }
         out.join("\n")
     });
+}
+
+/// Record 56 §5.5: the patch contract (`contracts/patch/`) is the format the
+/// engine reads. The version is `nils_pack::patch::FORMAT`; every operation
+/// the engine knows is on the schema, each with exactly the keys the engine
+/// reads, and the schema names no operation the engine does not.
+#[test]
+fn every_operation_and_key_the_engine_reads_is_on_the_patch_schema() {
+    let version: u64 = std::fs::read_to_string(contracts().join("patch/VERSION"))
+        .expect("contracts/patch/VERSION")
+        .trim()
+        .parse()
+        .expect("a version number");
+    assert_eq!(nils_pack::patch::FORMAT, version);
+    let text =
+        std::fs::read_to_string(contracts().join(format!("patch/v{version}/patch.schema.json")))
+            .expect("the patch schema of the published version exists");
+    let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema is JSON");
+    let top: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(top, nils_pack::patch::says(), "the patch's own keys");
+    assert_eq!(schema["additionalProperties"], false);
+    let ops = schema["$defs"]["operation"]["oneOf"].as_array().unwrap();
+    let mut named = Vec::new();
+    for op in ops {
+        let kind = op["properties"]["op"]["const"]
+            .as_str()
+            .expect("an op names its kind");
+        named.push(kind);
+        let keys: Vec<&str> = op["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut want = nils_pack::patch::reads(kind);
+        let mut got = keys.clone();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, want, "{kind}: the schema's keys are the engine's");
+        assert_eq!(op["additionalProperties"], false, "{kind}");
+        assert!(
+            op["description"].as_str().is_some_and(|d| !d.is_empty()),
+            "{kind} says what it does"
+        );
+    }
+    let mut kinds = nils_pack::patch::KINDS.to_vec();
+    kinds.sort_unstable();
+    named.sort_unstable();
+    assert_eq!(
+        named, kinds,
+        "the operations the schema names are the engine's"
+    );
+}
+
+/// The patch contract's example is a patch the engine reads, and every
+/// operation of it applies to the MRI pack.
+#[test]
+fn the_patch_contract_s_example_applies_to_the_mri_pack() {
+    let version = std::fs::read_to_string(contracts().join("patch/VERSION")).unwrap();
+    let text =
+        std::fs::read_to_string(contracts().join(format!("patch/v{}/example.yml", version.trim())))
+            .expect("the example of the published version exists");
+    let p = nils_pack::patch::Patch::parse("example.yml", &text).unwrap_or_else(|e| panic!("{e}"));
+    let kinds: std::collections::BTreeSet<&str> =
+        p.operations.iter().map(|o| o.kind.as_str()).collect();
+    assert!(kinds.len() >= 7, "the example shows most kinds: {kinds:?}");
+    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let patched = nils_pack::patch::apply(&mri, &p, &|_| true).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(patched.applied.len(), p.operations.len());
 }

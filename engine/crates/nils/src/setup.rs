@@ -577,6 +577,18 @@ pub(crate) struct SetupArgs {
     /// The registry key's passphrase, from a file instead of a prompt
     #[arg(long, value_name = "FILE")]
     key_file: Option<PathBuf>,
+    /// The registry's key from a key file, where a site already has one:
+    /// one line, REG_KEY=<value> or the value alone, kept readable by its
+    /// owner only (chmod 600). The value is the key, byte for byte
+    #[arg(long, value_name = "FILE", conflicts_with = "key_file")]
+    reg_key_file: Option<PathBuf>,
+    /// The pseudonym scheme a new registry is made with: blake2b-8, the
+    /// subject code generator, the keyed 8-byte BLAKE2b of the identifier as
+    /// 16 hex characters (the default; also accepted as
+    /// subject-code-generator), or blake2b-32. A registry keeps the scheme it
+    /// was made with
+    #[arg(long, value_name = "blake2b-8|blake2b-32")]
+    scheme: Option<String>,
     /// Write and start services
     #[arg(long)]
     service: bool,
@@ -1337,7 +1349,7 @@ struct AccountStep {
 /// account makes it, since every pseudonym the registry ever gives follows
 /// from these, so a registry made in setup's own process and one made as the
 /// engine's account are both made from this.
-fn registry_init(backend: &BackendChoice) -> InitOptions {
+fn registry_init(backend: &BackendChoice, scheme: Scheme) -> InitOptions {
     let (backend, dsn, schema) = match backend {
         BackendChoice::Sqlite => (Backend::Sqlite, None, None),
         BackendChoice::Postgres { dsn, schema } => {
@@ -1348,11 +1360,118 @@ fn registry_init(backend: &BackendChoice) -> InitOptions {
         backend,
         dsn,
         schema,
-        scheme: Scheme::Blake2b32,
+        scheme,
         key: "nils".to_string(),
         display_length: 12,
         session_scheme: None,
     }
+}
+
+/// The longest key BLAKE2b takes, in bytes.
+const MAX_KEY_BYTES: usize = 64;
+
+/// The prefix a site's key file may write before the value.
+const REG_KEY_PREFIX: &str = "REG_KEY=";
+
+/// The pseudonym scheme an install's registry has: the one named, else the
+/// default, for a registry this install makes. A registry that is already
+/// there keeps the scheme it was made with, since every code it has given
+/// follows from it: a scheme named that is not its own is refused, and one
+/// that cannot be read where it stands is left to the registry.
+fn scheme_for(named: Option<&str>, existing: Option<&Home>) -> Result<Scheme, String> {
+    let scheme = match named {
+        Some(name) => name.parse::<Scheme>().map_err(|_| {
+            format!("--scheme {name}: blake2b-8 (the subject code generator) or blake2b-32")
+        })?,
+        None => Scheme::DEFAULT,
+    };
+    if let (Some(name), Some(home)) = (named, existing)
+        && let Some(own) = scheme_of(home)
+        && own != scheme
+    {
+        return Err(format!(
+            "--scheme {name}: the registry at {} was made with {own}, and a registry keeps \
+             the scheme it was made with; leave --scheme out to keep it",
+            home.dir().display()
+        ));
+    }
+    Ok(scheme)
+}
+
+/// The scheme of the registry at `home`, read as it stands with nothing
+/// changed; none where it cannot be read that way.
+fn scheme_of(home: &Home) -> Option<Scheme> {
+    use nils_registry::store::Param;
+    let mut store = home.open_as_it_stands().ok()?;
+    let table = store.qualified("registry_meta");
+    let sql = format!(
+        "SELECT value FROM {table} WHERE key = {}",
+        store.dialect().param(1, nils_registry::schema::Type::Text)
+    );
+    let row = store
+        .query_opt(&sql, &[Param::from("pseudonym_scheme")])
+        .ok()??;
+    row.text(0).ok()?.parse().ok()
+}
+
+/// The registry's key from a site's key file (`--reg-key-file`): one line,
+/// `REG_KEY=<value>` or the value alone, with one line end after it. The
+/// value is the key byte for byte, so nothing in it is changed: a value
+/// that begins or ends with a space or a tab is refused rather than trimmed,
+/// since trimming would make another key without a word. Refused as well:
+/// a file that is not a regular file, one that its group or others may
+/// read or write, an empty value, a second line, and a value longer than
+/// the 64 bytes BLAKE2b takes as a key. The value is never in a message.
+fn reg_key_from_file(path: &Path) -> Result<String, String> {
+    let named = || format!("--reg-key-file {}", path.display());
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", named()))?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a regular file", named()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{}: its group or others may read or write it (mode {mode:o}); the registry's \
+                 key is readable by its owner only: chmod 600 {}",
+                named(),
+                path.display()
+            ));
+        }
+    }
+    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", named()))?;
+    let text = String::from_utf8(raw).map_err(|_| format!("{}: not text", named()))?;
+    let line = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(&text);
+    if line.contains(['\n', '\r']) {
+        return Err(format!(
+            "{}: more than one line; the file holds the key alone",
+            named()
+        ));
+    }
+    let value = line.strip_prefix(REG_KEY_PREFIX).unwrap_or(line);
+    if value.is_empty() {
+        return Err(format!("{}: the key is empty", named()));
+    }
+    if value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) {
+        return Err(format!(
+            "{}: the key begins or ends with a space or a tab, which is not trimmed, since the \
+             key is used byte for byte; remove it from the file",
+            named()
+        ));
+    }
+    if value.len() > MAX_KEY_BYTES {
+        return Err(format!(
+            "{}: the key is {} bytes, and a key is at most {MAX_KEY_BYTES}",
+            named(),
+            value.len()
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// The two steps that make a registry: the key added, with its passphrase on
@@ -1367,10 +1486,21 @@ fn registry_init(backend: &BackendChoice) -> InitOptions {
 /// reads the connection string from its input. It makes the registry from
 /// [`registry_init`] itself, as setup's own process does, so the pseudonym
 /// settings are one place's and cannot drift between the two.
-fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<AccountStep> {
+fn registry_made_steps(
+    backend: &BackendChoice,
+    scheme: Scheme,
+    passphrase: &str,
+) -> Vec<AccountStep> {
     let (init, input) = match backend {
         BackendChoice::Sqlite => (
-            owned_words(&[REGISTRY_STEP, "init", "--backend", Backend::Sqlite.name()]),
+            owned_words(&[
+                REGISTRY_STEP,
+                "init",
+                "--backend",
+                Backend::Sqlite.name(),
+                "--scheme",
+                scheme.name(),
+            ]),
             None,
         ),
         BackendChoice::Postgres { dsn, schema } => (
@@ -1381,6 +1511,8 @@ fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<Account
                 Backend::Postgres.name(),
                 "--schema",
                 schema,
+                "--scheme",
+                scheme.name(),
             ]),
             Some(dsn.as_bytes().to_vec()),
         ),
@@ -3996,6 +4128,40 @@ pub(crate) fn read_state() -> Option<State> {
     toml::from_str(&text).ok()
 }
 
+/// The copy of the setup record an uninstall that keeps the data leaves in
+/// the install's own directory, beside the data it describes: the parts, the
+/// places, the sign-in, the ports, the model server, and the schemas and the
+/// lingering this install made, which a later purge removes. The next setup
+/// in that directory reads it for its defaults, so nothing has to be given
+/// again, and carries what the install made outside its directory into the
+/// record it writes; an uninstall finds it where no record is left.
+const KEPT_RECORD: &str = "setup.kept.toml";
+
+fn kept_record_path(dir: &Path) -> PathBuf {
+    dir.join(KEPT_RECORD)
+}
+
+/// The record as it is kept: the facts, without what the uninstall took
+/// away. The programs it named and the privilege it was given are gone, and
+/// a kept record is never an install that stopped partway.
+fn kept_record_of(state: &State) -> State {
+    let mut kept = state.clone();
+    kept.programs.clear();
+    kept.helper = None;
+    kept.unfinished = false;
+    kept
+}
+
+/// The record an uninstall kept in `dir`, where there is one. The directory
+/// it was found in is the install's, wherever the directory has moved since.
+fn read_kept_record(dir: &Path) -> Option<State> {
+    let text = std::fs::read_to_string(kept_record_path(dir)).ok()?;
+    let mut kept: State = toml::from_str(&text).ok()?;
+    kept.dir = dir.display().to_string();
+    kept.unfinished = false;
+    Some(kept)
+}
+
 fn write_state(state: &State) -> Result<PathBuf, Exit> {
     let path = state_path();
     if let Some(dir) = path.parent() {
@@ -4073,6 +4239,12 @@ pub(crate) struct Plan {
     /// given the one setup asked for.
     pub(crate) sources: Vec<(String, PathBuf)>,
     pub(crate) registry_exists: bool,
+    /// The pseudonym scheme a registry made by this install is made with.
+    /// A registry that is already there keeps its own.
+    pub(crate) scheme: Scheme,
+    /// The key file the registry's key is read from (`--reg-key-file`),
+    /// named in the plan; the key itself never is.
+    pub(crate) reg_key_file: Option<PathBuf>,
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
@@ -4375,6 +4547,8 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
             .map(|p| PathBuf::from(&p.path)),
         sources,
         registry_exists: true,
+        scheme: Scheme::DEFAULT,
+        reg_key_file: None,
         service: !state.service.is_empty() && state.service != "none",
         channel: channel.map(str::to_string),
         version: update::VERSION.to_string(),
@@ -5766,11 +5940,31 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
     let mut console = Console::new(args.yes || args.print);
     let (existing, restarted) = go_on_from(read_state());
+    // With no record, the one an uninstall that kept the data left in the
+    // directory this run installs into: its choices are this run's defaults.
+    let kept = if existing.is_none() && restarted.is_none() {
+        let dir = args
+            .dir
+            .as_ref()
+            .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()))
+            .unwrap_or_else(default_dir);
+        read_kept_record(&dir)
+    } else {
+        None
+    };
     let facts = Facts::probe();
 
     let flow = if console.can_draw_screens() {
-        let (flow, answered) = console
-            .screens(|console| questions(console, &args, existing.as_ref(), &facts, restarted))?;
+        let (flow, answered) = console.screens(|console| {
+            questions(
+                console,
+                &args,
+                existing.as_ref(),
+                kept.as_ref(),
+                &facts,
+                restarted,
+            )
+        })?;
         if matches!(flow, Flow::Install(..)) && !answered.is_empty() {
             let p = console.palette;
             println!();
@@ -5782,8 +5976,15 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             "{}",
             console.bold("NILS setup: the engine, the desk and the assistant")
         );
-        questions(&mut console, &args, existing.as_ref(), &facts, restarted)
-            .map_err(Stop::into_exit)?
+        questions(
+            &mut console,
+            &args,
+            existing.as_ref(),
+            kept.as_ref(),
+            &facts,
+            restarted,
+        )
+        .map_err(Stop::into_exit)?
     };
 
     match flow {
@@ -5800,6 +6001,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             purge: false,
             yes: false,
             print: args.print,
+            dir: None,
         }),
         Flow::Printed => Ok(()),
         Flow::Unready(missing) => Err(fail(format!(
@@ -5836,6 +6038,7 @@ fn questions(
     console: &mut Console,
     args: &SetupArgs,
     existing: Option<&State>,
+    kept: Option<&State>,
     facts: &Facts,
     restarted: Option<Ports>,
 ) -> Result<Flow, Stop> {
@@ -5882,6 +6085,21 @@ fn questions(
             state_path().display()
         ))
         .into());
+    }
+
+    // What this install's own services hold is the install on record's
+    // alone; every other default is taken from it, or where none is on
+    // record, from the record an uninstall that kept the data left.
+    let installed = existing;
+    let existing = existing.or(kept);
+    if let Some(kept) = kept {
+        console.note(&format!(
+            "the setup kept with the data in {} is read, so the choices made there are the \
+             defaults: {}, {} mode",
+            kept.dir,
+            kept.parts.keys().cloned().collect::<Vec<_>>().join(", "),
+            kept.mode
+        ));
     }
 
     if !console.interactive() && !args.print {
@@ -6301,8 +6519,21 @@ fn questions(
             }
         }
     };
+    let scheme =
+        scheme_for(args.scheme.as_deref(), registry_exists.then_some(&home)).map_err(usage)?;
+    if let Some(path) = &args.reg_key_file
+        && !registry_exists
+    {
+        // read now, so a key file that would be refused costs a sentence
+        // before anything is written; the key is read again where it is used
+        reg_key_from_file(path).map_err(usage)?;
+    }
     let mut answers = Answers::default();
-    if !registry_exists && args.key_file.is_none() && console.interactive() {
+    if !registry_exists
+        && args.key_file.is_none()
+        && args.reg_key_file.is_none()
+        && console.interactive()
+    {
         answers.passphrase = console.ask_secret("A passphrase for the registry's key")?;
     }
 
@@ -6593,7 +6824,7 @@ fn questions(
     // from the record, or where the last run stopped partway, from the ports
     // that run chose, which its units may be running on.
     let recorded = existing.map(|s| s.ports).or(restarted).unwrap_or_default();
-    let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
+    let ours = |part: &str| installed.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
     // llama.cpp runs beside Kvasir wherever there is a build for this machine;
     // podman and docker on macOS run in a machine of their own, where it does not
@@ -6790,6 +7021,8 @@ fn questions(
         source,
         sources,
         registry_exists,
+        scheme,
+        reg_key_file: args.reg_key_file.clone(),
         host_loopback,
         postgres,
         service,
@@ -7337,6 +7570,22 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         ),
     ));
     rows.push((
+        "pseudonyms",
+        if plan.registry_exists {
+            "the registry's own scheme and key".to_string()
+        } else {
+            let scheme = if plan.scheme == Scheme::SUBJECT_CODE_GENERATOR {
+                format!("{} (the subject code generator)", plan.scheme)
+            } else {
+                plan.scheme.to_string()
+            };
+            match &plan.reg_key_file {
+                Some(path) => format!("{scheme}, the key from {}", path.display()),
+                None => format!("{scheme}, the key from a passphrase"),
+            }
+        },
+    ));
+    rows.push((
         "backend",
         match &plan.backend {
             BackendChoice::Sqlite => "sqlite".to_string(),
@@ -7630,7 +7879,7 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
                 acting.account
             ))
         );
-        for step in registry_made_steps(&plan.backend, "") {
+        for step in registry_made_steps(&plan.backend, plan.scheme, "") {
             let _ = writeln!(out, "    {}", acting.argv(&step.words).join(" "));
         }
     }
@@ -7835,7 +8084,10 @@ fn do_it(
     only_update: bool,
     answers: &Answers,
 ) -> Result<Vec<Service>, Exit> {
-    let made_outside = made_outside_before(existing.as_ref(), read_state().as_ref());
+    // what an install whose data this run picks up made outside its
+    // directory: on record, or kept with the data by an uninstall
+    let on_disk = read_state().or_else(|| read_kept_record(&plan.dir));
+    let made_outside = made_outside_before(existing.as_ref(), on_disk.as_ref());
     let mut state = State {
         dir: plan.dir.display().to_string(),
         mode: plan.mode.name().to_string(),
@@ -7943,6 +8195,8 @@ fn do_it(
 
     state.unfinished = false;
     let path = write_state(&state)?;
+    // the record names everything the kept copy did, so the copy goes
+    let _ = std::fs::remove_file(kept_record_path(&plan.dir));
     if !console.live {
         println!("  {}", path.display());
     }
@@ -8731,6 +8985,8 @@ fn registry_container_steps(plan: &Plan) -> Option<Vec<Vec<String>>> {
         "init",
         "--key",
         "nils",
+        "--scheme",
+        plan.scheme.name(),
     ]));
     made.extend(backend);
     Some(vec![key, made])
@@ -8747,7 +9003,20 @@ fn make_registry(
     asked: Option<&str>,
     acting: Option<&AsAccount>,
 ) -> Result<(), Exit> {
+    let from_key_file = match &args.reg_key_file {
+        Some(path) => {
+            let key = reg_key_from_file(path).map_err(usage)?;
+            console.note(&format!(
+                "the registry's key is read from {}, fingerprint {}",
+                path.display(),
+                nils_registry::pseudonym::fingerprint(key.as_bytes())
+            ));
+            Some(key)
+        }
+        None => None,
+    };
     let passphrase = match (&args.key_file, asked) {
+        _ if let Some(key) = from_key_file => key,
         (Some(path), _) => std::fs::read_to_string(path)
             .map_err(|e| usage(format!("--key-file {}: {e}", path.display())))?,
         (None, Some(asked)) => asked.to_string(),
@@ -8855,7 +9124,7 @@ fn make_registry(
                 acting.account
             ))
         })?;
-        for step in registry_made_steps(&plan.backend, &passphrase) {
+        for step in registry_made_steps(&plan.backend, plan.scheme, &passphrase) {
             let ran = acting.run(&step.words, step.input.as_deref());
             if !ran.ok {
                 return Err(fail(format!(
@@ -8874,7 +9143,7 @@ fn make_registry(
         .map_err(|e| fail(e.to_string()))?;
     // The connection string goes into `nils.toml` as it was given, and is
     // dialled from here, which is where this process runs.
-    let init = registry_init(&plan.backend);
+    let init = registry_init(&plan.backend, plan.scheme);
     home.clone()
         .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
         .init(&init)
@@ -9011,6 +9280,10 @@ fn declare_in(
                     let probed = crate::places::probe(Path::new(&path));
                     match place::set(registry.store(), there.id, Some(&path), None, Some(&probed)) {
                         Ok(_) => {
+                            // Wave 7a: the new folder made what it is
+                            if role == Role::Source {
+                                shape_source(registry, &there, Path::new(&path), said);
+                            }
                             let _ = crate::audit(
                                 registry,
                                 nils_registry::audit::Action::PlaceSet,
@@ -9040,25 +9313,53 @@ fn declare_in(
                 return Err(format!("the {} place could not be read: {e}", spec.name));
             }
         }
+        // what a site declared about the storage behind it; what the engine
+        // measured is the probe beside it
+        let guarantees = serde_json::json!({
+            "backup": spec.backup,
+            "snapshots": spec.snapshots,
+            "protected": spec.protected,
+            "fast": spec.fast,
+        });
+        // Wave 7a: a source place is a root, explored, each folder under it
+        // a dataset whose structure says how its files arrive; nothing is
+        // moved, and an unknown dataset is not read until a person says
+        let shaped = if role == Role::Source {
+            match crate::dataset::shape_place(
+                registry.store(),
+                &spec.name,
+                Path::new(&path),
+                &serde_json::json!({}),
+                None,
+                &guarantees,
+                // setup looks and never writes: a v0 folder keeps the
+                // dcm-raw v0 reads (review of 2026-10-10)
+                false,
+            ) {
+                Ok(s) => Some(s),
+                Err(r) => {
+                    return Err(format!(
+                        "the {} place was not declared: {}",
+                        spec.name, r.message
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         let made = place::add(
             registry.store(),
             &place::New {
                 name: &spec.name,
                 role,
                 path: &path,
-                // what a site declared about the storage behind it; what
-                // the engine measured is the probe beside it
-                guarantees: serde_json::json!({
-                    "backup": spec.backup,
-                    "snapshots": spec.snapshots,
-                    "protected": spec.protected,
-                    "fast": spec.fast,
-                }),
+                guarantees,
                 probed: crate::places::probe(Path::new(&path)),
                 handling: serde_json::Value::Null,
-                // a source place setup declares reads its folder itself
-                // until a dataset is declared on it (record 26)
-                dataset: serde_json::Value::Null,
+                dataset: shaped
+                    .as_ref()
+                    .map(|(d, _)| d.dataset.clone())
+                    .unwrap_or(serde_json::Value::Null),
             },
         );
         match made {
@@ -9067,8 +9368,13 @@ fn declare_in(
                     registry,
                     nils_registry::audit::Action::PlaceAdd,
                     serde_json::json!({"place": id, "name": spec.name, "role": spec.role}),
-                    None,
+                    shaped
+                        .as_ref()
+                        .map(|(d, _)| serde_json::json!({"layout": d.layout})),
                 );
+                if let Some((d, found)) = &shaped {
+                    say_shaped(&spec.name, id, d, found, said);
+                }
                 declared.push(row);
             }
             Err(e) => {
@@ -9080,7 +9386,11 @@ fn declare_in(
     // mounts a directory added at the desk even when it does not read the
     // registry.
     if let Ok(active) = place::active(registry.store()) {
-        for p in active.into_iter().filter(|p| p.role == Role::Source) {
+        // a dataset under a root is mounted with its root
+        for p in active
+            .into_iter()
+            .filter(|p| p.role == Role::Source && p.dataset["root"].is_null())
+        {
             if !declared.iter().any(|d| d.name == p.name) {
                 declared.push(PlaceState {
                     name: p.name,
@@ -9091,6 +9401,52 @@ fn declare_in(
         }
     }
     Ok(declared)
+}
+
+/// What setup says of a source place it made what it is (Wave 7a): the
+/// place, and each dataset found under a root.
+fn say_shaped(
+    name: &str,
+    id: i64,
+    d: &crate::dataset::Declared,
+    found: &[crate::dataset::Found],
+    said: &mut dyn FnMut(String),
+) {
+    for line in crate::dataset::layout_lines(id, &d.dataset, &d.layout) {
+        said(format!("the {name} place: {line}"));
+    }
+    for f in found {
+        for line in crate::dataset::layout_lines(f.place.id, &f.place.dataset, &f.layout) {
+            said(format!("the {} dataset: {line}", f.place.name));
+        }
+    }
+}
+
+/// Wave 7a: a source place setup moved to another folder is made what that
+/// folder is, and said so; a failure is said, not a reason to stop.
+fn shape_source(
+    registry: &mut nils_registry::Registry,
+    there: &nils_registry::place::Place,
+    path: &Path,
+    said: &mut dyn FnMut(String),
+) {
+    use nils_registry::place;
+    match crate::dataset::shape_place(
+        registry.store(),
+        &there.name,
+        path,
+        &serde_json::json!({}),
+        Some(there),
+        &there.guarantees,
+        false,
+    ) {
+        Ok((d, found)) => {
+            if place::set_dataset(registry.store(), there.id, &d.dataset).is_ok() {
+                say_shaped(&there.name, there.id, &d, &found, said);
+            }
+        }
+        Err(r) => said(format!("the {} place: {}", there.name, r.message)),
+    }
 }
 
 // ------------------------------------------ the engine's account's own side
@@ -9125,6 +9481,9 @@ pub(crate) enum RegistryStep {
         /// The Postgres schema of the registry
         #[arg(long, value_name = "NAME")]
         schema: Option<String>,
+        /// The pseudonym scheme; the default scheme where not named
+        #[arg(long, value_name = "blake2b-8|blake2b-32")]
+        scheme: Option<String>,
     },
     /// The registry's source places as it stands, as JSON; a registry at
     /// another schema is left as it is, and where it stands is said instead
@@ -9155,8 +9514,13 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             println!("dropped {schema} and {schema}_linkage");
             Ok(())
         }
-        RegistryStep::Init { backend, schema } => {
-            let meta = registry_made_here(home, &backend, schema, std::io::stdin().lock())?;
+        RegistryStep::Init {
+            backend,
+            schema,
+            scheme,
+        } => {
+            let scheme = scheme_for(scheme.as_deref(), None).map_err(usage)?;
+            let meta = registry_made_here(home, &backend, schema, scheme, std::io::stdin().lock())?;
             println!(
                 "initialised {} on {backend}: registry {}, schema version {}, pseudonyms {} from key {}",
                 home.dir().display(),
@@ -9212,6 +9576,7 @@ fn registry_made_here(
     home: &Home,
     backend: &str,
     schema: Option<String>,
+    scheme: Scheme,
     input: impl std::io::Read,
 ) -> Result<nils_registry::Meta, Exit> {
     let backend: Backend = backend
@@ -9235,7 +9600,7 @@ fn registry_made_here(
             BackendChoice::Postgres { dsn, schema }
         }
     };
-    let init = registry_init(&choice);
+    let init = registry_init(&choice, scheme);
     let registry = home
         .clone()
         .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
@@ -17290,7 +17655,8 @@ fn update_binary_part(
 #[derive(Debug, Args)]
 pub(crate) struct UninstallArgs {
     /// Remove NILS and keep the data: the registry and its key, the backups,
-    /// the desk's people and the assistant's history stay where they are
+    /// the desk's people, the assistant's history, Kvasir's models and sealed
+    /// credentials, and the setup's choices stay, for the next setup to read
     #[arg(long, conflicts_with = "purge")]
     keep_data: bool,
     /// Remove NILS and every file it made, the registry's key included
@@ -17302,6 +17668,10 @@ pub(crate) struct UninstallArgs {
     /// Say what would be removed and what kept, and change nothing
     #[arg(long)]
     print: bool,
+    /// Where no setup is recorded, the directory an uninstall that kept the
+    /// data left its setup in (the default is ~/nils)
+    #[arg(long, value_name = "DIR")]
+    dir: Option<PathBuf>,
 }
 
 /// The first-party packs a release carries. A pack directory holding only
@@ -17336,15 +17706,19 @@ struct Removal {
     packs_kept: Option<PathBuf>,
     /// What building Kvasir and the assistant made.
     built: Vec<PathBuf>,
-    /// Kvasir's directory, where the data stays: the models it holds and
-    /// their keys, its subscriptions, its seal key and pepper, and the
-    /// assistant's key go with NILS. Where everything goes, it goes with the
-    /// base directory.
-    kvasir: Option<PathBuf>,
+    /// Kvasir's directory, where the data stays: its build goes, and the
+    /// models it holds, its store with their keys and the sealed
+    /// credentials, its seal key and pepper, and the assistant's key stay
+    /// for the next setup. Where everything goes, it goes with the base
+    /// directory.
+    kvasir_kept: Option<PathBuf>,
     /// llama.cpp's build, which goes with NILS where the data stays; where
     /// everything goes, it goes with the base directory.
     llama: Option<PathBuf>,
     state: PathBuf,
+    /// Where the data stays, the record's facts as they are kept in the
+    /// install's directory for the next setup to read, and where.
+    kept_record: Option<(PathBuf, State)>,
     /// The runtime of a Postgres this setup runs, whose container goes; its
     /// data goes with the base directory, or stays with it.
     postgres: Option<String>,
@@ -17579,13 +17953,62 @@ fn remove_outside(doing: &Doing, registry: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether two directories are one, as the file system resolves them, or
+/// as written where either cannot be resolved.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let resolved = |p: &Path| {
+        std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    resolved(a) == resolved(b)
+}
+
 pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     let mut console = Console::new(args.yes);
     println!("{}", console.bold("NILS uninstall"));
-    let Some(state) = read_state() else {
-        return remove_leftovers(&args, &mut console);
+    // With no record, the one an uninstall that kept the data left in its
+    // directory: what it names is still this install's to remove, the
+    // registry's schemas among them.
+    let (state, from_kept) = match read_state() {
+        // A --dir that names another directory than the setup on record is
+        // refused, never ignored: a purge would otherwise remove the
+        // recorded install and its key while the person named an old one
+        // (review of 2026-10-10).
+        Some(state)
+            if args
+                .dir
+                .as_ref()
+                .is_some_and(|d| !same_dir(d, Path::new(&state.dir))) =>
+        {
+            let named = args.dir.as_ref().expect("a --dir was given");
+            return Err(fail(format!(
+                "the setup on record is at {}, and --dir names {}, another directory; nothing was removed. Leave --dir out to uninstall the one on record, or give its directory",
+                state.dir,
+                named.display()
+            )));
+        }
+        Some(state) => (state, false),
+        None => {
+            let dir = args
+                .dir
+                .as_ref()
+                .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()))
+                .unwrap_or_else(default_dir);
+            match read_kept_record(&dir) {
+                Some(kept) => (kept, true),
+                None => return remove_leftovers(&args, &mut console),
+            }
+        }
     };
     println!("  {}", describe_state(&state));
+    if from_kept {
+        println!(
+            "  no setup is recorded at {}; this is the one kept with the data in {}",
+            state_path().display(),
+            kept_record_path(Path::new(&state.dir)).display()
+        );
+    }
 
     let leaving = if args.purge {
         Leaving::Purge
@@ -17599,9 +18022,9 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 (
                     "NILS, keeping your data",
                     &format!(
-                        "the services, the programs, the packs and Kvasir's models and keys; the \
-                         registry and its key, the backups, the desk's people and the assistant's \
-                         history stay in {dir}"
+                        "the services, the programs and the packs; the registry and its key, the \
+                         backups, the desk's people, the assistant's history, Kvasir's models and \
+                         sealed credentials, and the setup's choices stay in {dir}"
                     ),
                 ),
                 (
@@ -17621,7 +18044,12 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     let me = std::env::current_exe()
         .ok()
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
-    let removal = gather_removal(&state, me, leaving);
+    let mut removal = gather_removal(&state, me, leaving);
+    if from_kept {
+        // the record read is the kept one, which goes with the directory or
+        // is kept again
+        removal.state = kept_record_path(&removal.dir);
+    }
 
     if leaving == Leaving::Purge
         && let Err(why) = safe_to_purge(&removal.dir, home_dir().as_deref())
@@ -17680,7 +18108,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 "  NILS is gone from this machine; your data is still in {}",
                 removal.dir.display()
             );
-            println!("  to install again and pick it up:");
+            println!("  to install again and pick it up, with the choices made before:");
             println!(
                 "    curl -fsSL https://nils.kineuro.se/get | sh -s -- --dir {}",
                 removal.dir.display()
@@ -17976,9 +18404,11 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         packs: Vec::new(),
         packs_kept: None,
         built: Vec::new(),
-        kvasir: None,
+        kvasir_kept: None,
         llama: None,
         state: state_path(),
+        kept_record: (leaving == Leaving::KeepData)
+            .then(|| (kept_record_path(&dir), kept_record_of(state))),
         postgres: None,
         // read while the registry's own configuration is still there, since
         // a purge removes the directory that holds it
@@ -18156,14 +18586,14 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
 
     // what building Kvasir and the assistant made; the rest of the
     // assistant's directory holds its data and its configuration
-    for (name, part) in state.parts.iter().filter(|(_, p)| p.kind == "node") {
+    for part in state.parts.values().filter(|p| p.kind == "node") {
         let path = PathBuf::from(&part.path);
         let outside = !path.starts_with(&dir);
         if leaving == Leaving::Purge && outside {
             removal.built.push(path);
             continue;
         }
-        if leaving == Leaving::KeepData && name != "kvasir" {
+        if leaving == Leaving::KeepData {
             for sub in ["node_modules", "dist"] {
                 if path.join(sub).exists() {
                     removal.built.push(path.join(sub));
@@ -18171,17 +18601,18 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
             }
         }
     }
-    // Kvasir's state goes with NILS where the data stays, the whole of its
-    // directory, which holds nothing else a person keeps: the models it holds
-    // and their keys, its subscriptions, its seal key and pepper, and the
-    // assistant's key.
+    // Kvasir's state stays where the data does, and only its build goes: the
+    // models it holds, its store with their keys, the subscriptions and the
+    // sealed credentials, its seal key and pepper, and the assistant's key.
+    // The next setup adopts the folder as it finds it, so the stations come
+    // back with the models and credentials they had.
     if leaving == Leaving::KeepData {
         let kvasir = state
             .parts
             .get("kvasir")
             .map_or_else(|| dir.join("kvasir"), |part| PathBuf::from(&part.path));
         if kvasir.exists() {
-            removal.kvasir = Some(kvasir);
+            removal.kvasir_kept = Some(kvasir);
         }
         let llama = dir.join(LLAMA_PART);
         if llama.exists() {
@@ -18272,17 +18703,6 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
                 .join(", "),
         );
     }
-    if let Some(kvasir) = &removal.kvasir {
-        row(
-            &mut out,
-            "kvasir",
-            format!(
-                "{}, with the models it holds, their keys, its subscriptions and the assistant's \
-                 key",
-                kvasir.display()
-            ),
-        );
-    }
     if let Some(llama) = &removal.llama {
         row(
             &mut out,
@@ -18293,11 +18713,19 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             ),
         );
     }
-    row(
-        &mut out,
-        "setup record",
-        removal.state.display().to_string(),
-    );
+    // the record, unless it is the kept copy, which an uninstall that keeps
+    // the data writes again where it is
+    let record_kept = removal
+        .kept_record
+        .as_ref()
+        .is_some_and(|(kept, _)| *kept == removal.state);
+    if !record_kept {
+        row(
+            &mut out,
+            "setup record",
+            removal.state.display().to_string(),
+        );
+    }
     if leaving == Leaving::Purge {
         row(
             &mut out,
@@ -18319,6 +18747,30 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             row(&mut out, "data", removal.dir.display().to_string());
             for line in data_summary(&removal.dir) {
                 let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
+            }
+            if let Some(kvasir) = &removal.kvasir_kept {
+                row(
+                    &mut out,
+                    "kvasir",
+                    format!(
+                        "{}: the models it holds, its store with their keys and the sealed \
+                         credentials, its seal key and pepper, and the assistant's key; only its \
+                         build goes",
+                        kvasir.display()
+                    ),
+                );
+            }
+            if let Some((kept, state)) = &removal.kept_record {
+                row(
+                    &mut out,
+                    "setup",
+                    format!(
+                        "the choices made, kept in {}, which the next nils setup in {} reads: {}",
+                        kept.display(),
+                        removal.dir.display(),
+                        kept_facts(state).join(", ")
+                    ),
+                );
             }
             // an uninstall that keeps the data keeps the registry wherever
             // it is, and says where that is
@@ -18363,6 +18815,43 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
     out
 }
 
+/// What the record kept for the next setup holds, in a few words each.
+fn kept_facts(state: &State) -> Vec<String> {
+    let mut out = Vec::new();
+    if !state.parts.is_empty() {
+        out.push(format!(
+            "the parts ({})",
+            state.parts.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out.push(format!("the {} sign-in", state.mode));
+    if state.oidc.is_some() {
+        out.push("the identity provider".to_string());
+    }
+    if !state.places.is_empty() || state.site.is_some() {
+        out.push("the places".to_string());
+    }
+    out.push("the ports".to_string());
+    if !state.origin.is_empty() {
+        out.push(format!("the address {}", state.origin));
+    }
+    if let Some(server) = &state.model_server {
+        out.push(format!("the model server at {}", server.url));
+    }
+    if let Some(schema) = &state.registry_made {
+        out.push(format!(
+            "and that this install made the schemas {schema} and {schema}_linkage, which a later \
+             purge drops"
+        ));
+    }
+    if let Some(account) = &state.linger {
+        out.push(format!(
+            "and the lingering it turned on for {account}, which a later purge turns off"
+        ));
+    }
+    out
+}
+
 /// A few lines saying what a data directory holds, without walking a
 /// working directory that may hold a whole archive.
 fn data_summary(dir: &Path) -> Vec<String> {
@@ -18397,6 +18886,14 @@ fn data_summary(dir: &Path) -> Vec<String> {
     }
     if dir.join("assistant").join("assistant.sqlite").exists() {
         out.push("the assistant's conversations".to_string());
+    }
+    let kvasir = dir.join("kvasir");
+    let models = count(&kvasir.join("models"));
+    if models > 0 {
+        out.push(format!("{models} model(s) Kvasir holds"));
+    }
+    if kvasir.join("kvasir.sqlite").exists() || kvasir.join("kvasir.seal").exists() {
+        out.push("Kvasir's store, with its keys and sealed credentials".to_string());
     }
     for sub in ["working", "export"] {
         let n = count(&dir.join(sub));
@@ -18572,15 +19069,6 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<Stri
             Err(e) => say(format!("{} was not removed: {e}", path.display())),
         }
     }
-    if let Some(kvasir) = &removal.kvasir {
-        match remove_path(kvasir, &removal.runtime) {
-            Ok(()) => say(format!(
-                "removed {}, with the models Kvasir held and their keys",
-                kvasir.display()
-            )),
-            Err(e) => say(format!("{} was not removed: {e}", kvasir.display())),
-        }
-    }
     if let Some(llama) = &removal.llama {
         match remove_path(llama, &removal.runtime) {
             Ok(()) => say(format!("removed {}", llama.display())),
@@ -18609,7 +19097,35 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<Stri
             Err(e) => say(format!("{} was not removed: {e}", path.display())),
         }
     }
-    if std::fs::remove_file(&removal.state).is_ok() {
+    // The record's facts are kept with the data before the record goes, so
+    // there is never a moment where neither says what this install made.
+    let mut record_kept = false;
+    if let Some((kept, state)) = &removal.kept_record {
+        let written = toml::to_string(state)
+            .map_err(|e| e.to_string())
+            .and_then(|text| write_secret_bytes(kept, text.as_bytes()).map_err(|e| e.message));
+        match written {
+            Ok(()) => {
+                say(format!(
+                    "kept the setup's choices in {}, for the next nils setup to read",
+                    kept.display()
+                ));
+                record_kept = *kept == removal.state;
+            }
+            Err(e) => {
+                say(format!(
+                    "the setup's choices were not kept in {}: {e}",
+                    kept.display()
+                ));
+                say(format!(
+                    "so the record stays at {}, and nothing it names is lost",
+                    removal.state.display()
+                ));
+                record_kept = true;
+            }
+        }
+    }
+    if !record_kept && std::fs::remove_file(&removal.state).is_ok() {
         say(format!("removed {}", removal.state.display()));
         // the directory the record lived in, when nothing else lives there
         if let Some(parent) = removal.state.parent() {
@@ -18753,6 +19269,8 @@ mod tests {
             source: Some(PathBuf::from("/data/source")),
             sources: Vec::new(),
             registry_exists: false,
+            scheme: Scheme::DEFAULT,
+            reg_key_file: None,
             service: true,
             channel: None,
             version: "1.0.0-alpha.2".to_string(),
@@ -18898,7 +19416,7 @@ mod tests {
             llama: None,
         };
         let (outcome, drawn) = on_screens(
-            |console| questions(console, &args, None, &facts, None),
+            |console| questions(console, &args, None, None, &facts, None),
             vec![
                 Enter, // the engine and the desk
                 Enter, // no directory of DICOM
@@ -20666,12 +21184,15 @@ mod tests {
     }
 
     #[test]
-    fn an_uninstall_removes_kvasirs_state_even_where_the_data_is_kept() {
+    fn an_uninstall_that_keeps_the_data_keeps_kvasirs_models_and_credentials() {
         let root = scratch("uninstall-kvasir");
         let dir = root.join("nils");
         let kvasir = dir.join("kvasir");
         std::fs::create_dir_all(kvasir.join("state")).unwrap();
-        for file in [
+        std::fs::create_dir_all(kvasir.join("models").join("a-model")).unwrap();
+        std::fs::create_dir_all(kvasir.join("node_modules")).unwrap();
+        std::fs::create_dir_all(kvasir.join("dist")).unwrap();
+        let data = [
             "kvasir.json",
             "kvasir.sqlite",
             "kvasir.seal",
@@ -20679,7 +21200,9 @@ mod tests {
             "assistant.key",
             "backends-to-add.json",
             "state/held",
-        ] {
+            "models/a-model/weights.gguf",
+        ];
+        for file in data {
             std::fs::write(kvasir.join(file), "x").unwrap();
         }
         let assistant = dir.join("assistant");
@@ -20702,17 +21225,26 @@ mod tests {
             );
         }
         let removal = gather_removal(&state, None, Leaving::KeepData);
-        assert_eq!(removal.kvasir.as_deref(), Some(kvasir.as_path()));
+        assert_eq!(removal.kvasir_kept.as_deref(), Some(kvasir.as_path()));
+        let mut built = removal.built.clone();
+        built.sort();
         assert_eq!(
-            removal.built,
-            vec![assistant.join("node_modules")],
-            "the assistant's history stays, and Kvasir goes whole"
+            built,
+            vec![
+                assistant.join("node_modules"),
+                kvasir.join("dist"),
+                kvasir.join("node_modules"),
+            ],
+            "only what building them made goes"
         );
         let text = removal_text(&removal, Leaving::KeepData, &Console::new(true));
+        let (removing, keeping) = text.split_once("Keeping").unwrap();
+        assert!(!removing.contains("kvasir "), "{removing}");
         assert!(
-            text.contains("the models it holds, their keys, its subscriptions"),
-            "{text}"
+            keeping.contains("the models it holds, its store with their keys and the sealed"),
+            "{keeping}"
         );
+        assert!(keeping.contains("1 model(s) Kvasir holds"), "{keeping}");
 
         // carried out with nothing of this machine's own in it
         let record = root.join("setup.toml");
@@ -20731,17 +21263,23 @@ mod tests {
             ..removal
         };
         carry_out(&removal, Leaving::KeepData, &Console::new(true));
-        assert!(!kvasir.exists(), "Kvasir's state stayed");
+        for file in data {
+            assert!(kvasir.join(file).is_file(), "{file} went with NILS");
+        }
+        assert!(!kvasir.join("node_modules").exists() && !kvasir.join("dist").exists());
         assert!(
             assistant.join("assistant.sqlite").is_file(),
             "the assistant's history is data"
         );
         assert!(!assistant.join("node_modules").exists());
         assert!(!record.exists());
+        assert!(kept_record_path(&dir).is_file(), "the setup's choices stay");
 
         // where everything goes, Kvasir goes with the base directory
-        std::fs::create_dir_all(&kvasir).unwrap();
-        assert_eq!(gather_removal(&state, None, Leaving::Purge).kvasir, None);
+        assert_eq!(
+            gather_removal(&state, None, Leaving::Purge).kvasir_kept,
+            None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -21246,6 +21784,96 @@ mod tests {
         assert!(
             carry_out(&removal, Leaving::KeepData, &console).is_empty(),
             "an uninstall that keeps the data leaves nothing named"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An uninstall that keeps the data keeps the record's facts beside it:
+    /// the plan says so, the copy names the schemas this install made, the
+    /// next setup carries them into the record it writes, and a purge read
+    /// from the copy alone still drops them.
+    #[test]
+    fn the_data_kept_keeps_the_record_so_a_later_purge_still_drops_the_schemas() {
+        let root = scratch("keep-data-record");
+        let mut state = on_postgres(&root, "nils", Some("nils"));
+        let dir = PathBuf::from(&state.dir);
+        state.mode = "oidc".to_string();
+        state.origin = "https://nils.example.org".to_string();
+        state.linger = Some("nils".to_string());
+        state.programs = vec![root.join("bin").join("nils-desk").display().to_string()];
+        state.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: root.join("model.key"),
+            model: None,
+        });
+        state.parts.insert(
+            "desk".to_string(),
+            PartState {
+                version: "1.0.0".to_string(),
+                path: root.join("bin").join("nils-desk").display().to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+
+        let removal = gather_removal(&state, None, Leaving::KeepData);
+        let console = Console::new(true);
+        let text = removal_text(&removal, Leaving::KeepData, &console);
+        let (removing, keeping) = text.split_once("Keeping").unwrap();
+        assert!(removing.contains("setup record"), "{removing}");
+        let kept_at = kept_record_path(&dir);
+        for said in [
+            format!("the choices made, kept in {}", kept_at.display()),
+            "the parts (desk)".to_string(),
+            "the oidc sign-in".to_string(),
+            "the address https://nils.example.org".to_string(),
+            "the model server at https://models.example.org/v1".to_string(),
+            "this install made the schemas nils and nils_linkage, which a later purge drops"
+                .to_string(),
+        ] {
+            assert!(keeping.contains(&said), "{said} is not in:\n{keeping}");
+        }
+
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record.clone(),
+            ..removal
+        };
+        carry_out(&removal, Leaving::KeepData, &console);
+        assert!(!record.exists(), "the record itself goes");
+        let kept = read_kept_record(&dir).expect("the record's facts are kept");
+        assert_eq!(kept.registry_made.as_deref(), Some("nils"));
+        assert_eq!(kept.linger.as_deref(), Some("nils"));
+        assert_eq!(kept.origin, "https://nils.example.org");
+        assert_eq!(kept.mode, "oidc");
+        assert_eq!(kept.model_server, state.model_server);
+        assert!(kept.parts.contains_key("desk"));
+        assert!(kept.programs.is_empty(), "the programs went with NILS");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&kept_at).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+
+        // the next setup carries what the install made into its own record
+        assert_eq!(
+            made_outside_before(None, Some(&kept)),
+            (Some("nils".to_string()), Some("nils".to_string()))
+        );
+
+        // and a purge with no record but the kept one drops the schemas
+        let removal = gather_removal(&kept, None, Leaving::Purge);
+        let database = removal
+            .outside
+            .iter()
+            .find(|o| o.key == DATABASE_KEY)
+            .expect("the schemas are named");
+        assert!(
+            matches!(&database.doing, Some(Doing::Schemas { schema, .. }) if schema == "nils"),
+            "{database:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -22951,7 +23579,7 @@ mod tests {
             dsn: dsn.to_string(),
             schema: "nils".to_string(),
         };
-        let steps = registry_made_steps(&postgres, passphrase);
+        let steps = registry_made_steps(&postgres, Scheme::DEFAULT, passphrase);
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].words, ["key", "add", "nils"]);
         assert_eq!(
@@ -22967,7 +23595,9 @@ mod tests {
                 "--backend",
                 "postgres",
                 "--schema",
-                "nils"
+                "nils",
+                "--scheme",
+                "blake2b-8"
             ]
         );
         assert_eq!(
@@ -22985,10 +23615,17 @@ mod tests {
                 "a command line is every account's to read: {argv:?}"
             );
         }
-        let sqlite = registry_made_steps(&BackendChoice::Sqlite, passphrase);
+        let sqlite = registry_made_steps(&BackendChoice::Sqlite, Scheme::Blake2b32, passphrase);
         assert_eq!(
             sqlite[1].words,
-            ["setup-registry", "init", "--backend", "sqlite"]
+            [
+                "setup-registry",
+                "init",
+                "--backend",
+                "sqlite",
+                "--scheme",
+                "blake2b-32"
+            ]
         );
         assert_eq!(sqlite[1].input, None);
     }
@@ -22997,11 +23634,12 @@ mod tests {
     /// account and from setup's own process, and what each came to.
     fn made_both_ways(
         backend: &BackendChoice,
+        chosen: Scheme,
         dir: &Path,
         clear: &dyn Fn(),
     ) -> [(nils_registry::Meta, String); 2] {
         use clap::Parser as _;
-        let steps = registry_made_steps(backend, "a passphrase");
+        let steps = registry_made_steps(backend, chosen, "a passphrase");
         let argv = as_the_engine().argv(&steps[1].words);
         // the words as the engine binary reads them
         let cli = crate::Cli::try_parse_from(&argv[4..])
@@ -23015,6 +23653,7 @@ mod tests {
                 RegistryStep::Init {
                     backend: named,
                     schema,
+                    scheme,
                 },
         } = cli.command
         else {
@@ -23028,12 +23667,17 @@ mod tests {
         clear();
         let step = home_at("as-the-account");
         let input = steps[1].input.clone().unwrap_or_default();
-        let by_step = registry_made_here(&step, &named, schema, input.as_slice())
+        let scheme = scheme_for(scheme.as_deref(), None).unwrap();
+        let by_step = registry_made_here(&step, &named, schema, scheme, input.as_slice())
             .unwrap_or_else(|e| panic!("{argv:?} was refused: {}", e.message));
         let by_step_config = std::fs::read_to_string(step.config_path()).unwrap();
         clear();
         let own = home_at("in-process");
-        let in_process = own.init(&registry_init(backend)).unwrap().meta().clone();
+        let in_process = own
+            .init(&registry_init(backend, chosen))
+            .unwrap()
+            .meta()
+            .clone();
         let own_config = std::fs::read_to_string(own.config_path()).unwrap();
         clear();
         [(by_step, by_step_config), (in_process, own_config)]
@@ -23056,11 +23700,17 @@ mod tests {
             }
             _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
         }
-        for (backend, postgres) in backends {
-            let at = dir.join(match backend {
-                BackendChoice::Sqlite => "sqlite",
-                BackendChoice::Postgres { .. } => "postgres",
-            });
+        for ((backend, postgres), chosen) in backends
+            .into_iter()
+            .flat_map(|b| [(b.clone(), Scheme::Blake2b8), (b, Scheme::Blake2b32)])
+        {
+            let at = dir.join(format!(
+                "{}-{chosen}",
+                match backend {
+                    BackendChoice::Sqlite => "sqlite",
+                    BackendChoice::Postgres { .. } => "postgres",
+                }
+            ));
             let clear = || {
                 if let Some((dsn, schema)) = &postgres {
                     nils_registry::store::Store::connect_postgres(dsn, schema)
@@ -23072,10 +23722,10 @@ mod tests {
                         .unwrap();
                 }
             };
-            let [(step, step_config), (own, own_config)] = made_both_ways(&backend, &at, &clear);
+            let [(step, step_config), (own, own_config)] =
+                made_both_ways(&backend, chosen, &at, &clear);
             assert_eq!(
-                step.pseudonym_scheme,
-                Scheme::Blake2b32,
+                step.pseudonym_scheme, chosen,
                 "every pseudonym follows from the scheme: {backend:?}"
             );
             assert_eq!(
@@ -23100,15 +23750,275 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A key made up for these tests; no site's key.
+    const TEST_REG_KEY: &str = "test-reg-key-not-real";
+
+    #[test]
+    fn a_registry_key_file_gives_its_value_byte_for_byte_and_refuses_what_is_not_one() {
+        let dir = scratch("reg-key-file");
+        let file = |name: &str, content: &[u8], mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            #[cfg(not(unix))]
+            let _ = mode;
+            path
+        };
+        let key = format!("REG_KEY={TEST_REG_KEY}");
+        for (name, content) in [
+            ("prefixed", format!("{key}\n")),
+            ("prefixed-no-end", key.clone()),
+            ("prefixed-crlf", format!("{key}\r\n")),
+            ("value-alone", format!("{TEST_REG_KEY}\n")),
+        ] {
+            let path = file(name, content.as_bytes(), 0o600);
+            assert_eq!(
+                reg_key_from_file(&path).as_deref(),
+                Ok(TEST_REG_KEY),
+                "{name}"
+            );
+        }
+        let refused = |name: &str, content: &[u8], mode: u32, says: &str| {
+            let path = file(name, content, mode);
+            let why = reg_key_from_file(&path).expect_err(name);
+            assert!(why.contains(says), "{name}: {why}");
+            assert!(
+                !why.contains(TEST_REG_KEY),
+                "{name}: the key was said: {why}"
+            );
+        };
+        refused("empty", b"", 0o600, "empty");
+        refused("prefix-only", b"REG_KEY=\n", 0o600, "empty");
+        refused(
+            "spaces",
+            format!("REG_KEY= {TEST_REG_KEY}\n").as_bytes(),
+            0o600,
+            "space",
+        );
+        refused(
+            "trailing-tab",
+            format!("{TEST_REG_KEY}\t\n").as_bytes(),
+            0o600,
+            "space or a tab",
+        );
+        refused(
+            "two-lines",
+            format!("{TEST_REG_KEY}\nmore\n").as_bytes(),
+            0o600,
+            "more than one line",
+        );
+        refused("too-long", "k".repeat(65).as_bytes(), 0o600, "at most 64");
+        assert_eq!(
+            reg_key_from_file(&file("longest", "k".repeat(64).as_bytes(), 0o600)).map(|k| k.len()),
+            Ok(64)
+        );
+        #[cfg(unix)]
+        {
+            refused("group-reads", key.as_bytes(), 0o640, "chmod 600");
+            refused("all-read", key.as_bytes(), 0o644, "chmod 600");
+            refused("others-write", key.as_bytes(), 0o602, "chmod 600");
+        }
+        let missing = reg_key_from_file(&dir.join("not-there")).unwrap_err();
+        assert!(missing.contains("--reg-key-file"), "{missing}");
+        let directory = reg_key_from_file(&dir).unwrap_err();
+        assert!(directory.contains("not a regular file"), "{directory}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wave 7a, T4 for `nils setup`: the source place setup declares is a
+    /// root, and only the root (Nima, 2026-10-08): its folders are listed
+    /// as they are and become datasets only when a person adds them, whose
+    /// structure then says what each is. Nothing is moved; the root, its
+    /// folders and an unknown dataset are never read, nor any originals.
+    /// Moved on a rerun to another folder, the place is that folder's root.
+    #[test]
+    fn setup_s_source_place_is_a_root_whose_datasets_say_what_they_are() {
+        use nils_registry::place;
+        let dicom = {
+            let mut b = vec![0u8; 128];
+            b.extend_from_slice(b"DICM");
+            b
+        };
+        let dir = scratch("source-root");
+        let home = Home::new(dir.join("registry"));
+        home.keys(None)
+            .add("nils", b"a test key, no site's")
+            .unwrap();
+        let mut registry = home
+            .clone()
+            .init(&registry_init(&BackendChoice::Sqlite, Scheme::DEFAULT))
+            .unwrap();
+        let data = dir.join("data");
+        for (rel, bytes) in [
+            ("known/derivatives/dcm-original/p1/IM_0001", &dicom),
+            ("loose/sub-1/IM_0001", &dicom),
+        ] {
+            std::fs::create_dir_all(data.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(data.join(rel), bytes).unwrap();
+        }
+        let spec = |path: &Path| PlaceSpec {
+            name: "data".into(),
+            role: "source".into(),
+            path: path.to_path_buf(),
+            backup: None,
+            snapshots: false,
+            protected: false,
+            fast: false,
+        };
+        let mut said = Vec::new();
+        let declared = declare_in(&mut registry, &[spec(&data)], &mut |l| said.push(l)).unwrap();
+        // the root alone, its folders listed as they are
+        assert_eq!(declared.len(), 1, "{declared:?}");
+        let root = place::by_name(registry.store(), "data").unwrap().unwrap();
+        assert_eq!(root.dataset["kind"], "root", "{}", root.dataset);
+        assert_eq!(place::list(registry.store()).unwrap().len(), 1);
+        assert!(
+            said.iter().any(|l| l.contains("a root: 2 folder(s)")),
+            "{said:?}"
+        );
+        let (listed, _, _) =
+            crate::dataset::folders(registry.store(), &root, None, 50, None).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|f| f["added"] == false));
+        for path in [data.clone(), data.join("loose/sub-1"), data.join("known")] {
+            assert!(
+                crate::dataset::not_read(registry.store(), &path).is_some(),
+                "{} would be read",
+                path.display()
+            );
+        }
+        // added by a person, each says what it is
+        let known = crate::dataset::add_dataset(
+            registry.store(),
+            &root,
+            "known",
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(known.place.dataset["state"], "identified");
+        let loose = crate::dataset::add_dataset(
+            registry.store(),
+            &root,
+            "loose",
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(loose.place.dataset["state"], "unknown");
+        assert!(data.join("loose/sub-1/IM_0001").is_file());
+        assert!(!data.join("loose/derivatives").exists());
+        for path in [
+            data.clone(),
+            data.join("loose"),
+            data.join("loose/sub-1"),
+            data.join("known"),
+            data.join("known/derivatives/dcm-original"),
+            dir.clone(),
+        ] {
+            assert!(
+                crate::dataset::not_read(registry.store(), &path).is_some(),
+                "{} would be read",
+                path.display()
+            );
+        }
+        assert_eq!(
+            crate::dataset::not_read(registry.store(), &data.join("known/derivatives/dcm-anon")),
+            None
+        );
+        // moved by a rerun to an empty folder: a root with nothing under it
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let mut said = Vec::new();
+        declare_in(&mut registry, &[spec(&elsewhere)], &mut |l| said.push(l)).unwrap();
+        let p = place::by_name(registry.store(), "data").unwrap().unwrap();
+        assert_eq!(p.dataset["kind"], "root", "{}", p.dataset);
+        assert!(
+            said.iter().any(|l| l.contains("a root: 0 folder(s)")),
+            "{said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_registry_made_on_a_key_files_value_gives_the_codes_of_that_key() {
+        let dir = scratch("reg-key-registry");
+        let path = dir.join("reg-key");
+        std::fs::write(&path, format!("REG_KEY={TEST_REG_KEY}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let value = reg_key_from_file(&path).unwrap();
+        let home = Home::new(dir.join("registry"));
+        // as setup's own process adds it and makes the registry
+        let (bytes, _) = nils_registry::keys::strip_newline(value.as_bytes());
+        home.keys(None).add("nils", bytes).unwrap();
+        let scheme = scheme_for(None, None).unwrap();
+        assert_eq!(scheme, Scheme::Blake2b8, "the default for a new registry");
+        let registry = home
+            .clone()
+            .init(&registry_init(&BackendChoice::Sqlite, scheme))
+            .unwrap();
+        assert_eq!(registry.meta().pseudonym_scheme, Scheme::Blake2b8);
+        let key = registry.pseudonym_key().unwrap();
+        assert_eq!(key, TEST_REG_KEY.as_bytes());
+        let code = nils_registry::pseudonym::code(Scheme::Blake2b8, &key, "PID-0001", 12).code;
+        assert_eq!(
+            code,
+            nils_registry::pseudonym::code(
+                Scheme::Blake2b8,
+                TEST_REG_KEY.as_bytes(),
+                "PID-0001",
+                12
+            )
+            .code
+        );
+        assert_eq!(code.len(), 16);
+        drop(registry);
+
+        // the registry keeps its scheme: the same named again is taken,
+        // another is refused, and none named is the registry's own business
+        assert_eq!(
+            scheme_for(Some("blake2b-8"), Some(&home)),
+            Ok(Scheme::Blake2b8)
+        );
+        let why = scheme_for(Some("blake2b-32"), Some(&home)).unwrap_err();
+        assert!(why.contains("made with blake2b-8"), "{why}");
+        assert!(scheme_for(None, Some(&home)).is_ok());
+        let why = scheme_for(Some("sha"), None).unwrap_err();
+        assert!(
+            why.contains("blake2b-8 (the subject code generator) or blake2b-32"),
+            "{why}"
+        );
+        // the generator's other name is the same scheme as the registry's own
+        assert_eq!(
+            scheme_for(Some("subject-code-generator"), Some(&home)),
+            Ok(Scheme::Blake2b8)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_step_that_makes_a_registry_takes_a_connection_string_only_on_its_input() {
         let dir = scratch("registry-step-refusals");
         let home = Home::new(dir.join("registry"));
         let refused = |backend: &str, schema: Option<&str>, input: &str| {
-            registry_made_here(&home, backend, schema.map(str::to_string), input.as_bytes())
-                .map(|_| ())
-                .unwrap_err()
-                .message
+            registry_made_here(
+                &home,
+                backend,
+                schema.map(str::to_string),
+                Scheme::DEFAULT,
+                input.as_bytes(),
+            )
+            .map(|_| ())
+            .unwrap_err()
+            .message
         };
         assert!(
             refused("postgres", Some("nils"), "")
@@ -23243,7 +24153,7 @@ mod tests {
         );
         assert!(
             said.contains(&format!(
-                "{as_engine} setup-registry init --backend postgres --schema nils\n"
+                "{as_engine} setup-registry init --backend postgres --schema nils --scheme blake2b-8\n"
             )),
             "{said}"
         );
@@ -27087,6 +27997,8 @@ mod tests {
                 "init",
                 "--key",
                 "nils",
+                "--scheme",
+                "blake2b-8",
             ])
         );
 

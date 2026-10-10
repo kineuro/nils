@@ -20,23 +20,34 @@ pub const SAMPLE_DEFAULT: usize = 2_000;
 pub const SAMPLE_MAX: usize = 20_000;
 
 /// Whether the classifier would ask a person about this axis of this
-/// verdict, as `classify` decides it.
+/// verdict, as `classify` decides it. Record 55 H3 (2026-10-09): an axis no
+/// rule answered is asked where it matters (`missing_asked`); a rule's low
+/// confidence alone is asked only when a person names a threshold
+/// (`review_below`), never by the pack's; a conflict is never asked.
 fn asks(
-    pack: &Pack,
     review_below: Option<f64>,
-    silent: bool,
+    verdict: &nils_pack::Verdict,
     axis: &str,
-    value: &str,
-    confidence: f64,
+    missing_asked: &[String],
+    by_model: &[String],
 ) -> bool {
-    if silent {
+    if verdict.silent {
         return false;
     }
-    let below = review_below.unwrap_or(pack.review.below(axis));
-    if value.is_empty() {
-        pack.review.asks_when_missing(axis)
-    } else {
-        confidence > 0.0 && nils_pack::weaker_than(confidence, below)
+    if verdict.unresolved.iter().any(|a| a == axis) {
+        return missing_asked.iter().any(|a| a == axis);
+    }
+    let Some(below) = review_below else {
+        return false;
+    };
+    if by_model.iter().any(|a| a == axis) {
+        return false;
+    }
+    match verdict.axis(axis) {
+        Some(a) if !a.stored().is_empty() => {
+            a.confidence > 0.0 && nils_pack::weaker_than(a.confidence, below)
+        }
+        _ => false,
     }
 }
 
@@ -60,6 +71,8 @@ pub fn run(
     let mut close = 0i64;
     let mut open = 0i64;
     let mut read = 0i64;
+    let asked_before = nils_pack::matters::missing_asked(before);
+    let asked_after = nils_pack::matters::missing_asked(after);
     for r in &rows {
         let (_, stack, private) =
             to_stack(r, false, before).map_err(|e| Error::Message(e.to_string()))?;
@@ -67,9 +80,15 @@ pub fn run(
         let was = Evaluated::with_private(before, &stack, private.clone()).classify();
         let now = Evaluated::with_private(after, &stack, private).classify();
         let mut axes: Vec<&str> = was.axes.iter().map(|a| a.axis.as_str()).collect();
-        for a in &now.axes {
-            if !axes.contains(&a.axis.as_str()) {
-                axes.push(&a.axis);
+        for a in now
+            .axes
+            .iter()
+            .map(|a| &a.axis)
+            .chain(&was.unresolved)
+            .chain(&now.unresolved)
+        {
+            if !axes.contains(&a.as_str()) {
+                axes.push(a);
             }
         }
         for axis in axes {
@@ -80,10 +99,20 @@ pub fn run(
                     .entry((axis.to_string(), from.clone(), to.clone()))
                     .or_insert(0) += 1;
             }
-            let c_was = was.axis(axis).map(|a| a.confidence).unwrap_or(0.0);
-            let c_now = now.axis(axis).map(|a| a.confidence).unwrap_or(0.0);
-            let asked = asks(before, review_below, was.silent, axis, &from, c_was);
-            let asks_now = asks(after, review_below, now.silent, axis, &to, c_now);
+            let asked = asks(
+                review_below,
+                &was,
+                axis,
+                &asked_before,
+                &before.review.by_model,
+            );
+            let asks_now = asks(
+                review_below,
+                &now,
+                axis,
+                &asked_after,
+                &after.review.by_model,
+            );
             match (asked, asks_now) {
                 (true, false) => close += 1,
                 (false, true) => open += 1,

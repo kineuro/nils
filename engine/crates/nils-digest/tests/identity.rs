@@ -4,7 +4,8 @@
 //! runs; the linkage store holds the identifier sealed and gives it back to
 //! `reveal` with an audit row; a file without the field falls back to its
 //! study; a rule reads another field through a pattern; a subject an import
-//! created keeps its code; a blake2b-8 registry reproduces the v0 codes; two
+//! created keeps its code; a registry of the subject code generator reproduces
+//! the previous prototype's codes; two
 //! identifiers on one code stop the job with a review item. Every test runs
 //! on each backend.
 
@@ -153,7 +154,7 @@ fn one_identifier_is_one_subject_across_studies_and_runs() {
         // the code is the scheme's code of the identifier under the key
         assert_eq!(
             code_of(&mut reg, sub_a),
-            pseudonym::code(Scheme::DEFAULT, KEY, "P1", 12).code,
+            pseudonym::code(Scheme::Blake2b32, KEY, "P1", 12).code,
             "{name}"
         );
         // the identifier comes back from the linkage store, and the read is audited
@@ -432,7 +433,7 @@ fn a_subject_an_import_created_keeps_its_code() {
 }
 
 #[test]
-fn a_blake2b_8_registry_reproduces_the_v0_codes() {
+fn the_subject_code_generator_reproduces_the_prototypes_codes() {
     // the fixture of §7.1: PID-0001 under nils-fixture-key
     for lab in labs_keyed(Scheme::Blake2b8, 16, b"nils-fixture-key") {
         let name = lab.name;
@@ -471,12 +472,95 @@ fn a_blake2b_8_registry_reproduces_the_v0_codes() {
 }
 
 #[test]
+fn a_personnummer_rule_is_refused_where_the_codes_are_not_the_generators() {
+    // The review of Wave 7a's merge (2026-10-10): a registry that makes its
+    // codes with blake2b-32 would give a person a code no other registry
+    // gives them, so it reads no personnummer, and says why.
+    let rule = Rule::parse("identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n")
+        .unwrap();
+    for lab in labs_keyed(Scheme::Blake2b32, 12, b"test-reg-key-not-real") {
+        let name = lab.name;
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+        let dir = TempDir::new("identity-pnr-old");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "19850101-2382", &[]));
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        let refused = match digest(&s, &mut reg) {
+            Ok(_) => panic!("{name}: a personnummer was read under blake2b-32"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            refused.contains("subject code generator"),
+            "{name}: {refused}"
+        );
+    }
+}
+
+#[test]
+fn a_personnummer_rule_gives_the_generators_code_of_the_twelve_digits() {
+    // The tax agency's published test numbers, which nobody holds, under a
+    // made-up key; the codes are the subject code generator's of the twelve digits,
+    // as Python's
+    // hashlib.blake2b(pn, key=key, digest_size=8) gives them.
+    let rule = Rule::parse("identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n")
+        .unwrap();
+    for lab in labs_keyed(Scheme::Blake2b8, 16, b"test-reg-key-not-real") {
+        let name = lab.name;
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+        let dir = TempDir::new("identity-pnr");
+        // one person written three ways, another, and a study id that is no number
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "19850101-2382", &[]));
+        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "850101-2382", &[]));
+        dir.file("c/IM_0001", &mr("C", "C.1", "C.1.1", "198501012382", &[]));
+        dir.file("d/IM_0001", &mr("D", "D.1", "D.1.1", "150101-2395", &[]));
+        dir.file("e/IM_0001", &mr("E", "E.1", "E.1.1", "TRIAL-0042", &[]));
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        s.batch_rows = 1;
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.clone().unwrap();
+        assert_eq!(w.subjects_created, 3, "{name}");
+        let sub_a = subject_of_study(&mut reg, "A");
+        assert_eq!(subject_of_study(&mut reg, "B"), sub_a, "{name}");
+        assert_eq!(subject_of_study(&mut reg, "C"), sub_a, "{name}");
+        assert_eq!(code_of(&mut reg, sub_a), "c6d36050d4d0a55b", "{name}");
+        let sub_d = subject_of_study(&mut reg, "D");
+        assert_eq!(code_of(&mut reg, sub_d), "97567e4f9035c39b", "{name}");
+        // the number is filed once, by its lookup alone: never kept, not
+        // even sealed (Wave 7a), and found again however it was written
+        assert_eq!(
+            revealed(&mut reg, &mut store, sub_a),
+            [identity("personnummer", "", "dicom")],
+            "{name}"
+        );
+        // the study id is no personnummer: its study's UID stands for it
+        let sub_e = subject_of_study(&mut reg, "E");
+        assert_eq!(
+            revealed(&mut reg, &mut store, sub_e)[0].0,
+            "study-instance-uid",
+            "{name}"
+        );
+        let unparsed = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == "identity_unparsed")
+            .map(|d| d.count)
+            .sum::<u64>();
+        assert_eq!(unparsed, 1, "{name}: {:?}", report.diagnostics);
+    }
+}
+
+#[test]
 fn two_identifiers_on_one_code_stop_the_job_with_a_review_item() {
     // one character of display: identifiers that share it are easy to find
     let mut by_code: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for i in 0..256 {
         let id = format!("P{i}");
-        let code = pseudonym::code(Scheme::DEFAULT, KEY, &id, 1).code;
+        let code = pseudonym::code(Scheme::Blake2b32, KEY, &id, 1).code;
         by_code.entry(code).or_default().push(id);
     }
     let mut pairs = by_code.values().filter(|ids| ids.len() >= 2);
@@ -488,7 +572,7 @@ fn two_identifiers_on_one_code_stop_the_job_with_a_review_item() {
         let ids = pairs.next().expect("a second pair");
         (ids[0].clone(), ids[1].clone())
     };
-    for lab in labs_with(Scheme::DEFAULT, 1) {
+    for lab in labs_with(Scheme::Blake2b32, 1) {
         let name = lab.name;
         let dir = TempDir::new("identity-collision");
         dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", &a, &[]));

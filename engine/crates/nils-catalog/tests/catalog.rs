@@ -27,7 +27,7 @@ fn registry() -> (Registry, TempDir) {
             backend: Backend::Sqlite,
             dsn: None,
             schema: None,
-            scheme: nils_registry::Scheme::DEFAULT,
+            scheme: nils_registry::Scheme::Blake2b32,
             key: "k".to_string(),
             display_length: 12,
             session_scheme: None,
@@ -214,9 +214,10 @@ fn a_sensitive_kind_is_absent_without_the_class_and_refused_at_validate() {
 
 /// The ruling of 2026-10-01 (decision 48): a sequence name is shown
 /// everywhere, at every detail. Every sequence name the catalog carries is
-/// technical, so the ask doors read it and project it raw at plain, quasi
+/// technical, the series description and the protocol name among them since
+/// record 55 K7, so the ask doors read it and project it raw at plain, quasi
 /// and sensitive alike, while a quasi-identifying text stays held below
-/// quasi and an identifier has no record.
+/// quasi (answered as its shape) and an identifier has no record.
 #[test]
 fn sequence_names_are_projected_raw_at_every_detail() {
     let (mut registry, _dir) = registry();
@@ -234,6 +235,10 @@ fn sequence_names_are_projected_raw_at_every_detail() {
         ("series", "pulse_sequence_name"),
         ("stack", "text_sequence_name"),
         ("stack", "pulse_sequence_name"),
+        ("series", "series_description"),
+        ("series", "protocol_name"),
+        ("stack", "text_series_description"),
+        ("stack", "text_protocol_name"),
     ] {
         let f = catalog
             .fields
@@ -251,15 +256,35 @@ fn sequence_names_are_projected_raw_at_every_detail() {
         }
     }
     let ask = parse(
-        r#"{"ast_version": 1, "sets": {"s": {"grain": "stack"}}, "out": {"set": "s", "level": "record", "columns": [["field", {}, "text_sequence_name"], ["field", {}, "pulse_sequence_name"], ["field", {}, "series.sequence_name"]]}}"#,
+        r#"{"ast_version": 1, "sets": {"s": {"grain": "stack"}}, "out": {"set": "s", "level": "record", "columns": [["field", {}, "text_sequence_name"], ["field", {}, "pulse_sequence_name"], ["field", {}, "series.sequence_name"], ["field", {}, "text_series_description"], ["field", {}, "text_protocol_name"], ["field", {}, "series.series_description"], ["field", {}, "series.protocol_name"]]}}"#,
     )
     .unwrap();
-    prepare(ask, &catalog, &plain).unwrap();
+    let prepared = prepare(ask, &catalog, &plain).unwrap();
+    assert!(
+        prepared.validated.shaped.is_empty(),
+        "{:?}",
+        prepared.validated.shaped
+    );
     // the other quasi-identifying texts are held below quasi as before
-    let f = catalog.fields[&("series".to_string(), "protocol_name".to_string())].clone();
+    let f = catalog.fields[&("study".to_string(), "station_name".to_string())].clone();
     assert_eq!(f.class, Class::QuasiIdentifying);
     assert!(!catalog.may_project_raw(&f, &plain));
     assert!(catalog.may_project_raw(&f, &quasi));
+    let ask = parse(
+        r#"{"ast_version": 1, "sets": {"s": {"grain": "stack"}}, "out": {"set": "s", "level": "record", "columns": [["field", {}, "text_series_description"], ["field", {}, "station_name"], ["field", {}, "text_all"]]}}"#,
+    )
+    .unwrap();
+    let shaped = |s: &Scope| -> Vec<usize> {
+        prepare(ask.clone(), &catalog, s)
+            .unwrap()
+            .validated
+            .shaped
+            .into_iter()
+            .collect()
+    };
+    assert_eq!(shaped(&plain), vec![1, 2]);
+    assert!(shaped(&quasi).is_empty());
+    assert!(shaped(&sensitive).is_empty());
     // and an identifier has no record at all
     assert!(catalog.field("subject", "patient_name").is_none());
 }

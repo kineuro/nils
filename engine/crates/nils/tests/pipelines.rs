@@ -1403,7 +1403,7 @@ impl Server {
             format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
         ]
         .join(",");
-        let mut child = lab
+        let child = lab
             .command(&lab.path)
             .args([
                 "serve",
@@ -1423,17 +1423,18 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let Some(Ok(first)) = lines.next() else {
-            let _ = child.kill();
             panic!("nils serve did not listen");
         };
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
         // the worker prints a line a job; nobody need read them
         std::thread::spawn(move || for _ in lines {});
-        Server { child, port }
+        held
     }
 
     fn raw(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Vec<u8>) {
@@ -4246,7 +4247,9 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
 }
 
 /// Record 49 A3: a pipeline of the bids layout that needs a T1w and a
-/// FLAIR a session, and makes an output only where it has both.
+/// FLAIR a session, and makes an output only where it has both. It finds
+/// the FLAIR as the release names it since record 55 C4, a modifier in
+/// `acq-` on the T2w suffix (`acq-Sag+2D+FLAIR+..._T2w`).
 const NEEDS_FLAIR: &str = r#"name: needs-flair
 schema-version: "0.5"
 tool-version: "1"
@@ -4259,7 +4262,7 @@ command-line: |
   src, out = sys.argv[1], sys.argv[2]
   for t in sorted(glob.glob(src + "/sub-*/ses-*/anat/*_T1w.nii.gz")):
       a = os.path.dirname(t)
-      if not glob.glob(a + "/*_FLAIR.nii.gz"):
+      if not glob.glob(a + "/*_acq-*FLAIR*_T2w.nii.gz"):
           continue
       rel = os.path.relpath(t, src)
       d = os.path.join(out, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
@@ -4279,6 +4282,17 @@ x-nils:
       columns: [{name: bytes, type: integer}]
   needs: {cores: 2, memory-gb: 3, unit-minutes: 4}
 "#;
+
+/// Whether a file the release wrote is a T2 FLAIR's image, as the release
+/// names one since record 55 C4: `FLAIR` among the `+` tokens of its
+/// `acq-`, on the T2w suffix (`sub-a_ses-b_acq-Sag+2D+FLAIR_T2w.nii.gz`).
+fn is_flair_image(name: &str) -> bool {
+    name.strip_suffix("_T2w.nii.gz").is_some_and(|stem| {
+        stem.split('_')
+            .filter_map(|e| e.strip_prefix("acq-"))
+            .any(|acq| acq.split('+').any(|t| t == "FLAIR"))
+    })
+}
 
 /// Record 49 A3's proof, the second half: the pre-flight of a selection
 /// whose one session lacks its FLAIR counts the units the run then has and
@@ -4483,6 +4497,203 @@ fn the_preflight_counts_what_the_run_then_does() {
     ]);
     assert_eq!(after["estimate"]["source"], "runs", "{after}");
     assert_eq!(after["estimate"]["runs"], 1, "{after}");
+}
+
+/// Record 55 C4 ("FLAIR is always a modifier"): the starters that read a
+/// FLAIR, over the release a run makes, which names it a T2w with FLAIR
+/// among the `+` tokens of its `acq-`. The pre-flight finds each session's
+/// FLAIR for SAMSEG with lesions, which needs one; segcsvd reads a FLAIR
+/// where a session has one and needs only the T1w. Then the three run as
+/// the runner runs them, their command lines as shipped, the images' tools
+/// stood in for by scripts that keep their words, and each unit's needs
+/// made small enough for any machine's lane: SynthSeg's label maps,
+/// segcsvd's WMH segmented on each session's FLAIR and named for it, and
+/// SAMSEG with the FLAIR resampled onto the T1w.
+#[test]
+fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-flair-starters");
+    // the shipped descriptors, each unit asking one core and 2 GB, which
+    // its threads follow
+    let cores = regex::Regex::new(r"(?m)^    cores: \d+$").unwrap();
+    let memory = regex::Regex::new(r"(?m)^    memory-gb: \d+$").unwrap();
+    for name in ["synthseg", "segcsvd", "samseg-lesions"] {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let small = cores.replace_all(&text, "    cores: 1");
+        let small = memory.replace_all(&small, "    memory-gb: 2").to_string();
+        assert_ne!(small, text, "{name} declares its needs");
+        lab.add_descriptor(name, &small);
+    }
+    // the images' tools: each keeps its words, a line a call, and writes
+    // what the command line reads next
+    let log = lab.bin.path().join("tools.log");
+    let keep = format!(
+        "l=${{0##*/}}; for a; do l=\"$l\t$a\"; done; printf '%s\\n' \"$l\" >> '{}'",
+        log.display()
+    );
+    let tools: [(&str, &str); 6] = [
+        (
+            "mri_synthseg",
+            r#"while [ $# -gt 0 ]; do case "$1" in --o) o=$2;; --vol) v=$2;; --qc) q=$2;; esac; shift; done
+printf x > "$o"
+printf 'subject,total intracranial\nx,1500000\n' > "$v"
+printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,0.9\n' > "$q""#,
+        ),
+        ("sbtResliceLike", r#"printf x > "$3""#),
+        (
+            "segment_wmh",
+            r#"printf x > "$3"; printf x > "$(dirname "$3")/thr_wmh.nii.gz""#,
+        ),
+        (
+            "segment_pvs",
+            r#"printf x > "$4"; printf x > "$(dirname "$4")/thr_pvs.nii.gz""#,
+        ),
+        // SAMSEG's folder read for its measures; otherwise an image written
+        // to its last word
+        (
+            "fspython",
+            r#"for l; do :; done; if [ -d "$l" ]; then echo '{"Intra-Cranial": 1500000.0, "Lesions": 1200.0}'; else printf x > "$l"; fi"#,
+        ),
+        (
+            "run_samseg",
+            r#"while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; mkdir -p "$o"; printf x > "$o/seg.mgz""#,
+        ),
+    ];
+    // python3 runs the stand-in podman too: only the image's nibabel steps
+    // are stood in for, the volumes of the masks given in pairs, each there
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|d| d.join("python3"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let python3 = format!(
+        r#"case "$2" in
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do [ -s "$2" ] || exit 1; s="$s${{s:+, }}\"$1\": 1.0"; shift 2; done; echo "{{$s}}"; exit 0;;
+*nibabel*) for l; do :; done; printf x > "$l"; exit 0;;
+esac
+exec '{}' "$@""#,
+        python.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (tool, body) in tools {
+            let f = lab
+                .bin
+                .file(tool, format!("#!/bin/sh\n{keep}\n{body}\n").as_bytes());
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let f = lab
+            .bin
+            .file("python3", format!("#!/bin/sh\n{python3}\n").as_bytes());
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // the pre-flight finds the FLAIR the release will write in each session
+    for name in ["samseg-lesions", "segcsvd"] {
+        let pre = lab.json(&[
+            "run",
+            name,
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ]);
+        let roles = if name == "segcsvd" {
+            json!(["t1w"])
+        } else {
+            json!(["t1w", "flair"])
+        };
+        assert_eq!(pre["roles"], roles, "{pre}");
+        assert_eq!(pre["units"]["total"], 2, "{name}: {pre}");
+        assert_eq!(pre["units"]["missing"], 0, "{name}: {pre}");
+    }
+
+    let run = |name: &str| -> Value {
+        let v = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
+        assert_eq!(v["status"], "done", "{name}: {v}");
+        assert_eq!(v["summary"]["units"]["succeeded"], 2, "{name}: {v}");
+        v
+    };
+    // the FLAIR each session's tool was handed: segment_wmh's first word,
+    // and the first after the code of SAMSEG's resampling
+    let handed = |tool: &str| -> Vec<String> {
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let mut out: Vec<String> = calls
+            .lines()
+            .map(|l| l.split('\t').collect::<Vec<_>>())
+            .filter_map(|w| match w.as_slice() {
+                [t, flair, ..] if *t == tool && tool == "segment_wmh" => Some(flair.to_string()),
+                [t, "-c", code, flair, ..] if *t == tool && code.contains("resample_like") => {
+                    Some(flair.to_string())
+                }
+                _ => None,
+            })
+            .map(|p| p.rsplit('/').next().unwrap_or_default().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+
+    run("synthseg");
+    let v = run("segcsvd");
+    let flairs = handed("segment_wmh");
+    assert_eq!(flairs.len(), 2, "a FLAIR in each session: {flairs:?}");
+    assert!(flairs.iter().all(|f| is_flair_image(f)), "{flairs:?}");
+    assert_ne!(flairs[0], flairs[1]);
+    // the WMH are registered, each named for its FLAIR's stem without
+    // the suffix, and measured
+    let rows = lab.json(&[
+        "derivative",
+        "list",
+        "--run",
+        &v["id"].to_string(),
+        "--json",
+    ]);
+    let mut wmh: Vec<String> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["path"].as_str())
+        .filter_map(|p| {
+            p.rsplit('/')
+                .next()?
+                .strip_suffix("_label-WMH_desc-segcsvd_mask.nii.gz")
+                .map(|s| format!("{s}_T2w.nii.gz"))
+        })
+        .collect();
+    wmh.sort();
+    assert_eq!(wmh, flairs, "{rows}");
+    assert_eq!(v["summary"]["derivatives"], 10, "{v}");
+    let volumes: Vec<Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["path"].as_str())
+        .filter(|p| p.ends_with("_desc-segcsvd_volumes.json"))
+        .map(|p| serde_json::from_slice(&std::fs::read(lab.work.path().join(p)).unwrap()).unwrap())
+        .collect();
+    assert_eq!(volumes.len(), 2, "{rows}");
+    assert!(
+        volumes.iter().all(|t| t["wmh_volume"] == 1.0),
+        "{volumes:?}"
+    );
+
+    let v = run("samseg-lesions");
+    let resampled = handed("fspython");
+    assert_eq!(resampled, flairs, "SAMSEG reads the FLAIR segcsvd read");
+    assert_eq!(v["summary"]["derivatives"], 4, "{v}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let lesions = calls
+        .lines()
+        .filter(|l| l.starts_with("run_samseg\t") && l.contains("\t--lesion\t"))
+        .count();
+    assert_eq!(lesions, 2, "{calls}");
 }
 
 /// Record 49 A4's proof: an engine started on a fresh registry seeds the
@@ -5871,7 +6082,7 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
                 let path = e.path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.to_string_lossy().ends_with("_FLAIR.nii.gz") {
+                } else if is_flair_image(&e.file_name().to_string_lossy()) {
                     n += 1;
                 }
             }

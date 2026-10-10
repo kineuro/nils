@@ -1252,6 +1252,23 @@ then Uniform) is carried beside the Dixon one. A role is scored on tables of
 its own, and a role without them is refused at load. The MRI pack adds the
 role `t2w`, whose tables are this project's and not v0's.
 
+**The 2026-10-10 study of the pick borders amends it again.** A pick counts
+the images a stack holds, each frame of an enhanced multi-frame file one, as
+its slice count (R5). A retake is full stacks taken at different times (R6,
+after record 38): series of one candidate acquired at one moment are one
+acquisition stored twice, and the candidate keeps the scanner's original
+image, then the series it wrote first; a stack of two images or fewer is a
+fragment, no candidate and no part of one. Pack contract 9 lets a pick file
+say which stacks holding a role compete for it (`candidates`: per role, a
+`when` and an `unless` list of conditions over the names the pick reads; a
+stack it does not admit is no candidate and no part of the role's population)
+and how a near tie is decided (`near_tie`: steps that prefer values, avoid
+them or take the lower or higher number, for every role or the roles they
+name; among the candidates within `runner_up_within` of the best the first
+step that tells the first two apart decides, and the pick says which in its
+notes). A near tie no step decides is still a border. The MRI pack declares
+neither until a ruling does; a patch rehearses either (record 56, §5.5).
+
 ### 10.1 Who authored a decision
 
 A small addition, made here because it has to exist before anything writes

@@ -37,8 +37,22 @@ fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// A home with the key `k` stored and a SQLite registry initialised.
+/// A home with the key `k` stored and a SQLite registry initialised, its
+/// codes `blake2b-32` of ten characters.
 fn home() -> TempDir {
+    home_with(&["--scheme", "blake2b-32", "--display-length", "10"])
+}
+
+/// A home whose registry makes its codes with the subject code generator's
+/// scheme: a personnummer is read only into such a registry (the review of
+/// Wave 7a's merge, 2026-10-10).
+fn generator_home() -> TempDir {
+    home_with(&["--scheme", "blake2b-8"])
+}
+
+/// A home with the key `k` stored and a SQLite registry initialised with
+/// these `nils init` arguments beside the key.
+fn home_with(scheme: &[&str]) -> TempDir {
     let home = TempDir::new("cli-home");
     let out = nils()
         .args(["--registry"])
@@ -61,7 +75,8 @@ fn home() -> TempDir {
     let out = nils()
         .args(["--registry"])
         .arg(home.path())
-        .args(["init", "--key", "k", "--display-length", "10"])
+        .args(["init", "--key", "k"])
+        .args(scheme)
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
@@ -709,7 +724,7 @@ fn an_identity_rule_comes_from_a_file() {
 }
 
 #[test]
-fn a_blake2b_8_registry_gives_the_v0_code() {
+fn the_subject_code_generator_gives_the_prototypes_code() {
     let home = TempDir::new("cli-v0");
     let out = nils()
         .args(["--registry"])
@@ -1770,7 +1785,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@1.0.1"),
+            .any(|p| p["pack"] == "mri@1.0.2"),
         "{listed}"
     );
 
@@ -1784,10 +1799,9 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert_eq!(shown["modality"], "MR");
     assert_eq!(shown["flags"], 584);
     assert_eq!(
-        shown["contract"], 8,
-        "record 53: a session pass, a fallback border over several values and the private \
-         elements a reader is shown (contract 8), after record 51's nine pick borders \
-         (contract 7)"
+        shown["contract"], 9,
+        "pack 1.0.2: review.by_model (contract 9), after record 53's session pass, fallback \
+         border over several values and private elements a reader is shown (contract 8)"
     );
     // record 53: what a packet must carry to replay the pack: the private
     // elements it shows, with where a builder reads them, and what the
@@ -2801,6 +2815,8 @@ fn the_cli_runs_a_round_on_postgres_too() {
             schema,
             "--key",
             "k",
+            "--scheme",
+            "blake2b-32",
             "--display-length",
             "10",
         ])
@@ -3363,11 +3379,11 @@ fn a_scheme_anchored_on_a_diagnosis_takes_month_zero_from_the_clinical_layer() {
 
 #[test]
 fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_sense() {
-    // Record 37 S7. A person chooses with `--naming`; unasked it follows the
-    // layout, and the release row carries the answer, so a re-run of that
-    // release writes the names that release wrote. `--naming bids` on a
-    // descriptive tree is the one pair that means nothing: that tree has no
-    // entities, so its names carry every axis whatever the flag says.
+    // Record 37 S7 and record 55 C4. A person chooses with `--naming`; unasked
+    // it is `full`, and the release row carries the answer, so a re-run of
+    // that release writes the names that release wrote. `--naming minimal`
+    // on a descriptive tree is the one pair that means nothing: that tree is
+    // v0's grammar and spells every slot whatever the flag says.
     let home = home();
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
     let registry = ["--registry", home.path().to_str().unwrap()];
@@ -3395,7 +3411,7 @@ fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_
             "--layout",
             "descriptive",
             "--naming",
-            "bids",
+            "minimal",
             "--pack-dir",
             packs.to_str().unwrap(),
             "--out",
@@ -3405,7 +3421,7 @@ fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_
         .unwrap();
     assert!(!refused.status.success());
     assert!(
-        stderr(&refused).contains("--naming bids needs --layout bids"),
+        stderr(&refused).contains("--naming minimal needs --layout bids"),
         "{}",
         stderr(&refused)
     );
@@ -3428,7 +3444,7 @@ fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_
         .unwrap();
     assert!(written.status.success(), "{}", stderr(&written));
     let report: serde_json::Value = serde_json::from_str(&stdout(&written)).unwrap();
-    assert_eq!(report["naming"], "informative", "{report}");
+    assert_eq!(report["naming"], "full", "{report}");
 }
 
 #[test]
@@ -4566,7 +4582,16 @@ fn a_laptop_binds_directories_as_places_and_a_release_keeps_to_the_export_one() 
         .output()
         .unwrap();
     let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    // the source is a root (Wave 7a), added alone: its folders become
+    // datasets only when a person adds them
     assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
+    let src = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "src")
+        .unwrap();
+    assert_eq!(src["dataset"]["kind"], "root", "{src}");
 }
 
 /// Record 26 at the keyboard: `nils place add --role source` declares a
@@ -4596,7 +4621,14 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
         .args(registry)
         .args(["place", "add", "ds"])
         .arg(dir.path())
-        .args(["--role", "source", "--arrives", "identified", "--identity"])
+        .args([
+            "--role",
+            "source",
+            "--move-into",
+            "originals",
+            "--confirm-move",
+            "--identity",
+        ])
         .arg(&rule)
         .args(["--cohort", "study-a", "--remove", "0010,1010", "--json"])
         .output()
@@ -4607,7 +4639,9 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
     assert_eq!(ds["dataset"]["identity"]["id_type"], "study-id", "{ds}");
     assert_eq!(ds["dataset"]["cohort"], "study-a", "{ds}");
     assert_eq!(ds["dataset"]["tags"]["remove"][0], "0010,1010", "{ds}");
-    assert_eq!(ds["layout"]["loose"], 0, "{ds}");
+    // the rule file holds no DICOM: it stays beside derivatives/, unread
+    assert_eq!(ds["layout"]["loose"], 1, "{ds}");
+    assert_eq!(ds["layout"]["moved"]["entries"], 1, "{ds}");
     assert!(
         dir.path()
             .join("derivatives/dcm-original/sub-1/IM_0001")
@@ -4726,7 +4760,7 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
         .args(registry)
         .args(["place", "add", "out"])
         .arg(elsewhere.path())
-        .args(["--role", "export", "--arrives", "coded"])
+        .args(["--role", "export", "--subjects", "map"])
         .output()
         .unwrap();
     assert!(!refused.status.success());
@@ -4790,7 +4824,13 @@ fn a_dataset_s_originals_are_surveyed_then_vaulted_at_the_keyboard() {
         .args(registry)
         .args(["place", "add", "ds"])
         .arg(dir.path())
-        .args(["--role", "source", "--arrives", "identified"])
+        .args([
+            "--role",
+            "source",
+            "--move-into",
+            "originals",
+            "--confirm-move",
+        ])
         .output()
         .unwrap();
     assert!(added.status.success(), "{}", stderr(&added));
@@ -4936,8 +4976,9 @@ fn a_changed_original_refuses_a_purge_until_the_dataset_is_pseudonymised_again()
         dir.path().to_str().unwrap(),
         "--role",
         "source",
-        "--arrives",
-        "identified",
+        "--move-into",
+        "originals",
+        "--confirm-move",
         "--unmapped",
         "code",
     ]);
@@ -5100,8 +5141,9 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         dir.path().to_str().unwrap(),
         "--role",
         "source",
-        "--arrives",
-        "identified",
+        "--move-into",
+        "originals",
+        "--confirm-move",
         "--unmapped",
         "code",
     ]);
@@ -5113,9 +5155,9 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "--role",
         "source",
     ]);
-    // a dataset read in place has nothing to pseudonymise
+    // a dataset nobody declared is not read, so not pseudonymised either
     let why = refused(&["pseudonymize", "@plain"]);
-    assert!(why.contains("read in place"), "{why}");
+    assert!(why.contains("undeclared"), "{why}");
     assert!(
         refused(&["pseudonymize", "ds"]).contains("@name"),
         "a dataset is named as @name"
@@ -5146,6 +5188,19 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         !text.contains("199001011234") && !text.contains("Doe"),
         "{text}"
     );
+    // Wave 7a (2026-10-10): the run counts the dataset's trees again when
+    // it ends, so the copy is counted without a probe
+    let places: serde_json::Value =
+        serde_json::from_str(&run(&["place", "list", "--json"])).unwrap();
+    let ds = places
+        .as_array()
+        .or_else(|| places["places"].as_array())
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ds")
+        .unwrap_or_else(|| panic!("{places}"));
+    assert_eq!(ds["dataset"]["trees"]["anon"]["files"], 6, "{ds}");
+    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 6, "{ds}");
     let codes: Vec<String> = std::fs::read_dir(&anon)
         .unwrap()
         .flatten()
@@ -5212,36 +5267,78 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     );
     assert!(queued.contains("then nils classify --pack mri"), "{queued}");
     run(&["jobs", "work", "--once"]);
-    let listed: serde_json::Value =
-        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
-    let jobs = listed.as_array().unwrap();
-    // the chain, followed link by link from the queued job
-    let first = jobs
-        .iter()
-        .find(|j| j["kind"] == "pseudonymize" && j["name"] == "second")
-        .unwrap_or_else(|| panic!("{listed}"));
-    let mut ran: Vec<(String, String, Option<i64>, Option<i64>)> = Vec::new();
-    let mut next = Some(first["id"].as_i64().unwrap());
-    while let Some(id) = next {
-        let j = jobs.iter().find(|j| j["id"] == id).unwrap();
-        ran.push((
-            j["kind"].as_str().unwrap().to_string(),
-            j["state"].as_str().unwrap().to_string(),
-            j["chain"]["before"].as_i64(),
-            j["chain"]["after"].as_i64(),
-        ));
-        next = j["chain"]["after"].as_i64();
-    }
-    let kinds: Vec<&str> = ran.iter().map(|r| r.0.as_str()).collect();
+    // the chain, followed link by link from its first job
+    let chain_of = |name: &str| -> (Vec<serde_json::Value>, serde_json::Value) {
+        let listed: serde_json::Value =
+            serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+        let jobs = listed.as_array().unwrap();
+        let first = jobs
+            .iter()
+            .find(|j| j["kind"] == "pseudonymize" && j["name"] == name)
+            .unwrap_or_else(|| panic!("{listed}"));
+        let mut ran = Vec::new();
+        let mut next = first["id"].as_i64();
+        while let Some(id) = next {
+            let j = jobs.iter().find(|j| j["id"] == id).unwrap();
+            ran.push(j.clone());
+            next = j["chain"]["after"].as_i64();
+        }
+        (ran, listed)
+    };
+    let kinds = |ran: &[serde_json::Value]| -> Vec<String> {
+        ran.iter()
+            .map(|j| j["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Wave 7a (2026-10-10): every file was read already, so the read added
+    // and changed nothing, and the chain ends with it: no sort and no pick
+    // over what is there, and the read says what it left and why
+    let (ran, listed) = chain_of("second");
+    assert_eq!(kinds(&ran), ["pseudonymize", "digest"], "{listed}");
+    assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
+    assert_eq!(ran[0]["then"].as_array().unwrap().len(), 3, "{listed}");
+    let ended = &ran[1]["result"]["chain_ended"];
     assert_eq!(
-        kinds,
-        ["pseudonymize", "digest", "fingerprint", "classify"],
+        ended["skipped"],
+        serde_json::json!([["fingerprint"], ["classify", "--pack", "mri"]]),
         "{listed}"
     );
-    assert!(ran.iter().all(|r| r.1 == "done"), "{listed}");
-    assert!(ran[0].2.is_none() && ran[0].3.is_some(), "{listed}");
-    assert!(ran[3].2.is_some() && ran[3].3.is_none(), "{listed}");
-    assert_eq!(first["then"].as_array().unwrap().len(), 3, "{first}");
+    assert!(
+        ended["why"].as_str().unwrap().contains("nothing new"),
+        "{ended}"
+    );
+    assert_eq!(
+        ran[1]["chain"]["after"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
+
+    // a file that arrives later is new: the whole thread runs for it
+    dir.file(
+        "derivatives/dcm-original/sub-0/IM_0004",
+        &identified("199001011234", 1, 4),
+    );
+    run(&["bring-in", "@ds", "--name", "third", "--pack", "mri"]);
+    run(&["jobs", "work", "--once"]);
+    let (ran, listed) = chain_of("third");
+    // record 55 H2: the sort is followed by picking main scans, a pipeline
+    // step of its own that the chain did not name
+    assert_eq!(
+        kinds(&ran),
+        ["pseudonymize", "digest", "fingerprint", "classify", "pick"],
+        "{listed}"
+    );
+    assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
+    assert_eq!(ran[0]["result"]["files"]["written"], 1, "{listed}");
+    assert!(
+        ran[0]["chain"]["before"].is_null() && ran[0]["chain"]["after"].is_i64(),
+        "{listed}"
+    );
+    assert!(
+        ran[4]["chain"]["before"].is_i64() && ran[4]["chain"]["after"].is_null(),
+        "{listed}"
+    );
+    assert!(ran[1]["result"]["chain_ended"].is_null(), "{listed}");
 }
 
 fn packs_dir() -> std::path::PathBuf {
@@ -5983,7 +6080,7 @@ fn a_pack_is_replayed_over_header_packets() {
         assert_eq!(got[0]["stack"], 1);
         assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
         assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
-        assert!(stderr(&out).contains("2 packets replayed through mri@1.0.1"));
+        assert!(stderr(&out).contains("2 packets replayed through mri@1.0.2"));
     }
     let bad = dir.file("bad.jsonl", b"{not json\n");
     let out = nils()
@@ -5999,4 +6096,621 @@ fn a_pack_is_replayed_over_header_packets() {
         "{}",
         stderr(&out)
     );
+}
+
+/// One MR file with its own UIDs, for the layout tests.
+fn mr_file(dir: &TempDir, rel: &str, n: u32) {
+    let sop = format!("1.2.7.{n}.1.1");
+    let mr = synth::minimal_mr(&format!("1.2.7.{n}"), &format!("1.2.7.{n}.1"), &sop);
+    dir.file(rel, &synth::part10(&MetaFields::mr(&sop), &mr, true));
+}
+
+/// Wave 7a, T4 at the keyboard (Nima, 2026-10-08: "NILS should always get
+/// the declaration from structure"): a source place is a root, and each
+/// folder under it a dataset whose structure says what it is: identified
+/// (only originals), anonymised (only dcm-anon or dcm-raw, renamed), both,
+/// or unknown (DICOM beside derivatives/, or no tree). Nothing of an unknown
+/// dataset, of the root, or of a folder holding it is digested or brought
+/// in; an unknown dataset's entries move only into the tree a person names
+/// and only on the person's word, and then the structure says what it is.
+/// Anonymised data is read once it says what PatientID holds and how its
+/// subjects are found. The arrival is never declared.
+#[test]
+fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let outer = TempDir::new("cli-layout");
+    mr_file(&outer, "src/idf/derivatives/dcm-original/p1/IM_0001", 1);
+    mr_file(&outer, "src/anon/derivatives/dcm-anon/s1/IM_0002", 2);
+    mr_file(&outer, "src/raw/derivatives/dcm-raw/s1/IM_0003", 3);
+    mr_file(&outer, "src/both/derivatives/dcm-original/p1/IM_0004", 4);
+    mr_file(&outer, "src/both/derivatives/dcm-raw/s1/IM_0004", 4);
+    mr_file(&outer, "src/loose/p1/IM_0005", 5);
+    mr_file(&outer, "src/mixed/derivatives/dcm-anon/s1/IM_0006", 6);
+    mr_file(&outer, "src/mixed/p9/IM_0007", 7);
+    let root = outer.path().join("src");
+    let run = |args: &[&str]| nils().args(registry).args(args).output().unwrap();
+
+    std::fs::create_dir_all(root.join("papers")).unwrap();
+    std::fs::write(root.join("papers/notes"), b"no dicom here").unwrap();
+    let added = run(&[
+        "place",
+        "add",
+        "src",
+        root.to_str().unwrap(),
+        "--role",
+        "source",
+        "--json",
+    ]);
+    assert!(added.status.success(), "{}", stderr(&added));
+    let src: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    // the root alone (Nima, 2026-10-08)
+    assert_eq!(src["dataset"]["kind"], "root", "{src}");
+    assert_eq!(src["datasets"], serde_json::Value::Null, "{src}");
+    assert_eq!(src["layout"]["folders"], 7, "{src}");
+    // its folders as they are, nothing assumed
+    let listed = run(&["place", "folders", "src", "--json"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let doc: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(doc["matching"], 7, "{doc}");
+    assert_eq!(doc["next"], serde_json::Value::Null, "{doc}");
+    assert!(
+        doc["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["added"] == false),
+        "{doc}"
+    );
+    // found by name, a page at a time
+    let found = run(&["place", "folders", "src", "--search", "PAP", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert_eq!(doc["folders"][0]["name"], "papers", "{doc}");
+    assert_eq!(doc["count"], 1, "{doc}");
+    let paged = run(&["place", "folders", "src", "--limit", "2", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&paged.stdout).unwrap();
+    assert_eq!(doc["next"], "both", "{doc}");
+    let paged = run(&[
+        "place", "folders", "src", "--limit", "2", "--after", "both", "--json",
+    ]);
+    let doc: serde_json::Value = serde_json::from_slice(&paged.stdout).unwrap();
+    assert_eq!(doc["folders"][0]["name"], "idf", "{doc}");
+    // one folder looked at before it is added
+    let look = |name: &str| -> serde_json::Value {
+        let out = run(&["place", "folder", "src", name, "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    assert_eq!(look("papers")["holds_dicom"], "no");
+    assert_eq!(look("loose")["holds_dicom"], "yes");
+    assert_eq!(look("loose")["layout"]["state"], "unknown");
+    assert_eq!(look("idf")["layout"]["state"], "identified");
+    assert!(
+        root.join("raw/derivatives/dcm-raw").is_dir(),
+        "nothing renamed yet"
+    );
+    // each data folder added by a person: only then is its structure read
+    let mut added_sets = std::collections::BTreeMap::new();
+    for folder in ["anon", "both", "idf", "loose", "mixed", "raw"] {
+        let out = run(&["place", "add-dataset", "src", folder, "--json"]);
+        assert!(out.status.success(), "{folder}: {}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["dataset"]["root"], "src", "{doc}");
+        added_sets.insert(folder.to_string(), doc);
+    }
+    let states: std::collections::BTreeMap<String, String> = added_sets
+        .iter()
+        .map(|(k, d)| {
+            (
+                k.clone(),
+                d["dataset"]["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let want: std::collections::BTreeMap<String, String> = [
+        ("anon", "anonymised"),
+        ("both", "both"),
+        ("idf", "identified"),
+        ("loose", "unknown"),
+        ("mixed", "unknown"),
+        ("raw", "anonymised"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect();
+    assert_eq!(states, want);
+    let id_of = |name: &str| added_sets[name]["id"].as_i64().unwrap().to_string();
+    let loose = &added_sets["loose"];
+    assert_eq!(loose["layout"]["question"], true, "{loose}");
+    assert_eq!(
+        loose["layout"]["loose_dicom"],
+        serde_json::json!(["p1"]),
+        "{loose}"
+    );
+    assert_eq!(
+        loose["layout"]["move_into"]["choices"],
+        serde_json::json!(["originals", "anon"]),
+        "{loose}"
+    );
+    // the papers were never added: not a dataset, never read
+    let refused = run(&["digest", root.join("papers").to_str().unwrap()]);
+    assert!(!refused.status.success());
+    // dcm-raw renamed, shown; nothing of an unknown dataset moved
+    assert!(root.join("raw/derivatives/dcm-anon/s1/IM_0003").is_file());
+    assert!(root.join("loose/p1/IM_0005").is_file());
+    assert!(!root.join("loose/derivatives").exists());
+    assert!(root.join("mixed/p9/IM_0007").is_file());
+
+    let shown = run(&["place", "layout", "src"]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let text = stdout(&shown);
+    assert!(text.contains("a root"), "{text}");
+    assert!(text.contains("unknown: 1 entry with DICOM"), "{text}");
+
+    // 0 files digested, whichever way an unknown dataset or the root is named
+    for target in [
+        "@src".to_string(),
+        root.display().to_string(),
+        outer.path().display().to_string(),
+        "@loose".to_string(),
+        root.join("loose/p1").display().to_string(),
+        "@mixed".to_string(),
+        root.join("mixed/p9").display().to_string(),
+        "@anon".to_string(),
+    ] {
+        let refused = run(&["digest", &target]);
+        assert!(!refused.status.success(), "{target}");
+    }
+    let refused = run(&["bring-in", "@loose"]);
+    assert!(!refused.status.success());
+    let status = status_json(&home);
+    assert_eq!(
+        status["batches"].as_array().map(Vec::len),
+        Some(0),
+        "{status}"
+    );
+    assert_eq!(status["jobs"].as_array().map(Vec::len), Some(0), "{status}");
+
+    // the arrival is the structure's, never a person's
+    let refused = run(&["place", "set", &id_of("loose"), "--arrives", "identified"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("read from its folder"),
+        "{}",
+        stderr(&refused)
+    );
+    // an unknown dataset's entries: the tree named, refused without the word
+    let asked = run(&[
+        "place",
+        "set",
+        &id_of("loose"),
+        "--move-into",
+        "originals",
+        "--json",
+    ]);
+    assert!(!asked.status.success());
+    assert!(
+        stderr(&asked).contains("--confirm-move"),
+        "{}",
+        stderr(&asked)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&asked.stdout).unwrap();
+    assert_eq!(
+        doc["layout"]["loose_dicom"],
+        serde_json::json!(["p1"]),
+        "{doc}"
+    );
+    assert!(root.join("loose/p1/IM_0005").is_file());
+    let set = run(&[
+        "place",
+        "set",
+        &id_of("loose"),
+        "--move-into",
+        "originals",
+        "--confirm-move",
+        "--json",
+    ]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let doc: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(doc["dataset"]["state"], "identified", "{doc}");
+    assert_eq!(doc["dataset"]["root"], "src", "{doc}");
+    assert!(
+        root.join("loose/derivatives/dcm-original/p1/IM_0005")
+            .is_file()
+    );
+
+    // anonymised data is read once it says what PatientID holds and how
+    // its subjects are found
+    let refused = run(&["digest", "@anon"]);
+    assert!(
+        stderr(&refused).contains("patient_id"),
+        "{}",
+        stderr(&refused)
+    );
+    let set = run(&[
+        "place",
+        "set",
+        &id_of("anon"),
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "generated",
+    ]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let done = run(&["digest", "@anon", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    assert_eq!(report["parsed"], 1, "{report}");
+    // a dataset's folder outside its tree is not read
+    let refused = run(&["digest", root.join("anon").to_str().unwrap()]);
+    assert!(
+        stderr(&refused).contains("pseudonymised tree alone"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // looked at again: every dataset read anew, and a new folder is no
+    // dataset until a person adds it
+    mr_file(&outer, "src/late/derivatives/dcm-anon/s1/IM_0008", 8);
+    let again = run(&["place", "explore", "--json"]);
+    assert!(again.status.success(), "{}", stderr(&again));
+    let doc: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(doc["datasets"].as_array().unwrap().len(), 6, "{doc}");
+    assert!(
+        doc["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["new"] == false),
+        "{doc}"
+    );
+    let listed = run(&["place", "folders", "src", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let late = doc["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "late")
+        .unwrap();
+    assert_eq!(late["added"], false, "{doc}");
+    assert_eq!(late.get("has_derivatives"), None, "{doc}");
+}
+
+/// Wave 7a: a place from before that names a dataset's pseudonymised tree
+/// itself (`…/derivatives/dcm-raw`) is legacy: read as that tree, an
+/// anonymised dataset, once it says what PatientID holds and how its
+/// subjects are found; it is never renamed and nothing beside it moves.
+#[test]
+fn a_place_on_a_pseudonymised_tree_is_legacy_and_read_as_that_tree() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-layout-legacy");
+    mr_file(&dir, "study/derivatives/dcm-raw/s1/IM_0001", 11);
+    mr_file(&dir, "study/derivatives/dcm-original/p1/IM_0001", 12);
+    let tree = dir.path().join("study/derivatives/dcm-raw");
+    let run = |args: &[&str]| nils().args(registry).args(args).output().unwrap();
+    let added = run(&[
+        "place",
+        "add",
+        "old",
+        tree.to_str().unwrap(),
+        "--role",
+        "source",
+        "--json",
+    ]);
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["kind"], "legacy", "{ds}");
+    assert_eq!(ds["dataset"]["state"], "anonymised", "{ds}");
+    let id = ds["id"].as_i64().unwrap().to_string();
+    assert!(!run(&["digest", "@old"]).status.success());
+    let set = run(&[
+        "place",
+        "set",
+        &id,
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "map",
+    ]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let done = run(&["digest", "@old", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    // read, and held: no map names its subject yet
+    assert_eq!(report["seen"], 1, "{report}");
+    assert!(tree.is_dir(), "never renamed");
+    // its originals beside it are never read
+    let refused = run(&[
+        "digest",
+        dir.path()
+            .join("study/derivatives/dcm-original")
+            .to_str()
+            .unwrap(),
+    ]);
+    assert!(!refused.status.success());
+}
+
+/// Wave 7a §5.4, T5 at the keyboard: a dataset declared with `--patient-id
+/// id-type:study-id` has each person's study id written into PatientID of
+/// its pseudonymised tree, through the subject the generator's code names;
+/// its digest reads the tree back by that type and finds the same
+/// subjects; and what PatientID holds is not changed once files were
+/// pseudonymised. The numbers are the tax agency's published test numbers.
+#[test]
+fn a_dataset_writes_the_declared_id_type_and_its_digest_reads_it_back() {
+    let home = generator_home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let go = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    let dir = TempDir::new("cli-patient-id");
+    for (n, pn) in [(1, "19850101-2382"), (2, "201501012395")] {
+        let sop = format!("1.2.8.{n}.1.1");
+        dir.file(
+            &format!("p{n}/IM_000{n}"),
+            &mr_of(&format!("1.2.8.{n}"), &sop, patient(pn, None)),
+        );
+    }
+    let aside = TempDir::new("cli-patient-id-aside");
+    let rule = aside.file(
+        "rule.yml",
+        b"identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n",
+    );
+    let map = aside.file(
+        "map.csv",
+        b"pnr,study\n19850101-2382,STUDY-A\n201501012395,STUDY-B\n",
+    );
+    go(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--column",
+        "pnr=canonical:personnummer",
+        "--column",
+        "study=identifier:study-id",
+        "--make-types",
+    ]);
+    let added = go(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--move-into",
+        "originals",
+        "--confirm-move",
+        "--identity",
+        rule.to_str().unwrap(),
+        "--patient-id",
+        "id-type:study-id",
+        "--json",
+    ]);
+    let ds: serde_json::Value = serde_json::from_str(&added).unwrap();
+    assert_eq!(ds["dataset"]["patient_id"], "id-type:study-id", "{ds}");
+    let id = ds["id"].as_i64().unwrap().to_string();
+    // a personnummer is never what PatientID holds
+    let refused = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--patient-id", "id-type:personnummer"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("never holds"),
+        "{}",
+        stderr(&refused)
+    );
+
+    go(&["pseudonymize", "@ds"]);
+    let mut ids = std::collections::BTreeSet::new();
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut queue = vec![anon.clone()];
+    while let Some(d) = queue.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            if e.path().is_dir() {
+                queue.push(e.path());
+            } else {
+                let x = nils_dicom::extract(&e.path()).unwrap();
+                ids.insert(x.identity.values[0].clone().unwrap_or_default());
+            }
+        }
+    }
+    assert_eq!(
+        ids,
+        ["STUDY-A", "STUDY-B"]
+            .into_iter()
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    let described = go(&["digest", "@ds", "--describe"]);
+    assert!(described.contains("as study-id"), "{described}");
+    let report: serde_json::Value =
+        serde_json::from_str(&go(&["digest", "@ds", "--json"])).unwrap();
+    assert_eq!(report["parsed"], 2, "{report}");
+    // the same two subjects, found by their study ids: none made
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let subjects = store.query("SELECT COUNT(*) FROM subject", &[]).unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(subjects, 2);
+    let studies = store
+        .query("SELECT COUNT(DISTINCT subject_id) FROM study", &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(studies, 2);
+
+    // once pseudonymised, what PatientID holds stays
+    let refused = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--patient-id", "subject-code"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("only before anything is pseudonymised"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// Wave 7a (Nima, 2026-10-08): anonymised data must say what its PatientID
+/// holds and how its subjects are found. `generated`: the subject code
+/// generator makes each code from the id, as from a personnummer, so one id
+/// is one subject, never provisional. `map`: a file whose id no map names
+/// is held, and the next digest after the map files it under the map's
+/// code. Neither is read before it says.
+#[test]
+fn anonymised_data_resolves_its_subjects_by_a_map_or_by_the_generator() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let run = |args: &[&str]| nils().args(registry).args(args).output().unwrap();
+    let outer = TempDir::new("cli-subjects");
+    for (rel, study, id) in [
+        ("src/gen/derivatives/dcm-anon/a/IM_1", "1.2.9.1", "S-0001"),
+        ("src/gen/derivatives/dcm-anon/b/IM_1", "1.2.9.2", "S-0001"),
+        ("src/gen/derivatives/dcm-anon/c/IM_1", "1.2.9.3", "S-0002"),
+        (
+            "src/mapped/derivatives/dcm-anon/d/IM_1",
+            "1.2.9.4",
+            "S-0009",
+        ),
+    ] {
+        outer.file(
+            rel,
+            &mr_of(study, &format!("{study}.1.1"), patient(id, None)),
+        );
+    }
+    let root = outer.path().join("src");
+    let added = run(&[
+        "place",
+        "add",
+        "src",
+        root.to_str().unwrap(),
+        "--role",
+        "source",
+        "--json",
+    ]);
+    assert!(added.status.success(), "{}", stderr(&added));
+    // each data folder added by a person
+    let mut ids = std::collections::BTreeMap::new();
+    let mut layouts = std::collections::BTreeMap::new();
+    for folder in ["gen", "mapped"] {
+        let out = run(&["place", "add-dataset", "src", folder, "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["dataset"]["state"], "anonymised", "{doc}");
+        ids.insert(folder, doc["id"].as_i64().unwrap().to_string());
+        layouts.insert(folder, doc["layout"].clone());
+    }
+    let id_of = |name: &str| ids[name].clone();
+    let gen_layout = &layouts["gen"];
+    assert_eq!(
+        gen_layout["settings"]["patient_id"]["required"], true,
+        "{gen_layout}"
+    );
+    assert_eq!(
+        gen_layout["settings"]["subjects"]["choices"],
+        serde_json::json!(["map", "generated"]),
+        "{gen_layout}"
+    );
+    // nothing is read before the dataset says
+    for name in ["@gen", "@mapped"] {
+        let refused = run(&["digest", name]);
+        assert!(!refused.status.success(), "{name}");
+        assert!(
+            stderr(&refused).contains("subjects"),
+            "{}",
+            stderr(&refused)
+        );
+    }
+    let set = |name: &str, subjects: &str| {
+        let out = run(&[
+            "place",
+            "set",
+            &id_of(name),
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            subjects,
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+    };
+    set("gen", "generated");
+    set("mapped", "map");
+    let store = || nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let count = |sql: &str| store().query(sql, &[]).unwrap()[0].int(0).unwrap();
+
+    let done = run(&["digest", "@gen", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    assert_eq!(count("SELECT COUNT(*) FROM subject"), 2);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM subject WHERE provisional = 1"),
+        0
+    );
+    // one id is one subject: the two studies of S-0001 share theirs
+    assert_eq!(count("SELECT COUNT(DISTINCT subject_id) FROM study"), 2);
+
+    let done = run(&["digest", "@mapped", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    // no map names S-0009: held, no subject made
+    assert_eq!(count("SELECT COUNT(*) FROM subject"), 2);
+    let map = outer.file("map.csv", b"code,identifier\nmapped-0001,S-0009\n");
+    let imported = run(&["linkage", "import", map.to_str().unwrap()]);
+    assert!(imported.status.success(), "{}", stderr(&imported));
+    let done = run(&["digest", "@mapped", "--json", "--retry-quarantine"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM study s JOIN subject j ON j.id = s.subject_id WHERE j.code = 'mapped-0001'"
+        ),
+        1
+    );
+}
+
+/// Wave 7a (Nima, 2026-10-08: "we always have to have resolved IDs"): an
+/// identified dataset's tree holds what the pseudonymiser resolved; a file
+/// put there by hand whose PatientID no subject holds is held by the digest,
+/// never made a subject.
+#[test]
+fn an_unresolved_file_in_an_identified_dataset_s_tree_is_held() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let run = |args: &[&str]| nils().args(registry).args(args).output().unwrap();
+    let dir = TempDir::new("cli-resolved");
+    dir.file(
+        "derivatives/dcm-original/p1/IM_1",
+        &mr_of("1.2.10.1", "1.2.10.1.1.1", patient("P1", None)),
+    );
+    dir.file(
+        "derivatives/dcm-anon/x/IM_1",
+        &mr_of(
+            "1.2.10.2",
+            "1.2.10.2.1.1",
+            patient("0123456789abcdef", None),
+        ),
+    );
+    let added = run(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--json",
+    ]);
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["state"], "both", "{ds}");
+    let done = run(&["digest", "@ds", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let subjects = store.query("SELECT COUNT(*) FROM subject", &[]).unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(subjects, 0);
 }

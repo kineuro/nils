@@ -9,8 +9,8 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 1.0.1
-contract: 8
+version: 1.0.2
+contract: 9
 modality: MR
 
 parsers:
@@ -187,6 +187,15 @@ fields:
 # numbers that decide what is worth a person's time, and they are the pack's
 # because what counts as a weak answer is knowledge about MRI.
 #
+# Record 55 H3 (Nima's ruling of 2026-10-09): the pack decides. A rule's low
+# confidence alone is never a question, and neither is a conflict between
+# the pack's rules, so the numbers below no longer raise anything: they say
+# which answers are weak, and a stack's classification notes them. What a
+# person is still asked is an axis that matters (the release's name, the
+# main scans, a release) with no answer at all; the engine works that set
+# out from what reads the axes (`nils_pack::matters`), so `missing` below is
+# no longer read.
+#
 # Each number is read as strictly below: an axis written at exactly the
 # confidence named here is an answer, not a question. Both numbers below are
 # set at a confidence a rule always writes, so each takes its whole
@@ -217,16 +226,34 @@ review:
     # doubtful body part, and it is asked there, so the region's own
     # threshold asks about none of its stacks.
     body_region: 0.65
-  # An axis with no value at all is a question only where a value is always
+  # An axis with no value at all was a question only where a value is always
   # expected. A modifier or a construct is legitimately absent on most
-  # stacks; a technique that nothing recognised is a gap in the pack.
+  # stacks; a technique that nothing recognised is a gap in the pack. Kept
+  # for the engines before record 55 H3, which read it; this engine asks
+  # where an axis matters instead.
   missing: [technique]
+  # Record 55 H3: the body part belongs to the body-part image model, its own
+  # run and its own review of what it is unsure of, so sorting raises no
+  # question about it, nor about the region folded from it. Nima, 2026-10-09:
+  # "the body part is not for sorting part to rule out". Record 56 section 2:
+  # post-contrast is its own operation too (F2's time rule as the label, then
+  # the post-contrast model, a step of a dataset and of a cohort), "post
+  # contrast is like body part" (Nima, 2026-10-09). What the rules state of
+  # either is kept as they state it; sorting only asks nothing about them.
+  by_model: [body_part, body_region, post_contrast]
   # And nobody is asked about a stack the pack has ruled out. A localizer or
   # a scout is excluded on purpose: every other axis is blank because there
   # is nothing to say, not because the pack failed to say it. 81,296 stacks
   # of the corpus are this, and asking about each one is exactly how v0's
-  # queue came to hold 84 percent of the archive.
-  silent_when: {axis: directory_type, is: excluded}
+  # queue came to hold 84 percent of the archive. Record 56 section 2
+  # (2026-10-09): a scout the pack reads as a localizer (provenance
+  # Localizer, so directory_type localizer) is silent too. It has no base
+  # contrast by definition, so a base the rules left empty on it is no
+  # question; what the rules state of it is kept as they state it.
+  silent_when:
+    any:
+      - {axis: directory_type, is: excluded}
+      - {axis: directory_type, is: localizer}
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the

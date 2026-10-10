@@ -805,7 +805,7 @@ fn contract_8_is_refused_where_a_pack_gets_it_wrong() {
             "shown is pack contract 8's; this pack declares contract 7",
         ),
     ] {
-        let dir = edited("pack.yml", |t| t.replace("contract: 8\n", "contract: 7\n"));
+        let dir = edited("pack.yml", |t| t.replace("contract: 9\n", "contract: 7\n"));
         let edit = |name: &str, f: &dyn Fn(&str) -> String| {
             let p = dir.join(name);
             let text = std::fs::read_to_string(&p).unwrap();

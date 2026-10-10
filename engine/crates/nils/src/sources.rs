@@ -50,6 +50,35 @@ fn held(store: &mut Store, place_id: i64) -> Result<Value, StoreError> {
     Ok(json!({"files": row.int(0)?, "identifiers": row.int(1)?}))
 }
 
+/// Every `source` row with its canonical root.
+fn roots(store: &mut Store) -> Result<Vec<(i64, String)>, StoreError> {
+    store
+        .query(
+            &format!(
+                "SELECT id, root_canonical FROM {}",
+                store.qualified("source")
+            ),
+            &[],
+        )?
+        .iter()
+        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
+        .collect()
+}
+
+fn ids_under(p: &Place, roots: &[(i64, String)]) -> Vec<i64> {
+    roots
+        .iter()
+        .filter(|(_, root)| p.holds_path(Path::new(root)))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// A place's `source` rows: the roots under its path, as the sources door
+/// counts its totals by (Wave 7a: the scans door lists the same stacks).
+pub(crate) fn source_ids(store: &mut Store, p: &Place) -> Result<Vec<i64>, StoreError> {
+    Ok(ids_under(p, &roots(store)?))
+}
+
 /// The sources document: each active source place with its digests, the
 /// newest `recent` of them in full, and its totals.
 pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
@@ -62,25 +91,13 @@ pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreEr
         .into_iter()
         .filter(|p| p.role == Role::Source && p.retired_at.is_none())
         .collect();
-    let roots: Vec<(i64, String)> = store
-        .query(
-            &format!(
-                "SELECT id, root_canonical FROM {}",
-                store.qualified("source")
-            ),
-            &[],
-        )?
-        .iter()
-        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
-        .collect::<Result<_, StoreError>>()?;
+    let roots = roots(store)?;
+    // what makes a scan need a look, read once for every dataset
+    let asks = crate::certainty::Asks::sort(store)?;
     let mut sources = Vec::with_capacity(places.len());
     for p in &places {
-        let ids: Vec<i64> = roots
-            .iter()
-            .filter(|(_, root)| p.holds_path(Path::new(root)))
-            .map(|(id, _)| *id)
-            .collect();
-        sources.push(source(store, p, &ids, window, recent)?);
+        let ids = ids_under(p, &roots);
+        sources.push(source(store, &asks, p, &ids, window, recent)?);
     }
     // record 26 §14: what this machine does per second, from the last run
     // of each step that ended here
@@ -93,6 +110,7 @@ pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreEr
 
 fn source(
     store: &mut Store,
+    asks: &crate::certainty::Asks,
     p: &Place,
     ids: &[i64],
     window: i64,
@@ -105,10 +123,14 @@ fn source(
         "trees",
         "identity",
         "unmapped",
+        "patient_id",
+        "subjects",
+        "copy_folder",
         "cohort",
         "tags",
         "originals_kept",
         "originals_vault",
+        "picks",
     ] {
         doc[key] = doc["dataset"][key].clone();
     }
@@ -116,26 +138,26 @@ fn source(
     doc["roots"] = json!(ids.len());
     if ids.is_empty() {
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
-        doc["totals"] = json!({"subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0, "to_sort": 0});
+        doc["totals"] = json!({
+            "subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
+            "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {}, "noted": {},
+        });
         return Ok(doc);
     }
     let sources = list(ids);
     let q = |t: &str| store.qualified(t);
-    let (batch, stack, study, subject, file, cache, member, item, class) = (
+    let (batch, stack, study, subject, file, cache, class) = (
         q("ingest_batch"),
         q("stack"),
         q("study"),
         q("subject"),
         q("source_file"),
         q("session_cache_study"),
-        q("review_member"),
-        q("review_item"),
         q("classification"),
     );
     let (instance, series) = (q("instance"), q("series"));
     let of_source =
         format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
-    let open = "ri.status IN ('open', 'staged')";
 
     // the digests: a pseudonymise step is not one, and shows on the
     // digest it shares a name with (record 26 §14)
@@ -209,7 +231,8 @@ fn source(
     let last = rows.first().map(first_last).transpose()?;
     let first = rows.last().map(first_last).transpose()?;
 
-    // what each of the recent digests has had judged, and what still waits for a person
+    // what each of the recent digests has had judged, and how many of its
+    // stacks need a look, as the card counts them
     let shown_ids: Vec<i64> = shown.iter().map(|(id, _)| *id).collect();
     if !shown_ids.is_empty() {
         let batches = list(&shown_ids);
@@ -220,14 +243,7 @@ fn source(
                  WHERE st.first_batch_id IN ({batches}) GROUP BY st.first_batch_id"
             ),
         )?;
-        let unsure = pairs(
-            store,
-            &format!(
-                "SELECT st.first_batch_id, COUNT(DISTINCT st.id) FROM {stack} st \
-                 JOIN {member} rm ON rm.stack_id = st.id JOIN {item} ri ON ri.id = rm.item_id \
-                 WHERE {open} AND st.first_batch_id IN ({batches}) GROUP BY st.first_batch_id"
-            ),
-        )?;
+        let look = asks.by_first_batch(store, &shown_ids)?;
         // the classify runs over each batch's stacks, the last stage of the
         // thread the sources door can name
         let classifiers = pairs(
@@ -247,7 +263,7 @@ fn source(
                     .unwrap_or(0)
             };
             doc["classified"] = json!(of(&classified));
-            doc["to_sort"] = json!(of(&unsure));
+            doc["to_sort"] = json!(look.get(id).map_or(0, |a| a.scans));
             doc["chain"]["classify"] = json!(
                 classifiers
                     .iter()
@@ -292,13 +308,10 @@ fn source(
             "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
         ),
     )?;
-    let to_sort = count(
-        store,
-        &format!(
-            "SELECT COUNT(DISTINCT rm.stack_id) FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
-             JOIN {stack} x ON x.id = rm.stack_id {of_source} AND {open}"
-        ),
-    )?;
+    // record 55 H2 (round 4): how sure the sort is, "N scans · N sure ·
+    // N need a look", with what the questions are; a look as everywhere
+    // (record 56: the sort's own questions alone)
+    let certainty = crate::certainty::of_sources(store, asks, &sources, stacks)?;
     doc["digests"] = json!({
         "count": digests,
         "first": first,
@@ -311,7 +324,11 @@ fn source(
         "sessions": sessions,
         "stacks": stacks,
         "refused_files": refused,
-        "to_sort": to_sort,
+        "to_sort": certainty.to_sort,
+        "sure": certainty.sure,
+        "unsorted": certainty.unsorted,
+        "need_a_look": certainty.need_a_look,
+        "noted": certainty.noted,
     });
     Ok(doc)
 }

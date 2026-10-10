@@ -127,6 +127,25 @@ pub fn content_hash(compiled: &Compiled, rows: &[Row]) -> String {
     hex::encode(h.finalize())
 }
 
+/// Record 55 K7 (spec §7.1): the columns that read a quasi identifying
+/// field the caller may not project raw are answered as their shapes, before
+/// the hash, so the handle, its pages and every door that reads them carry
+/// the shapes alone. A null stays null.
+pub fn shape_columns(compiled: &Compiled, rows: &mut [Row]) {
+    if compiled.shaped_columns.is_empty() {
+        return;
+    }
+    for row in rows.iter_mut() {
+        for &i in &compiled.shaped_columns {
+            if let Some(cell) = row.0.get_mut(i)
+                && !matches!(cell, Cell::Null)
+            {
+                *cell = Cell::Text(crate::validate::shape(&render(cell)));
+            }
+        }
+    }
+}
+
 /// Run a compiled ask inside a read transaction, under the bounds.
 pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Answer, ExecError> {
     let started = Instant::now();
@@ -185,6 +204,7 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
         }
     }
     ended?;
+    shape_columns(compiled, &mut rows);
     let content_hash = (!truncated).then(|| content_hash(compiled, &rows));
     Ok(Answer {
         columns: compiled.columns.clone(),

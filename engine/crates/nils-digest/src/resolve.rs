@@ -143,6 +143,9 @@ pub struct Resolver {
     fallback: IdType,
     /// The rule reads the code itself, not an identifier to derive one from.
     verbatim: bool,
+    /// The rule files personnummer, whose codes the subject code generator
+    /// derives (record 54, D4).
+    personnummer: bool,
     /// The tree is this registry's own pseudonymised tree (record 26 §3): a
     /// value read verbatim there is one of this registry's codes, or no
     /// code at all.
@@ -164,6 +167,17 @@ impl Drop for Resolver {
 
 impl Resolver {
     pub fn new(registry: &mut Registry, rule: &Rule, batch_id: i64) -> Result<Resolver, HomeError> {
+        // A personnummer's code is the subject code generator's (record 54),
+        // so a registry that makes its codes with another scheme makes none
+        // from one: it would give the person a code no other registry gives
+        // them (the review of Wave 7a's merge, 2026-10-10).
+        let scheme = registry.meta().pseudonym_scheme;
+        if rule.normalises() && scheme != Scheme::SUBJECT_CODE_GENERATOR {
+            return Err(HomeError::Message(format!(
+                "a personnummer's code is the subject code generator's, and this registry makes its codes with {}; read personnummer into a registry made with the generator's scheme (nils init --scheme subject-code-generator)",
+                scheme.name()
+            )));
+        }
         let key = registry.pseudonym_key()?;
         let keys = Subkeys::derive(&key);
         let mut linkage = registry.open_linkage()?;
@@ -180,6 +194,7 @@ impl Resolver {
             id_type,
             fallback,
             verbatim: rule.verbatim,
+            personnummer: rule.normalises(),
             own_codes: rule.own_codes,
             batch_id,
             identities: LruCache::new(cap),
@@ -225,6 +240,53 @@ impl Resolver {
         self.verbatim && !ident.fell_back && (!self.own_codes || self.own_shape(&ident.value))
     }
 
+    /// Whether the subject code generator derives this file's code from its
+    /// personnummer, which is then no provisional subject's (record 54, D4):
+    /// as [`Rule::derives_by_generator`].
+    pub fn derives_by_generator(&self, ident: &Ident) -> bool {
+        self.personnummer && !self.verbatim && !ident.fell_back
+    }
+
+    /// The value of the id type `name` that each of `subjects` holds, for a
+    /// dataset that writes it into PatientID (Wave 7a §5.4); a subject with
+    /// none is not in the answer, and a type the store does not know gives
+    /// nothing. Every value read is audited with `why`.
+    pub fn values_of_type(
+        &mut self,
+        subjects: &[i64],
+        name: &str,
+        why: &str,
+    ) -> Result<HashMap<i64, String>, HomeError> {
+        let Some(type_id) = linkage::id_type_id(&mut self.linkage, name)? else {
+            return Ok(HashMap::new());
+        };
+        Ok(linkage::values_of_type(
+            &mut self.linkage,
+            &self.keys,
+            subjects,
+            type_id,
+            "pseudonymize",
+            why,
+        )?)
+    }
+
+    /// Which of `subjects` hold a value of the id type `name`, nothing
+    /// opened; none where the store does not know the type.
+    pub fn subjects_with_type(
+        &mut self,
+        subjects: &[i64],
+        name: &str,
+    ) -> Result<std::collections::HashSet<i64>, HomeError> {
+        let Some(type_id) = linkage::id_type_id(&mut self.linkage, name)? else {
+            return Ok(Default::default());
+        };
+        Ok(linkage::subjects_with_type(
+            &mut self.linkage,
+            subjects,
+            type_id,
+        )?)
+    }
+
     /// The id type a file's identifier is filed under.
     pub fn type_of(&self, ident: &Ident) -> &IdType {
         if ident.fell_back {
@@ -240,10 +302,12 @@ impl Resolver {
         self.keys.lookup(&self.type_of(ident).name, &ident.value)
     }
 
-    /// An identifier sealed under the store's encrypt key, for the one door
-    /// that reveals it.
-    pub fn seal(&self, value: &str) -> Vec<u8> {
-        self.keys.seal(value)
+    /// A file's identifier sealed under the store's encrypt key, for the one
+    /// door that reveals it; none for a personnummer, which is never kept
+    /// (Wave 7a): its held row keeps the keyed lookup and the shape alone.
+    pub fn seal(&self, ident: &Ident) -> Option<Vec<u8>> {
+        let sealed = self.keys.seal_kept(&self.type_of(ident).name, &ident.value);
+        (!sealed.is_empty()).then_some(sealed)
     }
 
     /// The subject of every file (§7.4): by the lookup of its identifier
@@ -402,8 +466,10 @@ impl Resolver {
                 }
                 row.push(Param::Int(self.batch_id));
                 row.push(Param::from(now));
+                // a personnummer is its own map: its subject is no
+                // provisional one (record 54, D4)
                 row.push(match make {
-                    Make::Provisional => Param::Int(1),
+                    Make::Provisional if !self.derives_by_generator(w.ident) => Param::Int(1),
                     _ => Param::Null,
                 });
                 rows.push(row);
@@ -519,7 +585,7 @@ impl Resolver {
             subject_id,
             id_type_id: ty.id,
             lookup: lookup.clone(),
-            ciphertext: self.keys.seal(&ident.value),
+            ciphertext: self.keys.seal_kept(&ty.name, &ident.value),
             source: "dicom",
             first_batch_id: Some(self.batch_id),
         });

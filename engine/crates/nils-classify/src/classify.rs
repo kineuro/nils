@@ -39,6 +39,10 @@ pub const WINDOW: usize = 4_096;
 /// stacks of one image each, and nothing said so.
 const SPLIT_SINGLETONS: f64 = 4.0;
 
+/// The kind of the split note, which was the kind of its question before
+/// record 55 H3 made it information (2026-10-09).
+pub const SPLIT_NOTE: &str = "split:one_image_per_stack";
+
 /// The split this stack came out of, where the split left it holding one
 /// image and made many such stacks: the reason, and how many stacks the
 /// series has.
@@ -50,8 +54,14 @@ fn split_singleton(stack: &Stack) -> Option<(String, f64, f64)> {
     }
     let stacks = stack.num(at("stacks_in_series"))?;
     let instances = stack.num(at("n_instances"))?;
-    (instances <= 1.0 && stacks >= SPLIT_SINGLETONS)
-        .then(|| (reason.to_string(), stacks, instances))
+    is_split_note(stacks, instances).then(|| (reason.to_string(), stacks, instances))
+}
+
+/// Whether a stack of a split series is the split note's: one image, in a
+/// series split into at least [`SPLIT_SINGLETONS`] stacks. The one test,
+/// which the sort writes on the stack and the doors count by.
+pub fn is_split_note(stacks_in_series: f64, n_instances: f64) -> bool {
+    n_instances <= 1.0 && stacks_in_series >= SPLIT_SINGLETONS
 }
 
 /// The fingerprint columns a pack is fed, in the order the select reads them.
@@ -529,8 +539,8 @@ pub struct Author {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Ids {
     pub(crate) stack: i64,
-    series: i64,
-    subject: i64,
+    pub(crate) series: i64,
+    pub(crate) subject: i64,
 }
 
 /// The fields that name an origin, and the fingerprint field each one
@@ -550,7 +560,7 @@ impl Decisions {
     /// staged waits). Where two hold the same key, the higher rank wins
     /// (C15: a person over an agent over a model) and among equals the
     /// later one, which is the order they are read in.
-    fn load(store: &mut Store) -> Result<Decisions, Error> {
+    pub(crate) fn load(store: &mut Store) -> Result<Decisions, Error> {
         let sql = format!(
             "SELECT scope, ref, axis, value, actor, author_kind, author_version, id, model_id, campaign_id FROM {} \
              WHERE withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) \
@@ -626,11 +636,11 @@ impl Decisions {
 
     /// Whether any decision reaches past a single stack, which is what makes
     /// the run pay for the join that says which series and subject a stack is.
-    fn needs_ids(&self) -> bool {
+    pub(crate) fn needs_ids(&self) -> bool {
         !self.by_series.is_empty() || !self.by_subject.is_empty()
     }
 
-    fn any(&self) -> bool {
+    pub(crate) fn any(&self) -> bool {
         !self.by_stack.is_empty()
             || !self.by_group.is_empty()
             || !self.by_series.is_empty()
@@ -644,7 +654,7 @@ impl Decisions {
     /// person's call about a scanner beats an agent's about the stack), and
     /// among equals the narrowest scope, which is where somebody looked
     /// closest.
-    fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Decided> {
+    pub(crate) fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Decided> {
         let key = |id: i64| (id, axis.to_string());
         // (rank, narrowness, the decision)
         let mut candidates: Vec<(u8, u8, &Decided)> = Vec::new();
@@ -799,6 +809,172 @@ impl Voters {
     }
 }
 
+/// Record 55 H3: the `<axis>:missing` questions of a run, for the stacks
+/// and axes the rules left unanswered, less those a pass or a decision has
+/// answered since. Each stack's classification counts the questions it
+/// raised. Answers how many were raised, and how many on each axis.
+fn ask_missing(
+    store: &mut Store,
+    pack: &Pack,
+    pending: &[(i64, String)],
+    now: &str,
+    job_id: i64,
+) -> Result<(i64, std::collections::BTreeMap<String, i64>), Error> {
+    let mut answered: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
+    let stacks: Vec<i64> = pending
+        .iter()
+        .map(|(s, _)| *s)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            // a person's decision answers the axis, a decision that it holds
+            // nothing too, whose row carries no value (review of 2026-10-10)
+            "SELECT stack_id, axis FROM {} WHERE stack_id IN ({list}) AND ((value IS NOT NULL AND value <> '') OR tier = 'decision')",
+            store.qualified("classification_axis")
+        );
+        for r in store.query(&sql, &[])? {
+            answered.insert((r.int(0)?, r.text(1)?.to_string()));
+        }
+    }
+    let matters = nils_pack::matters::of(pack);
+    let mut reviews: Vec<Vec<Param>> = Vec::new();
+    let mut per_stack: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+    for (stack, axis) in pending {
+        if answered.contains(&(*stack, axis.clone())) {
+            continue;
+        }
+        reviews.push(vec![
+            Param::from(format!("{axis}:missing")),
+            Param::from("stack"),
+            Param::from(serde_json::json!({"stack_id": stack}).to_string()),
+            Param::from(
+                serde_json::json!({
+                    "axis": axis,
+                    "value": "",
+                    "tier": "missing",
+                    // why the axis matters, as the engine worked it out
+                    "matters": matters.axes.get(axis).cloned().unwrap_or_default(),
+                    "pack": pack.id(),
+                })
+                .to_string(),
+            ),
+            Param::from("open"),
+            Param::from(now),
+            Param::Int(job_id),
+        ]);
+    }
+    store.begin()?;
+    let write = (|| -> Result<(), nils_registry::store::Error> {
+        nils_registry::labels::drop_sealed_items(store, &mut reviews, 2)
+            .map_err(|e| nils_registry::store::Error::Message(e.to_string()))?;
+        for r in &reviews {
+            let stack = match &r[2] {
+                Param::Text(t) => serde_json::from_str::<serde_json::Value>(t)
+                    .ok()
+                    .and_then(|v| v["stack_id"].as_i64()),
+                _ => None,
+            };
+            if let Some(s) = stack {
+                *per_stack.entry(s).or_insert(0) += 1;
+            }
+        }
+        if !reviews.is_empty() {
+            store.insert(
+                &Insert::new(
+                    table("review_item"),
+                    &[
+                        "kind",
+                        "scope",
+                        "ref",
+                        "evidence",
+                        "status",
+                        "created_at",
+                        "job_id",
+                    ],
+                ),
+                &reviews,
+            )?;
+        }
+        let mut by_count: std::collections::BTreeMap<i64, Vec<i64>> =
+            std::collections::BTreeMap::new();
+        for (s, n) in &per_stack {
+            by_count.entry(*n).or_default().push(*s);
+        }
+        for (n, stacks) in by_count {
+            for chunk in stacks.chunks(500) {
+                store.execute(
+                    &format!(
+                        "UPDATE {} SET review_items = review_items + {n} WHERE stack_id IN ({})",
+                        store.qualified("classification"),
+                        chunk
+                            .iter()
+                            .map(i64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    &[],
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    match write {
+        Ok(()) => store.commit()?,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(Error::Store(e));
+        }
+    }
+    let mut by_axis: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for r in &reviews {
+        if let Param::Text(kind) = &r[0]
+            && let Some(axis) = kind.strip_suffix(":missing")
+        {
+            *by_axis.entry(axis.to_string()).or_insert(0) += 1;
+        }
+    }
+    Ok((reviews.len() as i64, by_axis))
+}
+
+/// Record 55 H3 (2026-10-09): what the sort decided about a stack without
+/// asking anybody, as its classification keeps it: `overrides`, who beat
+/// whom where the pack's ranking decided between two rules (each with what
+/// it cited, its tier, its confidence and its place in the pack's order, and
+/// what ranked it); `below`, the answers under the pack's threshold;
+/// `unresolved`, the axes no rule answered; `split`, the split note; and
+/// `equal_rank`, the answers nothing in the pack ranks. None when there is
+/// nothing to say.
+pub(crate) fn notes_of(
+    verdict: &nils_pack::Verdict,
+    split: Option<serde_json::Value>,
+    below: Vec<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let mut notes = serde_json::Map::new();
+    if !verdict.overrides.is_empty() {
+        notes.insert("overrides".into(), serde_json::json!(verdict.overrides));
+    }
+    if !below.is_empty() {
+        notes.insert("below".into(), serde_json::Value::Array(below));
+    }
+    if !verdict.unresolved.is_empty() {
+        notes.insert("unresolved".into(), serde_json::json!(verdict.unresolved));
+    }
+    if let Some(s) = split {
+        notes.insert("split".into(), s);
+    }
+    if !verdict.equal_rank.is_empty() {
+        notes.insert("equal_rank".into(), serde_json::json!(verdict.equal_rank));
+    }
+    (!notes.is_empty()).then_some(serde_json::Value::Object(notes))
+}
+
 /// The classifier's questions still open before a run, by the stack they
 /// stand on: a question about one stack, whose ref names it, and a grouped
 /// question, under each of its members. A run supersedes them a window at
@@ -806,18 +982,25 @@ impl Voters {
 /// every review item ever written once for each window's members, and a
 /// full re-classification of the archive spent most of its time there.
 /// What this run asks itself is written after the read, and a stack is
-/// judged once in a run, so none of it is ever here.
-fn open_questions(store: &mut Store) -> Result<HashMap<i64, Vec<i64>>, Error> {
+/// judged once in a run, so none of it is ever here. A question a sort
+/// does not ask is not its to supersede: a model's (`<axis>:model`), and
+/// any about an axis an operation of its own answers (the pack's
+/// `review.by_model`), which only that operation's next run replaces
+/// (review of 2026-10-10: a re-sort closed the body-part step's questions).
+fn open_questions(store: &mut Store, by_model: &[String]) -> Result<HashMap<i64, Vec<i64>>, Error> {
     let mut asked: HashMap<i64, Vec<i64>> = HashMap::new();
     let review = store.qualified("review_item");
     let members = store.qualified("review_member");
     for r in store.query(
         &format!(
-            "SELECT id, CAST(ref AS TEXT) FROM {review} \
+            "SELECT id, CAST(ref AS TEXT), kind FROM {review} \
              WHERE status = 'open' AND scope = 'stack' AND kind LIKE '%:%'"
         ),
         &[],
     )? {
+        if !sorts_own(r.text(2)?, by_model) {
+            continue;
+        }
         // The ref a classifier question is written with, and nothing else.
         let stack = r
             .opt_text(1)?
@@ -832,14 +1015,27 @@ fn open_questions(store: &mut Store) -> Result<HashMap<i64, Vec<i64>>, Error> {
     }
     for r in store.query(
         &format!(
-            "SELECT m.stack_id, m.item_id FROM {members} m JOIN {review} i ON i.id = m.item_id \
+            "SELECT m.stack_id, m.item_id, i.kind FROM {members} m JOIN {review} i ON i.id = m.item_id \
              WHERE i.status = 'open' AND i.scope = 'group'"
         ),
         &[],
     )? {
+        if !sorts_own(r.text(2)?, by_model) {
+            continue;
+        }
         asked.entry(r.int(0)?).or_default().push(r.int(1)?);
     }
     Ok(asked)
+}
+
+/// Whether a question of this kind is one a sort asks, and so supersedes
+/// when it judges the stack again: not a model's, and not one about an axis
+/// the pack leaves to an operation of its own.
+fn sorts_own(kind: &str, by_model: &[String]) -> bool {
+    match kind.split_once(':') {
+        Some((axis, what)) => what != "model" && !by_model.iter().any(|a| a == axis),
+        None => true,
+    }
 }
 
 /// Classify every stack in scope.
@@ -871,6 +1067,8 @@ pub fn classify(
     }
     let store = registry.store();
     match &result {
+        // the caller's own step finishes it (`Settings::leave_open`)
+        Ok(report) if settings.leave_open && !report.cancelled => {}
         Ok(report) => {
             let state = if report.cancelled {
                 "cancelled"
@@ -922,7 +1120,14 @@ fn run(
 
     // The questions still open from an earlier run, by the stack they stand
     // on, read once. A first run has none, and then no window pays for them.
-    let asked = open_questions(store)?;
+    let asked = open_questions(store, &pack.review.by_model)?;
+
+    // Record 55 H3: the axes where an answer that is missing is a question,
+    // worked out from what reads them, and the stacks found missing one,
+    // asked once the passes have had their say.
+    let asks_missing = nils_pack::matters::missing_asked(pack);
+    report.asks_missing = asks_missing.clone();
+    let mut pending_missing: Vec<(i64, String)> = Vec::new();
 
     // Wave 4c §6.6: what the evaluator noticed, tallied per batch and
     // written once at the end as diagnostic rows with samples.
@@ -983,6 +1188,8 @@ fn run(
                 tallies.note(batch_of(r, with_ids), &verdict);
             }
             let mut raised = 0i64;
+            // Record 55 H3: the answers below the pack's threshold, noted.
+            let mut notes_below: Vec<serde_json::Value> = Vec::new();
             // where this stack's questions begin, so a sealed stack's can be
             // taken back whole before the window is written
             let raised_from = reviews.len();
@@ -991,34 +1198,18 @@ fn run(
             // split key failing and not an acquisition (record 35, S4). It
             // reaches nobody through the axes: every axis is answered, with
             // the evidence of a stack that holds one image, so the run reads
-            // as a success. The question is about the series rather than the
-            // axis, and it is raised once per stack with the split's reason
-            // as its value, which is what collapses them into one item per
-            // reason. A stack the pack has ruled out is still nobody's
-            // question.
-            if !verdict.silent
-                && let Some((reason, stacks, instances)) = split_singleton(&stack)
-            {
-                reviews.push(vec![
-                    Param::from("split:one_image_per_stack"),
-                    Param::from("stack"),
-                    Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
-                    Param::from(
-                        serde_json::json!({
-                            "value": reason,
-                            "tier": "split",
-                            "stacks_in_series": stacks,
-                            "n_instances": instances,
-                            "pack": pack.id(),
-                        })
-                        .to_string(),
-                    ),
-                    Param::from("open"),
-                    Param::from(now.as_str()),
-                    Param::Int(job_id),
-                ]);
-                raised += 1;
-            }
+            // as a success. Record 55 H3 (2026-10-09): it is information, not
+            // a question. It is noted on the stack's classification, with the
+            // split's reason, and the doors that show a stack's facts show it.
+            let split = split_singleton(&stack).map(|(reason, stacks, instances)| {
+                serde_json::json!({
+                    "kind": SPLIT_NOTE,
+                    "value": reason,
+                    "stacks_in_series": stacks,
+                    "n_instances": instances,
+                })
+            });
+            report.split_notes += i64::from(split.is_some());
 
             // Record 48: the rules' answer held to the pack's own exclusions
             // and implications, as a rater's is. A break keeps the values as
@@ -1075,7 +1266,10 @@ fn run(
                     .flatten()
                 {
                     let decided = d.value.clone().unwrap_or_default();
-                    if decided != value {
+                    // Record 55 H3: no question at all on an axis an image
+                    // model answers; its decision standing over the rules is
+                    // how that axis is answered.
+                    if decided != value && !pack.review.by_model.contains(&a.axis) {
                         // The rule's answer is computed as usual and the
                         // decision wins; the disagreement is the review item,
                         // not the decision.
@@ -1123,14 +1317,18 @@ fn run(
                 // databases. v0 flags 84 percent of its stacks, mostly for a
                 // missing keyword rather than for doubt; the count here is in
                 // the report so that a pack cannot quietly do the same.
+                // Record 55 H3 (Nima's ruling of 2026-10-09): a rule's low
+                // confidence alone is never a question. An answer below the
+                // pack's threshold is noted on the stack's classification,
+                // where the explain and why doors read it. Only a person who
+                // runs a classify with an explicit `--review-below` still
+                // has the answers under it asked about: that is a person
+                // asking, not the pack. Never on an axis an image model
+                // answers (the body part), which its own run asks about.
                 let below = settings.review_below.unwrap_or(pack.review.below(&a.axis));
-                let missing = value.is_empty();
-                let ask = !verdict.silent
-                    && if missing {
-                        pack.review.asks_when_missing(&a.axis)
-                    } else {
-                        a.confidence > 0.0 && nils_pack::weaker_than(a.confidence, below)
-                    };
+                let empty = value.is_empty();
+                let weak =
+                    !empty && a.confidence > 0.0 && nils_pack::weaker_than(a.confidence, below);
                 // The population the threshold decides by its boundary: an
                 // answer written at exactly the confidence the threshold
                 // names is not below it, so it is never asked about. Not a
@@ -1138,13 +1336,28 @@ fn run(
                 // because a threshold set at the confidence a rule always
                 // writes drains a whole axis out of the queue and nothing
                 // else in a run says so.
-                if !verdict.silent && !missing && nils_pack::at_threshold(a.confidence, below) {
+                if !verdict.silent && !empty && nils_pack::at_threshold(a.confidence, below) {
                     *report.at_threshold.entry(a.axis.clone()).or_insert(0) += 1;
                 }
-                if ask {
-                    let kind = if missing { "missing" } else { "low_confidence" };
+                // noted whether or not the stack is one nobody is asked
+                // about: it is evidence, and the silence is about questions
+                if weak {
+                    *report.below.entry(a.axis.clone()).or_insert(0) += 1;
+                    notes_below.push(serde_json::json!({
+                        "axis": a.axis,
+                        "value": a.stored(),
+                        "confidence": a.confidence,
+                        "tier": a.tier,
+                        "below": below,
+                    }));
+                }
+                if weak
+                    && !verdict.silent
+                    && settings.review_below.is_some()
+                    && !pack.review.by_model.contains(&a.axis)
+                {
                     reviews.push(vec![
-                        Param::from(format!("{}:{kind}", a.axis)),
+                        Param::from(format!("{}:low_confidence", a.axis)),
                         Param::from("stack"),
                         Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
                         Param::from(
@@ -1165,57 +1378,38 @@ fn run(
                 }
             }
 
-            // Wave 2 §8.2, and record 35 finding 6: the evidence disagreed,
-            // and that reaches the stack it belongs to. The evaluator
-            // records a conflict wherever a rule would have stored something
-            // else on an axis another rule had closed; those are counted per
-            // batch as a fact about the pack (Wave 4c §6.6), and the count
-            // stays, but a person reading one stack cannot see a tally. One
-            // item per stack and pair of answers: the same rules disagreeing
-            // the same way twice on one stack is one disagreement, and
-            // grouping collapses the same disagreement across stacks into
-            // one question about the pack.
-            if !verdict.silent {
-                let mut said: std::collections::BTreeSet<(&str, &str, &str)> =
-                    std::collections::BTreeSet::new();
-                for d in verdict
-                    .diagnostics
-                    .iter()
-                    .filter(|d| d.kind == "axis_conflict")
+            // Wave 2 §8.2, and record 35 finding 6: the evidence disagreed.
+            // Record 55 H3 (2026-10-09): the pack decides. Where one rule
+            // decided an axis over another, the pack's ranking (its rule
+            // sets' order, a set's rule order, a group's priority) did what
+            // it was written to do, and that is never a question. Who beat
+            // whom, what each cited, their tiers and confidences and what
+            // ranked them are kept on the stack's classification, and the
+            // diagnostics still count them per batch for whoever tunes the
+            // pack.
+            for o in &verdict.overrides {
+                *report.overrides.entry(o.rank.clone()).or_insert(0) += 1;
+            }
+            // And where nothing in the pack ranks two answers on one axis,
+            // the pack has a defect: reported by rule pair, never asked.
+            let mut pairs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for e in &verdict.equal_rank {
+                pairs.extend(e.pairs());
+            }
+            if !sealed_window.contains(&stack_id) {
+                for pair in &pairs {
+                    *report.disagreements.entry(pair.clone()).or_insert(0) += 1;
+                }
+            }
+            // An axis no rule answered, of the class phase: recorded on the
+            // stack, and asked about once the passes ran, where it matters.
+            for axis in &verdict.unresolved {
+                *report.unresolved.entry(axis.clone()).or_insert(0) += 1;
+                if !verdict.silent
+                    && !sealed_window.contains(&stack_id)
+                    && asks_missing.contains(axis)
                 {
-                    if !said.insert((d.axis.as_str(), d.by_value.as_str(), d.value.as_str())) {
-                        continue;
-                    }
-                    reviews.push(vec![
-                        Param::from(format!("{}:conflict", d.axis)),
-                        Param::from("stack"),
-                        Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
-                        Param::from(
-                            serde_json::json!({
-                                "axis": d.axis,
-                                // what the stack says, and what the rule
-                                // that was pre-empted would have said
-                                "value": d.by_value,
-                                "other": d.value,
-                                "decided_by": {
-                                    "rule_set": d.by_rule_set,
-                                    "rule": d.by_rule,
-                                    "matched": d.by_matched,
-                                },
-                                "over": {
-                                    "rule_set": d.rule_set,
-                                    "rule": d.rule,
-                                    "matched": d.matched,
-                                },
-                                "pack": pack.id(),
-                            })
-                            .to_string(),
-                        ),
-                        Param::from("open"),
-                        Param::from(now.as_str()),
-                        Param::Int(job_id),
-                    ]);
-                    raised += 1;
+                    pending_missing.push((stack_id, axis.clone()));
                 }
             }
 
@@ -1301,6 +1495,7 @@ fn run(
             }
             report.review_items += raised;
             report.written += 1;
+            let notes = notes_of(&verdict, split, notes_below);
             classes.push(vec![
                 Param::Int(stack_id),
                 Param::from(pack.name.as_str()),
@@ -1313,6 +1508,11 @@ fn run(
                 Param::Int(job_id),
                 Param::Int(epoch),
                 Param::Int(raised),
+                match notes {
+                    Some(n) => Param::from(n.to_string()),
+                    None => Param::Null,
+                },
+                Param::Int(pairs.len() as i64),
             ]);
         }
 
@@ -1382,6 +1582,8 @@ fn run(
                     "job_id",
                     "epoch",
                     "review_items",
+                    "notes",
+                    "disagreements",
                 ];
                 store.insert(
                     &Insert::new(
@@ -1395,6 +1597,8 @@ fn run(
                             "job_id",
                             "epoch",
                             "review_items",
+                            "notes",
+                            "disagreements",
                         ],
                     )
                     .on_conflict(Conflict::Update {
@@ -1491,6 +1695,17 @@ fn run(
         for p in &report.passes {
             report.review_items += p.review_items;
         }
+    }
+
+    // Record 55 H3 (2026-10-09): an axis that matters that nothing answered,
+    // neither a rule nor a pass, is a question until System 1 answers it.
+    // Asked now, after the passes, because a pass fills what the rules left
+    // (the physics vote a base, the session pass a construct) and a question
+    // it answered would only be asked to be superseded.
+    if !report.cancelled && !pending_missing.is_empty() {
+        let (raised, by_axis) = ask_missing(store, pack, &pending_missing, &now, job_id)?;
+        report.review_items += raised;
+        report.missing = by_axis;
     }
 
     // And last, what to do with each stack (Wave 3 §7), from what the rules

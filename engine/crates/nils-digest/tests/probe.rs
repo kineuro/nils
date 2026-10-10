@@ -109,3 +109,80 @@ fn a_probe_of_nothing_is_refused_and_a_missing_root_is_named_without_its_path() 
     assert!(e.contains("cannot be read"), "{e}");
     assert!(!e.contains("nowhere"), "the answer names no path: {e}");
 }
+
+/// Record 55 K9: asked for it, the probe pairs the identities whose birth
+/// date and sex agree and whose visits overlap, for its caller alone; the
+/// answer is the same as without it and carries none of them.
+#[test]
+fn the_merge_reading_pairs_alike_identities_and_the_answer_carries_none() {
+    use common::{birth, sex};
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth;
+    let day = |d: &str| synth::text(tags::STUDY_DATE, VR::DA, d);
+    let dir = TempDir::new("probe-alike");
+    let people: [(&str, &str, &str, &[&str]); 5] = [
+        ("AB1001", "19580214", "F", &["20210510", "20220512"]),
+        ("AB1002", "19580214", "F", &["20220512", "20230101"]),
+        // the same birth date, another sex
+        ("AB1003", "19580214", "M", &["20210510"]),
+        // the same birth date and sex, no visit in common
+        ("AB1004", "19580214", "F", &["20190101"]),
+        // its files disagree on the birth date: left out
+        ("AB1005", "19580214", "F", &["20210510"]),
+    ];
+    let mut n = 0;
+    for (id, b, s, days) in people {
+        for d in days {
+            n += 1;
+            let study = format!("S{n}");
+            dir.file(
+                &format!("{id}/{d}/IM_0001"),
+                &mr(
+                    &study,
+                    &format!("{study}.1"),
+                    &format!("{study}.1.1"),
+                    id,
+                    &[birth(b), sex(s), day(d)],
+                ),
+            );
+        }
+    }
+    dir.file(
+        "AB1005/x/IM_0001",
+        &mr(
+            "S99",
+            "S99.1",
+            "S99.1.1",
+            "AB1005",
+            &[birth("19600101"), sex("F"), day("20210510")],
+        ),
+    );
+    let rule =
+        Rule::parse("identity:\n  id_type: patient-id\n  from:\n    - field: PatientID\n").unwrap();
+    let candidates = [("tag".to_string(), rule)];
+    let (doc, pairs) =
+        nils_digest::probe::probe_with(dir.path(), 1_000, &candidates, 2, true).unwrap();
+    let plain = nils_digest::probe::probe(dir.path(), 1_000, &candidates, 2).unwrap();
+    assert_eq!(doc, plain, "the answer is the same with the merge reading");
+    assert_eq!(pairs.len(), 1);
+    let found: Vec<_> = pairs[0]
+        .iter()
+        .map(|p| (p.a.1.as_str(), p.b.1.as_str(), p.shared, p.days))
+        .collect();
+    assert_eq!(
+        found,
+        vec![("AB1001", "AB1002", 1, (2, 2))],
+        "{:?}",
+        pairs[0]
+    );
+    assert_eq!(pairs[0][0].a.0, "patient-id");
+    let text = doc.to_string();
+    for marker in ["AB1001", "19580214", "20210510"] {
+        assert!(!text.contains(marker), "{marker} escaped: {text}");
+    }
+    // without it, nothing is kept
+    let (_, none) =
+        nils_digest::probe::probe_with(dir.path(), 1_000, &candidates, 2, false).unwrap();
+    assert!(none[0].is_empty());
+}

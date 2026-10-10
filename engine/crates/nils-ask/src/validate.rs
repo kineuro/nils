@@ -63,13 +63,131 @@ pub struct ColumnRef {
     pub ci: Option<String>,
 }
 
+/// A dataset a stack can be of (Wave 7a): its name, and the `source` rows
+/// (the roots its digests read) that are its own. A stack is of the
+/// dataset whose source its first digest read; a subject or a session is
+/// of every dataset one of its stacks is of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dataset {
+    pub name: String,
+    pub sources: Vec<i64>,
+}
+
+/// The table a `dataset` field names in the catalog (Wave 7a): the name is
+/// the place's, read through the stack's first digest and its source.
+pub const DATASET_TABLE: &str = "place";
+
+/// Whether a path reads a `dataset` field: its own (`dataset`) or a carried
+/// level's or a named set's (`subject.dataset`, `visits.dataset`). A
+/// measure's path is never one.
+pub fn is_dataset_path(path: &str) -> bool {
+    path == "dataset" || (path.ends_with(".dataset") && !is_measure_path(path))
+}
+
+/// One value of a classification axis by its names (Wave 7a): the
+/// identity, the label, and the identities it had before a rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisValueNames {
+    pub id: String,
+    pub label: String,
+    pub aliases: Vec<String>,
+}
+
+/// A classification axis as a document names its values (Wave 7a). A
+/// document may name a value by its identity, by an identity it had before
+/// a rename, or by its label, and a row may hold any of them: the rules
+/// write the name the pack stores (with `stores: label`, post_contrast's
+/// `given` is `1` and base's `T2starw` is `T2*w`), and a person's decision
+/// may hold the identity. Whichever a document writes, it is answered with
+/// every row that holds the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisNames {
+    /// Whether a row stores a value's label rather than its identity.
+    pub stores_label: bool,
+    pub values: Vec<AxisValueNames>,
+}
+
+impl AxisNames {
+    /// The value a document's text names: by its identity first, then by
+    /// an identity it had before a rename, then by its label.
+    pub fn named(&self, text: &str) -> Option<&AxisValueNames> {
+        self.values
+            .iter()
+            .find(|v| v.id == text)
+            .or_else(|| {
+                self.values
+                    .iter()
+                    .find(|v| v.aliases.iter().any(|a| a == text))
+            })
+            .or_else(|| self.values.iter().find(|v| v.label == text))
+    }
+
+    /// The name the pack stores for a value: the one form a group's key
+    /// and the value sampler answer.
+    pub fn stored<'a>(&self, v: &'a AxisValueNames) -> &'a str {
+        if self.stores_label { &v.label } else { &v.id }
+    }
+
+    /// Every text a row may hold for a value: the name the pack stores,
+    /// then each other name of it that names no other value of the axis.
+    pub fn held(&self, v: &AxisValueNames) -> Vec<String> {
+        let mut out = vec![self.stored(v).to_string()];
+        let others = std::iter::once(&v.id)
+            .chain(std::iter::once(&v.label))
+            .chain(v.aliases.iter());
+        for name in others {
+            let elsewhere = self.values.iter().any(|w| {
+                w.id != v.id && (w.id == *name || w.label == *name || w.aliases.contains(name))
+            });
+            if !elsewhere && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
+    /// Each text a row may hold that is not the name the pack stores, with
+    /// the name it stores: how a group's key and the value sampler read a
+    /// value in one form whichever form its rows hold.
+    pub fn synonyms(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for v in &self.values {
+            let stored = self.stored(v);
+            for name in self.held(v) {
+                if name != stored {
+                    out.push((name, stored.to_string()));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// What validation asks the catalog (§9).
 pub trait Names {
     /// A field of a level (`subject`, `study`, `series`, `session`, `stack`,
     /// `instance`, `event`, `cohort`), by its catalog path.
     fn field(&self, level: &str, path: &str) -> Option<FieldInfo>;
-    /// The values of a classification axis; none for an unknown axis.
+    /// The values of a classification axis, by identity; none for an
+    /// unknown axis.
     fn axis_values(&self, axis: &str) -> Option<Vec<String>>;
+    /// The values of a classification axis by their names, and which name
+    /// a row stores (Wave 7a); none for an unknown axis. A catalog that
+    /// knows the identities alone (a fixture) answers them, each its own
+    /// label.
+    fn axis_names(&self, axis: &str) -> Option<AxisNames> {
+        self.axis_values(axis).map(|values| AxisNames {
+            stores_label: false,
+            values: values
+                .into_iter()
+                .map(|id| AxisValueNames {
+                    label: id.clone(),
+                    id,
+                    aliases: Vec::new(),
+                })
+                .collect(),
+        })
+    }
     fn kind(&self, name: &str) -> Option<KindInfo>;
     fn level(&self, name: &str) -> bool;
     /// A library set shipped by the pack, and its grain.
@@ -127,6 +245,12 @@ pub trait Names {
     }
     /// Every derived field.
     fn derived_fields(&self) -> Vec<(String, DerivedInfo)> {
+        Vec::new()
+    }
+    /// The datasets a stack can be of (Wave 7a), for the compiler and for
+    /// checking a name a document compares a `dataset` field with. A
+    /// fixture knows none.
+    fn datasets(&self) -> Vec<Dataset> {
         Vec::new()
     }
 }
@@ -263,6 +387,44 @@ pub struct Validated {
     /// set filtered on one, and a set filtered on a measure whose count or
     /// existence is the answer (Nima's ruling after record 49's review).
     pub small_cells: BTreeSet<String>,
+    /// Record 55 K7 (spec §7.1): the places in `out.columns` that read a
+    /// quasi identifying field this scope may not project raw, and so are
+    /// answered as their shapes (see [`may_project_raw`]).
+    pub shaped: BTreeSet<usize>,
+}
+
+/// Record 55 K7, the one place the quasi-identifier rule is decided:
+/// whether a scope projects a field of this class raw. An identifier never
+/// (it enters through values and leaves through `out.identifiers`); a
+/// sensitive or a quasi identifying field with its class; a technical or a
+/// clinical field always. Below the rule, a quasi identifying field is
+/// answered as its shape and still filters, orders and counts.
+pub fn may_project_raw(class: Class, scope: &Scope) -> bool {
+    match class {
+        Class::Identifying => false,
+        Class::Sensitive => scope.classes.contains(&Class::Sensitive),
+        Class::QuasiIdentifying => scope.classes.contains(&Class::QuasiIdentifying),
+        Class::Technical | Class::Clinical => true,
+    }
+}
+
+/// A value's shape, as the values sampler shows a field no caller may
+/// project raw: digits as 9, letters as a or A, everything else kept, the
+/// first 40 characters and a `~` when there were more.
+pub fn shape(v: &str) -> String {
+    let mut out = String::new();
+    for c in v.chars().take(40) {
+        out.push(match c {
+            '0'..='9' => '9',
+            'a'..='z' => 'a',
+            'A'..='Z' => 'A',
+            other => other,
+        });
+    }
+    if v.chars().count() > 40 {
+        out.push('~');
+    }
+    out
 }
 
 /// The smallest group of scans whose totals of a measure the ask shows
@@ -360,6 +522,23 @@ fn issue(
 pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated, Vec<Issue>> {
     let mut issues: Vec<Issue> = Vec::new();
     let mut out = Validated::default();
+
+    // clauses nest at most MAX_CLAUSE_DEPTH deep: what reads a quasi field
+    // is traced through every level below it, so a deeper document is
+    // refused rather than answered unshaped (record 55 K7, review of
+    // 2026-10-10)
+    let depth = serde_json::to_value(ask)
+        .map(|v| crate::ast::clause_depth(&v))
+        .unwrap_or(usize::MAX);
+    if depth > MAX_CLAUSE_DEPTH {
+        issues.push(issue(
+            Code::NotCompilable,
+            "sets",
+            format!("clauses nest {depth} deep; an ask nests them at most {MAX_CLAUSE_DEPTH} deep"),
+            "bind an inner value to a name and use the name",
+        ));
+        return Err(issues);
+    }
 
     if !ask.pipeline.is_empty() {
         issues.push(issue(
@@ -561,6 +740,8 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     measures_within_detail(ask, scope, &mut issues);
     rows_within_detail(ask, scope, &mut issues);
     out.small_cells = small_cells(ask, scope);
+    out.shaped = shaped_columns(ask, names, scope, &out);
+    measures_of_shapes(ask, &out.shaped, &mut issues);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
         issues.into_iter().partition(|i| i.code.is_warning());
@@ -1357,26 +1538,79 @@ fn check_clause(
 ) {
     let mut all: Vec<&Clause> = Vec::new();
     c.walk(&mut all);
-    // an equality on an axis checks the value against the pack
+    // an equality on an axis checks the value against the pack: a value is
+    // named by its identity, an identity it had before a rename, or its
+    // label (Wave 7a)
     for cl in &all {
         if (COMPARISONS.contains(&cl.op.as_str()) || cl.op == "has")
             && let (Some(Arg::Clause(l)), Some(r)) = (cl.args.first(), cl.args.get(1))
             && l.op == "axis"
             && let Some(axis) = l.ref_name()
-            && let Some(values) = names.axis_values(axis)
+            && let Some(values) = names.axis_names(axis)
+        {
+            // a value is text, so a number a document wrote is read as its
+            // digits, as the compiler reads it
+            let literal = |a: &Arg| match a {
+                Arg::Text(t) => Some(t.clone()),
+                Arg::Int(n) => Some(n.to_string()),
+                Arg::Number(n) => Some(n.to_string()),
+                _ => None,
+            };
+            let literals: Vec<String> = match r {
+                Arg::List(items) => items.iter().filter_map(literal).collect(),
+                other => literal(other).into_iter().collect(),
+            };
+            for v in literals {
+                if values.named(&v).is_none() {
+                    issues.push(issue(
+                        Code::UnknownValue,
+                        path,
+                        format!("{v} is not a value of axis {axis}"),
+                        format!(
+                            "GET /api/ask/catalog for the values of {axis}, each named by its id or its label"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    // Wave 7a: a dataset named by its literal is one the registry holds, so
+    // a misspelt name is refused rather than answered with nothing
+    for cl in &all {
+        if matches!(cl.op.as_str(), "=" | "<>" | "in" | "not_in" | "has")
+            && let (Some(Arg::Clause(l)), Some(r)) = (cl.args.first(), cl.args.get(1))
+            && l.op == "field"
+            && let Some(p) = l.ref_name()
+            && is_dataset_path(p)
+            && matches!(
+                resolve_field(p, set, set_name, ask, so_far, exposed, names, 0),
+                Ok(Some(_))
+            )
         {
             let literals: Vec<&str> = match r {
                 Arg::Text(t) => vec![t.as_str()],
                 Arg::List(items) => items.iter().filter_map(Arg::as_text).collect(),
                 _ => Vec::new(),
             };
+            let known: Vec<String> = names.datasets().into_iter().map(|d| d.name).collect();
             for v in literals {
-                if !values.iter().any(|x| x == v) {
+                if !known.iter().any(|k| k == v) {
+                    let listed = if known.is_empty() {
+                        "this registry holds none".to_string()
+                    } else if known.len() > 12 {
+                        format!(
+                            "the datasets are {} and {} more",
+                            known[..12].join(", "),
+                            known.len() - 12
+                        )
+                    } else {
+                        format!("the datasets are {}", known.join(", "))
+                    };
                     issues.push(issue(
                         Code::UnknownValue,
                         path,
-                        format!("{v} is not a value of axis {axis}"),
-                        format!("GET /api/ask/catalog for the values of {axis}"),
+                        format!("{v} is not a dataset of this registry; {listed}"),
+                        "GET /api/ask/catalog for the datasets",
                     ));
                 }
             }
@@ -1914,6 +2148,228 @@ fn measure_filtered(ask: &Ask) -> BTreeSet<String> {
         }
     }
     filtered
+}
+
+/// How deep clauses may nest in an ask. The shapes check traces a value
+/// through every level, so it is bounded, and validate refuses a document
+/// deeper than the bound. Deep enough for a case ladder over every value of
+/// an axis, which the profile door writes (one level per value).
+pub const MAX_CLAUSE_DEPTH: usize = 64;
+
+/// Derived fields whose value is a date of the record, and so read a quasi
+/// identifying field.
+const QUASI_DERIVED: &[&str] = &["study_day"];
+
+/// What reads a quasi identifying field the scope may not project raw
+/// (record 55 K7): per set, the names it exposes that do, bindings and a
+/// group's keys, filled in topological order.
+struct Shapes<'a> {
+    ask: &'a Ask,
+    names: &'a dyn Names,
+    scope: &'a Scope,
+    v: &'a Validated,
+    tainted: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Shapes<'_> {
+    fn below(&self, info: &FieldInfo) -> bool {
+        !may_project_raw(info.class, self.scope)
+    }
+
+    /// Whether a clause's value, read in a set, carries a field below the
+    /// rule. A comparison or a predicate answers a boolean and a count or a
+    /// distinct count a number, as a filter does, so neither carries it.
+    fn clause(&self, c: &Clause, set: &str, depth: u8) -> bool {
+        let op = c.op.as_str();
+        // past the bound nothing is traced, so the value counts as carrying
+        // the field: validate refuses such a document first, and this keeps
+        // the check closed if it ever is not
+        if usize::from(depth) >= MAX_CLAUSE_DEPTH {
+            return true;
+        }
+        if COMPARISONS.contains(&op) || PREDICATES.contains(&op) {
+            return false;
+        }
+        match op {
+            "field" => c.ref_name().is_some_and(|p| self.path(p, set, 0)),
+            "derived" => c.ref_name().is_some_and(|n| {
+                QUASI_DERIVED.contains(&n) && !may_project_raw(Class::QuasiIdentifying, self.scope)
+            }),
+            "axis" | "param" => false,
+            "count" | "distinct" => false,
+            op if AGGREGATES.contains(&op) => {
+                // the aggregated clause reads the target's names
+                let target = c.opts.get("set").and_then(Value::as_str).unwrap_or(set);
+                c.args.iter().any(|a| self.arg(a, target, depth + 1))
+            }
+            _ => c.args.iter().any(|a| self.arg(a, set, depth + 1)),
+        }
+    }
+
+    fn arg(&self, a: &Arg, set: &str, depth: u8) -> bool {
+        match a {
+            Arg::Clause(c) => self.clause(c, set, depth),
+            Arg::List(items) => items.iter().any(|i| self.arg(i, set, depth)),
+            _ => false,
+        }
+    }
+
+    /// Whether a path, read in a set, is a field below the rule or a name
+    /// made from one; the walk follows `resolve_field`'s.
+    fn path(&self, path: &str, set_name: &str, depth: u8) -> bool {
+        let (Some(set), Some(exposed)) = (self.ask.sets.get(set_name), self.v.sets.get(set_name))
+        else {
+            return false;
+        };
+        if depth > 6 {
+            // resolve_field refuses a path this deep; closed if it ever does not
+            return true;
+        }
+        let own = self.tainted.get(set_name);
+        if exposed.bindings.iter().any(|b| b == path) {
+            return own.is_some_and(|t| t.contains(path));
+        }
+        for b in &exposed.change_bindings {
+            if let Some(rest) = path
+                .strip_prefix(b.as_str())
+                .and_then(|r| r.strip_prefix('.'))
+            {
+                // a change pair's days, and the days between them
+                return matches!(rest, "from_date" | "to_date" | "gap_days")
+                    && !may_project_raw(Class::QuasiIdentifying, self.scope);
+            }
+        }
+        if set.grain == Grain::Group {
+            return own.is_some_and(|t| t.contains(path));
+        }
+        if is_measure_path(path) {
+            // record 49 R4 decides a pipeline's measures
+            return false;
+        }
+        let (first, rest) = match path.split_once('.') {
+            Some((f, r)) => (f, Some(r)),
+            None => (path, None),
+        };
+        if first == "pick" {
+            return false;
+        }
+        if let Some(partner) = exposed.partners.get(first) {
+            return rest.is_some_and(|r| match r {
+                // the partner's day, and the days to it
+                "date" | "offset_days" => !may_project_raw(Class::QuasiIdentifying, self.scope),
+                r if PARTNER_EXTRAS.contains(&r) => false,
+                r => self.path(r, partner, depth + 1),
+            });
+        }
+        if let Some(of) = &exposed.of
+            && of == first
+        {
+            return rest.is_some_and(|r| self.path(r, of, depth + 1));
+        }
+        if let Some(rest) = rest
+            && level_prefix(set.grain, first)
+        {
+            return self
+                .names
+                .field(first, rest)
+                .is_some_and(|i| self.below(&i));
+        }
+        self.names
+            .field(set.grain.name(), path)
+            .is_some_and(|i| self.below(&i))
+    }
+}
+
+/// Record 55 K7 (spec §7.1): below detail quasi, a column of the answer that
+/// reads a quasi identifying field is projected as its shape, as the values
+/// sampler shows it, whichever door ran the question (a run, a preview, a
+/// job, and MCP through them). Its use as a filter, an order or a count
+/// stays allowed. Empty at detail quasi and above.
+fn shaped_columns(ask: &Ask, names: &dyn Names, scope: &Scope, v: &Validated) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    if may_project_raw(Class::QuasiIdentifying, scope) || !ask.sets.contains_key(&ask.out.set) {
+        return out;
+    }
+    let mut s = Shapes {
+        ask,
+        names,
+        scope,
+        v,
+        tainted: BTreeMap::new(),
+    };
+    for name in &v.order {
+        let Some(set) = ask.sets.get(name) else {
+            continue;
+        };
+        let mut t: BTreeSet<String> = BTreeSet::new();
+        // what a set narrows or combines passes its bindings on
+        if let Some(Src::Set(from)) = &set.from {
+            t.extend(s.tainted.get(from).cloned().unwrap_or_default());
+        }
+        if let Some(a) = &set.algebra {
+            for operand in &a.sets {
+                t.extend(s.tainted.get(operand).cloned().unwrap_or_default());
+            }
+        }
+        if let Some(g) = &set.group {
+            for c in &g.by {
+                if let Some(p) = c.ref_name()
+                    && s.clause(c, &g.of, 0)
+                {
+                    t.insert(p.to_string());
+                }
+            }
+        }
+        s.tainted.insert(name.clone(), t);
+        // bind reads what was bound before it
+        for (b, c) in &set.bind.0 {
+            if s.clause(c, name, 0) {
+                s.tainted.entry(name.clone()).or_default().insert(b.clone());
+            }
+        }
+    }
+    for (i, c) in ask.out.columns.iter().enumerate() {
+        if s.clause(c, &ask.out.set, 0) {
+            out.insert(i);
+        }
+    }
+    out
+}
+
+/// A post pass measure over a shaped column would compute over the raw
+/// values a caller may not see; it is refused (record 55 K7).
+fn measures_of_shapes(ask: &Ask, shaped: &BTreeSet<usize>, issues: &mut Vec<Issue>) {
+    if shaped.is_empty() {
+        return;
+    }
+    let shaped_names: BTreeSet<String> = ask
+        .out
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| shaped.contains(i))
+        .map(|(i, c)| {
+            c.ref_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("col{i}"))
+        })
+        .collect();
+    for (i, m) in ask.out.measures.iter().enumerate() {
+        for (k, v) in &m.0 {
+            if let Some(of) = v.get("of").and_then(Value::as_str)
+                && shaped_names.contains(of)
+            {
+                issues.push(issue(
+                    Code::ForbiddenField,
+                    format!("out.measures[{i}]"),
+                    format!(
+                        "{k} of {of}: {of} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7)"
+                    ),
+                    "measure another column, or ask for detail quasi",
+                ));
+            }
+        }
+    }
 }
 
 /// Pin every bare `selection:<name>` to its current version (§8.2), inside

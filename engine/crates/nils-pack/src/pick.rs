@@ -180,6 +180,13 @@ pub struct Borders {
 /// is a retake when it keeps more stacks than the family's `retake_above`
 /// (v0: more than one of a Dixon's canonical construct, more than two of an
 /// MP2RAGE's).
+///
+/// The 2026-10-10 borders study, R6, after record 38's ruling on what a
+/// rescan is: a retake is full stacks **taken at different times**. Stacks
+/// of one moment of acquisition are one acquisition stored twice (a second
+/// reconstruction, a re-send) and count once, and a stack of
+/// [`FRAGMENT_IMAGES`] or fewer is never a take, so both are counted in
+/// takes ([`Candidate::acquired`]) and not in stacks.
 #[derive(Debug, Clone)]
 pub struct Retake {
     /// The slice count, a field of the fingerprint.
@@ -187,6 +194,11 @@ pub struct Retake {
     pub partial_below: f64,
     pub partial_min_slices: f64,
 }
+
+/// A stack of this many images or fewer is a fragment, never a take of an
+/// acquisition and never a candidate (the 2026-10-10 borders study, R6): a
+/// spin echo split into stacks of 2, 19 and 1 images is one take of 19.
+pub const FRAGMENT_IMAGES: f64 = 2.0;
 
 /// v0's slice-count outlier: the winner's largest slice count is strictly
 /// below the `below` quantile or strictly above the `above` quantile of the
@@ -236,6 +248,120 @@ pub struct Model {
     /// a Dixon, and an MP2RAGE). A stack belongs to the first whose token it
     /// holds.
     pub families: Vec<Family>,
+    /// Pack contract 9: which stacks holding a role compete for it, by role.
+    /// A role with none takes every stack that holds it.
+    pub candidates: BTreeMap<String, Candidacy>,
+    /// Pack contract 9: how a near tie is decided, best first. Empty, a near
+    /// tie is a `too_close` border, as before.
+    pub near_tie: Vec<Order>,
+}
+
+/// One condition on a stack's values, by the name a pick reads (pack
+/// contract 9).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Condition {
+    /// It holds one of these values of the name, as a token of a
+    /// multi-valued one, case aside.
+    Holds { of: String, any: Vec<String> },
+    /// Its number of the name compared with this one. A stack with no
+    /// number there does not meet it.
+    Number {
+        of: String,
+        op: crate::expr::NumOp,
+        value: f64,
+    },
+}
+
+impl Condition {
+    /// The name it reads.
+    pub fn of(&self) -> &str {
+        match self {
+            Condition::Holds { of, .. } | Condition::Number { of, .. } => of,
+        }
+    }
+
+    /// Whether a stack's values meet it.
+    pub fn met(&self, values: &BTreeMap<String, String>) -> bool {
+        let v = values.get(self.of()).map(String::as_str).unwrap_or("");
+        match self {
+            Condition::Holds { any, .. } => any.iter().any(|a| holds(v, a)),
+            Condition::Number { op, value, .. } => {
+                v.trim().parse::<f64>().is_ok_and(|n| op.apply(n, *value))
+            }
+        }
+    }
+}
+
+/// Which stacks holding a role compete for it (pack contract 9): each of
+/// `when` holds and none of `unless` does. A stack that is not one is no
+/// candidate for the role and no part of the population the role is scored
+/// against, as if it did not hold the role at all. The 2026-10-10 borders
+/// study's R1 is one: a spine, neck, chest or other body part is no brain
+/// role's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Candidacy {
+    pub when: Vec<Condition>,
+    pub unless: Vec<Condition>,
+}
+
+impl Candidacy {
+    pub fn admits(&self, values: &BTreeMap<String, String>) -> bool {
+        self.when.iter().all(|c| c.met(values)) && !self.unless.iter().any(|c| c.met(values))
+    }
+}
+
+/// One step of the order a near tie is decided by (pack contract 9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Order {
+    /// The name it reads.
+    pub of: String,
+    /// The roles it orders; every role the pick has where empty.
+    pub roles: Vec<String>,
+    pub rank: Rank,
+}
+
+/// How one step ranks two candidates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rank {
+    /// These values first, in this order, and any other after them.
+    Prefer(Vec<String>),
+    /// These values after any other.
+    Avoid(Vec<String>),
+    /// The lower number first, and none after every number.
+    Lowest,
+    /// The higher number first, and none after every number.
+    Highest,
+}
+
+impl Order {
+    /// Where a candidate stands on this step: the lower, the better.
+    fn key(&self, c: &Candidate) -> (u8, f64) {
+        match &self.rank {
+            Rank::Prefer(list) => (
+                0,
+                list.iter()
+                    .position(|v| c.holds(&self.of, v))
+                    .unwrap_or(list.len()) as f64,
+            ),
+            Rank::Avoid(list) => (
+                0,
+                f64::from(u8::from(list.iter().any(|v| c.holds(&self.of, v)))),
+            ),
+            Rank::Lowest => match c.num(&self.of) {
+                Some(n) => (0, n),
+                None => (1, 0.0),
+            },
+            Rank::Highest => match c.num(&self.of) {
+                Some(n) => (0, -n),
+                None => (1, 0.0),
+            },
+        }
+    }
+
+    fn compare(&self, a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+        let (ka, kb) = (self.key(a), self.key(b));
+        ka.0.cmp(&kb.0).then_with(|| ka.1.total_cmp(&kb.1))
+    }
 }
 
 /// One acquisition that produced several images, merged back into one
@@ -319,9 +445,19 @@ impl Model {
             out.push(f.over.clone());
             out.extend(f.ignoring.iter().cloned());
         }
+        for c in self.candidates.values() {
+            out.extend(c.when.iter().chain(&c.unless).map(|x| x.of().to_string()));
+        }
+        out.extend(self.near_tie.iter().map(|o| o.of.clone()));
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Whether a stack holding `role`, with these values, competes for it
+    /// ([`Candidacy`]).
+    pub fn admits(&self, role: &str, values: &BTreeMap<String, String>) -> bool {
+        self.candidates.get(role).is_none_or(|c| c.admits(values))
     }
 
     /// The populations the percentile components read, and what each is of.
@@ -445,6 +581,12 @@ pub struct Candidate {
     pub each: Vec<BTreeMap<String, String>>,
     /// The family whose outputs were merged into this candidate, by name.
     pub family: Option<String>,
+    /// When each stack's images were first acquired, in the order of
+    /// `stacks`, for the retake: two stacks of one moment are one
+    /// acquisition stored twice. Empty where the caller did not say, and
+    /// then, as for a stack whose moment is none, each stack is a moment of
+    /// its own.
+    pub acquired: Vec<Option<String>>,
 }
 
 impl Candidate {
@@ -468,6 +610,22 @@ impl Candidate {
         } else {
             self.each.iter().collect()
         }
+    }
+
+    /// How many takes these stacks of the candidate are: one per moment of
+    /// acquisition, a stack with no moment one of its own.
+    fn takes(&self, of: impl Iterator<Item = usize>) -> usize {
+        let mut moments = std::collections::BTreeSet::new();
+        let mut unknown = 0;
+        for i in of {
+            match self.acquired.get(i).and_then(Option::as_deref) {
+                Some(m) => {
+                    moments.insert(m);
+                }
+                None => unknown += 1,
+            }
+        }
+        moments.len() + unknown
     }
 
     /// The values of a multi-valued name as a set of tokens, where nothing is
@@ -744,8 +902,13 @@ pub struct Picked {
     /// variant of a retake, the twin's stacks, the plain candidate's stacks,
     /// the slice count and the bounds it fell outside.
     pub notes: BTreeMap<&'static str, String>,
-    /// Every candidate's score, for the row: what the alternatives were.
+    /// Every candidate's score, for the row: what the alternatives were, in
+    /// the order the pick ranked them.
     pub considered: Vec<(Vec<i64>, f64)>,
+    /// Pack contract 9: the step of the pick's near-tie order that decided
+    /// between the winner and the one behind it, where one did. The winner
+    /// may then have scored lower, and `margin` is below nought.
+    pub decided: Option<String>,
 }
 
 /// Choose one candidate for one role.
@@ -767,6 +930,44 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
             .total_cmp(&a.score)
             .then_with(|| candidates[*ia].stacks.cmp(&candidates[*ib].stacks))
     });
+    // Pack contract 9: the candidates within `runner_up_within` of the best
+    // are ordered by the pick's near-tie order, where it has one, and the
+    // first step that tells the first two apart decides between them. Among
+    // candidates no step tells apart, the score and the stacks keep their
+    // order, and a near tie stays a border.
+    let within = model.borders.runner_up_within;
+    let near = |best: f64, s: f64| {
+        let gap = if best > 0.0 { (best - s) / best } else { 0.0 };
+        gap <= within || crate::pack::at_threshold(gap, within)
+    };
+    let steps: Vec<&Order> = model
+        .near_tie
+        .iter()
+        .filter(|o| o.roles.is_empty() || o.roles.iter().any(|r| r == role))
+        .collect();
+    let mut decided = None;
+    if !steps.is_empty() && scored.len() >= 2 {
+        let best = scored[0].1.score;
+        let n = scored
+            .iter()
+            .take_while(|(_, s)| near(best, s.score))
+            .count();
+        let by_order = |a: usize, b: usize| {
+            steps
+                .iter()
+                .map(|o| o.compare(&candidates[a], &candidates[b]))
+                .find(|o| o.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        scored[..n].sort_by(|(a, _), (b, _)| by_order(*a, *b));
+        if n >= 2 {
+            let (a, b) = (scored[0].0, scored[1].0);
+            decided = steps
+                .iter()
+                .find(|o| o.compare(&candidates[a], &candidates[b]).is_ne())
+                .map(|o| o.of.clone());
+        }
+    }
 
     let considered = scored
         .iter()
@@ -783,6 +984,7 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
             borders: vec![Border::Nothing],
             notes: BTreeMap::new(),
             considered,
+            decided: None,
         };
     };
 
@@ -797,8 +999,9 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
     let mut borders = Vec::new();
     // `within` takes the number itself and `below` does not, as each is
     // written: a margin of exactly the fraction is too close, and a share of
-    // exactly the floor is not rare.
+    // exactly the floor is not rare. A near tie the order decided is none.
     if second.is_some()
+        && decided.is_none()
         && (margin <= model.borders.runner_up_within
             || crate::pack::at_threshold(margin, model.borders.runner_up_within))
     {
@@ -813,10 +1016,26 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
 
     let mut notes = BTreeMap::new();
     let winner = &candidates[first];
-    let others: Vec<(&Candidate, f64)> = scored[1..]
+    if let (Some(of), Some((i, _))) = (&decided, &second) {
+        let said = |c: &Candidate| match c.get(of) {
+            "" => "nothing".to_string(),
+            v => v.to_string(),
+        };
+        notes.insert(
+            "near_tie",
+            format!("{of}: {} over {}", said(winner), said(&candidates[*i])),
+        );
+    }
+    // The others best first by their score, which the borders below read
+    // in that order whatever the near-tie order did.
+    let mut others: Vec<(&Candidate, f64)> = scored[1..]
         .iter()
         .map(|(i, s)| (&candidates[*i], s.score))
         .collect();
+    others.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.0.stacks.cmp(&b.0.stacks))
+    });
     more_borders(
         model,
         winner,
@@ -837,6 +1056,7 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
         borders,
         notes,
         considered,
+        decided,
     }
 }
 
@@ -867,57 +1087,65 @@ fn more_borders(
     };
 
     // Retake. A family's candidate is judged on what the family kept; any
-    // other on its stacks, less the short ones v0 demotes first.
+    // other on its stacks, less the short ones v0 demotes first. Either is
+    // counted in takes: full stacks at different moments (R6).
     if let Some(r) = &b.retake {
         let family = winner
             .family
             .as_ref()
             .and_then(|n| model.families.iter().find(|f| &f.name == n));
+        let counted: Vec<Option<f64>> = winner
+            .stacks_values()
+            .iter()
+            .map(|v| num(v, &r.of))
+            .collect();
+        let slices: Vec<f64> = counted.iter().map(|n| n.unwrap_or(0.0)).collect();
+        // A stack with no slice count is not known to be a fragment.
+        let whole = |i: usize| counted[i].is_none_or(|n| n > FRAGMENT_IMAGES);
         match family {
             Some(f) => {
-                if winner.stacks.len() > f.retake_above {
+                let takes = winner.takes((0..slices.len()).filter(|i| whole(*i)));
+                if takes > f.retake_above {
                     borders.push(Border::Retake);
                     notes.insert(
                         "retake",
                         format!(
-                            "{}: {} stacks of its canonical output, more than {}",
-                            f.name,
-                            winner.stacks.len(),
-                            f.retake_above
+                            "{}: {takes} stacks of its canonical output taken at different times, more than {}",
+                            f.name, f.retake_above
                         ),
                     );
                 }
             }
             None => {
-                let slices: Vec<f64> = winner
-                    .stacks_values()
-                    .iter()
-                    .map(|v| num(v, &r.of).unwrap_or(0.0))
-                    .collect();
                 let largest = slices.iter().copied().fold(0.0, f64::max);
-                let (kept, short) = if slices.len() >= 2
+                let full: Vec<usize> = if slices.len() >= 2
                     && (largest >= r.partial_min_slices
                         || crate::pack::at_threshold(largest, r.partial_min_slices))
                 {
                     let cutoff = r.partial_below * largest;
-                    let kept = slices
-                        .iter()
-                        .filter(|n| **n >= cutoff || crate::pack::at_threshold(**n, cutoff))
-                        .count();
-                    (kept, slices.len() - kept)
+                    (0..slices.len())
+                        .filter(|i| {
+                            slices[*i] >= cutoff || crate::pack::at_threshold(slices[*i], cutoff)
+                        })
+                        .collect()
                 } else {
-                    (slices.len(), 0)
+                    (0..slices.len()).collect()
                 };
-                if kept > 1 {
+                let full: Vec<usize> = full.into_iter().filter(|i| whole(*i)).collect();
+                let short = slices.len() - full.len();
+                let takes = winner.takes(full.iter().copied());
+                if takes > 1 {
                     borders.push(Border::Retake);
                     notes.insert(
                         "retake",
                         if short > 0 {
                             format!(
-                                "plain: {kept} full stacks of one acquisition, {short} short one(s) set aside"
+                                "plain: {takes} full stacks of one acquisition taken at different times, {short} short one(s) set aside"
                             )
                         } else {
-                            format!("plain: {kept} stacks of one acquisition")
+                            format!(
+                                "plain: {takes} stacks of one acquisition taken at different times"
+                            )
                         },
                     );
                 }
@@ -1072,6 +1300,8 @@ mod tests {
             },
             same_acquisition: vec!["technique".into()],
             families: Vec::new(),
+            candidates: BTreeMap::new(),
+            near_tie: Vec::new(),
         }
     }
 
@@ -1300,6 +1530,8 @@ mod tests {
             },
             same_acquisition: vec!["q".into()],
             families,
+            candidates: BTreeMap::new(),
+            near_tie: Vec::new(),
         }
     }
 
@@ -1330,6 +1562,7 @@ mod tests {
             values,
             each: stacks.iter().map(|(_, p)| map(p)).collect(),
             family: family.map(str::to_string),
+            acquired: Vec::new(),
         }
     }
 
@@ -1393,6 +1626,90 @@ mod tests {
         // One stack is no retake.
         let one = with_each(&[(1, &[("q", "top"), ("n_instances", "176")])], None);
         assert!(pick(&m, "t1w", &[one], &r).borders.is_empty());
+    }
+
+    /// The candidate with each stack's moment of acquisition, in the order
+    /// of its stacks.
+    fn taken(mut c: Candidate, moments: &[Option<&str>]) -> Candidate {
+        c.acquired = moments.iter().map(|m| m.map(str::to_string)).collect();
+        c
+    }
+
+    #[test]
+    fn a_retake_is_two_full_stacks_taken_at_different_times() {
+        // The 2026-10-10 borders study, R6, after record 38's ruling: two
+        // stacks of one acquisition time are one acquisition stored twice (a
+        // second reconstruction, a re-send), never a retake.
+        let m = chosen(retake(), Vec::new());
+        let r = Reference::default();
+        let pair = || {
+            with_each(
+                &[
+                    (1, &[("q", "top"), ("n_instances", "192")]),
+                    (2, &[("q", "top"), ("n_instances", "168")]),
+                ],
+                None,
+            )
+        };
+        let morning = Some("2026-01-05 09:30:00.000000");
+        let later = Some("2026-01-05 10:00:00.000000");
+        let p = pick(&m, "t1w", &[taken(pair(), &[morning, morning])], &r);
+        assert!(p.borders.is_empty(), "one moment: {:?}", p.borders);
+        let p = pick(&m, "t1w", &[taken(pair(), &[morning, later])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("plain: 2"), "{:?}", p.notes);
+        // A moment nobody wrote down is a moment of its own: an absence is
+        // not a measurement, so it is never the same as another.
+        let p = pick(&m, "t1w", &[taken(pair(), &[morning, None])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        let p = pick(&m, "t1w", &[pair()], &r);
+        assert_eq!(p.borders, [Border::Retake], "no moments given");
+        // A spin echo split into fragments of 2, 19 and 1 images: the
+        // fragments are no take of their own, so one stack is left, and no
+        // retake, whatever their moments.
+        let fragments = with_each(
+            &[
+                (1, &[("q", "top"), ("n_instances", "2")]),
+                (2, &[("q", "top"), ("n_instances", "19")]),
+                (3, &[("q", "top"), ("n_instances", "1")]),
+            ],
+            None,
+        );
+        let p = pick(&m, "t1w", &[fragments], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+    }
+
+    #[test]
+    fn a_family_s_retake_is_counted_in_takes_at_different_times() {
+        // A Dixon's canonical image stored twice at one moment is one take;
+        // an MP2RAGE's run three times is a retake only where the three were
+        // taken at three times.
+        let m = chosen(retake(), vec![family("dixon", 1), family("mp2rage", 2)]);
+        let r = Reference::default();
+        let stacks = |n: i64, fam: &str| {
+            let rows: Vec<(i64, &[(&str, &str)])> =
+                (1..=n).map(|i| (i, &[("q", "top")][..])).collect();
+            with_each(&rows, Some(fam))
+        };
+        let a = Some("2026-01-05 09:00:00.000000");
+        let b = Some("2026-01-05 09:20:00.000000");
+        let c = Some("2026-01-05 09:40:00.000000");
+        let p = pick(&m, "t1w", &[taken(stacks(2, "dixon"), &[a, a])], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        let p = pick(&m, "t1w", &[taken(stacks(2, "dixon"), &[a, b])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("dixon: 2"), "{:?}", p.notes);
+        let p = pick(&m, "t1w", &[taken(stacks(3, "mp2rage"), &[a, a, a])], &r);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        let p = pick(&m, "t1w", &[taken(stacks(3, "mp2rage"), &[a, b, b])], &r);
+        assert!(
+            p.borders.is_empty(),
+            "two takes are the family's own: {:?}",
+            p.borders
+        );
+        let p = pick(&m, "t1w", &[taken(stacks(3, "mp2rage"), &[a, b, c])], &r);
+        assert_eq!(p.borders, [Border::Retake]);
+        assert!(p.notes["retake"].starts_with("mp2rage: 3"), "{:?}", p.notes);
     }
 
     #[test]
@@ -1640,6 +1957,160 @@ mod tests {
         let lone = candidate(&[1], &[("q", "top"), ("modifier", "Dixon")]);
         let p = pick(&m, "t1w", &[lone, other("at_90", "")], &r);
         assert!(p.borders.is_empty());
+    }
+
+    // ------------------------------------------------------ pack contract 9
+
+    /// A model whose one component scores a candidate by its `q`: `a` is
+    /// 1.0, `b` 0.97 (within 5 % of `a`) and `c` 0.80 (well behind).
+    fn scored_by_q(near_tie: Vec<Order>) -> Model {
+        Model {
+            components: vec![Component {
+                name: "q".into(),
+                weight: 1.0,
+                kind: Kind::Choice {
+                    of: "q".into(),
+                    scores: [("a", 1.0), ("b", 0.97), ("c", 0.80)]
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                    missing: 0.0,
+                    crowded_by: None,
+                },
+            }],
+            penalty: None,
+            borders: Borders {
+                runner_up_within: 0.05,
+                ..Borders::default()
+            },
+            near_tie,
+            roles: vec!["t1w".into(), "flair".into()],
+            ..model()
+        }
+    }
+
+    fn step(of: &str, rank: Rank) -> Order {
+        Order {
+            of: of.into(),
+            roles: Vec::new(),
+            rank,
+        }
+    }
+
+    #[test]
+    fn a_near_tie_is_decided_by_the_pick_s_order_and_asks_nothing() {
+        // The 2026-10-10 borders study's R8, as a pack would declare it: 3D
+        // first within the margin, then the thinner slices.
+        let r = Reference::default();
+        let two_d = candidate(&[1], &[("q", "a"), ("dim", "2D"), ("thick", "5")]);
+        let three_d = candidate(&[2], &[("q", "b"), ("dim", "3D"), ("thick", "1")]);
+        // Without an order, a near tie is a border, and the score decides.
+        let p = pick(
+            &scored_by_q(Vec::new()),
+            "t1w",
+            &[two_d.clone(), three_d.clone()],
+            &r,
+        );
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [1]);
+        assert_eq!(p.borders, [Border::TooClose]);
+        assert_eq!(p.decided, None);
+        // With one, the order decides, says which step did, and asks nothing.
+        let m = scored_by_q(vec![step("dim", Rank::Prefer(vec!["3D".into()]))]);
+        let p = pick(&m, "t1w", &[two_d.clone(), three_d.clone()], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [2]);
+        assert!(p.borders.is_empty(), "{:?}", p.borders);
+        assert_eq!(p.decided.as_deref(), Some("dim"));
+        assert_eq!(p.notes["near_tie"], "dim: 3D over 2D");
+        assert!(p.margin < 0.0, "the winner scored lower: {}", p.margin);
+        assert_eq!(p.considered[0].0, [2], "ranked as the order decided");
+        // A candidate outside the margin is not reordered.
+        let behind = candidate(&[3], &[("q", "c"), ("dim", "3D"), ("thick", "1")]);
+        let p = pick(&m, "t1w", &[two_d.clone(), behind], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [1]);
+        assert!(p.borders.is_empty());
+        // Where no step tells them apart, the near tie stays a border.
+        let alike = candidate(&[4], &[("q", "b"), ("dim", "2D"), ("thick", "5")]);
+        let p = pick(&m, "t1w", &[two_d.clone(), alike.clone()], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [1]);
+        assert_eq!(p.borders, [Border::TooClose]);
+        assert_eq!(p.decided, None);
+        // The next step reads on where the first is equal: the lower number.
+        let m = scored_by_q(vec![
+            step("dim", Rank::Prefer(vec!["3D".into()])),
+            step("thick", Rank::Lowest),
+        ]);
+        let thin = candidate(&[5], &[("q", "b"), ("dim", "2D"), ("thick", "3")]);
+        let p = pick(&m, "t1w", &[two_d.clone(), thin], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [5]);
+        assert_eq!(p.decided.as_deref(), Some("thick"));
+        // A value to avoid comes after every other, and none is no number.
+        let m = scored_by_q(vec![step("construct", Rank::Avoid(vec!["ND".into()]))]);
+        let nd = candidate(&[6], &[("q", "a"), ("construct", "ND,NORM")]);
+        let corrected = candidate(&[7], &[("q", "b")]);
+        let p = pick(&m, "t1w", &[nd, corrected], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [7]);
+        // A step that names roles orders only those.
+        let m = scored_by_q(vec![Order {
+            roles: vec!["flair".into()],
+            ..step("dim", Rank::Prefer(vec!["3D".into()]))
+        }]);
+        let p = pick(&m, "t1w", &[two_d.clone(), three_d.clone()], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [1]);
+        assert_eq!(p.borders, [Border::TooClose]);
+        let p = pick(&m, "flair", &[two_d, three_d], &r);
+        assert_eq!(p.winner.as_ref().unwrap().stacks, [2]);
+    }
+
+    #[test]
+    fn a_role_s_candidacy_admits_the_stacks_it_names_and_no_other() {
+        // The borders study's R1: the brain roles are a spine's, a neck's, a
+        // chest's or an unknown part's no more; a brain-neck stack and one
+        // whose part nobody stated stay.
+        let values = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect()
+        };
+        let mut m = model();
+        m.candidates.insert(
+            "t1w".into(),
+            Candidacy {
+                when: vec![Condition::Number {
+                    of: "fov_x".into(),
+                    op: crate::expr::NumOp::Ge,
+                    value: 175.0,
+                }],
+                unless: vec![Condition::Holds {
+                    of: "body_part".into(),
+                    any: vec![
+                        "spine".into(),
+                        "neck".into(),
+                        "chest".into(),
+                        "other".into(),
+                    ],
+                }],
+            },
+        );
+        let fov = ("fov_x", "240");
+        assert!(m.admits("t1w", &values(&[fov, ("body_part", "brain")])));
+        assert!(m.admits("t1w", &values(&[fov, ("body_part", "brain-neck")])));
+        assert!(m.admits("t1w", &values(&[fov])));
+        assert!(!m.admits("t1w", &values(&[fov, ("body_part", "spine")])));
+        assert!(
+            !m.admits("t1w", &values(&[fov, ("body_part", "Neck")])),
+            "case aside"
+        );
+        assert!(!m.admits("t1w", &values(&[("fov_x", "130"), ("body_part", "brain")])));
+        assert!(
+            !m.admits("t1w", &values(&[("body_part", "brain")])),
+            "no number is no match"
+        );
+        // A role with no entry takes every stack that holds it.
+        assert!(m.admits("flair", &values(&[("body_part", "spine")])));
+        // And what it reads is fetched.
+        let reads = m.reads();
+        assert!(reads.contains(&"body_part".to_string()) && reads.contains(&"fov_x".to_string()));
     }
 
     #[test]

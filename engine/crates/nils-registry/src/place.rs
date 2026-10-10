@@ -16,6 +16,12 @@
 //! under, what an unmapped identifier does, the cohort it feeds, its tag
 //! lists and what becomes of the originals. The `dataset` column holds
 //! that; [`dataset_of`] checks it and fills what it does not name.
+//!
+//! A source place whose arrival has not been declared is `undeclared`
+//! (Wave 7a §5.3): it has no tree, and nothing in it is read until a person
+//! says how its files arrive. That is the default everywhere a dataset or a
+//! handling is read, so a folder without the layout is never read as
+//! de-identified.
 
 use std::path::Path;
 
@@ -115,9 +121,8 @@ pub struct Place {
     /// The dataset a source place is (record 26): what arrives, the two
     /// trees, the identity rule, what an unmapped identifier does, the
     /// cohort it feeds, the tag lists and what becomes of the originals.
-    /// Null on a place of another role, and on a source place from before
-    /// it was declared, which reads as the defaults: the folder itself is
-    /// the pseudonymised tree.
+    /// Null on a place of another role. A source place always has one:
+    /// one whose arrival was never declared is `undeclared` and has no tree.
     pub dataset: Value,
 }
 
@@ -191,13 +196,106 @@ impl Place {
         })
     }
 
-    /// Whether a path lies under this place.
+    /// Whether a path lies under this place: under its folder, or under one
+    /// of its dataset's trees, each side resolved the same way. A tree that
+    /// is a symbolic link (derivatives/dcm-anon pointing elsewhere) resolves
+    /// outside the folder, and a digest keeps that resolved root, so the
+    /// trees are matched too.
     pub fn holds_path(&self, path: &Path) -> bool {
-        let mine = Path::new(&self.path);
-        let mine = std::fs::canonicalize(mine).unwrap_or_else(|_| mine.to_path_buf());
-        let theirs = canonical_prefix(path);
-        theirs.starts_with(&mine)
+        self.depth_holding(&canonical_prefix(path)).is_some()
     }
+
+    /// How closely this place holds a path already resolved: the depth of
+    /// the deepest of its folder and its trees the path lies under, none
+    /// where it lies under neither. [`Place::holds_path`] asks the same.
+    fn depth_holding(&self, theirs: &Path) -> Option<usize> {
+        std::iter::once(Path::new(&self.path).to_path_buf())
+            .chain(
+                ["originals", "anon"]
+                    .iter()
+                    .filter_map(|tree| self.tree_path(tree)),
+            )
+            .map(|mine| canonical_prefix(&mine))
+            .filter(|mine| theirs.starts_with(mine))
+            .map(|mine| mine.components().count())
+            .max()
+    }
+}
+
+/// A dataset a stack can be of (Wave 7a): an active source place that is a
+/// dataset, not a root, with the `source` rows (the roots its digests read)
+/// that are its own. The ask reads a stack's dataset from these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetSources {
+    pub id: i64,
+    pub name: String,
+    pub sources: Vec<i64>,
+}
+
+/// Every active dataset with its `source` rows, in the order of their ids.
+/// A root (each folder under it a dataset of its own) is none. A `source`
+/// row two datasets hold is the one's that holds it most closely (the
+/// deeper folder, then the lower id), so a row is of one dataset at most,
+/// and a row no dataset holds is of none.
+pub fn dataset_sources(store: &mut Store) -> Result<Vec<DatasetSources>, Error> {
+    let places: Vec<Place> = active(store)?
+        .into_iter()
+        .filter(|p| p.role == Role::Source && !is_root(&p.dataset))
+        .collect();
+    let mut out: Vec<DatasetSources> = places
+        .iter()
+        .map(|p| DatasetSources {
+            id: p.id,
+            name: p.name.clone(),
+            sources: Vec::new(),
+        })
+        .collect();
+    if places.is_empty() {
+        return Ok(out);
+    }
+    let sql = format!(
+        "SELECT id, root_canonical FROM {} ORDER BY id",
+        store.qualified("source")
+    );
+    for r in &store.query(&sql, &[])? {
+        let theirs = canonical_prefix(Path::new(r.text(1)?));
+        let mut best: Option<(usize, usize)> = None;
+        for (i, p) in places.iter().enumerate() {
+            if let Some(depth) = p.depth_holding(&theirs)
+                && best.is_none_or(|(d, _)| depth > d)
+            {
+                best = Some((depth, i));
+            }
+        }
+        if let Some((_, i)) = best {
+            out[i].sources.push(r.int(0)?);
+        }
+    }
+    Ok(out)
+}
+
+/// What [`dataset_sources`] reads, as one text that changes whenever its
+/// answer could: each source place's id, name, path, retirement and
+/// dataset, and how many `source` rows there are up to which id. A place
+/// changes without the epoch moving, and comparing this is cheaper than
+/// resolving every root under every place again.
+pub fn dataset_stamp(store: &mut Store) -> Result<String, Error> {
+    let mut out = String::new();
+    for p in list(store)? {
+        if p.role == Role::Source {
+            out.push_str(&format!(
+                "{}|{}|{}|{:?}|{}\n",
+                p.id, p.name, p.path, p.retired_at, p.dataset
+            ));
+        }
+    }
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM {}",
+        store.qualified("source")
+    );
+    let r = &store.query(&sql, &[])?[0];
+    out.push_str(&format!("{}|{}", r.int(0)?, r.int(1)?));
+    Ok(out)
 }
 
 /// The longest existing prefix of a path, canonicalised, with the rest
@@ -293,7 +391,13 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
         handling_of(&p.handling).map_err(Error::Message)?
     };
     let dataset = if p.dataset.is_null() {
-        Value::Null
+        // Wave 7a §5.3: a source place is a dataset from the start, and
+        // undeclared until a person says how its files arrive
+        if p.role == Role::Source {
+            default_dataset(None)
+        } else {
+            Value::Null
+        }
     } else if p.role != Role::Source {
         return Err(Error::Message(format!(
             "a dataset is a source place; {} is a {} place",
@@ -445,14 +549,212 @@ fn pick(
     }
 }
 
-/// The three ways data arrives in a dataset (record 26 §2).
-pub const ARRIVALS: [&str; 3] = ["identified", "deidentified", "coded"];
+/// The ways data arrives in a dataset (record 26 §2), and `undeclared`
+/// (Wave 7a §5.3): nobody has said yet, so nothing in it is read.
+pub const ARRIVALS: [&str; 4] = [UNDECLARED, "identified", "deidentified", "coded"];
+
+/// What a dataset's pseudonymiser writes into PatientID, and so what its
+/// digest reads back from the pseudonymised tree (Wave 7a §5.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatientId {
+    /// The subject's code, the subject code generator's (`subject-code`).
+    SubjectCode,
+    /// The subject's value of this id type, from the linkage store
+    /// (`id-type:<name>`).
+    IdType(String),
+}
+
+/// The declaration's word for the subject's code.
+pub const PATIENT_ID_CODE: &str = "subject-code";
+
+/// The declaration's prefix for an id type.
+pub const PATIENT_ID_TYPE: &str = "id-type:";
+
+impl PatientId {
+    /// The declaration as written: `subject-code` or `id-type:<name>`. An
+    /// id type of `subject-code` is the code; a personnummer is never what
+    /// PatientID holds, since that is the identifier pseudonymisation takes
+    /// away.
+    pub fn parse(text: &str) -> Result<PatientId, String> {
+        let text = text.trim();
+        if text == PATIENT_ID_CODE {
+            return Ok(PatientId::SubjectCode);
+        }
+        let Some(name) = text.strip_prefix(PATIENT_ID_TYPE) else {
+            return Err(format!(
+                "patient_id is {PATIENT_ID_CODE} or {PATIENT_ID_TYPE}<name>, not {text}"
+            ));
+        };
+        if name == crate::schema::SUBJECT_CODE_TYPE {
+            return Ok(PatientId::SubjectCode);
+        }
+        if !crate::linkage::valid_id_type_name(name) {
+            return Err(format!(
+                "patient_id: {name} is no id type's name (lower case letters, digits and hyphens)"
+            ));
+        }
+        if crate::personnummer::is_type(name) {
+            return Err(format!(
+                "patient_id: a pseudonymised file never holds a {name}; write the subject's code or another id type"
+            ));
+        }
+        Ok(PatientId::IdType(name.to_string()))
+    }
+
+    /// The declaration as stored.
+    pub fn as_text(&self) -> String {
+        match self {
+            PatientId::SubjectCode => PATIENT_ID_CODE.to_string(),
+            PatientId::IdType(name) => format!("{PATIENT_ID_TYPE}{name}"),
+        }
+    }
+
+    /// What a dataset document declares; none where it declares nothing,
+    /// which an identified dataset reads as the subject's code and any other
+    /// as its identity rule says.
+    pub fn of(dataset: &Value) -> Result<Option<PatientId>, String> {
+        match &dataset["patient_id"] {
+            Value::Null => Ok(None),
+            Value::String(s) => PatientId::parse(s).map(Some),
+            other => Err(format!("patient_id is a word, not {other}")),
+        }
+    }
+}
+
+/// What a source place is (Wave 7a, Nima 2026-10-08: "NILS should always
+/// get the declaration from structure"): a `root` the engine explores, each
+/// folder under it a dataset; a `dataset`, one folder whose structure says
+/// how its files arrive; or a `legacy` place that names a dataset's
+/// pseudonymised tree itself (`…/derivatives/dcm-raw` or `dcm-anon`), read
+/// as that tree.
+pub const KINDS: [&str; 3] = ["dataset", "root", "legacy"];
+
+/// What a dataset's structure says (Wave 7a): only originals
+/// (`identified`), only a pseudonymised tree (`anonymised`), both (`both`,
+/// identified with its anonymised copy), or anything else (`unknown`):
+/// entries holding DICOM beside `derivatives/`, or no tree at all.
+pub const STATES: [&str; 4] = ["identified", "anonymised", "both", "unknown"];
+
+/// How a de-identified or coded dataset's subjects are found (Wave 7a): a
+/// map of subject codes to its ids, or codes the subject code generator
+/// makes from the ids.
+pub const SUBJECTS: [&str; 2] = ["map", "generated"];
+
+/// What names the folder of each pseudonymised copy (Wave 7a): the
+/// subject's code, or the id type's value PatientID holds.
+pub const FOLDERS: [&str; 2] = ["subject-code", "id-type"];
+
+/// Record 55 H2 (round 4): whether picking main scans follows a sort of
+/// the dataset as a pipeline step (`after_sort`, the default) or not
+/// (`off`).
+pub const PICKS: [&str; 2] = ["after_sort", "off"];
+
+/// Whether a dataset's sorts are followed by a pick run: true unless the
+/// dataset says `off`. A dataset stored before the field existed has none
+/// and is picked after a sort.
+pub fn picks_after_sort(dataset: &Value) -> bool {
+    dataset["picks"].as_str() != Some("off")
+}
+
+/// Why a dataset may not be read yet, where its declaration is not whole
+/// (Wave 7a): undeclared, without a tree, or arriving de-identified or
+/// coded without saying what PatientID holds and how its subjects are
+/// found. None for a whole declaration.
+pub fn incomplete(dataset: &Value) -> Option<String> {
+    let Ok(d) = dataset_of(dataset, None) else {
+        return Some("its declaration cannot be read".into());
+    };
+    if d["kind"] == "root" {
+        return Some(
+            "it is a root: each folder under it is a dataset, read by its own name".into(),
+        );
+    }
+    let arrives = d["arrives"].as_str().unwrap_or(UNDECLARED);
+    if arrives == UNDECLARED || d["state"] == "unknown" {
+        return Some(
+            "its structure is unknown: entries beside derivatives/, or no tree at all; say which tree they go into"
+                .into(),
+        );
+    }
+    let legacy = d["kind"] == "legacy";
+    if d["trees"]["anon"]
+        .as_str()
+        .is_none_or(|t| t == "." && !legacy)
+    {
+        return Some("it has no pseudonymised tree".into());
+    }
+    if arrives != "identified" {
+        let mut missing = Vec::new();
+        if d["patient_id"].is_null() {
+            missing.push("what PatientID holds (patient_id: subject-code or id-type:<name>)");
+        }
+        if d["subjects"].is_null() {
+            missing.push("how its subjects are found (subjects: map or generated)");
+        }
+        if !missing.is_empty() {
+            return Some(format!(
+                "it arrives {arrives} and does not say {}",
+                missing.join(", nor ")
+            ));
+        }
+    }
+    None
+}
+
+/// Why a dataset's subject codes cannot be made on this registry (the
+/// review of Wave 7a's merge, 2026-10-10): its declaration has the subject
+/// code generator make them (a personnummer rule, or subjects `generated`)
+/// while the registry makes codes with another scheme, so they would not be
+/// the generator's. A provisional code for an identifier no map names
+/// (`unmapped: code`) is the registry's own and stays. None when they can
+/// be made.
+pub fn generator_refused(dataset: &Value, scheme: crate::pseudonym::Scheme) -> Option<String> {
+    if scheme == crate::pseudonym::Scheme::SUBJECT_CODE_GENERATOR {
+        return None;
+    }
+    let d = dataset_of(dataset, None).ok()?;
+    let personnummer = d["identity"]["id_type"] == "personnummer";
+    let generated = d["subjects"] == "generated";
+    (personnummer || generated).then(|| {
+        format!(
+            "its subject codes are the subject code generator's, and this registry makes its codes with {}; a registry made with the generator's scheme reads it (nils init --scheme subject-code-generator), or the dataset takes its codes from a map",
+            scheme.name()
+        )
+    })
+}
+
+/// [`incomplete`], and on a registry whose code scheme is not the
+/// generator's, a dataset whose codes the generator would make
+/// ([`generator_refused`]).
+pub fn incomplete_on(dataset: &Value, scheme: crate::pseudonym::Scheme) -> Option<String> {
+    incomplete(dataset).or_else(|| generator_refused(dataset, scheme))
+}
+
+/// The arrival of a dataset nobody has declared: the default of
+/// [`handling_of`], [`dataset_of`] and [`default_dataset`]. Such a dataset
+/// has no tree and is never digested, brought in or pseudonymised.
+pub const UNDECLARED: &str = "undeclared";
+
+/// Whether a dataset document says its arrival was never declared; a null
+/// document is one.
+pub fn is_undeclared(dataset: &Value) -> bool {
+    dataset_of(dataset, None)
+        .map(|d| d["arrives"] == UNDECLARED)
+        .unwrap_or(true)
+}
+
+/// Whether a source place's document says it is a root, each folder under
+/// it a dataset of its own (Wave 7a), rather than a dataset.
+pub fn is_root(dataset: &Value) -> bool {
+    dataset_of(dataset, None).is_ok_and(|d| d["kind"] == "root")
+}
 
 /// How what comes in through a place is handled, as the operator declares it:
 /// whether it arrives identified, and what a release does to it on the way
-/// out. A key not given takes its default; a value not known is refused with
-/// the choices. `arrives` lives on the dataset since record 26 and is
-/// mirrored here for a reader from before.
+/// out. A key not given takes its default, `undeclared` for the arrival, as
+/// [`dataset_of`] has it; a value not known is refused with the choices.
+/// `arrives` lives on the dataset since record 26 and is mirrored here for a
+/// reader from before.
 ///
 /// The dates are not a choice (record 38 S3): a release writes the real date.
 /// `dates: keep`, which a caller from before may send, is taken and dropped;
@@ -461,7 +763,7 @@ pub fn handling_of(doc: &Value) -> Result<Value, String> {
     if !(doc.is_object() || doc.is_null()) {
         return Err("handling is an object: {arrives, on_release: {uids, deface}}".into());
     }
-    let arrives = pick(doc, None, "arrives", &ARRIVALS, "identified")?;
+    let arrives = pick(doc, None, "arrives", &ARRIVALS, UNDECLARED)?;
     let release = doc.get("on_release").cloned().unwrap_or(Value::Null);
     if !(release.is_object() || release.is_null()) {
         return Err("on_release is an object: {uids, deface}".into());
@@ -502,34 +804,36 @@ pub fn set_handling(store: &mut Store, id: i64, handling: &Value) -> Result<Plac
 }
 
 /// The two trees of a dataset, under the place's path (record 26 §1). A
-/// dataset with no such layout reads the folder itself, `.`, as its
-/// pseudonymised tree.
+/// dataset declared before Wave 7a may read the folder itself, `.`, as its
+/// pseudonymised tree, and keeps that declaration; no declaration makes one
+/// now, and an undeclared dataset has no tree at all.
 pub const ORIGINALS_TREE: &str = "derivatives/dcm-original";
 pub const ANON_TREE: &str = "derivatives/dcm-anon";
 
 /// The dataset a source place is, as the operator declares it: what
-/// arrives (`identified`, `deidentified` or `coded`), the two trees as the
+/// arrives (`undeclared`, `identified`, `deidentified` or `coded`), the two trees as the
 /// engine found or made them, the identity rule as `nils digest
 /// --identity-rule` reads it or null, what an unmapped identifier does
 /// (`hold` or `code`), the cohort every digest of it feeds or null, the tag
 /// lists (`keep_demographics`, `remove`, `keep`, each tag as `gggg,eeee`)
 /// and what becomes of the originals (`kept`, `vaulted` or `purged`). A key
-/// not given keeps what is in force, or takes its default: de-identified,
-/// the folder itself as the pseudonymised tree, no rule, `hold` for
-/// identified arrivals and `code` otherwise, no cohort, demographics kept,
-/// the originals kept. A value not known is refused with the choices.
+/// not given keeps what is in force, or takes its default: undeclared, with
+/// no tree, no rule, `code` for de-identified and coded arrivals and `hold`
+/// otherwise, no cohort, demographics kept, the originals kept. A value not
+/// known is refused with the choices.
 pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String> {
     if !(doc.is_object() || doc.is_null()) {
         return Err("dataset is an object: {arrives, trees, identity, unmapped, cohort, tags, originals_kept}".into());
     }
     let current = current.filter(|c| c.is_object());
-    let arrives = pick(doc, current, "arrives", &ARRIVALS, "deidentified")?;
+    let arrives = pick(doc, current, "arrives", &ARRIVALS, UNDECLARED)?;
+    let undeclared = arrives == UNDECLARED;
     let trees = match doc.get("trees") {
         Some(t) if t.is_object() => t.clone(),
         Some(Value::Null) | None => current
             .map(|c| c["trees"].clone())
             .filter(Value::is_object)
-            .unwrap_or_else(|| json!({"originals": null, "anon": "."})),
+            .unwrap_or_else(|| json!({"originals": null, "anon": null})),
         Some(other) => {
             return Err(format!(
                 "trees is an object {{originals, anon}}, not {other}"
@@ -545,10 +849,19 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
             ));
         }
     };
+    // a tree is the engine's to set; one not set is none. The folder itself
+    // (`.`) is read from a document written before Wave 7a, which schema 80
+    // turns undeclared; nothing makes one now
     let anon = match &trees["anon"] {
-        Value::Null => Value::String(".".into()),
+        Value::Null => Value::Null,
         Value::String(s) if s == ANON_TREE || s == "." => Value::String(s.clone()),
         other => return Err(format!("trees.anon is {ANON_TREE} or ., not {other}")),
+    };
+    // an undeclared dataset has no tree: nothing in it is read (§5.3)
+    let (originals, anon) = if undeclared {
+        (Value::Null, Value::Null)
+    } else {
+        (originals, anon)
     };
     let identity = match doc.get("identity") {
         Some(Value::Null) => Value::Null,
@@ -567,10 +880,10 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         current,
         "unmapped",
         &["hold", "code"],
-        if arrives == "identified" {
-            "hold"
-        } else {
+        if arrives == "deidentified" || arrives == "coded" {
             "code"
+        } else {
+            "hold"
         },
     )?;
     let cohort = match doc.get("cohort") {
@@ -586,6 +899,71 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         None => current.map(|c| c["cohort"].clone()).unwrap_or(Value::Null),
     };
     let tags = tags_of(doc.get("tags"), current.map(|c| &c["tags"]))?;
+    // Wave 7a §5.4: what the pseudonymiser writes into PatientID; an
+    // identified dataset writes the subject's code unless it says another
+    let patient_id = match doc.get("patient_id") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) => Value::String(PatientId::parse(s)?.as_text()),
+        Some(other) => return Err(format!("patient_id is a word, not {other}")),
+        None => current
+            .map(|c| c["patient_id"].clone())
+            .filter(|v| !v.is_null())
+            .unwrap_or(Value::Null),
+    };
+    let patient_id = if patient_id.is_null() && arrives == "identified" {
+        Value::String(PATIENT_ID_CODE.into())
+    } else {
+        patient_id
+    };
+    // Wave 7a (Nima, 2026-10-08): how the subjects of a dataset that
+    // arrives de-identified or coded are found: through a map of subject
+    // codes to its ids, given or already in the registry (`map`), or made
+    // by the subject code generator from each id (`generated`)
+    let subjects = match doc.get("subjects") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) if SUBJECTS.contains(&s.as_str()) => Value::String(s.clone()),
+        Some(other) => {
+            return Err(format!(
+                "subjects is one of {}, not {other}",
+                SUBJECTS.join(", ")
+            ));
+        }
+        None => current
+            .map(|c| c["subjects"].clone())
+            .unwrap_or(Value::Null),
+    };
+    // what the place is and what its structure says, both the engine's
+    let kind = pick(doc, current, "kind", &KINDS, KINDS[0])?;
+    let state = pick(
+        doc,
+        current,
+        "state",
+        &STATES,
+        match arrives.as_str() {
+            "identified" => "identified",
+            "deidentified" | "coded" => "anonymised",
+            _ => "unknown",
+        },
+    )?;
+    let root = match doc.get("root") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) => Value::String(s.clone()),
+        Some(other) => return Err(format!("root is a place's name or null, not {other}")),
+        None => current.map(|c| c["root"].clone()).unwrap_or(Value::Null),
+    };
+    // the folder of each pseudonymised copy: the subject's code, or the id
+    // type's value PatientID holds
+    let folder = pick(doc, current, "copy_folder", &FOLDERS, FOLDERS[0])?;
+    if folder == "id-type"
+        && !matches!(
+            PatientId::of(&json!({ "patient_id": patient_id })),
+            Ok(Some(PatientId::IdType(_)))
+        )
+    {
+        return Err(
+            "copy_folder id-type names each copy's folder by the id type PatientID holds; declare patient_id: id-type:<name> with it".into(),
+        );
+    }
     let originals_kept = pick(
         doc,
         current,
@@ -610,20 +988,61 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
             .map(|c| c["originals_vault"].clone())
             .unwrap_or(Value::Null),
     };
+    // record 55 H2 (round 4): picking main scans after a sort, or not
+    let picks = pick(doc, current, "picks", &PICKS, PICKS[0])?;
     Ok(json!({
         "arrives": arrives,
         "trees": {"originals": originals, "anon": anon},
         "identity": identity,
         "unmapped": unmapped,
+        "patient_id": patient_id,
+        "subjects": subjects,
+        "copy_folder": folder,
+        "kind": kind,
+        "state": state,
+        "root": root,
         "cohort": cohort,
         "tags": tags,
         "originals_kept": originals_kept,
         "originals_vault": originals_vault,
+        "picks": picks,
     }))
 }
 
 /// A dataset's tag lists: whether sex, weight and size are kept, the tags
 /// removed beside the four groups the pseudonymiser always removes, and the
+/// The direct identifiers a dataset's `keep` list never holds: what may
+/// never survive a release (`nils_release::tags::NEVER_LEAVES`) less the
+/// device and the institution, which an option of the standard retains by
+/// name, and less the accession number and the study id, which every writer
+/// removes whatever a list says. A list that kept the patient's name would
+/// leave copies that say their identity was removed (the review of Wave 7a's
+/// merge, 2026-10-10). Held equal to the release's list by a test there.
+pub const UNKEEPABLE: [&str; 22] = [
+    "0008,0090",
+    "0008,1050",
+    "0008,1070",
+    "0010,0010",
+    "0010,0030",
+    "0010,1000",
+    "0010,1001",
+    "0010,1005",
+    "0010,1040",
+    "0010,2154",
+    "0010,4000",
+    "0012,0040",
+    "0032,1032",
+    "0038,0010",
+    "0038,0300",
+    "0038,0400",
+    "0040,0242",
+    "0040,2008",
+    "0040,2010",
+    "0040,2016",
+    "0040,2017",
+    "0040,A123",
+];
+
 /// tags kept out of them. A tag is `gggg,eeee` in hex, upper-cased here; a
 /// tag on both lists is refused.
 fn tags_of(doc: Option<&Value>, current: Option<&Value>) -> Result<Value, String> {
@@ -687,15 +1106,20 @@ fn tags_of(doc: Option<&Value>, current: Option<&Value>) -> Result<Value, String
     if let Some(both) = remove.iter().find(|t| keep.contains(t)) {
         return Err(format!("tags: {both} is on both remove and keep"));
     }
+    if let Some(direct) = keep.iter().find(|t| UNKEEPABLE.contains(&t.as_str())) {
+        return Err(format!(
+            "tags.keep: {direct} names the person or the examination; a copy that kept it could not say its identity was removed, so no dataset keeps it"
+        ));
+    }
     Ok(json!({"keep_demographics": keep_demographics, "remove": remove, "keep": keep}))
 }
 
-/// The dataset a source place is until one is declared: de-identified
-/// unless said otherwise, reading the folder itself.
+/// The dataset a source place is until one is declared: undeclared unless
+/// said otherwise, with no tree (Wave 7a §5.3).
 pub fn default_dataset(arrives: Option<&str>) -> Value {
     let arrives = arrives
         .filter(|a| ARRIVALS.contains(a))
-        .unwrap_or("deidentified");
+        .unwrap_or(UNDECLARED);
     dataset_of(&json!({"arrives": arrives}), None).expect("the defaults are a dataset")
 }
 
@@ -884,33 +1308,216 @@ pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        ANON_TREE, ORIGINALS_TREE, dataset_of, default_dataset, default_handling, handling_of,
+        ANON_TREE, ORIGINALS_TREE, PatientId, SUBJECTS, UNDECLARED, dataset_of, default_dataset,
+        default_handling, handling_of, incomplete, incomplete_on, is_root, is_undeclared,
     };
+    use crate::pseudonym::Scheme;
     use serde_json::json;
 
     #[test]
-    fn a_dataset_not_declared_arrives_deidentified_and_reads_its_folder() {
+    fn a_dataset_whose_codes_the_generator_makes_is_not_read_on_another_scheme() {
+        // the review of Wave 7a's merge (2026-10-10): codes made with
+        // blake2b-32 would not be the subject code generator's
+        let generated = json!({
+            "arrives": "deidentified",
+            "trees": {"originals": null, "anon": "derivatives/dcm-anon"},
+            "patient_id": "id-type:study-id",
+            "subjects": "generated",
+        });
+        // a provisional code for an identifier no map names is the
+        // registry's own, on any scheme
+        let held = json!({
+            "arrives": "identified",
+            "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
+            "unmapped": "code",
+        });
+        assert_eq!(incomplete(&generated), None);
+        assert_eq!(incomplete_on(&generated, Scheme::Blake2b8), None);
+        let why = incomplete_on(&generated, Scheme::Blake2b32).unwrap();
+        assert!(why.contains("subject code generator"), "{why}");
+        assert_eq!(incomplete_on(&held, Scheme::Blake2b32), None);
+    }
+
+    #[test]
+    fn a_dataset_not_declared_is_undeclared_and_has_no_tree() {
         assert_eq!(
             default_dataset(None),
             json!({
-                "arrives": "deidentified",
-                "trees": {"originals": null, "anon": "."},
+                "arrives": "undeclared",
+                "trees": {"originals": null, "anon": null},
                 "identity": null,
-                "unmapped": "code",
+                "unmapped": "hold",
+                "patient_id": null,
+                "subjects": null,
+                "copy_folder": "subject-code",
+                "kind": "dataset",
+                "state": "unknown",
+                "root": null,
                 "cohort": null,
                 "tags": {"keep_demographics": true, "remove": [], "keep": []},
                 "originals_kept": "kept",
                 "originals_vault": null,
+                "picks": "after_sort",
             })
         );
         assert_eq!(dataset_of(&json!({}), None).unwrap(), default_dataset(None));
+        // record 55 H2 (round 4): picking after a sort, on unless turned off,
+        // and a document from before the field picks after a sort too
+        let off = dataset_of(&json!({"picks": "off"}), None).unwrap();
+        assert_eq!(off["picks"], "off");
+        assert!(!super::picks_after_sort(&off));
+        assert_eq!(dataset_of(&json!({}), Some(&off)).unwrap()["picks"], "off");
+        assert!(dataset_of(&json!({"picks": "sometimes"}), None).is_err());
+        assert!(super::picks_after_sort(&json!({"arrives": "identified"})));
         assert_eq!(
             dataset_of(&json!(null), None).unwrap(),
             default_dataset(None)
         );
         // an arrival the handling of before named is kept; one it could not is not
         assert_eq!(default_dataset(Some("identified"))["arrives"], "identified");
-        assert_eq!(default_dataset(Some("maybe"))["arrives"], "deidentified");
+        assert_eq!(default_dataset(Some("maybe"))["arrives"], "undeclared");
+        assert!(is_undeclared(&json!(null)));
+        assert!(is_undeclared(&default_dataset(None)));
+        assert!(!is_undeclared(&default_dataset(Some("deidentified"))));
+        // an undeclared dataset has no tree whatever it is given
+        let d = dataset_of(
+            &json!({"trees": {"originals": ORIGINALS_TREE, "anon": ANON_TREE}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["trees"], json!({"originals": null, "anon": null}));
+        // a declared dataset has the trees the engine set, and no other
+        let d = dataset_of(&json!({"arrives": "deidentified"}), None).unwrap();
+        assert_eq!(d["trees"], json!({"originals": null, "anon": null}));
+        assert_eq!(d["unmapped"], "code");
+    }
+
+    /// Wave 7a §5.4: a dataset declares what PatientID holds; an identified
+    /// one writes the subject's code unless it says another; a personnummer
+    /// is never what it holds.
+    #[test]
+    fn a_dataset_declares_what_patient_id_holds() {
+        let d = dataset_of(&json!({"arrives": "identified"}), None).unwrap();
+        assert_eq!(d["patient_id"], "subject-code");
+        let d = dataset_of(&json!({"arrives": "deidentified"}), None).unwrap();
+        assert_eq!(d["patient_id"], json!(null));
+        let d = dataset_of(
+            &json!({"arrives": "identified", "patient_id": "id-type:study-id"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["patient_id"], "id-type:study-id");
+        assert_eq!(
+            PatientId::of(&d).unwrap(),
+            Some(PatientId::IdType("study-id".into()))
+        );
+        // kept by a change that does not name it
+        let after = dataset_of(&json!({"cohort": "x"}), Some(&d)).unwrap();
+        assert_eq!(after["patient_id"], "id-type:study-id");
+        let d = dataset_of(&json!({"patient_id": "id-type:subject-code"}), None).unwrap();
+        assert_eq!(d["patient_id"], "subject-code");
+        for (bad, what) in [
+            ("id-type:personnummer", "never holds"),
+            ("id-type:Study ID", "no id type"),
+            ("the code", "subject-code or id-type:"),
+        ] {
+            let why = dataset_of(&json!({"patient_id": bad}), None).unwrap_err();
+            assert!(why.contains(what), "{bad}: {why}");
+        }
+    }
+
+    /// Wave 7a (Nima, 2026-10-08): a dataset is read only on a whole
+    /// declaration. One arriving de-identified or coded says what PatientID
+    /// holds and how its subjects are found; the copy's folder is the code
+    /// unless PatientID holds an id type and the dataset asks for it.
+    #[test]
+    fn a_dataset_is_read_only_on_a_whole_declaration() {
+        let trees = json!({"originals": null, "anon": ANON_TREE});
+        assert!(incomplete(&json!(null)).unwrap().contains("unknown"));
+        assert!(
+            incomplete(&json!({"kind": "root"}))
+                .unwrap()
+                .contains("root")
+        );
+        // a root is no dataset of its own; a dataset, a legacy place and a
+        // document nobody declared are
+        assert!(is_root(&json!({"kind": "root"})));
+        for d in [
+            json!({"kind": "dataset"}),
+            json!({"kind": "legacy"}),
+            json!(null),
+        ] {
+            assert!(!is_root(&d), "{d}");
+        }
+        // a legacy place reads the pseudonymised tree it names, once whole
+        assert_eq!(
+            incomplete(
+                &json!({"kind": "legacy", "arrives": "deidentified", "trees": {"anon": "."}, "patient_id": "id-type:site-id", "subjects": "map"})
+            ),
+            None
+        );
+        assert!(
+            incomplete(&json!({"arrives": "deidentified", "trees": {"anon": "."}}))
+                .unwrap()
+                .contains("no pseudonymised tree")
+        );
+        let why = incomplete(&json!({"arrives": "deidentified", "trees": trees})).unwrap();
+        assert!(
+            why.contains("patient_id") && why.contains("subjects"),
+            "{why}"
+        );
+        let why =
+            incomplete(&json!({"arrives": "coded", "trees": trees, "patient_id": "subject-code"}))
+                .unwrap();
+        assert!(
+            !why.contains("patient_id") && why.contains("subjects"),
+            "{why}"
+        );
+        for subjects in SUBJECTS {
+            assert_eq!(
+                incomplete(
+                    &json!({"arrives": "deidentified", "trees": trees, "patient_id": "id-type:site-id", "subjects": subjects})
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            incomplete(
+                &json!({"arrives": "identified", "trees": {"originals": ORIGINALS_TREE, "anon": ANON_TREE}})
+            ),
+            None
+        );
+        let why = dataset_of(&json!({"subjects": "guessed"}), None).unwrap_err();
+        assert!(why.contains("map, generated"), "{why}");
+        // the folder by the id type needs PatientID to hold one
+        let d = dataset_of(
+            &json!({"arrives": "identified", "patient_id": "id-type:site-id", "copy_folder": "id-type"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(d["copy_folder"], "id-type");
+        assert_eq!(
+            dataset_of(&json!({}), None).unwrap()["copy_folder"],
+            "subject-code"
+        );
+        let why = dataset_of(
+            &json!({"arrives": "identified", "copy_folder": "id-type"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(why.contains("patient_id: id-type"), "{why}");
+    }
+
+    /// Wave 7a §5.3: the handling's arrival and the dataset's agree when
+    /// neither was declared.
+    #[test]
+    fn the_handling_and_the_dataset_default_to_the_same_arrival() {
+        assert_eq!(default_handling()["arrives"], UNDECLARED);
+        assert_eq!(default_dataset(None)["arrives"], UNDECLARED);
+        assert_eq!(
+            handling_of(&json!(null)).unwrap()["arrives"],
+            dataset_of(&json!(null), None).unwrap()["arrives"]
+        );
     }
 
     #[test]
@@ -953,6 +1560,16 @@ mod tests {
             (
                 json!({"tags": {"keep_demographics": "yes"}}),
                 "true or false",
+            ),
+            // the review of Wave 7a's merge (2026-10-10): a person's direct
+            // identifiers are never kept, so a copy's marks stay true
+            (
+                json!({"tags": {"keep": ["0010,0040", "0010,0010"]}}),
+                "0010,0010 names the person",
+            ),
+            (
+                json!({"tags": {"keep": ["0040,a123"]}}),
+                "0040,A123 names the person",
             ),
             (json!({"originals_kept": "lost"}), "kept, vaulted, purged"),
             (
@@ -1004,10 +1621,10 @@ mod tests {
     }
 
     #[test]
-    fn a_handling_not_declared_arrives_identified_and_remaps_uids() {
+    fn a_handling_not_declared_is_undeclared_and_remaps_uids() {
         assert_eq!(
             default_handling(),
-            json!({"arrives": "identified", "on_release": {"uids": "remap", "deface": false}})
+            json!({"arrives": "undeclared", "on_release": {"uids": "remap", "deface": false}})
         );
         assert_eq!(handling_of(&json!({})).unwrap(), default_handling());
     }

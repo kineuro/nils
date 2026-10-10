@@ -155,6 +155,16 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     fn start(home: &TempDir, requests: usize, extra: &[&str]) -> Server {
         let mut cmd = nils();
@@ -175,19 +185,21 @@ impl Server {
             .env("HOSTNAME", "ward-3")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let child = cmd.spawn().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let Some(Ok(first)) = lines.next() else {
             let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
+            if let Some(mut e) = held.child.stderr.take() {
                 let _ = e.read_to_string(&mut err);
             }
             panic!("nils serve did not listen: {err}");
         };
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     /// A GET with a bearer: the status, the headers, the body's bytes.
@@ -234,9 +246,23 @@ impl Server {
         )
     }
 
+    /// The server exits on its own once it has served the count the test
+    /// started it with; a count that is wrong fails the test, never hangs
+    /// it, and the server is killed as the test unwinds.
     fn finish(mut self) {
-        let status = self.child.wait().unwrap();
-        assert!(status.success(), "nils serve exited {status}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            match self.child.try_wait().unwrap() {
+                Some(status) => {
+                    assert!(status.success(), "nils serve exited {status}");
+                    return;
+                }
+                None if std::time::Instant::now() > deadline => panic!(
+                    "nils serve still waiting for requests after 120 s: the test's request count is wrong"
+                ),
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 
@@ -312,13 +338,11 @@ fn the_pyramid_is_built_into_a_working_place_and_the_doors_are_gated() {
     };
     let root = work.path().join("pyramids").join(plain.to_string());
     assert!(root.join("manifest.json").exists());
-    assert!(root.join("0").join("0").join("0_0.j2c").exists());
-    assert!(
-        root.join("3")
-            .join(format!("{}", NZ - 1))
-            .join("0_0.j2c")
-            .exists()
-    );
+    // E6: one file per level, no file per tile
+    for level in 0..4 {
+        assert!(root.join(format!("{level}.tiles")).is_file());
+        assert!(!root.join(level.to_string()).exists());
+    }
     let raw = built["raw_bytes"].as_u64().unwrap();
     let total: u64 = built["bytes_per_level"]
         .as_array()
@@ -475,8 +499,11 @@ fn the_pyramid_is_built_into_a_working_place_and_the_doors_are_gated() {
     server.finish();
 }
 
+/// Record 55 H2: before the pyramid exists the door queues its build and
+/// answers 202, never 404; with no worker the build waits, queued, and the
+/// tiles asked meanwhile name the same build.
 #[test]
-fn a_reader_of_the_manifest_is_refused_before_the_pyramid_exists() {
+fn a_reader_of_the_manifest_has_its_build_queued_before_the_pyramid_exists() {
     let (home, _src) = registry();
     let work = TempDir::new("instances-work-2");
     ok(
@@ -502,17 +529,123 @@ fn a_reader_of_the_manifest_is_refused_before_the_pyramid_exists() {
         ],
     );
     let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
-    assert_eq!(status, 404, "{doc}");
-    assert!(
-        doc["error"]
-            .as_str()
-            .unwrap()
-            .contains("pyramid build --stack 1"),
-        "{doc}"
-    );
+    assert_eq!(status, 202, "{doc}");
+    assert_eq!(doc["building"], true, "{doc}");
+    assert_eq!(doc["state"], "queued", "{doc}");
+    let job = doc["job"].as_i64().unwrap();
     let (status, doc) = server.json("/api/instances/1/tiles/9/0", REVIEWER);
-    assert_eq!(status, 404, "{doc}");
+    assert_eq!(status, 202, "{doc}");
+    assert_eq!(doc["job"], job, "one build for the stack: {doc}");
     let (status, doc) = server.json("/api/instances/x/manifest", REVIEWER);
     assert_eq!(status, 404, "{doc}");
     server.finish();
+}
+
+/// E6: turn a packed level back into the layout before, a file per tile
+/// (`<level>/<plane>/<row>_<column>.j2c`), as a pyramid built before E6
+/// was kept: the packed file's index read as its header says.
+fn unpack(root: &Path, level: u32) -> usize {
+    let path = root.join(format!("{level}.tiles"));
+    let b = std::fs::read(&path).unwrap();
+    assert_eq!(&b[..8], b"NILSLVL1");
+    let (nz, ty, tx) = (u32_at(&b, 12), u32_at(&b, 16), u32_at(&b, 20));
+    let mut k = 32;
+    for z in 0..nz {
+        let dir = root.join(level.to_string()).join(z.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        for j in 0..ty {
+            for i in 0..tx {
+                let off = u64::from_le_bytes(b[k..k + 8].try_into().unwrap()) as usize;
+                let len = u32_at(&b, k + 8) as usize;
+                std::fs::write(dir.join(format!("{j}_{i}.j2c")), &b[off..off + len]).unwrap();
+                k += 12;
+            }
+        }
+    }
+    std::fs::remove_file(&path).unwrap();
+    (nz * ty * tx) as usize
+}
+
+/// E6: a pyramid kept a file per tile, as every pyramid built before was,
+/// is served as it was, `pyramid pack` makes it one file per level with
+/// the same answers at the doors, and packing again changes nothing.
+#[test]
+fn a_pyramid_of_tile_files_is_served_and_packed_in_place() {
+    let (home, _src) = registry();
+    let work = TempDir::new("instances-pack-work");
+    ok(
+        &home,
+        &[
+            "place",
+            "add",
+            "scratch",
+            work.path().to_str().unwrap(),
+            "--role",
+            "working",
+            "--fast",
+        ],
+        None,
+    );
+    for stack in ["1", "2"] {
+        ok(
+            &home,
+            &["pyramid", "build", "--stack", stack, "--workers", "2"],
+            None,
+        );
+    }
+    let root = work.path().join("pyramids").join("1");
+    let tiles: usize = (0..4).map(|level| unpack(&root, level)).sum();
+    let answers = |home: &TempDir| -> Vec<Vec<u8>> {
+        let asks = [
+            "/api/instances/1/tiles/0/5",
+            "/api/instances/1/slab/0/0-8",
+            "/api/instances/1/slab/2/8-40",
+            "/api/instances/1/render/1/30?axis=y&c=2000&w=4000",
+            "/api/instances/1/render/0/100?axis=x&c=2000&w=4000",
+            "/api/instances/1/thumb",
+        ];
+        let server = Server::start(
+            home,
+            asks.len(),
+            &[
+                "--auth",
+                "token",
+                "--token",
+                &format!("{ADMIN}=root@lab:admin"),
+            ],
+        );
+        let out = asks
+            .iter()
+            .map(|a| {
+                let (status, _, body) = server.get(a, ADMIN);
+                assert_eq!(status, 200, "{a}: {}", String::from_utf8_lossy(&body));
+                body
+            })
+            .collect();
+        server.finish();
+        out
+    };
+    let _ = std::fs::remove_dir_all(root.join("thumbs"));
+    let before = answers(&home);
+    let packed: serde_json::Value =
+        serde_json::from_str(ok(&home, &["pyramid", "pack", "--stack", "1"], None).trim()).unwrap();
+    assert_eq!(packed["packed"], 1, "{packed}");
+    assert_eq!(packed["levels_packed"], 4, "{packed}");
+    assert_eq!(packed["tile_files_removed"], tiles, "{packed}");
+    for level in 0..4 {
+        assert!(root.join(format!("{level}.tiles")).is_file());
+        assert!(!root.join(level.to_string()).exists());
+    }
+    let _ = std::fs::remove_dir_all(root.join("thumbs"));
+    assert_eq!(answers(&home), before);
+    let again: serde_json::Value =
+        serde_json::from_str(ok(&home, &["pyramid", "pack", "--all"], None).trim()).unwrap();
+    assert_eq!(again["stacks"], 2, "{again}");
+    assert_eq!(again["packed"], 0, "{again}");
+    assert_eq!(again["already"], 2, "{again}");
+    assert_eq!(again["tile_files_removed"], 0, "{again}");
+    // a stack with no pyramid is not packed, and says so by its id alone
+    let (good, out, _) = run(&home, &["pyramid", "pack", "--stack", "9"], None);
+    assert!(!good);
+    assert!(out.contains("\"failures\":[9]"), "{out}");
 }

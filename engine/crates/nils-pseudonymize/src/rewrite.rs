@@ -19,7 +19,7 @@ use nils_dicom::{Framed, QuarantineClass, Refusal};
 use nils_digest::rule::{Ident, Rule};
 use nils_pack::private::Allowed;
 use nils_release::policy::{Policy, Uids};
-use nils_release::scrub::{self, Applied, Plan};
+use nils_release::scrub::{self, Applied, Plan, Writer};
 use nils_release::tags::Category;
 
 use crate::layout::Facts;
@@ -30,15 +30,32 @@ pub const WRITE_BUF: usize = 256 << 10;
 /// The copy buffer the pixel tail goes through, one per worker.
 pub const COPY_BUF: usize = 256 << 10;
 
-/// The four groups the pseudonymiser always removes: v0's list, tag for
-/// tag (record 26 §3). Never the times, and never the dates, which are the
+/// The groups the pseudonymiser always removes: v0's four, tag for tag
+/// (record 26 §3), and the identifiers v0's four never named (`ids`, record
+/// 35), since a copy that says its identity was removed must not hold an
+/// admission id, an order number or a birth name (the review of Wave 7a's
+/// merge, 2026-10-10). Never the times, and never the dates, which are the
 /// science.
-pub const CATEGORIES: [Category; 4] = [
+pub const CATEGORIES: [Category; 5] = [
     Category::Patient,
     Category::Trial,
     Category::Provider,
     Category::Institution,
+    Category::Ids,
 ];
+
+/// What the pseudonymiser keeps of the `ids` category because the rules
+/// read it from the copy: the image's comments, part of the pack's search
+/// text, kept and cleaned of the file's own identifiers as every
+/// description is (`nils_release::scrub::DESCRIPTORS`).
+pub const RULES_READ: [Tag; 1] = [tags::IMAGE_COMMENTS];
+
+/// The device's identity, kept in the copy by default and claimed as the
+/// Retain Device Identity Option (113109): the rules read the station name,
+/// a decision for "this scanner" is scoped by it, the pack declares it
+/// local, and v0 kept the serial number. The rest of the `ids` category
+/// goes. A default until Nima rules on it (2026-10-10).
+pub const DEVICE_KEPT: [Tag; 6] = nils_release::scrub::DEVICE;
 
 /// A file read and understood, ready to be resolved and written.
 pub struct Prepared {
@@ -105,35 +122,48 @@ pub fn prepare(path: &Path, rel: &str, rule: &Rule) -> Result<Prepared, Refusal>
 pub struct Scrub<'a> {
     pub policy: Policy,
     pub private: &'a [Allowed],
-    pub keep: &'a [Tag],
+    /// The dataset's own `keep` list, what the rules read (`RULES_READ`) and
+    /// the device's identity (`DEVICE_KEPT`).
+    pub keep: Vec<Tag>,
     pub remove: &'a [Tag],
 }
 
 impl<'a> Scrub<'a> {
-    pub fn new(private: &'a [Allowed], keep: &'a [Tag], remove: &'a [Tag]) -> Scrub<'a> {
+    pub fn new(private: &'a [Allowed], keep: &[Tag], remove: &'a [Tag]) -> Scrub<'a> {
+        // what the copy keeps by default yields to a dataset that names it
+        // to remove
+        let mut kept = keep.to_vec();
+        for tag in RULES_READ.into_iter().chain(DEVICE_KEPT) {
+            if !kept.contains(&tag) && !remove.contains(&tag) {
+                kept.push(tag);
+            }
+        }
         Scrub {
             policy: Policy {
                 uids: Uids::Preserve,
                 ..Policy::default()
             },
             private,
-            keep,
+            keep: kept,
             remove,
         }
     }
 
     /// The plan one file is rewritten under, under the subject's `code`: the
     /// four categories, the policy that keeps the dates and the UIDs, and
-    /// the dataset's own lists. One statement of it, so that what the door
+    /// the dataset's own lists. The plan also takes the accession number and
+    /// the study id out of every file, whatever the lists keep
+    /// (`scrub::EXAMINATION_IDS`). One statement of it, so that what the door
     /// of record 28 serves and what a file meets cannot part company.
     pub fn plan<'p>(&'p self, code: &'p str) -> Plan<'p> {
         Plan {
+            writer: Writer::Pseudonymise,
             policy: &self.policy,
             categories: &CATEGORIES,
             private: self.private,
             code,
             remap: None,
-            keep: self.keep,
+            keep: &self.keep,
             remove: self.remove,
         }
     }
@@ -306,6 +336,8 @@ mod tests {
         e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "7"));
         e.push(synth::text(tags::INSTANCE_NUMBER, VR::IS, "42"));
         e.push(synth::text(tags::INSTITUTION_NAME, VR::LO, "Somewhere"));
+        e.push(synth::text(tags::ACCESSION_NUMBER, VR::SH, "A00000001"));
+        e.push(synth::text(tags::STUDY_ID, VR::SH, "S0001"));
         e.push(synth::text(Tag(0x0019, 0x0010), VR::LO, "A VENDOR"));
         e.push(synth::text(Tag(0x0019, 0x100C), VR::IS, "1000"));
         e.push(synth::text(Tag(0x0019, 0x1099), VR::LO, "the operator"));
@@ -333,7 +365,9 @@ mod tests {
             element: 0x0C,
             why: "a test".into(),
         }];
-        let keep = [tags::PATIENT_SEX];
+        // a dataset that names the examination's numbers to keep keeps
+        // neither (Nima's ruling of 2026-10-09)
+        let keep = [tags::PATIENT_SEX, tags::ACCESSION_NUMBER, tags::STUDY_ID];
         let scrub = Scrub::new(&allowed, &keep, &[]);
         let target = dir.path().join("out/x.dcm");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -368,6 +402,8 @@ mod tests {
         );
         assert_eq!(text(ds, tags::SOP_INSTANCE_UID).as_deref(), Some("1.2.3.3"));
         assert_eq!(text(ds, tags::INSTITUTION_NAME), None);
+        assert!(ds.get(tags::ACCESSION_NUMBER).is_none());
+        assert!(ds.get(tags::STUDY_ID).is_none());
         assert_eq!(text(ds, Tag(0x0019, 0x100C)).as_deref(), Some("1000"));
         assert_eq!(text(ds, Tag(0x0019, 0x1099)), None);
         assert_eq!(
@@ -379,6 +415,35 @@ mod tests {
             "1.2.3.3"
         );
         assert!(outcome.applied.total("removed") >= 4);
+        // the marks of spec Wave 7a §6.1: the descriptions cleaned, the
+        // dates, the covariates, the device's identity and the UIDs kept,
+        // and the private element the allowlist names
+        assert_eq!(
+            text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("YES")
+        );
+        assert_eq!(
+            text(ds, tags::DEIDENTIFICATION_METHOD),
+            Some(format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            text(ds, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED).as_deref(),
+            Some("UNMODIFIED")
+        );
+        let codes: Vec<String> = ds
+            .get(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|i| text(i, tags::CODE_VALUE).unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                "113100", "113105", "113106", "113108", "113109", "113110", "113111"
+            ]
+        );
         // the pixels read back as an element of the right length
         let whole = dicom_object::OpenFileOptions::new()
             .open_file(&target)

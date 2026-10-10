@@ -53,16 +53,225 @@ pub struct Picked {
     pub raised: i64,
     /// The population each role was scored against.
     pub reference: String,
+    /// Record 55 H2: the subjects whose occasions this run decided, when it
+    /// decided some and not all: `cohort:NAME` or `dataset:NAME`. They are
+    /// scored against the whole registry as any run is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub only: Option<String>,
+    /// How many subjects `only` named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subjects: Option<usize>,
+    /// Record 55 H2 (round 4): the datasets whose subjects `only` named,
+    /// where it was made from them (a pick run after a sort).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<String>,
+    /// Record 55 H2 (round 4): occasions whose two best candidates scored
+    /// the same, which the run reports and does not settle by row order.
+    pub tied: i64,
+    /// Record 55 H2 (round 4): the same counts for each role, so that a
+    /// page can say "T1: 112 picked, 104 clear, 8 borders".
+    pub roles: BTreeMap<String, RoleReport>,
+    /// The job the run was, which keeps this report as its result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<i64>,
     pub seconds: f64,
 }
 
+/// What a run did for one role (record 55 H2, round 4).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RoleReport {
+    /// Occasions looked at.
+    pub sessions: i64,
+    /// Picks written.
+    pub picked: i64,
+    /// Picks written with no border, no tie and no person's pick standing
+    /// over them: nothing for a person to look at.
+    pub clear: i64,
+    /// Occasions with no candidate at all.
+    pub empty: i64,
+    /// Occasions whose two best candidates scored the same.
+    pub tied: i64,
+    /// Occasions where a person's pick stands.
+    pub standing: i64,
+    /// Occasions with an open `pick.border` review item after the run.
+    pub raised: i64,
+    /// The borders, by reason.
+    pub borders: BTreeMap<String, i64>,
+}
+
+/// Whether a run's two best candidates scored the same: a tie, which the
+/// run reports and never settles by row order.
+pub fn is_tied(picked: &pick::Picked) -> bool {
+    picked.winner.is_some()
+        && picked.decided.is_none()
+        && picked.considered.len() >= 2
+        && picked.considered[0].1 == picked.considered[1].1
+}
+
+/// The stacks of a role: those holding it that the pick's candidacy for it
+/// admits (pack contract 9). They are its candidates and the population it
+/// is scored against.
+pub(crate) fn of_role<'a>(model: &Model, role: &str, rows: &'a [Row]) -> Vec<&'a Row> {
+    rows.iter()
+        .filter(|r| r.roles.iter().any(|x| x == role) && model.admits(role, &r.values))
+        .collect()
+}
+
+/// Record 55 H2: the subjects a run decides, named for the report: a
+/// cohort's open members or a dataset's subjects. The population a role is
+/// scored against stays the registry's, so a pick does not change with the
+/// part of the registry it was run for.
+#[derive(Debug, Clone)]
+pub struct Only {
+    pub label: String,
+    pub subjects: std::collections::BTreeSet<i64>,
+    /// The datasets the subjects were found through, named in the report
+    /// (record 55 H2, round 4: a pick run after a sort); empty otherwise.
+    pub datasets: Vec<String>,
+}
+
 /// One stack, as the picks need it.
-struct Row {
-    stack: i64,
-    subject: i64,
-    study: i64,
-    values: BTreeMap<String, String>,
-    roles: Vec<String>,
+pub(crate) struct Row {
+    pub(crate) stack: i64,
+    pub(crate) subject: i64,
+    pub(crate) study: i64,
+    pub(crate) values: BTreeMap<String, String>,
+    pub(crate) roles: Vec<String>,
+    pub(crate) scan: Scan,
+}
+
+impl Row {
+    /// The stack with what [`scans`] read of it. The 2026-10-10 borders
+    /// study, R5: the pick reads a stack's `n_instances` as the images it
+    /// holds, so an enhanced multi-frame file, one instance of many frames,
+    /// is the volume of its frames and not a volume of one slice. Where the
+    /// stack holds no more images than instances, nothing changes.
+    pub(crate) fn with_scan(mut self, scan: Scan) -> Row {
+        if let Some(images) = scan.images
+            && let Some(n) = self
+                .values
+                .get("n_instances")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+            && images as f64 > n
+        {
+            self.values
+                .insert("n_instances".to_string(), images.to_string());
+        }
+        self.scan = scan;
+        self
+    }
+}
+
+/// What the picks read of a stack beside the names the pack's model reads.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Scan {
+    /// How many images it holds: its instances, each frame of an enhanced
+    /// multi-frame file counted as one (R5). None where the fingerprint
+    /// says nothing.
+    pub(crate) images: Option<i64>,
+    /// The series it came out of, and the number the scanner gave it.
+    pub(crate) series: i64,
+    pub(crate) series_number: Option<i64>,
+    /// When its images were first acquired, the date and the time as the
+    /// fingerprint writes them (record 38 S2): one moment is one
+    /// acquisition (R6).
+    pub(crate) acquired: Option<String>,
+    /// Whether its ImageType says DERIVED rather than ORIGINAL.
+    pub(crate) derived: bool,
+}
+
+/// The SOP classes whose image is one frame by definition, the MR and CT
+/// images a scanner writes by default: a stack of them holds as many images
+/// as instances, and its files are not read for frames.
+const ONE_FRAME: &[&str] = &["1.2.840.10008.5.1.4.1.1.4", "1.2.840.10008.5.1.4.1.1.2"];
+
+/// How many stacks one query of [`scans`] names.
+const SCANS_CHUNK: usize = 500;
+
+/// A [`Scan`] of each of `stacks` that has a fingerprint. The images of a
+/// stack whose SOP class may hold several frames are counted from its
+/// files: every frame of an instance that names the stack, and where one
+/// file's frames were split over several stacks (record 37 S8), the frames
+/// `instance_frame` gives each.
+pub(crate) fn scans(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Scan>, StoreError> {
+    let mut out: HashMap<i64, Scan> = HashMap::new();
+    let mut framed: Vec<i64> = Vec::new();
+    let fp = table("stack_fingerprint");
+    let text = |column: &str| {
+        store
+            .dialect()
+            .text_of(fp.column(column).expect("a fingerprint column"))
+    };
+    let (date, time) = (
+        text("earliest_acquisition_date"),
+        text("earliest_acquisition_time"),
+    );
+    for chunk in stacks.chunks(SCANS_CHUNK) {
+        let sql = format!(
+            "SELECT stack_id, n_instances, sop_class_uid, series_id, series_number, {date}, {time}, \
+                    image_type FROM {} WHERE stack_id IN ({})",
+            store.qualified("stack_fingerprint"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            let stack = r.int(0)?;
+            if r.opt_text(2)?
+                .is_none_or(|class| !ONE_FRAME.contains(&class.trim()))
+            {
+                framed.push(stack);
+            }
+            // a time without its day is a moment still; a day without its
+            // time is none
+            let acquired = match (r.opt_text(5)?, r.opt_text(6)?) {
+                (_, None) => None,
+                (Some(day), Some(time)) => Some(format!("{day} {time}")),
+                (None, Some(time)) => Some(time.to_string()),
+            };
+            out.insert(
+                stack,
+                Scan {
+                    images: r.opt_int(1)?,
+                    series: r.int(3)?,
+                    series_number: r.opt_int(4)?,
+                    acquired,
+                    derived: r.opt_text(7)?.is_some_and(|t| {
+                        t.split('\\')
+                            .next()
+                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("DERIVED"))
+                    }),
+                },
+            );
+        }
+    }
+    for chunk in framed.chunks(SCANS_CHUNK) {
+        let list = id_list(chunk);
+        let sql = format!(
+            "SELECT stack_id, CAST(SUM(n) AS BIGINT) FROM (\
+               SELECT i.stack_id AS stack_id, COALESCE(i.number_of_frames, 1) AS n FROM {i} i \
+                WHERE i.stack_id IN ({list}) \
+                  AND NOT EXISTS (SELECT 1 FROM {fr} fr WHERE fr.instance_id = i.id) \
+               UNION ALL \
+               SELECT fr.stack_id AS stack_id, fr.n_frames AS n FROM {fr} fr \
+                WHERE fr.stack_id IN ({list})\
+             ) t GROUP BY stack_id",
+            i = store.qualified("instance"),
+            fr = store.qualified("instance_frame"),
+        );
+        for r in store.query(&sql, &[])? {
+            let (stack, frames) = (r.int(0)?, r.opt_int(1)?);
+            if let (Some(scan), Some(frames)) = (out.get_mut(&stack), frames) {
+                scan.images = Some(scan.images.map_or(frames, |n| n.max(frames)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Run every pick the pack declares.
@@ -74,14 +283,38 @@ pub fn run(
     subject: Option<&str>,
     actor: &str,
 ) -> Result<Picked, Error> {
+    run_for(registry, pack, scheme, subject, None, actor)
+}
+
+/// [`run`] deciding the occasions of `only`'s subjects alone (record 55
+/// H2: a pick run for a dataset or a cohort, as the bring-in runs it).
+pub fn run_for(
+    registry: &mut Registry,
+    pack: &Pack,
+    scheme: &Scheme,
+    subject: Option<&str>,
+    only: Option<&Only>,
+    actor: &str,
+) -> Result<Picked, Error> {
     let settings = crate::job::Settings {
-        name: subject.unwrap_or("all").to_string(),
+        name: only
+            .map(|o| o.label.clone())
+            .or_else(|| subject.map(str::to_string))
+            .unwrap_or_else(|| "all".to_string()),
         ..crate::job::Settings::default()
     };
     let job_id = crate::job::claim_for(registry, &settings, "pick")?;
-    let result = run_pick(registry, pack, scheme, subject, actor, Some(job_id));
-    let (state, error) = match &result {
-        Ok(_) => ("done", None),
+    let mut result = run_pick(registry, pack, scheme, subject, only, actor, Some(job_id));
+    let (state, error) = match &mut result {
+        Ok(report) => {
+            // record 55 H2 (round 4): the job keeps its report, which the
+            // picks summary door serves beside the picks themselves
+            report.job = Some(job_id);
+            if let Ok(doc) = serde_json::to_value(&*report) {
+                let _ = nils_registry::job::set_result(registry.store(), job_id, &doc);
+            }
+            ("done", None)
+        }
         Err(e) => ("failed", Some(e.to_string())),
     };
     let _ = crate::job::finish(registry.store(), job_id, state, error.as_deref());
@@ -93,11 +326,17 @@ fn run_pick(
     pack: &Pack,
     scheme: &Scheme,
     subject: Option<&str>,
+    only: Option<&Only>,
     actor: &str,
     job_id: Option<i64>,
 ) -> Result<Picked, Error> {
     let started = std::time::Instant::now();
     let mut report = Picked::default();
+    if let Some(o) = only {
+        report.only = Some(o.label.clone());
+        report.subjects = Some(o.subjects.len());
+        report.datasets = o.datasets.clone();
+    }
     if pack.picks.is_empty() {
         return Ok(report);
     }
@@ -123,6 +362,7 @@ fn run_pick(
             scheme,
             &labels,
             &rows,
+            only.map(|o| &o.subjects),
             actor,
             job_id,
             &mut report,
@@ -187,6 +427,7 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
             study: r.int(2)?,
             values,
             roles: Vec::new(),
+            scan: Scan::default(),
         });
     }
 
@@ -210,7 +451,7 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         // One row per value (Wave 4a §6.1): a role arrives as rows, and an
         // axis a pick reads is joined back into the text the model matches
         // a token against.
-        if axis == "role" {
+        if axis == nils_pack::matters::PICK_CANDIDATES {
             rows[i].roles.push(value.trim().to_string());
         }
         if reads.iter().any(|n| n == axis) {
@@ -225,7 +466,15 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         }
     }
     rows.retain(|r| !r.roles.is_empty());
-    Ok(rows)
+    let ids: Vec<i64> = rows.iter().map(|r| r.stack).collect();
+    let mut scans = scans(store, &ids)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let scan = scans.remove(&r.stack).unwrap_or_default();
+            r.with_scan(scan)
+        })
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -236,6 +485,7 @@ fn run_one(
     scheme: &Scheme,
     labels: &HashMap<i64, nils_session::Labelled>,
     rows: &[Row],
+    only: Option<&std::collections::BTreeSet<i64>>,
     actor: &str,
     job_id: Option<i64>,
     report: &mut Picked,
@@ -255,12 +505,10 @@ fn run_one(
     };
 
     for role in &model.roles {
-        let mine: Vec<&Row> = rows
-            .iter()
-            .filter(|r| r.roles.iter().any(|x| x == role))
-            .collect();
-        // The population is every candidate for this role, and it is named on
-        // every row it decided.
+        let mine: Vec<&Row> = of_role(model, role, rows);
+        // The population is every stack of this role, a fragment no
+        // candidate is made of included, and it is named on every row it
+        // decided.
         let reference = build_reference(model, &report.reference, &mine);
 
         // Which studies are one occasion, per subject.
@@ -269,6 +517,10 @@ fn run_one(
             by_subject.entry(r.subject).or_default().push(r);
         }
         for (subject, subject_rows) in &by_subject {
+            // the population is everyone's; the occasions decided are only's
+            if only.is_some_and(|o| !o.contains(subject)) {
+                continue;
+            }
             let mut occasions: BTreeMap<i64, (Day, Vec<&Row>)> = BTreeMap::new();
             for r in subject_rows {
                 let Some(l) = labels.get(&r.study) else {
@@ -282,10 +534,23 @@ fn run_one(
             }
             for (first, here) in occasions.values() {
                 report.sessions += 1;
+                report.roles.entry(role.clone()).or_default().sessions += 1;
                 let candidates = group(model, here);
                 let picked = pick::pick(model, role, &candidates, &reference);
                 for b in &picked.borders {
                     *report.borders.entry(b.name().to_string()).or_insert(0) += 1;
+                    *report
+                        .roles
+                        .entry(role.clone())
+                        .or_default()
+                        .borders
+                        .entry(b.name().to_string())
+                        .or_insert(0) += 1;
+                }
+                let tied = is_tied(&picked);
+                if tied {
+                    report.tied += 1;
+                    report.roles.entry(role.clone()).or_default().tied += 1;
                 }
                 // Record 42 S3: a person's pick on this occasion stands. The
                 // run neither replaces nor withdraws it, and asks nothing
@@ -293,6 +558,7 @@ fn run_one(
                 let standing = standing_person(store, &model.name, role, *subject, *first)?;
                 let pick_id = if picked.winner.is_none() {
                     report.empty += 1;
+                    report.roles.entry(role.clone()).or_default().empty += 1;
                     None
                 } else {
                     let id = write(
@@ -312,16 +578,23 @@ fn run_one(
                         job_id,
                     )?;
                     report.written += 1;
+                    let r = report.roles.entry(role.clone()).or_default();
+                    r.picked += 1;
+                    if picked.borders.is_empty() && !tied && standing.is_none() {
+                        r.clear += 1;
+                    }
                     Some(id)
                 };
                 if standing.is_some() {
                     report.standing += 1;
+                    report.roles.entry(role.clone()).or_default().standing += 1;
                     continue;
                 }
                 if border_item(
                     store, model, &picked, *subject, *first, pick_id, actor, job_id, &origin,
                 )? {
                     report.raised += 1;
+                    report.roles.entry(role.clone()).or_default().raised += 1;
                 }
             }
         }
@@ -349,7 +622,7 @@ fn short_scheme(scheme: &Scheme) -> String {
 
 /// Two stacks of one acquisition are one candidate, and the outputs of one
 /// acquisition are merged back into one after that.
-fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
+pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
     let key_of = |r: &Row, ignoring: &[String], over: Option<&str>| -> String {
         model
             .same_acquisition
@@ -360,9 +633,17 @@ fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
             .join("\u{1}")
     };
 
-    // Stage one: the full key.
+    // Stage one: the full key. A fragment of a few images is no candidate
+    // and no part of one (the 2026-10-10 borders study, R6): a spin echo
+    // split into stacks of 2, 19 and 1 images is a take of 19.
     let mut groups: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
     for r in rows {
+        if r.scan
+            .images
+            .is_some_and(|n| n as f64 <= pick::FRAGMENT_IMAGES)
+        {
+            continue;
+        }
         groups.entry(key_of(r, &[], None)).or_default().push(r);
     }
 
@@ -429,15 +710,49 @@ fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
     out
 }
 
+/// R6 of the 2026-10-10 borders study, after record 38's ruling on what a
+/// rescan is: series of one candidate acquired at one moment are one
+/// acquisition stored twice, a second reconstruction or a re-send, so the
+/// candidate keeps one of them, the scanner's original image over a derived
+/// one and then the series it wrote first. The stacks of one series are its
+/// parts and stay together, and a stack whose images carry no time is a
+/// moment of its own, because an absence is not a measurement.
+fn one_series_a_moment<'a>(rows: &[&'a Row]) -> Vec<&'a Row> {
+    let mut kept: BTreeMap<&str, (bool, i64, i64)> = BTreeMap::new();
+    for r in rows {
+        let Some(moment) = r.scan.acquired.as_deref() else {
+            continue;
+        };
+        let rank = (
+            r.scan.derived,
+            r.scan.series_number.unwrap_or(i64::MAX),
+            r.scan.series,
+        );
+        kept.entry(moment)
+            .and_modify(|best| *best = (*best).min(rank))
+            .or_insert(rank);
+    }
+    rows.iter()
+        .copied()
+        .filter(|r| {
+            r.scan
+                .acquired
+                .as_deref()
+                .is_none_or(|m| kept[m].2 == r.scan.series)
+        })
+        .collect()
+}
+
 /// One candidate of the rows of one acquisition: what they agree on, each
 /// number at its largest, because a bundle's slice count is the fullest
 /// volume in it, and each stack's own values beside.
 fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
+    let kept = one_series_a_moment(kept);
     let reads = model.reads();
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     for name in &reads {
         let mut best: Option<String> = None;
-        for r in kept {
+        for r in &kept {
             let Some(v) = r.values.get(name) else {
                 continue;
             };
@@ -455,7 +770,7 @@ fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
             values.insert(name.clone(), v);
         }
     }
-    let mut each: Vec<(i64, BTreeMap<String, String>)> = kept
+    let mut each: Vec<(i64, BTreeMap<String, String>, Option<String>)> = kept
         .iter()
         .map(|r| {
             (
@@ -465,14 +780,16 @@ fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
                     .filter(|(k, _)| reads.contains(k))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
+                r.scan.acquired.clone(),
             )
         })
         .collect();
-    each.sort_by_key(|(s, _)| *s);
+    each.sort_by_key(|(s, _, _)| *s);
     Candidate {
-        stacks: each.iter().map(|(s, _)| *s).collect(),
+        stacks: each.iter().map(|(s, _, _)| *s).collect(),
         values,
-        each: each.into_iter().map(|(_, v)| v).collect(),
+        acquired: each.iter().map(|(_, _, m)| m.clone()).collect(),
+        each: each.into_iter().map(|(_, v, _)| v).collect(),
         family: family.map(str::to_string),
     }
 }
@@ -482,7 +799,7 @@ fn holds(csv: &str, token: &str) -> bool {
 }
 
 /// What the population says about itself.
-fn build_reference(model: &Model, name: &str, rows: &[&Row]) -> Reference {
+pub(crate) fn build_reference(model: &Model, name: &str, rows: &[&Row]) -> Reference {
     let mut counts: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for name in model.reads() {
         let mut per: BTreeMap<String, i64> = BTreeMap::new();
@@ -1516,6 +1833,7 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
             roles: vec!["t1w".into()],
+            scan: Scan::default(),
         }
     }
 
@@ -1546,6 +1864,8 @@ mod tests {
                 "echo_time".into(),
             ],
             families: family.into_iter().collect(),
+            candidates: BTreeMap::new(),
+            near_tie: Vec::new(),
         }
     }
 
@@ -1718,6 +2038,113 @@ mod tests {
         assert_eq!(got[0].each.len(), 2);
         assert_eq!(got[0].each[0]["n_instances"], "176");
         assert_eq!(got[0].each[1]["n_instances"], "40");
+    }
+
+    /// A row with what the fingerprint says of its acquisition: its images,
+    /// its series and the number the scanner gave it, the moment it was
+    /// acquired and whether its ImageType says DERIVED.
+    fn scanned(
+        mut r: Row,
+        images: i64,
+        (series, number): (i64, i64),
+        moment: Option<&str>,
+        derived: bool,
+    ) -> Row {
+        r.scan = Scan {
+            images: Some(images),
+            series,
+            series_number: Some(number),
+            acquired: moment.map(str::to_string),
+            derived,
+        };
+        r
+    }
+
+    #[test]
+    fn a_fragment_of_two_images_or_fewer_is_no_candidate() {
+        // R6 of the 2026-10-10 borders study: a spin echo split into stacks
+        // of 2, 19 and 1 images is one candidate of 19, and fragments alone
+        // are no candidate at all.
+        let m = model(None);
+        let at = Some("2026-01-05 09:30:00.000000");
+        let of = |stack, images, series| {
+            scanned(
+                row(stack, &[("technique", "SE"), ("echo_time", "15")]),
+                images,
+                (series, 8),
+                at,
+                false,
+            )
+        };
+        let (a, b, c) = (of(1, 2, 10), of(2, 19, 11), of(3, 1, 12));
+        let got = group(&m, &[&a, &b, &c]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].stacks, [2]);
+        assert!(group(&m, &[&a, &c]).is_empty());
+    }
+
+    #[test]
+    fn one_moment_of_acquisition_is_one_scan_and_its_original_series_stays() {
+        // R6, after record 38: two series of one acquisition time are one
+        // acquisition stored twice, a second reconstruction or a re-send,
+        // and the candidate keeps the scanner's original, the series it
+        // wrote first.
+        let m = model(None);
+        let at = Some("2026-01-05 13:30:00.000000");
+        let of = |stack, series: (i64, i64), moment, derived| {
+            scanned(
+                row(stack, &[("technique", "SPACE"), ("echo_time", "386")]),
+                448,
+                series,
+                moment,
+                derived,
+            )
+        };
+        let first = of(1, (20, 11), at, false);
+        let again = of(2, (21, 13), at, false);
+        let got = group(&m, &[&again, &first]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].stacks, [1], "the series written first");
+        assert_eq!(got[0].acquired, [at.map(str::to_string)]);
+        // An original image over a derived one, whatever their numbers.
+        let derived = of(3, (22, 11), at, true);
+        let original = of(4, (23, 13), at, false);
+        assert_eq!(group(&m, &[&derived, &original])[0].stacks, [4]);
+        // Two moments are two takes, both named, for the retake to judge.
+        let later = of(5, (24, 15), Some("2026-01-05 14:02:00.000000"), false);
+        let got = group(&m, &[&first, &later]);
+        assert_eq!(got[0].stacks, [1, 5]);
+        assert_eq!(got[0].acquired.len(), 2);
+        // A moment nobody wrote down is never the same as another.
+        let unknown = of(6, (25, 17), None, false);
+        assert_eq!(group(&m, &[&first, &unknown])[0].stacks, [1, 6]);
+        // And the stacks of one series are its parts, never a copy of each
+        // other.
+        let part = of(7, (20, 11), at, false);
+        assert_eq!(group(&m, &[&first, &part])[0].stacks, [1, 7]);
+    }
+
+    #[test]
+    fn a_stack_s_slice_count_is_its_images_where_its_files_hold_frames() {
+        // R5 of the 2026-10-10 borders study: one enhanced file of 176
+        // frames is a volume of 176 slices, not of one.
+        let file = row(1, &[("n_instances", "1")]).with_scan(Scan {
+            images: Some(176),
+            ..Scan::default()
+        });
+        assert_eq!(file.values["n_instances"], "176");
+        // A stack of single-frame images is what it was.
+        let plain = row(2, &[("n_instances", "176")]).with_scan(Scan {
+            images: Some(176),
+            ..Scan::default()
+        });
+        assert_eq!(plain.values["n_instances"], "176");
+        // And a model that reads no slice count is given none.
+        let unread = row(3, &[("technique", "MPRAGE")]).with_scan(Scan {
+            images: Some(176),
+            ..Scan::default()
+        });
+        assert!(!unread.values.contains_key("n_instances"));
     }
 
     #[test]

@@ -128,6 +128,16 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     /// Start `nils serve` on a free port, serving `requests` requests.
     fn start(home: &TempDir, requests: usize, extra: &[&str], env: &[(&str, &str)]) -> Server {
@@ -152,22 +162,23 @@ impl Server {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let child = cmd.spawn().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         // A server that dies before it listens says why, never a bare unwrap.
         let Some(Ok(first)) = lines.next() else {
             let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
+            if let Some(mut e) = held.child.stderr.take() {
                 let _ = e.read_to_string(&mut err);
             }
-            let _ = child.wait();
             panic!("nils serve did not listen: {err}");
         };
         // "nils serve   127.0.0.1:PORT   auth ..."
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     fn request(
@@ -246,9 +257,23 @@ impl Server {
         (status, body.to_string())
     }
 
+    /// The server exits on its own once it has served the count the test
+    /// started it with; a count that is wrong fails the test, never hangs
+    /// it, and the server is killed as the test unwinds.
     fn finish(mut self) {
-        let status = self.child.wait().unwrap();
-        assert!(status.success(), "nils serve exited {status}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            match self.child.try_wait().unwrap() {
+                Some(status) => {
+                    assert!(status.success(), "nils serve exited {status}");
+                    return;
+                }
+                None if std::time::Instant::now() > deadline => panic!(
+                    "nils serve still waiting for requests after 120 s: the test's request count is wrong"
+                ),
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 
@@ -347,12 +372,13 @@ fn the_door_serves_what_the_command_line_has() {
     }
 
     // Record 28: the engine serves the tag policy it owns, so that nothing
-    // reading it has to keep a copy. A hundred elements in four categories,
-    // never the times, which are a release's.
+    // reading it has to keep a copy. v0's four categories and the ids
+    // category (the review of Wave 7a's merge, 2026-10-10), never the times,
+    // which are a release's.
     assert!(doors.contains(&"GET /api/pseudonymize/tags"), "{doors:?}");
     let (status, policy) = server.request("GET", "/api/pseudonymize/tags", None, None);
     assert_eq!(status, 200, "{policy}");
-    assert_eq!(policy["count"], 100, "{policy}");
+    assert_eq!(policy["count"], 145, "{policy}");
     assert_eq!(
         policy["categories"],
         serde_json::json!([
@@ -360,6 +386,7 @@ fn the_door_serves_what_the_command_line_has() {
             {"category": "trial", "count": 23},
             {"category": "provider", "count": 38},
             {"category": "institution", "count": 5},
+            {"category": "ids", "count": 47},
         ]),
         "{policy}"
     );
@@ -368,8 +395,31 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(policy["code"]["fate"], "replaced", "{policy}");
     assert_eq!(policy["mandatory"][0]["tag"], "0008,0016", "{policy}");
     assert_eq!(policy["mandatory"][1]["tag"], "0008,0018", "{policy}");
+    // The accession number and the study id leave every file (2026-10-09).
+    assert_eq!(policy["examination"][0]["tag"], "0008,0050", "{policy}");
+    assert_eq!(policy["examination"][1]["tag"], "0020,0010", "{policy}");
     assert_eq!(
         policy["covariates"]["opt_out"], "keep_demographics",
+        "{policy}"
+    );
+    // Wave 7a §6.2: the version a cache keys on, a reason on every row, and
+    // the marks every pseudonymised file carries, per writer.
+    assert_eq!(policy["version"], env!("CARGO_PKG_VERSION"), "{policy}");
+    assert!(
+        policy["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["reason"].is_string()),
+        "{policy}"
+    );
+    assert_eq!(policy["marks"]["tags"][0]["tag"], "0012,0062", "{policy}");
+    assert_eq!(
+        policy["marks"]["writers"][0]["writer"], "pseudonymise",
+        "{policy}"
+    );
+    assert_eq!(
+        policy["marks"]["writers"][1]["writer"], "release",
         "{policy}"
     );
 
@@ -1112,7 +1162,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "a longhand rule's words"
     );
     assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
-    assert_eq!(packs_doc["packs"][0]["contract"], 8, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 9, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -1549,6 +1599,31 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             .unwrap_or(0),
         "{signals}"
     );
+    // kineuro/nils#94, the rest: the text each axis the rules resolved was
+    // matched against, per value, over the same sample and under the same
+    // threshold, so the two stacks of one subject show none
+    let resolved = &signals["resolved_texts"];
+    for key in [
+        "pack",
+        "overlay",
+        "text",
+        "sample",
+        "read",
+        "complete",
+        "shown_when",
+    ] {
+        assert_eq!(resolved[key], unresolved[key], "{key}: {signals}");
+    }
+    let technique = &resolved["axes"]["technique"];
+    assert_eq!(technique["stacks"], 2, "{signals}");
+    let values = technique["values"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    assert!(!values.is_empty(), "{signals}");
+    for doc in values.values() {
+        assert_eq!(doc["texts"], serde_json::json!([]), "{signals}");
+        assert_eq!(doc["withheld"]["stacks"], doc["stacks"], "{signals}");
+    }
     // record 26: the same by value, and the origins for the scope chips
     let by_value = signals["by_value"]["technique"]
         .as_object()
@@ -1757,6 +1832,15 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         unresolved["axes"]["post_contrast"]["stacks"], 1,
         "{signals}"
     );
+    // and the stack the site's word resolved is the resolved sample's, under
+    // the value the word reached
+    let resolved = &signals["resolved_texts"];
+    assert_eq!(resolved["overlay"], "site@1.0.0", "{signals}");
+    assert_eq!(
+        resolved["axes"]["post_contrast"]["values"]["1"]["stacks"], 1,
+        "{signals}"
+    );
+    assert_eq!(resolved["axes"]["post_contrast"]["stacks"], 1, "{signals}");
     let counted: i64 = unresolved["axes"]
         .as_object()
         .unwrap()
@@ -1819,6 +1903,325 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert!(wrote.contains("site-1.0.0.overlay.json"), "{wrote}");
     let exported = nils_pack::Overlay::load(&out.path().join("site-1.0.0.overlay.json")).unwrap();
     assert_eq!(exported.id, "site@1.0.0");
+}
+
+/// Wave 7a and record 55 K9: a dataset is probed by its name, its
+/// originals read, shapes only, at data:work and detail quasi; the probe
+/// names the subjects whose birth date and sex agree and whose visits
+/// overlap by their codes, which a caller below quasi reads as a count.
+/// What the dataset's structure says decides whether there is anything to
+/// read: a root is no dataset, and a dataset whose structure is unknown, or
+/// one that is anonymised, holds no originals to probe.
+#[test]
+fn a_dataset_is_probed_by_name_and_its_alike_subjects_are_named_at_quasi() {
+    let home = registry();
+    let data = TempDir::new("probe-ds");
+    // four people under four identifiers; the first two are one person
+    // (the same birth date, sex and days), the fourth is that person too
+    // under an identifier no map names, the third is someone else
+    let people = [
+        ("KM5101", "19580214", "F", &["20210510", "20220512"][..]),
+        ("KM5102", "19580214", "F", &["20210510", "20220512"][..]),
+        ("KM5103", "19611120", "M", &["20210510", "20220512"][..]),
+        ("KM5104", "19580214", "F", &["20220512"][..]),
+    ];
+    let mut n = 0;
+    for (id, birth, sex, days) in people {
+        for day in days {
+            n += 1;
+            let study = format!("1.2.826.9.{n}");
+            let sop = format!("{study}.1.1");
+            let mut e = synth::minimal_mr(&study, &format!("{study}.1"), &sop);
+            e.push(synth::text(tags::PATIENT_ID, VR::LO, id));
+            e.push(synth::text(tags::PATIENT_BIRTH_DATE, VR::DA, birth));
+            e.push(synth::text(tags::PATIENT_SEX, VR::CS, sex));
+            e.push(synth::text(tags::STUDY_DATE, VR::DA, day));
+            data.file(
+                &format!("derivatives/dcm-original/{id}/{day}/a.dcm"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let empty = TempDir::new("probe-ds-empty");
+    empty.file("derivatives/dcm-anon/x/a.txt", b"nothing identified here");
+    // a dataset whose structure is unknown: DICOM beside derivatives/
+    let unknown = TempDir::new("probe-ds-unknown");
+    let loose = synth::part10(
+        &MetaFields::mr("1.2.826.9.90.1.1"),
+        &synth::minimal_mr("1.2.826.9.90", "1.2.826.9.90.1", "1.2.826.9.90.1.1"),
+        true,
+    );
+    unknown.file("derivatives/dcm-original/KM5190/a.dcm", &loose);
+    unknown.file("scans/IM_0001", &loose);
+    // a root: each folder under it a dataset of its own, once a person adds it
+    let site = TempDir::new("probe-root");
+    site.file("site-a/notes.txt", b"a folder nobody has added");
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds",
+            data.path().to_str().unwrap(),
+            "--role",
+            "source",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "anon-only",
+            empty.path().to_str().unwrap(),
+            "--role",
+            "source",
+        ],
+        None,
+    );
+    for (name, dir) in [("unknown-ds", &unknown), ("site-root", &site)] {
+        run(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                dir.path().to_str().unwrap(),
+                "--role",
+                "source",
+            ],
+            None,
+        );
+    }
+    // the command line refuses as the door does, before a job is claimed
+    let refused = |name: &str| {
+        let out = nils()
+            .arg("--registry")
+            .arg(home.path())
+            .args(["ingest", "probe", "--dataset", name])
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{name} was probed");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+    for (name, why) in [
+        ("anon-only", "anonymised"),
+        ("unknown-ds", "structure is unknown"),
+        ("site-root", "is a root"),
+    ] {
+        let said = refused(name);
+        assert!(said.contains(why), "{name}: {said}");
+    }
+    let map = data.path().join("map.csv");
+    std::fs::write(
+        &map,
+        "identifier,code\nKM5101,BENM01\nKM5102,BENM02\nKM5103,BENM03\n",
+    )
+    .unwrap();
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-type",
+            "patient-id",
+            "--place",
+            "ds",
+        ],
+        None,
+    );
+    std::fs::remove_file(&map).unwrap();
+
+    let server = Server::start(
+        &home,
+        14,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "a-plain-data-worker-tok=pl@lab:data:work,pipelines:see",
+            "--token",
+            "a-quasi-data-worker-tok=qu@lab:reviewer,data:work",
+        ],
+        &[],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let plain = Some("a-plain-data-worker-tok");
+    let quasi = Some("a-quasi-data-worker-tok");
+    let rules = r#"[{"id_type": "patient-id", "from": [{"field": "PatientID"}]},
+                    {"id_type": "subject-code", "code": "verbatim", "from": [{"path": {"segment": 1}, "pattern": "^(?<id>[A-Z]{2}[0-9]{4})$"}]}]"#;
+    let body = |more: &str| format!(r#"{{{more}, "sample": 100, "rules": {rules}}}"#);
+
+    // 1: below detail quasi a dataset's originals are not probed
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "ds""#)),
+        plain,
+    );
+    assert_eq!(status, 403, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("quasi"), "{doc}");
+    // 2-3: one of dataset and location, never both, never neither
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "ds", "location": "src""#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&format!(r#"{{"rules": {rules}}}"#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("dataset or location"),
+        "{doc}"
+    );
+    // 4: a name that is no dataset is refused naming the datasets
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "nowhere""#)),
+        ops,
+    );
+    assert_eq!(status, 404, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("ds"), "{doc}");
+    // 5: a path is not a dataset's name
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "ds/derivatives/dcm-original""#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    // 6: a dataset with no originals has nothing identified to probe
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "anon-only""#)),
+        ops,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("anonymised"),
+        "{doc}"
+    );
+    // 6a: nor has a dataset whose structure is unknown, until a person says
+    // which tree its entries go into
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "unknown-ds""#)),
+        ops,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("structure is unknown"),
+        "{doc}"
+    );
+    // 6b: a root is no dataset, and the datasets it is refused with are
+    // the datasets alone
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "site-root""#)),
+        ops,
+    );
+    assert_eq!(status, 404, "{doc}");
+    let said = doc["error"].as_str().unwrap();
+    assert!(said.contains("is a root"), "{doc}");
+    let (_, listed) = said.split_once("the datasets are ").unwrap();
+    assert!(
+        listed.contains("ds") && listed.contains("unknown-ds") && !listed.contains("site-root"),
+        "{doc}"
+    );
+    // 7: at quasi with data:work it is queued, and the command line names
+    // the dataset, never its path
+    let (status, queued) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&body(r#""dataset": "@ds""#)),
+        quasi,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    // 8
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{job}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    let argv = shown["args"]["argv"].to_string();
+    assert!(
+        argv.contains("--dataset") && argv.contains("\"ds\""),
+        "{argv}"
+    );
+    assert!(!argv.contains(&data.path().display().to_string()), "{argv}");
+
+    // the worker runs it
+    let _ = run(&home, &["jobs", "work", "--once"], None);
+    // 9: at quasi the job names the alike pair by its codes, shapes only
+    let (status, done) = server.request("GET", &format!("/api/jobs/{job}"), None, quasi);
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["state"], "done", "{done}");
+    let result = &done["result"];
+    assert_eq!(result["dataset"], "ds", "{result}");
+    assert_eq!(result["sample"]["parsed"], 7, "{result}");
+    let tag = &result["candidates"][0];
+    assert_eq!(tag["subjects"], 4, "{tag}");
+    assert_eq!(tag["sources"][0]["shapes"]["AA9999"], 7, "{tag}");
+    assert_eq!(
+        tag["alike"]["pairs"],
+        serde_json::json!([{
+            "subjects": ["BENM01", "BENM02"],
+            "agree": ["birth_date", "sex"],
+            "visits": {"shared": 2, "of": [2, 2]},
+        }]),
+        "{tag}"
+    );
+    // the fourth identifier is held, not mapped: a map names it, not a merge
+    assert_eq!(tag["alike"]["unmapped"], 2, "{tag}");
+    assert_eq!(tag["alike"]["linked"], 0, "{tag}");
+    // the folder rule reads codes verbatim that are no subject's: nothing named
+    let path = &result["candidates"][1];
+    assert_eq!(path["alike"]["pairs"], serde_json::json!([]), "{path}");
+    let text = done.to_string();
+    for value in ["KM5101", "KM5104", "19580214", "20210510", "dcm-original"] {
+        assert!(!text.contains(value), "{value} escaped: {text}");
+    }
+    assert!(!text.contains(&data.path().display().to_string()), "{text}");
+    // 10: below quasi the pair is a count
+    let (status, low) = server.request("GET", &format!("/api/jobs/{job}"), None, plain);
+    assert_eq!(status, 200, "{low}");
+    let alike = &low["result"]["candidates"][0]["alike"];
+    assert_eq!(alike["pairs"], serde_json::json!([]), "{low}");
+    assert_eq!(alike["withheld"], 1, "{low}");
+    assert!(!low.to_string().contains("BENM01"), "{low}");
+    // 11: and so is the list
+    let (status, list) = server.request("GET", "/api/jobs", None, plain);
+    assert_eq!(status, 200, "{list}");
+    assert!(!list.to_string().contains("BENM01"), "{list}");
+    // 12: the merge stays a person's act at its own door, at sensitive
+    let (status, doc) = server.request(
+        "POST",
+        "/api/linkage/merge",
+        Some(r#"{"canonical": "BENM01", "alias": "BENM02", "why": "same birth date, sex and visits"}"#),
+        quasi,
+    );
+    assert_eq!(status, 403, "{doc}");
+    server.finish();
 }
 
 /// Wave 4c §5.3: the trust list vectors of `contracts/suite/v3` run against
@@ -2529,7 +2932,21 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
     run(&home, &["init", "--key", "k"], None);
     run(
         &home,
-        &["place", "add", "incoming", tree, "--role", "source"],
+        &[
+            "place",
+            "add",
+            "incoming",
+            tree,
+            "--role",
+            "source",
+            "--move-into",
+            "anon",
+            "--confirm-move",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
         None,
     );
     // record 26: the map makes the subject and the digest meets it, which
@@ -2551,7 +2968,7 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
     );
     run(
         &home,
-        &["digest", "--name", "first", "--no-private", tree],
+        &["digest", "--name", "first", "--no-private", "@incoming"],
         None,
     );
     run(&home, &["fingerprint"], None);
@@ -2587,8 +3004,9 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
     assert_eq!(doc["count"], 1, "{doc}");
     let source = &doc["sources"][0];
     assert_eq!(source["name"], "incoming", "{doc}");
-    // record 26: a source declared with nothing said is a dataset reading
-    // its folder itself, de-identified, and the handling mirrors it
+    // record 26: a source declared de-identified reads its pseudonymised
+    // tree, its loose entries moved there on the person's word (Wave 7a),
+    // and the handling mirrors it
     assert_eq!(source["handling"]["arrives"], "deidentified", "{doc}");
     assert_eq!(source["handling_declared"], false, "{doc}");
     assert_eq!(source["arrives"], "deidentified", "{doc}");
@@ -2597,7 +3015,11 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
         serde_json::Value::Null,
         "{doc}"
     );
-    assert_eq!(source["trees"]["anon"]["path"], tree, "{doc}");
+    assert_eq!(
+        source["trees"]["anon"]["path"],
+        format!("{tree}/derivatives/dcm-anon"),
+        "{doc}"
+    );
     assert_eq!(
         source["held"],
         serde_json::json!({"files": 0, "identifiers": 0}),
@@ -2697,6 +3119,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     let v0 = TempDir::new("ds-v0");
     let plain = TempDir::new("ds-plain");
     let bare = TempDir::new("ds-bare");
+    let loose = TempDir::new("ds-loose");
     let dicom = |study: &str, sop: &str| {
         let e = synth::minimal_mr(study, &format!("{study}.1"), sop);
         synth::part10(&MetaFields::mr(sop), &e, true)
@@ -2712,7 +3135,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         &dicom("1.2.3.D", "1.2.3.D.1.1"),
     );
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
-    const LIMIT: usize = 42;
+    loose.file("sub-9/a.dcm", &dicom("1.2.3.F", "1.2.3.F.1.1"));
+    loose.file("sub-8/notes.txt", b"no dicom here");
+    const LIMIT: usize = 100;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -2726,16 +3151,24 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "an-operator-token-of-len=ops@lab:operator",
             "--token",
             "a-places-token-of-length=pl@lab:places:work,data:see",
+            "--token",
+            "an-admin-token-of-length=ad@lab:admin",
+            "--token",
+            "a-plain-work-token-of-ln=pw@lab:places:work,data:work,data:see",
             "--ingest-root",
             &format!("ds={}", identified.path().display()),
             "--ingest-root",
             &format!("old={}", v0.path().display()),
+            "--ingest-root",
+            &format!("loose={}", loose.path().display()),
         ],
         &[],
     );
     let reader = Some("a-reader-token-of-length");
     let ops = Some("an-operator-token-of-len");
     let places_only = Some("a-places-token-of-length");
+    let admin = Some("an-admin-token-of-length");
+    let plain_work = Some("a-plain-work-token-of-ln");
     let ask = |method: &str, path: &str, body: Option<&str>, token: Option<&str>| {
         used.set(used.get() + 1);
         server.request(method, path, body, token)
@@ -2822,7 +3255,365 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     assert_eq!(status, 400, "{refused}");
     assert!(identified.path().join("sub-1").is_dir());
 
-    // an identified dataset: the loose entries move into the originals
+    // Wave 7a: the arrival is the structure's, never declared
+    let (status, refused) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "ds",
+            "source",
+            identified.path(),
+            serde_json::json!({"arrives": "identified"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("read from its folder"),
+        "{refused}"
+    );
+    // T4: a dataset's entries move into the tree a person names only on the
+    // person's word; named without it, the door answers the question,
+    // naming the entries and the trees, and nothing is written
+    let (status, asked) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "ds",
+            "source",
+            identified.path(),
+            serde_json::json!({"move_into": "originals"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 409, "{asked}");
+    assert_eq!(asked["confirm"], "confirm_move", "{asked}");
+    assert_eq!(
+        asked["layout"]["loose_entries"],
+        serde_json::json!(["notes.txt", "sub-1"]),
+        "{asked}"
+    );
+    // the notes hold no DICOM: only the study would move
+    assert_eq!(
+        asked["layout"]["loose_dicom"],
+        serde_json::json!(["sub-1"]),
+        "{asked}"
+    );
+    assert_eq!(
+        asked["layout"]["move_into"]["trees"]["originals"], "derivatives/dcm-original",
+        "{asked}"
+    );
+    assert!(identified.path().join("sub-1").is_dir());
+    assert!(!identified.path().join("derivatives").exists());
+    let (status, none) = ask("GET", "/api/places", None, ops);
+    assert_eq!(status, 200, "{none}");
+    assert!(
+        !none["places"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "ds"),
+        "{none}"
+    );
+    // a folder without derivatives/ is a root: each folder under it a
+    // dataset, here one of unknown structure; nothing moved, and no digest
+    // or bring-in of either is queued
+    let (status, undeclared) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "loose",
+            "source",
+            loose.path(),
+            serde_json::json!({}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 201, "{undeclared}");
+    assert_eq!(
+        undeclared["dataset"]["arrives"], "undeclared",
+        "{undeclared}"
+    );
+    assert_eq!(
+        undeclared["handling"]["arrives"], "undeclared",
+        "{undeclared}"
+    );
+    assert_eq!(
+        undeclared["dataset"]["trees"]["anon"],
+        serde_json::Value::Null,
+        "{undeclared}"
+    );
+    // Wave 7a (Nima, 2026-10-08): the root alone; its folders listed as
+    // they are; a folder a dataset only when a person adds it
+    assert_eq!(undeclared["dataset"]["kind"], "root", "{undeclared}");
+    assert_eq!(undeclared["layout"]["folders"], 2, "{undeclared}");
+    assert_eq!(
+        undeclared["datasets"],
+        serde_json::Value::Null,
+        "{undeclared}"
+    );
+    let (status, listed) = ask("GET", "/api/places/loose/folders", None, reader);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["root"], "loose", "{listed}");
+    assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["matching"], 2, "{listed}");
+    assert_eq!(listed["next"], serde_json::Value::Null, "{listed}");
+    assert_eq!(listed["folders"][0]["name"], "sub-8", "{listed}");
+    // the listing never looks inside a folder
+    assert_eq!(listed["folders"][0].get("holds_dicom"), None, "{listed}");
+    assert_eq!(listed["folders"][0]["added"], false, "{listed}");
+    assert_eq!(
+        listed["folders"][0]["dataset_id"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
+    assert_eq!(listed["folders"][1]["name"], "sub-9", "{listed}");
+    // found by name, a page at a time
+    let (status, found) = ask(
+        "GET",
+        "/api/places/loose/folders?q=SUB-9&limit=1",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["count"], 1, "{found}");
+    assert_eq!(found["folders"][0]["name"], "sub-9", "{found}");
+    let (status, refused) = ask("GET", "/api/places/loose/folders?limit=500", None, reader);
+    assert_eq!(status, 400, "{refused}");
+    // one folder looked at before it is added: a bounded look and the
+    // structure it would have; nothing changed
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-9", None, reader);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["holds_dicom"], "yes", "{look}");
+    assert_eq!(look["has_derivatives"], false, "{look}");
+    assert_eq!(look["added"], false, "{look}");
+    assert_eq!(look["layout"]["state"], "unknown", "{look}");
+    assert_eq!(look["layout"]["question"], true, "{look}");
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-8", None, reader);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["holds_dicom"], "no", "{look}");
+    // looking at the roots again adds no dataset; it writes, so it is a
+    // POST that needs Places and Data work and is audited (the review of
+    // Wave 7a's merge, 2026-10-10), and a read never explores
+    let (status, refused) = ask("GET", "/api/places?explore=1", None, ops);
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask("POST", "/api/places/explore", Some("{}"), reader);
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = ask("POST", "/api/places/explore", Some("{}"), places_only);
+    assert_eq!(status, 403, "{refused}");
+    let (status, explored) = ask("POST", "/api/places/explore", Some("{}"), ops);
+    assert_eq!(status, 200, "{explored}");
+    assert_eq!(explored["errors"], serde_json::json!([]), "{explored}");
+    assert!(
+        explored["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "loose"),
+        "{explored}"
+    );
+    let (_, audit) = ask("GET", "/api/audit?action=place.set", None, admin);
+    assert!(
+        audit["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["scope"]["explore"] == true),
+        "{audit}"
+    );
+    // an error's words may name a folder: shaped for a caller who may not
+    // read a folder's names, and always in the audit row (2026-10-10)
+    let person = TempDir::new("ds-person");
+    person.file(
+        "Svensson Anna 1912/derivatives/dcm-anon/a.dcm",
+        &dicom("1.2.3.P", "1.2.3.P.1.1"),
+    );
+    let folder = person.path().join("Svensson Anna 1912");
+    let (status, made) = ask(
+        "POST",
+        "/api/places",
+        Some(
+            &serde_json::json!({"role": "source", "name": "person", "path": folder.display().to_string()})
+                .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{made}");
+    std::fs::rename(&folder, person.path().join("gone")).unwrap();
+    let (status, shaped) = ask("POST", "/api/places/explore", Some("{}"), plain_work);
+    assert_eq!(status, 200, "{shaped}");
+    let words = shaped["errors"].to_string();
+    assert!(words.contains("Aaaaaaaa Aaaa 9999"), "{shaped}");
+    assert!(!words.contains("Svensson"), "{shaped}");
+    let (_, named) = ask("POST", "/api/places/explore", Some("{}"), ops);
+    assert!(
+        named["errors"].to_string().contains("Svensson Anna 1912"),
+        "{named}"
+    );
+    let (_, audit) = ask("GET", "/api/audit?action=place.set", None, admin);
+    assert!(!audit.to_string().contains("Svensson"), "{audit}");
+    std::fs::rename(person.path().join("gone"), &folder).unwrap();
+    let (status, again) = ask("GET", "/api/places", None, ops);
+    assert_eq!(status, 200, "{again}");
+    assert!(
+        !again["places"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "sub-9" || p["name"] == "sub-8"),
+        "{again}"
+    );
+    let (status, under) = ask(
+        "POST",
+        "/api/places",
+        Some(r#"{"role": "source", "root": "loose", "folder": "sub-9"}"#),
+        ops,
+    );
+    assert_eq!(status, 201, "{under}");
+    let (status, notes) = ask(
+        "POST",
+        "/api/places",
+        Some(
+            &serde_json::json!({
+                "role": "source",
+                "name": "notes",
+                "path": loose.path().join("sub-8").display().to_string(),
+            })
+            .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{notes}");
+    assert_eq!(notes["dataset"]["root"], "loose", "{notes}");
+    assert_eq!(notes["dataset"]["state"], "unknown", "{notes}");
+    assert_eq!(under["name"], "sub-9", "{under}");
+    assert_eq!(under["dataset"]["state"], "unknown", "{under}");
+    assert_eq!(under["dataset"]["root"], "loose", "{under}");
+    assert_eq!(under["layout"]["question"], true, "{under}");
+    assert!(
+        under["not_read"].as_str().unwrap().contains("unknown"),
+        "{under}"
+    );
+    assert_eq!(
+        under["layout"]["loose_dicom"],
+        serde_json::json!(["a.dcm"]),
+        "{under}"
+    );
+    assert_eq!(under["layout"]["entry_names"], "names", "{under}");
+    assert!(loose.path().join("sub-9/a.dcm").is_file());
+    // the review of Wave 7a's merge (2026-10-10): a loose entry may be
+    // named after a person, so its name goes only to Data work at detail
+    // sensitive; a reader sees its shape, and no audit row keeps the name
+    let (status, read) = ask("GET", "/api/places", None, reader);
+    assert_eq!(status, 200, "{read}");
+    let row = read["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "sub-9")
+        .unwrap();
+    assert_eq!(
+        row["layout"]["loose_dicom"],
+        serde_json::json!(["a.aaa"]),
+        "{row}"
+    );
+    assert_eq!(row["layout"]["entry_names"], "shapes", "{row}");
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-9", None, reader);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(
+        look["layout"]["loose_dicom"],
+        serde_json::json!(["a.aaa"]),
+        "{look}"
+    );
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-9", None, ops);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(
+        look["layout"]["loose_dicom"],
+        serde_json::json!(["a.dcm"]),
+        "{look}"
+    );
+    let (status, audit) = ask("GET", "/api/audit?action=place.add", None, admin);
+    assert_eq!(status, 200, "{audit}");
+    let text = audit.to_string();
+    assert!(text.contains("a.aaa"), "{audit}");
+    assert!(!text.contains("a.dcm"), "{audit}");
+    assert!(!text.contains("notes.txt"), "{audit}");
+    for command in [
+        r#"["digest", "@loose"]"#,
+        r#"["digest", "@loose/sub-9"]"#,
+        r#"["bring-in", "@loose"]"#,
+    ] {
+        let (status, refused) = ask(
+            "POST",
+            "/api/jobs",
+            Some(&format!(r#"{{"command": {command}}}"#)),
+            ops,
+        );
+        assert_eq!(status, 409, "{command}: {refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains("undeclared")
+                || error.contains("not read")
+                || error.contains("by its own name"),
+            "{command}: {refused}"
+        );
+    }
+    let (_, listed) = ask("GET", "/api/places", None, ops);
+    let row = listed["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "loose")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["layout"]["root"], true, "{row}");
+    assert_eq!(
+        row["datasets"],
+        serde_json::json!(["sub-9", "notes"]),
+        "{row}"
+    );
+    assert!(row["not_read"].as_str().unwrap().contains("root"), "{row}");
+    let row = listed["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "sub-9")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["layout"]["question"], true, "{row}");
+    assert_eq!(row["layout"]["state"], "unknown", "{row}");
+    assert!(
+        row["not_read"].as_str().unwrap().contains("unknown"),
+        "{row}"
+    );
+    // the unknown dataset's entries go into the tree the person names, at
+    // the place's door, only with the confirmation
+    let sub9 = format!("/api/places/{}", row["id"]);
+    let (status, asked) = ask("PUT", &sub9, Some(r#"{"move_into": "anon"}"#), ops);
+    assert_eq!(status, 409, "{asked}");
+    assert_eq!(asked["confirm"], "confirm_move", "{asked}");
+    assert!(loose.path().join("sub-9/a.dcm").is_file());
+    let (status, moved) = ask(
+        "PUT",
+        &sub9,
+        Some(r#"{"move_into": "anon", "confirm_move": true}"#),
+        ops,
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["dataset"]["state"], "anonymised", "{moved}");
+    assert_eq!(moved["dataset"]["root"], "loose", "{moved}");
+    assert!(
+        loose
+            .path()
+            .join("sub-9/derivatives/dcm-anon/a.dcm")
+            .is_file()
+    );
+
+    // the person's word: the study goes into the originals, and the
+    // structure says identified
     let (status, ds) = ask(
         "POST",
         "/api/places",
@@ -2831,7 +3622,8 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "source",
             identified.path(),
             serde_json::json!({
-                "arrives": "identified",
+                "move_into": "originals",
+                "confirm_move": true,
                 "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]},
                 "cohort": "study-a",
                 "tags": {"remove": ["0010,1010"]},
@@ -2860,26 +3652,29 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         ),
         "{ds}"
     );
-    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 2, "{ds}");
+    assert_eq!(ds["dataset"]["state"], "identified", "{ds}");
+    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 1, "{ds}");
     assert_eq!(ds["dataset"]["trees"]["anon"]["files"], 0, "{ds}");
     assert_eq!(ds["layout"]["v0"], serde_json::Value::Null, "{ds}");
-    assert_eq!(ds["layout"]["loose"], 0, "{ds}");
+    // the notes stay beside derivatives/, unread
+    assert_eq!(ds["layout"]["loose"], 1, "{ds}");
+    assert_eq!(
+        ds["layout"]["moved"],
+        serde_json::json!({"into": "derivatives/dcm-original", "entries": 1}),
+        "{ds}"
+    );
     assert!(
         identified
             .path()
             .join("derivatives/dcm-original/sub-1/ses-1/a.dcm")
             .is_file()
     );
-    assert!(
-        identified
-            .path()
-            .join("derivatives/dcm-original/notes.txt")
-            .is_file()
-    );
+    assert!(identified.path().join("notes.txt").is_file());
     assert!(identified.path().join("derivatives/dcm-anon").is_dir());
     assert!(!identified.path().join("sub-1").exists());
 
-    // a v0 cohort folder: dcm-raw is renamed, nothing else touched
+    // a v0 cohort folder: its structure says both, identified with its
+    // anonymised copy; dcm-raw is renamed, shown, nothing else touched
     let (status, old) = ask(
         "POST",
         "/api/places",
@@ -2887,7 +3682,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         ops,
     );
     assert_eq!(status, 201, "{old}");
-    assert_eq!(old["dataset"]["arrives"], "deidentified", "{old}");
+    assert_eq!(old["dataset"]["arrives"], "identified", "{old}");
+    assert_eq!(old["dataset"]["state"], "both", "{old}");
+    assert_eq!(old["layout"]["renamed"], true, "{old}");
     assert_eq!(
         old["layout"]["v0"],
         serde_json::json!({"original_files": 1, "raw_files": 1, "partial": false, "renamed": true}),
@@ -2910,7 +3707,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     assert!(!v0.path().join("derivatives/dcm-raw").exists());
     assert!(v0.path().join("derivatives/dcm-anon/sub-1/a.dcm").is_file());
 
-    // a de-identified folder moves into the tree when asked; a bare one reads itself
+    // a folder whose entries are anonymised goes into dcm-anon when the
+    // person says so (by the move's name from before here), and the
+    // structure says anonymised; a bare folder is a root with nothing in it
     let (status, moved) = ask(
         "POST",
         "/api/places",
@@ -2918,11 +3717,12 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "plain",
             "source",
             plain.path(),
-            serde_json::json!({"arrives": "coded", "move_into_anon": true}),
+            serde_json::json!({"move_into_anon": true}),
         )),
         ops,
     );
     assert_eq!(status, 201, "{moved}");
+    assert_eq!(moved["dataset"]["state"], "anonymised", "{moved}");
     assert_eq!(
         moved["dataset"]["trees"]["originals"],
         serde_json::Value::Null,
@@ -2948,9 +3748,15 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         ops,
     );
     assert_eq!(status, 201, "{bare_place}");
+    assert_eq!(bare_place["dataset"]["kind"], "root", "{bare_place}");
+    assert_eq!(bare_place["layout"]["folders"], 0, "{bare_place}");
     assert_eq!(
-        bare_place["dataset"]["trees"]["anon"]["path"],
-        bare.path().display().to_string(),
+        bare_place["dataset"]["arrives"], "undeclared",
+        "{bare_place}"
+    );
+    assert_eq!(
+        bare_place["dataset"]["trees"]["anon"],
+        serde_json::Value::Null,
         "{bare_place}"
     );
     assert_eq!(
@@ -3045,7 +3851,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     );
     assert_eq!(status, 200, "{look}");
     assert!(ends(&look["path"], "derivatives/dcm-original"), "{look}");
-    assert_eq!(look["here"]["files"]["count"], 1, "{look}");
+    assert_eq!(look["here"]["files"]["count"], 0, "{look}");
     let (_, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@ds"}"#), ops);
     assert!(ends(&look["path"], "derivatives/dcm-anon"), "{look}");
 
@@ -3059,7 +3865,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         .find(|s| s["name"] == "ds")
         .unwrap();
     assert_eq!(source["arrives"], "identified", "{doc}");
-    assert_eq!(source["trees"]["originals"]["files"], 2, "{doc}");
+    assert_eq!(source["trees"]["originals"]["files"], 1, "{doc}");
     assert_eq!(source["trees"]["anon"]["files"], 0, "{doc}");
     assert_eq!(
         source["trees"]["anon"]["last_written"],
@@ -3167,6 +3973,32 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         .unwrap();
     assert_eq!(row["grant"], "places:work", "{row}");
     assert_eq!(row["dataset"], "data:work", "{row}");
+    // the review of Wave 7a's merge (2026-10-10): a folder's name in the
+    // address is percent-encoded, so one with a space or å, ä, ö is found;
+    // a name that leads out of the root by a symbolic link is refused, and
+    // nothing past it is looked at
+    loose.file("Åsa Öberg 7/a.dcm", &dicom("1.2.3.G", "1.2.3.G.1.1"));
+    let outside = TempDir::new("ds-outside");
+    outside.file("x/a.dcm", &dicom("1.2.3.H", "1.2.3.H.1.1"));
+    std::os::unix::fs::symlink(outside.path().join("x"), loose.path().join("escape")).unwrap();
+    let (status, look) = ask(
+        "GET",
+        "/api/places/loose/folders/%C3%85sa%20%C3%96berg%207",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["name"], "Åsa Öberg 7", "{look}");
+    assert_eq!(look["holds_dicom"], "yes", "{look}");
+    let (status, refused) = ask("GET", "/api/places/loose/folders/escape", None, reader);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the root"),
+        "{refused}"
+    );
     while used.get() < LIMIT {
         ask("GET", "/api/capabilities", None, reader);
     }
@@ -3217,8 +4049,9 @@ fn the_originals_door_refuses_a_purge_when_an_original_changed_after_its_copy() 
             dir.path().to_str().unwrap(),
             "--role",
             "source",
-            "--arrives",
-            "identified",
+            "--move-into",
+            "originals",
+            "--confirm-move",
             "--unmapped",
             "code",
         ],
@@ -3727,6 +4560,24 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "review-work",
             "review-see",
             "review:work",
+        ),
+        // record 56: rehearsing a rule change is the work of a reviewer
+        // or of a pipeline's operator
+        (
+            "POST",
+            "/api/packs/mri/rehearse",
+            "{}",
+            "review-work",
+            "data-work",
+            "pipelines:work, review:work",
+        ),
+        (
+            "POST",
+            "/api/packs/mri/rehearse",
+            "{}",
+            "pipelines-work",
+            "review-see",
+            "pipelines:work, review:work",
         ),
         (
             "POST",
@@ -4278,13 +5129,14 @@ fn the_grants_vectors_hold() {
 }
 
 /// Record 26 §7 and §14 through the doors: `bring-in @dataset` queues the
-/// thread of a dataset as a chain the serve worker runs step by step,
-/// each job naming the one before and after it; the batch page reads the
-/// five stages off the thread and the timeline serves the batch; the
+/// thread of a dataset as a chain the serve worker runs step by step, each
+/// job naming the one before and after it, the sort followed by the pick
+/// run after it (record 55 H2) and nothing after that; the batch page reads
+/// the five stages off the thread and the timeline serves the batch; the
 /// sources door fills the pseudonymise step in and the machine's rates; a
 /// step the caller who queued the chain may not queue ends the chain and
-/// the job says why; a chain that is not one is refused at the door; and
-/// a dataset's originals are never digested.
+/// the job says why; a chain that is not one is refused at the door; and a
+/// dataset's originals are never digested.
 #[test]
 fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let home = registry();
@@ -4328,8 +5180,9 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
             dir.path().to_str().unwrap(),
             "--role",
             "source",
-            "--arrives",
-            "identified",
+            "--move-into",
+            "originals",
+            "--confirm-move",
             "--unmapped",
             "code",
         ],
@@ -4337,7 +5190,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     );
     // The requests the door answers before the server stops. Waiting on a
     // job reads the registry from the command line and asks the door once,
-    // when the job is over, so the test asks the same 25 however slow the
+    // when the job is over, so the test asks the same 26 however slow the
     // runner is; the rest are capabilities at the end.
     const LIMIT: usize = 32;
     let used = std::cell::Cell::new(0usize);
@@ -4389,6 +5242,21 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         assert_eq!(status, 200, "{shown}");
         shown
     };
+    // What the worker writes on a job once the job is over: the job it
+    // queued after it, or why the chain stopped there. The verb ends the
+    // job's row and the worker goes on from it a moment later, so the mark
+    // is waited for, read beside the server, two minutes at most.
+    let marked = |job: i64, mark: fn(&serde_json::Value) -> serde_json::Value| {
+        let since = std::time::Instant::now();
+        loop {
+            let found = mark(&look(job));
+            if !found.is_null() || since.elapsed().as_secs() >= 120 {
+                return found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    let after = |j: &serde_json::Value| j["chain"]["after"].clone();
 
     // the originals are the pseudonymiser's: a digest of them is refused
     let (status, refused) = ask(
@@ -4471,15 +5339,9 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(job["chain"]["before"], serde_json::Value::Null, "{job}");
     // the chain, step by step, each job naming the one before
     for expected in ["digest", "fingerprint", "classify"] {
-        let mut next = job["chain"]["after"].as_i64();
-        for _ in 0..300 {
-            if next.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            next = look(*ids.last().unwrap())["chain"]["after"].as_i64();
-        }
-        let next = next.unwrap_or_else(|| panic!("no job after {expected}: {job}"));
+        let next = marked(*ids.last().unwrap(), after)
+            .as_i64()
+            .unwrap_or_else(|| panic!("no {expected} queued after {job}"));
         job = wait(next);
         assert_eq!(job["state"], "done", "{job}");
         assert_eq!(job["kind"], expected, "{job}");
@@ -4492,8 +5354,32 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         assert_eq!(job["args"]["detail"], "sensitive", "{job}");
         ids.push(next);
     }
+    // the chain the door queued ends with the sort; record 55 H2 (round 4):
+    // a sort that judged stacks is followed by picking main scans for the
+    // subjects it judged, which the worker queues and links once the sort
+    // is over, and nothing comes after the pick run
     assert_eq!(job["then"], serde_json::json!([]), "{job}");
-    assert_eq!(job["chain"]["after"], serde_json::Value::Null, "{job}");
+    let sort = *ids.last().unwrap();
+    let pick = marked(sort, after)
+        .as_i64()
+        .unwrap_or_else(|| panic!("no pick run queued after the sort {job}"));
+    let picked = wait(pick);
+    assert_eq!(picked["state"], "done", "{picked}");
+    assert_eq!(picked["kind"], "pick", "{picked}");
+    assert_eq!(
+        picked["args"]["queued"],
+        serde_json::json!(["pick", "run", "--after-sort", sort.to_string()]),
+        "{picked}"
+    );
+    assert_eq!(picked["chain"]["before"], sort, "{picked}");
+    assert_eq!(picked["args"]["principal"], "ops@lab", "{picked}");
+    assert_eq!(picked["args"]["detail"], "sensitive", "{picked}");
+    assert_eq!(picked["then"], serde_json::json!([]), "{picked}");
+    assert_eq!(
+        picked["chain"]["after"],
+        serde_json::Value::Null,
+        "{picked}"
+    );
 
     // the batch is the thread: the two batches of one name, the stages
     let (status, batches) = ask("GET", "/api/batches", None, reader);
@@ -4665,28 +5551,69 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(dry["result"]["files"]["seen"], 6, "{dry}");
     assert_eq!(dry["result"]["files"]["unchanged"], 6, "{dry}");
 
-    // a step the caller may not queue ends the chain, and the job says why
+    // Wave 7a (2026-10-10): the pseudonymise run counted the dataset's
+    // trees again when it ended, so the copy is counted with no probe, and
+    // the dataset's step says it is done
+    let source = &sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "ds")
+        .unwrap()["dataset"];
+    assert_eq!(source["trees"]["anon"]["files"], 6, "{sources}");
+    let (status, summary) = ask("GET", "/api/datasets/ds/summary", None, reader);
+    assert_eq!(status, 200, "{summary}");
+    let step = summary["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == "pseudonymised")
+        .unwrap_or_else(|| panic!("{summary}"));
+    assert_eq!(step["state"], "done", "{step}");
+    assert_eq!(step["files"], 6, "{step}");
+    assert_eq!(step["waiting"], 0, "{step}");
+
+    // a read that adds and changes nothing ends its chain: what it would
+    // sort is sorted already, so the sort and the pick are not queued, and
+    // the read says which steps it left and why
     let (status, queued) = ask(
         "POST",
         "/api/jobs",
         Some(
             r#"{"command": ["digest", "@ds", "--name", "chain-2"], "then": [["fingerprint"], ["classify"]]}"#,
         ),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let second = queued["job"].as_i64().unwrap();
+    let job = wait(second);
+    assert_eq!(job["state"], "done", "{job}");
+    let ended = marked(second, |j| j["result"]["chain_ended"].clone());
+    assert_eq!(
+        ended["skipped"],
+        serde_json::json!([["fingerprint"], ["classify"]]),
+        "{ended}"
+    );
+    assert!(
+        ended["why"].as_str().unwrap().contains("nothing new"),
+        "{ended}"
+    );
+    let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
+    assert_eq!(again["chain"]["after"], serde_json::Value::Null, "{again}");
+
+    // a step the caller may not queue ends the chain, and the job says why
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds", "--name", "chain-3"], "then": [["session"]]}"#),
         data,
     );
     assert_eq!(status, 202, "{queued}");
     let second = queued["job"].as_i64().unwrap();
     let job = wait(second);
     assert_eq!(job["state"], "done", "{job}");
-    let mut stopped = job["result"]["chain_stopped"].clone();
-    for _ in 0..300 {
-        if !stopped.is_null() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        stopped = look(second)["result"]["chain_stopped"].clone();
-    }
-    assert_eq!(stopped["step"], serde_json::json!(["fingerprint"]), "{job}");
+    let stopped = marked(second, |j| j["result"]["chain_stopped"].clone());
+    assert_eq!(stopped["step"], serde_json::json!(["session"]), "{job}");
     assert!(
         stopped["why"].as_str().unwrap().contains("pipelines:work"),
         "{stopped}"
@@ -4949,7 +5876,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@1.0.1", "{classified}");
+    assert_eq!(classified["pack"], "mri@1.0.2", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the
@@ -5467,4 +6394,2161 @@ fn only_a_person_withdraws_a_person_s_pick() {
         assert!(doc["error"].as_str().unwrap().contains("a person"), "{doc}");
     }
     server.finish();
+}
+
+/// Wave 7a (record 55 H2): a dataset's scans a page at a time, read from the
+/// registry and never through a cohort. Keyset paged by stack id; below
+/// detail quasi the subject's code, the day and a date label come back as
+/// their shapes (K7), the ids and the series description as they are; a
+/// sealed stack is never listed; an identified dataset nothing has read
+/// lists nothing, and is no error.
+#[test]
+fn a_dataset_lists_its_scans_a_page_at_a_time_shaped_below_quasi() {
+    scans_sweep(None);
+}
+
+/// The same on Postgres, where the dates are cast to text and the keyset is
+/// a row comparison.
+#[test]
+fn a_dataset_lists_its_scans_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    scans_sweep(Some(&dsn));
+    scans_store(Some(&dsn))
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {SCANS_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCANS_SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+}
+
+const SCANS_SCHEMA: &str = "nils_scans_door";
+
+fn scans_store(dsn: Option<&str>) -> nils_registry::Store {
+    match dsn {
+        Some(dsn) => nils_registry::Store::connect_postgres(dsn, SCANS_SCHEMA).unwrap(),
+        None => unreachable!(),
+    }
+}
+
+fn scans_sweep(dsn: Option<&str>) {
+    let home = TempDir::new("scans-home");
+    let dir = TempDir::new("scans-src");
+    let only_originals = TempDir::new("scans-originals");
+    for (patient, study, date, series) in [
+        ("P1", "1.2.3.A", "20260102", "t1 mprage"),
+        ("P1", "1.2.3.B", "20260305", "flair"),
+        ("P2", "1.2.3.C", "20260407", "dwi"),
+    ] {
+        let sop = format!("{study}.1.1");
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, series));
+        // a dataset is read from its structure: its anonymised tree
+        dir.file(
+            &format!("derivatives/dcm-anon/{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    let e = synth::minimal_mr("1.2.3.Z", "1.2.3.Z.1", "1.2.3.Z.1.1");
+    only_originals.file(
+        "derivatives/dcm-original/sub-1/a.dcm",
+        &synth::part10(&MetaFields::mr("1.2.3.Z.1.1"), &e, true),
+    );
+    let tree = dir.path().to_str().unwrap();
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    match dsn {
+        Some(dsn) => {
+            scans_store(Some(dsn))
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {SCANS_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCANS_SCHEMA}_linkage CASCADE"
+                ))
+                .unwrap();
+            run(
+                &home,
+                &[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    SCANS_SCHEMA,
+                    "--key",
+                    "k",
+                ],
+                None,
+            );
+        }
+        None => {
+            run(&home, &["init", "--key", "k"], None);
+        }
+    }
+    let open = || match dsn {
+        Some(_) => scans_store(dsn),
+        None => nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "incoming",
+            tree,
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nP1,mapped-0001\nP2,mapped-0002\n",
+    );
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "identified",
+            only_originals.path().to_str().unwrap(),
+            "--role",
+            "source",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "first", "--no-private", "@incoming"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(&home, &["session", "rebuild"], None);
+    let stacks: Vec<i64> = {
+        let mut store = open();
+        let stack = store.qualified("stack");
+        store
+            .query(&format!("SELECT id FROM {stack} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+    };
+    assert_eq!(stacks.len(), 3, "{stacks:?}");
+
+    const LIMIT: usize = 13;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+            "--token",
+            "a-places-token-of-length=pl@lab:places:see",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-len");
+    let places_only = Some("a-places-token-of-length");
+    let ask = |path: &str, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request("GET", path, None, token)
+    };
+
+    // at detail quasi every value as it is, sorted by code, then day
+    let (status, doc) = ask("/api/datasets/incoming/scans", reviewer);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["dataset"], "incoming", "{doc}");
+    assert_eq!(doc["detail"], "quasi", "{doc}");
+    assert_eq!(doc["total"], 3, "{doc}");
+    assert_eq!(doc["count"], 3, "{doc}");
+    assert_eq!(doc["next"], serde_json::Value::Null, "{doc}");
+    let scans = doc["scans"].as_array().unwrap();
+    let mut listed: Vec<i64> = scans.iter().map(|s| s["stack"].as_i64().unwrap()).collect();
+    listed.sort();
+    assert_eq!(listed, stacks, "{doc}");
+    let first = &scans[0];
+    for key in [
+        "stack",
+        "subject",
+        "session",
+        "series_description",
+        "orientation",
+        "images",
+        "day",
+    ] {
+        assert!(first.get(key).is_some(), "{key}: {doc}");
+    }
+    let days: Vec<&str> = scans.iter().map(|s| s["day"].as_str().unwrap()).collect();
+    let codes: Vec<&str> = scans
+        .iter()
+        .map(|s| s["subject"]["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.windows(2).all(|w| w[0] <= w[1]), "{doc}");
+    assert!(days.contains(&"2026-01-02"), "{doc}");
+    assert_eq!(first["images"], 1, "{doc}");
+    let one = scans.iter().find(|s| s["day"] == "2026-03-05").unwrap();
+    assert_eq!(one["series_description"], "flair", "{doc}");
+    assert!(one["session"]["id"].as_i64().is_some(), "{doc}");
+    assert_eq!(one["session"]["label"], "20260305", "{doc}");
+    let quasi_codes: Vec<String> = codes.iter().map(|c| c.to_string()).collect();
+
+    // the dataset view (2026-10-09): each scan's names, datatype, folder,
+    // axes and series number, from its own decided axes
+    let by_series = |d: &serde_json::Value, series: &str| -> i64 {
+        d["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["series_description"] == series)
+            .unwrap()["stack"]
+            .as_i64()
+            .unwrap()
+    };
+    {
+        let mut store = open();
+        let axis = store.qualified("classification_axis");
+        let t1 = by_series(&doc, "t1 mprage");
+        let flair = by_series(&doc, "flair");
+        for (stack, name, value) in [
+            (t1, "directory_type", "anat"),
+            (t1, "base", "T1w"),
+            (t1, "technique", "MPRAGE"),
+            (flair, "directory_type", "anat"),
+            (flair, "base", "T2w"),
+            (flair, "modifier", "FLAIR"),
+            (flair, "disposition", "scout"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {axis} (stack_id, axis, value, confidence, tier) \
+                         VALUES ({stack}, '{name}', '{value}', 1.0, 'rule')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+    let (status, named) = ask("/api/datasets/incoming/scans", reviewer);
+    assert_eq!(status, 200, "{named}");
+    let scan = |series: &str| -> serde_json::Value {
+        named["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["series_description"] == series)
+            .unwrap()
+            .clone()
+    };
+    let t1 = scan("t1 mprage");
+    assert_eq!(t1["datatype"], "anat", "{named}");
+    assert_eq!(t1["folder"], "anat", "{named}");
+    let name = t1["name"].as_str().unwrap();
+    assert!(name.contains("T1w") && name.contains("MPRAGE"), "{named}");
+    let bids = t1["bids"].as_str().unwrap();
+    assert!(bids.ends_with("_T1w") && bids.contains("MPRAGE"), "{named}");
+    assert!(!bids.contains("sub-") && !bids.contains("ses-"), "{named}");
+    assert_eq!(t1["axes"]["base"], "T1w", "{named}");
+    assert!(t1.get("series_number").is_some(), "{named}");
+    // the open questions come without pictures too
+    assert!(t1["questions"].is_array(), "{named}");
+    // a scout never takes a BIDS name and is shown under other
+    let scout = scan("flair");
+    assert_eq!(scout["datatype"], "other", "{named}");
+    assert_eq!(scout["bids"], serde_json::Value::Null, "{named}");
+    assert!(scout["name"].as_str().unwrap().contains("FLAIR"), "{named}");
+    // nothing decided: a name all the same, and other
+    let bare = scan("dwi");
+    assert_eq!(bare["datatype"], "other", "{named}");
+    assert_eq!(bare["bids"], serde_json::Value::Null, "{named}");
+    assert_eq!(bare["axes"], serde_json::json!({}), "{named}");
+
+    // at plain the code, the day and the date label are shapes; the ids and
+    // the series description are not
+    let (status, plain) = ask("/api/datasets/incoming/scans", reader);
+    assert_eq!(status, 200, "{plain}");
+    assert_eq!(plain["detail"], "plain", "{plain}");
+    let text = plain.to_string();
+    for code in &quasi_codes {
+        assert!(!text.contains(code.as_str()), "{code} at plain: {plain}");
+    }
+    assert!(!text.contains("2026-"), "{plain}");
+    assert!(!text.contains("20260305"), "{plain}");
+    let one = plain["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["series_description"] == "flair")
+        .unwrap();
+    assert_eq!(one["day"], "9999-99-99", "{plain}");
+    assert_eq!(one["session"]["label"], "99999999", "{plain}");
+    assert!(one["subject"]["id"].as_i64().is_some(), "{plain}");
+    // the same stacks in the same order, so a page reads the same either way
+    let order = |d: &serde_json::Value| -> Vec<i64> {
+        d["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["stack"].as_i64().unwrap())
+            .collect()
+    };
+    assert_eq!(order(&plain), order(&doc), "{plain}");
+
+    // a page at a time, the cursor a stack id
+    let (status, page) = ask("/api/datasets/incoming/scans?limit=2", reader);
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["count"], 2, "{page}");
+    assert_eq!(page["total"], 3, "{page}");
+    let next = page["next"].as_i64().unwrap();
+    assert_eq!(next, order(&doc)[1], "{page}");
+    let (status, rest) = ask(
+        &format!("/api/datasets/incoming/scans?limit=2&after={next}"),
+        reader,
+    );
+    assert_eq!(status, 200, "{rest}");
+    assert_eq!(order(&rest), vec![order(&doc)[2]], "{rest}");
+    assert_eq!(rest["next"], serde_json::Value::Null, "{rest}");
+
+    // the limit and the cursor are checked
+    let (status, refused) = ask("/api/datasets/incoming/scans?limit=0", reader);
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask("/api/datasets/incoming/scans?after=x", reader);
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask("/api/datasets/incoming/scans?after=999999", reader);
+    assert_eq!(status, 400, "{refused}");
+    // no such dataset, and the grant is data:see
+    let (status, refused) = ask("/api/datasets/nowhere/scans", reader);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/datasets/incoming/scans", places_only);
+    assert_eq!(status, 403, "{refused}");
+
+    // an identified dataset nothing has read: an empty list, not an error
+    let (status, empty) = ask("/api/datasets/identified/scans", reader);
+    assert_eq!(status, 200, "{empty}");
+    assert_eq!(empty["total"], 0, "{empty}");
+    assert_eq!(empty["scans"], serde_json::json!([]), "{empty}");
+    assert_eq!(empty["next"], serde_json::Value::Null, "{empty}");
+
+    // a stack of a sample sealed now is never listed
+    let sealed = order(&doc)[0];
+    {
+        let mut store = open();
+        let [stack, series, sealed_stack] =
+            ["stack", "series", "sealed_stack"].map(|t| store.qualified(t));
+        let subject = store
+            .query(
+                &format!("SELECT se.subject_id FROM {stack} st JOIN {series} se ON se.id = st.series_id WHERE st.id = {sealed}"),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {sealed_stack} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {sealed}, {subject}, 'anna', '2026-10-09T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let (status, after_seal) = ask("/api/datasets/incoming/scans", reviewer);
+    assert_eq!(status, 200, "{after_seal}");
+    assert_eq!(after_seal["total"], 2, "{after_seal}");
+    assert!(!order(&after_seal).contains(&sealed), "{after_seal}");
+
+    // the door is listed and has its policy row
+    let (status, caps) = ask("/api/capabilities", reader);
+    assert_eq!(status, 200, "{caps}");
+    assert!(
+        caps["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "GET /api/datasets/{name}/scans"),
+        "{caps}"
+    );
+    assert!(
+        caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["door"] == "GET /api/datasets/{name}/scans" && p["grant"] == "data:see"),
+        "{caps}"
+    );
+    assert_eq!(used.get(), LIMIT);
+    server.finish();
+}
+
+/// A dataset whose anonymised tree, or whose own folder, is a symbolic link
+/// lists its scans and counts its stacks: the digest keeps the tree's
+/// resolved root, and the place is matched to it through its trees resolved
+/// the same way.
+#[test]
+fn a_dataset_behind_a_symbolic_link_lists_its_scans() {
+    let home = TempDir::new("symlink-home");
+    let elsewhere = TempDir::new("symlink-anon");
+    let linked_tree = TempDir::new("symlink-tree-ds");
+    let real_ds = TempDir::new("symlink-real-ds");
+    let links = TempDir::new("symlink-links");
+    let write = |dir: &TempDir, rel: &str, study: &str, patient: &str| {
+        let sop = format!("{study}.1.1");
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        dir.file(
+            &format!("{rel}{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    };
+    // one: derivatives/dcm-anon is a link to a tree elsewhere
+    write(&elsewhere, "", "1.2.3.L", "P1");
+    std::fs::create_dir_all(linked_tree.path().join("derivatives")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path(),
+        linked_tree.path().join("derivatives/dcm-anon"),
+    )
+    .unwrap();
+    // two: the dataset's folder is itself a link
+    write(&real_ds, "derivatives/dcm-anon/", "1.2.3.M", "P2");
+    let linked_ds = links.path().join("ds-two");
+    std::os::unix::fs::symlink(real_ds.path(), &linked_ds).unwrap();
+
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nP1,mapped-0001\nP2,mapped-0002\n",
+    );
+    for (name, path) in [
+        ("one", linked_tree.path().to_str().unwrap()),
+        ("two", linked_ds.to_str().unwrap()),
+    ] {
+        run(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                path,
+                "--role",
+                "source",
+                "--patient-id",
+                "id-type:patient-id",
+                "--subjects",
+                "map",
+            ],
+            None,
+        );
+    }
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    for name in ["one", "two"] {
+        run(
+            &home,
+            &[
+                "digest",
+                "--name",
+                &format!("d-{name}"),
+                "--no-private",
+                &format!("@{name}"),
+            ],
+            None,
+        );
+    }
+    let server = Server::start(
+        &home,
+        3,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    for name in ["one", "two"] {
+        let (status, doc) =
+            server.request("GET", &format!("/api/datasets/{name}/scans"), None, reader);
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["total"], 1, "{name}: {doc}");
+    }
+    let (status, doc) = server.request("GET", "/api/sources", None, reader);
+    assert_eq!(status, 200, "{doc}");
+    for source in doc["sources"].as_array().unwrap() {
+        assert_eq!(source["totals"]["stacks"], 1, "{doc}");
+    }
+    assert_eq!(doc["sources"].as_array().unwrap().len(), 2, "{doc}");
+    server.finish();
+}
+
+/// Wave 7a, 2026-10-09: a dataset added through the places door while the
+/// engine runs is read by its name at once, with no restart; its anonymised
+/// tree, a symbolic link to where the files are, is looked into and found
+/// to hold DICOM; and an anonymised dataset is not read until it says what
+/// PatientID holds and how its subjects are found.
+#[cfg(unix)]
+#[test]
+fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
+    let home = registry();
+    let root = TempDir::new("live-root");
+    let real = TempDir::new("live-real");
+    for (i, sop) in ["1.2.3.L.1.1", "1.2.3.L.1.2"].iter().enumerate() {
+        let e = synth::minimal_mr("1.2.3.L", "1.2.3.L.1", sop);
+        // a file named as scanners name them, without `.dcm`
+        real.file(
+            &format!("sub-1/ses-1/IM{i:04}"),
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    std::fs::create_dir_all(root.path().join("study-big/derivatives")).unwrap();
+    std::os::unix::fs::symlink(
+        real.path(),
+        root.path().join("study-big/derivatives/dcm-anon"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.path().join("study-two/derivatives")).unwrap();
+    std::os::unix::fs::symlink(
+        real.path(),
+        root.path().join("study-two/derivatives/dcm-anon"),
+    )
+    .unwrap();
+    // the engine is started knowing the root alone, as an install's unit
+    // names the places it had then
+    let server = Server::start(
+        &home,
+        9,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--ingest-root",
+            &format!("data-test={}", root.path().display()),
+        ],
+        &[],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let (status, added) = server.request(
+        "POST",
+        "/api/places",
+        Some(
+            &serde_json::json!({
+                "name": "data-test",
+                "role": "source",
+                "path": root.path().display().to_string(),
+                "guarantees": {"backup": null, "snapshots": false, "protected": false, "fast": false},
+            })
+            .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{added}");
+    // the look follows the link into the tree and finds DICOM there
+    let (status, look) =
+        server.request("GET", "/api/places/data-test/folders/study-big", None, ops);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["holds_dicom"], "yes", "{look}");
+    assert_eq!(look["layout"]["state"], "anonymised", "{look}");
+    assert_eq!(
+        look["layout"]["settings"]["patient_id"]["required"], true,
+        "{look}"
+    );
+    assert_eq!(
+        look["layout"]["settings"]["subjects"]["required"], true,
+        "{look}"
+    );
+
+    // added without saying what PatientID holds: added, not read
+    let (status, two) = server.request(
+        "POST",
+        "/api/places",
+        Some(r#"{"role": "source", "root": "data-test", "folder": "study-two"}"#),
+        ops,
+    );
+    assert_eq!(status, 201, "{two}");
+    let not_read = two["not_read"].as_str().unwrap_or_default();
+    assert!(not_read.contains("PatientID"), "{two}");
+    assert!(not_read.contains("subjects"), "{two}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@study-two"]}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("not read"),
+        "{refused}"
+    );
+
+    // added with both: read by its name at once, no restart
+    let (status, big) = server.request(
+        "POST",
+        "/api/places",
+        Some(
+            r#"{"role": "source", "root": "data-test", "folder": "study-big", "patient_id": "subject-code", "subjects": "generated"}"#,
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{big}");
+    assert_eq!(big["not_read"], serde_json::Value::Null, "{big}");
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@study-big", "--name", "big"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert!(
+        queued["command"][1]
+            .as_str()
+            .is_some_and(|c| c.ends_with("study-big/derivatives/dcm-anon")),
+        "{queued}"
+    );
+    // a name that is no place is still refused, naming the new one
+    let (status, refused) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@nowhere"]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("study-big"),
+        "{refused}"
+    );
+    let (status, _) = server.request("GET", "/api/places", None, ops);
+    assert_eq!(status, 200);
+    let (status, _) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200);
+    server.finish();
+}
+
+/// The dataset viewer (2026-10-09): a dataset's subjects as the Grid's
+/// folders, one subject's visits, and one visit's scans, and the same over
+/// a cohort's members across datasets. Counts, order, filters, the search,
+/// the id type a person shows subjects by (clear only to a caller who may
+/// read identifiers), K7's shapes at plain, the sealed rule, paging, and
+/// every refusal.
+#[test]
+fn the_viewer_lists_subjects_visits_and_a_visit_s_scans() {
+    viewer_sweep(None);
+}
+
+/// The same on Postgres, where the dates are read as text and the counts
+/// come back as integers.
+#[test]
+fn the_viewer_lists_subjects_visits_and_a_visit_s_scans_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    viewer_sweep(Some(&dsn));
+    viewer_store(Some(&dsn))
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {VIEWER_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {VIEWER_SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+}
+
+/// Review of 2026-10-10: a visit's scans are its subject's alone. Two
+/// patients whose files name one study share it in the registry, which files
+/// the study under whichever patient it read first; a visit of that one,
+/// named by its session or by its studies, lists its scans and never the
+/// other's.
+#[test]
+fn a_visit_s_scans_are_its_subject_s_alone() {
+    let home = TempDir::new("viewer-shared-home");
+    let tree = TempDir::new("viewer-shared");
+    viewer_file(
+        &tree,
+        "S-0001",
+        "1.2.9.S",
+        "1.2.9.S.1",
+        "20260102",
+        "t1 mprage",
+        "SIEMENS",
+    );
+    viewer_file(
+        &tree,
+        "S-0002",
+        "1.2.9.S",
+        "1.2.9.S.2",
+        "20260102",
+        "t2 tse",
+        "SIEMENS",
+    );
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "shared",
+            tree.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,mapped-0001\nS-0002,mapped-0002\n",
+    );
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "shared", "--no-private", "@shared"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(&home, &["session", "rebuild"], None);
+    // the digest reads in parallel, so either patient may own the study
+    let (first, code) = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let [study, subject] = ["study", "subject"].map(|t| store.qualified(t));
+        let r = &store
+            .query(
+                &format!(
+                    "SELECT s.id, s.code FROM {study} sy JOIN {subject} s ON s.id = sy.subject_id \
+                     WHERE sy.study_instance_uid = '1.2.9.S'"
+                ),
+                &[],
+            )
+            .unwrap()[0];
+        (r.int(0).unwrap(), r.text(1).unwrap().to_string())
+    };
+    let own = if code == "mapped-0001" {
+        "t1 mprage"
+    } else {
+        "t2 tse"
+    };
+    let server = Server::start(
+        &home,
+        8,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+        ],
+        &[],
+    );
+    let reviewer = Some("a-reviewer-token-of-len");
+    let (status, v) = server.request(
+        "GET",
+        &format!("/api/datasets/shared/subjects/{first}/visits"),
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    let visit = &v["visits"][0];
+    let session = visit["session"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the visit's session: {v}"));
+    let study = visit["studies"][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the visit's study: {v}"));
+    for path in [
+        format!("/api/datasets/shared/scans?session={session}"),
+        format!("/api/datasets/shared/scans?studies={study}"),
+    ] {
+        let (status, scans) = server.request("GET", &path, None, reviewer);
+        assert_eq!(status, 200, "{path}: {scans}");
+        let named: Vec<&str> = scans["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["series_description"].as_str())
+            .collect();
+        assert_eq!(named, [own], "{path}: {scans}");
+        assert_eq!(scans["total"], 1, "{path}: {scans}");
+    }
+}
+
+const VIEWER_SCHEMA: &str = "nils_viewer_doors";
+
+fn viewer_store(dsn: Option<&str>) -> nils_registry::Store {
+    match dsn {
+        Some(dsn) => nils_registry::Store::connect_postgres(dsn, VIEWER_SCHEMA).unwrap(),
+        None => unreachable!(),
+    }
+}
+
+/// One synthetic MR file of a series: its patient, study and date, what
+/// the scanner called it, who made the scanner and its physics.
+fn viewer_file(
+    tree: &TempDir,
+    patient: &str,
+    study: &str,
+    series: &str,
+    date: &str,
+    description: &str,
+    maker: &str,
+) {
+    let sop = format!("{series}.1");
+    let mut e = synth::minimal_mr(study, series, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
+    e.push(synth::text(tags::MANUFACTURER, VR::LO, maker));
+    e.push(synth::text(tags::ECHO_TIME, VR::DS, "2.3"));
+    e.push(synth::text(tags::REPETITION_TIME, VR::DS, "2300"));
+    e.push(synth::text(tags::FLIP_ANGLE, VR::DS, "8"));
+    tree.file(
+        &format!("derivatives/dcm-anon/{study}/{sop}"),
+        &synth::part10(&MetaFields::mr(&sop), &e, true),
+    );
+}
+
+fn viewer_sweep(dsn: Option<&str>) {
+    let home = TempDir::new("viewer-home");
+    let trees = [
+        ("first", TempDir::new("viewer-first")),
+        ("second", TempDir::new("viewer-second")),
+        ("third", TempDir::new("viewer-third")),
+    ];
+    // three subjects in one dataset; the first comes back in a second one,
+    // where a fourth turns out to be the first and is merged into it; the
+    // third comes back in a third one, read after the sessions were built.
+    // A file a line: dataset, patient, study, series, date, description,
+    // maker.
+    const FILES: &str = "\
+first|S-0001|1.2.9.A|1.2.9.A.1|20260102|t1 mprage|SIEMENS
+first|S-0001|1.2.9.A|1.2.9.A.2|20260102|sc t2|SIEMENS
+first|S-0001|1.2.9.B|1.2.9.B.1|20260305|flair|SIEMENS
+first|S-0002|1.2.9.C|1.2.9.C.1|20260407|dwi|GE MEDICAL SYSTEMS
+first|S-0003|1.2.9.D|1.2.9.D.1|20260510|t1 post|Philips Medical Systems
+first|S-0003|1.2.9.D|1.2.9.D.2|20260510|symri|Philips Medical Systems
+second|S-0001|1.2.9.E|1.2.9.E.1|20260601|t2 tse|SIEMENS
+second|S-0004|1.2.9.F|1.2.9.F.1|20260601|pd tse|SIEMENS
+third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
+    for line in FILES.lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        let tree = &trees.iter().find(|(n, _)| *n == f[0]).unwrap().1;
+        viewer_file(tree, f[1], f[2], f[3], f[4], f[5], f[6]);
+    }
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    match dsn {
+        Some(dsn) => {
+            viewer_store(Some(dsn))
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {VIEWER_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {VIEWER_SCHEMA}_linkage CASCADE"
+                ))
+                .unwrap();
+            run(
+                &home,
+                &[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    VIEWER_SCHEMA,
+                    "--key",
+                    "k",
+                ],
+                None,
+            );
+        }
+        None => {
+            run(&home, &["init", "--key", "k"], None);
+        }
+    }
+    let open = || match dsn {
+        Some(_) => viewer_store(dsn),
+        None => nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    for (name, tree) in &trees {
+        run(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                tree.path().to_str().unwrap(),
+                "--role",
+                "source",
+                "--patient-id",
+                "id-type:patient-id",
+                "--subjects",
+                "map",
+            ],
+            None,
+        );
+    }
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,mapped-0001\nS-0002,mapped-0002\nS-0003,mapped-0003\nS-0004,mapped-0004\n",
+    );
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    for name in ["first", "second"] {
+        let at = format!("@{name}");
+        run(
+            &home,
+            &["digest", "--name", name, "--no-private", &at],
+            None,
+        );
+    }
+    run(&home, &["fingerprint"], None);
+    // the fourth is the first: its code becomes the first's alias
+    run(
+        &home,
+        &[
+            "linkage",
+            "merge",
+            "mapped-0001",
+            "mapped-0004",
+            "--why",
+            "one person",
+        ],
+        None,
+    );
+    run(&home, &["session", "rebuild"], None);
+    // the third dataset is read after the sessions were built: its study
+    // is a visit the cache does not hold yet
+    run(
+        &home,
+        &["digest", "--name", "third", "--no-private", "@third"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+
+    // the registry's ids, read here; the doors are asked for the rest
+    let (stack_of, subject_of, study_of) = {
+        let mut store = open();
+        let [stack, fp, subject, study] =
+            ["stack", "stack_fingerprint", "subject", "study"].map(|t| store.qualified(t));
+        let pairs = |store: &mut nils_registry::Store, sql: &str| {
+            store
+                .query(sql, &[])
+                .unwrap()
+                .iter()
+                .map(|r| (r.text(1).unwrap().to_string(), r.int(0).unwrap()))
+                .collect::<std::collections::HashMap<String, i64>>()
+        };
+        (
+            pairs(
+                &mut store,
+                &format!(
+                    "SELECT st.id, f.text_series_description FROM {stack} st \
+                     JOIN {fp} f ON f.stack_id = st.id"
+                ),
+            ),
+            pairs(&mut store, &format!("SELECT id, code FROM {subject}")),
+            pairs(
+                &mut store,
+                &format!("SELECT id, study_instance_uid FROM {study}"),
+            ),
+        )
+    };
+    assert_eq!(stack_of.len(), 9, "{stack_of:?}");
+    let st = |d: &str| stack_of[d];
+    let (s1, s2, s3) = (
+        subject_of["mapped-0001"],
+        subject_of["mapped-0002"],
+        subject_of["mapped-0003"],
+    );
+
+    // what NILS says each scan is, the questions, the picks and a cohort
+    {
+        let mut store = open();
+        let [axis, item, member, pick, pick_stack, cohort, cohort_member] = [
+            "classification_axis",
+            "review_item",
+            "review_member",
+            "pick",
+            "pick_stack",
+            "cohort",
+            "cohort_member",
+        ]
+        .map(|t| store.qualified(t));
+        for (series, name, value) in [
+            ("t1 mprage", "directory_type", "anat"),
+            ("t1 mprage", "base", "T1w"),
+            ("t1 mprage", "body_part", "brain"),
+            ("sc t2", "directory_type", "anat"),
+            ("sc t2", "base", "T2w"),
+            ("sc t2", "body_part", "spine"),
+            ("flair", "directory_type", "anat"),
+            ("flair", "base", "T2w"),
+            ("flair", "modifier", "FLAIR"),
+            ("flair", "body_part", "brain"),
+            ("flair", "post_contrast", "1"),
+            ("dwi", "directory_type", "dwi"),
+            ("dwi", "base", "DWI"),
+            ("dwi", "body_part", "brain"),
+            ("t1 post", "directory_type", "anat"),
+            ("t1 post", "base", "T1w"),
+            ("t1 post", "body_part", "brain-neck"),
+            ("symri", "directory_type", "anat"),
+            ("symri", "provenance", "SyMRI"),
+            ("symri", "body_part", "brain"),
+            ("t2 tse", "directory_type", "anat"),
+            ("t2 tse", "base", "T2w"),
+            ("t2 tse", "body_part", "brain"),
+            ("pd tse", "directory_type", "anat"),
+            ("pd tse", "base", "PDw"),
+            ("pd tse", "body_part", "brain"),
+            ("t1 late", "directory_type", "anat"),
+            ("t1 late", "base", "T1w"),
+            ("t1 late", "body_part", "brain"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {axis} (stack_id, axis, value, confidence, tier) \
+                         VALUES ({}, '{name}', '{value}', 1.0, 'rule')",
+                        st(series)
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // an open grouped question on the first T1, a staged question of
+        // System 1's about the SyMRI scan alone, and an accepted one that
+        // waits for nobody: the sort's questions, a look wherever counted
+        let mut question = |kind: &str, scope: &str, reference: &str, status: &str| {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {item} (kind, scope, ref, status, created_at) \
+                         VALUES ('{kind}', '{scope}', '{reference}', '{status}', '2026-10-09T10:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            store
+                .query(&format!("SELECT MAX(id) FROM {item}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        let grouped = question("base:low_confidence", "rule", "{}", "open");
+        let _ = question(
+            "classify.asked",
+            "stack",
+            &format!("{{\"stack_id\": {}}}", st("symri")),
+            "staged",
+        );
+        let accepted = question("body_part:low_confidence", "rule", "{}", "accepted");
+        for (item_id, series) in [(grouped, "t1 mprage"), (accepted, "dwi")] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {member} (item_id, stack_id) VALUES ({item_id}, {})",
+                        st(series)
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // a live T1w and FLAIR of the first subject, and a withdrawn T1w of
+        // the third
+        for (role, series, subject, day, withdrawn) in [
+            ("t1w", "t1 mprage", s1, "2026-01-02", "NULL"),
+            ("flair", "flair", s1, "2026-03-05", "NULL"),
+            ("t1w", "t1 post", s3, "2026-05-10", "'2026-10-09T11:00:00Z'"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {pick} (model, role, subject_id, session_day, scheme, reference, \
+                         pack, pack_version, actor, author_kind, decided_at, withdrawn_at) \
+                         VALUES ('main', '{role}', {subject}, '{day}', 'default', 'site', 'mri', \
+                         '1.0.0', 'nils', 'agent', '2026-10-09T10:00:00Z', {withdrawn})"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let id = store
+                .query(&format!("SELECT MAX(id) FROM {pick}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {pick_stack} (pick_id, stack_id) VALUES ({id}, {})",
+                        st(series)
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // a cohort of the first and the third; the second joined and left
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {cohort} (name, owner, created_at) \
+                     VALUES ('c1', 'anna', '2026-10-09T10:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let c1 = store
+            .query(&format!("SELECT id FROM {cohort} WHERE name = 'c1'"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        for (subject, left) in [(s1, "NULL"), (s3, "NULL"), (s2, "'2026-10-09T10:30:00Z'")] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {cohort_member} (cohort_id, subject_id, joined_at, left_at, source) \
+                         VALUES ({c1}, {subject}, '2026-10-09T10:00:00Z', {left}, 'manual')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+
+    const LIMIT: usize = 72;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+            "--token",
+            "a-reviewer-who-works-tok=work@lab:reviewer,data:work",
+            "--token",
+            "an-operator-token-of-len=op@lab:operator",
+            "--token",
+            "a-places-token-of-length=pl@lab:places:see",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-len");
+    let works = Some("a-reviewer-who-works-tok");
+    let operator = Some("an-operator-token-of-len");
+    let places_only = Some("a-places-token-of-length");
+    let ask = |path: &str, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request("GET", path, None, token)
+    };
+    let ids = |d: &serde_json::Value| -> Vec<i64> {
+        d["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_i64().unwrap())
+            .collect()
+    };
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // ---- the subjects of a dataset, at detail quasi
+    let (status, doc) = ask("/api/datasets/first/subjects", reviewer);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["scope"]["kind"], "dataset", "{doc}");
+    assert_eq!(doc["scope"]["name"], "first", "{doc}");
+    assert_eq!(doc["detail"], "quasi", "{doc}");
+    assert_eq!(doc["show"], "code", "{doc}");
+    assert_eq!(doc["order"], "look", "{doc}");
+    assert_eq!(
+        doc["totals"],
+        serde_json::json!({"subjects": 3, "visits": 4, "scans": 6, "look": 2}),
+        "{doc}"
+    );
+    assert_eq!(doc["matched"], 3, "{doc}");
+    assert_eq!(doc["count"], 3, "{doc}");
+    assert_eq!(doc["next"], serde_json::Value::Null, "{doc}");
+    // most to look at first, then by code
+    assert_eq!(ids(&doc), vec![s1, s3, s2], "{doc}");
+    let one = &doc["subjects"][0];
+    assert_eq!(one["code"], "mapped-0001", "{doc}");
+    assert_eq!(one["label"], "mapped-0001", "{doc}");
+    assert_eq!(one["visits"], 2, "{doc}");
+    assert_eq!(one["scans"], 3, "{doc}");
+    assert_eq!(one["look"], 1, "{doc}");
+    assert_eq!(
+        one["regions"],
+        serde_json::json!(["brain", "spine"]),
+        "{doc}"
+    );
+    assert_eq!(one["makers"], serde_json::json!(["Siemens"]), "{doc}");
+    assert_eq!(one["main"], serde_json::json!(["flair", "t1w"]), "{doc}");
+    let three = &doc["subjects"][1];
+    // the staged question about one stack counts; the withdrawn pick does not
+    assert_eq!(three["look"], 1, "{doc}");
+    assert_eq!(three["main"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        three["regions"],
+        serde_json::json!(["brain", "neck"]),
+        "{doc}"
+    );
+    assert_eq!(three["makers"], serde_json::json!(["Philips"]), "{doc}");
+    // the accepted question waits for nobody
+    assert_eq!(doc["subjects"][2]["look"], 0, "{doc}");
+    assert_eq!(
+        doc["subjects"][2]["makers"],
+        serde_json::json!(["GE"]),
+        "{doc}"
+    );
+    assert_eq!(
+        names(&doc["facets"]["makers"]),
+        vec!["GE", "Philips", "Siemens"],
+        "{doc}"
+    );
+    assert_eq!(
+        doc["facets"]["regions"][0],
+        serde_json::json!({"name": "brain", "subjects": 3}),
+        "{doc}"
+    );
+    assert_eq!(
+        names(&doc["facets"]["roles"]),
+        vec!["flair", "t1w"],
+        "{doc}"
+    );
+    assert_eq!(
+        doc["facets"]["id_types"],
+        serde_json::json!([
+            {"name": "patient-id", "subjects": 3},
+            {"name": "subject-code", "subjects": 1},
+        ]),
+        "{doc}"
+    );
+
+    // every order, the ties by code
+    for (order, want) in [
+        ("code", vec![s1, s2, s3]),
+        ("visits", vec![s1, s2, s3]),
+        ("scans", vec![s1, s3, s2]),
+    ] {
+        let (status, d) = ask(
+            &format!("/api/datasets/first/subjects?order={order}"),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(ids(&d), want, "{order}: {d}");
+    }
+    // the filters: kinds all hold, values of one kind any
+    for (filter, want) in [
+        ("look", vec![s1, s3]),
+        ("visits2", vec![s1]),
+        ("main:t1w", vec![s1]),
+        ("main:flair,main:t1w", vec![s1]),
+        ("region:spine", vec![s1]),
+        ("region:neck,region:spine", vec![s1, s3]),
+        ("maker:ge", vec![s2]),
+        ("maker:Siemens,maker:philips", vec![s1, s3]),
+        ("look,maker:siemens", vec![s1]),
+    ] {
+        let (status, d) = ask(
+            &format!("/api/datasets/first/subjects?filter={filter}"),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(ids(&d), want, "{filter}: {d}");
+        assert_eq!(d["matched"], want.len(), "{filter}: {d}");
+        // the totals stay the whole dataset's
+        assert_eq!(d["totals"]["subjects"], 3, "{filter}: {d}");
+    }
+    // the search finds a code as the caller is shown it
+    let (status, d) = ask("/api/datasets/first/subjects?q=0002", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), vec![s2], "{d}");
+    // an identifier given whole finds its subject only for a caller who may
+    // read identifiers, and nothing is opened to find it
+    let (status, d) = ask("/api/datasets/first/subjects?q=S-0003", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), Vec::<i64>::new(), "{d}");
+    let (status, d) = ask("/api/datasets/first/subjects?q=S-0003", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), vec![s3], "{d}");
+    // the merged subject's identifier is the first's now
+    let (status, d) = ask("/api/datasets/first/subjects?q=S-0004", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(ids(&d), vec![s1], "{d}");
+
+    // shown by an id type: clear only to data:work at detail sensitive
+    let label_of = |d: &serde_json::Value, id: i64| -> serde_json::Value {
+        d["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()["label"]
+            .clone()
+    };
+    let (status, d) = ask("/api/datasets/first/subjects?show=patient-id", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["show"], "patient-id", "{d}");
+    assert_eq!(label_of(&d, s1), "S-0001", "{d}");
+    assert_eq!(label_of(&d, s3), "S-0003", "{d}");
+    for token in [reviewer, works, reader] {
+        let (status, d) = ask("/api/datasets/first/subjects?show=patient-id", token);
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(label_of(&d, s1), "A-9999", "{d}");
+        assert!(!d.to_string().contains("S-000"), "{d}");
+    }
+    // the alias a merge files is a code, shown as codes are: as it is at
+    // detail quasi, as its shape below
+    let (status, d) = ask("/api/datasets/first/subjects?show=subject-code", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(label_of(&d, s1), "mapped-0004", "{d}");
+    assert_eq!(label_of(&d, s2), serde_json::Value::Null, "{d}");
+    let (status, d) = ask("/api/datasets/first/subjects?show=subject-code", reader);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(label_of(&d, s1), "aaaaaa-9999", "{d}");
+    let (status, refused) = ask("/api/datasets/first/subjects?show=no-such-type", reviewer);
+    assert_eq!(status, 400, "{refused}");
+
+    // at plain the code is its shape, so its value is not found by it
+    let (status, plain) = ask("/api/datasets/first/subjects", reader);
+    assert_eq!(status, 200, "{plain}");
+    assert_eq!(plain["detail"], "plain", "{plain}");
+    assert!(!plain.to_string().contains("mapped-"), "{plain}");
+    assert_eq!(plain["subjects"][0]["code"], "aaaaaa-9999", "{plain}");
+    assert_eq!(ids(&plain), ids(&doc), "{plain}");
+    let (status, d) = ask("/api/datasets/first/subjects?q=0002", reader);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["matched"], 0, "{d}");
+
+    // a page at a time, the cursor a subject's id
+    let (status, page) = ask("/api/datasets/first/subjects?limit=2", reviewer);
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(ids(&page), vec![s1, s3], "{page}");
+    assert_eq!(page["next"], s3, "{page}");
+    let (status, rest) = ask(
+        &format!("/api/datasets/first/subjects?limit=2&after={s3}"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{rest}");
+    assert_eq!(ids(&rest), vec![s2], "{rest}");
+    assert_eq!(rest["next"], serde_json::Value::Null, "{rest}");
+    for bad in [
+        "limit=0",
+        "limit=201",
+        "after=x",
+        "after=999999",
+        "order=newest",
+        "filter=visits3",
+        "filter=region",
+    ] {
+        let (status, refused) = ask(&format!("/api/datasets/first/subjects?{bad}"), reviewer);
+        assert_eq!(status, 400, "{bad}: {refused}");
+    }
+    let (status, refused) = ask("/api/datasets/nowhere/subjects", reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/datasets/first/subjects", places_only);
+    assert_eq!(status, 403, "{refused}");
+
+    // ---- one subject's visits, by date, number and days from the first
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["name"], "date", "{v}");
+    assert_eq!(v["subject"]["id"], s1, "{v}");
+    assert_eq!(v["subject"]["code"], "mapped-0001", "{v}");
+    assert_eq!(
+        v["totals"],
+        serde_json::json!({"visits": 2, "scans": 3, "look": 1, "span": "62"}),
+        "{v}"
+    );
+    let visits = v["visits"].as_array().unwrap();
+    assert_eq!(visits.len(), 2, "{v}");
+    let (a, b) = (&visits[0], &visits[1]);
+    assert_eq!(a["label"], "ses-20260102", "{v}");
+    assert_eq!(a["first"], "2026-01-02", "{v}");
+    assert_eq!(a["day"], "0", "{v}");
+    assert_eq!(a["number"], 1, "{v}");
+    assert_eq!(a["scans"], 2, "{v}");
+    assert_eq!(a["look"], 1, "{v}");
+    assert_eq!(a["regions"], serde_json::json!(["brain", "spine"]), "{v}");
+    assert_eq!(
+        a["kinds"],
+        serde_json::json!([{"kind": "T1w", "scans": 1}, {"kind": "T2w", "scans": 1}]),
+        "{v}"
+    );
+    assert_eq!(a["contrast"], false, "{v}");
+    assert_eq!(a["symri"], 0, "{v}");
+    assert_eq!(a["main"][0]["role"], "t1w", "{v}");
+    assert_eq!(a["main"][0]["stack"], st("t1 mprage"), "{v}");
+    assert!(
+        a["main"][0]["name"].as_str().unwrap().contains("T1w"),
+        "{v}"
+    );
+    assert!(a["session"].as_i64().is_some(), "{v}");
+    assert_eq!(
+        a["studies"],
+        serde_json::json!([study_of["1.2.9.A"]]),
+        "{v}"
+    );
+    assert_eq!(b["label"], "ses-20260305", "{v}");
+    assert_eq!(b["day"], "62", "{v}");
+    assert_eq!(
+        b["kinds"],
+        serde_json::json!([{"kind": "FLAIR", "scans": 1}]),
+        "{v}"
+    );
+    assert_eq!(b["contrast"], true, "{v}");
+    assert_eq!(b["main"][0]["role"], "flair", "{v}");
+    let session_a = a["session"].as_i64().unwrap();
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits?name=number"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][0]["label"], "ses-01", "{v}");
+    assert_eq!(v["visits"][1]["label"], "ses-02", "{v}");
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits?name=days"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][0]["label"], "ses-d0", "{v}");
+    assert_eq!(v["visits"][1]["label"], "ses-d62", "{v}");
+    // the filters
+    for (filter, want) in [
+        ("look", vec!["ses-20260102"]),
+        ("contrast", vec!["ses-20260305"]),
+        ("region:spine", vec!["ses-20260102"]),
+        ("symri", vec![]),
+        ("look,contrast", vec![]),
+    ] {
+        let (status, v) = ask(
+            &format!("/api/datasets/first/subjects/{s1}/visits?filter={filter}"),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{v}");
+        let labels: Vec<&str> = v["visits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, want, "{filter}: {v}");
+        assert_eq!(v["totals"]["visits"], 2, "{filter}: {v}");
+    }
+    // at plain the dates and the days are shapes; the numbers are not
+    let (status, v) = ask(&format!("/api/datasets/first/subjects/{s1}/visits"), reader);
+    assert_eq!(status, 200, "{v}");
+    assert!(!v.to_string().contains("2026"), "{v}");
+    assert!(!v.to_string().contains("mapped-"), "{v}");
+    assert_eq!(v["visits"][0]["label"], "ses-99999999", "{v}");
+    assert_eq!(v["visits"][0]["first"], "9999-99-99", "{v}");
+    assert_eq!(v["visits"][1]["day"], "99", "{v}");
+    assert_eq!(v["visits"][1]["number"], 2, "{v}");
+    assert_eq!(v["totals"]["span"], "99", "{v}");
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s1}/visits?name=days"),
+        reader,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][1]["label"], "ses-d99", "{v}");
+    // refusals: a subject outside the dataset, one that is no subject, and
+    // what the door does not know
+    for (path, code) in [
+        (format!("/api/datasets/second/subjects/{s2}/visits"), 404),
+        (
+            "/api/datasets/first/subjects/999999/visits".to_string(),
+            404,
+        ),
+        ("/api/datasets/first/subjects/x/visits".to_string(), 400),
+        (
+            format!("/api/datasets/first/subjects/{s1}/visits?name=month"),
+            400,
+        ),
+        (
+            format!("/api/datasets/first/subjects/{s1}/visits?filter=maker:ge"),
+            400,
+        ),
+    ] {
+        let (status, refused) = ask(&path, reviewer);
+        assert_eq!(status, code, "{path}: {refused}");
+    }
+
+    // ---- one visit's scans: a session, or the studies of a visit
+    let (status, scans) = ask(
+        &format!("/api/datasets/first/scans?session={session_a}"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["scope"]["kind"], "dataset", "{scans}");
+    assert_eq!(scans["dataset"], "first", "{scans}");
+    assert_eq!(scans["total"], 2, "{scans}");
+    let scan = |d: &serde_json::Value, series: &str| -> serde_json::Value {
+        d["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["series_description"] == series)
+            .unwrap()
+            .clone()
+    };
+    let t1 = scan(&scans, "t1 mprage");
+    assert_eq!(t1["family"], "plain", "{scans}");
+    assert_eq!(t1["te"], 2.3, "{scans}");
+    assert_eq!(t1["tr"], 2300.0, "{scans}");
+    assert_eq!(t1["ti"], serde_json::Value::Null, "{scans}");
+    assert_eq!(t1["fa"], 8.0, "{scans}");
+    assert_eq!(t1["main"], serde_json::json!(["t1w"]), "{scans}");
+    assert_eq!(t1["study"], study_of["1.2.9.A"], "{scans}");
+    assert_eq!(
+        t1["questions"],
+        serde_json::json!(["base:low_confidence"]),
+        "{scans}"
+    );
+    let spine = scan(&scans, "sc t2");
+    assert_eq!(spine["family"], "body", "{scans}");
+    assert_eq!(spine["main"], serde_json::json!([]), "{scans}");
+    let (status, scans) = ask(
+        &format!("/api/datasets/first/scans?studies={}", study_of["1.2.9.D"]),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["total"], 2, "{scans}");
+    let symri = scan(&scans, "symri");
+    assert_eq!(symri["family"], "symri", "{scans}");
+    // a staged question about one stack is a question too
+    assert_eq!(
+        symri["questions"],
+        serde_json::json!(["classify.asked"]),
+        "{scans}"
+    );
+    let too_many = (0..101)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for bad in [
+        "session=x".to_string(),
+        "studies=1,x".to_string(),
+        format!("studies={too_many}"),
+        format!("session={session_a}&studies=1"),
+    ] {
+        let (status, refused) = ask(&format!("/api/datasets/first/scans?{bad}"), reviewer);
+        assert_eq!(status, 400, "{bad}: {refused}");
+    }
+
+    // ---- a cohort: its current members, across datasets
+    let (status, c) = ask("/api/cohorts/c1/subjects", reviewer);
+    assert_eq!(status, 200, "{c}");
+    assert_eq!(c["scope"]["kind"], "cohort", "{c}");
+    assert_eq!(c["scope"]["name"], "c1", "{c}");
+    assert_eq!(
+        c["totals"],
+        serde_json::json!({"subjects": 2, "visits": 5, "scans": 8, "look": 2}),
+        "{c}"
+    );
+    let member = |id: i64| -> serde_json::Value {
+        c["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(member(s1)["visits"], 3, "{c}");
+    assert_eq!(member(s1)["scans"], 5, "{c}");
+    assert_eq!(member(s3)["visits"], 2, "{c}");
+    let (status, v) = ask(&format!("/api/cohorts/c1/subjects/{s1}/visits"), reviewer);
+    assert_eq!(status, 200, "{v}");
+    let visits = v["visits"].as_array().unwrap();
+    assert_eq!(visits.len(), 3, "{v}");
+    // the merged subject's study of the same day is the same visit
+    let merged = &visits[2];
+    assert!(merged["session"].as_i64().is_some(), "{v}");
+    let mut both = vec![study_of["1.2.9.E"], study_of["1.2.9.F"]];
+    both.sort_unstable();
+    assert_eq!(merged["studies"], serde_json::json!(both), "{v}");
+    assert_eq!(merged["scans"], 2, "{v}");
+    assert_eq!(merged["day"], "150", "{v}");
+    let session_ef = merged["session"].as_i64().unwrap();
+    // the second dataset's view numbers that subject's visits the same way
+    let (status, v) = ask(
+        &format!("/api/datasets/second/subjects/{s1}/visits"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["visits"][0]["number"], 3, "{v}");
+    assert_eq!(v["totals"]["visits"], 1, "{v}");
+    // the third dataset's study is a visit the cache does not hold yet
+    let (status, v) = ask(&format!("/api/cohorts/c1/subjects/{s3}/visits"), reviewer);
+    assert_eq!(status, 200, "{v}");
+    let late = &v["visits"][1];
+    assert_eq!(late["session"], serde_json::Value::Null, "{v}");
+    assert_eq!(
+        late["studies"],
+        serde_json::json!([study_of["1.2.9.G"]]),
+        "{v}"
+    );
+    assert_eq!(late["label"], "ses-20260701", "{v}");
+    assert_eq!(late["number"], 2, "{v}");
+    assert_eq!(late["day"], "52", "{v}");
+    let (status, scans) = ask(
+        &format!("/api/cohorts/c1/scans?studies={}", study_of["1.2.9.G"]),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["cohort"], "c1", "{scans}");
+    assert_eq!(scans["scope"]["kind"], "cohort", "{scans}");
+    assert_eq!(scans["total"], 1, "{scans}");
+    assert_eq!(
+        scans["scans"][0]["series_description"], "t1 late",
+        "{scans}"
+    );
+    let (status, scans) = ask(
+        &format!("/api/cohorts/c1/scans?session={session_ef}"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{scans}");
+    assert_eq!(scans["total"], 2, "{scans}");
+    let (status, all) = ask("/api/cohorts/c1/scans", reviewer);
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(all["total"], 8, "{all}");
+    // a member who left is no member
+    let (status, refused) = ask(&format!("/api/cohorts/c1/subjects/{s2}/visits"), reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/cohorts/nowhere/subjects", reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/cohorts/nowhere/scans", reviewer);
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = ask("/api/cohorts/c1/subjects", places_only);
+    assert_eq!(status, 403, "{refused}");
+
+    // ---- a stack of a sample sealed now is in no scope and no count
+    {
+        let mut store = open();
+        let sealed_stack = store.qualified("sealed_stack");
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {sealed_stack} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {}, {s3}, 'anna', '2026-10-09T10:00:00Z')",
+                    st("symri")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let (status, d) = ask("/api/datasets/first/subjects", reviewer);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(
+        d["totals"],
+        serde_json::json!({"subjects": 3, "visits": 4, "scans": 5, "look": 1}),
+        "{d}"
+    );
+    let (status, v) = ask(
+        &format!("/api/datasets/first/subjects/{s3}/visits"),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["totals"]["scans"], 1, "{v}");
+    assert_eq!(v["visits"][0]["symri"], 0, "{v}");
+
+    // ---- the doors are listed and have their policy rows
+    let (status, caps) = ask("/api/capabilities", reader);
+    assert_eq!(status, 200, "{caps}");
+    for door in [
+        "GET /api/datasets/{name}/subjects",
+        "GET /api/datasets/{name}/subjects/{subject}/visits",
+        "GET /api/cohorts/{name}/scans",
+        "GET /api/cohorts/{name}/subjects",
+        "GET /api/cohorts/{name}/subjects/{subject}/visits",
+    ] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}: {caps}"
+        );
+        assert!(
+            caps["policy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["door"] == door && p["grant"] == "data:see"),
+            "{door}: {caps}"
+        );
+    }
+    // whatever was asked, the server ends: a miscount fails after it does
+    let made = used.get();
+    while used.get() < LIMIT {
+        let _ = ask("/api/status", reader);
+    }
+    server.finish();
+    assert_eq!(made, LIMIT, "the sweep made {made} requests");
+}
+
+/// Record 55 H3 (Nima's ruling of 2026-10-09): what the pack decided without
+/// asking is kept on the stack and shown at the explain and why doors; what
+/// the pack cannot rank has a door of its own for whoever tunes the pack;
+/// and the pack door says which axes matter and where a missing answer is
+/// asked.
+#[test]
+fn the_pack_decides_and_its_doors_show_what_it_decided_over() {
+    let home = TempDir::new("serve-h3-home");
+    let dir = TempDir::new("serve-h3-src");
+    let sop = "1.2.3.H.1.1";
+    let mut e = synth::minimal_mr("1.2.3.H", "1.2.3.H.1", sop);
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "sag t1 cervical cerebral"),
+        synth::text(tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+        synth::text(tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+        synth::text(tags::REPETITION_TIME, VR::DS, "600"),
+        synth::text(tags::ECHO_TIME, VR::DS, "12"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+    ]);
+    dir.file(
+        &format!("h/{sop}"),
+        &synth::part10(&MetaFields::mr(sop), &e, true),
+    );
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "h",
+            "--no-private",
+            dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    let said = run(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    assert!(said.contains("overrides"), "{said}");
+    let text = run(
+        &home,
+        &["explain", "1", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    assert!(
+        text.contains(
+            "body_part spine by body_part/spine over body_part/brain (brain), by rule order"
+        ),
+        "{text}"
+    );
+
+    let server = Server::start(&home, 5, &[], &[]);
+    // nothing the pack decided is a question
+    let (status, doc) = server.request("GET", "/api/explain/1", None, None);
+    assert_eq!(status, 200, "{doc}");
+    assert!(
+        doc["review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| !i["kind"].as_str().unwrap().ends_with(":conflict")),
+        "{doc}"
+    );
+    let o = doc["notes"]["overrides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["axis"] == "body_part")
+        .cloned()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(o["value"], "spine", "{o}");
+    assert_eq!(o["other"], "brain", "{o}");
+    assert_eq!(o["rank"], "rule_order", "{o}");
+    assert_eq!(o["by"]["rule"], "spine", "{o}");
+    assert_eq!(o["over"]["tier"], "keywords", "{o}");
+    // the auth is off, so detail is sensitive and the words show
+    assert!(!o["over"]["matched"].as_str().unwrap().is_empty(), "{o}");
+
+    // the why door gives the axis the rule it was decided over
+    let (status, why) = server.request("GET", "/api/stacks/1/why", None, None);
+    assert_eq!(status, 200, "{why}");
+    let body_part = why["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "body_part")
+        .cloned()
+        .unwrap_or_else(|| panic!("{why}"));
+    assert!(
+        body_part["overridden"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["rule"] == "brain" && v["value"] == "brain" && v["rank"] == "rule_order"),
+        "{body_part}"
+    );
+    assert!(why["unresolved"].is_array(), "{why}");
+
+    // what the pack cannot rank: nothing here
+    let (status, d) = server.request("GET", "/api/packs/mri/disagreements", None, None);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["pack"], "mri", "{d}");
+    assert_eq!(d["stacks"], 0, "{d}");
+    assert_eq!(d["pairs"], serde_json::json!([]), "{d}");
+
+    // the axes that matter, and where a missing answer is asked
+    let (status, pack) = server.request("GET", "/api/packs/mri", None, None);
+    assert_eq!(status, 200, "{pack}");
+    assert_eq!(
+        pack["review"]["asks_missing"],
+        serde_json::json!(["base"]),
+        "{pack}"
+    );
+    assert_eq!(
+        pack["review"]["by_model"],
+        serde_json::json!(["body_part", "body_region", "post_contrast"]),
+        "{pack}"
+    );
+    assert!(pack["review"]["matters"]["base"].is_array(), "{pack}");
+    assert!(
+        pack["review"]["matters"]["contrast_mix"].is_null(),
+        "{pack}"
+    );
+    let (status, review) = server.request("GET", "/api/review?status=open", None, None);
+    assert_eq!(status, 200, "{review}");
+    assert!(
+        review["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| !i["kind"].as_str().unwrap().starts_with("body_part:")),
+        "{review}"
+    );
+    server.finish();
+}
+
+/// Record 55 H3: the split note is information. A series a split left as
+/// stacks of one image each (here six echoes of one slice, each stating its
+/// echo time, which no fold joins) is noted on those stacks, shown on each
+/// scan of its dataset and counted on the sources door, and is never part of
+/// what needs a look.
+#[test]
+fn the_split_note_is_shown_on_the_scans_and_counted_beside_the_questions() {
+    let home = TempDir::new("serve-split-home");
+    let dir = TempDir::new("serve-split-src");
+    let write = |series: &str, echo: u32, instance: &str| {
+        let sop = format!("1.2.3.F.{series}.{echo}.{instance}");
+        let mut e = synth::minimal_mr("1.2.3.F", &format!("1.2.3.F.{series}"), &sop);
+        e.extend([
+            synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, "ax flow"),
+            synth::text(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            synth::text(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
+            synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            synth::text(tags::ECHO_TIME, VR::DS, &(2 * echo).to_string()),
+            synth::text(tags::REPETITION_TIME, VR::DS, "30.0"),
+            synth::text(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
+        ]);
+        dir.file(
+            &format!("derivatives/dcm-anon/{series}/{echo}-{instance}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    };
+    for echo in 1..=6 {
+        write("1", echo, "1");
+        write("2", echo, "1");
+        write("2", echo, "2");
+    }
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "flow",
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file("map.csv", b"PatientID,subject_code\nP1,mapped-0001\n");
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "flow", "--no-private", "@flow"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+
+    let server = Server::start(&home, 2, &[], &[]);
+    let (status, doc) = server.request("GET", "/api/sources", None, None);
+    assert_eq!(status, 200, "{doc}");
+    let flow = doc["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "flow")
+        .cloned()
+        .unwrap_or_else(|| panic!("{doc}"));
+    let totals = &flow["totals"];
+    assert_eq!(totals["stacks"], 12, "{totals}");
+    assert_eq!(
+        totals["noted"],
+        serde_json::json!({"split:one_image_per_stack": 6}),
+        "{totals}"
+    );
+    assert!(
+        totals["need_a_look"]
+            .get("split:one_image_per_stack")
+            .is_none(),
+        "{totals}"
+    );
+    let (status, page) = server.request("GET", "/api/datasets/flow/scans", None, None);
+    assert_eq!(status, 200, "{page}");
+    let noted: Vec<&serde_json::Value> = page["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| !s["notes"].as_array().unwrap().is_empty())
+        .collect();
+    assert_eq!(noted.len(), 6, "{page}");
+    for s in &noted {
+        assert_eq!(s["notes"][0]["kind"], "split:one_image_per_stack", "{s}");
+        assert_eq!(s["notes"][0]["value"], "multi_echo", "{s}");
+        assert_eq!(s["images"], 1, "{s}");
+        assert!(
+            s["questions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|q| !q.as_str().unwrap().starts_with("split")),
+            "{s}"
+        );
+    }
+    server.finish();
+}
+
+/// Record 56 §5.4, §5.5: a rule change's effect on the sorting, at the door
+/// and at the keyboard. The operations are applied to a copy of the pack and
+/// the registry is sorted both ways; nothing is written, and an operation
+/// that cannot apply is refused with why.
+#[test]
+fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
+    let home = registry();
+    let server = Server::start(&home, 5, &[], &[]);
+    let ops = r#"{"operations": [
+        {"op": "add_words", "axis": "post_contrast", "value": "given", "words": ["mprage"],
+         "reason": "a test word", "evidence": "this test"},
+        {"op": "silence", "when": {"axis": "technique", "is": "MRS"},
+         "reason": "a spectrum is nobody's question", "evidence": "this test"}
+    ], "examples": 3}"#;
+    let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["scope"]["stacks"], 2, "{doc}");
+    assert_eq!(doc["moved"]["stacks"], 2, "{doc}");
+    let pc = doc["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "post_contrast")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(pc["transitions"][0]["from"], "", "{doc}");
+    assert_eq!(pc["transitions"][0]["to"], "1", "{doc}");
+    assert_eq!(pc["transitions"][0]["stacks"], 2, "{doc}");
+    // the registry's stacks name no maker and no dataset, and say so
+    assert_eq!(pc["transitions"][0]["makes"]["(none)"], 2, "{doc}");
+    assert_eq!(pc["transitions"][0]["datasets"]["(none)"], 2, "{doc}");
+    assert_eq!(
+        pc["transitions"][0]["examples"].as_array().unwrap().len(),
+        2,
+        "{doc}"
+    );
+    assert_eq!(doc["names"]["descriptive"]["changed"], 2, "{doc}");
+    assert_eq!(doc["ships"]["as"], "rules release", "{doc}");
+    assert_eq!(doc["patch"]["cases"]["held"], true, "{doc}");
+    assert!(doc["review"]["by_kind"].is_array(), "{doc}");
+    assert_eq!(
+        doc["patch"]["applied"].as_array().unwrap().len(),
+        2,
+        "{doc}"
+    );
+    assert!(doc["seconds"]["total"].is_number(), "{doc}");
+    // nothing was written: the stacks are as they were
+    let (status, explain) = server.request("GET", "/api/explain/1", None, None);
+    assert_eq!(status, 200, "{explain}");
+    assert!(
+        explain["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["axis"] != "post_contrast" || a["value"] != "1"),
+        "{explain}"
+    );
+    // an operation that cannot apply says why, and a patch of another pack
+    // or a pack the engine does not serve is refused
+    let bad = r#"{"operations": [{"op": "move_set", "set": "symri", "after": "swi", "reason": "r", "evidence": "e"}]}"#;
+    let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(bad), None);
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("already runs after swi"),
+        "{doc}"
+    );
+    let other = r#"{"patch": {"patch": 1, "pack": "ct", "reason": "r", "evidence": "e", "operations": [{"op": "by_model", "axis": "base"}]}}"#;
+    let (status, doc) = server.request("POST", "/api/packs/mri/rehearse", Some(other), None);
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.request("POST", "/api/packs/ct/rehearse", Some(ops), None);
+    assert_eq!(status, 404, "{doc}");
+    server.finish();
+
+    // the keyboard says the same, and a pack edit is written as a diff
+    let dir = TempDir::new("rehearse-ops");
+    let file = dir.path().join("ops.yml");
+    std::fs::write(
+        &file,
+        "patch: 1\npack: mri\nreason: a test word\nevidence: this test\noperations:\n  - {op: add_words, axis: post_contrast, value: given, words: [mprage]}\n",
+    )
+    .unwrap();
+    let packs = packs();
+    let out = run(
+        &home,
+        &[
+            "pack",
+            "rehearse",
+            "--ops",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(out.contains("moved: 2 stacks"), "{out}");
+    assert!(out.contains("post_contrast: 2 moved"), "{out}");
+    assert!(out.contains("ships as a rules release: mri"), "{out}");
+    let written = dir.path().join("mri-next");
+    let out = run(
+        &home,
+        &[
+            "pack",
+            "apply",
+            packs.join("mri").to_str().unwrap(),
+            "--ops",
+            file.to_str().unwrap(),
+            "--out",
+            written.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(out.contains("written to"), "{out}");
+    assert!(out.contains("pack.yml"), "{out}");
+    let manifest = std::fs::read_to_string(written.join("pack.yml")).unwrap();
+    assert!(
+        manifest.contains("'mprage'") || manifest.contains("mprage"),
+        "the word is in"
+    );
+    assert!(
+        manifest.contains("# The order the rule sets run in."),
+        "the manifest kept its comments"
+    );
 }

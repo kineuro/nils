@@ -16,12 +16,13 @@
 //! The first shape, one identifier column and one code column
 //! ([`crate::linkage::import`]), runs through here.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use crate::linkage::{self, Identity, NewIdentity, Subject, Subkeys};
 use crate::merge;
 use crate::migrate;
+use crate::personnummer;
 use crate::pseudonym::{self, Scheme};
 use crate::schema::{Type, table};
 use crate::store::{Error, Insert, Param, Store};
@@ -139,6 +140,12 @@ pub enum Why {
     Mapped { code: String },
     /// The row's code names a subject that was merged into another.
     Merged { code: String, into: String },
+    /// A cell of a personnummer column is no personnummer: the column's
+    /// header and what is wrong with it, never the value.
+    NotPersonnummer {
+        column: String,
+        invalid: personnummer::Invalid,
+    },
 }
 
 impl fmt::Display for Why {
@@ -166,6 +173,11 @@ impl fmt::Display for Why {
             Why::Merged { code, into } => {
                 write!(f, "subject {code} was merged into {into}; name {into}")
             }
+            Why::NotPersonnummer { column, invalid } => write!(
+                f,
+                "{column}: not a personnummer ({invalid}); a personnummer column takes ten or \
+                 twelve digits with a valid date and check digit"
+            ),
         }
     }
 }
@@ -233,6 +245,18 @@ impl Released {
     }
 }
 
+/// A held identifier the map names, by the keyed lookup its held rows carry,
+/// and the code the map gives it (Wave 7a, the pseudonymise step): what lets
+/// a dataset's held identifiers fill with their codes as a map is
+/// rehearsed, never a value. One an identifier however many files hold it,
+/// and kept out of the report a door or a job answers; the door that
+/// rehearses a map for a dataset finds the dataset's own among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCode {
+    pub lookup: Vec<u8>,
+    pub code: String,
+}
+
 /// What the map will do, or did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -243,6 +267,8 @@ pub struct Report {
     pub held_released: u64,
     /// The same, by the type that named them and the type they were held as.
     pub held_released_by: Vec<Released>,
+    /// The held identifiers it names, each with the code the map gives it.
+    pub held_codes: Vec<HeldCode>,
     pub merges: Vec<Merge>,
     pub conflicts: Vec<Conflict>,
     pub dry_run: bool,
@@ -455,11 +481,35 @@ pub fn import(
             canonical: None,
             idents: Vec::new(),
         };
+        let mut refused = false;
         for (i, c) in map.columns.iter().enumerate() {
             let v = cell(i);
             if v.is_empty() {
                 continue;
             }
+            // a personnummer is filed, looked up and coded as its twelve
+            // digits, as the digest files it
+            let normal;
+            let v = match c.role.id_type() {
+                Some(t) if personnummer::is_type(t) => match personnummer::normalise(v) {
+                    Ok(n) => {
+                        normal = n;
+                        normal.as_str()
+                    }
+                    Err(invalid) => {
+                        report.conflicts.push(Conflict {
+                            row: r.line,
+                            why: Why::NotPersonnummer {
+                                column: c.header.clone(),
+                                invalid,
+                            },
+                        });
+                        refused = true;
+                        continue;
+                    }
+                },
+                _ => v,
+            };
             match &c.role {
                 Role::Identifier(t) => raw.idents.push(Ident {
                     id_type: t.clone(),
@@ -478,8 +528,8 @@ pub fn import(
                 Role::Ignore => {}
             }
         }
-        if raw.idents.is_empty() && raw.code.is_none() {
-            // a blank line
+        if refused || (raw.idents.is_empty() && raw.code.is_none()) {
+            // a blank line, or one refused above
             continue;
         }
         raws.push(raw);
@@ -618,8 +668,9 @@ pub fn import(
     let mut codes_ok: BTreeSet<String> = BTreeSet::new();
     let mut digests: HashMap<String, Vec<u8>> = HashMap::new();
     // every identifier of a row that stands, as (type, value), for the held
-    // files the map releases
+    // files the map releases, and the code each gives by its lookup
     let mut named: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut code_by_lookup: HashMap<Vec<u8>, String> = HashMap::new();
     'rows: for r in resolved {
         if let Some(s) = by_code.get(&r.code)
             && let Some(into) = s.merged_into
@@ -671,6 +722,7 @@ pub fn import(
         codes_ok.insert(r.code.clone());
         for i in r.idents {
             named.insert((i.id_type.clone(), i.value.clone()));
+            code_by_lookup.insert(i.lookup.clone(), r.code.clone());
             if let Some(e) = existing.get(&i.lookup) {
                 known.insert(i.lookup.clone());
                 let holder = code_of(&subjects, e.subject_id);
@@ -726,6 +778,21 @@ pub fn import(
     let matches = held_matches(registry, keys, &named)?;
     report.held_released = matches.len() as u64;
     report.held_released_by = released_by(&matches);
+    // a match's lookup is the value's under the type the map named it as,
+    // which is the lookup its row filed; gathered by the lookup the held
+    // rows carry, one an identifier
+    let mut held_codes: BTreeMap<Vec<u8>, String> = BTreeMap::new();
+    for m in &matches {
+        if let Some(code) = code_by_lookup.get(&m.lookup) {
+            held_codes
+                .entry(m.held_lookup.clone())
+                .or_insert_with(|| code.clone());
+        }
+    }
+    report.held_codes = held_codes
+        .into_iter()
+        .map(|(lookup, code)| HeldCode { lookup, code })
+        .collect();
     if map.dry_run {
         return Ok(report);
     }
@@ -856,7 +923,7 @@ fn apply(
             subject_id,
             id_type_id,
             lookup: i.lookup,
-            ciphertext: keys.seal(&i.value),
+            ciphertext: keys.seal_kept(&i.id_type, &i.value),
             source: "csv",
             first_batch_id: None,
         });
@@ -870,14 +937,15 @@ fn apply(
 const HELD_TABLE: &str = "pseudonym_file";
 
 /// One held file the map names: the row, the type the map named the
-/// value under with the lookup under that type, and the type the
-/// pseudonymiser held it as.
+/// value under with the lookup under that type, the type the pseudonymiser
+/// held it as, and the lookup the row carries under that type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldMatch {
     pub row: i64,
     pub id_type: String,
     pub held_as: String,
     pub lookup: Vec<u8>,
+    pub held_lookup: Vec<u8>,
 }
 
 /// The held files whose identifier the map names, matched by value: the
@@ -953,6 +1021,7 @@ pub fn held_matches(
                 id_type: id_type.clone(),
                 held_as: r.opt_text(2)?.unwrap_or("").to_string(),
                 lookup: keys.lookup(id_type, value),
+                held_lookup: lookup,
             });
         }
     }
@@ -1167,6 +1236,93 @@ mod tests {
         assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM identity"), 2);
         let text = again.to_string();
         assert!(text.starts_with("2 row(s): 2 subject(s) named, 2 known, 0 new; 2 identifier(s) filed, 2 known, 0 new\n"), "{text}");
+    }
+
+    /// A personnummer column gives the subject code generator's code of the twelve
+    /// digits however the number was written, and a cell that is no
+    /// personnummer refuses its row without naming the value. The numbers
+    /// are the tax agency's published test numbers; the vectors were made
+    /// with Python's hashlib under the made-up key.
+    #[test]
+    fn a_personnummer_column_codes_the_twelve_digits_by_the_generator() {
+        const TEST_KEY: &[u8] = b"test-reg-key-not-real";
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut linkage, Kind::Linkage).unwrap();
+        let keys = Subkeys::derive(TEST_KEY);
+        let derive = Derive {
+            scheme: Scheme::Blake2b8,
+            key: TEST_KEY,
+            display_length: 12,
+        };
+        let cols = columns(&[
+            ("study_id", "identifier:study-id"),
+            ("pnr", "canonical:personnummer"),
+        ]);
+        let data = rows(&[
+            &["S-1", "850101-2382"],
+            &["S-2", "19850101-2382"],
+            &["S-3", "201501012395"],
+            &["S-4", "850101-2383"],
+            &["S-5", "TRIAL-0042"],
+        ]);
+        let apply = |registry: &mut Store, linkage: &mut Store, data: &[Row]| {
+            import(
+                registry,
+                linkage,
+                &keys,
+                Some(&derive),
+                &Map {
+                    columns: &cols,
+                    rows: data,
+                    dry_run: false,
+                    make_types: true,
+                    place_id: None,
+                    actor: "tester@lab",
+                    job_id: None,
+                },
+            )
+            .unwrap()
+        };
+        let r = apply(&mut registry, &mut linkage, &data);
+        assert_eq!(r.conflicts.len(), 2, "{r}");
+        assert_eq!(r.conflicts[0].row, 5);
+        assert_eq!(
+            r.conflicts[0].why,
+            Why::NotPersonnummer {
+                column: "pnr".into(),
+                invalid: personnummer::Invalid::Checksum
+            }
+        );
+        assert_eq!(r.conflicts[1].row, 6);
+        let text = r.to_string();
+        assert!(!text.contains("2383") && !text.contains("TRIAL"), "{text}");
+        assert!(!r.written());
+        // without the two bad rows: two people, one of them written twice
+        let r = apply(&mut registry, &mut linkage, &data[..3]);
+        assert!(r.written(), "{r}");
+        assert_eq!(r.subjects.new, 2);
+        assert_eq!(
+            codes(&mut registry),
+            ["97567e4f9035c39b", "c6d36050d4d0a55b"]
+        );
+        // the number is filed as its twelve digits, found however written
+        let found = linkage::identities_by_lookup(
+            &mut linkage,
+            &[keys.lookup("personnummer", "8501012382")],
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].lookup,
+            pseudonym::lookup(
+                &pseudonym::subkey(TEST_KEY, pseudonym::LOOKUP_DOMAIN),
+                "personnummer",
+                "198501012382"
+            )
+            .to_vec()
+        );
     }
 
     #[test]
@@ -1484,6 +1640,18 @@ mod tests {
             false,
         );
         assert_eq!(dry.held_released, 2);
+        // Wave 7a: each held identifier the rehearsal names, once however
+        // many files hold it, with the code the map gives it, and none of it
+        // in the report a door answers
+        assert_eq!(
+            dry.held_codes,
+            vec![HeldCode {
+                lookup: keys.lookup("patient-id", "P1"),
+                code: "sub-one".into()
+            }]
+        );
+        assert!(dry.as_json().get("held_codes").is_none());
+        assert!(!dry.as_json().to_string().contains("P1"));
         assert_eq!(
             count(
                 &mut registry,
@@ -1680,7 +1848,7 @@ mod tests {
             ("study", "identifier:study-id"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[&["AA1234", "199001011234"], &["AA5678", "198502023456"]]);
+        let data = rows(&[&["AA1234", "198501012382"], &["AA5678", "198501012390"]]);
         let dry = run(&mut registry, &mut linkage, &keys, &cols, &data, true, true);
         assert_eq!(dry.held_released, 3, "{dry}");
         assert_eq!(
@@ -1768,15 +1936,15 @@ mod tests {
         let (mut registry, mut linkage, keys) = stores();
         linkage::add_id_type(&mut linkage, "personnummer", None).unwrap();
         // the two subjects as the pseudonymiser would have coded them
-        let first = pseudonym::code(Scheme::Blake2b32, KEY, "199001011234", 12).code;
-        let second = pseudonym::code(Scheme::Blake2b32, KEY, "199001019876", 12).code;
+        let first = pseudonym::code(Scheme::Blake2b32, KEY, "198501012382", 12).code;
+        let second = pseudonym::code(Scheme::Blake2b32, KEY, "200002292399", 12).code;
         let cols = columns(&[("nummer", "canonical:personnummer")]);
         let r = run(
             &mut registry,
             &mut linkage,
             &keys,
             &cols,
-            &rows(&[&["199001011234"], &["199001019876"]]),
+            &rows(&[&["198501012382"], &["200002292399"]]),
             false,
             false,
         );
@@ -1805,7 +1973,7 @@ mod tests {
             ("other", "identifier:personnummer"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[&["199001019876", "199001011234"]]);
+        let data = rows(&[&["200002292399", "198501012382"]]);
         let dry = run(
             &mut registry,
             &mut linkage,
@@ -1855,9 +2023,10 @@ mod tests {
         values.sort();
         assert_eq!(
             values,
+            // a personnummer is never kept, only its lookup (Wave 7a)
             [
-                ("personnummer".to_string(), "199001011234".to_string()),
-                ("personnummer".to_string(), "199001019876".to_string()),
+                ("personnummer".to_string(), String::new()),
+                ("personnummer".to_string(), String::new()),
                 ("subject-code".to_string(), second.clone()),
             ]
         );
@@ -1865,12 +2034,12 @@ mod tests {
         // a map whose apply fails: two new people and a merge, with the
         // linkage store refusing to file; no subject is created and the
         // merge does not happen
-        let third = pseudonym::code(Scheme::Blake2b32, KEY, "198001011111", 12).code;
+        let third = pseudonym::code(Scheme::Blake2b32, KEY, "201501012395", 12).code;
         let cols = columns(&[
             ("other", "identifier:personnummer"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[&["", "198001011111"], &["199001011234", "198001011111"]]);
+        let data = rows(&[&["", "201501012395"], &["198501012382", "201501012395"]]);
         linkage
             .execute(
                 "CREATE TRIGGER refuse BEFORE INSERT ON identity BEGIN SELECT RAISE(ABORT, 'the store refused'); END",
