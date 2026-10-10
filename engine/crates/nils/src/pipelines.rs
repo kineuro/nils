@@ -1680,21 +1680,37 @@ pub(crate) const MAX_BINDS: usize = 2000;
 /// place, unless the folders are more than [`MAX_BINDS`]. The registry is
 /// read a few hundred stacks at a time, not stack by stack. With `header`
 /// (record 50, `x-nils.input.header`) each entry also carries the stack's
-/// header facts, [`stack_headers`]; without it the file is as it was.
+/// header facts, [`stack_headers`]; with `geometry` (record 55 E2,
+/// `x-nils.input.geometry`) each entry carries the stack's geometry and
+/// each of its files their own, [`stack_geometry`] and [`file_geometry`];
+/// without either the file is as it was.
 fn materialise_stacks(
     store: &mut Store,
     stacks: &[i64],
     input: &Path,
     header: bool,
+    geometry: bool,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
     type Info = (i64, i64, String, Option<String>);
     let mut info: BTreeMap<i64, Info> = BTreeMap::new();
     let mut axes: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
-    // per stack: (source id, source root, path, frames and their count)
-    type File = (i64, String, String, Option<(String, i64)>);
+    // per stack: (source id, source root, path, frames and their count,
+    // the file's geometry where it was asked for)
+    type File = (i64, String, String, Option<(String, i64)>, Option<Value>);
     let mut files_of: BTreeMap<i64, Vec<File>> = BTreeMap::new();
+    let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
+    // the instance's columns a file's geometry is made of, after the ones
+    // each query reads anyway
+    let geo_columns = if geometry {
+        FILE_GEOMETRY
+            .iter()
+            .map(|c| format!(", i.{c}"))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
     for chunk in stacks.chunks(500) {
         let list = chunk
             .iter()
@@ -1702,14 +1718,18 @@ fn materialise_stacks(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT st.id, st.series_id, se.subject_id, st.modality, st.orientation FROM {} st \
-             JOIN {} se ON se.id = st.series_id WHERE st.id IN ({list})",
+            "SELECT st.id, st.series_id, se.subject_id, st.modality, st.orientation, \
+             st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices FROM {} st \
+             JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
+             WHERE st.id IN ({list})",
             store.qualified("stack"),
             store.qualified("series"),
+            store.qualified("stack_fingerprint"),
         );
         for r in store.query(&sql, &[]).map_err(err)? {
+            let id = r.int(0).map_err(err)?;
             info.insert(
-                r.int(0).map_err(err)?,
+                id,
                 (
                     r.int(1).map_err(err)?,
                     r.int(2).map_err(err)?,
@@ -1717,6 +1737,16 @@ fn materialise_stacks(
                     r.opt_text(4).map_err(err)?.map(str::to_string),
                 ),
             );
+            if geometry {
+                geometry_of.insert(
+                    id,
+                    stack_geometry(
+                        r.opt_text(5).map_err(err)?,
+                        r.opt_double(6).map_err(err)?,
+                        r.opt_double(7).map_err(err)?,
+                    ),
+                );
+            }
         }
         // the axes an image reads, as the registry holds them now
         let sql = format!(
@@ -1734,7 +1764,7 @@ fn materialise_stacks(
         // a multi-frame file's frames first, then the files whose every
         // frame is the stack's
         let framed = format!(
-            "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames FROM {} fr \
+            "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames{geo_columns} FROM {} fr \
              JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
              JOIN {} so ON so.id = f.source_id WHERE fr.stack_id IN ({list}) \
              ORDER BY fr.stack_id, f.path",
@@ -1744,15 +1774,21 @@ fn materialise_stacks(
             store.qualified("source"),
         );
         for r in store.query(&framed, &[]).map_err(err)? {
+            let geo = if geometry {
+                Some(file_geometry(&r, 6).map_err(err)?)
+            } else {
+                None
+            };
             files_of.entry(r.int(0).map_err(err)?).or_default().push((
                 r.int(1).map_err(err)?,
                 r.text(2).map_err(err)?.to_string(),
                 r.text(3).map_err(err)?.to_string(),
                 Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
+                geo,
             ));
         }
         let whole = format!(
-            "SELECT i.stack_id, so.id, so.root, f.path FROM {} i \
+            "SELECT i.stack_id, so.id, so.root, f.path{geo_columns} FROM {} i \
              JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
              WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
             store.qualified("instance"),
@@ -1760,11 +1796,17 @@ fn materialise_stacks(
             store.qualified("source"),
         );
         for r in store.query(&whole, &[]).map_err(err)? {
+            let geo = if geometry {
+                Some(file_geometry(&r, 4).map_err(err)?)
+            } else {
+                None
+            };
             files_of.entry(r.int(0).map_err(err)?).or_default().push((
                 r.int(1).map_err(err)?,
                 r.text(2).map_err(err)?.to_string(),
                 r.text(3).map_err(err)?.to_string(),
                 None,
+                geo,
             ));
         }
     }
@@ -1787,7 +1829,7 @@ fn materialise_stacks(
     let mut roots: BTreeMap<i64, String> = BTreeMap::new();
     let (mut widened, mut at_root) = (0usize, 0usize);
     for files in files_of.values() {
-        for (so, root, path, _) in files {
+        for (so, root, path, _, _) in files {
             roots.entry(*so).or_insert_with(|| root.clone());
             let dir = folder(root, path)?;
             if let std::collections::btree_map::Entry::Vacant(e) = folders.entry((*so, dir.clone()))
@@ -1843,7 +1885,7 @@ fn materialise_stacks(
         let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
         let mut files: Vec<Value> = Vec::new();
         let mut slices: i64 = 0;
-        for (so, _, path, frames) in files_of.remove(&stack).unwrap_or_default() {
+        for (so, _, path, frames, geo) in files_of.remove(&stack).unwrap_or_default() {
             if !seen.insert((so, path.clone())) {
                 continue;
             }
@@ -1865,7 +1907,11 @@ fn materialise_stacks(
             // a single-frame file is one slice; a multi-frame file the
             // frames that are the stack's
             slices += frames.as_ref().map_or(1, |(_, n)| *n);
-            files.push(json!({"source": n, "path": rel, "frames": frames.map(|(f, _)| f)}));
+            let mut file = json!({"source": n, "path": rel, "frames": frames.map(|(f, _)| f)});
+            if let Some(geo) = geo {
+                file["geometry"] = geo;
+            }
+            files.push(file);
         }
         if files.is_empty() {
             return Err(format!("stack {stack} has no files the registry can read"));
@@ -1880,6 +1926,9 @@ fn materialise_stacks(
         }));
         if header && let Some(entry) = entries.last_mut() {
             entry["header"] = headers.remove(&stack).unwrap_or(Value::Null);
+        }
+        if geometry && let Some(entry) = entries.last_mut() {
+            entry["geometry"] = geometry_of.remove(&stack).unwrap_or(Value::Null);
         }
         units.push(Unit {
             id: unit,
@@ -3459,7 +3508,9 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
 
     let released_before = x.resume.and_then(|r| r.input_release_id);
     let m = match (d.layout, released_before) {
-        (Layout::Stacks, _) => materialise_stacks(registry.store(), x.stacks, &input, d.header)?,
+        (Layout::Stacks, _) => {
+            materialise_stacks(registry.store(), x.stacks, &input, d.header, d.geometry)?
+        }
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
         (Layout::Bids, None) => {
             // a release is a job of its own kind, one at a time: the runs
@@ -5657,6 +5708,67 @@ const HEADER_FINGERPRINT: [(&str, char); 22] = [
     ("text_body_part_ci", 't'),
 ];
 
+/// The columns of `instance` a file's geometry object carries (record 55
+/// E2), in the order the stacks queries read them: where its image sits,
+/// its spacing, its matrix, its number and how many frames it holds.
+const FILE_GEOMETRY: [&str; 6] = [
+    "image_position_patient",
+    "pixel_spacing",
+    "rows",
+    "columns",
+    "instance_number",
+    "number_of_frames",
+];
+
+/// The numbers of a value DICOM writes as `a\b\c`, as a JSON list when
+/// there are exactly `n` and each is finite; null otherwise, so a pipeline
+/// never meets half a position.
+fn dicom_numbers(text: Option<&str>, n: usize) -> Value {
+    let Some(text) = text else {
+        return Value::Null;
+    };
+    let numbers: Option<Vec<f64>> = text
+        .split('\\')
+        .map(|v| v.trim().parse::<f64>().ok().filter(|x| x.is_finite()))
+        .collect();
+    match numbers {
+        Some(v) if v.len() == n => json!(v),
+        _ => Value::Null,
+    }
+}
+
+/// A file's geometry object for `stacks.json` (record 55 E2), from the
+/// instance's [`FILE_GEOMETRY`] columns starting at `at` in the row: as the
+/// registry read them from the file's header, each null where it holds
+/// none. A multi-frame file's position is its first frame's, so a pipeline
+/// reads the per-frame positions from the file itself.
+fn file_geometry(r: &nils_registry::store::Row, at: usize) -> Result<Value, nils_registry::Error> {
+    Ok(json!({
+        "image_position_patient": dicom_numbers(r.opt_text(at)?, 3),
+        "pixel_spacing": dicom_numbers(r.opt_text(at + 1)?, 2),
+        "rows": r.opt_int(at + 2)?,
+        "columns": r.opt_int(at + 3)?,
+        "instance_number": r.opt_int(at + 4)?,
+        "number_of_frames": r.opt_int(at + 5)?,
+    }))
+}
+
+/// A stack's geometry object for `stacks.json` (record 55 E2): the
+/// orientation of its images (the stack's own, six numbers) and the slice
+/// thickness and spacing of its fingerprint row, each null where the
+/// registry holds none (a stack not fingerprinted has neither).
+fn stack_geometry(
+    orientation: Option<&str>,
+    thickness: Option<f64>,
+    spacing: Option<f64>,
+) -> Value {
+    json!({
+        "image_orientation_patient": dicom_numbers(orientation, 6),
+        "slice_thickness": thickness.filter(|x| x.is_finite()),
+        "spacing_between_slices": spacing.filter(|x| x.is_finite()),
+    })
+}
+
 /// Each stack's header object for `stacks.json` (record 50): the named
 /// columns of its fingerprint row (null without one), every classification
 /// row by axis, the name of its first ingest batch, and the cohorts its
@@ -6176,6 +6288,46 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 55 E2: a geometry value is DICOM's backslash list of numbers
+    /// read whole, with the count it must have, or nothing: a pipeline never
+    /// meets half a position, a word or an infinity.
+    #[test]
+    fn geometry_numbers_are_whole_or_null() {
+        assert_eq!(
+            dicom_numbers(Some("1\\-2.5\\3e1"), 3),
+            json!([1.0, -2.5, 30.0])
+        );
+        assert_eq!(dicom_numbers(Some(" 0.5 \\ 0.5 "), 2), json!([0.5, 0.5]));
+        assert_eq!(
+            dicom_numbers(Some("1\\0\\0\\0\\1\\0"), 6)
+                .as_array()
+                .map(Vec::len),
+            Some(6)
+        );
+        for (text, n) in [
+            ("1\\2", 3),
+            ("1\\2\\3\\4", 3),
+            ("1\\x\\3", 3),
+            ("1\\inf\\3", 3),
+            ("1\\NaN\\3", 3),
+            ("", 2),
+            ("1\\\\2", 2),
+        ] {
+            assert_eq!(dicom_numbers(Some(text), n), Value::Null, "{text:?}");
+        }
+        assert_eq!(dicom_numbers(None, 3), Value::Null);
+        // a stack's thickness and spacing are numbers or null, never NaN
+        let g = stack_geometry(Some("0\\1\\0\\0\\0\\-1"), Some(1.5), Some(f64::NAN));
+        assert_eq!(
+            g["image_orientation_patient"],
+            json!([0.0, 1.0, 0.0, 0.0, 0.0, -1.0])
+        );
+        assert_eq!(g["slice_thickness"], json!(1.5));
+        assert_eq!(g["spacing_between_slices"], Value::Null);
+        let g = stack_geometry(None, None, None);
+        assert!(g.as_object().unwrap().values().all(Value::is_null), "{g}");
+    }
 
     /// The review of record 43: at detail plain a run's document says no
     /// unit by its subject or session, and keeps everything else.

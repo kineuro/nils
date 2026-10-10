@@ -5100,7 +5100,12 @@ fn the_lane_puts_a_run_s_outputs_and_its_scratch_where_it_names() {
 /// `NILS_TEST_POSTGRES_DSN` names one, in a schema of its own that is
 /// dropped before and after.
 fn on_both(name: &str, schema: &str, test: impl Fn(&Lab)) {
-    test(&Lab::new(name));
+    on_both_over(name, schema, tree, test);
+}
+
+/// [`on_both`] over the files `src` makes, made afresh for each lab.
+fn on_both_over(name: &str, schema: &str, src: impl Fn() -> TempDir, test: impl Fn(&Lab)) {
+    test(&Lab::with_tree(name, src()));
     let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
         .ok()
         .filter(|d| !d.is_empty())
@@ -5119,7 +5124,7 @@ fn on_both(name: &str, schema: &str, test: impl Fn(&Lab)) {
     drop();
     test(&Lab::with_backend(
         &format!("{name}-pg"),
-        tree(),
+        src(),
         Some((dsn.clone(), schema.to_string())),
     ));
     drop();
@@ -5348,6 +5353,310 @@ fn a_stacks_input_carries_each_stack_s_header_when_it_asks() {
             assert_eq!(own["stacks"][0]["header"], e["header"], "{unit}");
         }
     });
+}
+
+/// [`tree`] and a third person's Enhanced MR file of eight frames in two
+/// orientations, four axial and four sagittal, each where it sits: one file
+/// that is two stacks, each given its own frames (record 37 S8).
+fn tree_with_frames() -> TempDir {
+    let dir = tree();
+    let root = "1.2.826.0.1.3680043.8.498.73";
+    let (study, series, sop) = (
+        format!("{root}.1"),
+        format!("{root}.1.3"),
+        format!("{root}.1.3.1"),
+    );
+    let per_frame: Vec<Vec<synth::Elem>> = (0..8u32)
+        .map(|i| {
+            let (iop, ipp) = if i < 4 {
+                ("1\\0\\0\\0\\1\\0", format!("-4\\-4\\{}", 5 * i))
+            } else {
+                ("0\\1\\0\\0\\0\\-1", format!("{}\\-4\\4", 5 * (i - 4)))
+            };
+            vec![
+                synth::fg_orientation(iop),
+                synth::fg(
+                    tags::PLANE_POSITION_SEQUENCE,
+                    vec![synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &ipp)],
+                ),
+            ]
+        })
+        .collect();
+    let shared = vec![synth::fg(
+        tags::PIXEL_MEASURES_SEQUENCE,
+        vec![
+            synth::text(tags::PIXEL_SPACING, VR::DS, "0.5\\0.5"),
+            synth::text(tags::SLICE_THICKNESS, VR::DS, "5"),
+        ],
+    )];
+    let mut e = synth::enhanced_mr(&study, &series, &sop, shared, per_frame);
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "P3"),
+        synth::text(tags::STUDY_DATE, VR::DA, "20240101"),
+        synth::text(tags::SERIES_TIME, VR::TM, "091415"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t2_tse"),
+        synth::text(tags::PROTOCOL_NAME, VR::LO, "T2 TSE"),
+        synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\NONE"),
+        synth::us(tags::ROWS, 16),
+        synth::us(tags::COLUMNS, 16),
+    ]);
+    dir.file(
+        "P3/3/1",
+        &synth::part10(&synth::enhanced_meta(&sop), &e, true),
+    );
+    dir
+}
+
+/// Record 55 E2: a stacks input that asks for the geometry (`x-nils.input.
+/// geometry`) finds, in `stacks.json`, each stack's orientation, slice
+/// thickness and spacing, and each of its files their own position, pixel
+/// spacing, matrix, number and frame count, as the registry read them from
+/// the headers: a single-frame file and both stacks of a file whose frames
+/// hold two orientations, together and apart, alone or beside the header.
+/// Without the flag the file is what it was.
+#[test]
+fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both_over(
+        "pipelines-geometry",
+        "nils_pipelines_geometry",
+        tree_with_frames,
+        |lab| {
+            let image = format!("example.org/stack-echo@sha256:{}", "a".repeat(64));
+            let plain = stack_echo(&image);
+            lab.add_descriptor("stack-echo", &plain);
+            let with_geometry = plain
+                .replace("name: stack-echo", "name: stack-geo")
+                .replace(
+                    "input: {layout: stacks}",
+                    "input: {layout: stacks, geometry: true}",
+                );
+            lab.add_descriptor("stack-geo", &with_geometry);
+            lab.add_descriptor(
+                "stack-geo-apart",
+                &with_geometry
+                    .replace("name: stack-geo", "name: stack-geo-apart")
+                    .replace(
+                        "  needs: {gpu: optional}",
+                        "  units: apart\n  needs: {gpu: optional}",
+                    ),
+            );
+            lab.add_descriptor(
+                "stack-both",
+                &with_geometry
+                    .replace("name: stack-geo", "name: stack-both")
+                    .replace(
+                        "input: {layout: stacks, geometry: true}",
+                        "input: {layout: stacks, header: true, geometry: true}",
+                    ),
+            );
+            let run = |name: &str| -> i64 {
+                let r = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
+                assert_eq!(r["status"], "done", "{r}");
+                r["id"].as_i64().unwrap()
+            };
+            let off = stacks_json(lab, run("stack-echo"), None);
+            let on = stacks_json(lab, run("stack-geo"), None);
+            let entries = on["stacks"].as_array().unwrap();
+            assert_eq!(
+                entries.len(),
+                6,
+                "four stacks of single frames, two of one file"
+            );
+
+            // without the flag, no geometry; with it, the same entries and
+            // the geometry of each stack and each file
+            let strip = |doc: &Value| -> Value {
+                let mut doc = doc.clone();
+                for e in doc["stacks"].as_array_mut().unwrap() {
+                    let e = e.as_object_mut().unwrap();
+                    assert!(e.remove("geometry").is_some(), "{e:?}");
+                    for f in e.get_mut("files").unwrap().as_array_mut().unwrap() {
+                        assert!(
+                            f.as_object_mut().unwrap().remove("geometry").is_some(),
+                            "{f}"
+                        );
+                    }
+                }
+                doc
+            };
+            assert_eq!(strip(&on), off, "the geometry is all the flag adds");
+            for e in off["stacks"].as_array().unwrap() {
+                assert!(e.get("geometry").is_none(), "{e}");
+                for f in e["files"].as_array().unwrap() {
+                    assert!(f.get("geometry").is_none(), "{f}");
+                }
+            }
+
+            let numbers = |text: Option<&str>| -> Value {
+                text.map_or(Value::Null, |t| {
+                    json!(
+                        t.split('\\')
+                            .map(|v| v.trim().parse::<f64>().unwrap())
+                            .collect::<Vec<_>>()
+                    )
+                })
+            };
+            let mut store = lab.store();
+            let stack_t = store.qualified("stack");
+            let fp_t = store.qualified("stack_fingerprint");
+            let instance_t = store.qualified("instance");
+            let file_t = store.qualified("source_file");
+            let frame_t = store.qualified("instance_frame");
+            let mut orientations: Vec<Value> = Vec::new();
+            let mut framed = 0;
+            for e in entries {
+                let stack = e["stack_id"].as_i64().unwrap();
+                // the stack's own orientation, and its fingerprint's slices
+                let g = &e["geometry"];
+                let mut keys: Vec<&String> = g.as_object().unwrap().keys().collect();
+                keys.sort();
+                assert_eq!(
+                    keys,
+                    [
+                        "image_orientation_patient",
+                        "slice_thickness",
+                        "spacing_between_slices"
+                    ],
+                    "{g}"
+                );
+                let row = store
+                    .query(
+                        &format!(
+                            "SELECT st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices \
+                             FROM {stack_t} st LEFT JOIN {fp_t} fp ON fp.stack_id = st.id WHERE st.id = {stack}"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+                let iop = numbers(row[0].opt_text(0).unwrap());
+                assert_eq!(iop.as_array().map(Vec::len), Some(6), "{iop}");
+                assert_eq!(g["image_orientation_patient"], iop, "{g}");
+                assert_eq!(
+                    g["slice_thickness"],
+                    json!(row[0].opt_double(1).unwrap()),
+                    "{g}"
+                );
+                assert_eq!(
+                    g["spacing_between_slices"],
+                    json!(row[0].opt_double(2).unwrap()),
+                    "{g}"
+                );
+                orientations.push(iop);
+
+                // each file's own, as its instance row holds it, found by
+                // its name among the stack's files
+                let rows = store
+                    .query(
+                        &format!(
+                            "SELECT f.path, i.image_position_patient, i.pixel_spacing, i.rows, i.columns, \
+                             i.instance_number, i.number_of_frames FROM {instance_t} i \
+                             JOIN {file_t} f ON f.id = i.source_file_id \
+                             WHERE i.stack_id = {stack} \
+                             OR i.id IN (SELECT fr.instance_id FROM {frame_t} fr WHERE fr.stack_id = {stack})"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+                let files = e["files"].as_array().unwrap();
+                assert_eq!(files.len(), rows.len(), "{e}");
+                for f in files {
+                    let geo = &f["geometry"];
+                    let mut keys: Vec<&String> = geo.as_object().unwrap().keys().collect();
+                    keys.sort();
+                    assert_eq!(
+                        keys,
+                        [
+                            "columns",
+                            "image_position_patient",
+                            "instance_number",
+                            "number_of_frames",
+                            "pixel_spacing",
+                            "rows"
+                        ],
+                        "{geo}"
+                    );
+                    let name = f["path"].as_str().unwrap().rsplit('/').next().unwrap();
+                    let r = rows
+                        .iter()
+                        .find(|r| r.text(0).unwrap().rsplit('/').next() == Some(name))
+                        .unwrap_or_else(|| panic!("no instance row for {name}"));
+                    assert_eq!(
+                        geo["image_position_patient"],
+                        numbers(r.opt_text(1).unwrap())
+                    );
+                    assert_eq!(geo["pixel_spacing"], numbers(r.opt_text(2).unwrap()));
+                    assert_eq!(geo["rows"], json!(r.opt_int(3).unwrap()));
+                    assert_eq!(geo["columns"], json!(r.opt_int(4).unwrap()));
+                    assert_eq!(geo["instance_number"], json!(r.opt_int(5).unwrap()));
+                    assert_eq!(geo["number_of_frames"], json!(r.opt_int(6).unwrap()));
+                    if f["frames"].is_string() {
+                        // a file of frames: its matrix, its spacing and its
+                        // count, and the first frame's position
+                        framed += 1;
+                        assert_eq!(geo["number_of_frames"], 8, "{geo}");
+                        assert_eq!((&geo["rows"], &geo["columns"]), (&json!(16), &json!(16)));
+                        assert_eq!(geo["pixel_spacing"], json!([0.5, 0.5]), "{geo}");
+                        assert_eq!(
+                            geo["image_position_patient"].as_array().map(Vec::len),
+                            Some(3),
+                            "{geo}"
+                        );
+                    } else {
+                        // a single frame: where it sits is its number
+                        assert_eq!(geo["number_of_frames"], Value::Null, "{geo}");
+                        assert_eq!((&geo["rows"], &geo["columns"]), (&json!(32), &json!(32)));
+                        assert_eq!(geo["pixel_spacing"], json!([1.0, 1.0]), "{geo}");
+                        let n = geo["instance_number"].as_f64().unwrap();
+                        assert_eq!(geo["image_position_patient"], json!([n, 0.0, 0.0]), "{geo}");
+                    }
+                }
+            }
+            assert_eq!(framed, 2, "both stacks of the file of frames");
+            for want in [
+                json!([0.0, 1.0, 0.0, 0.0, 0.0, -1.0]),
+                json!([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            ] {
+                assert!(orientations.contains(&want), "{want} in {orientations:?}");
+            }
+
+            // apart: each unit's own stacks.json carries its stack's geometry
+            let apart = run("stack-geo-apart");
+            for e in entries {
+                let unit = e["unit"].as_str().unwrap();
+                let own = stacks_json(lab, apart, Some(unit));
+                assert_eq!(own["stacks"].as_array().unwrap().len(), 1);
+                assert_eq!(own["stacks"][0]["geometry"], e["geometry"], "{unit}");
+                assert_eq!(own["stacks"][0]["files"], e["files"], "{unit}");
+            }
+
+            // beside the header: each entry carries both, and nothing else
+            let both = stacks_json(lab, run("stack-both"), None);
+            let mut stripped = strip(&both);
+            for e in stripped["stacks"].as_array_mut().unwrap() {
+                assert!(e.as_object_mut().unwrap().remove("header").is_some(), "{e}");
+            }
+            assert_eq!(
+                stripped, off,
+                "the header and the geometry are all the flags add"
+            );
+            for (a, b) in both["stacks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(entries.iter())
+            {
+                assert_eq!(a["geometry"], b["geometry"]);
+                assert_eq!(a["files"], b["files"]);
+            }
+        },
+    );
 }
 
 /// Record 50 E2: `nils model keep` copies a registered model's artifact

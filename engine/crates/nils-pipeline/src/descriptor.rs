@@ -399,6 +399,13 @@ pub struct Descriptor {
     /// fingerprint row, the classification rows, its first ingest batch and
     /// its subject's open cohorts. Off unless asked for.
     pub header: bool,
+    /// For a stacks input, whether each stack's entry of `stacks.json`
+    /// carries its geometry and each of its files their own
+    /// (`x-nils.input.geometry`, record 55 E2): where each image sits, its
+    /// matrix, its spacing and its number, as the registry read them from
+    /// the headers, so an image chooses which frames to read without
+    /// reading a header first. Off unless asked for.
+    pub geometry: bool,
     /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
     /// which the pre-flight estimates from until the pipeline has run here.
     pub unit_minutes: Option<f64>,
@@ -1024,6 +1031,12 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             "x-nils.input.header puts each stack's header facts in stacks.json; a bids input has no stacks.json, so it is for a stacks input only".into(),
         );
     }
+    let geometry = opt_bool(&x["input"], "geometry", "x-nils.input.")?.unwrap_or(false);
+    if geometry && layout != Layout::Stacks {
+        return Err(
+            "x-nils.input.geometry puts each file's geometry in stacks.json; a bids input has no stacks.json, so it is for a stacks input only".into(),
+        );
+    }
     let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
         None => None,
         Some(m) if m > 0.0 && m.is_finite() => Some(m),
@@ -1047,6 +1060,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         checks,
         roles,
         header,
+        geometry,
         unit_minutes,
         document,
     })
@@ -1758,6 +1772,42 @@ x-nils:
         let t = d.outputs.iter().find(|o| o.id == "scores").unwrap();
         assert_eq!(t.table.as_ref().unwrap().format, "json");
         assert!(!t.run_level);
+    }
+
+    /// Record 55 E2: a stacks input may ask for each file's geometry in
+    /// `stacks.json`, beside the header or alone; it is off unless asked
+    /// for, and a bids input, which has no `stacks.json`, is refused it.
+    #[test]
+    fn a_stacks_input_may_ask_for_the_geometry_and_a_bids_one_may_not() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        assert!(!parse(&base).unwrap().geometry);
+        let stacks = |input: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace("  input: {layout: bids}\n", &format!("  input: {input}\n"))
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        let d = parse(&stacks("{layout: stacks}")).unwrap();
+        assert!(!d.geometry && !d.header);
+        assert!(
+            !parse(&stacks("{layout: stacks, geometry: false}"))
+                .unwrap()
+                .geometry
+        );
+        let d = parse(&stacks("{layout: stacks, geometry: true}")).unwrap();
+        assert!(d.geometry && !d.header, "the geometry alone");
+        let d = parse(&stacks("{layout: stacks, header: true, geometry: true}")).unwrap();
+        assert!(d.geometry && d.header, "both");
+        let e = parse(&stacks("{layout: stacks, geometry: 1}")).unwrap_err();
+        assert!(e.contains("x-nils.input.geometry is true or false"), "{e}");
+        let e = parse(&base.replace(
+            "  input: {layout: bids}\n",
+            "  input: {layout: bids, geometry: true}\n",
+        ))
+        .unwrap_err();
+        assert!(e.contains("for a stacks input only"), "{e}");
     }
 
     #[test]
