@@ -1885,3 +1885,31 @@ fn no_personnummer_is_kept_anywhere_in_the_registry() {
     }
     assert!(read >= 2, "the stores were read");
 }
+
+/// 2026-10-10, found trying the desk: a dataset whose identity rule or
+/// unmapped setting changed after a run held its files kept them held, filed
+/// under the old setting, since an unchanged file is never read again, and
+/// every run said the same IDs needed a subject code. A changed setting has
+/// the dataset's held files read again on its next run.
+#[test]
+fn a_changed_setting_has_the_held_files_read_again() {
+    let lab = lab();
+    let dir = dataset();
+    let mut registry = lab.home.open().unwrap();
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let held = pseudonymize(&settings(&place), &mut registry).unwrap();
+    let (_, written, _, held_files, _) = files_of(&held);
+    assert_eq!(written, 0, "{held}");
+    assert!(held_files > 0, "{held}");
+    // the person changes the dataset: an ID with no subject code gets a generated one
+    let mut changed = place.dataset.clone();
+    changed["unmapped"] = json!("code");
+    let place = place::set_dataset(registry.store(), place.id, &changed).unwrap();
+    let again = pseudonymize(&settings(&place), &mut registry).unwrap();
+    let (_, written, _, still_held, _) = files_of(&again);
+    assert_eq!(
+        still_held, 0,
+        "the held files were read again under the new setting: {again}"
+    );
+    assert_eq!(written, held_files, "{again}");
+}

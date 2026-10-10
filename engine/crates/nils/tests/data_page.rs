@@ -1787,3 +1787,161 @@ fn a_look_is_counted_the_same_on_postgres_too() {
     looks(Some((dsn.clone(), schema.to_string())));
     drop();
 }
+
+/// 2026-10-10, found trying the desk: a folder added again after its
+/// dataset was removed showed the removed dataset's failed run as its own,
+/// a "Stopped" with the other dataset's words. A dataset's jobs are its own:
+/// none made for another dataset, and where its folder held a dataset
+/// before, none from before it was added.
+#[test]
+fn a_folder_added_again_shows_none_of_the_removed_dataset_s_runs() {
+    let home = Home {
+        dir: TempDir::new("data-page-again-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let dir = TempDir::new("data-page-again");
+    std::fs::create_dir_all(dir.path().join("derivatives/dcm-anon")).unwrap();
+    let folder = dir.path().to_str().unwrap();
+    let declare = |name: &str| {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            folder,
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+        ]);
+    };
+    declare("first");
+
+    // a run of the first dataset that fails: a read of a folder in its tree that is not there
+    let server = Worked::start(&home);
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["digest", "@first/not-there", "--name", "first-2026-10-10"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let jobs = server.settled("first", &["digest"]);
+    assert!(
+        jobs.iter().any(|j| j["state"] == "failed"),
+        "the first dataset's read failed: {jobs:?}"
+    );
+    let before = server.get("/api/datasets/first/summary", OPS);
+    assert_eq!(step(&before, "read")["state"], "failed", "{before}");
+
+    // the first dataset removed as the desk removes it, the folder added
+    // again as another, a moment later
+    let places = server.get("/api/places", OPS);
+    let id = places["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "first")
+        .and_then(|p| p["id"].as_i64())
+        .unwrap_or_else(|| panic!("no place first: {places}"));
+    let (status, retired) = server.call(
+        "PUT",
+        &format!("/api/places/{id}"),
+        Some(json!({"retired": true})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{retired}");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    declare("again");
+    let mine = server.get("/api/jobs?dataset=again&all=1", OPS);
+    assert_eq!(
+        mine["count"], 0,
+        "the removed dataset's runs are not the new one's: {mine}"
+    );
+    let s = server.get("/api/datasets/again/summary", OPS);
+    for (name, st) in steps(&s) {
+        assert_ne!(
+            st["state"], "failed",
+            "{name} says another dataset's run failed: {s}"
+        );
+    }
+}
+
+/// 2026-10-10, found trying the desk: a removed dataset kept its name, so
+/// its folder added again came back under the root's name before it. A
+/// removed dataset's name is free for a new one, and the removed row keeps
+/// its id, its folder and its history under its name and id.
+#[test]
+fn a_removed_dataset_s_name_is_free_for_its_folder_again() {
+    let home = Home {
+        dir: TempDir::new("data-page-name-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let root = TempDir::new("data-page-name-root");
+    std::fs::create_dir_all(root.path().join("fresh/derivatives/dcm-anon")).unwrap();
+    std::fs::create_dir_all(root.path().join("other/derivatives/dcm-anon")).unwrap();
+    home.ok(&[
+        "place",
+        "add",
+        "data-test",
+        root.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    let server = Worked::serve(&home, false);
+    let add = || {
+        server.call(
+            "POST",
+            "/api/places",
+            Some(json!({
+                "role": "source", "root": "data-test", "folder": "fresh",
+                "patient_id": "id-type:patient-id", "subjects": "generated",
+            })),
+            OPS,
+        )
+    };
+    let (status, first) = add();
+    assert_eq!(status, 201, "{first}");
+    assert_eq!(first["name"], "fresh", "{first}");
+    let id = first["id"].as_i64().unwrap();
+    let (status, retired) = server.call(
+        "PUT",
+        &format!("/api/places/{id}"),
+        Some(json!({"retired": true})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{retired}");
+
+    // added again: its own name, not the root's before it
+    let (status, again) = add();
+    assert_eq!(status, 201, "{again}");
+    assert_eq!(again["name"], "fresh", "{again}");
+    assert_ne!(again["id"], first["id"], "{again}");
+    let places = server.get("/api/places", OPS);
+    let old = places["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == first["id"])
+        .unwrap_or_else(|| panic!("the removed dataset is kept: {places}"))
+        .clone();
+    assert_eq!(old["name"], format!("fresh.retired-{id}"), "{old}");
+    assert_eq!(old["path"], first["path"], "{old}");
+    assert!(!old["retired_at"].is_null(), "{old}");
+
+    // a name in force stays taken, for another folder too
+    let (status, taken) = server.call(
+        "POST",
+        "/api/places",
+        Some(json!({"role": "source", "root": "data-test", "folder": "other", "name": "fresh"})),
+        OPS,
+    );
+    assert_eq!(status, 409, "{taken}");
+}
