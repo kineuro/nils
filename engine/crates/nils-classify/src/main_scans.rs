@@ -424,7 +424,7 @@ fn metrics(read: &Read, taken: &[Vec<Taken>]) -> Value {
         }
         subjects += 1;
         visits += s.visits.len();
-        let mine: Vec<&Taken> = t.iter().filter(|x| !x.stacks.is_empty()).collect();
+        let mine: Vec<&Taken> = t.iter().filter(|x| x.kind.is_some()).collect();
         visits_taken += mine.len();
         if !mine.is_empty() {
             subjects_taken += 1;
@@ -468,7 +468,6 @@ fn steps(t: &[Taken]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for x in t {
         if let Some(k) = &x.kind
-            && !x.stacks.is_empty()
             && out.last() != Some(k)
         {
             out.push(k.clone());
@@ -604,9 +603,7 @@ fn kinds(read: &Read, cmp: &Compare, model: &Model, role: &str) -> (Vec<String>,
             for k in held {
                 *with.entry(k).or_insert(0) += 1;
             }
-            if let Some(k) = &x.kind
-                && !x.stacks.is_empty()
-            {
+            if let Some(k) = &x.kind {
                 *taken.entry(k.clone()).or_insert(0) += 1;
                 with.entry(k.clone()).or_insert(0);
             }
@@ -662,11 +659,7 @@ pub fn map(
             *series.entry(steps(t)).or_insert(0) += 1;
         }
         for (i, (x, (col, _))) in t.iter().zip(cols).enumerate() {
-            let kind = if x.stacks.is_empty() {
-                None
-            } else {
-                x.kind.clone()
-            };
+            let kind = x.kind.clone();
             let row = cells
                 .entry(kind.clone())
                 .or_insert_with(|| vec![0; columns.len()]);
@@ -795,20 +788,12 @@ pub fn subjects(
     let (labels, _) = columns(read, cmp, by);
     let mut found: Vec<(usize, usize, usize)> = Vec::new();
     for (si, (s, t)) in read.subjects.iter().zip(&shown.taken).enumerate() {
-        let kinds: BTreeSet<&String> = t
-            .iter()
-            .filter(|x| !x.stacks.is_empty())
-            .filter_map(|x| x.kind.as_ref())
-            .collect();
+        let kinds: BTreeSet<&String> = t.iter().filter_map(|x| x.kind.as_ref()).collect();
         let member = match group {
             Group::Breaks => kinds.len() >= 2,
             Group::Series(want) => s.visits.len() >= 2 && steps(t) == *want,
             Group::Cell { kind, column } => t.iter().zip(&labels[si]).any(|(x, (col, _))| {
-                let k = if x.stacks.is_empty() {
-                    None
-                } else {
-                    x.kind.clone()
-                };
+                let k = x.kind.clone();
                 k == *kind && col == column
             }),
         };
@@ -851,7 +836,7 @@ pub fn subjects(
                         "visit": vi + 1,
                         "column": col,
                         "field": field,
-                        "kind": if x.stacks.is_empty() { None } else { x.kind.clone() },
+                        "kind": x.kind.clone(),
                         "stack": x.stacks.first(),
                         "stacks": x.stacks,
                         "by": x.by,
@@ -914,9 +899,7 @@ pub fn strips(read: &Read, cmp: &Compare, model: &Model, role: &str, by: Columns
             let visits: Vec<i64> = t
                 .iter()
                 .map(|x| match &x.kind {
-                    Some(k) if !x.stacks.is_empty() => {
-                        keys.iter().position(|y| y == k).map_or(-1, |i| i as i64)
-                    }
+                    Some(k) => keys.iter().position(|y| y == k).map_or(-1, |i| i as i64),
                     _ => -1,
                 })
                 .collect();
