@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 86;
+pub const SCHEMA_VERSION: i64 = 87;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,6 +398,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 86,
         apply: the_same_everywhere_id_type_is_built_in,
     },
+    Migration {
+        version: 87,
+        apply: a_scan_is_held_wherever_its_files_are,
+    },
 ];
 
 /// Wave 7a (2026-10-10, found trying the desk): a dataset whose PatientID
@@ -426,6 +430,34 @@ fn the_same_everywhere_id_type_is_built_in(store: &mut Store, kind: Kind) -> Res
             Param::from(schema::GENERATOR_ID_DESCRIPTION),
         ],
     )?;
+    Ok(())
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a file whose subject,
+/// study, series and instance UIDs are an instance the registry holds is a
+/// location of that instance, and a dataset holds every scan its tree has a
+/// file of, whoever read the scan first. `source_file` gains when a file was
+/// first seen, filled from when it was last seen on a row from before; and
+/// `source_stack`, which sources hold a file of each stack, is filled from
+/// the files a registry from before recorded, its instances' own files and
+/// their copies alike. No file is touched.
+fn a_scan_is_held_wherever_its_files_are(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "source_file")? {
+        return Ok(());
+    }
+    add_columns(store, "source_file", &["first_seen_at"])?;
+    store.execute(
+        &format!(
+            "UPDATE {} SET first_seen_at = seen_at WHERE first_seen_at IS NULL",
+            store.qualified("source_file")
+        ),
+        &[],
+    )?;
+    let fresh = !table_exists(store, "source_stack")?;
+    add_tables(store, kind, &["source_stack"])?;
+    if fresh && table_exists(store, "instance")? && table_exists(store, "instance_frame")? {
+        crate::location::backfill(store)?;
+    }
     Ok(())
 }
 

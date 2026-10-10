@@ -2336,6 +2336,124 @@ pub fn close_provisional(
     )
 }
 
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a file whose instance
+/// UID the registry holds under another subject, study or series is neither
+/// a copy of that instance nor a new one. The digest holds it, quarantined
+/// under this reason, reads it again on every run, and asks once per source
+/// and pair of subjects: `ref` is `{subject_id, code, holder_id,
+/// holder_code}`, the subject the file names and the one the registry holds
+/// the instance under, and `evidence` `{files, differs, first_seen,
+/// batch_id, place_id, place}`, the files by what differs (`subject`,
+/// `study`, `series`), never an identifier. A merge of the two subjects
+/// answers it: the next read files the held files as copies, finds nothing
+/// held under the pair and closes the item as `superseded`.
+pub const SAME_INSTANCE_KIND: &str = "identity.same_instance";
+
+/// What groups the open `identity.same_instance` item of a source and pair.
+pub fn same_instance_key(source_id: i64, subject_id: i64, holder_id: i64) -> String {
+    format!("source:{source_id}|subject:{subject_id}|holder:{holder_id}")
+}
+
+/// The files of one source held under one pair of subjects.
+#[derive(Debug, Clone)]
+pub struct SameInstance<'a> {
+    pub source_id: i64,
+    pub subject_id: i64,
+    pub code: &'a str,
+    pub holder_id: i64,
+    pub holder_code: &'a str,
+    pub files: i64,
+    /// The files by what differs: `{subject: n, study: n, series: n}`.
+    pub differs: &'a serde_json::Value,
+    /// When the first of them was held.
+    pub first_seen: &'a str,
+    pub place_id: Option<i64>,
+    pub place: Option<&'a str>,
+    pub batch_id: Option<i64>,
+    pub job_id: Option<i64>,
+}
+
+/// Open, or bring up to date, the one `identity.same_instance` item of a
+/// source and pair of subjects. Answers the item's id.
+pub fn raise_same_instance(
+    store: &mut Store,
+    s: &SameInstance<'_>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = same_instance_key(s.source_id, s.subject_id, s.holder_id);
+    let reference = serde_json::json!({
+        "subject_id": s.subject_id, "code": s.code,
+        "holder_id": s.holder_id, "holder_code": s.holder_code,
+    });
+    let evidence = serde_json::json!({
+        "files": s.files,
+        "differs": s.differs,
+        "first_seen": s.first_seen,
+        "batch_id": s.batch_id,
+        "place_id": s.place_id,
+        "place": s.place,
+    });
+    if let Some((id, _)) = open_item(store, SAME_INSTANCE_KIND, &key)? {
+        refresh_item(store, id, &evidence, s.files, s.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        SAME_INSTANCE_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        s.files,
+        s.job_id,
+        now,
+    )
+}
+
+/// The group keys of the open `identity.same_instance` items of a source.
+pub fn open_same_instance_keys(
+    store: &mut Store,
+    source_id: i64,
+) -> Result<Vec<String>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT group_key FROM {} WHERE kind = {} AND status = 'open' AND group_key LIKE {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    store
+        .query(
+            &sql,
+            &[
+                Param::from(SAME_INSTANCE_KIND),
+                Param::from(format!("source:{source_id}|%")),
+            ],
+        )?
+        .iter()
+        .map(|r| r.text(0).map(str::to_string))
+        .collect()
+}
+
+/// Close the open `identity.same_instance` item under a group key, once a
+/// run of its source holds nothing under the pair: a merge, or files that
+/// changed, answered it. Answers whether one was open.
+pub fn close_same_instance(store: &mut Store, key: &str, now: &str) -> Result<bool, StoreError> {
+    let Some((id, _)) = open_item(store, SAME_INSTANCE_KIND, key)? else {
+        return Ok(false);
+    };
+    store.update_by_id(
+        table("review_item"),
+        &[
+            ("status", Param::from(RESOLVED)),
+            ("decided_at", Param::from(now)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(true)
+}
+
 /// A study row that holds no series. The row is a fact in a file, so it
 /// stays; what stops is the session made from it, and this says that the
 /// row is there and empty. v0 kept an ingest-conflict table and v1 kept the

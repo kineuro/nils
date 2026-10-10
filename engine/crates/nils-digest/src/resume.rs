@@ -67,7 +67,9 @@ pub struct Recorded {
     /// The row is a file held for want of a map (record 26 §4), quarantined
     /// under `identity.unmapped`: it is read again on the next run, so that
     /// a map filed since releases it without anyone asking for quarantine
-    /// to be retried.
+    /// to be retried. So is a file held because the registry holds its
+    /// instance UID under another subject, study or series (record 55,
+    /// `identity.same_instance`), which a merge of the two subjects releases.
     pub held: bool,
 }
 
@@ -162,13 +164,14 @@ impl Records {
         let batch = store.qualified("ingest_batch");
         let sql = format!(
             "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id, \
-             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason = '{held}' \
+             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason IN ('{held}', '{same}') \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
              LEFT JOIN {batch} AS b ON b.id = f.batch_id \
              WHERE f.source_id = {} AND f.dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text),
-            held = nils_registry::review::UNMAPPED_KIND
+            held = nils_registry::review::UNMAPPED_KIND,
+            same = nils_registry::review::SAME_INSTANCE_KIND
         );
         Ok(Records {
             store,

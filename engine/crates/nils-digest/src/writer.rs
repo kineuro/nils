@@ -163,6 +163,32 @@ struct Filed {
     own: bool,
     /// The instance an earlier run filed this path under, now another one.
     orphan: Option<i64>,
+    /// Record 55: a copy this source holds another file of the instance
+    /// beside (`twice`), rather than one of an instance another source read
+    /// first (`known`).
+    twice: bool,
+}
+
+impl Filed {
+    fn new(status: &'static str, instance_id: i64, own: bool) -> Filed {
+        Filed {
+            status,
+            instance_id,
+            own,
+            orphan: None,
+            twice: false,
+        }
+    }
+}
+
+/// What a file of the batch is to its instance (record 55, 2026-10-10).
+enum Filing {
+    /// It made the instance: the instance's own file.
+    Own,
+    /// The instance's own file from an earlier run, read again.
+    Again,
+    /// A copy: its subject, study and series are the instance's.
+    Copy,
 }
 
 pub struct Writer<'a> {
@@ -394,15 +420,39 @@ impl<'a> Writer<'a> {
         let (subject_ids, held) = self.subjects(&parsed, &now, &mut tally)?;
         // record 26 §4: a file the dataset holds for want of a map is no
         // part of what this batch writes; its `source_file` row says why
-        let parsed: Vec<&ParsedFile> = match held.iter().any(|h| *h) {
-            false => parsed,
+        let unheld: Vec<&ParsedFile> = match held.iter().any(|h| *h) {
+            false => parsed.clone(),
             true => parsed
-                .into_iter()
+                .iter()
                 .zip(&held)
                 .filter(|(_, h)| !**h)
-                .map(|(p, _)| p)
+                .map(|(p, _)| *p)
                 .collect(),
         };
+        self.checkpoint()?;
+        // record 55 (2026-10-10): nor is a file whose instance UID the
+        // registry holds under another subject, study or series, held by
+        // what differs, before any row of it is written
+        let others = self.same_instance(&unheld, &subject_ids)?;
+        let mut other: Vec<Option<String>> = Vec::with_capacity(parsed.len());
+        let mut kept = others.iter();
+        for h in &held {
+            other.push(match h {
+                true => None,
+                false => kept.next().cloned().flatten(),
+            });
+        }
+        let (parsed, subject_ids): (Vec<&ParsedFile>, Vec<i64>) =
+            match others.iter().any(Option::is_some) {
+                false => (unheld, subject_ids),
+                true => unheld
+                    .into_iter()
+                    .zip(subject_ids)
+                    .zip(&others)
+                    .filter(|(_, o)| o.is_none())
+                    .map(|(pair, _)| pair)
+                    .unzip(),
+            };
         self.checkpoint()?;
         let study_ids = self.studies(&parsed, &subject_ids, &mut tally)?;
         self.checkpoint()?;
@@ -415,7 +465,7 @@ impl<'a> Writer<'a> {
         self.checkpoint()?;
         self.instance_frames(&parsed, &stack_ids, &filed)?;
         self.checkpoint()?;
-        self.source_files(batch, &filed, &held, &now, progress)?;
+        self.source_files(batch, &filed, &held, &other, &now, progress)?;
         self.checkpoint()?;
         self.diagnostics(&tally, &now)?;
         self.written.epoch = self.registry.next_epoch()?;
@@ -1451,6 +1501,13 @@ impl<'a> Writer<'a> {
     /// Instances: a row per SOP instance UID the registry does not hold, in
     /// its file's stack; the status of every file follows from whether its
     /// instance is new, its own from an earlier run, or another file's (§5.3).
+    ///
+    /// Record 55 (Nima's duplicate policy, 2026-10-10): another file of an
+    /// instance is a copy, its subject, study and series the instance's too
+    /// ([`Writer::same_instance`] held the rest before any row was written).
+    /// A copy is filed as a location of the instance, `known` when no other
+    /// file of this source holds it and `twice` when one does, and every file
+    /// filed records its source as holding the instance's stacks.
     fn instances(
         &mut self,
         parsed: &[&ParsedFile],
@@ -1488,64 +1545,106 @@ impl<'a> Writer<'a> {
         for r in &returned {
             ids.insert(r.text(1)?.to_string(), (r.int(0)?, true));
         }
+        // an instance the registry held before this batch: its stack, where
+        // a copy of it is located
+        let mut held_in: HashMap<i64, Vec<i64>> = HashMap::new();
         let missing: Vec<String> = first
             .keys()
             .filter(|uid| !ids.contains_key(**uid))
             .map(|uid| uid.to_string())
             .collect();
         if !missing.is_empty() {
-            let cols = columns(t, &["id", "sop_instance_uid"], &Fields::of(&[]));
+            let cols = columns(t, &["id", "sop_instance_uid", "stack_id"], &Fields::of(&[]));
             let found =
                 self.registry
                     .store()
                     .select_by_keys(t, &cols, "sop_instance_uid", &missing)?;
             for r in &found {
-                ids.insert(r.text(1)?.to_string(), (r.int(0)?, false));
+                let id = r.int(0)?;
+                ids.insert(r.text(1)?.to_string(), (id, false));
+                held_in.insert(id, r.opt_int(2)?.into_iter().collect());
             }
         }
         let mut filed = Vec::with_capacity(parsed.len());
         let mut per_series: BTreeMap<i64, i64> = BTreeMap::new();
         let mut per_stack: BTreeMap<i64, i64> = BTreeMap::new();
         let mut diags = Vec::new();
+        // the copies of instances the registry held, which an earlier batch
+        // of this source may hold already
+        let mut copies: Vec<i64> = Vec::new();
         for (i, p) in parsed.iter().enumerate() {
             let x = &p.extracted;
             let &(id, created) = ids
                 .get(x.sop_uid.as_str())
                 .ok_or_else(|| missing_row("instance"))?;
-            let creator = created && first[x.sop_uid.as_str()] == i;
+            let at = first[x.sop_uid.as_str()];
+            let creator = created && at == i;
             let same = p.prior.is_some_and(|prior| prior.instance_id == Some(id));
-            let (st, own) = if creator {
+            let filing = if creator {
                 *per_series.entry(series_ids[i]).or_default() += 1;
                 // an instance counts once in every stack its frames reach
                 for id in &stack_ids[i] {
                     *per_stack.entry(*id).or_default() += 1;
                 }
-                (status::INGESTED, true)
+                Filing::Own
             } else if same {
-                (status::INGESTED, false)
+                Filing::Again
             } else {
-                (status::DUPLICATE, false)
+                if !created {
+                    copies.push(id);
+                }
+                Filing::Copy
             };
             if p.prior.is_some_and(|prior| prior.changed) {
-                let subject = if creator {
-                    "new_sop"
-                } else if same {
-                    "same_sop"
-                } else {
-                    "other_sop"
+                let subject = match filing {
+                    Filing::Own => "new_sop",
+                    Filing::Again => "same_sop",
+                    Filing::Copy => "other_sop",
                 };
                 diags.push(Diagnostic::new(DiagnosticKind::FileChanged, subject));
             }
-            filed.push(Filed {
-                status: st,
-                instance_id: id,
-                own,
-                orphan: p
+            filed.push(match filing {
+                Filing::Own => Filed::new(status::INGESTED, id, true),
+                Filing::Again => Filed::new(status::INGESTED, id, false),
+                Filing::Copy => Filed::new(status::DUPLICATE, id, false),
+            });
+            if let Some(f) = filed.last_mut() {
+                f.orphan = p
                     .prior
                     .and_then(|prior| prior.instance_id)
-                    .filter(|&old| old != id),
-            });
+                    .filter(|&old| old != f.instance_id);
+            }
         }
+        self.copies_twice(parsed, &mut filed, &copies, &first)?;
+        // the stacks each filed file is a location of: the instance's own,
+        // which for a copy is where the instance is, not where its file's
+        // headers alone would put it
+        let mut located: BTreeSet<i64> = BTreeSet::new();
+        let before: Vec<i64> = filed
+            .iter()
+            .map(|f| f.instance_id)
+            .filter(|id| held_in.contains_key(id))
+            .collect();
+        let frames = self.frames_of(&before)?;
+        for (i, f) in filed.iter().enumerate() {
+            let id = f.instance_id;
+            let at = first[parsed[i].extracted.sop_uid.as_str()];
+            match held_in.get(&id) {
+                // an instance from before: its row's stack and its frames'
+                Some(stacks) => {
+                    located.extend(stacks.iter().copied());
+                    located.extend(frames.get(&id).into_iter().flatten().copied());
+                }
+                // made by this batch: where its first file put it
+                None => located.extend(stack_ids[at].iter().copied()),
+            }
+        }
+        nils_registry::location::record(
+            self.registry.store(),
+            self.source_id,
+            &located,
+            &now_iso(),
+        )?;
         let pairs: Vec<(i64, i64)> = per_series.into_iter().collect();
         if !pairs.is_empty() {
             self.registry.store().update_from_values(
@@ -1566,6 +1665,205 @@ impl<'a> Writer<'a> {
         }
         self.note(tally, diags);
         Ok(filed)
+    }
+
+    /// Record 55 (Nima's duplicate policy, 2026-10-10): the files of the
+    /// batch whose instance UID the registry holds, or an earlier file of the
+    /// batch carries, under another subject, study or series. Such a file is
+    /// no copy of the instance and no new one: it is held, and its
+    /// `source_file` detail says the two subjects and what differs, never an
+    /// identifier. Subjects are compared as a merge left them.
+    fn same_instance(
+        &mut self,
+        parsed: &[&ParsedFile],
+        subject_ids: &[i64],
+    ) -> Result<Vec<Option<String>>, HomeError> {
+        let mut out = vec![None; parsed.len()];
+        // the batch's first file of each instance UID
+        let mut first: HashMap<&str, usize> = HashMap::with_capacity(parsed.len());
+        for (i, p) in parsed.iter().enumerate() {
+            first.entry(p.extracted.sop_uid.as_str()).or_insert(i);
+        }
+        // the registry's: instance UID → (series UID, study UID, subject)
+        let mut held: HashMap<String, (String, String, i64)> = HashMap::new();
+        let uids: Vec<&str> = first.keys().copied().collect();
+        let store = self.registry.store();
+        let d = store.dialect();
+        let (instance, series, study) = (
+            store.qualified("instance"),
+            store.qualified("series"),
+            store.qualified("study"),
+        );
+        for chunk in uids.chunks(500) {
+            let marks: Vec<String> = (1..=chunk.len()).map(|n| d.param(n, Type::Text)).collect();
+            let sql = format!(
+                "SELECT i.sop_instance_uid, se.series_instance_uid, sy.study_instance_uid, se.subject_id \
+                 FROM {instance} i JOIN {series} se ON se.id = i.series_id \
+                 JOIN {study} sy ON sy.id = se.study_id WHERE i.sop_instance_uid IN ({})",
+                marks.join(", ")
+            );
+            let params: Vec<Param> = chunk.iter().map(|u| Param::from(*u)).collect();
+            for r in store.query(&sql, &params)? {
+                held.insert(
+                    r.text(0)?.to_string(),
+                    (r.text(1)?.to_string(), r.text(2)?.to_string(), r.int(3)?),
+                );
+            }
+        }
+        // nothing to compare: no instance from before, no instance twice
+        if held.is_empty() && first.len() == parsed.len() {
+            return Ok(out);
+        }
+        // a merge points the alias at the canonical subject: follow it, a
+        // few steps at most
+        let mut merged: HashMap<i64, i64> = HashMap::new();
+        let mut ask: Vec<i64> = subject_ids
+            .iter()
+            .copied()
+            .chain(held.values().map(|(_, _, s)| *s))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let t = table("subject");
+        let cols = [
+            t.column("id").expect("subject.id"),
+            t.column("merged_into").expect("subject.merged_into"),
+        ];
+        for _ in 0..8 {
+            if ask.is_empty() {
+                break;
+            }
+            let mut next = Vec::new();
+            for r in &self.registry.store().select_by_ids(t, &cols, "id", &ask)? {
+                if let Some(into) = r.opt_int(1)? {
+                    merged.insert(r.int(0)?, into);
+                    if !merged.contains_key(&into) {
+                        next.push(into);
+                    }
+                }
+            }
+            ask = next;
+        }
+        let canonical = |mut id: i64| {
+            for _ in 0..8 {
+                match merged.get(&id) {
+                    Some(&into) => id = into,
+                    None => break,
+                }
+            }
+            id
+        };
+        for (i, p) in parsed.iter().enumerate() {
+            let x = &p.extracted;
+            let (series, study, subject) = match held.get(x.sop_uid.as_str()) {
+                Some((series, study, subject)) => (series.as_str(), study.as_str(), *subject),
+                None => {
+                    let at = first[x.sop_uid.as_str()];
+                    if at == i {
+                        continue;
+                    }
+                    let y = &parsed[at].extracted;
+                    (y.series_uid.as_str(), y.study_uid.as_str(), subject_ids[at])
+                }
+            };
+            let what = if canonical(subject) != canonical(subject_ids[i]) {
+                "subject"
+            } else if study != x.study_uid {
+                "study"
+            } else if series != x.series_uid {
+                "series"
+            } else {
+                continue;
+            };
+            out[i] = Some(format!(
+                "subject:{}|holder:{subject}|differs:{what}",
+                subject_ids[i]
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Which copies are a second file of their instance in this source: one
+    /// an earlier batch filed here under another path, or an earlier file of
+    /// this batch. The rest are `known`: the instance is another source's.
+    fn copies_twice(
+        &mut self,
+        parsed: &[&ParsedFile],
+        filed: &mut [Filed],
+        copies: &[i64],
+        first: &HashMap<&str, usize>,
+    ) -> Result<(), HomeError> {
+        // (instance, path) of the files an earlier batch of this source
+        // filed as an instance's, its own or a copy
+        let mut here: HashMap<i64, Vec<String>> = HashMap::new();
+        if !copies.is_empty() {
+            let d = self.registry.store().dialect();
+            for chunk in copies.chunks(500) {
+                let sql = format!(
+                    "SELECT instance_id, path FROM {} WHERE source_id = {} \
+                     AND status IN ('ingested', 'duplicate') AND instance_id IN ({})",
+                    self.registry.store().qualified("source_file"),
+                    d.param(1, Type::Int),
+                    chunk
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                for r in self
+                    .registry
+                    .store()
+                    .query(&sql, &[Param::Int(self.source_id)])?
+                {
+                    here.entry(r.int(0)?)
+                        .or_default()
+                        .push(r.text(1)?.to_string());
+                }
+            }
+        }
+        for (i, f) in filed.iter_mut().enumerate() {
+            if f.status != status::DUPLICATE {
+                continue;
+            }
+            let id = f.instance_id;
+            let p = parsed[i];
+            let earlier_in_batch = first
+                .get(p.extracted.sop_uid.as_str())
+                .is_some_and(|&at| at < i);
+            let earlier_here = here
+                .get(&id)
+                .is_some_and(|paths| paths.iter().any(|path| *path != p.path));
+            f.twice = earlier_in_batch || earlier_here;
+        }
+        Ok(())
+    }
+
+    /// The stacks other than its row's that the frames of each instance
+    /// from before are in (record 37, S8).
+    fn frames_of(&mut self, instances: &[i64]) -> Result<HashMap<i64, Vec<i64>>, HomeError> {
+        let mut out: HashMap<i64, Vec<i64>> = HashMap::new();
+        if instances.is_empty() {
+            return Ok(out);
+        }
+        let t = table("instance_frame");
+        let cols = [
+            t.column("instance_id").expect("instance_frame.instance_id"),
+            t.column("stack_id").expect("instance_frame.stack_id"),
+        ];
+        let unique: Vec<i64> = instances
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for r in &self
+            .registry
+            .store()
+            .select_by_ids(t, &cols, "instance_id", &unique)?
+        {
+            out.entry(r.int(0)?).or_default().push(r.int(1)?);
+        }
+        Ok(out)
     }
 
     /// Which frames of an instance are in which stack (record 37, S8): one
@@ -1619,6 +1917,7 @@ impl<'a> Writer<'a> {
         batch: &Batch,
         filed: &[Filed],
         held: &[bool],
+        other: &[Option<String>],
         now: &str,
         progress: &Progress,
     ) -> Result<(), HomeError> {
@@ -1637,6 +1936,7 @@ impl<'a> Writer<'a> {
                 "detail",
                 "instance_id",
                 "seen_at",
+                "first_seen_at",
             ],
         )
         .on_conflict(Conflict::Update {
@@ -1673,6 +1973,8 @@ impl<'a> Writer<'a> {
                 Param::from(detail),
                 Param::from(instance_id),
                 Param::from(now),
+                // kept by a row that is there: the update leaves it
+                Param::from(now),
             ]
         };
         let mut rows = Vec::with_capacity(batch.items.len());
@@ -1684,7 +1986,7 @@ impl<'a> Writer<'a> {
         let mut now_held: Vec<Vec<Param>> = Vec::new();
         let mut now_filed: Vec<&str> = Vec::new();
         // path → (instance id, the file is its own, the instance it left)
-        let mut wanted: HashMap<&str, (i64, bool, Option<i64>)> = HashMap::new();
+        let mut wanted: HashMap<&str, (Option<i64>, bool, Option<i64>)> = HashMap::new();
         let mut ingested = 0;
         let mut next = filed.iter();
         // the parsed files in the order the batch holds them, which is the
@@ -1694,6 +1996,7 @@ impl<'a> Writer<'a> {
             match item {
                 Item::Parsed(p) => {
                     let holds = held.get(nth).copied().unwrap_or(false);
+                    let same = other.get(nth).cloned().flatten();
                     nth += 1;
                     if holds {
                         // record 26 §4: no instance and no row of its own, a
@@ -1738,6 +2041,25 @@ impl<'a> Writer<'a> {
                         self.written.held += 1;
                         continue;
                     }
+                    // record 55: held, its instance UID another subject's,
+                    // study's or series'; no instance and no row of its own
+                    if let Some(detail) = same {
+                        rows.push(row(
+                            &p.path,
+                            &p.dir,
+                            p.size,
+                            p.mtime_ns,
+                            status::QUARANTINED,
+                            Some(nils_registry::review::SAME_INSTANCE_KIND),
+                            Some(detail.as_str()),
+                            None,
+                        ));
+                        if let Some(old) = p.prior.and_then(|prior| prior.instance_id) {
+                            wanted.insert(&p.path, (None, false, Some(old)));
+                        }
+                        self.written.same_instance += 1;
+                        continue;
+                    }
                     if place_id.is_some() && self.prior_held.contains_key(&p.path) {
                         now_filed.push(p.path.as_str());
                     }
@@ -1753,12 +2075,16 @@ impl<'a> Writer<'a> {
                         Some(f.instance_id),
                     ));
                     if f.own || f.orphan.is_some() {
-                        wanted.insert(&p.path, (f.instance_id, f.own, f.orphan));
+                        wanted.insert(&p.path, (Some(f.instance_id), f.own, f.orphan));
                     }
                     if f.status == status::INGESTED {
                         ingested += 1;
                     } else {
                         self.written.duplicate += 1;
+                        match f.twice {
+                            true => self.written.twice += 1,
+                            false => self.written.known += 1,
+                        }
                     }
                     if p.prior.is_some_and(|prior| prior.changed) {
                         self.written.changed += 1;
@@ -1813,7 +2139,7 @@ impl<'a> Writer<'a> {
         for r in &returned {
             if let Some(&(instance_id, own, orphan)) = wanted.get(r.text(1)?) {
                 let file_id = r.int(0)?;
-                if own {
+                if own && let Some(instance_id) = instance_id {
                     pairs.push((instance_id, file_id));
                 }
                 if let Some(old) = orphan {

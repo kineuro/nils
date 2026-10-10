@@ -579,6 +579,7 @@ fn finish(
     // and the one each subject it coded instead raises.
     ask_about_held(registry, run, settings, &now)?;
     ask_about_provisional(registry, run, settings, provisional, &now)?;
+    ask_about_same_instance(registry, run, settings, &now)?;
     let store = registry.store();
     store.begin()?;
     let result = (|| -> Result<Report, DigestError> {
@@ -809,6 +810,143 @@ fn ask_about_held(
         for shape in nils_registry::review::open_unmapped_shapes(store, place.id)? {
             if !holding.iter().any(|(s, _, _)| *s == shape) {
                 nils_registry::review::close_unmapped(store, place.id, &shape, now)?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = store.rollback();
+            Err(e)
+        }
+    }
+}
+
+/// The files a source holds under one pair of subjects: how many, by what
+/// differs, and when the first of them was held.
+struct Held {
+    files: i64,
+    differs: BTreeMap<String, i64>,
+    first_seen: String,
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): one
+/// `identity.same_instance` item per pair of subjects this source holds
+/// files under because the registry holds their instance UIDs under another
+/// subject, study or series; brought up to date by every run, and closed by
+/// a run that holds nothing under the pair any more, as after a merge of the
+/// two. The item names the subjects and counts the files; never a value.
+fn ask_about_same_instance(
+    registry: &mut Registry,
+    run: &Run,
+    settings: &Settings,
+    now: &str,
+) -> Result<(), DigestError> {
+    let store = registry.store();
+    let d = store.dialect();
+    let first = d.text_of(
+        table("source_file")
+            .column("first_seen_at")
+            .expect("first_seen_at"),
+    );
+    let sql = format!(
+        "SELECT detail, COUNT(*), MIN({first}) FROM {} WHERE source_id = {} AND status = 'quarantined' \
+         AND reason = {} AND detail IS NOT NULL GROUP BY detail",
+        store.qualified("source_file"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+    );
+    let rows = store.query(
+        &sql,
+        &[
+            Param::Int(run.source_id),
+            Param::from(nils_registry::review::SAME_INSTANCE_KIND),
+        ],
+    )?;
+    let mut pairs: BTreeMap<(i64, i64), Held> = BTreeMap::new();
+    for r in &rows {
+        let detail = r.text(0)?;
+        let field = |name: &str| {
+            detail
+                .split('|')
+                .find_map(|part| part.strip_prefix(name))
+                .map(str::to_string)
+        };
+        let (Some(subject), Some(holder)) = (
+            field("subject:").and_then(|v| v.parse::<i64>().ok()),
+            field("holder:").and_then(|v| v.parse::<i64>().ok()),
+        ) else {
+            continue;
+        };
+        let what = field("differs:").unwrap_or_else(|| "subject".into());
+        let files = r.int(1)?;
+        let seen = r.opt_text(2)?.unwrap_or(now).to_string();
+        let entry = pairs.entry((subject, holder)).or_insert_with(|| Held {
+            files: 0,
+            differs: BTreeMap::new(),
+            first_seen: seen.clone(),
+        });
+        entry.files += files;
+        *entry.differs.entry(what).or_default() += files;
+        if seen < entry.first_seen {
+            entry.first_seen = seen;
+        }
+    }
+    let mut codes: BTreeMap<i64, String> = BTreeMap::new();
+    let ids: Vec<i64> = pairs
+        .keys()
+        .flat_map(|(a, b)| [*a, *b])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !ids.is_empty() {
+        let t = table("subject");
+        let cols = [
+            t.column("id").expect("subject.id"),
+            t.column("code").expect("subject.code"),
+        ];
+        for r in &store.select_by_ids(t, &cols, "id", &ids)? {
+            codes.insert(r.int(0)?, r.text(1)?.to_string());
+        }
+    }
+    let place = nils_registry::place::tree_holding(store, "anon", &settings.root)?;
+    store.begin()?;
+    let result = (|| -> Result<(), DigestError> {
+        let mut open: Vec<String> = Vec::new();
+        for ((subject, holder), held) in &pairs {
+            let (files, first_seen) = (&held.files, &held.first_seen);
+            let differs = serde_json::json!(held.differs);
+            nils_registry::review::raise_same_instance(
+                store,
+                &nils_registry::review::SameInstance {
+                    source_id: run.source_id,
+                    subject_id: *subject,
+                    code: codes.get(subject).map_or("", String::as_str),
+                    holder_id: *holder,
+                    holder_code: codes.get(holder).map_or("", String::as_str),
+                    files: *files,
+                    differs: &differs,
+                    first_seen,
+                    place_id: place.as_ref().map(|p| p.id),
+                    place: place.as_ref().map(|p| p.name.as_str()),
+                    batch_id: Some(run.batch_id),
+                    job_id: Some(run.job_id),
+                },
+                now,
+            )?;
+            open.push(nils_registry::review::same_instance_key(
+                run.source_id,
+                *subject,
+                *holder,
+            ));
+        }
+        for key in nils_registry::review::open_same_instance_keys(store, run.source_id)? {
+            if !open.contains(&key) {
+                nils_registry::review::close_same_instance(store, &key, now)?;
             }
         }
         Ok(())
