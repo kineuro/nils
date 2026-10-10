@@ -4352,15 +4352,8 @@ fn routed(
             // belongs to the scope whose picks it reads; one of no stack
             // names its occasion
             let named = crate::main_scans::named_scope(registry, query, Some(&doc))?;
-            let reading = match &named {
-                Some(s) => nils_registry::pick_rules::reading(registry.store(), s)?,
-                None => None,
-            };
-            let session = doc["session"].as_str().or(doc["session_day"].as_str());
-            let occasion = match (doc["subject_id"].as_i64(), session) {
-                (Some(subject), Some(day)) => Some((subject, day)),
-                _ => None,
-            };
+            let (owner, made_in) = crate::main_scans::person_scope(registry, named.as_ref())?;
+            let occasion = crate::main_scans::occasion_of(registry, &scheme, named.as_ref(), &doc)?;
             let picked = nils_classify::picking::set_person(
                 registry,
                 &pack,
@@ -4372,13 +4365,14 @@ fn routed(
                     why,
                     actor: principal,
                     campaign: None,
-                    occasion,
-                    scope: reading.as_ref(),
+                    occasion: occasion.as_ref().map(|(s, d)| (*s, d.as_str())),
+                    scope: owner.as_ref(),
+                    made_in: made_in.as_deref(),
                 },
             )
             .map_err(pick_err)?;
             let mut doc = serde_json::to_value(picked).unwrap_or(serde_json::Value::Null);
-            doc["rules_scope"] = reading.as_ref().map_or(
+            doc["rules_scope"] = owner.as_ref().map_or(
                 serde_json::Value::Null,
                 nils_registry::pick_rules::Scope::to_json,
             );
@@ -4389,6 +4383,7 @@ fn routed(
         ["api", "picks", "rules"] if get => crate::main_scans::rules(doors, registry, query),
         ["api", "picks", "rules", "text"] if get => crate::main_scans::text(doors, registry, query),
         ["api", "picks", "rules"] if post => {
+            crate::main_scans::sized(body)?;
             let doc = json_body(body)?;
             let (version, scope, pack) =
                 crate::main_scans::save(doors, registry, query, &doc, principal)?;
@@ -4401,36 +4396,52 @@ fn routed(
                 "--pack".to_string(),
                 pack,
             ];
-            let command = located(doors, registry.store(), command)?;
-            let id = nils_registry::job::enqueue_with(
-                registry.store(),
-                &command,
-                Some(&scope.label()),
-                Some(principal),
-                queued_by(caller),
-            )
-            .map_err(job_err)?;
+            // a version whose run cannot be queued is taken back at once
+            let queued = located(doors, registry.store(), command).and_then(|command| {
+                nils_registry::job::enqueue_with(
+                    registry.store(),
+                    &command,
+                    Some(&scope.label()),
+                    Some(principal),
+                    queued_by(caller),
+                )
+                .map_err(job_err)
+            });
+            let id = match queued {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = nils_registry::pick_rules::unsave(registry.store(), &scope, version);
+                    return Err(e);
+                }
+            };
+            // the first version takes in the persons' picks made for the
+            // scope while it read the pack's
+            let carried = if version == 2 {
+                nils_registry::pick_rules::carry_person_picks(registry.store(), &scope)?
+            } else {
+                0
+            };
             Ok(Reply::created(serde_json::json!({
-                "version": version, "job": id, "scope": scope.to_json(),
+                "version": version, "job": id, "scope": scope.to_json(), "carried": carried,
             })))
         }
         // and the map of what the rules, saved or drafted, take for a role
         ["api", "picks", "map"] if post => crate::main_scans::map(
             doors,
             registry,
-            &json_body(body)?,
+            &crate::main_scans::sized(body).and_then(|_| json_body(body))?,
             crate::main_scans::Door::Map,
         ),
         ["api", "picks", "map", "subjects"] if post => crate::main_scans::map(
             doors,
             registry,
-            &json_body(body)?,
+            &crate::main_scans::sized(body).and_then(|_| json_body(body))?,
             crate::main_scans::Door::Subjects,
         ),
         ["api", "picks", "map", "strips"] if post => crate::main_scans::map(
             doors,
             registry,
-            &json_body(body)?,
+            &crate::main_scans::sized(body).and_then(|_| json_body(body))?,
             crate::main_scans::Door::Strips,
         ),
         // Record 55 H2 (round 4): what picking main scans found for a
@@ -4556,16 +4567,13 @@ fn routed(
             // record 55, decision 6: named, the pick must be of the scope
             // the person is looking at
             let named = crate::main_scans::named_scope(registry, query, Some(&doc))?;
-            let reading = match &named {
-                Some(s) => nils_registry::pick_rules::reading(registry.store(), s)?,
-                None => None,
-            };
+            let (owner, _) = crate::main_scans::person_scope(registry, named.as_ref())?;
             let done = nils_classify::picking::withdraw_person(
                 registry,
                 id,
                 principal,
                 doc["why"].as_str(),
-                named.as_ref().map(|_| reading.as_ref()),
+                named.as_ref().map(|_| owner.as_ref()),
             )
             .map_err(pick_err)?;
             Ok(Reply::ok(

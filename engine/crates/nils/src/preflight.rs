@@ -206,14 +206,18 @@ type LeftOut = Vec<(i64, String)>;
 pub(crate) fn pick_roles(
     store: &mut Store,
     stacks: &[i64],
+    reading: Option<&nils_registry::pick_rules::Reading>,
 ) -> Result<BTreeMap<i64, Picked>, String> {
+    // record 55, decision 6: the picks a release read (its pick_rules), or
+    // the pack's
+    let filter = nils_registry::pick_rules::reading_filter("p", reading);
     let err = |e: nils_registry::Error| e.to_string();
     let mut out: BTreeMap<i64, Picked> = BTreeMap::new();
     let d_ = store.dialect();
     for chunk in stacks.chunks(500) {
         let sql = format!(
             "SELECT ps.stack_id, p.subject_id, {}, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-             WHERE p.withdrawn_at IS NULL AND p.rules_scope_kind IS NULL AND ps.stack_id IN ({}) \
+             WHERE p.withdrawn_at IS NULL AND {filter} AND ps.stack_id IN ({}) \
              ORDER BY ps.stack_id",
             d_.text_of_qualified(
                 Some("p"),
@@ -325,7 +329,8 @@ fn bids_units(
     stacks: &[i64],
     pack: Option<&nils_pack::Pack>,
 ) -> Result<(Vec<Unit>, LeftOut), String> {
-    let picks = pick_roles(registry.store(), stacks)?;
+    // a run's input is a selection, released under the pack's picks
+    let picks = pick_roles(registry.store(), stacks, None)?;
     let unpicked = "no live pick takes it, so the release of the input leaves it out".to_string();
     let mut left: LeftOut = stacks
         .iter()

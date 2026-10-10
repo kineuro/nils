@@ -18,6 +18,23 @@ use serde_json::{Value, json};
 
 use crate::serve::{Doors, Reply};
 
+/// The longest reason a version of the rules is saved with.
+const REASON_MOST: usize = 500;
+
+/// The largest body the rules and map doors read.
+pub(crate) const BODY_MOST: usize = 256 * 1024;
+
+/// A body over [`BODY_MOST`] is refused before it is read.
+pub(crate) fn sized(body: &str) -> Result<(), Reply> {
+    if body.len() > BODY_MOST {
+        return Err(Reply::error(
+            413,
+            format!("a body of at most {BODY_MOST} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 fn failed(e: impl std::fmt::Display) -> Reply {
     Reply::error(500, e.to_string())
 }
@@ -72,6 +89,68 @@ pub(crate) fn named_scope(
             .ok_or_else(|| Reply::error(404, format!("no dataset named {d}"))),
         (None, None) => Ok(None),
     }
+}
+
+/// The scope a person's pick made for a dataset or a cohort belongs to: its
+/// own once it has rules saved; else the pack's, marked as made for it, so
+/// that its first save carries the pick in.
+pub(crate) fn person_scope(
+    registry: &mut Registry,
+    named: Option<&Scope>,
+) -> Result<(Option<Scope>, Option<String>), Reply> {
+    let Some(scope) = named else {
+        return Ok((None, None));
+    };
+    if pick_rules::latest(registry.store(), scope)
+        .map_err(failed)?
+        .is_some()
+    {
+        Ok((Some(scope.clone()), None))
+    } else {
+        Ok((None, Some(pick_rules::made_in(scope))))
+    }
+}
+
+/// The occasion a person's pick names, when it names one: `session_id`
+/// (the map's), or `subject_id` with `session` (its day). It must be one of
+/// the subject's own under the scheme, and the subject one of the named
+/// scope's.
+pub(crate) fn occasion_of(
+    registry: &mut Registry,
+    scheme: &nils_registry::session::Scheme,
+    named: Option<&Scope>,
+    doc: &Value,
+) -> Result<Option<(i64, String)>, Reply> {
+    let session_id = doc["session_id"].as_i64();
+    let day = doc["session"].as_str().or(doc["session_day"].as_str());
+    let subject = doc["subject_id"].as_i64();
+    if session_id.is_none() && (subject.is_none() || day.is_none()) {
+        return Ok(None);
+    }
+    let labels = nils_session::labels_by_study(registry.store(), scheme).map_err(failed)?;
+    let found = labels.values().find(|l| match session_id {
+        Some(id) => l.session_id == id && subject.is_none_or(|s| s == l.subject_id),
+        None => {
+            Some(l.subject_id) == subject
+                && day.is_some_and(|d| d.get(..10).unwrap_or(d) == l.first.to_string())
+        }
+    });
+    let Some(l) = found else {
+        return Err(Reply::error(
+            404,
+            "no such visit of the subject under the scheme",
+        ));
+    };
+    if let Some(scope) = named {
+        let subjects = crate::pick_scopes::subjects_of(registry.store(), scope).map_err(failed)?;
+        if !subjects.contains(&l.subject_id) {
+            return Err(Reply::error(
+                409,
+                format!("the subject is not one of {}'s", scope.label()),
+            ));
+        }
+    }
+    Ok(Some((l.subject_id, l.first.to_string())))
 }
 
 /// The served pack a door names (`pack`, else the served one), with picks.
@@ -171,6 +250,9 @@ pub(crate) fn rules(
         "pack": {"name": pack.name, "version": pack.version.to_string()},
         "current": current,
         "versions": versions,
+        // what the scope's picks are read from now, and a version whose
+        // run has not finished yet
+        "picks": pick_rules::state(registry.store(), &scope).map_err(failed)?,
     })))
 }
 
@@ -224,6 +306,11 @@ pub(crate) fn save(
     let pack = pack_of(doors, query, Some(doc))?;
     let model = model_of(&pack, None)?;
     let reason = doc["reason"].as_str().unwrap_or("").trim();
+    if reason.chars().count() > REASON_MOST {
+        let mut r = Reply::error(400, format!("reason: at most {REASON_MOST} characters"));
+        r.body["field"] = Value::from("reason");
+        return Err(r);
+    }
     if reason.is_empty() {
         let mut r = Reply::error(422, "a version of the rules says why it was made");
         r.body["field"] = Value::from("reason");
@@ -335,6 +422,7 @@ pub(crate) fn map(
     };
     let subjects = crate::pick_scopes::subjects_of(registry.store(), &scope).map_err(failed)?;
     let reading = pick_rules::reading(registry.store(), &scope).map_err(failed)?;
+    // and what the rules door says of them
     let datasets = match by {
         Columns::Dataset => datasets(registry, &subjects)?,
         Columns::Scanner => HashMap::new(),

@@ -4521,6 +4521,7 @@ fn pick_writer(
                 campaign: Some(ask.campaign),
                 occasion: Some((ask.subject_id, ask.session_day)),
                 scope: None,
+                made_in: None,
             },
         )
         .map(|picked| picked.id)

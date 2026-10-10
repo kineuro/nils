@@ -523,7 +523,16 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let started = std::time::Instant::now();
     // Record 26 §13: the policies in play, the run's own and each
     // dataset's, every one checked by name before anything is read.
-    let policies = Policies::resolve(registry.store(), settings)?;
+    // record 55, decision 6: the picks a release of picked stacks reads,
+    // worked out once, and what its row records of them
+    let (reading, pick_rules) = picks_read(
+        registry.store(),
+        &settings.selection,
+        &settings.pack.name,
+        &settings.pack.version.to_string(),
+    )?;
+    let reading = reading.as_ref();
+    let policies = Policies::resolve(registry.store(), settings, reading)?;
     let scheme = settings.scheme;
 
     // §9.2 and §9.6, before a registry row exists. A pack with no mapping
@@ -554,7 +563,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // has to be room. A release that discovers a full disk after 400 GB has
     // written 400 GB for nothing, and what it reports is the operating
     // system's word for it rather than what to do about it.
-    let wanted = selection_bytes(registry.store(), &settings.selection)?;
+    let wanted = selection_bytes(registry.store(), &settings.selection, reading)?;
     preflight(settings.root, wanted)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
@@ -662,6 +671,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         earlier.as_ref(),
         &report.placements,
         &report.policies,
+        pick_rules.as_ref(),
     )?;
 
     // The parts of a stack's content digest that are the same for every stack
@@ -720,8 +730,8 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // about: places() names every stack of the registry, so that a name never
     // depends on what else a release took.
     let mut in_version: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-    for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
-        let mine = select_subject(registry.store(), &settings.selection, subject)?;
+    for (subject, code) in selected_subjects(registry.store(), &settings.selection, reading)? {
+        let mine = select_subject(registry.store(), &settings.selection, subject, reading)?;
         if mine.is_empty() {
             continue;
         }
@@ -2086,8 +2096,10 @@ pub fn plan_picked(
         ..Selection::default()
     };
     let mut out = Vec::new();
-    for (subject, code) in selected_subjects(registry.store(), &selection)? {
-        let mine = select_subject(registry.store(), &selection, subject)?;
+    let (reading, _) = picks_read(registry.store(), &selection, "", "")?;
+    let reading = reading.as_ref();
+    for (subject, code) in selected_subjects(registry.store(), &selection, reading)? {
+        let mine = select_subject(registry.store(), &selection, subject, reading)?;
         let labels = session_labels(&mine, &by_study, subject);
         let mut studies: BTreeMap<i64, i64> = BTreeMap::new();
         for i in &mine {
@@ -2672,7 +2684,11 @@ fn prune(root: &Path, from: Option<&Path>) {
 
 /// The `WHERE` of a selection over the joined tables `i`, `k`, `se`, `su`,
 /// `sf`, `so`, shared by the three readers below so they cannot disagree.
-fn selection_where(store: &mut Store, selection: &Selection) -> String {
+fn selection_where(
+    store: &mut Store,
+    selection: &Selection,
+    reading: Option<&nils_registry::pick_rules::Reading>,
+) -> String {
     let mut wheres: Vec<String> = Vec::new();
     if !selection.subjects.is_empty() {
         wheres.push(format!(
@@ -2761,24 +2777,15 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         ));
     }
     if selection.picked_only {
-        // Record 55, decision 6: a release of a cohort or a dataset with
-        // main-scan rules of its own reads that scope's picks; any other,
-        // the pack's.
-        let scope = nils_registry::pick_rules::for_release(
-            store,
-            &selection.cohorts,
-            &selection.datasets,
-            "",
-            "",
-        )
-        .map(|(scope, _)| scope)
-        .unwrap_or(None);
+        // Record 55, decision 6: a release of a cohort or a dataset whose
+        // picks are read from its own rules reads those; any other, the
+        // pack's.
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {} ps JOIN {} p ON p.id = ps.pick_id \
              WHERE ps.stack_id = k.id AND p.withdrawn_at IS NULL AND {})",
             store.qualified("pick_stack"),
             store.qualified("pick"),
-            nils_registry::pick_rules::pick_filter("p", scope.as_ref()),
+            nils_registry::pick_rules::reading_filter("p", reading),
         ));
     }
     // Record 26 §13: only the files under the named datasets' pseudonymised
@@ -2801,6 +2808,34 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         true => String::new(),
         false => format!(" AND {}", wheres.join(" AND ")),
     }
+}
+
+/// Record 55, decision 6: what a release of picked stacks reads of the
+/// picks (the scope and version, none for the pack's) and what it records
+/// of them, worked out once per release.
+fn picks_read(
+    store: &mut Store,
+    selection: &Selection,
+    pack: &str,
+    pack_version: &str,
+) -> Result<
+    (
+        Option<nils_registry::pick_rules::Reading>,
+        Option<serde_json::Value>,
+    ),
+    Error,
+> {
+    if !selection.picked_only {
+        return Ok((None, None));
+    }
+    let (reading, doc) = nils_registry::pick_rules::for_release(
+        store,
+        &selection.cohorts,
+        &selection.datasets,
+        pack,
+        pack_version,
+    )?;
+    Ok((reading, Some(doc)))
 }
 
 /// The sources whose root lies under one of the named datasets'
@@ -2840,7 +2875,11 @@ struct Policies {
 }
 
 impl Policies {
-    fn resolve(store: &mut Store, settings: &Settings) -> Result<Policies, Error> {
+    fn resolve(
+        store: &mut Store,
+        settings: &Settings,
+        reading: Option<&nils_registry::pick_rules::Reading>,
+    ) -> Result<Policies, Error> {
         let mut out = Policies {
             all: vec![settings.policy.clone()],
             datasets: vec![None],
@@ -2850,7 +2889,7 @@ impl Policies {
         // the source roots the selection reaches, and the dataset holding
         // each
         let from = selection_from(store);
-        let filter = selection_where(store, &settings.selection);
+        let filter = selection_where(store, &settings.selection, reading);
         let sql = format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}");
         let roots: Vec<(String, String)> = store
             .query(&sql, &[])?
@@ -2951,9 +2990,10 @@ fn selection_from(store: &mut Store) -> String {
 fn selected_subjects(
     store: &mut Store,
     selection: &Selection,
+    reading: Option<&nils_registry::pick_rules::Reading>,
 ) -> Result<Vec<(i64, String)>, Error> {
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, reading);
     let sql = format!(
         "SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter} ORDER BY se.subject_id"
     );
@@ -2965,9 +3005,13 @@ fn selected_subjects(
 }
 
 /// How much source the selection is, for the preflight.
-fn selection_bytes(store: &mut Store, selection: &Selection) -> Result<i64, Error> {
+fn selection_bytes(
+    store: &mut Store,
+    selection: &Selection,
+    reading: Option<&nils_registry::pick_rules::Reading>,
+) -> Result<i64, Error> {
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, reading);
     // Cast, because a sum of bigints is a numeric on Postgres and the store
     // reads a numeric only as text.
     let sql =
@@ -2993,8 +3037,9 @@ pub struct Preview {
 }
 
 pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Error> {
+    let (reading, _) = picks_read(store, selection, "", "")?;
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, reading.as_ref());
     let sql = format!(
         "SELECT COUNT(DISTINCT su.id), COUNT(DISTINCT se.study_id), COUNT(DISTINCT k.id),                 COUNT(*), CAST(COALESCE(SUM(sf.size), 0) AS BIGINT)          {from} WHERE 1 = 1{filter}"
     );
@@ -3019,9 +3064,10 @@ fn select_subject(
     store: &mut Store,
     selection: &Selection,
     subject: i64,
+    reading: Option<&nils_registry::pick_rules::Reading>,
 ) -> Result<Vec<Instance>, Error> {
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, reading);
     let sql = format!(
         // The stored path is relative to the batch root it was walked from,
         // which is what makes a registry portable; the root is on `source`.
@@ -3521,6 +3567,7 @@ fn open_row(
     earlier: Option<&Earlier>,
     placements: &BTreeMap<String, String>,
     policies: &[serde_json::Value],
+    pick_rules: Option<&serde_json::Value>,
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
     // record 26 §13: the row says where its policy came from, and what each
@@ -3532,20 +3579,7 @@ fn open_row(
     // number means written and counted under the default and held under
     // `--on-unknown hold`.
     policy["on_unknown"] = serde_json::Value::from(settings.on_unknown.name());
-    // record 55, decision 6: the rules whose picks a release of picked
-    // stacks read
-    let pick_rules = if settings.selection.picked_only {
-        let (_, doc) = nils_registry::pick_rules::for_release(
-            store,
-            &settings.selection.cohorts,
-            &settings.selection.datasets,
-            &settings.pack.name,
-            &settings.pack.version.to_string(),
-        )?;
-        Param::from(doc.to_string())
-    } else {
-        Param::Null
-    };
+    let pick_rules = pick_rules.map_or(Param::Null, |doc| Param::from(doc.to_string()));
     let written = store.insert(
         &Insert::new(
             table("release"),

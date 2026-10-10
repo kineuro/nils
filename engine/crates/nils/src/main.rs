@@ -8741,6 +8741,7 @@ fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
             campaign: None,
             occasion: None,
             scope: None,
+            made_in: None,
         },
     )
     .map_err(|e| match e {

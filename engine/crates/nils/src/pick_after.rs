@@ -225,14 +225,14 @@ pub(crate) fn cohort_summary(
 pub(crate) fn reading_of(
     store: &mut Store,
     scope: &Scope,
-) -> Result<(Option<Scope>, Value), StoreError> {
-    Ok(match pick_rules::latest(store, scope)? {
-        Some(saved) => (
-            Some(scope.clone()),
-            json!({"scope": scope.to_json(), "version": saved.version}),
-        ),
-        None => (None, json!({"scope": null, "version": 1})),
-    })
+) -> Result<(Option<pick_rules::Reading>, Value), StoreError> {
+    let reading = pick_rules::reading(store, scope)?;
+    let mut doc = match &reading {
+        Some(r) => json!({"scope": scope.to_json(), "version": r.version}),
+        None => json!({"scope": null, "version": 1}),
+    };
+    doc["state"] = pick_rules::state(store, scope)?;
+    Ok((reading, doc))
 }
 
 /// The roles of the summary for these subjects, read from the picks of
@@ -242,7 +242,7 @@ fn roles_of(
     store: &mut Store,
     subjects: &BTreeSet<i64>,
     scheme: Option<&str>,
-    scope: Option<&Scope>,
+    scope: Option<&pick_rules::Reading>,
 ) -> Result<(serde_json::Map<String, Value>, i64), StoreError> {
     let mut roles: BTreeMap<String, RoleSum> = BTreeMap::new();
     let mut tied_on: BTreeSet<(String, i64, String)> = BTreeSet::new();
@@ -263,7 +263,7 @@ fn roles_of(
             crate::text_of(store, "pick", "session_day"),
             crate::text_of(store, "pick", "considered"),
             store.qualified("pick"),
-            pick_rules::pick_filter("p", scope),
+            pick_rules::reading_filter("p", scope),
             chunk
                 .iter()
                 .map(i64::to_string)

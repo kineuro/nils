@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use nils_pack::pick::{Candidate, Model, Reference};
 use nils_pack::pick_rules::{self, Chooser, Chosen, Rules};
-use nils_registry::pick_rules::{Scope, pick_filter};
+use nils_registry::pick_rules::{Reading, reading_filter};
 use nils_registry::schema::{Type, table};
 use nils_registry::session::Scheme;
 use nils_registry::store::{Error as StoreError, Param, Store};
@@ -41,7 +41,7 @@ pub struct Ask<'a> {
     pub subjects: &'a BTreeSet<i64>,
     /// The scope whose stored picks are read (a person's picks among them):
     /// the scope's own when it has rules saved, else the pack's.
-    pub reading: Option<&'a Scope>,
+    pub reading: Option<&'a Reading>,
     /// The dataset of each stack, for columns by dataset.
     pub datasets: &'a HashMap<i64, String>,
 }
@@ -198,16 +198,22 @@ fn stored(store: &mut Store, ask: &Ask<'_>) -> Result<HashMap<(i64, String), Sto
     for chunk in ids.chunks(500) {
         let sql = format!(
             "SELECT id, subject_id, {day}, author_kind, why FROM {} WHERE role = {} \
-             AND model = {} AND withdrawn_at IS NULL AND {} AND subject_id IN ({}) ORDER BY id",
+             AND model = {} AND scheme_digest = {} AND withdrawn_at IS NULL AND {} \
+             AND subject_id IN ({}) ORDER BY id",
             store.qualified("pick"),
             d.param(1, Type::Text),
             d.param(2, Type::Text),
-            pick_filter("", ask.reading),
+            d.param(3, Type::Text),
+            reading_filter("", ask.reading),
             list(chunk)
         );
         let rows = store.query(
             &sql,
-            &[Param::from(ask.role), Param::from(ask.model.name.as_str())],
+            &[
+                Param::from(ask.role),
+                Param::from(ask.model.name.as_str()),
+                Param::from(ask.scheme.digest()),
+            ],
         )?;
         let mut found: Vec<((i64, String), Stored)> = Vec::new();
         for r in &rows {

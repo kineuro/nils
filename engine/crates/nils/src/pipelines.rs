@@ -2133,7 +2133,24 @@ fn units_missing(
         .iter()
         .flat_map(|u| u.stacks.iter().copied())
         .collect();
-    let picks = crate::preflight::pick_roles(store, &all)?;
+    // record 55, decision 6: the picks the release read, as it recorded them
+    let recorded = store
+        .query_opt(
+            &format!(
+                "SELECT {} FROM {} WHERE id = {}",
+                crate::text_of(store, "release", "pick_rules"),
+                store.qualified("release"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(release_id)],
+        )
+        .map_err(err)?
+        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let reading = recorded
+        .as_ref()
+        .and_then(nils_registry::pick_rules::of_release);
+    let picks = crate::preflight::pick_roles(store, &all, reading.as_ref())?;
     let mut out = BTreeMap::new();
     for u in units {
         let mut held: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();

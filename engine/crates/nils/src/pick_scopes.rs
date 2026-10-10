@@ -81,7 +81,9 @@ pub(crate) fn of_run(
                 scope.name
             ))
         })?;
+        let members = subjects_of(store, &scope)?;
         return Ok(vec![RunScope {
+            whole: only.is_none_or(|o| *o == members),
             scope: Some(scope),
             saved: Some(saved),
             subjects: only.cloned(),
@@ -110,6 +112,7 @@ pub(crate) fn of_run(
             continue;
         }
         let members = subjects_of(store, &scope)?;
+        let members_n = members.len();
         let subjects: BTreeSet<i64> = match (only, subject.is_some()) {
             (Some(o), _) => members.intersection(o).copied().collect(),
             (None, true) => members.into_iter().filter(|s| Some(*s) == one).collect(),
@@ -122,6 +125,7 @@ pub(crate) fn of_run(
             continue;
         };
         out.push(RunScope {
+            whole: subjects.len() == members_n,
             scope: Some(scope),
             saved: Some(saved),
             subjects: Some(subjects),

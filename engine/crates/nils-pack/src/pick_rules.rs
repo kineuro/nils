@@ -574,18 +574,32 @@ fn word<T>(
         .ok_or_else(|| refuse(field, format!("one of {choices}")))
 }
 
+/// The most kinds a list names, and the longest key.
+pub const KINDS_MOST: usize = 500;
+pub const KIND_KEY_MOST: usize = 80;
+
 fn kind_list(v: &Value, field: &str) -> Result<Vec<String>, Refusal> {
     let list = v
         .as_array()
         .ok_or_else(|| refuse(field, "a list of kind keys"))?;
+    if list.len() > KINDS_MOST {
+        return Err(refuse(field, format!("at most {KINDS_MOST} kinds")));
+    }
     let mut out: Vec<String> = Vec::with_capacity(list.len());
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for item in list {
         let key = item
             .as_str()
             .map(str::trim)
             .filter(|k| !k.is_empty())
             .ok_or_else(|| refuse(field, "a list of kind keys, each a text"))?;
-        if out.iter().any(|k| k == key) {
+        if key.chars().count() > KIND_KEY_MOST {
+            return Err(refuse(
+                field,
+                format!("a kind key of at most {KIND_KEY_MOST} characters"),
+            ));
+        }
+        if !seen.insert(key) {
             return Err(refuse(field, format!("{key} is named twice")));
         }
         out.push(key.to_string());

@@ -105,7 +105,7 @@ impl Scope {
     pub(crate) fn pick_scope(
         &self,
         store: &mut Store,
-    ) -> Result<Option<nils_registry::pick_rules::Scope>, StoreError> {
+    ) -> Result<Option<nils_registry::pick_rules::Reading>, StoreError> {
         use nils_registry::pick_rules::{Scope as Rules, ScopeKind};
         let mine = Rules {
             kind: match self {
@@ -463,7 +463,7 @@ fn picked(
         Some(s) => s.pick_scope(store)?,
         None => None,
     };
-    let filter = nils_registry::pick_rules::pick_filter("p", reading.as_ref());
+    let filter = nils_registry::pick_rules::reading_filter("p", reading.as_ref());
     let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
     for chunk in stacks.chunks(IN_CHUNKS) {
         for r in store.query(
@@ -871,7 +871,7 @@ pub(crate) fn subjects(
         // the roles of the live picks among the scope's scans, the scope's
         // own where it has main-scan rules (record 55, decision 6)
         let reading = scope.pick_scope(store).map_err(failed)?;
-        let filter = nils_registry::pick_rules::pick_filter("p", reading.as_ref());
+        let filter = nils_registry::pick_rules::reading_filter("p", reading.as_ref());
         for r in store
             .query(
                 &format!(
