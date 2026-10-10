@@ -253,6 +253,28 @@ number `has` would give per value and sums to more than the stacks. A stack with
 no value on the axis falls under the null key, numbered last on both backends.
 A stack the pack ruled out is in no group, as in every stack set.
 
+**axis values** are named in the pack's vocabulary, by any name the pack gives
+them (Wave 7a, 2026-10-10). A document names a value of an axis by its
+identity, by an identity it had before a rename, or by its label, and validate
+accepts each; any other text is `unknown_value`, and a number is read as its
+digits. A pack may store a value's label rather than its identity (`stores:
+label`): the MR pack's rules write `1` for post_contrast's `given`, `T2*w` for
+base's `T2starw` and `SPACE` for technique's `3D-TSE`, while a person's
+decision may hold the identity. So `=`, `<>`, `has`, `in` and `not_in` on an
+axis compare a row's value with every text a row may hold for the value named:
+the name the pack stores, then each other name of the value that names no
+other value of the axis. Everything the engine answers reads one form, the one
+the pack stores: a group keyed by an axis and a level's signature read each
+row's value through the axis's names, so a value is one key however its rows
+spell it, and a `where` on such a key compares with the stored name of the
+value it names. The value sampler answers a stack's axis in that form too, and
+the catalog says which form it is (`stores`) beside each value's identity,
+label and former identities. Before this, a value named by its identity
+missed every row that stores its label, so a question about contrast or about
+T2* scans counted none of what the rules had found; a handle records
+`axis_values: any_name` in its suppression, so no answer cached before is
+served again.
+
 **share** names its denominator. A denominator is an uncorrelated scalar count
 over a named set, legal only in a denominator position and only at count or
 distinct, so no generic join enters through that door (C39):
