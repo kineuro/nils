@@ -333,6 +333,12 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
         todo = {k: v for k, v in todo.items() if v}
         if todo:
             got_now = decode(todo) if decode is not None else _decode_with_headers(todo, heads)
+            if decode is not None:
+                # a card's decoder gives pixels only: each decoded file's
+                # own orientation and thickness come from its header, as
+                # on the CPU path, or the answer would depend on which
+                # stacks reach a card worker
+                _headers_of(todo, heads)
             opened |= set(todo)
             for path, got in got_now.items():
                 if isinstance(got, dict) and isinstance(cache.get(path), dict):
@@ -508,3 +514,35 @@ def file_bytes(paths) -> int:
 
 
 __all__ = ["build", "plan", "files_to_read", "check_policy", "PolicyError", "NoGeometry", "Unreadable"]
+
+
+def _headers_of(need: dict, heads: dict) -> None:
+    """Each decoded file's own orientation and slice thickness, from its
+    header with no pixels, as ``_decode_with_headers`` keeps them on the CPU
+    path. The card's decoder (``gpu``) returns pixels alone; without this a
+    stack decoded on the card keeps the registry's values, and which stacks
+    reach a card worker changes from run to run (the image-model speed
+    study, round 2: with it, the card path gives every answer and
+    probability of the CPU path)."""
+    import pydicom
+
+    for path in need:
+        if path in heads:
+            continue
+        try:
+            ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+            iop = volume._floats(getattr(ds, "ImageOrientationPatient", None) or [], 6)
+            thick = getattr(ds, "SliceThickness", None)
+            nf = int(getattr(ds, "NumberOfFrames", 1) or 1)
+            if nf > 1:
+                sh = getattr(ds, "SharedFunctionalGroupsSequence", None)
+                pf = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
+                iop = volume._floats(volume._fg_get(pf, sh, 0, "PlaneOrientationSequence", "ImageOrientationPatient") or [], 6) or iop
+                thick = volume._fg_get(pf, sh, 0, "PixelMeasuresSequence", "SliceThickness") or thick
+            try:
+                thick = float(thick)
+            except (TypeError, ValueError):
+                thick = None
+            heads[path] = (iop, thick)
+        except Exception:  # noqa: BLE001 - the decode step reports its own failures
+            pass
