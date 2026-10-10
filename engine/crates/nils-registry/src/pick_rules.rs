@@ -299,14 +299,215 @@ pub fn scopes(store: &mut Store) -> Result<Vec<(ScopeKind, i64)>, StoreError> {
     Ok(out)
 }
 
-/// The scope whose picks a dataset or a cohort reads: its own when it has
-/// rules saved, else the pack's (none).
-pub fn reading(store: &mut Store, scope: &Scope) -> Result<Option<Scope>, StoreError> {
-    Ok(latest(store, scope)?.map(|_| scope.clone()))
+/// What a reader of a scope's picks reads: the scope and the version of
+/// its rules whose run finished over all its subjects, and that run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reading {
+    pub scope: Scope,
+    pub version: i64,
+    pub job: Option<i64>,
+    pub at: String,
 }
 
-/// The picks of a scope among `pick` rows under `alias`, as a condition:
-/// the pack's are those that name no scope.
+impl Reading {
+    pub fn to_json(&self) -> Value {
+        json!({"scope": self.scope.to_json(), "version": self.version, "run": self.job, "at": self.at})
+    }
+}
+
+/// The scope whose picks a dataset or a cohort reads: its own once a run
+/// of a saved version finished over all its subjects, the latest such
+/// version; else none, the pack's. A version saved since, whose run is
+/// queued, running or failed, is not read until its run finishes.
+pub fn reading(store: &mut Store, scope: &Scope) -> Result<Option<Reading>, StoreError> {
+    let t = table("pick_rules_run");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT version, job_id, {} FROM {} WHERE scope_kind = {} AND scope_id = {} \
+           AND state = 'done' AND whole = 1 ORDER BY version DESC, id DESC LIMIT 1",
+        d.text_of(t.column("finished_at").expect("pick_rules_run.finished_at")),
+        store.qualified("pick_rules_run"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int),
+    );
+    Ok(match store.query_opt(&sql, &key(scope))? {
+        None => None,
+        Some(r) => Some(Reading {
+            scope: scope.clone(),
+            version: r.int(0)?,
+            job: r.opt_int(1)?,
+            at: r.opt_text(2)?.unwrap_or_default().to_string(),
+        }),
+    })
+}
+
+/// A run of a scope's version begins: answers its row.
+pub fn run_started(
+    store: &mut Store,
+    scope: &Scope,
+    version: i64,
+    job: Option<i64>,
+    whole: bool,
+) -> Result<i64, StoreError> {
+    let written = store.insert(
+        &Insert::new(
+            table("pick_rules_run"),
+            &[
+                "scope_kind",
+                "scope_id",
+                "version",
+                "job_id",
+                "state",
+                "whole",
+                "started_at",
+            ],
+        )
+        .returning(&["id"]),
+        &[vec![
+            Param::from(scope.kind.name()),
+            Param::Int(scope.id),
+            Param::Int(version),
+            job.map_or(Param::Null, Param::Int),
+            Param::from("running"),
+            Param::Int(i64::from(whole)),
+            Param::from(now_iso()),
+        ]],
+    )?;
+    written
+        .first()
+        .map(|r| r.int(0))
+        .transpose()?
+        .ok_or_else(|| StoreError::Message("the run was not written back".into()))
+}
+
+/// A run of a scope's version ended, done or failed with why.
+pub fn run_ended(store: &mut Store, row: i64, error: Option<&str>) -> Result<(), StoreError> {
+    store.update_by_id(
+        table("pick_rules_run"),
+        &[
+            (
+                "state",
+                Param::from(if error.is_some() { "failed" } else { "done" }),
+            ),
+            ("error", error.map_or(Param::Null, Param::from)),
+            ("finished_at", Param::from(now_iso())),
+        ],
+        "id",
+        row,
+    )?;
+    Ok(())
+}
+
+/// What the rules door says of a scope's picks: the version they are read
+/// from (`picks_from`, null while the scope reads the pack's) and the
+/// latest saved version not read yet with the state of its run (`pending`:
+/// `queued`, `running` or `failed`, null when none is).
+pub fn state(store: &mut Store, scope: &Scope) -> Result<Value, StoreError> {
+    let read = reading(store, scope)?;
+    let latest = latest(store, scope)?.map(|s| s.version);
+    let pending = match latest {
+        Some(v) if read.as_ref().is_none_or(|r| r.version < v) => {
+            let d = store.dialect();
+            let sql = format!(
+                "SELECT state, job_id, error FROM {} WHERE scope_kind = {} AND scope_id = {} \
+                   AND version = {} AND whole = 1 ORDER BY id DESC LIMIT 1",
+                store.qualified("pick_rules_run"),
+                d.param(1, Type::Text),
+                d.param(2, Type::Int),
+                d.param(3, Type::Int),
+            );
+            let [a, b] = key(scope);
+            match store.query_opt(&sql, &[a, b, Param::Int(v)])? {
+                Some(r) => json!({
+                    "version": v, "state": r.text(0)?, "run": r.opt_int(1)?, "error": r.opt_text(2)?,
+                }),
+                None => json!({"version": v, "state": "queued", "run": null, "error": null}),
+            }
+        }
+        _ => Value::Null,
+    };
+    Ok(json!({
+        "picks_from": read.as_ref().map(Reading::to_json),
+        "pending": pending,
+    }))
+}
+
+/// Remove a version just saved, when what it was saved for (its run) could
+/// not be queued: the one deletion of a rules row, made at once.
+pub fn unsave(store: &mut Store, scope: &Scope, version: i64) -> Result<(), StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "DELETE FROM {} WHERE scope_kind = {} AND scope_id = {} AND version = {}",
+        store.qualified("pick_rules"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int),
+        d.param(3, Type::Int),
+    );
+    let [a, b] = key(scope);
+    store.execute(&sql, &[a, b, Param::Int(version)])?;
+    Ok(())
+}
+
+/// The marker a person's pick made for a scope without rules carries in
+/// its `parts`, so that the scope's first save takes it in.
+pub fn made_in(scope: &Scope) -> String {
+    format!("{}:{}", scope.kind.name(), scope.id)
+}
+
+/// A scope's first version saved: the persons' picks made for it while it
+/// read the pack's (pack picks marked [`made_in`] it, standing) are copied
+/// into the scope, where they stand from now. Answers how many.
+pub fn carry_person_picks(store: &mut Store, scope: &Scope) -> Result<i64, StoreError> {
+    let t = table("pick");
+    let d = store.dialect();
+    let parts = d.text_of(t.column("parts").expect("pick.parts"));
+    let marker = format!("%\"made_in\":\"{}\"%", made_in(scope));
+    let sql = format!(
+        "SELECT id FROM {} WHERE author_kind = 'person' AND withdrawn_at IS NULL \
+           AND rules_scope_kind IS NULL AND {parts} LIKE {} ORDER BY id",
+        store.qualified("pick"),
+        d.param(1, Type::Text),
+    );
+    let ids: Vec<i64> = store
+        .query(&sql, &[Param::from(marker)])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    let columns = "model, role, subject_id, session_day, scheme, scheme_digest, reference, pack, \
+                   pack_version, actor, author_kind, decided_at, why, parts, campaign_id";
+    for id in &ids {
+        let written = store.query(
+            &format!(
+                "INSERT INTO {p} ({columns}, rules_scope_kind, rules_scope_id) \
+                 SELECT {columns}, {}, {} FROM {p} WHERE id = {} RETURNING id",
+                d.param(1, Type::Text),
+                d.param(2, Type::Int),
+                d.param(3, Type::Int),
+                p = store.qualified("pick"),
+            ),
+            &[
+                Param::from(scope.kind.name()),
+                Param::Int(scope.id),
+                Param::Int(*id),
+            ],
+        )?;
+        let new = written[0].int(0)?;
+        store.execute(
+            &format!(
+                "INSERT INTO {ps} (pick_id, stack_id) SELECT {}, stack_id FROM {ps} WHERE pick_id = {}",
+                d.param(1, Type::Int),
+                d.param(2, Type::Int),
+                ps = store.qualified("pick_stack"),
+            ),
+            &[Param::Int(new), Param::Int(*id)],
+        )?;
+    }
+    Ok(ids.len() as i64)
+}
+
+/// The run picks of a scope among `pick` rows under `alias`, any version,
+/// as a condition: the pack's are those that name no scope. For a run,
+/// which writes and replaces its own scope's.
 pub fn pick_filter(alias: &str, scope: Option<&Scope>) -> String {
     let a = if alias.is_empty() {
         String::new()
@@ -323,30 +524,49 @@ pub fn pick_filter(alias: &str, scope: Option<&Scope>) -> String {
     }
 }
 
+/// The picks a reader reads, as a condition on `pick` rows under `alias`:
+/// the pack's, or a scope's of the version read and its persons' picks.
+pub fn reading_filter(alias: &str, reading: Option<&Reading>) -> String {
+    let a = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{alias}.")
+    };
+    match reading {
+        None => pick_filter(alias, None),
+        Some(r) => format!(
+            "{} AND ({a}rules_version = {} OR {a}author_kind = 'person')",
+            pick_filter(alias, Some(&r.scope)),
+            r.version
+        ),
+    }
+}
+
 /// What a release records of the rules whose picks it read (the
-/// main-scans study, section 4), and the scope it read them in. A release
-/// of one cohort reads that cohort's picks when it has rules saved; else a
+/// main-scans study, section 4), and what it reads. A release of one cohort
+/// reads that cohort's picks when they are read from its own rules; else a
 /// release of one dataset, that dataset's; else the pack's, with the pack's
-/// version.
+/// version. The version recorded is the one the picks read were made with.
 pub fn for_release(
     store: &mut Store,
     cohorts: &[String],
     datasets: &[String],
     pack: &str,
     pack_version: &str,
-) -> Result<(Option<Scope>, Value), StoreError> {
+) -> Result<(Option<Reading>, Value), StoreError> {
     let named = match (cohorts, datasets) {
         ([one], _) => Scope::cohort(store, one)?,
         ([], [one]) => Scope::dataset(store, one)?,
         _ => None,
     };
     if let Some(scope) = named
-        && let Some(saved) = latest(store, &scope)?
+        && let Some(r) = reading(store, &scope)?
     {
+        let digest = version(store, &scope, r.version)?.map(|s| s.digest);
         let doc = json!({
-            "scope": scope.to_json(), "version": saved.version, "digest": saved.digest,
+            "scope": scope.to_json(), "version": r.version, "digest": digest, "run": r.job,
         });
-        return Ok((Some(scope), doc));
+        return Ok((Some(r), doc));
     }
     Ok((
         None,
@@ -355,6 +575,22 @@ pub fn for_release(
             "pack": pack, "pack_version": pack_version,
         }),
     ))
+}
+
+/// The reading a release recorded in its `pick_rules`, for a reader of the
+/// release's picks after it (a pipeline run's input): none for the pack's.
+pub fn of_release(doc: &Value) -> Option<Reading> {
+    let s = &doc["scope"];
+    Some(Reading {
+        scope: Scope {
+            kind: ScopeKind::parse(s["kind"].as_str()?)?,
+            id: s["id"].as_i64()?,
+            name: s["name"].as_str().unwrap_or_default().to_string(),
+        },
+        version: doc["version"].as_i64()?,
+        job: doc["run"].as_i64(),
+        at: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -403,7 +639,24 @@ mod tests {
         assert_eq!(all[1].digest, digest(&rules));
         assert_eq!(version(&mut s, &scope, 2).unwrap().unwrap().author, "anna");
         assert!(version(&mut s, &scope, 9).unwrap().is_none());
-        assert_eq!(reading(&mut s, &scope).unwrap(), Some(scope.clone()));
+        // read only once a whole run of a version finished
+        assert!(reading(&mut s, &scope).unwrap().is_none());
+        let run = run_started(&mut s, &scope, 2, Some(9), true).unwrap();
+        assert!(reading(&mut s, &scope).unwrap().is_none());
+        assert_eq!(
+            state(&mut s, &scope).unwrap()["pending"]["state"],
+            "queued"
+        );
+        run_ended(&mut s, run, None).unwrap();
+        let r = reading(&mut s, &scope).unwrap().unwrap();
+        assert_eq!((r.version, r.job), (2, Some(9)));
+        assert_eq!(state(&mut s, &scope).unwrap()["pending"]["version"], 3);
+        assert_eq!(
+            reading_filter("p", Some(&r)),
+            "p.rules_scope_kind = 'cohort' AND p.rules_scope_id = 7 AND (p.rules_version = 2 OR p.author_kind = 'person')"
+        );
+        unsave(&mut s, &scope, 3).unwrap();
+        assert_eq!(latest(&mut s, &scope).unwrap().unwrap().version, 2);
         assert_eq!(scopes(&mut s).unwrap(), [(ScopeKind::Cohort, 7)]);
         // another scope's versions are its own
         let other = Scope {

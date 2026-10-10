@@ -1425,6 +1425,27 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["scope_kind", "scope_id", "version"]),
+        // Record 55, decision 6: each run of a scope's saved rules, so that
+        // a scope is read only once a run of a version has finished over all
+        // its subjects; until then its readers keep the version before, or
+        // the pack's picks. `state` is `running`, `done` or `failed`;
+        // `whole` says the run decided every subject of the scope.
+        Table::new(
+            "pick_rules_run",
+            vec![
+                col("id", Type::Id),
+                req("scope_kind", Type::Text),
+                req("scope_id", Type::Int),
+                req("version", Type::Int),
+                col("job_id", Type::Int),
+                req("state", Type::Text),
+                req("whole", Type::Int),
+                col("error", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+            ],
+        )
+        .index(&["scope_kind", "scope_id", "version"]),
         // Record 42 S4: a file made from the archive that is not the archive,
         // a mask, an embedding, a pipeline's output, kept in a working place
         // (Wave 5 section 10.2) and named here by its digest. The registry

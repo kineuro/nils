@@ -418,7 +418,7 @@ fn a_scope_keeps_its_own_main_scan_rules(store: &mut Store, kind: Kind) -> Resul
     if kind != Kind::Registry {
         return Ok(());
     }
-    add_tables(store, kind, &["pick_rules"])?;
+    add_tables(store, kind, &["pick_rules", "pick_rules_run"])?;
     add_columns(
         store,
         "pick",
