@@ -239,7 +239,9 @@ fn tree_of(at: impl Fn(&str, &str, u32) -> String, people: &[Person<'_>]) -> Tem
                     synth::us(tags::PIXEL_REPRESENTATION, 0),
                     synth::us(tags::SAMPLES_PER_PIXEL, 1),
                     synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
-                    synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
+                    // 32 pixels of 8 mm: a brain's 256 mm across, since the
+                    // MRI pack gives no role to a slab under 175 mm both ways
+                    synth::text(tags::PIXEL_SPACING, VR::DS, "8.0\\8.0"),
                     synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
                     synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "0\\1\\0\\0\\0\\-1"),
                     synth::text(
@@ -5278,7 +5280,7 @@ fn a_stacks_input_carries_each_stack_s_header_when_it_asks() {
             assert_eq!(fp["rows"], 32);
             assert_eq!(fp["columns"], 32);
             assert_eq!(fp["n_slices"], json!(row.opt_int(5).unwrap()));
-            assert_eq!(fp["pixel_spacing_row"], json!(1.0));
+            assert_eq!(fp["pixel_spacing_row"], json!(8.0));
             assert_eq!(
                 fp["text_series_description_ci"],
                 json!(row.opt_text(7).unwrap())
