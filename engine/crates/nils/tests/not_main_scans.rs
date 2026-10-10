@@ -883,20 +883,6 @@ fn rehearse_and_resort(home: &Home, before: &Path, patch: &Path) -> Value {
             doc["picks"]
         );
     }
-    eprintln!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "moved": doc["moved"],
-            "axes": doc["axes"].as_array().unwrap().iter().map(|a| serde_json::json!({
-                "axis": a["axis"],
-                "transitions": a["transitions"].as_array().unwrap().iter().map(|t| serde_json::json!({
-                    "from": t["from"], "to": t["to"], "stacks": t["stacks"],
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-            "picks_by_role": doc["picks"]["models"][0]["by_role"].clone(),
-        }))
-        .unwrap()
-    );
     doc
 }
 
@@ -943,11 +929,11 @@ fn planning_scans(home: &Home) {
     // The two planning series were the only T1w and T2w of their sessions,
     // which lose the pick. The tri-plane scout's single images were never
     // picked (a fragment of one image is set aside), so its session had no
-    // pick to lose. And the population of the T1w picks lost stacks, which
-    // turns the near tie of the dynamic and the T1 spin echo beside it (5
-    // percent apart) to the spin echo.
+    // pick to lose. Nothing else moves: the dynamic, whose near tie with the
+    // T1 spin echo beside it the smaller population would turn, holds no
+    // role already (R2b; the whole rehearsal below counts the turn).
     let picks = report_picks(&doc);
-    assert_eq!(picks["t1w"][1..], [1, 1, 0], "{}", doc["picks"]);
+    assert_eq!(picks["t1w"][1..], [0, 1, 0], "{}", doc["picks"]);
     assert_eq!(picks["t2w"][1..], [0, 1, 0], "{}", doc["picks"]);
     assert_eq!(picks["flair"][1..], [0, 0, 0], "{}", doc["picks"]);
 }
@@ -960,4 +946,103 @@ fn a_planning_scan_is_no_main_scan() {
 #[test]
 fn a_planning_scan_is_no_main_scan_on_postgres_too() {
     postgres("nils_not_main_planning", planning_scans);
+}
+
+// ---------------------------------------------------------------------------
+// R2b: what holds no role.
+
+const R2B: (&str, &[&str]) = (
+    "rules/role.yml",
+    &[
+        "angiography_tof",
+        "angiography_ce",
+        "angiography_pc",
+        "dynamic",
+        "small_field",
+    ],
+);
+
+fn never_main(home: &Home) {
+    let before = packs_without(home, "packs-before", &[R2B], &["never-a-main-scan.yml"]);
+    let patch = patch_of(home, &["never-a-main-scan.yml"]);
+    applies_to_the_shipped_pack(home, &before, &patch, &["rules/role.yml"]);
+    let doc = rehearse_and_resort(home, &before, &patch);
+    // the TOF, the contrast MRA and the dynamic lose the T1w role, the inner
+    // ear and the orbit the T2w; nothing else moves
+    assert_eq!(
+        report_moves(&doc),
+        moves(&[("role", "t1w", "", 3), ("role", "t2w", "", 2)]),
+        "{}",
+        doc["axes"]
+    );
+    assert_eq!(doc["moved"]["stacks"], 5, "{}", doc["moved"]);
+    // The TOF, the contrast MRA and the inner ear were the only candidates
+    // of their sessions. The dynamic and the orbit each had an ordinary scan
+    // beside them that the pick already took (with R2a in the pack, the
+    // dynamic's near tie goes to the spin echo), so those picks stay.
+    let picks = report_picks(&doc);
+    assert_eq!(picks["t1w"][1..], [0, 2, 0], "{}", doc["picks"]);
+    assert_eq!(picks["t2w"][1..], [0, 1, 0], "{}", doc["picks"]);
+    assert_eq!(picks["flair"][1..], [0, 0, 0], "{}", doc["picks"]);
+}
+
+#[test]
+fn an_angiography_a_dynamic_and_a_small_slab_hold_no_role() {
+    never_main(&registry(None));
+}
+
+#[test]
+fn an_angiography_a_dynamic_and_a_small_slab_hold_no_role_on_postgres_too() {
+    postgres("nils_not_main_never", never_main);
+}
+
+// ---------------------------------------------------------------------------
+// R2 whole: both, on the pack before either.
+
+fn not_main(home: &Home) {
+    let before = packs_without(
+        home,
+        "packs-before",
+        &[R2A, R2B],
+        &["planning-scans.yml", "never-a-main-scan.yml"],
+    );
+    let patch = patch_of(home, &["planning-scans.yml", "never-a-main-scan.yml"]);
+    applies_to_the_shipped_pack(
+        home,
+        &before,
+        &patch,
+        &["rules/disposition.yml", "rules/role.yml"],
+    );
+    let doc = rehearse_and_resort(home, &before, &patch);
+    // every planted scan but the ordinary ones: ten stacks
+    assert_eq!(
+        report_moves(&doc),
+        moves(&[
+            ("disposition", "acquisition", "scout", 5),
+            ("role", "t1w", "", 7),
+            ("role", "t2w", "", 3),
+        ]),
+        "{}",
+        doc["axes"]
+    );
+    assert_eq!(doc["moved"]["stacks"], 10, "{}", doc["moved"]);
+    // Removed: the 6-slice planning series, the TOF and the contrast MRA
+    // (T1w), the 9-slice survey and the inner ear (T2w). Changed: the
+    // dynamic's session, now the T1 spin echo beside it. The orbit's session
+    // keeps its ordinary T2, every other session its pick.
+    let picks = report_picks(&doc);
+    assert_eq!(picks["t1w"][1..], [1, 3, 0], "{}", doc["picks"]);
+    assert_eq!(picks["t2w"][1..], [0, 2, 0], "{}", doc["picks"]);
+    assert_eq!(picks["flair"][1..], [0, 0, 0], "{}", doc["picks"]);
+    assert_eq!(doc["picks"]["moved"], 6, "{}", doc["picks"]);
+}
+
+#[test]
+fn never_a_main_scan_as_a_whole() {
+    not_main(&registry(None));
+}
+
+#[test]
+fn never_a_main_scan_as_a_whole_on_postgres_too() {
+    postgres("nils_not_main_whole", not_main);
 }

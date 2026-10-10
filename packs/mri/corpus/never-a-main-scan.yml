@@ -1,0 +1,241 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pick borders study of 2026-10-10 (record 55, R2b; the design
+# repository's `studies/2026-10-10-pick-borders/`): what holds no role,
+# whatever its base (rules/role.yml). An angiography, a series of more than
+# one temporal position, a slab whose two in-plane fields of view are both
+# under 175 mm. Every stack here is invented from the pattern the study
+# names; none is a real header.
+
+cases:
+
+  # --- angiography
+
+  - name: a TOF is T1-weighted and no T1w candidate
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: 'SP\OSP'
+      text_sequence_name: '*fl3d1r_t70'
+      text_series_description: 'tof_3d_multi-slab'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      echo_time: 3.6
+      repetition_time: 22
+      flip_angle: 18
+      n_instances: 160
+      n_slices: 160
+      fov_x: 200
+      fov_y: 181
+      image_role: original_primary
+    axes:
+      technique: TOF
+      base: T1w
+      directory_type: anat
+      disposition: acquisition
+      role: ''
+
+  - name: a time-resolved contrast MRA is no T1w candidate
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      text_sequence_name: '*fl3d1_ns'
+      text_series_description: 'twist mra cor +c'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      echo_time: 1.2
+      repetition_time: 3
+      flip_angle: 25
+      n_instances: 1440
+      n_slices: 72
+      temporal_positions: 20
+      temporal_resolution: 2500
+      fov_x: 400
+      fov_y: 300
+      image_role: original_primary
+    axes:
+      technique: CE-MRA
+      base: T1w
+      disposition: acquisition
+      role: ''
+
+  - name: a single-phase contrast MRA is none either
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      text_sequence_name: '*fl3d1_ns'
+      text_series_description: 'ce-mra carotids'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      echo_time: 1.2
+      repetition_time: 3.5
+      flip_angle: 25
+      n_instances: 120
+      n_slices: 120
+      fov_x: 350
+      fov_y: 300
+      image_role: original_primary
+    axes:
+      technique: CE-MRA
+      base: T1w
+      role: ''
+
+  # --- more than one temporal position
+
+  - name: a pituitary dynamic of 5 slices by 11 phases is no T1w candidate
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*tse2d1_3'
+      text_series_description: 't1 tse cor dyn hypofys'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 10
+      repetition_time: 400
+      flip_angle: 150
+      n_instances: 55
+      n_slices: 5
+      temporal_positions: 11
+      temporal_resolution: 20000
+      fov_x: 180
+      fov_y: 180
+      image_role: original_primary
+    axes:
+      # what it is stays as pack 1.0.1 reads it (Q2): a T1-weighted run
+      base: T1w
+      disposition: acquisition
+      role: ''
+
+  - name: guard, a volume whose header states one temporal position keeps its role
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 't1_mprage_sag'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      echo_time: 2.98
+      repetition_time: 2300
+      inversion_time: 900
+      flip_angle: 9
+      n_instances: 176
+      n_slices: 176
+      temporal_positions: 1
+      fov_x: 256
+      fov_y: 256
+      image_role: original_primary
+    axes:
+      base: T1w
+      role: t1w
+
+  - name: guard, a dynamic whose header states no temporal positions is read as one volume
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Cor T1 DCE hypofys'
+      repetition_time: 400
+      echo_time: 10
+      n_instances: 55
+      n_slices: 5
+      fov_x: 180
+      fov_y: 180
+      image_role: original_primary
+    axes:
+      base: T1w
+      role: t1w
+
+  # --- a slab whose two in-plane fields of view are under 175 mm
+
+  - name: a 130 mm inner-ear slab is no T2w candidate
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: '*spcR_282ns'
+      text_series_description: 't2_spc_tra inner ear'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      echo_time: 139
+      repetition_time: 1200
+      flip_angle: 120
+      n_instances: 64
+      n_slices: 64
+      fov_x: 130
+      fov_y: 130
+      image_role: original_primary
+    axes:
+      base: T2w
+      technique: SPACE
+      disposition: acquisition
+      role: ''
+
+  - name: a 170 mm orbit T2 is no T2w candidate
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: '*tse2d1_15'
+      text_series_description: 't2_tse_cor orbita'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 89
+      repetition_time: 4000
+      flip_angle: 150
+      n_instances: 20
+      n_slices: 20
+      fov_x: 170
+      fov_y: 170
+      image_role: original_primary
+    axes:
+      base: T2w
+      role: ''
+
+  - name: guard, a brain T2 of 220 by 175 mm keeps its role, 175 not being under
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: '*tse2d1_17'
+      text_series_description: 't2_tse_tra'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 98
+      repetition_time: 6000
+      flip_angle: 150
+      n_instances: 44
+      n_slices: 44
+      fov_x: 220
+      fov_y: 175
+      image_role: original_primary
+    axes:
+      base: T2w
+      role: t2w
+
+  - name: guard, a rectangular field of view under 175 mm one way only keeps its role
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*spcir_278ns'
+      text_series_description: 't2_space_dark-fluid_sag'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      echo_time: 386
+      repetition_time: 5000
+      inversion_time: 1800
+      flip_angle: 120
+      n_instances: 176
+      n_slices: 176
+      fov_x: 250
+      fov_y: 160
+      image_role: original_primary
+    axes:
+      modifier: FLAIR
+      role: flair

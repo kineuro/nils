@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pick borders study of 2026-10-10, R2b, as typed operations (patch
+# format 1): what `rules/role.yml` gained, written so that `nils pack
+# rehearse` measures it (tests/not_main_scans.rs). A rule that says nothing
+# of the role goes first in its set, so each operation puts its rule before
+# the one written before it: they are listed last to first.
+
+patch: 1
+pack: mri
+version: 1.0.2
+reason: never a main scan
+evidence: the pick borders study of 2026-10-10 (the design repository's studies/2026-10-10-pick-borders), R2b
+operations:
+  - {op: add_rule, axis: role, nothing: true, rule: small_field, when: [{tag: fov_x, lt: 175}, {tag: fov_y, lt: 175}], why: 'a slab whose in-plane fields of view are both under 175 mm (an inner ear, an orbit, a pituitary) does not cover a brain'}
+  - {op: add_rule, axis: role, nothing: true, rule: dynamic, when: [{tag: temporal_positions, gt: 1}], why: 'a series of more than one temporal position is a dynamic run, not one volume to measure on'}
+  - {op: add_rule, axis: role, nothing: true, rule: angiography_pc, when: [{axis: technique, is: PC-MRA}], why: 'an angiography images vessels, not the brain'}
+  - {op: add_rule, axis: role, nothing: true, rule: angiography_ce, when: [{axis: technique, is: CE-MRA}], why: 'an angiography images vessels, not the brain'}
+  - {op: add_rule, axis: role, nothing: true, rule: angiography_tof, when: [{axis: technique, is: TOF-MRA}], why: 'an angiography images vessels, not the brain'}

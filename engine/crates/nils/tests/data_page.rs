@@ -274,7 +274,9 @@ fn round(pg: Option<(String, String)>) {
                     VR::DS,
                     "1\\0\\0\\0\\1\\0",
                 ));
-                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"));
+                // 16 pixels of 16 mm: a brain's 256 mm across, since the
+                // MRI pack gives no role to a slab under 175 mm both ways
+                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "16\\16"));
                 e.push(synth::text(tags::SLICE_THICKNESS, VR::DS, "2"));
                 e.push(synth::us(tags::SAMPLES_PER_PIXEL, 1));
                 e.push(synth::text(
