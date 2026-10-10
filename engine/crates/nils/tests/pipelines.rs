@@ -6103,8 +6103,7 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
     assert_eq!(flairs(&lab, "before"), 3);
 
     // P1's two FLAIRs made the outputs of one Dixon that the pack does not
-    // measure on: nothing is eligible there, and the earlier run's pick of
-    // them still applies
+    // measure on: nothing is eligible there
     let mut store = lab.store();
     let mut by_subject: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
     for r in store
@@ -6145,13 +6144,57 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
             )
             .unwrap();
     }
+    // the earlier run's pick on P1's occasion, which says where it looked
+    let earlier = store
+        .query(
+            &format!(
+                "SELECT model, subject_id, CAST(session_day AS TEXT), scheme, scheme_digest, pack, \
+                        pack_version FROM pick WHERE role = 'flair' AND author_kind = 'agent' \
+                        AND subject_id = (SELECT subject_id FROM stack_fingerprint WHERE stack_id = {})",
+                p1[0]
+            ),
+            &[],
+        )
+        .unwrap()
+        .remove(0);
     let run = lab.json(&["pick", "run", "--pack-dir", p, "--json"]);
-    assert_eq!(run["borders"]["nothing_eligible"], 1, "{run}");
+    // record 55, decision 6: under the rules nothing is asked, and where
+    // nothing is eligible the earlier run's pick is removed
+    assert_eq!(run["raised"], 0, "{run}");
+    assert!(run["empty"].as_i64().unwrap() >= 1, "{run}");
     let pre = preflight(&lab);
     assert_eq!(
-        pre["units"]["missing"], 0,
-        "the earlier pick still applies: {pre}"
+        pre["units"]["missing"], 1,
+        "no pick applies there now: {pre}"
     );
+
+    // a border on the occasion, as a run before the rules raised one
+    let scheme = json!({
+        "name": earlier.text(3).unwrap(), "digest": earlier.text(4).unwrap(),
+        "definition": nils_registry::session::Scheme::default(),
+    });
+    nils_registry::review::raise_pick_border(
+        &mut store,
+        &nils_registry::review::PickBorder {
+            model: earlier.text(0).unwrap(),
+            role: "flair",
+            subject_id: earlier.int(1).unwrap(),
+            day: &earlier.text(2).unwrap()[..10],
+            borders: &["nothing_eligible"],
+            pick_id: None,
+            score: None,
+            margin: None,
+            runner_up_score: None,
+            considered: &json!([]),
+            notes: &json!({}),
+            job_id: None,
+            scheme: &scheme,
+            pack: earlier.text(5).unwrap(),
+            pack_version: earlier.text(6).unwrap(),
+        },
+        "2026-10-10T00:00:00Z",
+    )
+    .unwrap();
 
     // kept: no FLAIR stands for P1's session, said by a person
     let items = lab.json(&[

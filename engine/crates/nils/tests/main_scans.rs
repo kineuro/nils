@@ -525,3 +525,77 @@ fn a_cohort_s_own_rules_make_its_picks_and_a_release_records_them() {
     assert_eq!(recorded["version"], 2, "{recorded}");
     assert!(recorded["digest"].is_string(), "{recorded}");
 }
+
+/// A run removes its own scope's run picks that no longer win: a visit
+/// whose stacks lost the role (here, every stack of two subjects) keeps no
+/// run pick, and a person's pick there stands.
+#[test]
+fn a_run_removes_its_picks_that_no_longer_win_and_leaves_a_person_s() {
+    let home = registry();
+    let p = packs();
+    let mut store = home.store();
+    let pick = store.qualified("pick");
+    let pick_stack = store.qualified("pick_stack");
+    let rows = store
+        .query(
+            &format!(
+                "SELECT DISTINCT p.subject_id, ps.stack_id FROM {pick} p \
+                 JOIN {pick_stack} ps ON ps.pick_id = p.id \
+                 WHERE p.author_kind = 'agent' AND p.rules_scope_kind IS NULL ORDER BY p.subject_id"
+            ),
+            &[],
+        )
+        .unwrap();
+    let mut subjects: Vec<(i64, i64)> = rows
+        .iter()
+        .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+        .collect();
+    subjects.dedup_by_key(|(s, _)| *s);
+    assert!(subjects.len() >= 2, "{subjects:?}");
+    let ((gone, _), (kept, kept_stack)) = (subjects[0], subjects[1]);
+    // a person's pick on one of them
+    let set: Value = serde_json::from_str(&home.ok(&[
+        "pick",
+        "set",
+        "--pack-dir",
+        &p,
+        "--role",
+        "t1w",
+        "--stack",
+        &kept_stack.to_string(),
+        "--why",
+        "this one, by eye",
+        "--json",
+    ]))
+    .unwrap();
+    let person = set["id"].as_i64().unwrap();
+    // both subjects' stacks hold the role no more
+    let axis = store.qualified("classification_axis");
+    let fp = store.qualified("stack_fingerprint");
+    store
+        .execute(
+            &format!(
+                "DELETE FROM {axis} WHERE axis = 'role' AND stack_id IN \
+                 (SELECT stack_id FROM {fp} WHERE subject_id IN ({gone}, {kept}))"
+            ),
+            &[],
+        )
+        .unwrap();
+    let report: Value =
+        serde_json::from_str(&home.ok(&["pick", "run", "--pack-dir", &p, "--json"])).unwrap();
+    assert!(report["removed"].as_i64().unwrap() >= 2, "{report}");
+    assert_eq!(
+        home.count(&format!(
+            "SELECT COUNT(*) FROM {{pick}} WHERE author_kind = 'agent' AND subject_id IN ({gone}, {kept})"
+        )),
+        0,
+        "no run pick where nothing wins"
+    );
+    assert_eq!(
+        home.count(&format!(
+            "SELECT COUNT(*) FROM {{pick}} WHERE id = {person} AND withdrawn_at IS NULL"
+        )),
+        1,
+        "the person's pick stands"
+    );
+}
