@@ -2761,11 +2761,24 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         ));
     }
     if selection.picked_only {
+        // Record 55, decision 6: a release of a cohort or a dataset with
+        // main-scan rules of its own reads that scope's picks; any other,
+        // the pack's.
+        let scope = nils_registry::pick_rules::for_release(
+            store,
+            &selection.cohorts,
+            &selection.datasets,
+            "",
+            "",
+        )
+        .map(|(scope, _)| scope)
+        .unwrap_or(None);
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-             WHERE ps.stack_id = k.id AND p.withdrawn_at IS NULL)",
+             WHERE ps.stack_id = k.id AND p.withdrawn_at IS NULL AND {})",
             store.qualified("pick_stack"),
             store.qualified("pick"),
+            nils_registry::pick_rules::pick_filter("p", scope.as_ref()),
         ));
     }
     // Record 26 §13: only the files under the named datasets' pseudonymised
@@ -3519,6 +3532,20 @@ fn open_row(
     // number means written and counted under the default and held under
     // `--on-unknown hold`.
     policy["on_unknown"] = serde_json::Value::from(settings.on_unknown.name());
+    // record 55, decision 6: the rules whose picks a release of picked
+    // stacks read
+    let pick_rules = if settings.selection.picked_only {
+        let (_, doc) = nils_registry::pick_rules::for_release(
+            store,
+            &settings.selection.cohorts,
+            &settings.selection.datasets,
+            &settings.pack.name,
+            &settings.pack.version.to_string(),
+        )?;
+        Param::from(doc.to_string())
+    } else {
+        Param::Null
+    };
     let written = store.insert(
         &Insert::new(
             table("release"),
@@ -3548,6 +3575,7 @@ fn open_row(
                 "added",
                 "removed",
                 "policies",
+                "pick_rules",
             ],
         )
         .returning(&["id"]),
@@ -3585,6 +3613,7 @@ fn open_row(
             Param::Int(0),
             Param::Int(0),
             Param::from(serde_json::Value::Array(policies.to_vec()).to_string()),
+            pick_rules,
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))

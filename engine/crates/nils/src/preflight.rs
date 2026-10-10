@@ -213,7 +213,8 @@ pub(crate) fn pick_roles(
     for chunk in stacks.chunks(500) {
         let sql = format!(
             "SELECT ps.stack_id, p.subject_id, {}, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-             WHERE p.withdrawn_at IS NULL AND ps.stack_id IN ({}) ORDER BY ps.stack_id",
+             WHERE p.withdrawn_at IS NULL AND p.rules_scope_kind IS NULL AND ps.stack_id IN ({}) \
+             ORDER BY ps.stack_id",
             d_.text_of_qualified(
                 Some("p"),
                 nils_registry::schema::table("pick")
@@ -444,7 +445,7 @@ fn picked_nothing(
     let d = store.dialect();
     let sql = format!(
         "SELECT p.id, p.role FROM {} p WHERE p.author_kind = 'person' AND p.withdrawn_at IS NULL \
-         AND p.subject_id = {} AND p.session_day = {} \
+         AND p.rules_scope_kind IS NULL AND p.subject_id = {} AND p.session_day = {} \
          AND NOT EXISTS (SELECT 1 FROM {} ps WHERE ps.pick_id = p.id) ORDER BY p.id",
         store.qualified("pick"),
         d.param(1, nils_registry::schema::Type::Int),

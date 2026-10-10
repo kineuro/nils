@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nils_registry::job::{self, Job};
+use nils_registry::pick_rules::{self, Scope, ScopeKind};
 use nils_registry::place::{self, Place, Role};
 use nils_registry::review;
 use nils_registry::schema::Type;
@@ -172,10 +173,17 @@ pub(crate) fn summary(
     scheme: Option<&str>,
 ) -> Result<Value, StoreError> {
     let subjects = crate::chain::dataset_subjects(store, dataset)?;
-    let (roles, review_items) = roles_of(store, &subjects, scheme)?;
+    let scope = Scope {
+        kind: ScopeKind::Dataset,
+        id: dataset.id,
+        name: dataset.name.clone(),
+    };
+    let (reading, rules) = reading_of(store, &scope)?;
+    let (roles, review_items) = roles_of(store, &subjects, scheme, reading.as_ref())?;
     Ok(json!({
         "dataset": dataset.name,
         "dataset_id": dataset.id,
+        "rules": rules,
         "picks": if place::picks_after_sort(&dataset.dataset) { "after_sort" } else { "off" },
         "subjects": subjects.len(),
         "scheme": scheme,
@@ -194,12 +202,15 @@ pub(crate) fn cohort_summary(
     name: &str,
     scheme: Option<&str>,
 ) -> Result<Option<Value>, StoreError> {
-    let Some(subjects) = nils_registry::cohort::open_members_of(store, name)? else {
+    let Some(scope) = Scope::cohort(store, name)? else {
         return Ok(None);
     };
-    let (roles, review_items) = roles_of(store, &subjects, scheme)?;
+    let subjects = nils_registry::cohort::open_members(store, scope.id)?;
+    let (reading, rules) = reading_of(store, &scope)?;
+    let (roles, review_items) = roles_of(store, &subjects, scheme, reading.as_ref())?;
     Ok(Some(json!({
         "cohort": name,
+        "rules": rules,
         "subjects": subjects.len(),
         "scheme": scheme,
         "roles": roles,
@@ -208,12 +219,30 @@ pub(crate) fn cohort_summary(
     })))
 }
 
-/// The roles of the summary for these subjects, and their open
-/// `pick.border` items in all.
+/// Record 55, decision 6: the scope whose picks a dataset or a cohort
+/// reads (its own when it has rules saved, else the pack's), and what the
+/// summary says of them: `{scope, version}`, the scope null for the pack's.
+pub(crate) fn reading_of(
+    store: &mut Store,
+    scope: &Scope,
+) -> Result<(Option<Scope>, Value), StoreError> {
+    Ok(match pick_rules::latest(store, scope)? {
+        Some(saved) => (
+            Some(scope.clone()),
+            json!({"scope": scope.to_json(), "version": saved.version}),
+        ),
+        None => (None, json!({"scope": null, "version": 1})),
+    })
+}
+
+/// The roles of the summary for these subjects, read from the picks of
+/// `scope` (the pack's when none), and their open `pick.border` items in
+/// all.
 fn roles_of(
     store: &mut Store,
     subjects: &BTreeSet<i64>,
     scheme: Option<&str>,
+    scope: Option<&Scope>,
 ) -> Result<(serde_json::Map<String, Value>, i64), StoreError> {
     let mut roles: BTreeMap<String, RoleSum> = BTreeMap::new();
     let mut tied_on: BTreeSet<(String, i64, String)> = BTreeSet::new();
@@ -230,10 +259,11 @@ fn roles_of(
     for chunk in ids.chunks(500) {
         let sql = format!(
             "SELECT p.role, p.subject_id, {}, p.author_kind, {} FROM {} p \
-             WHERE p.withdrawn_at IS NULL AND p.subject_id IN ({}){scheme_filter}",
+             WHERE p.withdrawn_at IS NULL AND {} AND p.subject_id IN ({}){scheme_filter}",
             crate::text_of(store, "pick", "session_day"),
             crate::text_of(store, "pick", "considered"),
             store.qualified("pick"),
+            pick_rules::pick_filter("p", scope),
             chunk
                 .iter()
                 .map(i64::to_string)

@@ -4360,6 +4360,7 @@ fn routed(
                     actor: principal,
                     campaign: None,
                     occasion: None,
+                    scope: None,
                 },
             )
             .map_err(pick_err)?;
@@ -4492,6 +4493,7 @@ fn routed(
                 id,
                 principal,
                 doc["why"].as_str(),
+                None,
             )
             .map_err(pick_err)?;
             Ok(Reply::ok(
@@ -4699,7 +4701,7 @@ fn scans_door(
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
     crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
     // the dataset viewer: its family, its physics and its main roles
-    crate::viewer::with_facts(registry, &mut doc)?;
+    crate::viewer::with_facts(registry, &mut doc, scope)?;
     // record 55 H2: each scan's picture inline and its open questions, so
     // a page of the grid is one request
     if pictures {
@@ -5826,7 +5828,7 @@ fn pick_run_located(
     let mut out = vec!["pick".to_string(), "run".to_string()];
     let mut it = command.into_iter().skip(2);
     while let Some(arg) = it.next() {
-        if arg == "--json" {
+        if arg == "--json" || arg == "--own-rules" {
             out.push(arg);
             continue;
         }
