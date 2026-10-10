@@ -4519,7 +4519,7 @@ flags:
   # YBR form, or three samples a pixel): a display composite of the viewer's
   # settings, a map coloured over a synthetic image, not a map (research
   # round 6, question 3, from the SyMRI manual). Read as the SyMRI
-  # screenshot is (record 48, D4) up to MRI pack 1.0.2, and from 1.0.3 a
+  # screenshot is (record 48, D4) up to MRI pack 1.0.2, and from 1.1.0 a
   # display composite of its own, construct DisplayComposite and disposition
   # display_composite, classified and found like any stack and left out of a
   # release unless asked for (record 55 C3, rules/display.yml).

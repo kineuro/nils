@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# MRI pack 1.0.3: the display composite (record 55 C3, the ruling of
+# MRI pack 1.1.0: the display composite (record 55 C3, the ruling of
 # 2026-10-08; rules/display.yml). A SyMRI stack saved in colour is a picture
 # made to be looked at: construct DisplayComposite with no base and no
 # modifier, the technique of its SyMRI acquisition, and disposition

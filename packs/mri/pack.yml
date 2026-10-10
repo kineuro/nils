@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 1.0.3
+version: 1.1.0
 contract: 9
 modality: MR
 
@@ -66,7 +66,7 @@ rules:
   # The routes run before the axes they override: a route decides for the
   # stacks it claims, and an axis leaves alone what is already decided.
   - rules/excluded.yml
-  # MRI pack 1.0.3 (record 55 C3): a SyMRI stack saved in colour, a display
+  # MRI pack 1.1.0 (record 55 C3): a SyMRI stack saved in colour, a display
   # composite, decided before the routes so none reads it as the map it shows.
   - rules/display.yml
   - rules/swi.yml
@@ -254,7 +254,7 @@ review:
   # contrast by definition, so a base the rules left empty on it is no
   # question; what the rules state of it is kept as they state it.
   #
-  # MRI pack 1.0.3 (record 55 C3): a display composite is silent as well. It
+  # MRI pack 1.1.0 (record 55 C3): a display composite is silent as well. It
   # is a picture made to be looked at, which no pick takes and a release
   # leaves out unless asked for, so nothing a person could answer about it
   # changes what NILS does with it; until 1.0.2 it was excluded, and silent

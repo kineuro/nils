@@ -2,9 +2,10 @@
 
 //! A pack's version (`docs/specs/wave2-fingerprint-and-classify.md`, §5.2).
 //!
-//! Semantic, and the major number carries a promise: a vocabulary change is a
-//! major bump, because a federated question asked for pack 2 must not be
-//! answered by pack 3's vocabulary (D26). The engine does not enforce that
+//! Semantic in the usual sense (amended 2026-10-10): adding to the vocabulary
+//! is a minor bump and removing or renaming any of it a major one, so a
+//! federated question written for pack 2.1 is answered alike by every later
+//! 2.x and never by pack 3's vocabulary (D26). The engine does not enforce that
 //! promise, it records what version answered, which is what makes a breach
 //! visible.
 

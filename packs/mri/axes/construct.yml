@@ -712,7 +712,7 @@ values:
   'MultiQmap': {terms: ['multiple quantitative maps', 'qmaps']}
   # The EPIMix route writes it; v0 declares it nowhere and wrote it 67 times.
   'isoDWI': {terms: ['isotropic DWI', 'isoDWI']}
-  # MRI pack 1.0.3 (record 55 C3): a picture made to be looked at, which
+  # MRI pack 1.1.0 (record 55 C3): a picture made to be looked at, which
   # rules/display.yml writes on a SyMRI stack saved in colour. Its disposition
   # is `display_composite`, which a release leaves out unless asked for.
   'DisplayComposite':

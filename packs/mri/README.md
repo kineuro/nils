@@ -22,10 +22,13 @@ routes, the intent cascade and the passes land in slices 3, 4 and 6 of Wave 2
 
 ## How to change it
 
-Anything that changes a verdict changes the version, and a **vocabulary**
-change (an axis value, a directory type, an identifier namespace) is a major
-bump, because a federated question asked for pack 2 must not be answered by
-pack 3's vocabulary (D26). Every classified row records the pack name, version
+Anything that changes a verdict changes the version. Adding to the
+**vocabulary** (an axis value, a directory type, an identifier namespace) is a
+minor bump, and removing or renaming any of it a major one: the usual semantic
+versions, decided on 2026-10-10 (it was first that every vocabulary change is
+a major). A question written for pack 1.1 is answered alike by every later
+1.x, never by 1.0, which lacks what 1.1 added, and never by 2.0, where a value
+it names may be gone (D26). Every classified row records the pack name, version
 and contract that judged it, which is what turns a re-classification from a
 blind overwrite into a diff.
 

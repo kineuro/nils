@@ -242,7 +242,7 @@ with the second (section 9).
 | D23 | The harness is replaceable and the contract is the product | accept | with the six-week time-box above |
 | D24 | Transcripts are inside the custody boundary | accept | with the 90-day default above |
 | D25 | Local first, node optional | accept | federation off is the standalone engine byte for byte |
-| D26 | The pack is the common data model | accept | vocabulary change is a major; incompatible refuses with a diff |
+| D26 | The pack is the common data model | accept | vocabulary change is a major (amended 2026-10-10: adding is a minor, removing or renaming a major); incompatible refuses with a diff |
 | D27 | Disclosure levels and safe outputs at the door | accept | k of 5 and 10, complementary suppression on |
 | D28 | Federated requests are review items | accept | see C29 |
 | D29 | Compute travels, data stays | accept | executor built only on Amsterdam's confirmation |

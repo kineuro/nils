@@ -556,7 +556,7 @@ fn the_report_s_moves_and_questions_equal_a_full_re_sort_and_a_sealed_stack_is_n
         assert_eq!(answers["breaks"], 1, "{name}");
         // what it ships as, and what was replayed
         assert_eq!(doc["ships"]["as"], "rules release", "{name}");
-        assert_eq!(doc["ships"]["version"], "1.0.4", "{name}");
+        assert_eq!(doc["ships"]["version"], "1.1.1", "{name}");
         assert_eq!(doc["scope"]["replayed"], "pack", "{name}");
     }
 }

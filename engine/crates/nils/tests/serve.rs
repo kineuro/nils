@@ -5906,7 +5906,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@1.0.3", "{classified}");
+    assert_eq!(classified["pack"], "mri@1.1.0", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the

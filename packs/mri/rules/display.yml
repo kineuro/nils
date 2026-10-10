@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# A picture made to be looked at: MRI pack 1.0.3 (record 55 C3).
+# A picture made to be looked at: MRI pack 1.1.0 (record 55 C3).
 #
 # SyMRI's viewer saves a stack as it shows it, with the viewport's windowing,
 # contrast and colour settings: by default a segmentation or a map drawn in

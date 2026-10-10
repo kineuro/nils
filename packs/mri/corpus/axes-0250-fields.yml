@@ -225,8 +225,8 @@ cases:
 
   # --- PhotometricInterpretation
 
-  # MRI pack 1.0.3 (record 55 C3): read as its screenshot is until 1.0.2,
-  # and a display composite of its own since (corpus/axes-103.yml).
+  # MRI pack 1.1.0 (record 55 C3): read as its screenshot is until 1.0.2,
+  # and a display composite of its own since (corpus/axes-110.yml).
   - name: a SyMRI map saved in colour is a display composite
     stack:
       image_type: 'DERIVED\PRIMARY\QMAP\T1'

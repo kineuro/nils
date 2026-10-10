@@ -480,7 +480,7 @@ it out. It is derived from the decided axes and the fingerprint by rules the
 **pack** declares, and it answers three questions at once:
 
 - **kind**: `acquisition`, `scanner_derived`, `reformat`, `working_scan`,
-  `scout`, `excluded`, and since MRI pack 1.0.3 (record 55 C3)
+  `scout`, `excluded`, and since MRI pack 1.1.0 (record 55 C3)
   `display_composite`, a picture made to be looked at (SyMRI's maps saved in
   colour), which a release leaves out unless its selection names it, as it
   leaves out `excluded`.
