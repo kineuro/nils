@@ -322,6 +322,8 @@ A model registered with `nils model register --card --artifact` is checked again
 
 A stacks input may ask for each stack's header facts with `x-nils.input.header: true` (record 50). Each entry of `stacks.json` then carries a `header` object: the stack's fingerprint columns (`fingerprint`, null without a fingerprint row), every classification row by axis (`classification`), the name of its first ingest batch (`batch`) and the cohorts its subject is an open member of (`cohorts`). Without the flag `stacks.json` is as before, and a bids input is refused the flag.
 
+It may also ask for the geometry with `x-nils.input.geometry: true` (record 55 E2), beside the header or alone. Each entry then carries a `geometry` object, the orientation of its images (`image_orientation_patient`, six numbers) and its fingerprint's `slice_thickness` and `spacing_between_slices`, and each of its files a `geometry` object of its own: `image_position_patient` (three numbers), `pixel_spacing` (two), `rows`, `columns`, `instance_number` and `number_of_frames`, each null where the registry holds none. An image chooses which frames to read from these without reading a header first. A multi-frame file's position is its first frame's; the other frames' positions are in the file. Without the flag `stacks.json` is as before, and a bids input is refused it.
+
 ## Curate a run's seeds
 
 1. Read the seeds a run suggested and save the stacks as a selection:

@@ -86,6 +86,16 @@
               "cohorts": {"type": "array", "items": {"type": "string"}, "description": "The names of the cohorts the stack's subject is an open member of, sorted"}
             }
           },
+          "geometry": {
+            "type": ["object", "null"],
+            "description": "Record 55 E2: present on every stack only when the descriptor sets x-nils.input.geometry, beside each file's own geometry, so a pipeline chooses which frames to read without reading a header first. Each member is null where the registry holds none",
+            "required": ["image_orientation_patient", "slice_thickness", "spacing_between_slices"],
+            "properties": {
+              "image_orientation_patient": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 6, "maxItems": 6, "description": "The direction cosines of the stack's rows and columns, ImageOrientationPatient as the stack's own images give it"},
+              "slice_thickness": {"type": ["number", "null"], "description": "The slice thickness of the stack's fingerprint row, in mm; null for a stack not fingerprinted"},
+              "spacing_between_slices": {"type": ["number", "null"], "description": "The spacing between slices of the stack's fingerprint row, in mm; null for a stack not fingerprinted"}
+            }
+          },
           "files": {
             "type": "array",
             "items": {
@@ -94,7 +104,20 @@
               "properties": {
                 "source": {"type": "integer", "minimum": 0},
                 "path": {"type": "string", "description": "Under the source's mount"},
-                "frames": {"type": ["string", "null"], "description": "The frames of a multi-frame file that are this stack's, from one, as ranges (1-4,9); null for every frame"}
+                "frames": {"type": ["string", "null"], "description": "The frames of a multi-frame file that are this stack's, from one, as ranges (1-4,9); null for every frame"},
+                "geometry": {
+                  "type": "object",
+                  "description": "Record 55 E2: present on every file only when the descriptor sets x-nils.input.geometry: the file's own geometry as the registry read it from its header, each member null where it holds none. A multi-frame file's position is its first frame's; a pipeline reads the other frames' positions from the file",
+                  "required": ["image_position_patient", "pixel_spacing", "rows", "columns", "instance_number", "number_of_frames"],
+                  "properties": {
+                    "image_position_patient": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 3, "maxItems": 3, "description": "ImagePositionPatient: where the image's first pixel sits, in mm"},
+                    "pixel_spacing": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "PixelSpacing: the spacing of rows, then of columns, in mm"},
+                    "rows": {"type": ["integer", "null"]},
+                    "columns": {"type": ["integer", "null"]},
+                    "instance_number": {"type": ["integer", "null"]},
+                    "number_of_frames": {"type": ["integer", "null"], "description": "NumberOfFrames of the whole file; null for a file that does not say, which is one frame"}
+                  }
+                }
               }
             }
           }
