@@ -594,12 +594,29 @@ fn yaml(path: &Path) -> Value {
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// The MRI pack's version before R2a and R2b, which the patches name; the
+/// version that shipped them is the one the pack holds now.
+const BEFORE: &str = "1.0.2";
+
+/// The version the shipped MRI pack holds.
+fn shipped() -> String {
+    yaml(&packs().join("mri/pack.yml"))["version"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 /// The shipped packs copied under `home` with these rules taken out of
 /// these rule sets of the MRI pack, and the cases of these patches out of
-/// its corpus: the pack as it was before them.
+/// its corpus: the pack as it was before them, at its version then.
 fn packs_without(home: &Home, name: &str, rules: &[(&str, &[&str])], fixtures: &[&str]) -> PathBuf {
     let dir = home.dir.path().join(name);
     copy(&packs(), &dir);
+    let manifest = dir.join("mri/pack.yml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let line = format!("version: {}", shipped());
+    assert!(text.contains(&line), "{}: {line}", manifest.display());
+    std::fs::write(&manifest, text.replacen(&line, &format!("version: {BEFORE}"), 1)).unwrap();
     for f in fixtures {
         std::fs::remove_file(dir.join("mri/corpus").join(f)).unwrap();
     }
@@ -667,7 +684,7 @@ fn applies_to_the_shipped_pack(home: &Home, before: &Path, patch: &Path, files: 
         "--out",
         out.to_str().unwrap(),
         "--version",
-        "1.0.2",
+        &shipped(),
     ]);
     for f in files {
         assert_eq!(
@@ -929,9 +946,8 @@ fn planning_scans(home: &Home) {
     // The two planning series were the only T1w and T2w of their sessions,
     // which lose the pick. The tri-plane scout's single images were never
     // picked (a fragment of one image is set aside), so its session had no
-    // pick to lose. Nothing else moves: the dynamic, whose near tie with the
-    // T1 spin echo beside it the smaller population would turn, holds no
-    // role already (R2b; the whole rehearsal below counts the turn).
+    // pick to lose. Nothing else moves: the dynamic holds no role already
+    // (R2b), and the pick's rules take the T1 spin echo beside it anyway.
     let picks = report_picks(&doc);
     assert_eq!(picks["t1w"][1..], [0, 1, 0], "{}", doc["picks"]);
     assert_eq!(picks["t2w"][1..], [0, 1, 0], "{}", doc["picks"]);
@@ -978,8 +994,8 @@ fn never_main(home: &Home) {
     assert_eq!(doc["moved"]["stacks"], 5, "{}", doc["moved"]);
     // The TOF, the contrast MRA and the inner ear were the only candidates
     // of their sessions. The dynamic and the orbit each had an ordinary scan
-    // beside them that the pick already took (with R2a in the pack, the
-    // dynamic's near tie goes to the spin echo), so those picks stay.
+    // beside them that the pick already took (the pick's rules, version 1,
+    // take the 2D SE kind before the dynamic's 2D TSE), so those picks stay.
     let picks = report_picks(&doc);
     assert_eq!(picks["t1w"][1..], [0, 2, 0], "{}", doc["picks"]);
     assert_eq!(picks["t2w"][1..], [0, 1, 0], "{}", doc["picks"]);
@@ -1027,14 +1043,15 @@ fn not_main(home: &Home) {
     );
     assert_eq!(doc["moved"]["stacks"], 10, "{}", doc["moved"]);
     // Removed: the 6-slice planning series, the TOF and the contrast MRA
-    // (T1w), the 9-slice survey and the inner ear (T2w). Changed: the
-    // dynamic's session, now the T1 spin echo beside it. The orbit's session
-    // keeps its ordinary T2, every other session its pick.
+    // (T1w), the 9-slice survey and the inner ear (T2w). The dynamic's
+    // session keeps the T1 spin echo beside it, which the pick's rules
+    // (version 1) take by its kind before either rule, and the orbit's its
+    // ordinary T2; every other session keeps its pick.
     let picks = report_picks(&doc);
-    assert_eq!(picks["t1w"][1..], [1, 3, 0], "{}", doc["picks"]);
+    assert_eq!(picks["t1w"][1..], [0, 3, 0], "{}", doc["picks"]);
     assert_eq!(picks["t2w"][1..], [0, 2, 0], "{}", doc["picks"]);
     assert_eq!(picks["flair"][1..], [0, 0, 0], "{}", doc["picks"]);
-    assert_eq!(doc["picks"]["moved"], 6, "{}", doc["picks"]);
+    assert_eq!(doc["picks"]["moved"], 5, "{}", doc["picks"]);
 }
 
 #[test]
