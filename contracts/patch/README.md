@@ -10,7 +10,7 @@ anything runs, and it is a reviewable diff of the pack.
 
 | version | schema | since |
 |---|---|---|
-| 1 | [`v1/patch.schema.json`](v1/patch.schema.json), [`v1/example.yml`](v1/example.yml) | 2026-10-09, record 56: `add_words`, `remove_words`, `move_rule`, `move_set`, `set_priority`, `add_value`, `add_rule`, `silence`, `by_model` and `map_name`, each scoped to the whole pack (a pack edit, shipped as a rules release) or to a site, a dataset or a scanner (an overlay) |
+| 1 | [`v1/patch.schema.json`](v1/patch.schema.json), [`v1/example.yml`](v1/example.yml) | 2026-10-09, record 56: `add_words`, `remove_words`, `move_rule`, `move_set`, `set_priority`, `add_value`, `add_rule`, `silence`, `by_model` and `map_name`, each scoped to the whole pack (a pack edit, shipped as a rules release) or to a site, a dataset or a scanner (an overlay). Amended in place, additively, on 2026-10-10 (the study of the pick borders): four operations on the main-scan pick, pack edits only, `set_candidates` (which stacks holding a role compete for it), `remove_border` (a border kind the pick raises no more), `set_near_tie` (the order a near tie is decided by) and `set_runner_up_within` (the margin of a near tie), the first and third raising the pack to declare pack contract 9; and `add_rule` with `nothing: true` on an axis that holds several values, the stack holding none of them where the conditions hold, the rule first in the first set that decides the axis |
 
 **What the engine does with one.** It applies the operations in order to the
 pack's own documents (the manifest, an axis file, a rule set, the BIDS
@@ -24,7 +24,10 @@ overlay, and their failures are part of the answer.
 - `nils pack rehearse --ops FILE [--scope ...]` and `POST
   /api/packs/{name}/rehearse` (OpenAPI version 7, added in place on
   2026-10-09) answer what the patch does to the sorting: the registry in
-  scope is sorted both ways, and nothing is written.
+  scope is sorted both ways, and nothing is written. The main-scan picks
+  are scored both ways too, each side by its own pack's pick, so a change
+  to the pick file shows its picks kept, changed, removed and added and
+  its borders raised and settled, by role.
 - `nils pack apply DIR --ops FILE --out DIR` writes a patch of pack edits as
   the pack's next version, each changed file rewritten where it changed so
   its comments stay.

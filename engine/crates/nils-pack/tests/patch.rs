@@ -364,3 +364,245 @@ fn a_patched_pack_is_written_as_a_diff_and_loads_where_it_is_written() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// ------------------------------------------- the 2026-10-10 pick borders
+
+fn main_pick(pack: &nils_pack::Pack) -> &nils_pack::pick::Model {
+    pack.picks.iter().find(|m| m.name == "main").unwrap()
+}
+
+#[test]
+fn the_pick_file_is_reached_by_four_operations() {
+    use nils_pack::pick::{Condition, Rank};
+    // The study's R4 (two border kinds out), R1 (the brain roles not a
+    // spine's) and an R8-like order, as typed operations.
+    let p = applied(concat!(
+        "  - {op: remove_border, border: rare}\n",
+        "  - {op: remove_border, border: slice_count_outlier}\n",
+        "  - {op: set_runner_up_within, within: 0.02}\n",
+        "  - op: set_candidates\n",
+        "    role: t1w\n",
+        "    unless: [{axis: body_part, is: [spine, neck, chest, other]}]\n",
+        "  - op: set_near_tie\n",
+        "    order:\n",
+        "      - {of: mr_acquisition_type, prefer: ['3D']}\n",
+        "      - {of: orientation, prefer: [Axial, Coronal, Sagittal]}\n",
+        "      - {of: post_contrast, avoid: ['1'], roles: [t1w]}\n",
+        "      - {of: slice_thickness, lowest: true}\n",
+    ));
+    assert_eq!(p.applied.len(), 5);
+    assert!(
+        p.applied
+            .iter()
+            .all(|a| a.files.contains(&"picks/main.yml".to_string())),
+        "{:?}",
+        p.applied
+    );
+    let m = main_pick(&p.pack);
+    assert!(m.borders.rare_within.is_none());
+    assert!(m.borders.slice_outlier.is_none());
+    assert!(m.borders.retake.is_some(), "the others stay");
+    assert_eq!(m.borders.runner_up_within, 0.02);
+    assert_eq!(
+        m.candidates["t1w"].unless,
+        [Condition::Holds {
+            of: "body_part".into(),
+            any: vec![
+                "spine".into(),
+                "neck".into(),
+                "chest".into(),
+                "other".into()
+            ],
+        }]
+    );
+    assert_eq!(m.near_tie.len(), 4);
+    // A value named by its label is the stored value: post-contrast's 1.
+    assert_eq!(m.near_tie[2].rank, Rank::Avoid(vec!["1".into()]));
+    assert_eq!(m.near_tie[3].rank, Rank::Lowest);
+    // The keys are contract 9's, and the pack was raised to declare it.
+    assert_eq!(p.pack.contract, 9);
+    let candidacy = p.applied[3].changes.join("; ");
+    assert!(
+        candidacy.contains("unless body_part is spine or neck or chest or other"),
+        "{candidacy}"
+    );
+    assert!(
+        candidacy.contains("declares contract 9 now, 8 before"),
+        "{candidacy}"
+    );
+    assert!(
+        p.applied[0].changes[0].contains("raises rare no more"),
+        "{:?}",
+        p.applied[0]
+    );
+    // The shipped pack is untouched.
+    let bare = nils_pack::load(&mri(), None).unwrap();
+    assert!(main_pick(&bare).borders.rare_within.is_some());
+    assert!(main_pick(&bare).candidates.is_empty() && main_pick(&bare).near_tie.is_empty());
+    // And a patched pack is written, its pick file where it changed.
+    let out = std::env::temp_dir().join(format!("nils-patch-pick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    p.docs.write(&out, Some("1.0.2")).unwrap();
+    let (written, _) = nils_pack::load_patched(&out, &Default::default(), &[]).unwrap();
+    assert_eq!(main_pick(&written).candidates, m.candidates);
+    assert_eq!(main_pick(&written).near_tie, m.near_tie);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_candidacy_or_a_near_tie_order_is_taken_out_as_it_was_put_in() {
+    let p = applied(concat!(
+        "  - {op: set_candidates, role: t2w, when: [{tag: fov_x, ge: 175}]}\n",
+        "  - {op: set_near_tie, order: [{of: series_number, lowest: true}]}\n",
+        "  - {op: set_candidates, role: t2w, when: [], unless: []}\n",
+        "  - {op: set_near_tie, order: []}\n",
+    ));
+    let m = main_pick(&p.pack);
+    assert!(m.candidates.is_empty() && m.near_tie.is_empty());
+    assert!(
+        p.applied[2].changes[0].contains("competes for it again"),
+        "{:?}",
+        p.applied[2]
+    );
+}
+
+#[test]
+fn a_pick_operation_that_cannot_apply_is_refused_with_why() {
+    for (ops, why) in [
+        (
+            "  - {op: set_candidates, role: t3w, unless: [{axis: body_part, is: spine}]}\n",
+            "t3w is not a role the pick main picks for",
+        ),
+        (
+            "  - {op: set_candidates, role: t1w, unless: [{axis: body_part, is: knee}]}\n",
+            "body_part has no value named knee",
+        ),
+        (
+            "  - {op: set_candidates, role: t1w, unless: [{words: [spine]}]}\n",
+            "a pick's candidacy reads what a pick reads",
+        ),
+        (
+            "  - {op: set_candidates, role: t1w, when: [{tag: no_such_field, ge: 1}]}\n",
+            "no_such_field is neither an axis of the pack nor a field",
+        ),
+        (
+            "  - {op: set_candidates, role: t1w}\n",
+            "says when or unless",
+        ),
+        (
+            "  - {op: set_candidates, role: t1w, when: [], unless: []}\n",
+            "competes for it already",
+        ),
+        (
+            "  - {op: remove_border, border: too_close}\n",
+            "too_close is the margin every pick declares",
+        ),
+        (
+            "  - {op: remove_border, border: flow}\n",
+            "flow is not a border a pick file declares",
+        ),
+        (
+            "  - {op: remove_border, border: rare, pick: other}\n",
+            "the pack has no pick named other",
+        ),
+        (
+            "  - {op: set_runner_up_within, within: 0.05}\n",
+            "runner_up_within is 0.05 already",
+        ),
+        (
+            "  - {op: set_runner_up_within, within: 5}\n",
+            "within is a fraction of the best score",
+        ),
+        (
+            "  - {op: set_near_tie, order: [{of: mr_acquisition_type, first: ['3D']}]}\n",
+            "a step is {of, prefer: [values]}",
+        ),
+        (
+            "  - {op: set_near_tie, order: [{of: dimension, lowest: true}]}\n",
+            "dimension is neither an axis of the pack nor a field",
+        ),
+        (
+            "  - {op: set_near_tie, order: [{of: series_number, lowest: true, roles: [t9w]}]}\n",
+            "t9w is not a role the pick main picks for",
+        ),
+        (
+            "  - {op: set_near_tie, order: []}\n",
+            "has no near-tie order",
+        ),
+        (
+            "  - {op: remove_border, border: rare, scope: 'site:north'}\n",
+            "it is a pack edit, scope pack",
+        ),
+    ] {
+        let e = refused(ops);
+        assert!(e.contains(why), "{ops}: {e}");
+    }
+    // A border taken out twice is refused the second time.
+    let e = refused(concat!(
+        "  - {op: remove_border, border: rare}\n",
+        "  - {op: remove_border, border: rare_within}\n",
+    ));
+    assert!(
+        e.contains("operation 2") && e.contains("raises no rare"),
+        "{e}"
+    );
+}
+
+/// The roles a stack of these decided axes holds under the pack, and the
+/// verdict that said so.
+fn disposed(pack: &nils_pack::Pack, decided: &[(&str, &str)]) -> nils_pack::verdict::Verdict {
+    let seed: Vec<Vec<String>> = pack
+        .axes
+        .iter()
+        .map(|a| {
+            decided
+                .iter()
+                .filter(|(n, _)| *n == a.name)
+                .map(|(_, v)| v.to_string())
+                .collect()
+        })
+        .collect();
+    Evaluated::new(pack, &stack(&[])).dispose(&seed)
+}
+
+#[test]
+fn a_rule_may_say_nothing_of_an_axis_that_holds_several_values() {
+    // The stack holds none of its values where the conditions hold: the
+    // study's R1 written in the rules, a spine's stack no role's.
+    let t1 = [
+        ("base", "T1w"),
+        ("directory_type", "anat"),
+        ("body_part", "spine"),
+    ];
+    let bare = nils_pack::load(&mri(), None).unwrap();
+    assert_eq!(disposed(&bare, &t1).stored("role"), "t1w");
+    let p = applied(
+        "  - {op: add_rule, axis: role, nothing: true, when: [{axis: body_part, is: spine}]}\n",
+    );
+    let set = p.pack.rule_sets.iter().find(|s| s.name == "role").unwrap();
+    assert_eq!(
+        set.rules[0].id, "added_1",
+        "first, before every rule that sets a role"
+    );
+    let v = disposed(&p.pack, &t1);
+    assert_eq!(v.stored("role"), "");
+    // The rule it stopped is ranked against it, not against a person.
+    let o = v
+        .overrides
+        .iter()
+        .find(|o| o.axis == "role")
+        .expect("the t1w rule, stopped");
+    assert_eq!(o.by.rule, "added_1");
+    assert_eq!(o.rank, "rule_order");
+    let brain = [
+        ("base", "T1w"),
+        ("directory_type", "anat"),
+        ("body_part", "brain"),
+    ];
+    assert_eq!(disposed(&p.pack, &brain).stored("role"), "t1w");
+    // Anywhere but first, it would stop only some of them.
+    let e = refused(
+        "  - {op: add_rule, axis: role, nothing: true, when: [{axis: body_part, is: spine}], position: last}\n",
+    );
+    assert!(e.contains("runs first in its set"), "{e}");
+}

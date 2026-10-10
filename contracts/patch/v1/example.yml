@@ -60,3 +60,22 @@ operations:
     axis: technique
     value: MPRAGE
     bids: MPR
+  # A stack that is an angiogram holds no role, whatever else the role rules
+  # say of it: nothing, of an axis that holds several values, goes first in
+  # the set that decides it.
+  - op: add_rule
+    axis: role
+    nothing: true
+    when: {axis: technique, is: TOF-MRA}
+  # The main-scan pick (the 2026-10-10 study of the pick borders): the brain
+  # roles are no spine's, neck's, chest's or unknown part's, a rare
+  # technique is asked about no more, and a near tie is decided by an order.
+  - op: set_candidates
+    role: t1w
+    unless: [{axis: body_part, is: [spine, neck, chest, other]}]
+  - {op: remove_border, border: rare}
+  - op: set_near_tie
+    order:
+      - {of: mr_acquisition_type, prefer: ['3D']}
+      - {of: orientation, prefer: [Axial, Coronal, Sagittal]}
+      - {of: series_number, lowest: true}

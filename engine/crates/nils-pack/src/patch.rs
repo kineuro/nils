@@ -6,7 +6,10 @@
 //! value's rule reads, a rule or a rule set moved in the order, a value's
 //! priority in its exclusion group, a new value, a new rule from a template,
 //! an axis silenced where a condition holds, an axis handed to a model, a
-//! value's name in a release. Each is an operation here, written as data,
+//! value's name in a release, and in the main-scan pick (the 2026-10-10
+//! study of the pick borders) which stacks of a role compete, a border kind
+//! taken out, a near tie's order and its margin. Each is an operation here,
+//! written as data,
 //! so a proposal is a reviewable diff of the pack that a form, a person or
 //! the assistant can write, and that the engine checks before anything runs.
 //!
@@ -55,6 +58,33 @@ pub const KINDS: &[&str] = &[
     "silence",
     "by_model",
     "map_name",
+    "set_candidates",
+    "remove_border",
+    "set_near_tie",
+    "set_runner_up_within",
+];
+
+/// The operations on a pick file, which are pack edits only: a pick's file
+/// is one for every stack and its population the whole registry's.
+const PICK_KINDS: &[&str] = &[
+    "set_candidates",
+    "remove_border",
+    "set_near_tie",
+    "set_runner_up_within",
+];
+
+/// The border kinds a pick file may declare under `borders`, by the reason
+/// a pick raises (as its review item names it) and the key the file writes.
+/// `too_close` is the `runner_up_within` every pick declares, set rather
+/// than removed.
+const BORDERS: &[(&str, &str)] = &[
+    ("rare", "rare_within"),
+    ("retake", "retake"),
+    ("unknown_dim", "unknown_dim"),
+    ("slice_count_outlier", "slice_outlier"),
+    ("pre_post_twin", "pre_post_twin"),
+    ("epimix_fallback", "fallback"),
+    ("dixon_vs_plain", "dixon_vs_plain"),
 ];
 
 /// What every operation says beside its own keys.
@@ -99,6 +129,10 @@ fn keys_of(kind: &str) -> &'static [&'static str] {
         "silence" => &["axis", "when"],
         "by_model" => &["axis"],
         "map_name" => &["axis", "value", "bids", "label"],
+        "set_candidates" => &["pick", "role", "when", "unless"],
+        "remove_border" => &["pick", "border"],
+        "set_near_tie" => &["pick", "order"],
+        "set_runner_up_within" => &["pick", "within"],
         _ => &[],
     }
 }
@@ -429,6 +463,25 @@ enum What {
         bids: Option<Value>,
         label: Option<String>,
     },
+    SetCandidates {
+        pick: Option<String>,
+        role: String,
+        when: Vec<Value>,
+        unless: Vec<Value>,
+    },
+    RemoveBorder {
+        pick: Option<String>,
+        /// The reason, as a pick raises it, and the key its file writes.
+        border: (&'static str, &'static str),
+    },
+    SetNearTie {
+        pick: Option<String>,
+        order: Vec<Value>,
+    },
+    SetRunnerUpWithin {
+        pick: Option<String>,
+        within: f64,
+    },
 }
 
 /// One operation of a patch.
@@ -748,6 +801,11 @@ fn read_op(
         }
     }
     let scope = Scope::of(m.get("scope").unwrap_or(&Value::Null))?;
+    if PICK_KINDS.contains(&kind.as_str()) && !scope.is_pack() {
+        return Err(format!(
+            "{kind} changes the main-scan pick, whose file is one for every stack and whose population is the whole registry's: it is a pack edit, scope pack, never an overlay's"
+        ));
+    }
     let reason = word(m, "reason")?
         .or_else(|| reason.map(str::to_string))
         .ok_or_else(|| "an operation says why: reason".to_string())?;
@@ -909,6 +967,78 @@ fn read_op(
                 label,
             }
         }
+        "set_candidates" => {
+            let when = conditions_of(m, "when")?;
+            let unless = conditions_of(m, "unless")?;
+            if when.is_none() && unless.is_none() {
+                return Err(
+                    "says when or unless: the conditions a stack holding the role meets to compete for it, or both empty to let every stack holding it compete again"
+                        .into(),
+                );
+            }
+            What::SetCandidates {
+                pick: word(m, "pick")?,
+                role: needs(m, "role")?,
+                when: when.unwrap_or_default(),
+                unless: unless.unwrap_or_default(),
+            }
+        }
+        "remove_border" => {
+            let named = needs(m, "border")?;
+            if matches!(named.as_str(), "too_close" | "runner_up_within") {
+                return Err(
+                    "too_close is the margin every pick declares (runner_up_within): set it with set_runner_up_within, or decide near ties with set_near_tie"
+                        .into(),
+                );
+            }
+            let border = BORDERS
+                .iter()
+                .find(|(reason, key)| named == *reason || named == *key)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "{named} is not a border a pick file declares; they are {}",
+                        BORDERS
+                            .iter()
+                            .map(|(r, _)| *r)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+            What::RemoveBorder {
+                pick: word(m, "pick")?,
+                border,
+            }
+        }
+        "set_near_tie" => {
+            let order = match m.get("order") {
+                Some(Value::Array(a)) => a.clone(),
+                _ => {
+                    return Err(
+                        "order is a list of steps, best first, or an empty list to take the order out"
+                            .into(),
+                    );
+                }
+            };
+            for step in &order {
+                near_tie_step(step)?;
+            }
+            What::SetNearTie {
+                pick: word(m, "pick")?,
+                order,
+            }
+        }
+        "set_runner_up_within" => What::SetRunnerUpWithin {
+            pick: word(m, "pick")?,
+            within: m
+                .get("within")
+                .and_then(Value::as_f64)
+                .filter(|w| (0.0..=1.0).contains(w))
+                .ok_or_else(|| {
+                    "within is a fraction of the best score from 0 to 1, the number itself included"
+                        .to_string()
+                })?,
+        },
         _ => unreachable!("the kinds are checked above"),
     };
     Ok(Op {
@@ -951,6 +1081,57 @@ fn templates(v: Option<&Value>) -> Result<Vec<Value>, String> {
         }
     }
     Ok(list)
+}
+
+/// The conditions of a role's candidacy under `key`: a condition or a list
+/// of them, an empty list saying none. None where the key is not given.
+fn conditions_of(m: &Map<String, Value>, key: &str) -> Result<Option<Vec<Value>>, String> {
+    let list = match m.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+    };
+    for c in &list {
+        if !c.is_object() {
+            return Err(format!(
+                "{key} holds conditions, each {{axis, is}} or {{tag, is | lt | le | gt | ge}}, not {c}"
+            ));
+        }
+    }
+    Ok(Some(list))
+}
+
+/// One step of a near tie's order, checked for shape: `{of, prefer:
+/// [values]}`, `{of, avoid: [values]}`, `{of, lowest: true}` or `{of,
+/// highest: true}`, with `roles` where it orders some roles only.
+fn near_tie_step(step: &Value) -> Result<(), String> {
+    let shape = "a step is {of, prefer: [values]}, {of, avoid: [values]}, {of, lowest: true} or {of, highest: true}, with roles: [...] where it orders some roles only";
+    let m = step.as_object().ok_or(shape)?;
+    if word(m, "of")?.is_none() {
+        return Err(shape.into());
+    }
+    let ranks: Vec<&String> = m
+        .keys()
+        .filter(|k| !matches!(k.as_str(), "of" | "roles"))
+        .collect();
+    match ranks.as_slice() {
+        [k] if matches!(k.as_str(), "prefer" | "avoid") => {
+            let values = texts_of(&m[k.as_str()], k)?;
+            if values.is_empty() {
+                return Err(format!("{k} names no value"));
+            }
+        }
+        [k] if matches!(k.as_str(), "lowest" | "highest") => {
+            if m[k.as_str()] != Value::Bool(true) {
+                return Err(shape.into());
+            }
+        }
+        _ => return Err(shape.into()),
+    }
+    if let Some(r) = m.get("roles") {
+        texts_of(r, "roles")?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,6 +1363,63 @@ impl Docs {
             "{axis} has no value named {value}; its values are {}",
             vm.keys().cloned().collect::<Vec<_>>().join(", ")
         )))
+    }
+
+    /// The file of the pick named, or of the pack's one pick where none is.
+    fn pick_rel(&mut self, op: &Op, name: Option<&str>) -> R<String> {
+        let mut picks: Vec<(String, String)> = Vec::new();
+        for rel in self.listed("picks") {
+            let n = self
+                .value(&rel)?
+                .get("pick")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            picks.push((rel, n));
+        }
+        let names = || {
+            picks
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (name, picks.as_slice()) {
+            (Some(want), _) => picks
+                .iter()
+                .find(|(_, n)| n == want)
+                .map(|(rel, _)| rel.clone())
+                .ok_or_else(|| {
+                    op.refuse(format!(
+                        "the pack has no pick named {want}; it has {}",
+                        names()
+                    ))
+                }),
+            (None, [(rel, _)]) => Ok(rel.clone()),
+            (None, []) => Err(op.refuse("the pack declares no pick")),
+            (None, _) => Err(op.refuse(format!(
+                "the pack declares several picks ({}): name one with pick",
+                names()
+            ))),
+        }
+    }
+
+    /// The pack raised to declare contract `at_least`, where it declares
+    /// less: a key of a contract is refused in a pack that declares less.
+    /// Answers the change, where there was one.
+    fn needs_contract(&mut self, at_least: u64, key: &str) -> Option<String> {
+        let now = self
+            .manifest()
+            .get("contract")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if now >= at_least {
+            return None;
+        }
+        self.set_manifest("contract", json!(at_least));
+        Some(format!(
+            "the pack declares contract {at_least} now, {now} before: {key} is contract {at_least}'s"
+        ))
     }
 
     /// The changed and new documents, as the loader reads them (JSON, which
@@ -1456,6 +1694,17 @@ fn apply_one(docs: &mut Docs, op: &Op) -> R<Vec<String>> {
             bids,
             label,
         } => map_name(docs, op, axis, value, bids.as_ref(), label.as_deref()),
+        What::SetCandidates {
+            pick,
+            role,
+            when,
+            unless,
+        } => set_candidates(docs, op, pick.as_deref(), role, when, unless),
+        What::RemoveBorder { pick, border } => remove_border(docs, op, pick.as_deref(), *border),
+        What::SetNearTie { pick, order } => set_near_tie(docs, op, pick.as_deref(), order),
+        What::SetRunnerUpWithin { pick, within } => {
+            set_runner_up_within(docs, op, pick.as_deref(), *within)
+        }
     }
 }
 
@@ -2307,16 +2556,20 @@ fn add_rule(docs: &mut Docs, op: &Op, a: AddRule<'_>) -> R<Vec<String>> {
             let (_, id) = docs.value_id(op, a.axis, v)?;
             json!(id)
         }
-        None => {
-            if multi(&axis_doc) {
-                return Err(op.refuse(format!(
-                    "{} holds several values, and one with none already says none; a rule sets one of its values",
-                    a.axis
-                )));
-            }
-            Value::Null
-        }
+        None => Value::Null,
     };
+    // Nothing, of an axis that holds several values, is that the stack holds
+    // none of them where the conditions hold: the rule runs first in the
+    // first set that decides the axis, so it closes the axis before any rule
+    // sets one of its values (a stack whose body part is a spine's holds no
+    // role).
+    let none_of_several = a.value.is_none() && multi(&axis_doc);
+    if none_of_several && a.anchor.is_some_and(|x| *x != Anchor::First) {
+        return Err(op.refuse(format!(
+            "a rule that says nothing of {}, which holds several values, runs first in its set, before every rule that sets one of them: leave its place out or say position: first",
+            a.axis
+        )));
+    }
     let (words, rest) = split_words(a.when).map_err(|e| op.refuse(e))?;
     let conds: Vec<Cond> = rest
         .iter()
@@ -2435,12 +2688,26 @@ fn add_rule(docs: &mut Docs, op: &Op, a: AddRule<'_>) -> R<Vec<String>> {
                     decides.join(", ")
                 )));
             }
+            if none_of_several {
+                let first = docs
+                    .deciders()?
+                    .into_iter()
+                    .find(|(_, axes)| axes.iter().any(|x| x == a.axis))
+                    .map(|(name, _)| name);
+                if first.as_deref() != Some(set.as_str()) {
+                    return Err(op.refuse(format!(
+                        "{set} is not the first set that decides {}, which holds several values: a rule that says nothing of it goes first in {}, before every rule that sets one of them",
+                        a.axis,
+                        first.unwrap_or_default()
+                    )));
+                }
+            }
             let rules = doc["rules"].as_object().cloned().unwrap_or_default();
             let id = rule_id(a.rule, "added", &rules).map_err(|e| op.refuse(e))?;
             let order = order_of(&doc);
             let anchor = match a.anchor {
                 Some(x) => x.clone(),
-                None if order.is_empty() => Anchor::First,
+                None if order.is_empty() || none_of_several => Anchor::First,
                 None => {
                     return Err(op.refuse(format!(
                         "say where in {set} it goes (before:, after: or position: first | last): the first rule of a set that fires decides"
@@ -2497,7 +2764,11 @@ fn add_rule(docs: &mut Docs, op: &Op, a: AddRule<'_>) -> R<Vec<String>> {
             let rules = doc["rules"].as_object().cloned().unwrap_or_default();
             let id = rule_id(a.rule, "added", &rules).map_err(|e| op.refuse(e))?;
             let order = order_of(&doc);
-            let anchor = a.anchor.cloned().unwrap_or(Anchor::Last);
+            let anchor = a.anchor.cloned().unwrap_or(if none_of_several {
+                Anchor::First
+            } else {
+                Anchor::Last
+            });
             doc["order"] = json!(anchor.place(&order, &id).map_err(|e| op.refuse(e))?);
             doc["rules"][&id] = Value::Object(body);
             let rel = match existing {
@@ -2835,6 +3106,341 @@ fn map_name(
         changes.extend(bids_name(docs, op, axis, &id, b)?);
     }
     Ok(changes)
+}
+
+// --- the main-scan pick (the 2026-10-10 study of the pick borders)
+
+/// The roles a pick file picks for.
+fn pick_roles(doc: &Value) -> Vec<String> {
+    doc.get("roles")
+        .map(|r| texts_of(r, "roles").unwrap_or_default())
+        .unwrap_or_default()
+}
+
+fn pick_name(doc: &Value) -> String {
+    doc.get("pick")
+        .and_then(Value::as_str)
+        .unwrap_or("main")
+        .to_string()
+}
+
+/// A name a pick may read: an axis of the pack or a field of the
+/// fingerprint, as a person names it.
+fn pick_reads(docs: &mut Docs, op: &Op, name: &str) -> R<String> {
+    let name = field_name(name);
+    if docs.axis_rel(&name)?.is_some() || crate::stack::field_index(&name).is_some() {
+        return Ok(name);
+    }
+    Err(op.refuse(format!(
+        "{name} is neither an axis of the pack nor a field of the fingerprint"
+    )))
+}
+
+/// The values of a name as a pick file writes them: an axis's by their
+/// identity, whatever the patch named them by; a field's as written.
+fn pick_values(docs: &mut Docs, op: &Op, of: &str, values: &[String]) -> R<Vec<String>> {
+    if docs.axis_rel(of)?.is_none() {
+        return Ok(values.to_vec());
+    }
+    values
+        .iter()
+        .map(|v| docs.value_id(op, of, v).map(|(_, id)| id))
+        .collect()
+}
+
+/// A role's candidacy conditions, from the patch's templates to the pick
+/// file's own: `{axis, is}` (a value or a list of them) is `{of, any}`, and
+/// `{tag, is | lt | le | gt | ge}` is `{of, any}` or one `{of, lt ...}` per
+/// comparison. Words and flags are the rules': a stack is reached by them
+/// with a rule that says nothing of the role.
+fn pick_conditions(docs: &mut Docs, op: &Op, list: &[Value]) -> R<Vec<Value>> {
+    let mut out = Vec::new();
+    for c in list {
+        let m = c.as_object().expect("conditions are mappings");
+        let not_here = || {
+            op.refuse(format!(
+                "a pick's candidacy reads what a pick reads: {{axis, is}} or {{tag, is | lt | le | gt | ge}}, not {c}; words and flags are the rules', and add_rule with nothing: true reaches a stack by them"
+            ))
+        };
+        if let Some(axis) = m.get("axis").and_then(Value::as_str) {
+            if m.len() != 2 || !m.contains_key("is") {
+                return Err(not_here());
+            }
+            let values = texts_of(&m["is"], "is").map_err(|e| op.refuse(e))?;
+            if docs.axis_rel(axis)?.is_none() {
+                let names = docs.axis_names()?;
+                return Err(op.refuse(format!(
+                    "the pack has no axis named {axis}; it decides {}",
+                    names.join(", ")
+                )));
+            }
+            out.push(json!({"of": axis, "any": pick_values(docs, op, axis, &values)?}));
+            continue;
+        }
+        let Some(tag) = m
+            .get("tag")
+            .or_else(|| m.get("field"))
+            .and_then(Value::as_str)
+        else {
+            return Err(not_here());
+        };
+        let of = pick_reads(docs, op, tag)?;
+        let mut said = false;
+        for (k, v) in m {
+            match k.as_str() {
+                "tag" | "field" => {}
+                "is" => {
+                    let values = texts_of(v, "is").map_err(|e| op.refuse(e))?;
+                    out.push(json!({"of": of, "any": pick_values(docs, op, &of, &values)?}));
+                    said = true;
+                }
+                "lt" | "le" | "gt" | "ge" => {
+                    let n = number(v).ok_or_else(|| op.refuse(format!("{k} is a number")))?;
+                    out.push(json!({"of": of, (k.as_str()): n}));
+                    said = true;
+                }
+                _ => return Err(not_here()),
+            }
+        }
+        if !said {
+            return Err(not_here());
+        }
+    }
+    Ok(out)
+}
+
+fn said_of(conditions: &[Value]) -> String {
+    conditions
+        .iter()
+        .map(|c| {
+            let of = c["of"].as_str().unwrap_or_default();
+            match c.get("any") {
+                Some(any) => format!(
+                    "{of} is {}",
+                    texts_of(any, "any").unwrap_or_default().join(" or ")
+                ),
+                None => {
+                    let (k, n) = c
+                        .as_object()
+                        .and_then(|m| m.iter().find(|(k, _)| k.as_str() != "of"))
+                        .map(|(k, n)| (k.as_str(), n.to_string()))
+                        .unwrap_or(("", String::new()));
+                    let op = match k {
+                        "lt" => "<",
+                        "le" => "<=",
+                        "gt" => ">",
+                        _ => ">=",
+                    };
+                    format!("{of} {op} {n}")
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+fn set_candidates(
+    docs: &mut Docs,
+    op: &Op,
+    pick: Option<&str>,
+    role: &str,
+    when: &[Value],
+    unless: &[Value],
+) -> R<Vec<String>> {
+    let rel = docs.pick_rel(op, pick)?;
+    let mut doc = docs.value(&rel)?.clone();
+    let roles = pick_roles(&doc);
+    if !roles.iter().any(|r| r == role) {
+        return Err(op.refuse(format!(
+            "{role} is not a role the pick {} picks for; it picks {}",
+            pick_name(&doc),
+            roles.join(", ")
+        )));
+    }
+    let when = pick_conditions(docs, op, when)?;
+    let unless = pick_conditions(docs, op, unless)?;
+    let mut changes = Vec::new();
+    if when.is_empty() && unless.is_empty() {
+        let held = doc
+            .get_mut("candidates")
+            .and_then(Value::as_object_mut)
+            .and_then(|c| c.remove(role));
+        if held.is_none() {
+            return Err(op.refuse(format!(
+                "every stack holding {role} competes for it already, so this changes nothing"
+            )));
+        }
+        if doc["candidates"].as_object().is_some_and(Map::is_empty) {
+            doc.as_object_mut()
+                .expect("a pick file is a mapping")
+                .remove("candidates");
+        }
+        changes.push(format!(
+            "{role}: every stack that holds it competes for it again"
+        ));
+    } else {
+        let mut entry = Map::new();
+        if !when.is_empty() {
+            entry.insert("when".into(), json!(when));
+        }
+        if !unless.is_empty() {
+            entry.insert("unless".into(), json!(unless));
+        }
+        let entry = Value::Object(entry);
+        if doc.get("candidates").and_then(|c| c.get(role)) == Some(&entry) {
+            return Err(op.refuse(format!(
+                "the candidacy of {role} says this already, so this changes nothing"
+            )));
+        }
+        if !doc.get("candidates").is_some_and(Value::is_object) {
+            doc["candidates"] = json!({});
+        }
+        doc["candidates"][role] = entry;
+        let mut said = Vec::new();
+        if !when.is_empty() {
+            said.push(format!("where {}", said_of(&when)));
+        }
+        if !unless.is_empty() {
+            said.push(format!("unless {}", said_of(&unless)));
+        }
+        changes.push(format!(
+            "{role}: a stack that holds it competes for it, and is of its population, only {}",
+            said.join(", and ")
+        ));
+        changes.extend(docs.needs_contract(9, "candidates"));
+    }
+    docs.set(&rel, doc);
+    Ok(changes)
+}
+
+fn remove_border(
+    docs: &mut Docs,
+    op: &Op,
+    pick: Option<&str>,
+    (reason, key): (&str, &str),
+) -> R<Vec<String>> {
+    let rel = docs.pick_rel(op, pick)?;
+    let mut doc = docs.value(&rel)?.clone();
+    let declared: Vec<String> = doc
+        .get("borders")
+        .and_then(Value::as_object)
+        .map(|b| b.keys().cloned().collect())
+        .unwrap_or_default();
+    if !declared.iter().any(|k| k == key) {
+        return Err(op.refuse(format!(
+            "the pick {} raises no {reason}: its borders are {}",
+            pick_name(&doc),
+            declared.join(", ")
+        )));
+    }
+    doc["borders"]
+        .as_object_mut()
+        .expect("borders is a mapping")
+        .remove(key);
+    docs.set(&rel, doc);
+    Ok(vec![format!(
+        "the pick raises {reason} no more ({key} out of its borders)"
+    )])
+}
+
+fn set_near_tie(docs: &mut Docs, op: &Op, pick: Option<&str>, order: &[Value]) -> R<Vec<String>> {
+    let rel = docs.pick_rel(op, pick)?;
+    let mut doc = docs.value(&rel)?.clone();
+    let roles = pick_roles(&doc);
+    if order.is_empty() {
+        if doc.get("near_tie").is_none() {
+            return Err(
+                op.refuse("the pick has no near-tie order, so taking it out changes nothing")
+            );
+        }
+        doc.as_object_mut()
+            .expect("a pick file is a mapping")
+            .remove("near_tie");
+        docs.set(&rel, doc);
+        return Ok(vec![
+            "the pick has no near-tie order: a near tie is a border again".into(),
+        ]);
+    }
+    let mut steps = Vec::new();
+    let mut said = Vec::new();
+    for step in order {
+        let m = step.as_object().expect("checked when read");
+        let of = pick_reads(docs, op, m["of"].as_str().expect("checked when read"))?;
+        let mut out = Map::new();
+        out.insert("of".into(), json!(of));
+        let mut line = String::new();
+        for (k, v) in m {
+            match k.as_str() {
+                "prefer" | "avoid" => {
+                    let values = texts_of(v, k).map_err(|e| op.refuse(e))?;
+                    let values = pick_values(docs, op, &of, &values)?;
+                    line = format!("{of} {k} {}", values.join(", "));
+                    out.insert(k.clone(), json!(values));
+                }
+                "lowest" | "highest" => {
+                    line = format!("{of} {k} first");
+                    out.insert(k.clone(), json!(true));
+                }
+                _ => {}
+            }
+        }
+        if let Some(r) = m.get("roles") {
+            let named = texts_of(r, "roles").map_err(|e| op.refuse(e))?;
+            for n in &named {
+                if !roles.iter().any(|x| x == n) {
+                    return Err(op.refuse(format!(
+                        "{n} is not a role the pick {} picks for; it picks {}",
+                        pick_name(&doc),
+                        roles.join(", ")
+                    )));
+                }
+            }
+            line.push_str(&format!(" (for {})", named.join(", ")));
+            out.insert("roles".into(), json!(named));
+        }
+        said.push(line);
+        steps.push(Value::Object(out));
+    }
+    let steps = Value::Array(steps);
+    if doc.get("near_tie") == Some(&steps) {
+        return Err(op.refuse("the pick's near-tie order is this already, so this changes nothing"));
+    }
+    doc["near_tie"] = steps;
+    docs.set(&rel, doc);
+    let mut changes = vec![format!(
+        "a near tie is decided by {}; one no step decides is a border still",
+        said.join(", then ")
+    )];
+    changes.extend(docs.needs_contract(9, "near_tie"));
+    Ok(changes)
+}
+
+fn set_runner_up_within(
+    docs: &mut Docs,
+    op: &Op,
+    pick: Option<&str>,
+    within: f64,
+) -> R<Vec<String>> {
+    let rel = docs.pick_rel(op, pick)?;
+    let mut doc = docs.value(&rel)?.clone();
+    let now = doc
+        .get("borders")
+        .and_then(|b| b.get("runner_up_within"))
+        .and_then(Value::as_f64);
+    if now.is_some_and(|n| crate::pack::at_threshold(n, within)) {
+        return Err(op.refuse(format!(
+            "runner_up_within is {within} already, so this changes nothing"
+        )));
+    }
+    if !doc.get("borders").is_some_and(Value::is_object) {
+        doc["borders"] = json!({});
+    }
+    doc["borders"]["runner_up_within"] = json!(within);
+    docs.set(&rel, doc);
+    Ok(vec![format!(
+        "a near tie is a runner-up within {within} of the best now{}",
+        now.map(|n| format!(", {n} before")).unwrap_or_default()
+    )])
 }
 
 /// The BIDS datatypes a suffix may sit in.

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/patch/v1/patch.schema.json",
   "title": "NILS pack patch",
-  "description": "Rule edits as typed operations (record 56, section 5.5): the changes to a pack written as data, each with its scope, its reason and its evidence, so a proposal is a reviewable diff that a form, a person or the assistant writes and the engine checks before anything runs. The engine applies the operations in order to the pack's own documents and builds the result with the pack's own loader; an operation that cannot apply is refused with why, and the pack's corpus and the patch's own cases judge the result. `nils pack rehearse --ops` and POST /api/packs/{name}/rehearse answer what it does to the sorting; `nils pack apply --out` writes a patch of pack edits as the next version of the pack. Written as YAML or sent as JSON.",
+  "description": "Rule edits as typed operations (record 56, section 5.5): the changes to a pack written as data (its rules, and since 2026-10-10 its main-scan pick), each with its scope, its reason and its evidence, so a proposal is a reviewable diff that a form, a person or the assistant writes and the engine checks before anything runs. The engine applies the operations in order to the pack's own documents and builds the result with the pack's own loader; an operation that cannot apply is refused with why, and the pack's corpus and the patch's own cases judge the result. `nils pack rehearse --ops` and POST /api/packs/{name}/rehearse answer what it does to the sorting; `nils pack apply --out` writes a patch of pack edits as the next version of the pack. Written as YAML or sent as JSON.",
   "type": "object",
   "required": [
     "patch",
@@ -390,7 +390,7 @@
         },
         {
           "type": "object",
-          "description": "Adds a rule from templates: words in a field, a tag equal to a value, a physics range, a flag, an axis value, or their combination (all must hold; words are the clause it cites and the rest its gate). It sets one value, or nothing (nothing: true). In the set named, at its place (before, after or position, required in a set that has rules), or else in the axis's own longhand set, or in a set of the rules added to the axis that runs just before what decides it.",
+          "description": "Adds a rule from templates: words in a field, a tag equal to a value, a physics range, a flag, an axis value, or their combination (all must hold; words are the clause it cites and the rest its gate). It sets one value, or nothing (nothing: true). Nothing, of an axis that holds several values (role, modifier), is that the stack holds none of them where the conditions hold: the rule goes first in the first set that decides the axis, before every rule that sets one of its values, so it closes the axis to them; a place other than first is refused, since it would stop only the rules after it (amended in place, additively, 2026-10-10). In the set named, at its place (before, after or position, required in a set that has rules), or else in the axis's own longhand set, or in a set of the rules added to the axis that runs just before what decides it.",
           "required": [
             "op",
             "axis",
@@ -419,7 +419,8 @@
               "type": "string"
             },
             "nothing": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Sets nothing: decided as nothing where the conditions hold. Of an axis that holds several values, the stack holds none of them, the rule first in the first set that decides the axis."
             },
             "when": {
               "oneOf": [
@@ -572,6 +573,187 @@
             },
             "label": {
               "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "The 2026-10-10 study of the pick borders: which stacks holding a role compete for it in the pick (the pick file's candidates, pack contract 9): each of when holds and none of unless does. A stack the role's candidacy does not admit is no candidate for it and no part of the population it is scored against. Both lists empty takes the role's candidacy out, so every stack holding it competes again. The pack is raised to declare contract 9 where it declares less. The brain roles not a spine's, a neck's, a chest's or an unknown part's (R1): {role: t1w, unless: [{axis: body_part, is: [spine, neck, chest, other]}]}.",
+          "required": [
+            "op",
+            "role"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set_candidates"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope",
+              "description": "pack only: a pick's file is one for every stack and its population the whole registry's, so a pick operation is a pack edit, never an overlay's."
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "pick": {
+              "type": "string",
+              "description": "The pick, by its name in its file (main); the pack's one pick when not given."
+            },
+            "role": {
+              "type": "string",
+              "description": "A role the pick picks for."
+            },
+            "when": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "description": "{axis: NAME, is: VALUE | [VALUES]}, a value of the axis by its identity, label or alias, or {tag: FIELD, is: VALUE | lt | le | gt | ge: NUMBER}, a field of the fingerprint as a person names it (te, tr, ti and flip too). Words and flags are the rules': a stack is reached by them with add_rule and nothing: true.",
+                  "minProperties": 2
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "description": "{axis: NAME, is: VALUE | [VALUES]}, a value of the axis by its identity, label or alias, or {tag: FIELD, is: VALUE | lt | le | gt | ge: NUMBER}, a field of the fingerprint as a person names it (te, tr, ti and flip too). Words and flags are the rules': a stack is reached by them with add_rule and nothing: true.",
+                    "minProperties": 2
+                  }
+                }
+              ],
+              "description": "The conditions a stack meets, all of them, to compete for the role. {axis: NAME, is: VALUE | [VALUES]}, a value of the axis by its identity, label or alias, or {tag: FIELD, is: VALUE | lt | le | gt | ge: NUMBER}, a field of the fingerprint as a person names it (te, tr, ti and flip too). Words and flags are the rules': a stack is reached by them with add_rule and nothing: true."
+            },
+            "unless": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "description": "{axis: NAME, is: VALUE | [VALUES]}, a value of the axis by its identity, label or alias, or {tag: FIELD, is: VALUE | lt | le | gt | ge: NUMBER}, a field of the fingerprint as a person names it (te, tr, ti and flip too). Words and flags are the rules': a stack is reached by them with add_rule and nothing: true.",
+                  "minProperties": 2
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "description": "{axis: NAME, is: VALUE | [VALUES]}, a value of the axis by its identity, label or alias, or {tag: FIELD, is: VALUE | lt | le | gt | ge: NUMBER}, a field of the fingerprint as a person names it (te, tr, ti and flip too). Words and flags are the rules': a stack is reached by them with add_rule and nothing: true.",
+                    "minProperties": 2
+                  }
+                }
+              ],
+              "description": "The conditions that keep a stack out, any one of them."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Takes a border kind out of the pick file's borders, so the pick never raises it: rare (rare_within), retake, unknown_dim, slice_count_outlier (slice_outlier), pre_post_twin, epimix_fallback (fallback) or dixon_vs_plain, by the reason a pick raises or the key the file writes. too_close is the margin every pick declares: set it with set_runner_up_within, or decide near ties with set_near_tie. Refused where the pick raises no such border.",
+          "required": [
+            "op",
+            "border"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "remove_border"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope",
+              "description": "pack only: a pick's file is one for every stack and its population the whole registry's, so a pick operation is a pack edit, never an overlay's."
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "pick": {
+              "type": "string",
+              "description": "The pick, by its name in its file (main); the pack's one pick when not given."
+            },
+            "border": {
+              "type": "string",
+              "description": "The border, by its reason or its key."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "How the pick decides a near tie (the pick file's near_tie, pack contract 9): among the candidates within runner_up_within of the best, the first step that tells the first two apart decides, the pick's notes say which, and no too_close is raised; a near tie no step decides is a border still. An empty order takes it out. The pack is raised to declare contract 9 where it declares less. The study's R8 is one: 3D, then axial, coronal and sagittal, then the thinner slices, then the scanner's default reconstruction, then the earlier series.",
+          "required": [
+            "op",
+            "order"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set_near_tie"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope",
+              "description": "pack only: a pick's file is one for every stack and its population the whole registry's, so a pick operation is a pack edit, never an overlay's."
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "pick": {
+              "type": "string",
+              "description": "The pick, by its name in its file (main); the pack's one pick when not given."
+            },
+            "order": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "description": "{of, prefer: [values]} (these first, in this order, any other after), {of, avoid: [values]} (these after any other), {of, lowest: true} or {of, highest: true} (by the number, none after every number), with roles: [ROLE, ...] where it orders some roles only. of is an axis of the pack or a field of the fingerprint; an axis's values by their identity, label or alias.",
+                "required": [
+                  "of"
+                ]
+              },
+              "description": "The steps, best first."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Sets the margin of a near tie (the pick file's borders.runner_up_within): a runner-up within this fraction of the best score, the fraction included, is a too_close border, or, where the pick has a near-tie order, decided by it. 0 leaves only an exact tie a border.",
+          "required": [
+            "op",
+            "within"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set_runner_up_within"
+            },
+            "scope": {
+              "$ref": "#/$defs/scope",
+              "description": "pack only: a pick's file is one for every stack and its population the whole registry's, so a pick operation is a pack edit, never an overlay's."
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Why, for the person who adopts or declines it. Required here or as the patch's own reason."
+            },
+            "evidence": {
+              "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
+            },
+            "pick": {
+              "type": "string",
+              "description": "The pick, by its name in its file (main); the pack's one pick when not given."
+            },
+            "within": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "A fraction of the best score, from 0 to 1."
             }
           }
         }
