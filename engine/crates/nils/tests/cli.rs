@@ -5206,7 +5206,9 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         text.contains("6 seen   6 written   0 unchanged   0 held   0 refused"),
         "{text}"
     );
-    assert!(text.contains("2 seen   2 new   2 provisional"), "{text}");
+    // the dataset codes what no map names: each subject code is made from
+    // its ID and final, so none is provisional (2026-10-10)
+    assert!(text.contains("2 seen   2 new   0 provisional"), "{text}");
     assert!(
         !text.contains("199001011234") && !text.contains("Doe"),
         "{text}"

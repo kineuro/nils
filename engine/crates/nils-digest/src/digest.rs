@@ -485,13 +485,12 @@ fn execute(
         (walked, resumed, counts, wrote)
     });
 
-    let (written, own, provisional) = match writer.take() {
+    let (written, own) = match writer.take() {
         Some(mut w) => (
             Some(std::mem::take(&mut w.written)),
             Some(std::mem::take(&mut w.counts)),
-            std::mem::take(&mut w.provisional),
         ),
-        None => (None, None, BTreeMap::new()),
+        None => (None, None),
     };
     // the writer's borrow of the registry ends here
     drop(writer);
@@ -529,15 +528,7 @@ fn execute(
     let elapsed = start.elapsed().as_secs_f64();
     match (registry, run, written) {
         (Some(reg), Some(r), Some(written)) => finish(
-            reg,
-            r,
-            settings,
-            setup,
-            &counts,
-            written,
-            &provisional,
-            elapsed,
-            cancelled,
+            reg, r, settings, setup, &counts, written, elapsed, cancelled,
         ),
         _ => {
             let mut report = Report::new(setup, &counts, elapsed, peak_rss());
@@ -558,7 +549,6 @@ fn finish(
     setup: Setup,
     counts: &Counts,
     mut written: Written,
-    provisional: &BTreeMap<i64, writer::Provisional>,
     elapsed: f64,
     cancelled: Option<Cancelled>,
 ) -> Result<Report, DigestError> {
@@ -575,10 +565,10 @@ fn finish(
     // transaction before the batch closes, so the batch's record carries it.
     let joined = feed_cohort(registry, run, settings)?;
     // Record 26 §4: the question the files this run held raise, one item
-    // per dataset and shape, in a transaction of its own as the cohort is,
-    // and the one each subject it coded instead raises.
+    // per dataset and shape, in a transaction of its own as the cohort is.
+    // A subject it coded from the ID asks nothing: its subject code is
+    // final (2026-10-10).
     ask_about_held(registry, run, settings, &now)?;
-    ask_about_provisional(registry, run, settings, provisional, &now)?;
     ask_about_same_instance(registry, run, settings, &now)?;
     let store = registry.store();
     store.begin()?;
@@ -982,71 +972,6 @@ fn read_in_place(
         id: place.id,
         name: place.name,
     }))
-}
-
-/// Record 26 §4: one `identity.provisional` item per subject the run coded
-/// from an identifier no map named, as the pseudonymiser opens one for every
-/// subject it codes. The item carries the subject and its code, the shape of
-/// the identifier and how many of the run's files are about the person, and
-/// never an identifier. A merge of the subject closes it.
-fn ask_about_provisional(
-    registry: &mut Registry,
-    run: &Run,
-    settings: &Settings,
-    provisional: &BTreeMap<i64, writer::Provisional>,
-    now: &str,
-) -> Result<(), DigestError> {
-    if provisional.is_empty() {
-        return Ok(());
-    }
-    let store = registry.store();
-    let Some(place) = nils_registry::place::tree_holding(store, "anon", &settings.root)? else {
-        return Ok(());
-    };
-    let t = table("subject");
-    let cols = [
-        t.column("id").expect("subject.id"),
-        t.column("code").expect("subject.code"),
-    ];
-    let ids: Vec<i64> = provisional.keys().copied().collect();
-    let mut codes: BTreeMap<i64, String> = BTreeMap::new();
-    for r in &store.select_by_ids(t, &cols, "id", &ids)? {
-        codes.insert(r.int(0)?, r.text(1)?.to_string());
-    }
-    store.begin()?;
-    let result = (|| -> Result<(), DigestError> {
-        for (id, p) in provisional {
-            let Some(code) = codes.get(id) else {
-                continue;
-            };
-            nils_registry::review::raise_provisional(
-                store,
-                &nils_registry::review::Provisional {
-                    subject_id: *id,
-                    code,
-                    id_type: &settings.identity.id_type,
-                    shape: &p.shape,
-                    place_id: place.id,
-                    place: &place.name,
-                    files: p.files,
-                    batch_id: Some(run.batch_id),
-                    job_id: Some(run.job_id),
-                },
-                now,
-            )?;
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            store.commit()?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = store.rollback();
-            Err(e)
-        }
-    }
 }
 
 /// One parser thread: every task until the resume check is done or a stop is

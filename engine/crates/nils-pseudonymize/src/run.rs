@@ -914,16 +914,16 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
             }
         };
         // who the file is about: made when the dataset codes unmapped
-        // identifiers or a person asked for this one; never in a dry run
+        // identifiers or a person asked for this one; never in a dry run.
+        // A subject code made from the ID is final, as one a personnummer
+        // gives (record 54, D4): the same ID gives the same subject code
+        // wherever it is read, so no question is asked about it (Nima,
+        // 2026-10-10: "the subject code should be created from their ID")
         let anyway = prior.as_ref().is_some_and(|p| p.code_anyway);
-        // a personnummer is its own map (record 54, D4): the subject code
-        // generator codes it whatever the dataset does with what no map named
         let by_generator = ctx.settings.identity.derives_by_generator(&prepared.ident);
         let make = if dry {
             Make::Nothing
-        } else if anyway || ctx.settings.unmapped == Unmapped::Code {
-            Make::Provisional
-        } else if by_generator {
+        } else if anyway || ctx.settings.unmapped == Unmapped::Code || by_generator {
             Make::Subject
         } else {
             Make::Nothing
@@ -1373,7 +1373,6 @@ impl<'a> Recorder<'a> {
             let key = match ask.make {
                 Make::Nothing => 0,
                 Make::Subject => 1,
-                Make::Provisional => 2,
             };
             by_make.entry(key).or_default().push(ask);
         }
@@ -2003,7 +2002,7 @@ impl<'a> Recorder<'a> {
             subjects: Subjects {
                 new: self.made.len() as u64 + self.would_make.len() as u64,
                 seen: self.subjects_seen.len() as u64 + self.would_make.len() as u64,
-                provisional: self.provisional_seen.len() as u64 + self.would_make.len() as u64,
+                provisional: self.provisional_seen.len() as u64,
             },
             tags_removed: tally.removed,
             private_removed: tally.private_removed,
@@ -2041,7 +2040,13 @@ impl<'a> Recorder<'a> {
         registry.store().begin()?;
         let result = (|| -> Result<(), PseudonymizeError> {
             let store = registry.store();
-            for (subject, (code, files)) in &made {
+            // only a subject still marked provisional (made by an engine
+            // from before 2026-10-10) counts its files on its open item; a
+            // subject code made from the ID now is final and asks nothing
+            for (subject, (code, files)) in made
+                .iter()
+                .filter(|(s, _)| self.codes.get(*s).is_some_and(|(_, p)| *p))
+            {
                 review::raise_provisional(
                     store,
                     &review::Provisional {

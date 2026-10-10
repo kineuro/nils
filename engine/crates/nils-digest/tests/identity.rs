@@ -997,7 +997,7 @@ fn a_dataset_that_holds_unmapped_identifiers_files_no_subject_and_asks() {
         );
 
         // and under `code` a subject is made for an identifier no map
-        // named, marked provisional as the pseudonymiser marks it
+        // named, its subject code made from the ID and final (2026-10-10)
         dir.file("c/IM_0001", &mr("C", "C.1", "C.1.1", "P3", &[]));
         s.unmapped = nils_digest::Unmapped::Code;
         let coded = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -1007,7 +1007,7 @@ fn a_dataset_that_holds_unmapped_identifiers_files_no_subject_and_asks() {
                 &mut reg,
                 "SELECT COUNT(*) FROM {subject} WHERE provisional = 1"
             ),
-            1,
+            0,
             "{name}"
         );
     }
@@ -1221,7 +1221,7 @@ fn a_dataset_read_in_place_records_what_it_holds_and_asks_about_whom_it_codes() 
                 &mut reg,
                 "SELECT COUNT(*) FROM {subject} WHERE provisional = 1"
             ),
-            2,
+            0,
             "{name}"
         );
         // finding 2: nothing waits for a map, so nothing is left open saying
@@ -1239,34 +1239,22 @@ fn a_dataset_read_in_place_records_what_it_holds_and_asks_about_whom_it_codes() 
             ["superseded"],
             "{name}"
         );
-        // finding 1: one open question per subject coded without a map, with
-        // the files under it, the shape and the dataset, and never a value
-        let items = items_of(&mut reg, "identity.provisional");
-        assert_eq!(items.len(), 2, "{name}");
-        let mut codes: BTreeMap<i64, String> = BTreeMap::new();
-        for r in &rows(
-            &mut reg,
-            "SELECT id, code FROM {subject} WHERE provisional = 1",
-        ) {
-            codes.insert(r.int(0).unwrap(), r.text(1).unwrap().to_string());
-        }
-        let mut files = 0;
-        for (group_key, members, evidence, reference) in &items {
-            let subject = reference["subject_id"].as_i64().unwrap();
-            assert_eq!(*group_key, format!("subject:{subject}"), "{name}");
-            assert_eq!(*members, 1, "{name}");
-            assert_eq!(reference["code"], codes[&subject].as_str(), "{name}");
-            assert_eq!(evidence["shape"], "A9", "{name}");
-            assert_eq!(evidence["place"], "south", "{name}");
-            assert_eq!(evidence["id_type"], "patient-id", "{name}");
-            let text = evidence.to_string();
-            assert!(
-                !text.contains("P1") && !text.contains("P2"),
-                "{name}: {text}"
-            );
-            files += evidence["files"].as_i64().unwrap();
-        }
-        assert_eq!(files, 3, "{name}");
+        // finding 1, as ruled again on 2026-10-10: a subject code made from
+        // the ID because the dataset says `code` is final, so no question
+        // is raised about it ("the subject code should be created from
+        // their ID"); the subjects carry the codes the registry derives
+        assert!(
+            items_of(&mut reg, "identity.provisional").is_empty(),
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE status = 'open'"
+            ),
+            0,
+            "{name}"
+        );
     }
 }
 
@@ -1349,12 +1337,13 @@ fn a_map_releases_the_files_a_digest_held_and_the_next_digest_reads_them_again()
         reg.store().execute(&sql, &[]).unwrap();
         let coded = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(coded.written.clone().unwrap().held, 0, "{name}");
+        // made from the ID, final: the person's word is the decision
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {subject} WHERE provisional = 1"
             ),
-            1,
+            0,
             "{name}"
         );
         assert_eq!(
@@ -1364,7 +1353,7 @@ fn a_map_releases_the_files_a_digest_held_and_the_next_digest_reads_them_again()
         );
         assert_eq!(
             items_of(&mut reg, "identity.provisional").len(),
-            1,
+            0,
             "{name}"
         );
         assert_eq!(items_of(&mut reg, "identity.unmapped").len(), 0, "{name}");

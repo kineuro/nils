@@ -122,11 +122,12 @@ pub struct Resolved {
 pub enum Make {
     /// Never: an unknown identifier is answered as such.
     Nothing,
-    /// A subject as the digest makes one.
+    /// A subject, its code made from the identifier. A subject code made
+    /// from the ID is final, whether a map, the dataset's `code` or a
+    /// person asked for it; no subject is made provisional any more
+    /// (2026-10-10), and the `provisional` mark stays only on subjects an
+    /// older engine made.
     Subject,
-    /// A subject marked provisional (record 26 §4): coded from an
-    /// identifier no map named.
-    Provisional,
 }
 
 pub struct Resolver {
@@ -466,12 +467,9 @@ impl Resolver {
                 }
                 row.push(Param::Int(self.batch_id));
                 row.push(Param::from(now));
-                // a personnummer is its own map: its subject is no
-                // provisional one (record 54, D4)
-                row.push(match make {
-                    Make::Provisional if !self.derives_by_generator(w.ident) => Param::Int(1),
-                    _ => Param::Null,
-                });
+                // a subject code made from the ID is final: no subject is
+                // provisional (record 54, D4; 2026-10-10)
+                row.push(Param::Null);
                 rows.push(row);
             }
             let spec = Insert::new(t, &columns)

@@ -79,15 +79,6 @@ struct PriorHeld {
     code_anyway: bool,
 }
 
-/// A subject this run coded from an identifier no map named (record 26 §4):
-/// the shape of that identifier and how many of the run's files are about
-/// the person, which is what the `identity.provisional` item carries.
-#[derive(Debug, Clone, Default)]
-pub struct Provisional {
-    pub shape: String,
-    pub files: i64,
-}
-
 /// The state of a `pseudonym_file` row whose file waits for a map, as the
 /// pseudonymiser writes it.
 const HELD: &str = "held";
@@ -221,9 +212,6 @@ pub struct Writer<'a> {
     /// Whether the dataset holds any such row at all, asked once: a dataset
     /// that has never held a file asks nothing per batch.
     any_held: Option<bool>,
-    /// The subjects this run coded from an identifier no map named, for the
-    /// items it raises when it ends.
-    pub provisional: BTreeMap<i64, Provisional>,
     /// Subject id → the row's field hashes.
     subjects: LruCache<i64, SubjectEntry>,
     studies: LruCache<String, StudyEntry>,
@@ -275,7 +263,6 @@ impl<'a> Writer<'a> {
             dataset: None,
             prior_held: HashMap::new(),
             any_held: None,
-            provisional: BTreeMap::new(),
             subjects: LruCache::new(cap),
             studies: LruCache::new(cap),
             series: LruCache::new(cap),
@@ -511,17 +498,17 @@ impl<'a> Writer<'a> {
             });
         }
         // record 26 §4: the dataset says what an identifier no subject holds
-        // does, and a run that holds makes nothing for one
+        // does, and a run that holds makes nothing for one. A subject code
+        // made from the ID (`code`, or a person's "code anyway") is final,
+        // as one a personnummer gives: the same ID gives the same subject
+        // code wherever it is read, and nothing is asked about it (Nima,
+        // 2026-10-10: "the subject code should be created from their ID")
         let make = match self.unmapped {
-            Unmapped::Subject => Make::Subject,
+            Unmapped::Subject | Unmapped::Code => Make::Subject,
             Unmapped::Hold => Make::Nothing,
-            Unmapped::Code => Make::Provisional,
         };
         let mut resolved = self.resolve_who(&who, now, make)?;
-        // the files coded from an identifier no map named, whose subjects are
-        // provisional: every one of them where the dataset says `code`, and
-        // where it holds, the ones a person asked to be coded anyway
-        let mut coded = vec![make == Make::Provisional; parsed.len()];
+        // where it holds, the files a person asked to be coded anyway
         if make == Make::Nothing && !self.prior_held.is_empty() {
             let anyway: Vec<usize> = (0..parsed.len())
                 .filter(|&i| {
@@ -545,13 +532,12 @@ impl<'a> Writer<'a> {
                         lookup: None,
                     });
                 }
-                let second = self.resolve_who(&asked, now, Make::Provisional)?;
+                let second = self.resolve_who(&asked, now, Make::Subject)?;
                 resolved.matched += second.matched;
                 resolved.created += second.created;
                 resolved.attached += second.attached;
                 for (k, &i) in anyway.iter().enumerate() {
                     resolved.found[i] = second.found[k];
-                    coded[i] = true;
                 }
             }
         }
@@ -587,11 +573,6 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        for (i, p) in parsed.iter().enumerate() {
-            if coded[i] && self.resolver.derives_by_generator(&p.ident) {
-                coded[i] = false;
-            }
-        }
         self.written.subjects_matched += resolved.matched;
         self.written.subjects_created += resolved.created;
         self.written.identities_attached += resolved.attached;
@@ -613,9 +594,6 @@ impl<'a> Writer<'a> {
                         kept: Kept::default(),
                     },
                 );
-            }
-            if coded[i] {
-                self.note_provisional(id, matches!(f, Found::Created(_)), &p.ident.value);
             }
             ids.push(id);
         }
@@ -705,23 +683,6 @@ impl<'a> Writer<'a> {
                 Err(HomeError::Message("identity collision".into()))
             }
             Err(ResolveError::Home(e)) => Err(e),
-        }
-    }
-
-    /// Record 26 §4: the subject a file was coded into and the shape of the
-    /// identifier it was coded from, so the run can ask about the person when
-    /// it ends. Counted per file, as the pseudonymiser counts them.
-    fn note_provisional(&mut self, id: i64, created: bool, value: &str) {
-        if created {
-            self.provisional.insert(
-                id,
-                Provisional {
-                    shape: nils_dicom::diagnostic::shape(value),
-                    files: 1,
-                },
-            );
-        } else if let Some(p) = self.provisional.get_mut(&id) {
-            p.files += 1;
         }
     }
 

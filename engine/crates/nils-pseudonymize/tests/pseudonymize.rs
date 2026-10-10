@@ -648,8 +648,8 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         Some("subj0001a")
     );
 
-    // coded anyway: the held rows are read again, their subject made and
-    // marked provisional, the question closed and a new one opened
+    // coded anyway: the held rows are read again and their subject made
+    // from the ID, final; the held question closes and none is opened
     registry
         .store()
         .execute(
@@ -664,7 +664,7 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
     assert!(fourth.held_only);
     assert_eq!(fourth.subjects.new, 1);
     assert_eq!(fourth.subjects.seen, 1);
-    assert_eq!(fourth.subjects.provisional, 1);
+    assert_eq!(fourth.subjects.provisional, 0, "{fourth}");
     assert_eq!(outputs(&anon).len(), 15);
     assert_eq!(
         one(
@@ -675,11 +675,19 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
     );
     let subject = &rows(
         &mut registry,
-        "SELECT code, provisional, first_batch_id FROM subject WHERE provisional = 1",
+        &format!(
+            "SELECT code, provisional, first_batch_id FROM subject WHERE first_batch_id = {}",
+            fourth.batch_id.unwrap()
+        ),
     )[0];
     let code = subject.text(0).unwrap().to_string();
     assert_eq!(code.len(), 12);
-    assert_eq!(subject.int(1).unwrap(), 1);
+    // made from the ID, as the registry derives every code: final
+    assert_eq!(
+        code,
+        nils_registry::pseudonym::code(Scheme::Blake2b32, KEY, UNMAPPED, 12).code
+    );
+    assert!(subject.opt_int(1).unwrap().unwrap_or(0) == 0);
     assert_eq!(subject.opt_int(2).unwrap(), fourth.batch_id);
     assert!(anon.join(&code).is_dir());
     let coded = &rows(
@@ -700,13 +708,9 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         &mut registry,
         "SELECT kind, status, evidence FROM review_item ORDER BY id",
     );
-    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0].text(0).unwrap(), review::UNMAPPED_KIND);
     assert_eq!(items[0].text(1).unwrap(), review::RESOLVED);
-    assert_eq!(items[1].text(0).unwrap(), review::PROVISIONAL_KIND);
-    assert_eq!(items[1].text(1).unwrap(), "open");
-    let evidence: Value = serde_json::from_str(items[1].text(2).unwrap()).unwrap();
-    assert_eq!(evidence["files"], 3);
     // the epoch moved for the subject made
     let batches = rows(
         &mut registry,
@@ -724,8 +728,8 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
             &mut registry,
             "SELECT COUNT(*) FROM review_item WHERE status = 'open'"
         ),
-        1,
-        "the provisional question stays"
+        0,
+        "nothing waits for a person"
     );
 }
 
@@ -1213,8 +1217,13 @@ fn a_run_asked_to_stop_before_it_began_writes_nothing_and_ends_cancelled() {
     assert_eq!(report.files.written, 12, "{report}");
 }
 
+/// A dataset that codes what no map names makes its subjects' codes from
+/// their IDs, final and asking nothing (Nima, 2026-10-10: "the subject code
+/// should be created from their ID"): the same ID gives the same subject
+/// code wherever it is read, and no `identity.provisional` question is
+/// raised for a choice the person made.
 #[test]
-fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
+fn a_dataset_that_codes_unmapped_identifiers_makes_final_subjects_from_their_ids() {
     let lab = lab();
     let dir = dataset();
     let mut registry = lab.home.open().unwrap();
@@ -1225,13 +1234,13 @@ fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
     assert_eq!(files_of(&report), (16, 15, 0, 0, 1), "{report}");
     assert_eq!(report.subjects.new, 3);
     assert_eq!(report.subjects.seen, 3);
-    assert_eq!(report.subjects.provisional, 3);
+    assert_eq!(report.subjects.provisional, 0, "{report}");
     assert_eq!(
         one(
             &mut registry,
             "SELECT COUNT(*) FROM subject WHERE provisional = 1"
         ),
-        3
+        0
     );
     assert_eq!(
         one(
@@ -1241,7 +1250,7 @@ fn a_dataset_that_codes_unmapped_identifiers_makes_provisional_subjects() {
                 review::PROVISIONAL_KIND
             )
         ),
-        3
+        0
     );
     assert_eq!(
         one(
