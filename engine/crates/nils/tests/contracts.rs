@@ -270,6 +270,10 @@ fn the_model_contract_is_the_engine_s_registry() {
         ["name", "version", "kind", "digest", "task"]
     );
     assert_eq!(card["$defs"]["digest"]["pattern"], "^sha256:[0-9a-f]{64}$");
+    // record 55 E2: a cascade names its parts by the input each fills
+    let parts = &card["properties"]["parts"];
+    assert_eq!(parts["additionalProperties"]["$ref"], "#/$defs/digest");
+    assert_eq!(parts["propertyNames"]["pattern"], "^[a-z][a-z0-9_]*$");
     let slot = card["$defs"]["slot"]["pattern"].as_str().unwrap();
     assert!(slot.contains("site") && slot.contains("cohort"), "{slot}");
     assert_eq!(

@@ -60,6 +60,14 @@
       "$ref": "#/$defs/reference",
       "description": "The encoder a head reads the features of. A head names its encoders here or in encoders, at least one: a new encoder makes its heads stale"
     },
+    "parts": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/digest" },
+      "description": "Record 55 E2: a cascade, one model that names its parts, each a registered model that is not retired, by digest, under the name of the pipeline input it fills (encoder, head, coarse, student, deferral); a run of the cascade is given each part, and the cascade itself as its input cascade. Promoting the cascade retires none of its parts"
+    },
     "encoders": {
       "type": "array",
       "minItems": 1,
