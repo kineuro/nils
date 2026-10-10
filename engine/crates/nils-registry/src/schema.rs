@@ -1304,6 +1304,14 @@ fn build_registry() -> Vec<Table> {
                 // applying. Withdrawing that person's pick lets it apply
                 // again, so a person's mistake is undone without a new run.
                 col("overruled_by", Type::Int),
+                // Record 55, decision 6 (the main-scans study, section 4):
+                // the scope a pick belongs to, a `dataset` or a `cohort` and
+                // its id, both null for the pack's; and the version of the
+                // scope's rules it was made with (1 is the pack's defaults).
+                // A run writes and replaces the run picks of its own scope.
+                col("rules_scope_kind", Type::Text),
+                col("rules_scope_id", Type::Int),
+                col("rules_version", Type::Int),
             ],
         )
         .index(&["role", "subject_id", "session_day"]),
@@ -1395,6 +1403,28 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["pick_id"])
         .index(&["stack_id"]),
+        // Record 55, decision 6 (the main-scans study, section 4): a
+        // dataset's or a cohort's own main-scan rules, one row per version.
+        // Version 1 is the pack's defaults and is never stored; a row is
+        // never changed or deleted, so every release names rules it can
+        // still read.
+        Table::new(
+            "pick_rules",
+            vec![
+                col("id", Type::Id),
+                // `dataset` (a source place's id) or `cohort` (a cohort's id)
+                req("scope_kind", Type::Text),
+                req("scope_id", Type::Int),
+                req("version", Type::Int),
+                req("rules", Type::Json),
+                // of the rules as stored
+                req("digest", Type::Text),
+                req("reason", Type::Text),
+                req("author", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["scope_kind", "scope_id", "version"]),
         // Record 42 S4: a file made from the archive that is not the archive,
         // a mask, an embedding, a pipeline's output, kept in a working place
         // (Wave 5 section 10.2) and named here by its digest. The registry
@@ -1561,6 +1591,10 @@ fn build_registry() -> Vec<Table> {
                 // pipeline run materialised, which the history leaves out
                 // unless asked (the run names it as `input_release_id`).
                 col("purpose", Type::Text),
+                // Record 55, decision 6: the main-scan rules whose picks the
+                // release read, `{scope, version, digest}`, or the pack's
+                // defaults with the pack's version. Null where it read none.
+                col("pick_rules", Type::Json),
             ],
         )
         .index(&["name"]),

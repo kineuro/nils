@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 87;
+pub const SCHEMA_VERSION: i64 = 88;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,7 +402,30 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 87,
         apply: a_scan_is_held_wherever_its_files_are,
     },
+    Migration {
+        version: 88,
+        apply: a_scope_keeps_its_own_main_scan_rules,
+    },
 ];
+
+/// Record 55, decision 6 (the main-scans study, section 4): a dataset or a
+/// cohort may keep main-scan rules of its own, versioned in `pick_rules`; a
+/// pick names the scope it belongs to and the version of the rules it was
+/// made with; and a release names the rules whose picks it read. A registry
+/// from before gains the table empty and the columns null: every pick it
+/// holds is the pack's.
+fn a_scope_keeps_its_own_main_scan_rules(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["pick_rules"])?;
+    add_columns(
+        store,
+        "pick",
+        &["rules_scope_kind", "rules_scope_id", "rules_version"],
+    )?;
+    add_columns(store, "release", &["pick_rules"])
+}
 
 /// Wave 7a (2026-10-10, found trying the desk): a dataset whose PatientID
 /// held an identifying ID that is the same everywhere failed at its first
