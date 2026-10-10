@@ -47,6 +47,15 @@ pub(crate) struct UpdateArgs {
     /// (engine, desk, assistant, kvasir, rules)
     #[arg(long = "part", value_name = "PART")]
     parts: Vec<String>,
+    /// Pin a first-party pack to one version, for example mri@1.0.0 to
+    /// reproduce the paper's rules: the rules update that follows puts that
+    /// version in place, and every update after it keeps it; repeatable
+    #[arg(long, value_name = "PACK@VERSION")]
+    pin: Vec<String>,
+    /// Lift a pack's pin; the rules update that follows takes its newest
+    /// release this engine reads; repeatable
+    #[arg(long, value_name = "PACK")]
+    unpin: Vec<String>,
 }
 
 impl UpdateArgs {
@@ -668,7 +677,12 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
                         } else {
                             crate::packs::first_party_in(&dir, &crate::setup::FIRST_PARTY_PACKS)
                         };
-                        crate::rules::find_all(&crate::rules::base(channel), &measured, &engine)
+                        crate::rules::find_all(
+                            &crate::rules::base(channel),
+                            &measured,
+                            &engine,
+                            &crate::packs::pins_in(&dir),
+                        )
                     } else {
                         Vec::new()
                     };
@@ -741,6 +755,21 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
                 "--part {part}: a part with releases of its own is one of {}",
                 crate::releases::OWN_RELEASES.join(", ")
             )));
+        }
+    }
+    // A pin, or a pin lifted, is the rules' own (record 55 B5): it is written
+    // where the engine reads its packs, and the rules update that follows
+    // acts on it, with nothing else updated unless named.
+    let mut args = args;
+    if !args.pin.is_empty() || !args.unpin.is_empty() {
+        if args.check {
+            return Err(usage(
+                "--pin and --unpin change what is in place; run them without --check",
+            ));
+        }
+        crate::rules::set_pins(&args.pin, &args.unpin, args.channel.as_deref())?;
+        if !args.parts.iter().any(|p| p == crate::rules::PART) {
+            args.parts.push(crate::rules::PART.to_string());
         }
     }
     if args.check {

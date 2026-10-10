@@ -4047,13 +4047,30 @@ pub(crate) struct RulesState {
     pub(crate) version: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) from: String,
+    /// The version the install is pinned to, where it is (record 55 B5,
+    /// 2026-10-10): an update takes that one and no other, as an install
+    /// that reproduces the paper's rules 1.0.0 does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pinned: Option<String>,
 }
 
-/// The rules in use in a pack directory, as the record keeps them.
+/// The rules in use in a pack directory, as the record keeps them, each
+/// with the version the directory pins it to.
 pub(crate) fn rules_of(dir: &Path) -> BTreeMap<String, RulesState> {
+    let pins = crate::packs::pins_in(dir);
     crate::packs::rules_in(dir, &FIRST_PARTY_PACKS)
         .into_iter()
-        .map(|(name, (version, from))| (name, RulesState { version, from }))
+        .map(|(name, (version, from))| {
+            let pinned = pins.get(&name).cloned();
+            (
+                name,
+                RulesState {
+                    version,
+                    from,
+                    pinned,
+                },
+            )
+        })
         .collect()
 }
 
@@ -9814,6 +9831,7 @@ fn install_packs(
             &crate::rules::base(plan.channel.as_deref()),
             &packs,
             &engine,
+            &crate::packs::pins_in(&dir),
         );
         let packs = crate::packs::plan(
             &dir,
@@ -16905,7 +16923,12 @@ fn mend_packs(state: &mut State, channel: Option<&str>, rules: bool) -> bool {
         } else {
             packs
         };
-        crate::rules::find_all(&crate::rules::base(channel), &measured, &engine)
+        crate::rules::find_all(
+            &crate::rules::base(channel),
+            &measured,
+            &engine,
+            &crate::packs::pins_in(&dir),
+        )
     } else {
         Vec::new()
     };

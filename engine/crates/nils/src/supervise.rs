@@ -1110,22 +1110,25 @@ fn cached_rules(
     release: &str,
     carried: &[crate::packs::Offer],
     engine: &crate::packs::Engine,
+    pins: &std::collections::BTreeMap<String, String>,
 ) -> Vec<crate::rules::Found> {
+    // a pin changes what is looked for, so it is part of what is kept
+    let key = format!("{release} {pins:?}");
     let held = RULES.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(guard) = held.lock()
-        && let Some((at, found)) = guard.get(release)
+        && let Some((at, found)) = guard.get(&key)
         && at.elapsed() < every
     {
         return found.clone();
     }
     let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
     let found: Vec<crate::rules::Found> =
-        crate::rules::find_all(&crate::rules::base(None), &packs, engine)
+        crate::rules::find_all(&crate::rules::base(None), &packs, engine, pins)
             .iter()
             .map(crate::rules::Found::described)
             .collect();
     if let Ok(mut guard) = held.lock() {
-        guard.insert(release.to_string(), (Instant::now(), found.clone()));
+        guard.insert(key, (Instant::now(), found.clone()));
     }
     found
 }
@@ -1233,7 +1236,13 @@ fn install(config: &Config) -> (u16, Value) {
                             files: std::collections::BTreeMap::new(),
                         })
                         .collect();
-                    let found = cached_rules(every, &release, &carried, &reads);
+                    let found = cached_rules(
+                        every,
+                        &release,
+                        &carried,
+                        &reads,
+                        &crate::packs::pins_in(&dir),
+                    );
                     let plan = crate::packs::plan(
                         &dir,
                         &release,

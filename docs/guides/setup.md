@@ -656,6 +656,28 @@ the rules alone. Where the engine's own release cannot be read, a pack's own
 releases are measured against the pack in place, never below it. An engine in a container reads the packs its image carries,
 so rules releases reach it with the engine's next image.
 
+An install can be pinned to one version of a pack, to reproduce what the
+paper reports with rules 1.0.0, for example:
+
+```
+nils update --pin mri@1.0.0
+```
+
+The pin is written beside the packs, in `.nils-packs.json`, and in the
+setup record (`pinned = "1.0.0"` under `[rules.mri]`). That version is put in
+place from its own release, or from the engine's copy where that is the
+version, whatever is newer; from then on neither a rules update nor an engine
+update replaces it, and `--check` says what the pin holds back. One command
+lifts it, and the rules update that follows takes the newest release this
+engine reads:
+
+```
+nils update --unpin mri
+```
+
+A pin names a version that is in place or a release this install can read;
+anything else is refused and nothing is written.
+
 ### A model server for the stations
 
 ```

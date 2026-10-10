@@ -358,6 +358,11 @@ impl Line {
 pub(crate) struct Manifest {
     pub(crate) release: String,
     pub(crate) packs: BTreeMap<String, Line>,
+    /// The packs pinned to one version (record 55 B5, 2026-10-10): an
+    /// update puts that version in place and no other, from the pack's own
+    /// release or the engine's copy, and an engine update leaves it where
+    /// it is, as when an install reproduces the paper's rules 1.0.0.
+    pub(crate) pinned: BTreeMap<String, String>,
 }
 
 impl Manifest {
@@ -378,9 +383,18 @@ impl Manifest {
                 ))
             })
             .collect();
+        let pinned = doc["pinned"]
+            .as_object()
+            .map(|pins| {
+                pins.iter()
+                    .filter_map(|(name, v)| Some((name.clone(), v.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(Manifest {
             release: doc["release"].as_str().unwrap_or_default().to_string(),
             packs,
+            pinned,
         })
     }
 
@@ -396,7 +410,10 @@ impl Manifest {
                 (name.clone(), doc)
             })
             .collect();
-        let doc = json!({ "release": self.release, "packs": packs });
+        let mut doc = json!({ "release": self.release, "packs": packs });
+        if !self.pinned.is_empty() {
+            doc["pinned"] = json!(self.pinned);
+        }
         let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
         std::fs::write(dir.join(MANIFEST), text + "\n")
             .map_err(|e| format!("{}: {e}", dir.join(MANIFEST).display()))
@@ -431,6 +448,9 @@ pub(crate) struct Status {
     /// Packs in the directory this engine would refuse, with why; the
     /// release's copy replaces each.
     pub(crate) refused: Vec<(String, String)>,
+    /// Packs pinned to one version, which an update takes only at that
+    /// version and an engine update leaves in place (record 55 B5).
+    pub(crate) pinned: Vec<String>,
 }
 
 /// Whether a pack in place stays over the copy the engine's release
@@ -489,6 +509,7 @@ pub(crate) fn compare(
         own: Vec::new(),
         ahead: Vec::new(),
         refused: Vec::new(),
+        pinned: Vec::new(),
     };
     let mut names: Vec<&String> = bundled
         .iter()
@@ -509,6 +530,21 @@ pub(crate) fn compare(
             && line.is_some_and(|l| l.digest != i.digest)
         {
             status.edited.push(name.clone());
+            continue;
+        }
+        // a pack pinned to one version (record 55 B5): that version goes in,
+        // from the pack's own release or else the engine's copy, whatever
+        // either says of being newer, and nothing replaces it once it is there
+        if let Some(pin) = manifest.and_then(|m| m.pinned.get(name.as_str())) {
+            let at_pin = |p: &Pack| p.version.as_deref() == Some(pin.as_str());
+            if !i.is_some_and(at_pin) {
+                if r.is_some_and(at_pin) {
+                    status.rules.push(name.clone());
+                } else if b.is_some_and(at_pin) {
+                    status.stale.push(name.clone());
+                }
+            }
+            status.pinned.push(name.clone());
             continue;
         }
         // what the engine's release does with it
@@ -596,6 +632,17 @@ impl Status {
                     i.said(),
                     b.said()
                 ),
+                Some(i)
+                    if self.pinned.contains(&b.name)
+                        && !self.rules.contains(&b.name)
+                        && !self.stale.contains(&b.name) =>
+                {
+                    format!(
+                        "{}: pinned, kept (the release brings {})",
+                        i.said(),
+                        b.said()
+                    )
+                }
                 Some(i) if self.rules.contains(&b.name) => match self.offered_of(&b.name) {
                     Some((r, tag)) => {
                         format!("{}: its own release {tag} brings {}", i.said(), r.said())
@@ -655,6 +702,7 @@ impl Status {
             "own": self.own,
             "ahead": self.ahead,
             "rules": self.rules,
+            "pinned": self.pinned,
             "refused": self
                 .refused
                 .iter()
@@ -813,6 +861,11 @@ pub(crate) fn apply(dir: &Path, plan: &Plan) -> Result<String, String> {
     let written = Manifest {
         release: status.release.clone(),
         packs,
+        pinned: plan
+            .manifest
+            .as_ref()
+            .map(|m| m.pinned.clone())
+            .unwrap_or_default(),
     }
     .write(dir);
 
@@ -966,6 +1019,27 @@ pub(crate) fn first_party_in(dir: &Path, also: &[&str]) -> Vec<Pack> {
                     .is_some_and(|m| m.packs.contains_key(&p.name))
         })
         .collect()
+}
+
+/// The packs a directory pins, each to its version (record 55 B5).
+pub(crate) fn pins_in(dir: &Path) -> BTreeMap<String, String> {
+    Manifest::read(dir).map(|m| m.pinned).unwrap_or_default()
+}
+
+/// Pin a pack in a directory to one version, or lift its pin with `None`:
+/// the manifest says it, and every update after it reads it there. A
+/// directory no refresh wrote a manifest in gets one that names only the pin.
+pub(crate) fn set_pin(dir: &Path, pack: &str, version: Option<&str>) -> Result<(), String> {
+    let mut manifest = Manifest::read(dir).unwrap_or_default();
+    match version {
+        Some(v) => {
+            manifest.pinned.insert(pack.to_string(), v.to_string());
+        }
+        None => {
+            manifest.pinned.remove(pack);
+        }
+    }
+    manifest.write(dir)
 }
 
 /// The rules in use in a pack directory, as the setup record notes them:
@@ -1138,6 +1212,7 @@ mod tests {
                 ("mri".to_string(), line(Some("0.7.0"), "m0")),
             ]
             .into(),
+            pinned: Default::default(),
         };
         let s = compare(
             Path::new("/p"),
@@ -1171,6 +1246,89 @@ mod tests {
         assert_eq!(s.doc()["behind"], false);
     }
 
+    /// Record 55 B5 (2026-10-10): a pack pinned to one version takes that
+    /// version and no other, from its own release or else the engine's copy,
+    /// whatever either says of being newer; once in place nothing replaces
+    /// it; and the manifest keeps the pin through a write and a read.
+    #[test]
+    fn a_pinned_pack_takes_its_version_and_keeps_it() {
+        let this = Engine::this();
+        let pinned = |at: &str, line: Line| Manifest {
+            release: "9".to_string(),
+            packs: [("mri".to_string(), line)].into(),
+            pinned: [("mri".to_string(), at.to_string())].into(),
+        };
+        let line = |version: &str, digest: &str, from: &str| Line {
+            version: Some(version.to_string()),
+            digest: digest.to_string(),
+            from: Some(from.to_string()),
+        };
+        let compare_with = |installed: Pack, bundled: Pack, offered: Option<Pack>, m: &Manifest| {
+            compare(
+                Path::new("/p"),
+                "9",
+                vec![installed],
+                vec![bundled],
+                offered
+                    .map(|p| {
+                        let tag = format!("pack-mri-v{}", p.version.clone().unwrap_or_default());
+                        vec![(p, tag)]
+                    })
+                    .unwrap_or_default(),
+                Some(m),
+                &this,
+            )
+        };
+
+        // pinned below what is in place and below the engine's copy: its own
+        // release of that version goes in, older though it is
+        let m = pinned("1.0.0", line("1.0.1", "m1", "v9"));
+        let s = compare_with(
+            pack("mri", "1.0.1", "m1"),
+            pack("mri", "1.0.2", "m2"),
+            Some(pack("mri", "1.0.0", "m0")),
+            &m,
+        );
+        assert_eq!(s.rules, ["mri"], "{s:?}");
+        assert!(s.stale.is_empty(), "{s:?}");
+        assert_eq!(s.pinned, ["mri"]);
+        // in place at its pin: neither a newer copy of the engine's nor a
+        // newer release of its own replaces it
+        let m = pinned("1.0.0", line("1.0.0", "m0", "pack-mri-v1.0.0"));
+        let s = compare_with(
+            pack("mri", "1.0.0", "m0"),
+            pack("mri", "1.0.2", "m2"),
+            Some(pack("mri", "1.0.3", "m3")),
+            &m,
+        );
+        assert!(!moves(&s), "{s:?}");
+        assert!(
+            s.lines()
+                .join("\n")
+                .contains("mri 1.0.0: pinned, kept (the release brings mri 1.0.2)"),
+            "{:?}",
+            s.lines()
+        );
+        // pinned at the engine's copy: that copy goes in, and its own newer
+        // release does not
+        let m = pinned("1.0.2", line("1.0.1", "m1", "v9"));
+        let s = compare_with(
+            pack("mri", "1.0.1", "m1"),
+            pack("mri", "1.0.2", "m2"),
+            Some(pack("mri", "1.0.3", "m3")),
+            &m,
+        );
+        assert_eq!(s.stale, ["mri"], "{s:?}");
+        assert!(s.rules.is_empty(), "{s:?}");
+        // the pin is kept through a write and a read, and lifted it is gone
+        let dir = temp("pinned");
+        set_pin(&dir, "mri", Some("1.0.0")).unwrap();
+        assert_eq!(pins_in(&dir).get("mri").map(String::as_str), Some("1.0.0"));
+        set_pin(&dir, "mri", None).unwrap();
+        assert!(pins_in(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Record 55 B5: the engine's release is the floor. A pack its own
     /// release put in place stays over an older copy the release carries, and
     /// over the same version; a newer copy replaces it; and its own release
@@ -1186,6 +1344,7 @@ mod tests {
         let manifest = |line: Line| Manifest {
             release: "9".to_string(),
             packs: [("mri".to_string(), line)].into(),
+            pinned: Default::default(),
         };
         let compare_with = |installed: Pack, bundled: Pack, offered: Option<Pack>, m: &Manifest| {
             compare(
@@ -1316,6 +1475,7 @@ mod tests {
                 },
             )]
             .into(),
+            pinned: Default::default(),
         };
         // a newer pack in place that needs a contract this engine lacks
         let s = compare(
