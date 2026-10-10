@@ -4348,6 +4348,19 @@ fn routed(
                 None | Some("default" | "day") => nils_registry::session::Scheme::default(),
                 Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
             };
+            // record 55, decision 6: a pick made for a dataset or a cohort
+            // belongs to the scope whose picks it reads; one of no stack
+            // names its occasion
+            let named = crate::main_scans::named_scope(registry, &query, Some(&doc))?;
+            let reading = match &named {
+                Some(s) => nils_registry::pick_rules::reading(registry.store(), s)?,
+                None => None,
+            };
+            let session = doc["session"].as_str().or(doc["session_day"].as_str());
+            let occasion = match (doc["subject_id"].as_i64(), session) {
+                (Some(subject), Some(day)) => Some((subject, day)),
+                _ => None,
+            };
             let picked = nils_classify::picking::set_person(
                 registry,
                 &pack,
@@ -4359,15 +4372,69 @@ fn routed(
                     why,
                     actor: principal,
                     campaign: None,
-                    occasion: None,
-                    scope: None,
+                    occasion,
+                    scope: reading.as_ref(),
                 },
             )
             .map_err(pick_err)?;
-            Ok(Reply::created(
-                serde_json::to_value(picked).unwrap_or(serde_json::Value::Null),
-            ))
+            let mut doc = serde_json::to_value(picked).unwrap_or(serde_json::Value::Null);
+            doc["rules_scope"] = reading.as_ref().map_or(
+                serde_json::Value::Null,
+                nils_registry::pick_rules::Scope::to_json,
+            );
+            Ok(Reply::created(doc))
         }
+        // Record 55, decision 6: a dataset's or a cohort's own main-scan
+        // rules, read, as text and saved; saving queues the scope's run
+        ["api", "picks", "rules"] if get => crate::main_scans::rules(doors, registry, &query),
+        ["api", "picks", "rules", "text"] if get => {
+            crate::main_scans::text(doors, registry, &query)
+        }
+        ["api", "picks", "rules"] if post => {
+            let doc = json_body(body)?;
+            let (version, scope, pack) =
+                crate::main_scans::save(doors, registry, &query, &doc, principal)?;
+            let command = vec![
+                "pick".to_string(),
+                "run".to_string(),
+                format!("--{}", scope.kind.name()),
+                scope.name.clone(),
+                "--own-rules".to_string(),
+                "--pack".to_string(),
+                pack,
+            ];
+            let command = located(doors, registry.store(), command)?;
+            let id = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                Some(&scope.label()),
+                Some(principal),
+                queued_by(caller),
+            )
+            .map_err(job_err)?;
+            Ok(Reply::created(serde_json::json!({
+                "version": version, "job": id, "scope": scope.to_json(),
+            })))
+        }
+        // and the map of what the rules, saved or drafted, take for a role
+        ["api", "picks", "map"] if post => crate::main_scans::map(
+            doors,
+            registry,
+            &json_body(body)?,
+            crate::main_scans::Door::Map,
+        ),
+        ["api", "picks", "map", "subjects"] if post => crate::main_scans::map(
+            doors,
+            registry,
+            &json_body(body)?,
+            crate::main_scans::Door::Subjects,
+        ),
+        ["api", "picks", "map", "strips"] if post => crate::main_scans::map(
+            doors,
+            registry,
+            &json_body(body)?,
+            crate::main_scans::Door::Strips,
+        ),
         // Record 55 H2 (round 4): what picking main scans found for a
         // dataset's subjects, per role, and the last run with its report
         ["api", "picks", "summary"] if get => {
@@ -4488,12 +4555,19 @@ fn routed(
             }
             let id = id_at(2)?;
             let doc = json_body(body)?;
+            // record 55, decision 6: named, the pick must be of the scope
+            // the person is looking at
+            let named = crate::main_scans::named_scope(registry, &query, Some(&doc))?;
+            let reading = match &named {
+                Some(s) => nils_registry::pick_rules::reading(registry.store(), s)?,
+                None => None,
+            };
             let done = nils_classify::picking::withdraw_person(
                 registry,
                 id,
                 principal,
                 doc["why"].as_str(),
-                None,
+                named.as_ref().map(|_| reading.as_ref()),
             )
             .map_err(pick_err)?;
             Ok(Reply::ok(
@@ -4803,6 +4877,15 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // record 55 H2: a pick run is the pick verb queued, which is
         // Pipelines work as at the jobs door
         ("POST", ["api", "picks", "run"]) => (Need::One("pipelines:work"), Plain),
+        // record 55, decision 6: a scope's main-scan rules and their map are
+        // read as the picks summary is; saving them queues a pick run
+        ("GET", ["api", "picks", "rules"])
+        | ("GET", ["api", "picks", "rules", "text"])
+        | ("POST", ["api", "picks", "map"])
+        | ("POST", ["api", "picks", "map", "subjects" | "strips"]) => {
+            (Need::AnyOf(&["data:see", "pipelines:see"]), Plain)
+        }
+        ("POST", ["api", "picks", "rules"]) => (Need::One("pipelines:work"), Plain),
         // 2026-10-10: a step's run is a pipeline run queued, which reads
         // pixels: Pipelines work at detail quasi, as `run` at the jobs door
         ("POST", ["api", "datasets" | "cohorts", _, "steps", _, "run"]) => {

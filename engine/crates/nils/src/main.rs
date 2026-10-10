@@ -48,6 +48,7 @@ mod grants;
 mod intake;
 mod linkage_doors;
 mod login;
+mod main_scans;
 mod mcp;
 mod measures;
 mod model_cli;
