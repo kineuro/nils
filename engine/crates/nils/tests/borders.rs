@@ -222,7 +222,13 @@ fn plant(store: &mut Store, ids: &[i64], stacks: &[Stack]) {
             .map(|(k, v)| {
                 let number = !matches!(
                     *k,
-                    "mr_acquisition_type" | "image_orientation_patient" | "orientation"
+                    "mr_acquisition_type"
+                        | "image_orientation_patient"
+                        | "orientation"
+                        | "sop_class_uid"
+                        | "image_type"
+                        | "earliest_acquisition_date"
+                        | "earliest_acquisition_time"
                 );
                 format!("{k} = {}", literal(v, number))
             })
@@ -590,4 +596,411 @@ fn an_mp2rage_keeps_its_denoised_uniform_image_and_a_true_retake_borders() {
 #[test]
 fn an_mp2rage_keeps_its_denoised_uniform_image_on_postgres_too() {
     postgres("nils_borders_mp2rage", mp2rage);
+}
+
+// ------------------------------------------------- the 2026-10-10 borders
+//
+// The study of the 59 pick borders of a real corpus: two engine changes
+// that follow standing rulings. The stacks are synthetic and their values
+// invented, as above.
+
+/// The SOP class of an enhanced MR image: one file that holds every frame
+/// of a volume.
+const ENHANCED_MR: &str = "1.2.840.10008.5.1.4.1.1.4.1";
+
+/// The run's T1w pick of a subject's occasion: its stacks, its borders and
+/// what its slice count part saw.
+fn t1w_pick(store: &mut Store, subject: i64) -> (Vec<i64>, String, String) {
+    let rows = store
+        .query(
+            &format!(
+                "SELECT p.borders, p.parts, ps.stack_id FROM {} p JOIN {} ps ON ps.pick_id = p.id \
+                 WHERE p.subject_id = {subject} AND p.role = 't1w' AND p.author_kind = 'agent' \
+                 ORDER BY ps.stack_id",
+                store.qualified("pick"),
+                store.qualified("pick_stack")
+            ),
+            &[],
+        )
+        .unwrap();
+    assert!(!rows.is_empty(), "a pick of subject {subject}");
+    let parts: serde_json::Value = serde_json::from_str(rows[0].text(1).unwrap()).unwrap();
+    let slices = parts["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "slices")
+        .map(|p| p["saw"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    (
+        rows.iter().map(|r| r.int(2).unwrap()).collect(),
+        rows[0].opt_text(0).unwrap().unwrap_or_default().to_string(),
+        slices,
+    )
+}
+
+/// One file of `frames` frames for the stack, as the digest files an
+/// enhanced multi-frame image: one instance, naming the stack.
+fn one_file_of_frames(store: &mut Store, stack: i64, frames: i64) {
+    let rows = store
+        .query(
+            &format!(
+                "SELECT series_id, first_batch_id FROM {} WHERE id = {stack}",
+                store.qualified("stack")
+            ),
+            &[],
+        )
+        .unwrap();
+    let (series, batch) = (rows[0].int(0).unwrap(), rows[0].int(1).unwrap());
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {} (sop_instance_uid, series_id, stack_id, number_of_frames, first_batch_id) \
+                 VALUES ('2.25.{stack}', {series}, {stack}, {frames}, {batch})",
+                store.qualified("instance")
+            ),
+            &[],
+        )
+        .unwrap();
+}
+
+/// One file of `frames` frames split over `stacks` in equal parts (record
+/// 37 S8): its instance names the first stack, and `instance_frame` gives
+/// each stack its frames.
+fn one_file_split(store: &mut Store, stacks: &[i64], frames: i64) {
+    one_file_of_frames(store, stacks[0], frames);
+    let instance = store
+        .query(
+            &format!(
+                "SELECT id, first_batch_id FROM {} WHERE sop_instance_uid = '2.25.{}'",
+                store.qualified("instance"),
+                stacks[0]
+            ),
+            &[],
+        )
+        .unwrap();
+    let (id, batch) = (instance[0].int(0).unwrap(), instance[0].int(1).unwrap());
+    let each = frames / stacks.len() as i64;
+    for (i, stack) in stacks.iter().enumerate() {
+        let first = 1 + i as i64 * each;
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {} (instance_id, stack_id, n_frames, first_frame, frames, first_batch_id) \
+                     VALUES ({id}, {stack}, {each}, {first}, '{first}-{}', {batch})",
+                    store.qualified("instance_frame"),
+                    first + each - 1
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+}
+
+/// A population beside the planted sessions: one ordinary MPRAGE a
+/// session, the slice counts spread as a cohort's are.
+fn population(store: &mut Store, subjects: &[(i64, Vec<i64>)]) {
+    let spread = ["160", "168", "176", "176", "176", "184", "192"];
+    for (i, (_, ids)) in subjects.iter().enumerate() {
+        plant(
+            store,
+            &ids[..1],
+            &[Stack::mprage().field("n_instances", Some(spread[i % spread.len()]))],
+        );
+    }
+}
+
+/// R5: a multi-frame file counts its frames as slices. An MPRAGE stored as
+/// one enhanced file of 176 frames is one instance, and the pick read it as
+/// a volume of one slice: below every percentile of the population, so a
+/// slice-count outlier and a poor score. It is 176 slices.
+fn multi_frame(home: &Home) {
+    let p = packs();
+    let mut store = home.store();
+    let subjects = first_studies(&mut store);
+    let (one, ids) = &subjects[0];
+    plant(
+        &mut store,
+        &ids[..1],
+        &[Stack::mprage()
+            .field("n_instances", Some("1"))
+            .field("sop_class_uid", Some(ENHANCED_MR))],
+    );
+    one_file_of_frames(&mut store, ids[0], 176);
+    // And one file of 352 frames whose frames were split over two stacks,
+    // the MPRAGE and another image: the MPRAGE is its own 176.
+    let (two, ids2) = &subjects[1];
+    plant(
+        &mut store,
+        &ids2[..2],
+        &[
+            Stack::mprage()
+                .field("n_instances", Some("1"))
+                .field("sop_class_uid", Some(ENHANCED_MR)),
+            Stack::mprage()
+                .field("n_instances", Some("1"))
+                .field("sop_class_uid", Some(ENHANCED_MR))
+                .axis("role", None),
+        ],
+    );
+    one_file_split(&mut store, &ids2[..2], 352);
+    population(&mut store, &subjects[2..14]);
+    home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let (stacks, borders, slices) = t1w_pick(&mut store, *one);
+    assert_eq!(stacks, [ids[0]]);
+    assert_eq!(borders, "", "an ordinary MPRAGE of 176 frames: {slices}");
+    assert!(slices.starts_with("176 in slices:3D"), "{slices}");
+    let (stacks, borders, slices) = t1w_pick(&mut store, *two);
+    assert_eq!(stacks, [ids2[0]]);
+    assert_eq!(borders, "", "the frames of its own part: {slices}");
+    assert!(slices.starts_with("176 in slices:3D"), "{slices}");
+}
+
+#[test]
+fn a_multi_frame_file_counts_its_frames_as_slices() {
+    multi_frame(&registry(None));
+}
+
+#[test]
+fn a_multi_frame_file_counts_its_frames_as_slices_on_postgres_too() {
+    postgres("nils_borders_frames", multi_frame);
+}
+
+/// R6: one acquisition time is one scan. Two series of one MPRAGE acquired
+/// at one moment are one acquisition stored twice (record 38's ruling), so
+/// the pick names the series the scanner wrote first and asks nothing; the
+/// same MPRAGE acquired at two moments is a retake; and a stack of two
+/// images or fewer is a fragment, no candidate and no part of one.
+fn one_moment(home: &Home) {
+    let p = packs();
+    let mut store = home.store();
+    let subjects = first_studies(&mut store);
+    let at = |time: &str, number: &str| {
+        Stack::mprage()
+            .field("earliest_acquisition_date", Some("2026-01-05"))
+            .field("earliest_acquisition_time", Some(time))
+            .field("series_number", Some(number))
+    };
+    // Stored twice: a second series of the same moment.
+    let (twice, ids) = &subjects[0];
+    plant(
+        &mut store,
+        &ids[..2],
+        &[at("13:48:19.795000", "13"), at("13:48:19.795000", "11")],
+    );
+    let first_written = ids[1];
+    // Run twice: two moments.
+    let (again, ids2) = &subjects[1];
+    plant(
+        &mut store,
+        &ids2[..2],
+        &[at("13:48:19.795000", "11"), at("14:02:00.000000", "15")],
+    );
+    // A take of 176 images and two fragments of it.
+    let (fragments, ids3) = &subjects[2];
+    plant(
+        &mut store,
+        &ids3[..3],
+        &[
+            at("09:56:57.105000", "8"),
+            at("09:56:57.105000", "8").field("n_instances", Some("2")),
+            at("09:56:57.105000", "7").field("n_instances", Some("1")),
+        ],
+    );
+    // And fragments alone.
+    let (only_fragments, ids4) = &subjects[3];
+    plant(
+        &mut store,
+        &ids4[..2],
+        &[
+            at("10:10:10.000000", "2").field("n_instances", Some("1")),
+            at("10:10:11.000000", "3").field("n_instances", Some("1")),
+        ],
+    );
+    population(&mut store, &subjects[4..16]);
+
+    let report = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let (stacks, borders, _) = t1w_pick(&mut store, *twice);
+    assert_eq!(stacks, [first_written], "the series written first");
+    assert_eq!(borders, "", "one acquisition stored twice is no retake");
+    let (stacks, borders, _) = t1w_pick(&mut store, *again);
+    assert_eq!(stacks, ids2[..2]);
+    assert_eq!(borders, "retake");
+    let (stacks, borders, _) = t1w_pick(&mut store, *fragments);
+    assert_eq!(stacks, [ids3[0]], "the fragments are no part of the take");
+    assert_eq!(borders, "");
+    let none = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE subject_id = {only_fragments} AND author_kind = 'agent'",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(none, 0, "fragments alone are nothing to pick");
+    assert_eq!(report["empty"], 1, "{report}");
+    // What the planted sessions raised: the population's own are its own.
+    let planted = [*twice, *again, *fragments, *only_fragments];
+    let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
+    let raised: Vec<String> = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["status"] == "open")
+        .filter(|i| {
+            i["ref"]["subject_id"]
+                .as_i64()
+                .is_some_and(|s| planted.contains(&s))
+        })
+        .map(|i| {
+            format!(
+                "{}:{}",
+                i["ref"]["subject_id"],
+                i["evidence"]["borders"][0].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    assert_eq!(
+        raised.len(),
+        2,
+        "the retake and the fragments alone: {raised:?}"
+    );
+    assert!(raised.contains(&format!("{again}:retake")), "{raised:?}");
+    assert!(
+        raised.contains(&format!("{only_fragments}:nothing_eligible")),
+        "{raised:?}"
+    );
+}
+
+#[test]
+fn one_acquisition_time_is_one_scan() {
+    one_moment(&registry(None));
+}
+
+#[test]
+fn one_acquisition_time_is_one_scan_on_postgres_too() {
+    postgres("nils_borders_moment", one_moment);
+}
+
+/// The MRI pack, copied under `home` and raised to pack contract 9, with
+/// `keys` added to its pick file. Answers the pack directory to pass.
+fn pack_at_9(home: &Home, keys: &str) -> String {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.path().is_dir() {
+                copy(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let dir = home.dir.path().join("packs");
+    let mri = dir.join("mri");
+    copy(&std::path::Path::new(&packs()).join("mri"), &mri);
+    let manifest = std::fs::read_to_string(mri.join("pack.yml")).unwrap();
+    std::fs::write(
+        mri.join("pack.yml"),
+        manifest.replace("\ncontract: 8\n", "\ncontract: 9\n"),
+    )
+    .unwrap();
+    let main = std::fs::read_to_string(mri.join("picks/main.yml")).unwrap();
+    std::fs::write(mri.join("picks/main.yml"), format!("{main}\n{keys}")).unwrap();
+    dir.to_str().unwrap().to_string()
+}
+
+/// Pack contract 9: a pick may say which stacks of a role compete (the
+/// borders study's R1, the brain roles not a spine's) and how a near tie is
+/// decided (an order like R8's), and a pick run does what it says.
+fn contract_9(home: &Home) {
+    let p = pack_at_9(
+        home,
+        "candidates:\n  t1w:\n    unless:\n      - {of: body_part, any: [spine, neck, chest, other]}\n\
+         near_tie:\n  - {of: orientation, prefer: [Axial, Coronal, Sagittal]}\n",
+    );
+    let mut store = home.store();
+    let subjects = first_studies(&mut store);
+    // A brain MPRAGE and a spine one that would outscore it.
+    let (both, ids) = &subjects[0];
+    plant(
+        &mut store,
+        &ids[..2],
+        &[
+            Stack::mprage().field("n_instances", Some("160")),
+            Stack::mprage()
+                .field("n_instances", Some("192"))
+                .field("echo_time", Some("3.1"))
+                .axis("body_part", Some("spine")),
+        ],
+    );
+    // A spine MPRAGE alone.
+    let (spine, ids2) = &subjects[1];
+    plant(
+        &mut store,
+        &ids2[..1],
+        &[Stack::mprage().axis("body_part", Some("spine"))],
+    );
+    // Two MPRAGEs alike but for the plane: a near tie the order decides.
+    let (alike, ids3) = &subjects[2];
+    plant(
+        &mut store,
+        &ids3[..2],
+        &[
+            Stack::mprage(),
+            Stack::mprage().field("orientation", Some("Axial")),
+        ],
+    );
+    population(&mut store, &subjects[3..15]);
+    let report = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let (stacks, borders, _) = t1w_pick(&mut store, *both);
+    assert_eq!(
+        stacks,
+        [ids[0]],
+        "the brain one: the spine one is no candidate"
+    );
+    assert_eq!(borders, "");
+    let none = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE subject_id = {spine}",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(none, 0, "a spine alone is no T1w occasion");
+    let (stacks, borders, _) = t1w_pick(&mut store, *alike);
+    assert_eq!(stacks, [ids3[1]], "the axial one, by the order");
+    assert_eq!(borders, "", "a near tie the order decided asks nothing");
+    assert_eq!(report["tied"], 0, "{report}");
+    let row = store
+        .query(
+            &format!(
+                "SELECT parts FROM {} WHERE subject_id = {alike} AND author_kind = 'agent'",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap();
+    let parts: serde_json::Value = serde_json::from_str(row[0].text(0).unwrap()).unwrap();
+    assert_eq!(
+        parts["notes"]["near_tie"], "orientation: Axial over Sagittal",
+        "{parts}"
+    );
+}
+
+#[test]
+fn a_pack_at_contract_9_says_which_stacks_compete_and_how_a_near_tie_is_decided() {
+    contract_9(&registry(None));
+}
+
+#[test]
+fn a_pack_at_contract_9_says_which_stacks_compete_on_postgres_too() {
+    postgres("nils_borders_contract_9", contract_9);
 }

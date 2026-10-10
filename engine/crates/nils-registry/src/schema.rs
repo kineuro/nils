@@ -1040,6 +1040,12 @@ fn build_registry() -> Vec<Table> {
                 // 1 when a person asked for the held file to be coded
                 // anyway, from the identifier under the key; 0 otherwise.
                 req("code_anyway", Type::Int),
+                // Wave 7a §5.4: a file whose subject is known but has no
+                // value of the id type the dataset writes into PatientID is
+                // held with its subject and that type, and released when
+                // the subject has one.
+                col("subject_id", Type::Int),
+                col("wants_type", Type::Text),
             ],
         )
         .unique(&["place_id", "path"])
@@ -1061,6 +1067,14 @@ fn build_registry() -> Vec<Table> {
                 req("epoch", Type::Int),
                 // How many review items this stack's verdict raised.
                 req("review_items", Type::Int),
+                // Record 55 H3: what the sort decided without asking anybody,
+                // as one document (who beat whom where the pack's ranking
+                // decided, the answers below the pack's threshold, the axes
+                // no rule answered, the split note, the equal-rank
+                // disagreements), and how many equal-rank disagreements the
+                // stack holds.
+                col("notes", Type::Json),
+                col("disagreements", Type::Int),
             ],
         )
         .unique(&["stack_id"])

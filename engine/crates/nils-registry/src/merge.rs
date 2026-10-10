@@ -69,6 +69,8 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("sealed_stack", Handling::Repoint),
     // record 49 A3: a run's measure names the subject of its unit
     ("measure", Handling::Repoint),
+    // Wave 7a §5.4: a file held for want of its subject's id type value
+    ("pseudonym_file", Handling::Repoint),
     // the linkage store
     ("identity", Handling::Repoint),
 ];

@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# An example pack patch (record 56, section 5.5), against the MRI pack. Each
+# operation carries its scope, its reason and its evidence; the patch's own
+# reason and evidence stand for an operation that states none.
+patch: 1
+pack: mri
+version: 1.0.1
+ships: 1.0.2
+reason: an example of each kind of operation
+evidence: contracts/patch/v1
+operations:
+  # A partner site's word for contrast, for that site's datasets alone: an
+  # overlay. The word lands in the bucket post_contrast=given reads.
+  - op: add_words
+    axis: post_contrast
+    value: given
+    words: [mdc]
+    scope: site:partner
+    reason: the partner writes mdc (mezzo di contrasto) for contrast given
+    evidence: {proposal: 12}
+  # The order of the rule sets: the SyMRI route right before the technique
+  # axis's own rules.
+  - op: move_set
+    set: symri
+    before: technique
+  # A value's priority in its exclusion group: the lower number wins.
+  - op: set_priority
+    axis: modifier
+    value: IR
+    priority: 5
+  # A new value, tried by the technique axis's own rules by its word, after
+  # MPRAGE, with its BIDS acq- token.
+  - op: add_value
+    axis: technique
+    value: ZZ-GRE
+    label: ZZGRE
+    family: GRE
+    words: [zzgre]
+    after: MPRAGE
+    bids: {acq: ZZGRE}
+  # A rule from templates: a physics range and a stated axis, in the base
+  # rules, after every rule already there.
+  - op: add_rule
+    axis: base
+    value: T2w
+    when:
+      - {tag: te, ge: 200}
+      - {tag: tr, ge: 4000}
+      - {not: {axis: directory_type, is: localizer}}
+    position: last
+    reason: a very long echo and repetition time is T2-weighted where nothing else said
+    evidence: {review_item: 4512}
+  # The base of a calibration says nothing and asks nothing.
+  - op: silence
+    axis: base
+    when: {axis: provenance, is: Calibration}
+  # A value's name in the BIDS names: its acq- token.
+  - op: map_name
+    axis: technique
+    value: MPRAGE
+    bids: MPR
+  # A stack that is an angiogram holds no role, whatever else the role rules
+  # say of it: nothing, of an axis that holds several values, goes first in
+  # the set that decides it.
+  - op: add_rule
+    axis: role
+    nothing: true
+    when: {axis: technique, is: TOF-MRA}
+  # The main-scan pick (the 2026-10-10 study of the pick borders): the brain
+  # roles are no spine's, neck's, chest's or unknown part's, a rare
+  # technique is asked about no more, and a near tie is decided by an order.
+  - op: set_candidates
+    role: t1w
+    unless: [{axis: body_part, is: [spine, neck, chest, other]}]
+  - {op: remove_border, border: rare}
+  - op: set_near_tie
+    order:
+      - {of: mr_acquisition_type, prefer: ['3D']}
+      - {of: orientation, prefer: [Axial, Coronal, Sagittal]}
+      - {of: series_number, lowest: true}

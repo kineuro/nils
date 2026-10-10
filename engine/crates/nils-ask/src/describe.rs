@@ -379,6 +379,26 @@ fn strict_anywhere(ask: &Ask) -> bool {
     })
 }
 
+/// Wave 7a: whether any clause, group key, column or order of the document
+/// reads a `dataset` field.
+fn reads_dataset(ask: &Ask) -> bool {
+    fn in_clause(c: &Clause) -> bool {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        all.iter()
+            .any(|x| x.op == "field" && x.ref_name().is_some_and(crate::validate::is_dataset_path))
+    }
+    ask.sets.values().any(|s| {
+        s.bind.0.iter().any(|(_, c)| in_clause(c))
+            || s.where_.iter().any(in_clause)
+            || s.group.as_ref().is_some_and(|g| g.by.iter().any(in_clause))
+            || s.pick
+                .as_ref()
+                .is_some_and(|p| p.by.iter().any(|o| in_clause(&o.0)))
+    }) || ask.out.columns.iter().any(in_clause)
+        || ask.out.order.iter().any(|o| in_clause(&o.0))
+}
+
 /// Describe a document, pure.
 pub fn describe(
     ask: &Ask,
@@ -411,6 +431,12 @@ pub fn describe(
             scheme.window_days
         ),
     ];
+    if reads_dataset(ask) {
+        conventions.push(
+            "a stack is of the dataset whose digest first read it; a subject or a session is of every dataset one of its stacks is of, and a group by its dataset counts it under each"
+                .to_string(),
+        );
+    }
     if scheme.window_days > 0 && ask.sets.values().any(|s| !s.near.is_empty()) {
         conventions.push(format!(
             "a session's own window of {} days sits beside every near window on the same row",

@@ -103,7 +103,7 @@ fn axial() -> [f64; 6] {
 }
 
 /// The plane nearest the stack's, by the largest component of its normal.
-fn plane_of(orientation: &[f64; 6]) -> (&'static str, bool) {
+pub(crate) fn plane_of(orientation: &[f64; 6]) -> (&'static str, bool) {
     let n = normal(orientation);
     let (i, largest) = n
         .iter()
@@ -397,6 +397,11 @@ struct Slice {
     position: Option<[f64; 3]>,
     orientation: Option<[f64; 6]>,
     instance: i64,
+    /// What orders the planes at one place, a cine's frames or a time
+    /// series' points, before the instance number: the trigger time in
+    /// microseconds, the temporal position and the echo number, where the
+    /// file writes them.
+    time: (Option<i64>, Option<i64>, Option<i64>),
     /// The file's place in the stack's list, and the frame's in the file,
     /// from zero: the order when nothing says where a plane is.
     file: usize,
@@ -576,6 +581,37 @@ fn frame_fragments(
 /// frame is handed over as a single-frame object of its own, so a codec
 /// never copies the file's other frames. The words say which syntax and
 /// never the file.
+/// The JPEG 2000 syntaxes, lossless and not.
+const JPEG_2000: [&str; 2] = ["1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.91"];
+
+/// How many times a picture of `long` pixels on its longer side may be
+/// halved and still be `at_least` long: at most three.
+fn reduction(long: u32, at_least: u32) -> u32 {
+    (1..=3u32)
+        .take_while(|r| (long >> r) >= at_least.max(1))
+        .last()
+        .unwrap_or(0)
+}
+
+/// One JPEG 2000 frame decoded `reduce` times halved: its width, height
+/// and samples as the codec adapter writes them, little endian, `bits`
+/// wide.
+fn decode_reduced(stream: &[u8], reduce: u32, bits: u16) -> Result<(u32, u32, Vec<u8>), String> {
+    let image =
+        jpeg2k::Image::from_bytes_with(stream, jpeg2k::DecodeParameters::new().reduce(reduce))
+            .map_err(|e| e.to_string())?;
+    let c = image
+        .components()
+        .first()
+        .ok_or("a JPEG 2000 frame with no component")?;
+    let per = (bits / 8) as usize;
+    let mut out = Vec::with_capacity(c.data().len() * per);
+    for v in c.data() {
+        out.extend_from_slice(&v.to_le_bytes()[..per]);
+    }
+    Ok((c.width(), c.height(), out))
+}
+
 fn decode_frame(header: &InMemDicomObject, ts: &str, stream: Vec<u8>) -> Result<Vec<u8>, String> {
     let failed = |e: &dyn std::fmt::Display| undecodable(ts, e);
     let mut obj = header.clone();
@@ -735,14 +771,18 @@ fn read_frames(
     file_index: usize,
     wanted: Option<&[u32]>,
     threads: usize,
+    reduce_to: Option<u32>,
 ) -> Result<Vec<Slice>, String> {
     // record 48: a file without the Part 10 preamble or meta group is read
     // as the digest reads it, a bare data set, so one such file does not
     // fail its stack's pyramid
     let (obj, ts) = nils_dicom::read_whole(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let obj = &obj;
-    let rows = int(obj, tags::ROWS).ok_or("no Rows")? as u32;
-    let cols = int(obj, tags::COLUMNS).ok_or("no Columns")? as u32;
+    let mut rows = int(obj, tags::ROWS).ok_or("no Rows")? as u32;
+    let mut cols = int(obj, tags::COLUMNS).ok_or("no Columns")? as u32;
+    // millimetres a pixel stands for, more than the file says where the
+    // planes were decoded at a lower resolution
+    let mut coarser = [1.0f64, 1.0];
     let bits = int(obj, tags::BITS_ALLOCATED).unwrap_or(16) as u16;
     if bits != 16 && bits != 8 {
         return Err(format!("{bits} bits allocated; the pyramid reads 8 and 16"));
@@ -785,7 +825,7 @@ fn read_frames(
             .collect::<Result<_, _>>()?,
     };
     let multiframe = count > 1;
-    let need = (rows * cols) as usize * (bits as usize / 8) * if colour { 3 } else { 1 };
+    let mut need = (rows * cols) as usize * (bits as usize / 8) * if colour { 3 } else { 1 };
     // the pixels of each wanted frame, in the order of `frames`
     let pixels: Vec<Vec<u8>> = if NATIVE.contains(&ts.as_str()) {
         let all = pixel_data.to_bytes().map_err(|e| e.to_string())?;
@@ -819,32 +859,53 @@ fn read_frames(
             .iter()
             .map(|&i| fragments[ranges[i as usize].clone()].concat())
             .collect();
-        let chunk = streams.len().div_ceil(threads.max(1)).max(1);
-        let (header, ts) = (&header, ts.as_str());
-        let decoded: Vec<Result<Vec<Vec<u8>>, String>> = std::thread::scope(|s| {
-            let handles: Vec<_> = streams
-                .chunks(chunk)
-                .map(|part| {
-                    s.spawn(move || {
-                        part.iter()
-                            .map(|stream| decode_frame(header, ts, stream.clone()))
-                            .collect()
+        // record 55 H2: a picture drawn small decodes a JPEG 2000 frame at
+        // a lower resolution, which skips the finest of its wavelet levels
+        let reduce = reduce_to
+            .filter(|_| !colour && JPEG_2000.contains(&ts.as_str()))
+            .map_or(0, |long| reduction(rows.max(cols), long));
+        if reduce > 0
+            && let Ok(small) = streams
+                .iter()
+                .map(|s| decode_reduced(s, reduce, bits))
+                .collect::<Result<Vec<_>, String>>()
+            && let Some((w, h)) = small.first().map(|(w, h, _)| (*w, *h))
+            && w > 0
+            && h > 0
+            && small.iter().all(|(a, b, _)| (*a, *b) == (w, h))
+        {
+            coarser = [rows as f64 / h as f64, cols as f64 / w as f64];
+            (rows, cols) = (h, w);
+            need = (rows * cols) as usize * (bits as usize / 8);
+            small.into_iter().map(|(_, _, p)| p).collect()
+        } else {
+            let chunk = streams.len().div_ceil(threads.max(1)).max(1);
+            let (header, ts) = (&header, ts.as_str());
+            let decoded: Vec<Result<Vec<Vec<u8>>, String>> = std::thread::scope(|s| {
+                let handles: Vec<_> = streams
+                    .chunks(chunk)
+                    .map(|part| {
+                        s.spawn(move || {
+                            part.iter()
+                                .map(|stream| decode_frame(header, ts, stream.clone()))
+                                .collect()
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join()
-                        .unwrap_or_else(|_| Err("a decoder panicked".to_string()))
-                })
-                .collect()
-        });
-        let mut out = Vec::with_capacity(frames.len());
-        for part in decoded {
-            out.extend(part?);
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("a decoder panicked".to_string()))
+                    })
+                    .collect()
+            });
+            let mut out = Vec::with_capacity(frames.len());
+            for part in decoded {
+                out.extend(part?);
+            }
+            out
         }
-        out
     };
     if let Some(short) = pixels.iter().find(|p| p.len() < need) {
         return Err(format!(
@@ -885,6 +946,14 @@ fn read_frames(
         .ok()
         .and_then(|e| e.items());
     let instance = int(obj, tags::INSTANCE_NUMBER).unwrap_or(0);
+    let time = (
+        f64s(obj, tags::TRIGGER_TIME)
+            .and_then(|t| t.first().copied())
+            .filter(|t| t.is_finite())
+            .map(|t| (t * 1000.0).round() as i64),
+        int(obj, tags::TEMPORAL_POSITION_IDENTIFIER),
+        int(obj, tags::ECHO_NUMBERS),
+    );
     let burned_in = text(obj, tags::BURNED_IN_ANNOTATION).map(|s| s.eq_ignore_ascii_case("YES"));
     let mut out = Vec::with_capacity(frames.len());
     for (&i, pixels) in frames.iter().zip(pixels) {
@@ -915,7 +984,8 @@ fn read_frames(
         let spacing = in_group(tags::PIXEL_MEASURES_SEQUENCE, tags::PIXEL_SPACING)
             .or_else(|| f64s(obj, tags::PIXEL_SPACING))
             .map(|v| [v[0], *v.get(1).unwrap_or(&v[0])])
-            .unwrap_or([1.0, 1.0]);
+            .map(|[r, c]| [r * coarser[0], c * coarser[1]])
+            .unwrap_or(coarser);
         // the first of these that is a distance: a spacing some files
         // write negative is its size
         let thickness = [
@@ -945,6 +1015,7 @@ fn read_frames(
             position,
             orientation,
             instance,
+            time,
             file: file_index,
             frame: i,
             multiframe,
@@ -982,6 +1053,13 @@ pub const ORDER_FRAMES: &str = "frames";
 /// The planes of one stack's files, and of the frames each names, into one
 /// volume, in order.
 pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
+    read_stack_at(files, None)
+}
+
+/// As [`read_stack`], a JPEG 2000 plane decoded at the lowest resolution
+/// that keeps `reduce_to` pixels on its longer side, when one is named:
+/// for a picture drawn small, at a fraction of the decode.
+pub fn read_stack_at(files: &[StackFile], reduce_to: Option<u32>) -> Result<Volume, String> {
     // a compressed plane costs its decode, so the files are read a few at
     // a time, and the frames of a file a few at a time within it; the first
     // file that fails, in the files' order, is the error
@@ -1003,6 +1081,7 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
                             c * chunk + k,
                             f.frames.as_deref(),
                             within,
+                            reduce_to,
                         )?);
                     }
                     Ok(slices)
@@ -1040,7 +1119,10 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
     // where it is and how it is turned, which for an axial stack is the
     // third coordinate as before; else by that coordinate; else by the
     // instance number, and a multi-frame file's frames in the file's order.
-    // Each plane's distance along the normal is its z.
+    // Each plane's distance along the normal is its z. Planes at one place
+    // (a cine's frames, a time series' points) go by their trigger time,
+    // their temporal position, their echo number and their instance number,
+    // as far as the files write them (wave 7a).
     let oriented = slices
         .iter()
         .all(|s| s.position.is_some() && s.orientation.is_some());
@@ -1053,8 +1135,13 @@ pub fn read_stack(files: &[StackFile]) -> Result<Volume, String> {
     }
     let placed = slices.iter().all(|s| s.z.is_finite());
     let order = if placed {
-        // stable: planes at one place keep the files' and frames' order
-        slices.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
+        // stable: planes at one place and one time keep the files' and
+        // frames' order
+        slices.sort_by(|a, b| {
+            a.z.partial_cmp(&b.z)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (a.time, a.instance).cmp(&(b.time, b.instance)))
+        });
         ORDER_POSITION
     } else {
         slices.sort_by_key(|s| (s.instance, s.file, s.frame));
@@ -1244,26 +1331,16 @@ fn halve(plane: &[u16], ny: u32, nx: u32) -> (Vec<u16>, u32, u32) {
     (out, hy, hx)
 }
 
-/// The tile file name.
+/// A tile's file in the layout before levels were packed (E6), which the
+/// doors still read where a level has no packed file.
 fn tile_path(root: &Path, level: u32, z: u32, ty: u32, tx: u32) -> PathBuf {
-    root.join(level.to_string())
-        .join(z.to_string())
-        .join(format!("{ty}_{tx}.j2c"))
+    crate::tilepack::loose_path(root, level, z, ty, tx)
 }
 
-/// Encode one plane's tiles at one level; returns the bytes written.
-fn write_plane(
-    root: &Path,
-    level: u32,
-    z: u32,
-    plane: &[u16],
-    ny: u32,
-    nx: u32,
-) -> Result<u64, String> {
+/// Encode one plane's tiles at one level, in row-major order of its grid.
+fn encode_plane(plane: &[u16], ny: u32, nx: u32) -> Result<Vec<Vec<u8>>, String> {
     let (ty, tx) = grid(ny, nx);
-    let dir = root.join(level.to_string()).join(z.to_string());
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let mut bytes = 0u64;
+    let mut out = Vec::with_capacity((ty * tx) as usize);
     let mut tile = Vec::with_capacity((TILE * TILE) as usize);
     for j in 0..ty {
         for i in 0..tx {
@@ -1276,12 +1353,67 @@ fn write_plane(
                 let row = &plane[(y * nx + x0) as usize..(y * nx + x0 + w) as usize];
                 tile.extend_from_slice(row);
             }
-            let encoded = encode_tile(&tile, w, h)?;
-            bytes += encoded.len() as u64;
-            std::fs::write(tile_path(root, level, z, j, i), &encoded).map_err(|e| e.to_string())?;
+            out.push(encode_tile(&tile, w, h)?);
         }
     }
-    Ok(bytes)
+    Ok(out)
+}
+
+/// How a pyramid's tiles are kept: each level one packed file (E6), or a
+/// file per tile as before, which only the tests still write, to prove the
+/// old layout reads and converts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Layout {
+    Packed,
+    #[cfg(test)]
+    Loose,
+}
+
+/// Write one level's tiles, plane by plane, in the layout asked.
+fn write_level(
+    root: &Path,
+    level: u32,
+    tiles: &[Vec<Vec<u8>>],
+    grid: (u32, u32),
+    layout: Layout,
+) -> Result<u64, String> {
+    match layout {
+        Layout::Packed => {
+            let flat: Vec<&[u8]> = tiles.iter().flatten().map(Vec::as_slice).collect();
+            crate::tilepack::write_level(root, level, [tiles.len() as u32, grid.0, grid.1], &flat)
+        }
+        #[cfg(test)]
+        Layout::Loose => {
+            let mut bytes = 0u64;
+            for (z, plane) in tiles.iter().enumerate() {
+                let dir = root.join(level.to_string()).join(z.to_string());
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                for (k, t) in plane.iter().enumerate() {
+                    let (j, i) = (k as u32 / grid.1, k as u32 % grid.1);
+                    std::fs::write(tile_path(root, level, z as u32, j, i), t)
+                        .map_err(|e| e.to_string())?;
+                    bytes += t.len() as u64;
+                }
+            }
+            Ok(bytes)
+        }
+    }
+}
+
+/// The folders of the layout before packing under a pyramid, one per
+/// level, which a packed build or `pyramid pack` leaves behind no more.
+fn loose_levels(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_type().is_ok_and(|t| t.is_dir())
+                && e.file_name().to_string_lossy().parse::<u32>().is_ok()
+        })
+        .map(|e| e.path())
+        .collect()
 }
 
 /// The shares of a sample at its largest value that make a plateau the
@@ -1291,7 +1423,7 @@ const PLATEAU_MOST: f64 = 0.1;
 
 /// The window the viewer opens at: the first and ninety-ninth percentiles
 /// of a sample of planes, less a plateau at the top.
-fn window(vol: &Volume) -> Window {
+pub(crate) fn window(vol: &Volume) -> Window {
     let nz = vol.shape[0] as usize;
     let step = (nz / 16).max(1);
     let mut sample: Vec<u16> = Vec::new();
@@ -1340,6 +1472,17 @@ pub fn build(
     workers: usize,
     pack_version: Option<String>,
 ) -> Result<Manifest, String> {
+    build_as(vol, stack, root, workers, pack_version, Layout::Packed)
+}
+
+pub(crate) fn build_as(
+    vol: &Volume,
+    stack: i64,
+    root: &Path,
+    workers: usize,
+    pack_version: Option<String>,
+    layout: Layout,
+) -> Result<Manifest, String> {
     let started = std::time::Instant::now();
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let [nz, ny, nx] = vol.shape;
@@ -1353,17 +1496,14 @@ pub fn build(
         let (ty, tx) = grid(ly, lx);
         let planes = &current;
         let chunk = (planes.len() / workers).max(1);
-        let results: Vec<Result<u64, String>> = std::thread::scope(|s| {
+        let results: Vec<Result<Vec<Vec<Vec<u8>>>, String>> = std::thread::scope(|s| {
             let mut handles = Vec::new();
-            for (c, part) in planes.chunks(chunk).enumerate() {
+            for part in planes.chunks(chunk) {
                 let (ly, lx) = (ly, lx);
                 handles.push(s.spawn(move || {
-                    let mut total = 0u64;
-                    for (k, plane) in part.iter().enumerate() {
-                        let z = (c * chunk + k) as u32;
-                        total += write_plane(root, level, z, plane, ly, lx)?;
-                    }
-                    Ok::<u64, String>(total)
+                    part.iter()
+                        .map(|plane| encode_plane(plane, ly, lx))
+                        .collect::<Result<Vec<_>, String>>()
                 }));
             }
             handles
@@ -1371,10 +1511,13 @@ pub fn build(
                 .map(|h| h.join().unwrap_or_else(|_| Err("a worker panicked".into())))
                 .collect()
         });
-        let mut bytes = 0u64;
+        // the chunks come back in order, so the planes are in order
+        let mut tiles = Vec::with_capacity(planes.len());
         for r in results {
-            bytes += r?;
+            tiles.extend(r?);
         }
+        let bytes = write_level(root, level, &tiles, (ty, tx), layout)?;
+        drop(tiles);
         level_shapes.push(Level {
             level,
             shape: [nz, ly, lx],
@@ -1449,7 +1592,13 @@ pub fn build(
         },
     };
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(root.join("manifest.json"), text).map_err(|e| e.to_string())?;
+    write_manifest(root, &text)?;
+    if layout == Layout::Packed {
+        // a pyramid built again over the layout before keeps no tile files
+        for d in loose_levels(root) {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
     // a gallery's picture of the stack, drawn now while the planes are warm:
     // a gallery opened on a campaign just built asks for hundreds at once,
     // and each first look otherwise decodes up to a hundred planes. A
@@ -1459,6 +1608,37 @@ pub fn build(
         let _ = thumb_cached(root, &manifest, THUMB_SIZE, 3, true);
     }
     Ok(manifest)
+}
+
+/// Write a pyramid's manifest whole or not at all, as a level's packed
+/// file is written: a part file of its own, flushed to the storage, then
+/// renamed over `manifest.json`. The manifest says the pyramid is built,
+/// and the doors read it while a build runs (the manifest door holds a
+/// request for it): written in place, it was read empty or half written,
+/// and the door answered 500 to a picture that was being built.
+fn write_manifest(root: &Path, text: &str) -> Result<(), String> {
+    // a part of its own per writer: two builds of one stack at once must
+    // not write one part file together
+    static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let k = PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let part = root.join(format!("manifest.json.part.{}.{k}", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&part)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&part, root.join("manifest.json"))?;
+        // the rename itself is durable once the folder is
+        if let Ok(d) = std::fs::File::open(root) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("the manifest was not written: {e}"));
+    }
+    Ok(())
 }
 
 /// The manifest of a built pyramid, or none.
@@ -1689,12 +1869,99 @@ pub fn unread_reply(why: String) -> Reply {
     }
 }
 
+/// The tiles of the planes `zs` at a level, each plane's in row-major order
+/// of its grid: from the level's packed file, a run of planes in one read,
+/// or, where the level is not packed (a pyramid built before E6), from a
+/// file per tile, [`READS_AT_ONCE`] at a time. A level packed while it was
+/// being read (`nils pyramid pack` beside a serving engine) is read again
+/// from its packed file.
+fn read_planes(
+    root: &Path,
+    m: &Manifest,
+    level: u32,
+    zs: &[u32],
+) -> Result<Vec<Vec<Vec<u8>>>, String> {
+    let lv = m
+        .level_shapes
+        .get(level as usize)
+        .ok_or_else(|| format!("level {level} is not in the pyramid; it has {}", m.levels))?;
+    if let Some(z) = zs.iter().find(|z| **z >= lv.shape[0]) {
+        return Err(format!("plane {z} is past the stack's {}", lv.shape[0]));
+    }
+    if let Some(p) = packed_level(root, m, level)? {
+        return read_packed(&p, zs);
+    }
+    let mut paths = Vec::new();
+    for &z in zs {
+        paths.extend(plane_tiles(root, m, level, z)?);
+    }
+    let read = match read_files_at_once(&paths) {
+        Err(why) if !why.starts_with(UNREADABLE) => match packed_level(root, m, level)? {
+            Some(p) => return read_packed(&p, zs),
+            None => return Err(why),
+        },
+        r => r?,
+    };
+    let per = (lv.tiles[0] * lv.tiles[1]) as usize;
+    let mut it = read.into_iter();
+    Ok(zs.iter().map(|_| it.by_ref().take(per).collect()).collect())
+}
+
+/// A level's packed file, checked against the manifest's grid.
+fn packed_level(
+    root: &Path,
+    m: &Manifest,
+    level: u32,
+) -> Result<Option<std::sync::Arc<crate::tilepack::Packed>>, String> {
+    let lv = &m.level_shapes[level as usize];
+    let p = crate::tilepack::level(root, level).map_err(|e| format!("{UNREADABLE}{e}"))?;
+    if let Some(p) = &p
+        && p.grid != [lv.shape[0], lv.tiles[0], lv.tiles[1]]
+    {
+        return Err(format!(
+            "level {level}'s packed file holds a grid of {:?}, and the manifest says {:?}",
+            p.grid,
+            [lv.shape[0], lv.tiles[0], lv.tiles[1]]
+        ));
+    }
+    Ok(p)
+}
+
+/// The planes `zs` from a packed level: each run of planes one after
+/// another is one read.
+fn read_packed(p: &crate::tilepack::Packed, zs: &[u32]) -> Result<Vec<Vec<Vec<u8>>>, String> {
+    let per = (p.grid[1] * p.grid[2]) as usize;
+    let mut out = Vec::with_capacity(zs.len());
+    let mut i = 0;
+    while i < zs.len() {
+        let mut j = i + 1;
+        while j < zs.len() && zs[j] == zs[j - 1] + 1 {
+            j += 1;
+        }
+        TILE_READS
+            .total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tiles = p.read_planes(zs[i], zs[j - 1] + 1).map_err(|e| {
+            TILE_READS
+                .failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("{UNREADABLE}{e}")
+        })?;
+        let mut it = tiles.into_iter();
+        for _ in i..j {
+            out.push(it.by_ref().take(per).collect());
+        }
+        i = j;
+    }
+    Ok(out)
+}
+
 /// One plane's tiles in one container: `[u32 count][u32 offset...][tiles]`,
 /// little endian; the offsets are from the start of the container, tiles
 /// in row-major order of the plane's grid.
 pub fn plane_container(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<u8>, String> {
-    let paths = plane_tiles(root, m, level, z)?;
-    Ok(container(&read_files_at_once(&paths)?))
+    let mut planes = read_planes(root, m, level, &[z])?;
+    Ok(container(&planes.pop().unwrap_or_default()))
 }
 
 pub fn container(tiles: &[Vec<u8>]) -> Vec<u8> {
@@ -1722,17 +1989,10 @@ pub fn slab_container(
     z0: u32,
     z1: u32,
 ) -> Result<Vec<u8>, String> {
-    let mut paths = Vec::new();
-    let mut counts = Vec::new();
-    for z in z0..z1 {
-        let p = plane_tiles(root, m, level, z)?;
-        counts.push(p.len());
-        paths.extend(p);
-    }
-    let mut tiles = read_files_at_once(&paths)?.into_iter();
-    let planes: Vec<Vec<u8>> = counts
-        .into_iter()
-        .map(|n| container(&tiles.by_ref().take(n).collect::<Vec<_>>()))
+    let zs: Vec<u32> = (z0..z1).collect();
+    let planes: Vec<Vec<u8>> = read_planes(root, m, level, &zs)?
+        .iter()
+        .map(|tiles| container(tiles))
         .collect();
     Ok(container(&planes))
 }
@@ -1744,17 +2004,55 @@ pub fn decode_plane(
     level: u32,
     z: u32,
 ) -> Result<(u32, u32, Vec<u16>), String> {
+    let mut tiles = read_planes(root, m, level, &[z])?;
+    plane_of_tiles(m, level, &tiles.pop().unwrap_or_default())
+}
+
+/// The planes `zs` decoded, each handed to `each` with its index, read
+/// [`PLANES_AT_ONCE`] at a time: a cut across the stack reads its planes
+/// in a few reads, not one per tile.
+fn each_plane(
+    root: &Path,
+    m: &Manifest,
+    level: u32,
+    zs: &[u32],
+    mut each: impl FnMut(u32, (u32, u32, Vec<u16>)) -> Result<(), String>,
+) -> Result<(), String> {
+    for part in zs.chunks(PLANES_AT_ONCE) {
+        for (z, tiles) in part.iter().zip(read_planes(root, m, level, part)?) {
+            each(*z, plane_of_tiles(m, level, &tiles)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// How many planes [`each_plane`] reads at once.
+const PLANES_AT_ONCE: usize = 32;
+
+/// A plane decoded from its tiles, in row-major order of its grid.
+fn plane_of_tiles(
+    m: &Manifest,
+    level: u32,
+    tiles: &[Vec<u8>],
+) -> Result<(u32, u32, Vec<u16>), String> {
     let lv = m
         .level_shapes
         .get(level as usize)
         .ok_or_else(|| format!("level {level} is not in the pyramid"))?;
     let [_, ny, nx] = lv.shape;
     let [ty, tx] = lv.tiles;
+    if tiles.len() != (ty * tx) as usize {
+        return Err(format!(
+            "a plane at level {level} has {} tiles, not {}",
+            tiles.len(),
+            ty * tx
+        ));
+    }
     let mut plane = vec![0u16; (ny * nx) as usize];
     for j in 0..ty {
         for i in 0..tx {
-            let bytes = read_tile(&tile_path(root, level, z, j, i))?;
-            let (w, h, px) = decode_tile(&bytes)?;
+            let bytes = &tiles[(j * tx + i) as usize];
+            let (w, h, px) = decode_tile(bytes)?;
             for y in 0..h {
                 let src = &px[(y * w) as usize..((y + 1) * w) as usize];
                 let dy = j * TILE + y;
@@ -1835,8 +2133,8 @@ pub fn plane_along(
         let mid = (nz.saturating_sub(1)) as f64 / 2.0;
         let (w, h) = if axis == 'y' { (nx, nz) } else { (ny, nz) };
         let mut out = Vec::with_capacity((w * h) as usize);
-        for z in 0..nz {
-            let (pw, ph, px) = decode_plane(root, m, level, z)?;
+        let zs: Vec<u32> = (0..nz).collect();
+        each_plane(root, m, level, &zs, |z, (pw, ph, px)| {
             let k = z as f64 - mid;
             for t in 0..w {
                 let (x, y) = if axis == 'y' {
@@ -1852,7 +2150,8 @@ pub fn plane_along(
                 };
                 out.push(sample(&px, pw, ph, x, y));
             }
-        }
+            Ok(())
+        })?;
         return Ok((w, h, out));
     }
     match axis {
@@ -1860,21 +2159,23 @@ pub fn plane_along(
         'y' => {
             let row = index.min(ny.saturating_sub(1));
             let mut out = Vec::with_capacity((nz * nx) as usize);
-            for z in 0..nz {
-                let (w, _, px) = decode_plane(root, m, level, z)?;
+            let zs: Vec<u32> = (0..nz).collect();
+            each_plane(root, m, level, &zs, |_, (w, _, px)| {
                 out.extend_from_slice(&px[(row * w) as usize..((row + 1) * w) as usize]);
-            }
+                Ok(())
+            })?;
             Ok((nx, nz, out))
         }
         _ => {
             let col = index.min(nx.saturating_sub(1));
             let mut out = Vec::with_capacity((nz * ny) as usize);
-            for z in 0..nz {
-                let (w, h, px) = decode_plane(root, m, level, z)?;
+            let zs: Vec<u32> = (0..nz).collect();
+            each_plane(root, m, level, &zs, |_, (w, h, px)| {
                 for y in 0..h {
                     out.push(px[(y * w + col) as usize]);
                 }
-            }
+                Ok(())
+            })?;
             Ok((ny, nz, out))
         }
     }
@@ -2012,12 +2313,11 @@ pub fn thumb(
         let f = 2f64.powi(level as i32);
         let shift = shear(m).map(|(a, b)| (a / (dx * f), b / (dy * f)));
         let mid = (nz - 1) as f64 / 2.0;
-        for z in &picks {
-            let (w, h, px) = decode_plane(root, m, level, *z)?;
+        each_plane(root, m, level, &picks, |z, (w, h, px)| {
             let at_row = if in_band(row) { 0 } else { 1 };
             match shift {
                 Some((sx, sy)) => {
-                    let k = *z as f64 - mid;
+                    let k = z as f64 - mid;
                     across_rows.extend((0..nx).map(|t| {
                         grey(sample(&px, w, h, t as f64 - k * sx, row as f64 - k * sy)) * at_row
                     }));
@@ -2044,7 +2344,8 @@ pub fn thumb(
                     }));
                 }
             }
-        }
+            Ok(())
+        })?;
         // the stack's planes run along its normal; across an axial stack
         // whose normal points to the head, the first plane is the lowest
         let up = normal(&m.orientation)[2] > 0.5;
@@ -2133,6 +2434,90 @@ pub fn built(working: &Path) -> BTreeMap<i64, Manifest> {
     out
 }
 
+/// What packing one pyramid did (E6): levels converted from a file per
+/// tile, levels that were packed already, and the tile files removed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Repacked {
+    pub levels_packed: u32,
+    pub levels_already: u32,
+    pub files_removed: u64,
+}
+
+/// Pack a pyramid built in the layout before E6, level by level: each
+/// level's tile files are read, written as one packed file (a part file
+/// renamed into place), read back and compared, and only when every level
+/// is packed are the tile files removed. A level packed already is left
+/// as it is, so packing again does nothing, and a pack stopped half way
+/// goes on where it stopped; the doors read a pyramid in either layout,
+/// and a level at a time, throughout. The manifest is not touched.
+pub fn repack(root: &Path) -> Result<Repacked, String> {
+    let m = manifest(root)?.ok_or("the folder holds no pyramid (no manifest)")?;
+    crate::tilepack::remove_parts(root);
+    let mut out = Repacked::default();
+    for level in 0..m.level_shapes.len() as u32 {
+        let lv = &m.level_shapes[level as usize];
+        let has_loose = root.join(level.to_string()).is_dir();
+        match packed_level(root, &m, level) {
+            Ok(Some(_)) => {
+                out.levels_already += 1;
+                continue;
+            }
+            Ok(None) => {}
+            // a packed file that is not right is written again from the
+            // tile files where they are still there
+            Err(why) if !has_loose => {
+                return Err(format!(
+                    "level {level}: {why}; no tile files are left to pack it from, so the pyramid is built again with pyramid build --force"
+                ));
+            }
+            Err(_) => {}
+        }
+        let zs: Vec<u32> = (0..lv.shape[0]).collect();
+        let mut paths = Vec::new();
+        for &z in &zs {
+            paths.extend(plane_tiles(root, &m, level, z)?);
+        }
+        let tiles = read_files_at_once(&paths).map_err(|why| format!("level {level}: {why}"))?;
+        let refs: Vec<&[u8]> = tiles.iter().map(Vec::as_slice).collect();
+        let grid = [lv.shape[0], lv.tiles[0], lv.tiles[1]];
+        crate::tilepack::write_level(root, level, grid, &refs)?;
+        let back = crate::tilepack::level(root, level)
+            .map_err(|e| e.to_string())?
+            .ok_or("the packed level is not there after it was written")?
+            .read_all()
+            .map_err(|e| e.to_string())?;
+        if back != tiles {
+            let _ = std::fs::remove_file(crate::tilepack::level_path(root, level));
+            return Err(format!(
+                "level {level}: the packed file did not read back as the tiles"
+            ));
+        }
+        out.levels_packed += 1;
+    }
+    for d in loose_levels(root) {
+        let files = walk_count(&d);
+        std::fs::remove_dir_all(&d).map_err(|e| format!("the tile files were not removed: {e}"))?;
+        out.files_removed += files;
+    }
+    Ok(out)
+}
+
+fn walk_count(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                walk_count(&e.path())
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 /// What a build over many stacks did (record 45 E1).
 #[derive(Debug, Default)]
 pub struct Many {
@@ -2202,7 +2587,8 @@ pub fn reason_of(why: &str, reading: bool) -> &'static str {
 
 /// Build the pyramids of `stacks` under a working place, one stack at a
 /// time, each with `workers` planes at once; a stack that has one is
-/// skipped, a stack that fails is counted with why and the rest go on.
+/// skipped, a stack that fails is counted with why and the rest go on;
+/// with `force` a stack that has one is built again (record 55 H2).
 /// `go_on` is asked after each stack with the counts so far, and a false
 /// stops the build there (a cancel).
 pub fn build_many(
@@ -2211,6 +2597,7 @@ pub fn build_many(
     stacks: &[i64],
     workers: usize,
     pack_version: Option<String>,
+    force: bool,
     go_on: &mut dyn FnMut(&mut Store, &Many) -> bool,
 ) -> Many {
     let mut out = Many::default();
@@ -2220,7 +2607,7 @@ pub fn build_many(
             continue;
         }
         let root = dir(working, stack);
-        if matches!(manifest(&root), Ok(Some(_))) {
+        if !force && matches!(manifest(&root), Ok(Some(_))) {
             out.skipped.push(stack);
         } else {
             match read_volume(store, stack)
@@ -2282,15 +2669,17 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             "--stack",
             "--select",
             "--handle",
+            "--classified",
             "--place",
             "--workers",
             "--pack",
+            "--force",
         ],
         Some("list") => &["--place"],
         _ => {
             return Err(Reply::error(
                 400,
-                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID) or pyramid list",
+                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID | --classified JOB) [--force] or pyramid list",
             ));
         }
     };
@@ -2299,7 +2688,8 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     let mut sources = 0;
     let mut select = false;
     while let Some(arg) = it.next() {
-        if arg == "--json" && verb == Some("list") {
+        if (arg == "--json" && verb == Some("list")) || (arg == "--force" && verb == Some("build"))
+        {
             out.push(arg);
             continue;
         }
@@ -2316,7 +2706,10 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
         let value = it
             .next()
             .ok_or_else(|| Reply::error(400, format!("pyramid {arg} takes a value")))?;
-        if matches!(arg.as_str(), "--stack" | "--select" | "--handle") {
+        if matches!(
+            arg.as_str(),
+            "--stack" | "--select" | "--handle" | "--classified"
+        ) {
             sources += 1;
         }
         select |= arg == "--select";
@@ -2326,7 +2719,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     if verb == Some("build") && sources != 1 {
         return Err(Reply::error(
             400,
-            "pyramid build names one of --stack, --select or --handle",
+            "pyramid build names one of --stack, --select, --handle or --classified",
         ));
     }
     if select && let Some(d) = pack_dir {
@@ -2380,7 +2773,7 @@ static OPENED: std::sync::LazyLock<std::sync::Mutex<Opened>> =
 
 /// One audit row per stack opened by a person, not per tile: the first
 /// request in the window writes the row, the rest in the window do not.
-fn note_open(
+pub(crate) fn note_open(
     registry: &mut nils_registry::Registry,
     caller: &Caller,
     stack: i64,
@@ -2692,7 +3085,7 @@ fn render_cached(
 static WORKING: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Place)>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-fn working_place_cached(store: &mut Store) -> Result<Place, String> {
+pub(crate) fn working_place_cached(store: &mut Store) -> Result<Place, String> {
     if let Ok(w) = WORKING.lock()
         && let Some((at, p)) = w.as_ref()
         && at.elapsed() < std::time::Duration::from_secs(1)
@@ -2704,6 +3097,202 @@ fn working_place_cached(store: &mut Store) -> Result<Place, String> {
         *w = Some((std::time::Instant::now(), p.clone()));
     }
     Ok(p)
+}
+
+/// How long a reader waits before it asks again for a picture being built,
+/// in whole seconds for `Retry-After`; `retry_after_ms` says it finer.
+pub const RETRY_AFTER_SECS: u64 = 1;
+
+/// How long the manifest door holds a request for a pyramid being built:
+/// the reader's answer comes as the build ends, not at its next poll.
+pub const MANIFEST_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// When a reader asks again for a build that began `age` ago: soon at
+/// first, less often as it goes on (250 milliseconds, then 500, then a
+/// second).
+pub fn retry_after_ms(age: std::time::Duration) -> u64 {
+    match age.as_millis() {
+        0..2000 => 250,
+        2000..6000 => 500,
+        _ => 1000,
+    }
+}
+
+/// The build queued for a stack by the door, while it is not over, and
+/// when the door first saw it, so many tiles asked at once queue one job
+/// and read one row (record 55 H2).
+static BUILDING: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, (i64, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+/// Whether a job builds the one stack's pyramid: `pyramid build --stack N`.
+fn builds_stack(job: &nils_registry::job::Job, stack: i64) -> bool {
+    if job.kind != "pyramid" {
+        return false;
+    }
+    let Some(words) = job.queued() else {
+        return false;
+    };
+    let id = stack.to_string();
+    words.len() >= 2
+        && words[0] == "pyramid"
+        && words[1] == "build"
+        && words.windows(2).any(|w| w[0] == "--stack" && w[1] == id)
+}
+
+/// Whether the registry holds a stack of that id.
+fn stack_exists(store: &mut Store, stack: i64) -> Result<bool, Reply> {
+    let sql = format!(
+        "SELECT 1 FROM {} WHERE id = {}",
+        store.qualified("stack"),
+        store.dialect().param(1, Type::Int)
+    );
+    store
+        .query_opt(&sql, &[Param::Int(stack)])
+        .map(|r| r.is_some())
+        .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// The reason class a failed single-stack build gave, as the verb printed
+/// it: `stack N: its pyramid was not built (CLASS)`.
+fn failed_class(error: Option<&str>) -> Option<String> {
+    let e = error?;
+    let at = e.find("was not built (")? + "was not built (".len();
+    let class = &e[at..at + e[at..].find(')')?];
+    class
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '_')
+        .then(|| class.to_string())
+}
+
+/// Wait up to `limit` for a pyramid's manifest, where a place among the
+/// held requests is free; none when there is none, or the time ran out.
+fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<Manifest>, Reply> {
+    let Some(_slot) = crate::preview::hold() else {
+        return Ok(None);
+    };
+    let until = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        if let Some(m) = manifest_cached(root).map_err(|e| Reply::error(500, e))? {
+            return Ok(Some(m));
+        }
+    }
+    Ok(None)
+}
+
+/// Record 55 H2, round 3: a stack with no pyramid has its build queued when
+/// its picture is first asked for, and the door answers 202 with the job
+/// and when to ask again, never 404. One build is queued per stack: a build
+/// queued or running already is answered, and a build that failed is said
+/// (422) and not queued again by the door, so a stack that cannot be read
+/// is not built over and over; `pyramid build --stack N` at the jobs door
+/// queues it again.
+fn on_demand(
+    store: &mut Store,
+    caller: &Caller,
+    stack: i64,
+    working: &Place,
+) -> Result<Reply, Reply> {
+    let mut building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let jerr = |e: nils_registry::job::Error| Reply::error(500, e.to_string());
+    // the build this process queued, or the newest one any process did
+    let mut job = match building.get(&stack) {
+        Some(&(id, _)) => nils_registry::job::show(store, id).map_err(jerr)?,
+        None => None,
+    };
+    let since = building
+        .get(&stack)
+        .map_or_else(std::time::Instant::now, |(_, at)| *at);
+    if job.is_none() {
+        job = nils_registry::job::list(store, true, 500)
+            .map_err(jerr)?
+            .into_iter()
+            .find(|j| builds_stack(j, stack));
+    }
+    let answer = |job: &nils_registry::job::Job| {
+        let ms = retry_after_ms(since.elapsed());
+        let mut r = Reply::accepted(serde_json::json!({
+            "stack": stack,
+            "building": true,
+            "job": job.id,
+            "state": job.state.name(),
+            "progress": job.progress,
+            "place": working.name,
+            "retry_after": RETRY_AFTER_SECS,
+            "retry_after_ms": ms,
+            "message": format!(
+                "the picture of stack {stack} is being built; ask again in {ms} milliseconds"
+            ),
+        }));
+        r.headers
+            .push(("Retry-After".to_string(), RETRY_AFTER_SECS.to_string()));
+        r
+    };
+    use nils_registry::job::State;
+    match &job {
+        Some(j) if matches!(j.state, State::Queued | State::Running | State::Cancelling) => {
+            building.insert(stack, (j.id, since));
+            return Ok(answer(j));
+        }
+        Some(j) if j.state == State::Failed => {
+            building.remove(&stack);
+            let reason = failed_class(j.error.as_deref());
+            let mut r = Reply::error(
+                422,
+                format!(
+                    "the picture of stack {stack} could not be built ({}); job {} says why, and pyramid build --stack {stack} at the jobs door tries again",
+                    reason.as_deref().unwrap_or("build_failed"),
+                    j.id
+                ),
+            );
+            r.body["stack"] = serde_json::json!(stack);
+            r.body["building"] = serde_json::json!(false);
+            r.body["job"] = serde_json::json!(j.id);
+            r.body["reason"] = serde_json::json!(reason);
+            return Err(r);
+        }
+        // done, or cancelled: built since, or to be built again
+        _ => {}
+    }
+    building.remove(&stack);
+    // a done build whose manifest is there now was read a moment after the
+    // door looked: the reader asks again and finds it
+    if let Some(j) = &job
+        && j.state == State::Done
+        && dir(Path::new(&working.path), stack)
+            .join("manifest.json")
+            .exists()
+    {
+        return Ok(answer(j));
+    }
+    if !stack_exists(store, stack)? {
+        return Err(Reply::error(404, format!("no stack {stack}")));
+    }
+    let command: Vec<String> = ["pyramid", "build", "--stack"]
+        .iter()
+        .map(|w| w.to_string())
+        .chain([
+            stack.to_string(),
+            "--place".to_string(),
+            working.name.clone(),
+        ])
+        .collect();
+    let id = nils_registry::job::enqueue_with(
+        store,
+        &command,
+        Some(&format!("stack {stack}")),
+        Some(caller.principal.as_str()),
+        crate::serve::queued_by(caller),
+    )
+    .map_err(jerr)?;
+    // record 55 H2: the pictures lane's worker starts it now, not at its
+    // next look
+    crate::worker::wake();
+    let j = nils_registry::job::show(store, id)
+        .map_err(jerr)?
+        .ok_or_else(|| Reply::error(500, format!("job {id} was queued and is not there")))?;
+    building.insert(stack, (id, std::time::Instant::now()));
+    Ok(answer(&j))
 }
 
 /// The gated instance door (Wave 5 §12.7): `manifest`, `tiles/{level}/{z}`,
@@ -2719,17 +3308,6 @@ pub fn door(
     query: &std::collections::HashMap<String, String>,
 ) -> Result<Reply, Reply> {
     let working = working_place_cached(registry.store()).map_err(|m| Reply::error(409, m))?;
-    let root = dir(Path::new(&working.path), stack);
-    let m = manifest_cached(&root)
-        .map_err(|e| Reply::error(500, e))?
-        .ok_or_else(|| {
-            Reply::error(
-                404,
-                format!(
-                    "no pyramid for stack {stack}; queue pyramid build --stack {stack} as a job"
-                ),
-            )
-        })?;
     // the disclosure class: pixels are quasi-identifying, so detail quasi
     // opens them; with burned-in annotation they are identifying until the
     // band is held, so detail sensitive opens the tiles and the slab
@@ -2739,6 +3317,36 @@ pub fn door(
             format!("the pixels of stack {stack} are quasi-identifying; detail quasi opens them"),
         ));
     }
+    let root = dir(Path::new(&working.path), stack);
+    let m = match manifest_cached(&root).map_err(|e| Reply::error(500, e))? {
+        Some(m) => m,
+        None => {
+            // record 55 H2, round 3: a picture is built when it is first
+            // asked for, so no desk flow sends a person to the command line
+            if !matches!(
+                rest.first().copied(),
+                Some("manifest" | "tiles" | "slab" | "render" | "thumb")
+            ) {
+                return Err(Reply::error(
+                    404,
+                    format!(
+                        "GET /api/instances/{stack}/{} is not a door",
+                        rest.join("/")
+                    ),
+                ));
+            }
+            let queued = on_demand(registry.store(), caller, stack, &working)?;
+            // the manifest is held while the build runs, so the reader has
+            // it as the build ends; the tiles are not, and a few at once
+            if rest != ["manifest"] || queued.status != 202 {
+                return Ok(queued);
+            }
+            match hold_for_manifest(&root, MANIFEST_HOLD)? {
+                Some(m) => m,
+                None => return Ok(queued),
+            }
+        }
+    };
     let held = m.annotation.burned_in && caller.access.detail < Detail::Sensitive;
     let level_of = |s: &str| -> Result<u32, Reply> {
         let l: u32 = s
@@ -2909,6 +3517,17 @@ pub fn door(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_picture_drawn_small_halves_its_decode_at_most_three_times() {
+        assert_eq!(reduction(640, 256), 1);
+        assert_eq!(reduction(1024, 256), 2);
+        assert_eq!(reduction(1120, 256), 2);
+        assert_eq!(reduction(4096, 256), 3);
+        assert_eq!(reduction(512, 384), 0);
+        assert_eq!(reduction(256, 256), 0);
+        assert_eq!(reduction(640, 288), 1);
+    }
+
     fn key(index: u32, held: bool) -> RenderKey {
         RenderKey {
             root: PathBuf::from("/pyramids/7"),
@@ -3025,7 +3644,7 @@ mod tests {
         };
         let dir = nils_dicom::synth::TempDir::new("pyramid-slab-at-once");
         let root = dir.path().join("pyramid");
-        let m = build(&vol, 3, &root, 2, None).unwrap();
+        let m = build_as(&vol, 3, &root, 2, None, Layout::Loose).unwrap();
         assert_eq!(m.level_shapes[0].tiles, [2, 3]);
         let one_by_one = |level: u32, z0: u32, z1: u32| {
             let planes: Vec<Vec<u8>> = (z0..z1)
@@ -3077,7 +3696,7 @@ mod tests {
         };
         let dir = nils_dicom::synth::TempDir::new("pyramid-tile-turns");
         let root = dir.path().join("pyramid");
-        let m = build(&vol, 4, &root, 2, None).unwrap();
+        let m = build_as(&vol, 4, &root, 2, None, Layout::Loose).unwrap();
         let want = slab_container(&root, &m, 0, 0, nz).unwrap();
         let (before, _) = TILE_READS.total();
         std::thread::scope(|s| {
@@ -3199,6 +3818,69 @@ mod tests {
         }
         files.reverse();
         files
+    }
+
+    /// A cine's frames at one place, as one vendor writes them: frame `n`
+    /// numbered `n` in EchoNumbers and InstanceNumber, every pixel `100 * n`,
+    /// and where `trigger` is given, a trigger time of its own. Handed over
+    /// out of their order.
+    fn cine_frames(dir: &nils_dicom::synth::TempDir, trigger: &[f64]) -> Vec<PathBuf> {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields};
+        let (ny, nx) = (8u32, 8u32);
+        let mut files = Vec::new();
+        for n in [3u16, 1, 4, 2] {
+            let sop = format!("1.2.3.12.{n}");
+            let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+            let mut e = synth::minimal_mr("1.2.3", "1.2.3.12", &sop);
+            e.push(synth::text(tags::ECHO_NUMBERS, VR::IS, &n.to_string()));
+            e.push(synth::text(tags::INSTANCE_NUMBER, VR::IS, &n.to_string()));
+            if let Some(t) = trigger.get(usize::from(n) - 1) {
+                e.push(synth::text(tags::TRIGGER_TIME, VR::DS, &t.to_string()));
+            }
+            e.push(synth::text(
+                tags::IMAGE_POSITION_PATIENT,
+                VR::DS,
+                "-90\\-76.8\\-32.8",
+            ));
+            e.push(synth::text(
+                tags::IMAGE_ORIENTATION_PATIENT,
+                VR::DS,
+                "0\\1\\0\\0\\0\\-1",
+            ));
+            e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"));
+            e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+            e.push(us(tags::ROWS, ny as u16));
+            e.push(us(tags::COLUMNS, nx as u16));
+            e.push(us(tags::BITS_ALLOCATED, 16));
+            e.push(us(tags::BITS_STORED, 16));
+            e.push(us(tags::HIGH_BIT, 15));
+            e.push(us(tags::PIXEL_REPRESENTATION, 0));
+            let px: Vec<u8> = (0..ny * nx).flat_map(|_| (100 * n).to_le_bytes()).collect();
+            e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, px));
+            files.push(dir.file(&sop, &synth::part10(&MetaFields::mr(&sop), &e, true)));
+        }
+        files
+    }
+
+    /// The frame each plane of a volume of [`cine_frames`] holds.
+    fn frames_of(vol: &Volume) -> Vec<u16> {
+        (0..vol.shape[0] as usize)
+            .map(|z| vol.plane(z)[0] / 100)
+            .collect()
+    }
+
+    #[test]
+    fn a_cine_s_frames_at_one_place_are_in_their_order() {
+        // no trigger time: the echo number the vendor counts the frames in
+        let dir = nils_dicom::synth::TempDir::new("pyramid-cine");
+        let vol = read_files(&cine_frames(&dir, &[])).unwrap();
+        assert_eq!(frames_of(&vol), [1, 2, 3, 4]);
+        assert_eq!(vol.order, ORDER_POSITION);
+        // a trigger time, where the files write one, goes first
+        let dir = nils_dicom::synth::TempDir::new("pyramid-cine-trigger");
+        let vol = read_files(&cine_frames(&dir, &[300.5, 200.0, 100.25, 0.0])).unwrap();
+        assert_eq!(frames_of(&vol), [4, 3, 2, 1]);
     }
 
     /// The row of each plane of a cut where it is brightest.
@@ -3964,5 +4646,271 @@ mod tests {
             j["failures_by_reason"],
             serde_json::json!({"compressed": 10, "no_files": 20})
         );
+    }
+
+    fn packing_volume(nz: u32, ny: u32, nx: u32) -> Volume {
+        Volume {
+            shape: [nz, ny, nx],
+            spacing: [2.0, 0.8, 0.8],
+            intercept: 0,
+            rescale: (1.0, 0.0),
+            rescale_varies: false,
+            burned_in: None,
+            data: (0..nz * ny * nx)
+                .map(|i| ((i % 4093) ^ (i / 977)) as u16)
+                .collect(),
+            geometry: None,
+            lossy: false,
+            syntaxes: Vec::new(),
+            order: ORDER_POSITION,
+            multiframe_files: 0,
+        }
+    }
+
+    /// Everything the doors answer from a pyramid, at every level: slabs,
+    /// single planes, renders along the three axes and the thumbs.
+    fn every_answer(root: &Path, m: &Manifest) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for lv in &m.level_shapes {
+            let [nz, ny, nx] = lv.shape;
+            out.push(slab_container(root, m, lv.level, 0, nz).unwrap());
+            out.push(slab_container(root, m, lv.level, nz / 3, nz / 3 + 2).unwrap());
+            out.push(plane_container(root, m, lv.level, nz - 1).unwrap());
+            for (axis, index) in [('z', nz / 2), ('y', ny / 2), ('x', nx / 3)] {
+                let (w, h, px) = plane_along(root, m, lv.level, axis, index).unwrap();
+                out.push([w.to_le_bytes(), h.to_le_bytes()].concat());
+                out.push(px.iter().flat_map(|p| p.to_le_bytes()).collect());
+            }
+        }
+        for planes in [1, 3] {
+            out.push(thumb(root, m, THUMB_SIZE, planes, false).unwrap());
+        }
+        out
+    }
+
+    fn tile_files(root: &Path) -> usize {
+        loose_levels(root)
+            .iter()
+            .map(|d| walk_count(d) as usize)
+            .sum()
+    }
+
+    /// E6: a pyramid in one file per level answers every door with the
+    /// bytes the layout before answers, and a new build writes no tile file.
+    #[test]
+    fn a_packed_pyramid_answers_as_a_pyramid_of_tile_files() {
+        let vol = packing_volume(7, 300, 520);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-packed-same");
+        let (loose, packed) = (dir.path().join("loose"), dir.path().join("packed"));
+        let ml = build_as(&vol, 5, &loose, 2, None, Layout::Loose).unwrap();
+        let mp = build(&vol, 5, &packed, 3, None).unwrap();
+        assert_eq!(ml.level_shapes.len(), 4);
+        assert_eq!(ml.bytes_per_level, mp.bytes_per_level);
+        assert_eq!(tile_files(&loose), 7 * 6 + 7 * 2 + 7 + 7);
+        assert_eq!(tile_files(&packed), 0);
+        for level in 0..4 {
+            assert!(crate::tilepack::level_path(&packed, level).is_file());
+            assert!(!crate::tilepack::level_path(&loose, level).exists());
+        }
+        assert_eq!(every_answer(&loose, &ml), every_answer(&packed, &mp));
+    }
+
+    /// The manifest says a pyramid is built, and the doors read it while a
+    /// build runs: a pyramid built again and again is read whole every
+    /// time, never empty or half written, and no part file is left.
+    #[test]
+    fn a_manifest_is_read_whole_while_its_pyramid_is_built_again() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let vol = packing_volume(2, 40, 32);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-manifest-whole");
+        let root = dir.path().join("p");
+        build(&vol, 3, &root, 1, None).unwrap();
+        let (reads, done) = (AtomicU64::new(0), AtomicBool::new(false));
+        let (whole, torn) = std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                let (mut whole, mut torn) = (0u64, Vec::new());
+                loop {
+                    match manifest(&root) {
+                        Ok(Some(_)) => whole += 1,
+                        Ok(None) => torn.push("no manifest".to_string()),
+                        Err(e) => torn.push(e),
+                    }
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    if done.load(Ordering::Relaxed) {
+                        break (whole, torn);
+                    }
+                }
+            });
+            // the builds start once the reader reads
+            while reads.load(Ordering::Relaxed) == 0 {
+                std::thread::yield_now();
+            }
+            for _ in 0..8 {
+                build(&vol, 3, &root, 1, None).unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            reader.join().unwrap()
+        });
+        assert!(
+            torn.is_empty(),
+            "{} of {} reads: {:?}",
+            torn.len(),
+            whole + torn.len() as u64,
+            &torn[..torn.len().min(3)]
+        );
+        assert!(whole > 0);
+        let parts: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part."))
+            .collect();
+        assert!(parts.is_empty(), "{parts:?}");
+    }
+
+    /// E6: `pyramid pack` turns a pyramid of tile files into one file per
+    /// level with the same answers, removes the tile files, leaves the
+    /// manifest as it was, and packing again changes nothing.
+    #[test]
+    fn packing_a_pyramid_keeps_its_answers_and_packing_again_does_nothing() {
+        let vol = packing_volume(6, 260, 300);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-repack");
+        let root = dir.path().join("p");
+        let m = build_as(&vol, 6, &root, 2, None, Layout::Loose).unwrap();
+        let want = every_answer(&root, &m);
+        let manifest_before = std::fs::read(root.join("manifest.json")).unwrap();
+        let stamp_before = std::fs::metadata(root.join("manifest.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let files = tile_files(&root) as u64;
+        let r = repack(&root).unwrap();
+        assert_eq!(
+            (r.levels_packed, r.levels_already, r.files_removed),
+            (4, 0, files)
+        );
+        assert_eq!(tile_files(&root), 0);
+        assert!(loose_levels(&root).is_empty());
+        assert_eq!(every_answer(&root, &m), want);
+        assert_eq!(
+            std::fs::read(root.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("manifest.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            stamp_before
+        );
+        let packed: Vec<Vec<u8>> = (0..4)
+            .map(|l| std::fs::read(crate::tilepack::level_path(&root, l)).unwrap())
+            .collect();
+        let again = repack(&root).unwrap();
+        assert_eq!(
+            (
+                again.levels_packed,
+                again.levels_already,
+                again.files_removed
+            ),
+            (0, 4, 0)
+        );
+        for l in 0..4 {
+            assert_eq!(
+                std::fs::read(crate::tilepack::level_path(&root, l)).unwrap(),
+                packed[l as usize]
+            );
+        }
+        // a folder with no pyramid is refused
+        assert!(repack(&dir.path().join("none")).is_err());
+    }
+
+    /// E6: a pack stopped half way (one level packed, a part file left by
+    /// a write cut short) still reads, each level from where it is, and the
+    /// next pack finishes the rest and clears the part.
+    #[test]
+    fn a_pack_stopped_half_way_reads_and_goes_on() {
+        let vol = packing_volume(5, 300, 280);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-repack-resume");
+        let root = dir.path().join("p");
+        let m = build_as(&vol, 7, &root, 2, None, Layout::Loose).unwrap();
+        let want = every_answer(&root, &m);
+        // level 1 packed by an earlier run, its tile files not yet removed
+        let lv = &m.level_shapes[1];
+        let mut paths = Vec::new();
+        for z in 0..lv.shape[0] {
+            paths.extend(plane_tiles(&root, &m, 1, z).unwrap());
+        }
+        let tiles: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        let refs: Vec<&[u8]> = tiles.iter().map(Vec::as_slice).collect();
+        crate::tilepack::write_level(&root, 1, [lv.shape[0], lv.tiles[0], lv.tiles[1]], &refs)
+            .unwrap();
+        // and level 2's write stopped part way
+        std::fs::write(root.join("2.tiles.part.999.0"), b"NILSLVL1 half").unwrap();
+        // level 1 is read from its packed file: its tile files are not needed
+        std::fs::remove_dir_all(root.join("1").join("0")).unwrap();
+        assert_eq!(every_answer(&root, &m), want);
+        let r = repack(&root).unwrap();
+        assert_eq!((r.levels_packed, r.levels_already), (3, 1));
+        assert!(!root.join("2.tiles.part.999.0").exists());
+        assert_eq!(tile_files(&root), 0);
+        assert_eq!(every_answer(&root, &m), want);
+    }
+
+    /// E6: a packed level that is cut short is never read as a picture; it
+    /// is packed again from the tile files where they are still there, and
+    /// refused with what to do where they are not.
+    #[test]
+    fn a_broken_packed_level_is_refused_and_packed_again_from_its_tiles() {
+        let vol = packing_volume(4, 270, 270);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-repack-broken");
+        let root = dir.path().join("p");
+        let m = build_as(&vol, 8, &root, 2, None, Layout::Loose).unwrap();
+        let want = every_answer(&root, &m);
+        std::fs::write(crate::tilepack::level_path(&root, 0), b"NILSLVL1").unwrap();
+        assert!(
+            slab_container(&root, &m, 0, 0, 4)
+                .unwrap_err()
+                .starts_with(UNREADABLE)
+        );
+        let r = repack(&root).unwrap();
+        assert_eq!(r.levels_packed, 4);
+        assert_eq!(every_answer(&root, &m), want);
+        // cut short with no tile files left: refused, and still not misread
+        let path = crate::tilepack::level_path(&root, 3);
+        let whole = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &whole[..whole.len() - 1]).unwrap();
+        let why = repack(&root).unwrap_err();
+        assert!(why.contains("--force"), "{why}");
+        assert!(plane_container(&root, &m, 3, 0).is_err());
+        // a packed file whose grid is not the manifest's is refused too
+        let lv = &m.level_shapes[2];
+        let n = (lv.shape[0] * lv.tiles[0] * lv.tiles[1]) as usize;
+        let tiles = vec![b"x".as_slice(); n + 1];
+        crate::tilepack::write_level(
+            &root,
+            2,
+            [lv.shape[0] + 1, lv.tiles[0], lv.tiles[1]],
+            &tiles,
+        )
+        .unwrap();
+        assert!(
+            plane_container(&root, &m, 2, 0)
+                .unwrap_err()
+                .contains("grid")
+        );
+    }
+
+    /// E6: a pyramid built again over the layout before keeps no tile file.
+    #[test]
+    fn building_again_over_tile_files_packs_and_removes_them() {
+        let vol = packing_volume(3, 256, 256);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-rebuild-packs");
+        let root = dir.path().join("p");
+        let ml = build_as(&vol, 9, &root, 2, None, Layout::Loose).unwrap();
+        let want = every_answer(&root, &ml);
+        assert!(tile_files(&root) > 0);
+        let mp = build(&vol, 9, &root, 2, None).unwrap();
+        assert_eq!(tile_files(&root), 0);
+        assert_eq!(every_answer(&root, &mp), want);
     }
 }

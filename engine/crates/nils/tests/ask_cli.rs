@@ -90,9 +90,19 @@ struct Server {
     url: String,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     fn start(home: &TempDir, requests: usize) -> Server {
-        let mut child = nils()
+        let child = nils()
             .arg("--registry")
             .arg(home.path())
             .args([
@@ -113,13 +123,16 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server {
+            child,
+            url: String::new(),
+        };
+        let stdout = held.child.stdout.take().unwrap();
         let first = BufReader::new(stdout).lines().next().unwrap().unwrap();
         let addr = first.split_whitespace().nth(2).unwrap();
-        Server {
-            child,
-            url: format!("http://{addr}"),
-        }
+        held.url = format!("http://{addr}");
+        held
     }
 
     /// The engine goes when the test is done with it: `--requests` bounds
@@ -1086,4 +1099,37 @@ fn selections_that_bind_different_ids_have_different_hashes() {
     assert_eq!(hashes[0], hashes[2], "the same ids, the same selection");
     // the question itself is one, whatever its parameter is bound to
     assert_eq!(questions[0], questions[1]);
+}
+
+/// Record 55 K7 (spec §7.1, T13): the command line holds every class by
+/// design, a person at the keyboard of the registry: a quasi identifying
+/// column comes back raw, and each run writes an audit row of what it read.
+#[test]
+fn the_keyboard_reads_every_class_and_audits_each_run() {
+    let home = synthetic();
+    let p = packs();
+    let p = p.to_str().unwrap();
+    let doc = document(
+        &home,
+        "k7.ask.yml",
+        "ast_version: 1\n\
+         name: stations\n\
+         sets:\n  s: {grain: stack}\n\
+         out: {set: s, level: record, columns: [[field, {}, station_name], [field, {}, text_series_description]], limit: 5}\n",
+    );
+    let rows = answer(&home, &doc, p);
+    assert!(!rows.is_empty());
+    // the station name raw, not its shape
+    assert!(
+        rows.iter().any(|r| r.iter().any(|c| c == "SYN1")),
+        "{rows:?}"
+    );
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let audited = store
+        .query(
+            "SELECT COUNT(*) FROM handle_read_audit WHERE purpose = 'nils ask run at the keyboard'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(audited[0].int(0).unwrap(), 1);
 }

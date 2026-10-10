@@ -414,6 +414,30 @@ documentation.
 
 **Tests:** T12, T17, T18.
 
+### 8.4 SyMRI and the DICOM export (C4, ruling of 2026-10-09)
+
+SyMRI is anatomical and stays together, as the previous prototype kept it
+(`anat/SyMRI/`): its maps and synthetic contrasts are NIfTI under
+`sub-*/ses-*/anat/SyMRI/` with their BIDS names, and its multi-dynamic
+multi-echo or QALAS acquisition, a working scan that is not an image to convert,
+is kept as DICOM. The pack names the folder and what goes in it
+(`packs/mri/bids.yml`, `folders`: provenance SyMRI, technique MDME or QALAS), and
+`.bidsignore` lists it. `--synthetic folder` is the default; `anat` and
+`derivatives` keep their earlier meaning.
+
+A BIDS release also writes a DICOM export inside the BIDS folder, as the previous
+prototype's DICOM tree did: each converted stack's scrubbed slices under
+`sourcedata/dicom/`, at the path its NIfTI has, in a folder named after the NIfTI
+file without its extension, one file per slice. Every DICOM a release writes
+is under `sourcedata/dicom/`: the scouts and working scans that went to
+`sourcedata/sub-*/ses-*/` before are now at
+`sourcedata/dicom/sub-*/ses-*/<datatype or localizer>/<name>/`, so that
+`sourcedata/` can hold other kinds of source beside the DICOM later.
+`--dicom all|folders|none`;
+`all` is the default because the prototype exported every stack. The export is
+part of the stack's state (an `@dicom` entry among its extensions), so a re-run
+moves it with a rename, drops it with the stack, and a handover packs it.
+
 ## 9. Rules that ship on their own (B5, C2)
 
 ### 9.1 Where it stands

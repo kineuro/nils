@@ -84,7 +84,7 @@ fn registry_in(
         backend,
         dsn,
         schema: (backend == Backend::Postgres).then(|| schema.to_string()),
-        scheme: Scheme::DEFAULT,
+        scheme: Scheme::Blake2b32,
         key: "k".to_string(),
         display_length: 12,
         session_scheme: None,
@@ -145,7 +145,7 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         key: KEY,
         pack: pack(),
         layout: run::Layout::Descriptive,
-        naming: nils_release::name::Naming::Informative,
+        naming: nils_release::name::Naming::Full,
         places: nils_release::bids::place::Options::default(),
         converter: None,
         compress: true,
@@ -337,7 +337,10 @@ fn tree_of(prefix: &str, patient: &str, day: &str) -> TempDir {
 }
 
 /// A source place on a folder, with the leaving policy it declares
-/// (record 26 section 13): the folder itself is its pseudonymised tree.
+/// (record 26 section 13): the folder itself is its pseudonymised tree,
+/// said in its dataset document, since a source place no longer defaults
+/// to one (Wave 7a reads the trees from the structure, and this library
+/// level test writes the document the structure would give).
 fn dataset(reg: &mut Registry, name: &str, path: &Path, on_release: serde_json::Value) -> i64 {
     nils_registry::place::add(
         reg.store(),
@@ -348,7 +351,10 @@ fn dataset(reg: &mut Registry, name: &str, path: &Path, on_release: serde_json::
             guarantees: serde_json::json!({}),
             probed: serde_json::json!({}),
             handling: serde_json::json!({"on_release": on_release}),
-            dataset: serde_json::Value::Null,
+            dataset: serde_json::json!({
+                "arrives": "deidentified",
+                "trees": {"originals": null, "anon": "."},
+            }),
         },
     )
     .unwrap()
@@ -2084,5 +2090,127 @@ fn the_ask_and_select_agree_on_how_many_subjects_a_selection_holds() {
             reached,
             "disowned {disowned}: an ask and a selection count one archive"
         );
+    }
+}
+
+/// The option codes, the method and the two flags of one written file.
+fn marks_of(path: &Path) -> (String, String, String, Vec<String>) {
+    let object = dicom_object::open_file(path).unwrap();
+    let text = |o: &dicom_object::InMemDicomObject, tag| {
+        o.element(tag)
+            .unwrap()
+            .value()
+            .to_str()
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let codes = object
+        .element(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+        .unwrap()
+        .items()
+        .unwrap()
+        .iter()
+        .map(|i| text(i, tags::CODE_VALUE))
+        .collect();
+    (
+        text(&object, tags::PATIENT_IDENTITY_REMOVED),
+        text(&object, tags::DEIDENTIFICATION_METHOD),
+        text(&object, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED),
+        codes,
+    )
+}
+
+/// A dataset as the pseudonymiser leaves it: the files rewritten under its
+/// own plan, so they carry its marks, 113110 among them.
+fn pseudonymised(prefix: &str, patient: &str) -> TempDir {
+    use nils_release::scrub::{self, Plan, Writer};
+    let dir = tree_of(prefix, patient, "20220115");
+    let path = dir.path().join("s/1");
+    let mut object = dicom_object::open_file(&path).unwrap();
+    let policy = Policy {
+        uids: nils_release::policy::Uids::Preserve,
+        ..Policy::default()
+    };
+    let four = [
+        categories::Category::Patient,
+        categories::Category::Trial,
+        categories::Category::Provider,
+        categories::Category::Institution,
+    ];
+    let code = format!("subj{prefix}");
+    scrub::apply(
+        &mut object,
+        &Plan {
+            writer: Writer::Pseudonymise,
+            policy: &policy,
+            categories: &four,
+            private: &[],
+            code: &code,
+            remap: None,
+            keep: &[tags::PATIENT_SEX],
+            remove: &[],
+        },
+    );
+    object.write_to_file(&path).unwrap();
+    let (_, method, _, codes) = marks_of(&path);
+    assert!(method.ends_with(" pseudonymise"), "{method}");
+    assert!(codes.contains(&"113110".to_string()), "{codes:?}");
+    dir
+}
+
+/// T7 (spec Wave 7a §6.1, record 17): a release of pseudonymised files
+/// carries the marks, and states its own options, not the pseudonymiser's:
+/// a release that remaps the UIDs drops 113110, one that keeps them says
+/// so, and the pack's allowlist adds 113111. Every category is removed, the
+/// trial category among them in the marks' own group, and the marks stay.
+#[test]
+fn a_release_keeps_the_marks_and_states_its_own_options() {
+    let a = pseudonymised("A", "subjA");
+    let home_dir = TempDir::new("marks-home");
+    let (_home, mut reg) = registry(&home_dir, &a);
+    let scheme = SessionScheme::default();
+    let method = format!("NILS {} release", env!("CARGO_PKG_VERSION"));
+    let allowlist = allowed();
+    let remapped = Policy::default();
+    let preserved = Policy {
+        uids: nils_release::policy::Uids::Preserve,
+        ..Policy::default()
+    };
+    for (name, policy, private, expected) in [
+        (
+            "remapped",
+            &remapped,
+            &[][..],
+            &["113100", "113106", "113108"][..],
+        ),
+        (
+            "preserved",
+            &preserved,
+            &[][..],
+            &["113100", "113106", "113108", "113110"][..],
+        ),
+        (
+            "private",
+            &remapped,
+            &allowlist[..],
+            &["113100", "113106", "113108", "113111"][..],
+        ),
+    ] {
+        let out = TempDir::new("marks-out");
+        let settings = run::Settings {
+            name,
+            private,
+            ..settings(out.path(), policy, &scheme)
+        };
+        let report = run::run(&mut reg, &settings).unwrap();
+        assert_eq!(report.files, 1, "{name}: {report:?}");
+        let written = files_under(out.path());
+        assert_eq!(written.len(), 1, "{name}");
+        let (removed, m, longitudinal, codes) = marks_of(&written[0]);
+        assert_eq!(removed, "YES", "{name}");
+        assert_eq!(m, method, "{name}");
+        assert_eq!(longitudinal, "UNMODIFIED", "{name}");
+        assert_eq!(codes, expected, "{name}");
     }
 }

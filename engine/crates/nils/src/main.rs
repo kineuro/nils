@@ -32,10 +32,13 @@ mod backup;
 mod batches;
 mod browse;
 mod campaigns;
+mod certainty;
 mod chain;
 mod dataset;
+mod dataset_summary;
 mod depends;
 mod derivatives;
+mod disagreements;
 mod door_client;
 mod explain;
 mod file_header;
@@ -48,16 +51,21 @@ mod login;
 mod mcp;
 mod measures;
 mod model_cli;
+mod operations;
 mod originals;
 mod packs;
 mod pair;
+mod pick_after;
 mod pipelines;
 mod places;
 mod preflight;
+mod preview;
 mod profile;
 mod pyramid;
 mod reader;
+mod rehearse;
 mod releases;
+mod scans;
 mod schedule;
 mod sealed;
 mod serve;
@@ -66,9 +74,11 @@ mod sources;
 mod starter;
 mod summary;
 mod supervise;
+mod tilepack;
 mod timeline;
 mod tui;
 mod update;
+mod viewer;
 mod worker;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
@@ -272,6 +282,11 @@ enum Command {
         #[command(subcommand)]
         command: PyramidCommand,
     },
+    /// A stack's preview: its three middle planes and every plane small, one file a stack beside the pyramids, made when it is sorted (record 55 H2)
+    Preview {
+        #[command(subcommand)]
+        command: PreviewCommand,
+    },
     /// Files made from the archive, kept in a working place and named by their digest: masks, embeddings, a pipeline's outputs (record 42)
     Derivative {
         #[command(subcommand)]
@@ -419,11 +434,12 @@ struct ReleaseArgs {
     /// which names what the standard admits and routes the rest (§9)
     #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
     layout: String,
-    /// What a name carries: what the standard's entities admit, with the rest
-    /// in acq-, or every axis the pack declares, for a tree a person reads.
-    /// The default is bids in the BIDS layout, and informative in the
-    /// descriptive one, which has no entities to carry anything (record 37)
-    #[arg(long, value_name = "bids|informative")]
+    /// How a BIDS name spells what the entities do not: full puts every slot
+    /// without an entity in acq- in v0's order (the default), minimal only 2D
+    /// or 3D, the modifiers and the technique. Every axis is in the sidecar's
+    /// NILS object either way. The descriptive layout is v0's grammar
+    /// whatever this says (record 55 C4)
+    #[arg(long, value_name = "full|minimal")]
     naming: Option<String>,
     /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
     /// 22 percent of a clinical archive is one (§9.3)
@@ -433,10 +449,18 @@ struct ReleaseArgs {
         value_name = "sourcedata|datatype|anat|drop"
     )]
     localizers: String,
-    /// Where a vendor's synthetic contrast goes. The qMRI appendix permits it
-    /// in raw anat/; a purist puts every synthetic image in derivatives/
-    #[arg(long, default_value = "anat", value_name = "anat|derivatives")]
+    /// Where a vendor's synthetic contrast goes. folder (the default, record
+    /// 55 C4): SyMRI's images, its synthetic contrasts among them, together
+    /// under anat/SyMRI/, and any other synthetic contrast in raw anat/; anat:
+    /// raw anat/, no folder; derivatives: derivatives/
+    #[arg(long, default_value = "folder", value_name = "folder|anat|derivatives")]
     synthetic: String,
+    /// Which stacks a BIDS release also writes as DICOM, under
+    /// sourcedata/dicom/ at the path of each NIfTI, in a folder named after
+    /// the file: all converted stacks (the default, as v0 did), only the
+    /// stacks in a folder of their own (SyMRI), or none (record 55 C4)
+    #[arg(long, default_value = "all", value_name = "all|folders|none")]
+    dicom: String,
     /// The DICOM to NIfTI converter, a prerequisite of a BIDS release (§9.6)
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
     dcm2niix: PathBuf,
@@ -659,18 +683,48 @@ enum SettingsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum PreviewCommand {
+    /// Make the previews of stacks already sorted: each made again only when
+    /// its files changed, so a run that stopped goes on where it was
+    Build {
+        /// One stack, by its id
+        #[arg(long, value_name = "ID", conflicts_with_all = ["dataset", "all"])]
+        stack: Option<i64>,
+        /// Every stack of a dataset, by its name
+        #[arg(long, value_name = "NAME", conflicts_with = "all")]
+        dataset: Option<String>,
+        /// Every stack of the registry; previews of stacks it no longer holds are removed
+        #[arg(long)]
+        all: bool,
+        /// The working place to write under; the first working place when absent
+        #[arg(long, value_name = "NAME")]
+        place: Option<String>,
+        /// Pictures encoded at once; the machine's cores when absent
+        #[arg(long, value_name = "N")]
+        workers: Option<usize>,
+        /// Make them again even where they are current
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum PyramidCommand {
     /// Build the pyramid of one stack, or of a selection's stacks as one job that skips those built: every slice at four in-plane levels, 256 by 256 tiles, reversible HTJ2K
     Build {
         /// The stack's id in the registry
-        #[arg(long, value_name = "ID", required_unless_present_any = ["select", "handle"], conflicts_with_all = ["select", "handle"])]
+        #[arg(long, value_name = "ID", required_unless_present_any = ["select", "handle", "classified"], conflicts_with_all = ["select", "handle"])]
         stack: Option<i64>,
         /// Every stack of a saved selection, frozen now into its stacks (record 45)
         #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
         select: Option<String>,
         /// Every stack of a frozen handle, such as the one a campaign pins
-        #[arg(long, value_name = "ID")]
+        #[arg(long, value_name = "ID", conflicts_with = "classified")]
         handle: Option<i64>,
+        /// Every stack a classify job judged: the background build a sort
+        /// queues on the pictures lane (record 55 H2)
+        #[arg(long, value_name = "JOB", conflicts_with_all = ["select", "stack"])]
+        classified: Option<i64>,
         /// The pack a selection is frozen under
         #[arg(long, default_value = "mri")]
         pack: String,
@@ -683,6 +737,26 @@ enum PyramidCommand {
         /// Planes encoded at once; the machine's cores when absent
         #[arg(long, value_name = "N")]
         workers: Option<usize>,
+        /// Build again the pyramids that are built; without it a stack that has one is skipped
+        #[arg(long)]
+        force: bool,
+    },
+    /// Pack pyramids built with a file per tile into one file per level, as new builds are written: a level at a time, safe to stop and run again, the doors serving throughout
+    Pack {
+        /// The stack whose pyramid is packed
+        #[arg(
+            long,
+            value_name = "ID",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
+        stack: Option<i64>,
+        /// Every pyramid under the working place
+        #[arg(long)]
+        all: bool,
+        /// The working place; the first working place when absent
+        #[arg(long, value_name = "NAME")]
+        place: Option<String>,
     },
     /// The pyramids a working place holds
     List {
@@ -764,9 +838,10 @@ enum JobsCommand {
         /// (Wave 4c section 6.6), as the serve flag names it
         #[arg(long = "ingest-root", value_name = "NAME=PATH")]
         ingest_root: Vec<String>,
-        /// Which jobs it takes: all, main (every job but a pipeline run),
-        /// or pipelines (runs only, record 49 A1); nils serve --worker runs
-        /// the two lanes side by side
+        /// Which jobs it takes: all, main (every job but a pipeline run or a
+        /// pyramid), pipelines (runs only, record 49 A1) or pictures (the
+        /// pyramids, record 55 H2); nils serve --worker runs the three
+        /// lanes side by side
         #[arg(long, default_value = "all")]
         lane: String,
     },
@@ -891,6 +966,69 @@ enum PlaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Look at the source places again (Wave 7a): each root, and each
+    /// dataset's state read again from its structure; the one named, or a
+    /// root's datasets, or all. Nothing is added
+    Explore {
+        /// A source place by its id or name
+        place: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// A page of a root's folders, found by name (Wave 7a): whether each
+    /// was added as a dataset. Nothing is looked into and nothing written
+    Folders {
+        /// The root, by its id or name
+        root: String,
+        /// Only folders whose name holds this, in any case
+        #[arg(long, value_name = "Q")]
+        search: Option<String>,
+        /// The most folders shown, 1 to 200
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
+        /// The folders after this name: the next page
+        #[arg(long, value_name = "NAME")]
+        after: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One folder of a root looked at before it is added (Wave 7a): whether
+    /// it holds DICOM (a bounded look), derivatives/, and the structure it
+    /// would have as a dataset. Nothing is written
+    Folder {
+        /// The root, by its id or name
+        root: String,
+        /// The folder's name under the root
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a folder under a root as a dataset (Wave 7a): only then is its
+    /// structure read and its state derived
+    AddDataset {
+        /// The root, by its id or name
+        root: String,
+        /// The folder under the root, by its name or its path
+        #[arg(value_name = "FOLDER")]
+        under: String,
+        /// The dataset's name; the folder's by default
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        #[command(flatten)]
+        dataset: DatasetFlags,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What a folder holds before anything reads it (Wave 7a §5.3): its
+    /// trees, the loose entries beside derivatives/, and for each way its
+    /// files may arrive the tree that is read and what a confirmed
+    /// declaration would move there. Nothing is written
+    Layout {
+        /// A source place by its id or name, or a directory
+        place: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Retire a place: it binds nothing from now on and stays as history
     Retire { id: i64 },
     /// The verbs that take a path and the role each needs, and where @name
@@ -905,9 +1043,15 @@ enum PlaceCommand {
 /// it. A flag not given keeps what is in force, or takes its default.
 #[derive(Debug, Args, Default)]
 struct DatasetFlags {
-    /// What arrives: identified, deidentified or coded
-    #[arg(long, value_name = "HOW")]
+    /// No longer declared: how a dataset's files arrive is read from its
+    /// folder (Wave 7a); given, it is refused with what to do instead
+    #[arg(long, value_name = "HOW", hide = true)]
     arrives: Option<String>,
+    /// The tree an unknown dataset's entries holding DICOM go into:
+    /// originals (identified data) or anon (already anonymised); moved only
+    /// with --confirm-move
+    #[arg(long, value_name = "originals|anon")]
+    move_into: Option<String>,
     /// The identity rule its files are read under, as nils digest --identity-rule reads it
     #[arg(long, value_name = "FILE")]
     identity: Option<PathBuf>,
@@ -917,12 +1061,33 @@ struct DatasetFlags {
     /// What an identifier the linkage store does not know does: hold its files, or code them
     #[arg(long, value_name = "hold|code")]
     unmapped: Option<String>,
+    /// What PatientID holds in the pseudonymised tree: the subject's code
+    /// (subject-code, an identified dataset's default) or its value of an id
+    /// type (id-type:NAME), whose files wait until the subject has one;
+    /// changed only before anything is pseudonymised
+    #[arg(long, value_name = "subject-code|id-type:NAME")]
+    patient_id: Option<String>,
+    /// How the subjects of a de-identified or coded dataset are found,
+    /// which it must say: map (a map of subject codes to its ids, given or
+    /// in the registry; a file no map names is held) or generated (the
+    /// subject code generator makes each code from the id)
+    #[arg(long, value_name = "map|generated")]
+    subjects: Option<String>,
+    /// What names each pseudonymised copy's folder: subject-code (the
+    /// default) or id-type (the value PatientID holds, with --patient-id
+    /// id-type:NAME); changed only before anything is pseudonymised
+    #[arg(long, value_name = "subject-code|id-type")]
+    copy_folder: Option<String>,
     /// The cohort every digest of the dataset feeds
     #[arg(long, value_name = "NAME")]
     cohort: Option<String>,
     /// Feed no cohort
     #[arg(long, conflicts_with = "cohort")]
     no_cohort: bool,
+    /// Whether picking main scans follows a sort of the dataset as a
+    /// pipeline step: after_sort (the default) or off
+    #[arg(long, value_name = "after_sort|off")]
+    picks: Option<String>,
     /// Keep sex, weight and size when pseudonymising (the default)
     #[arg(long)]
     keep_demographics: bool,
@@ -935,8 +1100,12 @@ struct DatasetFlags {
     /// A tag to keep out of those groups, as gggg,eeee (repeatable)
     #[arg(long, value_name = "TAG")]
     keep: Vec<String>,
-    /// Move the loose entries of a de-identified or coded folder into its pseudonymised tree
+    /// The person's word that the entries --move-into names may move;
+    /// without it the move is refused and names what would move
     #[arg(long)]
+    confirm_move: bool,
+    /// The name --confirm-move had for a de-identified or coded folder
+    #[arg(long, hide = true)]
     move_into_anon: bool,
 }
 
@@ -946,6 +1115,9 @@ impl DatasetFlags {
         let mut asked = serde_json::Map::new();
         if let Some(a) = &self.arrives {
             asked.insert("arrives".into(), serde_json::json!(a));
+        }
+        if let Some(m) = &self.move_into {
+            asked.insert("move_into".into(), serde_json::json!(m));
         }
         if let Some(file) = &self.identity {
             asked.insert(
@@ -958,10 +1130,22 @@ impl DatasetFlags {
         if let Some(u) = &self.unmapped {
             asked.insert("unmapped".into(), serde_json::json!(u));
         }
+        if let Some(p) = &self.patient_id {
+            asked.insert("patient_id".into(), serde_json::json!(p));
+        }
+        if let Some(s) = &self.subjects {
+            asked.insert("subjects".into(), serde_json::json!(s));
+        }
+        if let Some(f) = &self.copy_folder {
+            asked.insert("copy_folder".into(), serde_json::json!(f));
+        }
         if let Some(c) = &self.cohort {
             asked.insert("cohort".into(), serde_json::json!(c));
         } else if self.no_cohort {
             asked.insert("cohort".into(), serde_json::Value::Null);
+        }
+        if let Some(p) = &self.picks {
+            asked.insert("picks".into(), serde_json::json!(p));
         }
         let mut tags = serde_json::Map::new();
         if self.keep_demographics || self.no_keep_demographics {
@@ -979,8 +1163,8 @@ impl DatasetFlags {
         if !tags.is_empty() {
             asked.insert("tags".into(), serde_json::Value::Object(tags));
         }
-        if self.move_into_anon {
-            asked.insert("move_into_anon".into(), serde_json::json!(true));
+        if self.confirm_move || self.move_into_anon {
+            asked.insert("confirm_move".into(), serde_json::json!(true));
         }
         Ok(serde_json::Value::Object(asked))
     }
@@ -1308,6 +1492,17 @@ struct PickArgs {
     /// Only this subject, which also narrows the population scored against
     #[arg(long, value_name = "CODE")]
     subject: Option<String>,
+    /// Decide the occasions of this cohort's members alone, scored against the whole registry
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["subject", "dataset"])]
+    cohort: Option<String>,
+    /// Decide the occasions of this dataset's subjects alone, scored against the whole registry
+    #[arg(long, value_name = "NAME", conflicts_with = "subject")]
+    dataset: Option<String>,
+    /// Decide the occasions of the subjects the sort that was this job
+    /// judged, but those of a dataset whose picks are off: the pipeline
+    /// step a sort ends with
+    #[arg(long = "after-sort", value_name = "JOB", conflicts_with_all = ["subject", "cohort", "dataset"])]
+    after_sort: Option<i64>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -1650,12 +1845,11 @@ struct InitArgs {
     /// The Postgres schema of the registry; the linkage store lives in <schema>_linkage
     #[arg(long, value_name = "NAME")]
     schema: Option<String>,
-    /// The pseudonym scheme
-    #[arg(
-        long,
-        default_value = "blake2b-32",
-        value_name = "blake2b-32|blake2b-8"
-    )]
+    /// The pseudonym scheme: blake2b-8, the subject code generator (the keyed
+    /// 8-byte BLAKE2b of the identifier as 16 hex characters; also accepted
+    /// as subject-code-generator), or blake2b-32, a 32-byte digest shown as a
+    /// Crockford code of --display-length characters
+    #[arg(long, default_value = "blake2b-8", value_name = "blake2b-8|blake2b-32")]
     scheme: String,
     /// The name of the key in the key store the pseudonyms are derived from
     #[arg(long, value_name = "NAME")]
@@ -1706,7 +1900,7 @@ struct DigestArgs {
         value_name = "all|dcm|no-ext|<glob>[,...]"
     )]
     files: String,
-    /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default
+    /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default. A rule whose id_type is personnummer files each number as its twelve digits and skips a value that is no personnummer
     #[arg(long, value_name = "FILE")]
     identity_rule: Option<PathBuf>,
     /// The pack whose ingest list says which private elements are read into
@@ -1875,7 +2069,7 @@ enum LinkageCommand {
 struct ImportArgs {
     /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it; a personnummer column is read as twelve digits and a cell that is no personnummer refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
     #[arg(long, value_name = "HEADER=ROLE")]
     column: Vec<String>,
     /// The type the identifiers are filed under, without --column
@@ -1929,6 +2123,14 @@ struct StatusArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // record 55 H2: a job of the pictures lane runs below the rest, from
+    // before its first thread
+    if let Some(n) = std::env::var("NILS_NICE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+    {
+        worker::lower_priority(n);
+    }
     if cli
         .unsealed_access
         .as_deref()
@@ -1999,6 +2201,7 @@ fn main() -> ExitCode {
         Command::Jobs(command) => jobs_command(&home, command),
         Command::Settings { command } => settings_command(&home, command),
         Command::Pyramid { command } => pyramid_command(&home, command),
+        Command::Preview { command } => preview_command(&home, command),
         Command::Derivative { command } => derivatives::command(&home, command),
         Command::Pipeline { command } => pipelines::command(&home, command),
         Command::Run(args) => pipelines::run_command(&home, *args),
@@ -2086,10 +2289,12 @@ fn init(home: &Home, args: InitArgs) -> Result<(), Exit> {
         .backend
         .parse()
         .map_err(|_| usage(format!("--backend {}: sqlite or postgres", args.backend)))?;
-    let scheme: Scheme = args
-        .scheme
-        .parse()
-        .map_err(|_| usage(format!("--scheme {}: blake2b-32 or blake2b-8", args.scheme)))?;
+    let scheme: Scheme = args.scheme.parse().map_err(|_| {
+        usage(format!(
+            "--scheme {}: blake2b-8 (the subject code generator) or blake2b-32",
+            args.scheme
+        ))
+    })?;
     let session_scheme = match &args.session_scheme {
         Some(path) => Some(
             fs::read_to_string(path)
@@ -2223,6 +2428,10 @@ struct ClassifyArgs {
     /// have replaced are removed (record 41)
     #[arg(long)]
     no_votes: bool,
+    /// Make no previews of the stacks judged (record 55 H2); `nils preview
+    /// build` makes them later
+    #[arg(long)]
+    no_previews: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -2352,6 +2561,60 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         return Err(Exit {
             code: STOPPED,
             message: "stopped: what was judged is written; run again to go on".into(),
+        });
+    }
+    // record 55 H2: the stacks judged get their previews in the same run,
+    // while the sort is still the job, so no picture waits for a queue
+    if !args.no_previews {
+        classify_previews(&mut registry, report.job_id, &cancel)?;
+    }
+    Ok(())
+}
+
+/// The preview step of a classify run (record 55 H2): the previews of the
+/// stacks the run judged, each made only where its files changed, under the
+/// first working place; none where the deployment binds no working place.
+/// What it did is said on stderr and kept in the job's result as
+/// `previews`; a stop keeps what was made.
+fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> Result<(), Exit> {
+    let store = registry.store();
+    let Ok(working) = crate::pyramid::working_place(store, None) else {
+        return Ok(());
+    };
+    let stacks = crate::preview::classified_by(store, job).map_err(fail)?;
+    if stacks.is_empty() {
+        return Ok(());
+    }
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut go_on = |_: &mut nils_registry::Store, _: &crate::preview::Many| !cancel.stop();
+    let many = crate::preview::make_many(
+        store,
+        Path::new(&working.path),
+        &stacks,
+        false,
+        workers,
+        &mut go_on,
+    );
+    let summary = many.as_json(&working.name);
+    eprintln!(
+        "previews: {} made, {} current, {} failed in {:.1} s under {}",
+        many.built.len(),
+        many.current.len(),
+        many.failed.len(),
+        many.seconds,
+        working.name
+    );
+    if let Ok(Some(row)) = nils_registry::job::show(store, job) {
+        let mut result = row.result.unwrap_or_else(|| serde_json::json!({}));
+        if result.is_object() {
+            result["previews"] = summary;
+            let _ = nils_registry::job::set_result(store, job, &result);
+        }
+    }
+    if many.stopped {
+        return Err(Exit {
+            code: STOPPED,
+            message: "stopped: what was judged and made is written; run again to go on".into(),
         });
     }
     Ok(())
@@ -2486,6 +2749,62 @@ enum PackCommand {
         #[arg(long, value_name = "FILE")]
         overlay: Option<PathBuf>,
     },
+    /// What a rule change does to the sorting, before anyone decides
+    /// (record 56): the patch's typed operations applied to a copy of the
+    /// pack, the registry in scope sorted both ways without a row written
+    /// (the rules, the decisions in force, the session passes, the physics
+    /// vote, the questions, the disposition, the main-scan picks), and
+    /// what moves per axis from what to what, the names and picks that
+    /// change, the questions that appear and go, right and wrong against
+    /// the answers people settled, and what it ships as. A stack of a
+    /// sealed sample is never read
+    Rehearse {
+        /// The patch: `patch: 1`, the pack, its operations (each with its
+        /// scope, reason and evidence); or an overlay document, read as
+        /// the word edits it is
+        #[arg(long, value_name = "FILE")]
+        ops: PathBuf,
+        /// The stacks replayed and counted: pack, site:NAME,
+        /// dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE] or batch:ID;
+        /// the operations' own scopes when not given
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
+        /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// Example stacks per row of a transition table
+        #[arg(long, value_name = "N", default_value_t = 5)]
+        examples: usize,
+        /// Threads that replay; the machine's when not given
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        workers: usize,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a patch's typed operations to a pack directory and check the
+    /// result with the pack's own loader and corpus (record 56). With
+    /// --out, write the patched pack there, every changed file rewritten
+    /// where it changed so its comments stay, and the manifest naming its
+    /// new version
+    Apply {
+        /// The pack directory
+        dir: PathBuf,
+        /// The patch, or an overlay document
+        #[arg(long, value_name = "FILE")]
+        ops: PathBuf,
+        /// Write the patched pack here (a new directory); only a patch of
+        /// pack edits is written, since a scoped one is an overlay
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// The version the written pack names: the patch's `ships`, else
+        /// the next patch version
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Whether a directory is a pack directory: one that holds at least one
@@ -2614,22 +2933,50 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             tree(&d["trees"]["anon"])
         ))
     };
-    let show_layout = |layout: &serde_json::Value| {
-        if let Some(v0) = layout["v0"].as_object() {
+    // Wave 7a §5.3: what is read and what is not, said
+    let show_layout = |p: &place::Place, layout: &serde_json::Value| {
+        if p.role != Role::Source || !layout.is_object() {
+            return;
+        }
+        for line in dataset::layout_lines(p.id, &p.dataset, layout) {
+            println!("  {line}");
+        }
+    };
+    // the datasets found under a root, one line each and what they say
+    let show_found = |found: &[dataset::Found]| {
+        for f in found {
+            if f.place.id == 0 {
+                println!(
+                    "  {}: not settled: {}",
+                    f.place.name,
+                    f.layout["error"].as_str().unwrap_or("")
+                );
+                continue;
+            }
             println!(
-                "  a v0 cohort folder: {} original files, {} pseudonymised files{}",
-                v0["original_files"],
-                v0["raw_files"],
-                if v0["renamed"].as_bool() == Some(true) {
-                    "; dcm-raw is now dcm-anon"
-                } else {
-                    ""
-                }
+                "  dataset {} (place {}{}) at {}",
+                f.place.name,
+                f.place.id,
+                if f.new { ", new" } else { "" },
+                f.place.path
+            );
+            for line in dataset::layout_lines(f.place.id, &f.place.dataset, &f.layout) {
+                println!("    {line}");
+            }
+        }
+    };
+    // a refused declaration names what it would move, with --json whole
+    let refused = |r: dataset::Refused, json: bool| -> Exit {
+        if json && let Some(layout) = &r.layout {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"error": r.message, "layout": layout})
+                )
+                .unwrap_or_default()
             );
         }
-        if let Some(n) = layout["loose"].as_u64().filter(|n| *n > 0) {
-            println!("  {n} loose entries beside derivatives/, not read");
-        }
+        fail(r.message)
     };
     match command {
         PlaceCommand::List { json, probe } => {
@@ -2726,6 +3073,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     role.name()
                 )));
             }
+            let mut found = Vec::new();
             let (probed, dataset, layout) = if role == Role::Source {
                 if place::by_name(registry.store(), &name)
                     .map_err(|e| fail(e.to_string()))?
@@ -2733,8 +3081,18 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 {
                     return Err(fail(format!("a place is already named {name}")));
                 }
-                let d = dataset::declare(registry.store(), &path, &asked, None)
-                    .map_err(|r| fail(r.message))?;
+                // Wave 7a: a root explored, a dataset settled, by its folder
+                let g = guarantees(
+                    backup.as_deref(),
+                    snapshots,
+                    protected,
+                    fast,
+                    share.as_deref(),
+                );
+                let (d, under) =
+                    dataset::shape_place(registry.store(), &name, &path, &asked, None, &g)
+                        .map_err(|r| refused(r, json))?;
+                found = under;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2788,8 +3146,195 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 if let Some(line) = trees_line(&p) {
                     println!("  {line}");
                 }
-                show_layout(&layout);
+                show_layout(&p, &layout);
+                show_found(&found);
                 println!("  probed {}", p.probed);
+            }
+            Ok(())
+        }
+        PlaceCommand::Explore { place: asked, json } => {
+            // Wave 7a: the roots and the datasets looked at again; nothing
+            // is added, and no folder becomes a dataset here
+            let tops: Vec<place::Place> = place::active(registry.store())
+                .map_err(|e| fail(e.to_string()))?
+                .into_iter()
+                .filter(|p| p.role == Role::Source && p.dataset["root"].is_null())
+                .filter(|p| p.dataset["kind"] == "root" || place::is_undeclared(&p.dataset))
+                .filter(|p| match &asked {
+                    Some(a) => a == &p.name || a.parse::<i64>().ok() == Some(p.id),
+                    None => true,
+                })
+                .collect();
+            let mut roots = Vec::new();
+            for p in tops {
+                let path = PathBuf::from(&p.path);
+                let (d, _) = dataset::shape_place(
+                    registry.store(),
+                    &p.name,
+                    &path,
+                    &serde_json::json!({}),
+                    Some(&p),
+                    &p.guarantees,
+                )
+                .map_err(|r| refused(r, json))?;
+                place::set(registry.store(), p.id, None, None, Some(&d.probed))
+                    .map_err(|e| fail(e.to_string()))?;
+                let p = place::set_dataset(registry.store(), p.id, &d.dataset)
+                    .map_err(|e| fail(e.to_string()))?;
+                roots.push((p, d.layout));
+            }
+            let found = dataset::refresh(registry.store(), asked.as_deref())
+                .map_err(|r| refused(r, json))?;
+            if roots.is_empty() && found.is_empty() {
+                return Err(usage(match asked {
+                    Some(a) => format!("{a} is no source place"),
+                    None => "no source places; add one with nils place add NAME DIR --role source"
+                        .into(),
+                }));
+            }
+            if json {
+                let doc = serde_json::json!({
+                    "roots": roots.iter().map(|(p, l)| {
+                        let mut doc = p.as_json();
+                        doc["layout"] = l.clone();
+                        doc
+                    }).collect::<Vec<_>>(),
+                    "datasets": dataset::found_doc(&found),
+                });
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                for (p, l) in &roots {
+                    println!("place {}: {} at {}", p.id, p.name, p.path);
+                    show_layout(p, l);
+                }
+                show_found(&found);
+            }
+            Ok(())
+        }
+        PlaceCommand::Folders {
+            root,
+            search,
+            limit,
+            after,
+            json,
+        } => {
+            // Wave 7a: a page of a root's folders, found by name; nothing
+            // is looked into and nothing changed
+            let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
+            if !(1..=dataset::FOLDERS_MOST).contains(&limit) {
+                return Err(usage(format!("--limit is 1 to {}", dataset::FOLDERS_MOST)));
+            }
+            let (listed, matching, next) = dataset::folders(
+                registry.store(),
+                &r,
+                search.as_deref(),
+                limit,
+                after.as_deref(),
+            )
+            .map_err(|r| fail(r.message))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "root": r.name, "path": r.path, "q": search, "matching": matching,
+                        "count": listed.len(), "folders": listed, "next": next,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "root {}: {} at {}: {} of {matching} folder(s)",
+                    r.id,
+                    r.name,
+                    r.path,
+                    listed.len()
+                );
+                for f in &listed {
+                    println!(
+                        "  {:<32} {}",
+                        f["name"].as_str().unwrap_or(""),
+                        match f["dataset"].as_str() {
+                            Some(d) => format!("dataset {d}"),
+                            None => "not added".to_string(),
+                        }
+                    );
+                }
+                if let Some(n) = next {
+                    println!("  more: --after {n}");
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::Folder { root, name, json } => {
+            // Wave 7a: one folder looked at before it is added
+            let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
+            let look =
+                dataset::folder_look(registry.store(), &r, &name).map_err(|r| fail(r.message))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&look).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "{} under {}: {}, DICOM {}, {}",
+                    name,
+                    r.name,
+                    match look["dataset"].as_str() {
+                        Some(d) => format!("dataset {d}"),
+                        None => "not added".to_string(),
+                    },
+                    look["holds_dicom"].as_str().unwrap_or(""),
+                    if look["has_derivatives"].as_bool() == Some(true) {
+                        "holds derivatives/"
+                    } else {
+                        "no derivatives/"
+                    }
+                );
+                let derived = serde_json::json!({
+                    "arrives": match look["layout"]["state"].as_str() {
+                        Some("identified" | "both") => "identified",
+                        Some("anonymised") => "deidentified",
+                        _ => "undeclared",
+                    },
+                    "state": look["layout"]["state"],
+                    "trees": {"originals": null, "anon": "derivatives/dcm-anon"},
+                });
+                for line in dataset::layout_lines(
+                    look["dataset_id"].as_i64().unwrap_or(0),
+                    &derived,
+                    &look["layout"],
+                ) {
+                    println!("  {line}");
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::AddDataset {
+            root,
+            under,
+            name,
+            dataset,
+            json,
+        } => {
+            // Wave 7a: a folder becomes a dataset by a person's act, and
+            // only then is its structure read
+            let asked = dataset.asked()?;
+            let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
+            let f = dataset::add_dataset(registry.store(), &r, &under, name.as_deref(), &asked)
+                .map_err(|r| refused(r, json))?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::PlaceAdd,
+                serde_json::json!({"place": f.place.id, "name": f.place.name, "role": "source", "root": r.name}),
+                Some(serde_json::json!({"layout": f.layout})),
+            )?;
+            if json {
+                let mut doc = f.place.as_json();
+                doc["layout"] = f.layout.clone();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                show_found(std::slice::from_ref(&f));
             }
             Ok(())
         }
@@ -2844,12 +3389,20 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     current.role.name()
                 )));
             }
+            let mut found = Vec::new();
             let declared = if current.role == Role::Source && (dataset_given || path.is_some()) {
                 let folder = path.clone().unwrap_or_else(|| PathBuf::from(&current.path));
-                Some(
-                    dataset::declare(registry.store(), &folder, &asked, Some(&current))
-                        .map_err(|r| fail(r.message))?,
+                let (d, under) = dataset::shape_place(
+                    registry.store(),
+                    &current.name,
+                    &folder,
+                    &asked,
+                    Some(&current),
+                    &current.guarantees,
                 )
+                .map_err(|r| refused(r, json))?;
+                found = under;
+                Some(d)
             } else {
                 None
             };
@@ -2895,7 +3448,8 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 if let Some(line) = trees_line(&p) {
                     println!("  {line}");
                 }
-                show_layout(&layout);
+                show_layout(&p, &layout);
+                show_found(&found);
             }
             Ok(())
         }
@@ -2965,6 +3519,104 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     code: STOPPED,
                     message: "stopped: what was done stays done; run it again to go on".into(),
                 });
+            }
+            Ok(())
+        }
+        PlaceCommand::Layout { place: asked, json } => {
+            let found = match asked.parse::<i64>() {
+                Ok(id) => place::show(registry.store(), id),
+                Err(_) => place::by_name(registry.store(), &asked),
+            }
+            .map_err(|e| fail(e.to_string()))?;
+            let (folder, p) = match found {
+                Some(p) => (PathBuf::from(&p.path), Some(p)),
+                None => {
+                    let dir = fs::canonicalize(&asked).unwrap_or_else(|_| PathBuf::from(&asked));
+                    if !dir.is_dir() {
+                        return Err(usage(format!("{asked} is neither a place nor a directory")));
+                    }
+                    (dir, None)
+                }
+            };
+            // Wave 7a: a root lists each folder under it and what its
+            // structure says; a dataset, its own layout. Nothing is written
+            let shape = dataset::shape_of(&folder);
+            let mut under = Vec::new();
+            if shape == dataset::Shape::Root {
+                let mut subs: Vec<PathBuf> = fs::read_dir(&folder)
+                    .map_err(|e| fail(format!("{}: {e}", folder.display())))?
+                    .flatten()
+                    .filter(|e| {
+                        !e.file_name().to_string_lossy().starts_with('.')
+                            && e.file_type().is_ok_and(|t| t.is_dir())
+                    })
+                    .map(|e| e.path())
+                    .collect();
+                subs.sort();
+                for sub in subs {
+                    let layout = dataset::layout_doc(&sub, &dataset::detect(&sub));
+                    under.push(serde_json::json!({
+                        "folder": sub.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "path": sub.display().to_string(),
+                        "layout": layout,
+                    }));
+                }
+            }
+            let layout = match shape {
+                dataset::Shape::Root => serde_json::json!({"root": true, "datasets": under.len()}),
+                dataset::Shape::Legacy => {
+                    serde_json::json!({"legacy": true, "state": "anonymised", "reads": ".", "question": false})
+                }
+                dataset::Shape::Dataset => dataset::layout_doc(&folder, &dataset::detect(&folder)),
+            };
+            if json {
+                let doc = serde_json::json!({
+                    "path": folder.display().to_string(),
+                    "place": p.as_ref().map(|p| p.name.clone()),
+                    "shape": match shape {
+                        dataset::Shape::Root => "root",
+                        dataset::Shape::Legacy => "legacy",
+                        dataset::Shape::Dataset => "dataset",
+                    },
+                    "layout": layout,
+                    "datasets": under,
+                });
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+                return Ok(());
+            }
+            println!("{}", folder.display());
+            let lines_of = |layout: &serde_json::Value| {
+                let derived = serde_json::json!({
+                    "arrives": match layout["state"].as_str() {
+                        Some("identified" | "both") => "identified",
+                        Some("anonymised") => "deidentified",
+                        _ => "undeclared",
+                    },
+                    "state": layout["state"],
+                    "trees": {"originals": null, "anon": "derivatives/dcm-anon"},
+                });
+                dataset::layout_lines(p.as_ref().map_or(0, |p| p.id), &derived, layout)
+            };
+            match shape {
+                dataset::Shape::Root => {
+                    println!("  a root: each folder under it is a dataset");
+                    for d in &under {
+                        println!("  {}", d["folder"].as_str().unwrap_or(""));
+                        for line in lines_of(&d["layout"]) {
+                            println!("    {line}");
+                        }
+                    }
+                }
+                dataset::Shape::Legacy => {
+                    println!(
+                        "  legacy: names a pseudonymised tree itself, read as an anonymised dataset"
+                    );
+                }
+                dataset::Shape::Dataset => {
+                    for line in lines_of(&layout) {
+                        println!("  {line}");
+                    }
+                }
             }
             Ok(())
         }
@@ -3191,7 +3843,13 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     // Record 26: `@name` is the dataset's pseudonymised tree and
     // `@name/originals` its originals, which a probe may read, shapes only.
     let root = if let Some(rest) = args.location.strip_prefix('@') {
-        let roots = dataset::roots(registry.store(), &ingest_roots(&args.ingest_root)?);
+        // the worker's locations, then every source place by its own name,
+        // so a dataset added since the engine started is probed by its name
+        let mut given = ingest_roots(&args.ingest_root)?;
+        for (n, p) in dataset::place_roots(registry.store()) {
+            given.entry(n).or_insert(p);
+        }
+        let roots = dataset::roots(registry.store(), &given);
         let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
         if rel.split('/').any(|s| s == "..") {
             return Err(fail("a location's relative part stays inside it"));
@@ -3450,14 +4108,25 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         );
                     }
                 }
+                // record 55 H3: a weak answer is noted below its threshold and
+                // never asked; a missing one is asked where the axis matters
+                let asks_missing = nils_pack::matters::missing_asked(&pack);
+                let matters = nils_pack::matters::of(&pack);
                 for a in &pack.axes {
-                    let asked = if pack.review.asks_when_missing(&a.name) {
+                    let asked = if asks_missing.contains(&a.name) {
                         ", asked when missing"
+                    } else if pack.review.by_model.contains(&a.name) {
+                        ", left to its image model"
+                    } else {
+                        ""
+                    };
+                    let matters = if matters.contains(&a.name) {
+                        ", matters"
                     } else {
                         ""
                     };
                     println!(
-                        "  axis    {:20} {:3} values, asked below {:.2}{asked}",
+                        "  axis    {:20} {:3} values, weak below {:.2}{matters}{asked}",
                         a.name,
                         a.values.len(),
                         pack.review.below(&a.name)
@@ -3581,6 +4250,147 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 n += 1;
             }
             eprintln!("{n} packets replayed through {}", pack.id());
+            Ok(())
+        }
+        PackCommand::Rehearse {
+            ops,
+            scope,
+            pack_dir: d,
+            examples,
+            workers,
+            json,
+        } => {
+            let patch = rehearse::patch_file(&ops).map_err(usage)?;
+            let root = pack_dir(home, d)?;
+            let dir = packs_in(&root)?
+                .into_iter()
+                .find(|p| p.file_name().is_some_and(|f| *f == *patch.pack))
+                .ok_or_else(|| {
+                    fail(format!(
+                        "the patch amends {}, and {} holds no pack of that name",
+                        patch.pack,
+                        root.display()
+                    ))
+                })?;
+            let scope = scope
+                .as_deref()
+                .map(nils_pack::patch::Scope::parse)
+                .transpose()
+                .map_err(usage)?;
+            let mut registry = open(home)?;
+            let settings = nils_classify::effect::Settings {
+                scope,
+                examples,
+                workers,
+            };
+            let doc =
+                rehearse::report(&mut registry, &dir, &patch, &settings).map_err(|e| match e {
+                    nils_classify::effect::Error::Refused(m) => usage(m),
+                    other => fail(other.to_string()),
+                })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc)
+                        .map_err(|e| fail(format!("will not serialize: {e}")))?
+                );
+            } else {
+                print!("{}", rehearse::text(&doc));
+            }
+            Ok(())
+        }
+        PackCommand::Apply {
+            dir,
+            ops,
+            out,
+            version,
+            json,
+        } => {
+            let patch = rehearse::patch_file(&ops).map_err(usage)?;
+            let patched = nils_pack::patch::apply(&dir, &patch, &|_| true)
+                .map_err(|e| fail(e.to_string()))?;
+            let mut doc = serde_json::json!({
+                "pack": format!("{}@{}", patched.pack.name, patched.pack.version),
+                "applied": patched.applied,
+                "files": patched.docs.changed(),
+                "cases": {
+                    "held": patched.cases.is_none(),
+                    "failures": patched.cases.as_ref().map(|e| e.to_string()),
+                },
+            });
+            if let Some(out) = &out {
+                if !patch.is_pack_edit() {
+                    return Err(usage(
+                        "a patch with a scoped operation is an overlay, not a pack edit: rehearse it, and adopt it as one",
+                    ));
+                }
+                if let Some(e) = &patched.cases {
+                    return Err(fail(format!(
+                        "the patched pack's cases do not hold, so it would not load; mend the cases or the operations first:\n{e}"
+                    )));
+                }
+                if out.exists() {
+                    return Err(usage(format!(
+                        "{} exists; a patched pack is written to a new directory",
+                        out.display()
+                    )));
+                }
+                let next = version.or_else(|| patch.ships.clone()).unwrap_or_else(|| {
+                    let mut v = patched.pack.version;
+                    v.patch += 1;
+                    v.to_string()
+                });
+                nils_pack::Version::parse(&next, "version").map_err(|e| usage(e.to_string()))?;
+                let written = patched
+                    .docs
+                    .write(out, Some(&next))
+                    .map_err(|e| fail(e.to_string()))?;
+                let loaded = nils_pack::load(out, None)
+                    .map_err(|e| fail(format!("the written pack does not load: {e}")))?;
+                doc["written"] = serde_json::json!({
+                    "dir": out.display().to_string(),
+                    "pack": loaded.id(),
+                    "files": written.iter().map(|(f, whole)| serde_json::json!({"file": f, "whole": whole})).collect::<Vec<_>>(),
+                });
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc)
+                        .map_err(|e| fail(format!("will not serialize: {e}")))?
+                );
+                return Ok(());
+            }
+            println!(
+                "{} with {} operation(s):",
+                doc["pack"].as_str().unwrap_or(""),
+                patched.applied.len()
+            );
+            for a in &patched.applied {
+                println!("  {} {} {}: {}", a.at, a.op, a.scope, a.changes.join("; "));
+            }
+            match &patched.cases {
+                None => println!("  the pack's own cases and the patch's hold"),
+                Some(e) => println!("  cases that no longer hold:\n{e}"),
+            }
+            if let Some(w) = doc.get("written") {
+                println!(
+                    "written to {} as {}",
+                    w["dir"].as_str().unwrap_or(""),
+                    w["pack"].as_str().unwrap_or("")
+                );
+                for f in w["files"].as_array().into_iter().flatten() {
+                    println!(
+                        "  {}{}",
+                        f["file"].as_str().unwrap_or(""),
+                        if f["whole"] == true {
+                            " (written whole)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
             Ok(())
         }
         PackCommand::Shape { dir, overlay, json } => {
@@ -3832,6 +4642,10 @@ fn digest_tree(home: &Home, root: &Path) -> Result<PathBuf, Exit> {
             p.name,
             p.name
         )));
+    }
+    // Wave 7a §5.3: never read without the layout
+    if let Some(why) = dataset::not_read(store, &path) {
+        return Err(fail(why));
     }
     Ok(path)
 }
@@ -4097,14 +4911,23 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     use nils_registry::job;
     let mut registry = open(home)?;
     let dataset = dataset_named(&mut registry, &args.dataset)?;
+    if let Some(why) = dataset::undeclared_refusal(&dataset) {
+        return Err(fail(why));
+    }
     // a tree holding files no digest has read is digested first, so the
     // pseudonymiser knows what the tree holds (lab 26, defect 7)
     let unread = chain::unread_in_tree(registry.store(), &dataset);
+    // record 55 H2: a pick run ends the thread where the dataset feeds a
+    // cohort and the pack declares picks
+    let picks = pack_dir(home, None)
+        .ok()
+        .is_some_and(|d| chain::pack_has_picks(Some(&d), args.pack.as_deref().unwrap_or("mri")));
     let (first, then) = chain::bring_in(
         &dataset,
         args.name.as_deref(),
         args.pack.as_deref(),
         unread.is_some(),
+        picks,
     );
     let name = first
         .iter()
@@ -4190,10 +5013,12 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             stack,
             select,
             handle,
+            classified,
             pack,
             pack_dir,
             place,
             workers,
+            force,
         } => {
             let working =
                 crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
@@ -4204,9 +5029,24 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             });
             let Some(stack) = stack else {
                 drop(registry);
-                return pyramid_many(home, select, handle, &pack, pack_dir, &working, workers);
+                return pyramid_many(
+                    home, select, handle, classified, &pack, pack_dir, &working, workers, force,
+                );
             };
             let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
+            // record 55 H2: a stack that has its pyramid is skipped, as a
+            // selection's are, unless it is built again with --force; a
+            // build the picture door queued twice builds once
+            if !force && matches!(crate::pyramid::manifest(&root), Ok(Some(_))) {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "stack": stack, "place": working.name, "skipped": true,
+                        "why": "the stack has its pyramid; --force builds it again",
+                    })
+                );
+                return Ok(());
+            }
             // The reader's words name a file's path, which can hold a
             // subject code or a series name: they are said at a terminal,
             // and a queued job's error (what the verb printed) keeps the
@@ -4239,6 +5079,54 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
                 })
             );
             Ok(())
+        }
+        PyramidCommand::Pack { stack, all, place } => {
+            let working =
+                crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
+            drop(registry);
+            let base = std::path::Path::new(&working.path);
+            let stacks: Vec<i64> = match stack {
+                Some(s) => vec![s],
+                None if all => crate::pyramid::built(base).into_keys().collect(),
+                None => return Err(usage("--stack or --all")),
+            };
+            let (mut packed, mut already, mut levels, mut removed) = (0u64, 0u64, 0u64, 0u64);
+            let mut failed: Vec<i64> = Vec::new();
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            for s in &stacks {
+                match crate::pyramid::repack(&crate::pyramid::dir(base, *s)) {
+                    Ok(r) => {
+                        if r.levels_packed > 0 || r.files_removed > 0 {
+                            packed += 1;
+                        } else {
+                            already += 1;
+                        }
+                        levels += r.levels_packed as u64;
+                        removed += r.files_removed;
+                    }
+                    Err(why) => {
+                        // the words can name a path: said at a terminal only
+                        if terminal {
+                            eprintln!("stack {s}: not packed: {why}");
+                        }
+                        failed.push(*s);
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "place": working.name, "stacks": stacks.len(), "packed": packed,
+                    "already": already, "failed": failed.len(),
+                    "failures": failed.iter().take(20).collect::<Vec<_>>(),
+                    "levels_packed": levels, "tile_files_removed": removed,
+                })
+            );
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                Err(fail(format!("{} pyramid(s) were not packed", failed.len())))
+            }
         }
         PyramidCommand::List { place, json } => {
             let working =
@@ -4273,55 +5161,78 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
 /// Record 45 E1: the pyramids of a selection's or a handle's stacks as one
 /// job of kind `pyramid`, which skips the stacks built, counts the ones
 /// that fail with why and goes on, and ends with built, skipped and failed
-/// in its result.
+/// in its result; with `force` the ones built are built again.
+#[allow(clippy::too_many_arguments)]
 fn pyramid_many(
     home: &Home,
     select: Option<String>,
     handle: Option<i64>,
+    classified: Option<i64>,
     pack: &str,
     pack_dir: Option<std::path::PathBuf>,
     working: &nils_registry::place::Place,
     workers: usize,
+    force: bool,
 ) -> Result<(), Exit> {
-    let handle = match (&select, handle) {
-        (Some(spec), _) => crate::ask_cli::freeze(
-            home,
-            spec,
-            nils_ask::ast::Grain::Stack,
-            pack_dir,
-            pack,
-            crate::ask_cli::Freeze::Whole,
-        )
-        .map(|f| f.handle)?,
-        (None, Some(h)) => h,
-        (None, None) => return Err(usage("--stack, --select or --handle")),
+    let handle = match (&select, handle, classified) {
+        (Some(spec), _, _) => Some(
+            crate::ask_cli::freeze(
+                home,
+                spec,
+                nils_ask::ast::Grain::Stack,
+                pack_dir,
+                pack,
+                crate::ask_cli::Freeze::Whole,
+            )
+            .map(|f| f.handle)?,
+        ),
+        (None, Some(h), _) => Some(h),
+        (None, None, Some(_)) => None,
+        (None, None, None) => return Err(usage("--stack, --select, --handle or --classified")),
     };
     let mut registry = open(home)?;
-    let stacks: Vec<i64> =
-        crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)
-            .map_err(crate::campaigns::rerr)?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
+    let stacks: Vec<i64> = match (handle, classified) {
+        (Some(handle), _) => {
+            crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)
+                .map_err(crate::campaigns::rerr)?
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        }
+        (None, Some(job)) => crate::preview::classified_by(registry.store(), job).map_err(fail)?,
+        (None, None) => Vec::new(),
+    };
+    let name = match (&select, classified) {
+        (Some(s), _) => s.clone(),
+        (None, Some(j)) => format!("classified by job {j}"),
+        (None, None) => "handle".to_string(),
+    };
     let job = nils_registry::job::claim(
         registry.store(),
         &nils_registry::job::Claim {
             kind: "pyramid",
-            name: select.as_deref().unwrap_or("handle"),
+            name: &name,
             args: serde_json::json!({
-                "selection": select, "handle": handle, "place": working.name,
-                "stacks": stacks.len(), "workers": workers,
+                "selection": select, "handle": handle, "classified": classified,
+                "place": working.name, "stacks": stacks.len(), "workers": workers, "force": force,
             }),
         },
     )
     .map_err(|e| fail(e.to_string()))?;
     let total = stacks.len();
+    let root = std::path::PathBuf::from(&working.path);
     let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::pyramid::Many| {
         let done = so_far.built.len() + so_far.skipped.len() + so_far.failed.len();
         let progress = serde_json::json!({
             "done": done, "total": total, "built": so_far.built.len(),
             "skipped": so_far.skipped.len(), "failed": so_far.failed.len(),
         });
+        // record 55 H2: a picture a reader asked for while this build runs
+        // in the background is built now, between two of its stacks, rather
+        // than after all of them
+        if classified.is_some() {
+            crate::worker::build_asked_pyramids(store, &root, workers);
+        }
         !matches!(
             nils_registry::job::beat(store, job, Some(&progress)),
             Ok(nils_registry::job::Asked::Cancel)
@@ -4333,10 +5244,14 @@ fn pyramid_many(
         &stacks,
         workers,
         None,
+        force,
         &mut go_on,
     );
     let mut result = many.as_json(&working.name);
     result["handle"] = serde_json::json!(handle);
+    if classified.is_some() {
+        result["classified"] = serde_json::json!(classified);
+    }
     result["selection"] = serde_json::json!(select);
     let store = registry.store();
     nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
@@ -4351,6 +5266,133 @@ fn pyramid_many(
         return Err(Exit {
             code: crate::STOPPED,
             message: "stopped: what was built stays built; run it again to go on".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Record 55 H2: `nils preview build`, the previews of stacks already
+/// sorted. One stack is made at the keyboard; a dataset's or every stack is
+/// one job of kind `preview`, with its progress, that a cancel stops (what
+/// was made stays made) and whose result counts what was made, what was
+/// current and what failed with its reason class.
+fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
+    let PreviewCommand::Build {
+        stack,
+        dataset,
+        all,
+        place,
+        workers,
+        force,
+    } = command;
+    let mut registry = open(home)?;
+    let working =
+        crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
+    let root = std::path::PathBuf::from(&working.path);
+    let workers = workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
+    if let Some(stack) = stack {
+        let started = std::time::Instant::now();
+        let made = crate::preview::make(registry.store(), &root, stack, force, workers).map_err(
+            |(why, reading)| {
+                let class = crate::pyramid::reason_of(&why, reading);
+                // the reader's words can name a path: said at a terminal only
+                if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    fail(format!(
+                        "stack {stack}: its preview was not made ({class}): {why}"
+                    ))
+                } else {
+                    fail(format!("stack {stack}: its preview was not made ({class})"))
+                }
+            },
+        )?;
+        let (built, bytes) = match made {
+            crate::preview::Made::Built { bytes } => (true, bytes),
+            crate::preview::Made::Current => (false, 0),
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "stack": stack, "place": working.name, "built": built, "current": !built,
+                "bytes": bytes, "seconds": (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
+                "digest": crate::preview::digest_on_disk(&root, stack),
+            })
+        );
+        return Ok(());
+    }
+    let store = registry.store();
+    let (stacks, name) = match (&dataset, all) {
+        (Some(n), _) => {
+            let p = nils_registry::place::by_name(store, n)
+                .map_err(|e| fail(e.to_string()))?
+                .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none())
+                .ok_or_else(|| usage(format!("no dataset named {n}")))?;
+            (
+                crate::preview::dataset_stacks(store, &p).map_err(fail)?,
+                format!("dataset {n}"),
+            )
+        }
+        (None, true) => (
+            crate::preview::every_stack(store).map_err(fail)?,
+            "every stack".to_string(),
+        ),
+        (None, false) => {
+            return Err(usage(
+                "preview build names --stack ID, --dataset NAME or --all",
+            ));
+        }
+    };
+    let job = nils_registry::job::claim(
+        store,
+        &nils_registry::job::Claim {
+            kind: "preview",
+            name: &name,
+            args: serde_json::json!({
+                "dataset": dataset, "all": all, "place": working.name,
+                "stacks": stacks.len(), "workers": workers, "force": force,
+            }),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let cancel = stop_on_signal()?;
+    let total = stacks.len();
+    let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::preview::Many| {
+        let done = so_far.built.len() + so_far.current.len() + so_far.failed.len();
+        // a beat every stack is a write every stack: every tenth, and the last
+        if !done.is_multiple_of(10) && done != total {
+            return !cancel.stop();
+        }
+        let progress = serde_json::json!({
+            "done": done, "total": total, "built": so_far.built.len(),
+            "current": so_far.current.len(), "failed": so_far.failed.len(),
+        });
+        !cancel.stop()
+            && !matches!(
+                nils_registry::job::beat(store, job, Some(&progress)),
+                Ok(nils_registry::job::Asked::Cancel)
+            )
+    };
+    let mut many = crate::preview::make_many(store, &root, &stacks, force, workers, &mut go_on);
+    if all && !many.stopped {
+        let keep: std::collections::BTreeSet<i64> = stacks.iter().copied().collect();
+        many.pruned = crate::preview::prune(&root, &keep);
+    }
+    let result = many.as_json(&working.name);
+    nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
+    let state = if many.stopped {
+        nils_registry::job::State::Cancelled
+    } else {
+        nils_registry::job::State::Done
+    };
+    nils_registry::job::finish(store, job, state, None).map_err(|e| fail(e.to_string()))?;
+    println!("{result}");
+    if many.stopped {
+        return Err(Exit {
+            code: crate::STOPPED,
+            message: "stopped: what was made stays made; run it again to go on".into(),
         });
     }
     Ok(())
@@ -4594,9 +5636,10 @@ fn status_print(
     println!("  epoch            {}", meta.epoch);
     println!("  created          {}", meta.created_at);
     match meta.pseudonym_scheme {
-        // v0's code is the whole digest in hex; no display length applies
+        // the subject code generator's code is the whole digest in hex; no
+        // display length applies
         Scheme::Blake2b8 => println!(
-            "  pseudonyms       {} from key {}, 16 hex characters",
+            "  pseudonyms       {} (the subject code generator) from key {}, 16 hex characters",
             meta.pseudonym_scheme, meta.pseudonym_key
         ),
         Scheme::Blake2b32 => println!(
@@ -4822,7 +5865,14 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             for r in &shown {
                 println!(
                     "  {:<24} {}   (identity {}, from {})",
-                    r.id_type, r.value, r.identity_id, r.source
+                    r.id_type,
+                    if r.kept {
+                        r.value.as_str()
+                    } else {
+                        "not kept; the subject's code stands for it"
+                    },
+                    r.identity_id,
+                    r.source
                 );
             }
             let links = linkage::linkages_of(&mut store, subject)?;
@@ -6010,12 +7060,13 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["shape"]),
             s(&e["place"])
         ),
-        // Record 37 S2: a BIDS name more than one acquisition wanted. What a
-        // person is asked is which of them it belongs to, or whether the pack
-        // needs an axis for what differs.
+        // Record 37 S2 and Wave 7a §8.1: a BIDS name more than one stack
+        // wanted where the engine sees no difference and they are not a
+        // repeat. They are named with a plain number; what a person is asked
+        // is what they are.
         "release.shared_name" => format!(
-            "{} stack(s) would share one {} name and are not repeats of one another: {}; they \
-             are in sourcedata/ under their informative names",
+            "{} stack(s) share one {} name, are not repeats of one another and differ in \
+             nothing the engine can see: {}; they carry a plain number",
             e["stacks"],
             s(&e["suffix"]),
             s(&e["why"])
@@ -6239,8 +7290,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "where": where_db(REGISTRY_DB, &registry_schema),
             "files": if sqlite { db_files(REGISTRY_DB) } else { Vec::new() },
             "holds": [
-                "quasi-identifying: birth dates, sex, study dates and times, station and institution names, descriptions and comments, source paths",
-                "technical: everything else the catalogue declares",
+                "quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths",
+                "technical: everything else the catalogue declares, the series description and the protocol name among them",
             ],
             "counts": { "subjects": subjects, "studies": studies, "series": series, "instances": instances, "source_files": source_files },
             "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",
@@ -7574,6 +8625,15 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     let overlay = load_overlay(args.overlay.as_ref())?;
     let pack = nils_pack::load(&found, overlay.as_ref()).map_err(|e| fail(e.to_string()))?;
     if pack.picks.is_empty() {
+        // record 55 H2 (round 4): the step after a sort with a pack that
+        // picks nothing has nothing to do, which is not a failure
+        if args.after_sort.is_some() {
+            println!(
+                "{} declares no picks, so there is nothing to choose",
+                pack.id()
+            );
+            return Ok(());
+        }
         return Err(fail(format!(
             "{} declares no picks, so there is nothing to choose",
             pack.id()
@@ -7591,11 +8651,50 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
         (None, None) => session::Scheme::default(),
     };
 
-    let report = nils_classify::picking::run(
+    // record 55 H2: a run for a cohort or a dataset decides their subjects'
+    // occasions, scored against the whole registry
+    let only = match (&args.cohort, &args.dataset) {
+        // record 55 H2 (round 4): the subjects a sort judged, as the step
+        // after it
+        _ if args.after_sort.is_some() => {
+            let job = args.after_sort.unwrap_or_default();
+            let sorted = crate::pick_after::sorted_by(registry.store(), job)
+                .map_err(|e| fail(e.to_string()))?;
+            Some(nils_classify::picking::Only {
+                label: format!("sort:{job}"),
+                subjects: sorted.subjects,
+                datasets: sorted.datasets,
+            })
+        }
+        (Some(name), _) => {
+            let subjects = nils_registry::cohort::open_members_of(registry.store(), name)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no cohort named {name}")))?;
+            Some(nils_classify::picking::Only {
+                label: format!("cohort:{name}"),
+                subjects,
+                datasets: Vec::new(),
+            })
+        }
+        (None, Some(name)) => {
+            let name = name.trim_start_matches('@');
+            let place = dataset_named(&mut registry, &format!("@{name}"))?;
+            let subjects = crate::chain::dataset_subjects(registry.store(), &place)
+                .map_err(|e| fail(e.to_string()))?;
+            Some(nils_classify::picking::Only {
+                label: format!("dataset:{name}"),
+                subjects,
+                datasets: vec![name.to_string()],
+            })
+        }
+        (None, None) => None,
+    };
+    let report = nils_classify::picking::run_for(
         &mut registry,
         &pack,
         &scheme,
         args.subject.as_deref(),
+        only.as_ref(),
         &format!("pick:{}", pack.id()),
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -7609,6 +8708,9 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
         return Ok(());
     }
     println!("pick with {} against {}", pack.id(), report.reference);
+    if let (Some(only), Some(n)) = (&report.only, report.subjects) {
+        println!("  for              {only} ({n} subject(s))");
+    }
     println!("  occasions        {:>12}", report.sessions);
     println!("  picked           {:>12}", report.written);
     println!("  nothing eligible {:>12}", report.empty);
@@ -8250,8 +9352,11 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             ingest_root,
             lane,
         } => {
-            let lane = job::Lane::parse(&lane)
-                .ok_or_else(|| usage(format!("--lane is all, main or pipelines, not {lane}")))?;
+            let lane = job::Lane::parse(&lane).ok_or_else(|| {
+                usage(format!(
+                    "--lane is all, main, pipelines or pictures, not {lane}"
+                ))
+            })?;
             let queue = crate::worker::claim(store, once, lane).map_err(|e| match e {
                 job::Error::Busy { .. } => Exit {
                     code: BUSY,
@@ -9583,17 +10688,14 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // for a validator first; asked for, it is the release's own answer and is
     // recorded on the row, so a re-run writes the same names.
     let naming = match &args.naming {
-        None => match layout {
-            run::Layout::Bids => nils_release::name::Naming::Bids,
-            run::Layout::Descriptive => nils_release::name::Naming::Informative,
-        },
+        None => nils_release::name::Naming::Full,
         Some(text) => {
             let asked = nils_release::name::Naming::parse(text)
-                .ok_or_else(|| usage(format!("--naming is bids or informative, not {text}")))?;
-            if asked == nils_release::name::Naming::Bids && layout == run::Layout::Descriptive {
+                .ok_or_else(|| usage(format!("--naming is full or minimal, not {text}")))?;
+            if asked == nils_release::name::Naming::Minimal && layout == run::Layout::Descriptive {
                 return Err(usage(
-                    "--naming bids needs --layout bids: the descriptive tree has no \
-                     entities, so its names carry every axis whatever this says",
+                    "--naming minimal needs --layout bids: the descriptive tree is v0's \
+                     grammar and spells every slot",
                 ));
             }
             asked
@@ -9611,11 +10713,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         synthetic: nils_release::bids::place::Synthetic::parse(&args.synthetic).ok_or_else(
             || {
                 usage(format!(
-                    "--synthetic is anat or derivatives, not {}",
+                    "--synthetic is folder, anat or derivatives, not {}",
                     args.synthetic
                 ))
             },
         )?,
+        dicom: nils_release::bids::place::Dicom::parse(&args.dicom).ok_or_else(|| {
+            usage(format!(
+                "--dicom is all, folders or none, not {}",
+                args.dicom
+            ))
+        })?,
     };
     // §9.6. Found once, before anything is written, and recorded on the run and
     // in `GeneratedBy`. v0 discovers a missing converter per stack, in a worker
@@ -9736,8 +10844,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     println!(
         "  names            {}",
         match report.naming.as_str() {
-            "informative" => "informative: every axis the pack declares",
-            _ => "bids: the standard's entities, and the rest in acq-",
+            "minimal" => "minimal: 2D or 3D, the modifiers and the technique in acq-",
+            _ => "full: every slot without an entity in acq-, in v0's order",
         }
     );
     // record 26 section 13: what each dataset's files left under
@@ -9882,7 +10990,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         for (route, n) in &report.routes {
             let what = match route.as_str() {
                 "raw" => "in the tree, under a name the standard admits",
-                "sourcedata" => "sourcedata/, as DICOM",
+                "sourcedata" => "sourcedata/dicom/, as DICOM",
                 "derivatives" => "derivatives/nils/, which BIDS has no word for",
                 "beside" => "a directory of their own, in .bidsignore",
                 "unofficial" => "the raw tree under a suffix BIDS lacks, in .bidsignore",
@@ -9909,9 +11017,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
                 report.repeats
             );
             println!(
-                "      {:>10}   stack(s) that are not: no BIDS name, in sourcedata/ under their \
-                 informative names, each a review item",
-                report.not_repeats
+                "      {:>10}   stack(s) that are not, named by what differs",
+                report.not_repeats - report.numbered
+            );
+            println!(
+                "      {:>10}   stack(s) nothing spellable separates, named by a plain number",
+                report.numbered
             );
         }
         for (why, n) in &report.unconvertible {
@@ -10538,6 +11649,7 @@ pub(crate) fn pack_document(
     overlays: &[nils_registry::overlay::Overlay],
 ) -> serde_json::Value {
     use serde_json::json;
+    let asks_missing = nils_pack::matters::missing_asked(pack);
     // The site's adopted edits per list, named as the pack names it: a
     // bucket by name, a value as axis.identity whatever the overlay wrote.
     #[derive(Default)]
@@ -10614,6 +11726,12 @@ pub(crate) fn pack_document(
             },
             "missing": pack.review.missing,
             "silent_when": pack.review.silent_when.is_some(),
+            // record 55 H3 (2026-10-09): the axes left to an image model, and
+            // the axes where a missing answer is asked, each that matters
+            // with why
+            "by_model": pack.review.by_model,
+            "asks_missing": asks_missing,
+            "matters": nils_pack::matters::of(pack).axes,
         },
         "axes": pack.axes.iter().map(|a| json!({
             "axis": a.name,
@@ -10623,7 +11741,7 @@ pub(crate) fn pack_document(
             "default": a.default,
             "count": a.values.len(),
             "review_below": pack.review.below(&a.name),
-            "asks_when_missing": pack.review.asks_when_missing(&a.name),
+            "asks_when_missing": asks_missing.contains(&a.name),
             "values": a.values.iter().map(|v| {
                 let list = format!("{}.{}", a.name, v.id);
                 let amendable = pack.lists.contains(&list);

@@ -12,7 +12,7 @@ use dicom_dictionary_std::tags;
 use nils_digest::Rule;
 use nils_digest::knobs::{DEFAULT_BATCH_ROWS, DEFAULT_WALK_THREADS, default_workers};
 use nils_pack::private::Allowed;
-use nils_registry::place::Place;
+use nils_registry::place::{PatientId, Place};
 use nils_registry::time::today;
 use serde_json::{Value, json};
 
@@ -100,6 +100,13 @@ pub struct Settings {
     /// The identity rule the originals are read under.
     pub identity: Rule,
     pub unmapped: Unmapped,
+    /// What PatientID holds in the pseudonymised tree (Wave 7a §5.4): the
+    /// subject's code, or its value of an id type; a file whose subject has
+    /// no value of that type is held until it has one.
+    pub patient_id: PatientId,
+    /// Each copy's folder is named by the id type's value PatientID holds,
+    /// not the subject's code (Wave 7a, Nima 2026-10-08).
+    pub folder_by_id: bool,
     pub tags: TagLists,
     /// The private elements the pack keeps, by creator and offset, and
     /// which pack said so.
@@ -122,7 +129,16 @@ impl Settings {
     /// dataset's tree is read in place and never rewritten (record 26 §2).
     pub fn for_dataset(place: &Place) -> Result<Settings, String> {
         let dataset = &place.dataset;
-        let arrives = dataset["arrives"].as_str().unwrap_or("deidentified");
+        let arrives = dataset["arrives"]
+            .as_str()
+            .unwrap_or(nils_registry::place::UNDECLARED);
+        // Wave 7a §5.3: nothing in an undeclared dataset is read
+        if arrives == nils_registry::place::UNDECLARED {
+            return Err(format!(
+                "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared; declare it identified to pseudonymise its originals",
+                place.name
+            ));
+        }
         if arrives != "identified" {
             return Err(format!(
                 "the dataset {} arrives {arrives}: its tree is read in place and there is nothing to pseudonymise; only an identified dataset has originals to rewrite",
@@ -159,6 +175,9 @@ impl Settings {
         };
         let tags = TagLists::of(&dataset["tags"])
             .map_err(|e| format!("the tags of the dataset {}: {e}", place.name))?;
+        let patient_id = PatientId::of(dataset)
+            .map_err(|e| format!("the dataset {}: {e}", place.name))?
+            .unwrap_or(PatientId::SubjectCode);
         Ok(Settings {
             name: format!("{}-{}", place.name, today()),
             dataset: place.name.clone(),
@@ -167,6 +186,9 @@ impl Settings {
             anon,
             identity,
             unmapped,
+            folder_by_id: dataset["copy_folder"].as_str() == Some("id-type")
+                && matches!(patient_id, PatientId::IdType(_)),
+            patient_id,
             tags,
             private: Vec::new(),
             pack: None,
@@ -191,6 +213,8 @@ impl Settings {
             "name": self.name,
             "identity": self.identity.to_json(),
             "unmapped": self.unmapped.name(),
+            "patient_id": self.patient_id.as_text(),
+            "copy_folder": if self.folder_by_id { "id-type" } else { "subject-code" },
             "tags": {
                 "keep": self.tags.keep.iter().map(tag).collect::<Vec<_>>(),
                 "remove": self.tags.remove.iter().map(tag).collect::<Vec<_>>(),

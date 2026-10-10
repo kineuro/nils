@@ -12,7 +12,9 @@
 //! open one, no release row, no derivative and no measure. Such a stack is
 //! kept and reported instead, with the first reason found. What is derived
 //! from the stack alone (its fingerprint, its classification and the open
-//! review items the classifier raised on it) goes with it.
+//! review items the classifier raised on it) goes with it. The digest's fold
+//! of stacks that only the echo number told apart keeps and removes stacks
+//! by the same rules ([`kept_stacks`], [`remove_stacks`]).
 //!
 //! Which tables carry a stack or a series is not remembered here by hand:
 //! every table with a `stack_id` or a `series_id` column is listed in
@@ -109,16 +111,21 @@ impl Swept {
     }
 }
 
-fn ids_of(store: &mut Store, sql: &str, params: &[Param]) -> Result<Vec<i64>, Error> {
+pub(crate) fn ids_of(store: &mut Store, sql: &str, params: &[Param]) -> Result<Vec<i64>, Error> {
     store.query(sql, params)?.iter().map(|r| r.int(0)).collect()
 }
 
-fn list(ids: &[i64]) -> String {
+pub(crate) fn list(ids: &[i64]) -> String {
     ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
 }
 
 /// The ids among `ids` that `column` of `t` names.
-fn named_in(store: &mut Store, t: &str, column: &str, ids: &[i64]) -> Result<BTreeSet<i64>, Error> {
+pub(crate) fn named_in(
+    store: &mut Store,
+    t: &str,
+    column: &str,
+    ids: &[i64],
+) -> Result<BTreeSet<i64>, Error> {
     let mut out = BTreeSet::new();
     for chunk in ids.chunks(500) {
         let sql = format!(
@@ -184,7 +191,69 @@ fn reviewed(store: &mut Store, ids: &BTreeSet<i64>) -> Result<Vec<(i64, i64, boo
     Ok(out)
 }
 
-fn delete_where(store: &mut Store, t: &str, column: &str, ids: &[i64]) -> Result<(), Error> {
+/// Why each of `ids` must stay where it would otherwise go, the first reason
+/// found: a decision, a row that names what someone did, or a review item
+/// someone answered. A stack the map does not name may go. The stack review
+/// items naming any of them come back too, `(item, stack, open)`, so that
+/// [`remove_stacks`] takes the open ones with their stack.
+#[allow(clippy::type_complexity)]
+pub fn kept_stacks(
+    store: &mut Store,
+    ids: &[i64],
+) -> Result<(BTreeMap<i64, &'static str>, Vec<(i64, i64, bool)>), Error> {
+    let mut kept: BTreeMap<i64, &'static str> = BTreeMap::new();
+    if !ids.is_empty() {
+        for id in decided(store, "stack", ids)? {
+            kept.entry(id).or_insert("a decision names it");
+        }
+        for (t, row) in STACK_TABLES {
+            if let Row::Keeps(why) = row {
+                for id in named_in(store, t, "stack_id", ids)? {
+                    kept.entry(id).or_insert(why);
+                }
+            }
+        }
+    }
+    let set: BTreeSet<i64> = ids.iter().copied().collect();
+    let items = reviewed(store, &set)?;
+    for (_, stack, open) in &items {
+        if !open {
+            kept.entry(*stack)
+                .or_insert("a review item on it was answered");
+        }
+    }
+    Ok((kept, items))
+}
+
+/// Remove the stacks `gone` (sorted), what is derived from them alone, and
+/// the open review items among `items` that name them. Their instances are
+/// elsewhere by now, or there were none; the series' counts are the
+/// caller's. Runs inside the caller's transaction, if any.
+pub fn remove_stacks(
+    store: &mut Store,
+    gone: &[i64],
+    items: &[(i64, i64, bool)],
+) -> Result<(), Error> {
+    let open_items: Vec<i64> = items
+        .iter()
+        .filter(|(_, stack, open)| *open && gone.binary_search(stack).is_ok())
+        .map(|(item, _, _)| *item)
+        .collect();
+    delete_where(store, "review_item", "id", &open_items)?;
+    for (t, row) in STACK_TABLES {
+        if *row == Row::Goes {
+            delete_where(store, t, "stack_id", gone)?;
+        }
+    }
+    delete_where(store, "stack", "id", gone)
+}
+
+pub(crate) fn delete_where(
+    store: &mut Store,
+    t: &str,
+    column: &str,
+    ids: &[i64],
+) -> Result<(), Error> {
     for chunk in ids.chunks(500) {
         store.execute(
             &format!(
@@ -219,27 +288,7 @@ pub fn sweep(store: &mut Store, batch: Option<i64>, dry_run: bool) -> Result<Swe
     );
     let empty = ids_of(store, &sql, &params)?;
     let mut out = Swept::default();
-    let mut kept: BTreeMap<i64, &'static str> = BTreeMap::new();
-    if !empty.is_empty() {
-        for id in decided(store, "stack", &empty)? {
-            kept.entry(id).or_insert("a decision names it");
-        }
-        for (t, row) in STACK_TABLES {
-            if let Row::Keeps(why) = row {
-                for id in named_in(store, t, "stack_id", &empty)? {
-                    kept.entry(id).or_insert(why);
-                }
-            }
-        }
-    }
-    let set: BTreeSet<i64> = empty.iter().copied().collect();
-    let items = reviewed(store, &set)?;
-    for (_, stack, open) in &items {
-        if !open {
-            kept.entry(*stack)
-                .or_insert("a review item on it was answered");
-        }
-    }
+    let (kept, items) = kept_stacks(store, &empty)?;
     let gone: Vec<i64> = empty
         .iter()
         .copied()
@@ -313,18 +362,7 @@ pub fn sweep(store: &mut Store, batch: Option<i64>, dry_run: bool) -> Result<Swe
         return Ok(out);
     }
 
-    let open_items: Vec<i64> = items
-        .iter()
-        .filter(|(_, stack, open)| *open && gone.binary_search(stack).is_ok())
-        .map(|(item, _, _)| *item)
-        .collect();
-    delete_where(store, "review_item", "id", &open_items)?;
-    for (t, row) in STACK_TABLES {
-        if *row == Row::Goes {
-            delete_where(store, t, "stack_id", &gone)?;
-        }
-    }
-    delete_where(store, "stack", "id", &gone)?;
+    remove_stacks(store, &gone, &items)?;
     for (t, row) in SERIES_TABLES {
         if *row == Row::Goes {
             delete_where(store, t, "series_id", &series_gone)?;

@@ -39,7 +39,7 @@ fn bounds() -> Bounds {
 
 /// Run an ask through the pipeline with the test's defaults.
 fn go(l: &mut Lab, ask: Ask, name: Option<&str>, keep: bool) -> nils_ask::run::Outcome {
-    let scope = Scope::default();
+    let scope = common::quasi();
     let scheme = Scheme::default();
     run(
         &mut l.registry,

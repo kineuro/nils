@@ -2104,14 +2104,14 @@ fn units_missing(
         store.qualified("release_stack"),
         d.param(1, Type::Int)
     );
-    let mut suffix: BTreeMap<i64, Option<String>> = BTreeMap::new();
+    // each stack's stem in the raw tree, which says what it stands as
+    let mut stems: BTreeMap<i64, Option<String>> = BTreeMap::new();
     for r in store.query(&sql, &[Param::Int(release_id)]).map_err(err)? {
         let raw = r.text(2).map_err(err)? == "raw";
         let stem = r.opt_text(1).map_err(err)?;
-        suffix.insert(
+        stems.insert(
             r.int(0).map_err(err)?,
-            stem.filter(|_| raw)
-                .map(|s| nils_release::run::stem_suffix(s).to_string()),
+            stem.filter(|_| raw).map(str::to_string),
         );
     }
     let all: Vec<i64> = units
@@ -2129,7 +2129,7 @@ fn units_missing(
             for role in &picked.roles {
                 held.entry(role.clone())
                     .or_default()
-                    .push(suffix.get(s).cloned().flatten());
+                    .push(stems.get(s).cloned().flatten());
             }
         }
         let why = crate::preflight::roles_missing(roles, &held);

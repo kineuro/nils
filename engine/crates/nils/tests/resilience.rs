@@ -96,7 +96,7 @@ impl Engine {
     ) -> Engine {
         let stderr = home.path().join(format!("serve-{files}.err"));
         // `ulimit -n` in the shell sets both limits, then the shell becomes the engine
-        let mut child = Command::new("sh")
+        let child = Command::new("sh")
             .arg("-c")
             .arg(format!("ulimit -n {files} && exec \"$0\" \"$@\""))
             .arg(env!("CARGO_BIN_EXE_nils"))
@@ -113,23 +113,25 @@ impl Engine {
             .stderr(std::fs::File::create(&stderr).unwrap())
             .spawn()
             .unwrap();
-        let first = BufReader::new(child.stdout.take().unwrap())
+        // held from here, so that a panic below kills it too
+        let mut held = Engine {
+            child,
+            port: 0,
+            stderr,
+        };
+        let first = BufReader::new(held.child.stdout.take().unwrap())
             .lines()
             .next()
             .and_then(Result::ok)
             .unwrap_or_else(|| {
                 panic!(
                     "nils serve did not listen: {}",
-                    std::fs::read_to_string(&stderr).unwrap_or_default()
+                    std::fs::read_to_string(&held.stderr).unwrap_or_default()
                 )
             });
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Engine {
-            child,
-            port,
-            stderr,
-        }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     fn get(&self, path: &str, token: Option<&str>) -> Result<(u16, Vec<u8>), String> {

@@ -75,6 +75,9 @@ pub struct Compiled {
     pub columns: Vec<String>,
     /// Which answer columns are subject codes, digested before hashing.
     pub code_columns: Vec<usize>,
+    /// Record 55 K7: which answer columns read a quasi identifying field the
+    /// caller may not project raw, answered as their shapes.
+    pub shaped_columns: Vec<usize>,
 }
 
 /// The dialect layer: the hooks (H1 to H11) and the closures (§11.2, §11.3).
@@ -281,6 +284,30 @@ impl Sql {
     pub fn like(self, x: &str, pattern_placeholder: &str) -> String {
         format!("{x} LIKE {pattern_placeholder} ESCAPE '\\'")
     }
+
+    /// Wave 7a: whether a name is among a list of names joined by `, ` (the
+    /// datasets of a subject or a session). A dataset's name holds no
+    /// whitespace, so the separator never falls inside one; no list holds
+    /// no name.
+    pub fn member(self, list: &str, name: &str) -> String {
+        let hay = format!("', ' || COALESCE({list}, '') || ', '");
+        let needle = format!("', ' || {name} || ', '");
+        if self.is_pg() {
+            format!("(strpos({hay}, {needle}) > 0)")
+        } else {
+            format!("(instr({hay}, {needle}) > 0)")
+        }
+    }
+
+    /// Wave 7a: names as one list joined by `, `, sorted byte by byte on
+    /// both backends so the list reads the same on either; null for none.
+    pub fn name_list(self, x: &str) -> String {
+        if self.is_pg() {
+            format!("string_agg({x}, ', ' ORDER BY {x} COLLATE \"C\")")
+        } else {
+            format!("group_concat({x}, ', ' ORDER BY {x})")
+        }
+    }
 }
 
 /// Escape a literal for a LIKE pattern.
@@ -293,6 +320,12 @@ pub fn like_escape(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// A text as an SQL literal, its quotes doubled: for the names of a pack's
+/// vocabulary, which are the same on every run.
+fn sql_text(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 // ---------------------------------------------------------------- the frame
@@ -308,6 +341,11 @@ struct Term {
     /// The parameter the term binds, when it is one placeholder, so that a
     /// second use binds it again instead of naming a placeholder twice.
     param: Option<(Param, Type)>,
+    /// Wave 7a: the value is a list of names joined by `, ` (the datasets
+    /// a subject's or a session's stacks are of), so `=`, `<>`, `in`,
+    /// `not_in` and `has` ask whether a name is among them, and a group
+    /// keyed by it counts a row once under each name.
+    members: bool,
 }
 
 impl Term {
@@ -317,6 +355,7 @@ impl Term {
             prec: None,
             ci: None,
             param: None,
+            members: false,
         }
     }
 }
@@ -413,6 +452,10 @@ struct Builder<'a> {
     external: HashMap<String, BTreeSet<String>>,
     answer_columns: Vec<String>,
     code_columns: Vec<usize>,
+    /// The places in `out.columns` answered as their shapes (record 55 K7),
+    /// and their places in the answer.
+    shaped: BTreeSet<usize>,
+    shaped_columns: Vec<usize>,
     /// The sets whose totals show only for `MEASURE_K` scans or more
     /// (below detail quasi, over a pipeline's measures).
     small_cells: BTreeSet<String>,
@@ -788,6 +831,9 @@ impl<'a> Builder<'a> {
         if c.table == "measure" {
             return self.measure_column(level, &c.column);
         }
+        if c.table == crate::validate::DATASET_TABLE {
+            return self.dataset_column(level);
+        }
         if c.table == "study" && c.column == "day" {
             return Some(Term::plain(
                 "COALESCE(sy.date_filled, sy.study_date)".into(),
@@ -801,7 +847,82 @@ impl<'a> Builder<'a> {
             prec,
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
+            members: false,
         })
+    }
+
+    /// Wave 7a: a stack's `dataset`, the name of the dataset whose digest
+    /// first read it, and a session's or a subject's, the names of the
+    /// datasets its stacks are of as one sorted list, read beside the base
+    /// relation through each stack's first batch and that batch's source.
+    /// The stacks rolled up are the ones a stack set sees: none the pack
+    /// ruled out, and none of a sample sealed now where those are withheld.
+    fn dataset_column(&self, level: &str) -> Option<Term> {
+        if !matches!(level, "stack" | "session" | "subject") {
+            return None;
+        }
+        let quote = |t: &str| format!("'{}'", t.replace('\'', "''"));
+        let mut whens = String::new();
+        let mut sources: Vec<String> = Vec::new();
+        for d in self.ctx.names.datasets() {
+            for s in &d.sources {
+                whens.push_str(&format!(" WHEN {s} THEN {}", quote(&d.name)));
+                sources.push(s.to_string());
+            }
+        }
+        let mut term = if sources.is_empty() {
+            // no dataset holds a source, so no stack is of one
+            Term::plain("CAST(NULL AS TEXT)".into())
+        } else {
+            let name = format!("CASE dsb.source_id{whens} END");
+            let (batch, stack) = (self.q("ingest_batch"), self.q("stack"));
+            if level == "stack" {
+                let first = match self.current {
+                    Some(Grain::Instance) => format!(
+                        "(SELECT dst.first_batch_id FROM {stack} dst WHERE dst.id = i.stack_id)"
+                    ),
+                    _ => "st.first_batch_id".to_string(),
+                };
+                return Some(Term::plain(format!(
+                    "(SELECT {name} FROM {batch} dsb WHERE dsb.id = {first})"
+                )));
+            }
+            let series = self.q("series");
+            // whose stack it is comes off its series (record 35 finding 1),
+            // and a session's stacks are its studies' of its own subject
+            let (from, unit) = if level == "subject" {
+                (
+                    format!("{stack} dst JOIN {series} dse ON dse.id = dst.series_id"),
+                    "dse.subject_id = su.id",
+                )
+            } else {
+                (
+                    format!(
+                        "{} dscs JOIN {series} dse ON dse.study_id = dscs.study_id \
+                         JOIN {stack} dst ON dst.series_id = dse.id",
+                        self.q("session_cache_study")
+                    ),
+                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id",
+                )
+            };
+            let mut standing = format!(
+                " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
+                 AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
+                self.q("classification_axis")
+            );
+            if let Some(sealed) = self.not_sealed("dst.id") {
+                standing.push_str(&format!(" AND {sealed}"));
+            }
+            Term::plain(format!(
+                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} \
+                 JOIN {batch} dsb ON dsb.id = dst.first_batch_id \
+                 WHERE {unit} AND dsb.source_id IN ({}){standing}) dsn)",
+                self.sql.name_list("dsn.n"),
+                sources.join(", ")
+            ))
+        };
+        term.members = level != "stack";
+        Some(term)
     }
 
     /// A run's measure of a unit (record 49 A3), `<number|text|run>:
@@ -1213,6 +1334,7 @@ impl<'a> Builder<'a> {
                             prec,
                             ci: None,
                             param: None,
+                            members: t.members,
                         },
                     ));
                 }
@@ -1233,6 +1355,7 @@ impl<'a> Builder<'a> {
                 let col = field_col(p);
                 projected.push(format!("{} AS {col}", t.sql));
                 let mut layered = Term::plain(col.clone());
+                layered.members = t.members;
                 if let Some(pc) = &t.prec {
                     let pcol = format!("{col}__prec");
                     projected.push(format!("{pc} AS {pcol}"));
@@ -1255,6 +1378,7 @@ impl<'a> Builder<'a> {
                     prec: frame.has_prec.then(|| "prec".to_string()),
                     ci: None,
                     param: None,
+                    members: false,
                 },
             ));
         }
@@ -1342,6 +1466,7 @@ impl<'a> Builder<'a> {
                     prec: expr.prec,
                     ci: None,
                     param: None,
+                    members: expr.members,
                 },
             ));
         }
@@ -1443,6 +1568,7 @@ impl<'a> Builder<'a> {
                     prec,
                     ci,
                     param: None,
+                    members: t.members,
                 },
             ));
         }
@@ -1459,6 +1585,7 @@ impl<'a> Builder<'a> {
                     prec,
                     ci: None,
                     param: None,
+                    members: false,
                 },
             ));
         }
@@ -1554,6 +1681,7 @@ impl<'a> Builder<'a> {
                                 prec: t.prec.as_ref().map(|p| format!("q.{p}")),
                                 ci: None,
                                 param: None,
+                                members: t.members,
                             },
                         )
                     })
@@ -1566,6 +1694,7 @@ impl<'a> Builder<'a> {
                             prec: t.prec.as_ref().map(|p| format!("p.{p}")),
                             ci: None,
                             param: None,
+                            members: t.members,
                         },
                     ));
                 }
@@ -1797,6 +1926,7 @@ impl<'a> Builder<'a> {
             prec,
             ci: None,
             param: None,
+            members: false,
         };
         terms.push((
             binding.to_string(),
@@ -1844,10 +1974,45 @@ impl<'a> Builder<'a> {
         let mut axis_cols: Vec<String> = Vec::new();
         let mut axis_joins: Vec<String> = Vec::new();
         let mut by_sql: Vec<String> = Vec::new();
+        // Wave 7a: the keys read by an axis, by their column's name, which
+        // hold each value in the form the pack stores
+        let mut axis_keys: BTreeMap<String, String> = BTreeMap::new();
         for (i, c) in g.by.iter().enumerate() {
             let at = format!("{path}.group.by[{i}]");
             if c.op != "axis" {
-                by_sql.push(self.expr(c, &child_terms, "ch", &at)?.sql);
+                let key = self.expr(c, &child_terms, "ch", &at)?;
+                if !key.members {
+                    by_sql.push(key.sql);
+                    continue;
+                }
+                // Wave 7a: a subject or a session counts once under each
+                // dataset its stacks are of, as an axis read with `each`
+                // counts a stack, and under null where it has none
+                let col = format!("names_g{i}");
+                let mut names: Vec<String> = self
+                    .ctx
+                    .names
+                    .datasets()
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect();
+                names.sort();
+                if names.is_empty() {
+                    axis_cols.push(format!("CAST(NULL AS TEXT) AS {col}"));
+                } else {
+                    let alias = format!("dn{i}");
+                    let rows = names
+                        .iter()
+                        .map(|n| format!("SELECT CAST('{}' AS TEXT) AS n", n.replace('\'', "''")))
+                        .collect::<Vec<_>>()
+                        .join(" UNION ALL ");
+                    axis_joins.push(format!(
+                        "LEFT JOIN ({rows}) {alias} ON {}",
+                        self.sql.member(&key.sql, &format!("{alias}.n"))
+                    ));
+                    axis_cols.push(format!("{alias}.n AS {col}"));
+                }
+                by_sql.push(format!("ch.{col}"));
                 continue;
             }
             let child_grain = self.ask.sets.get(&g.of).map(|s| s.grain);
@@ -1865,14 +2030,18 @@ impl<'a> Builder<'a> {
                     "LEFT JOIN {} {alias} ON {alias}.stack_id = ch.k AND {alias}.axis = {ax}",
                     self.q("classification_axis")
                 ));
-                axis_cols.push(format!("{alias}.value AS {col}"));
+                axis_cols.push(format!(
+                    "{} AS {col}",
+                    self.stored_form(axis, &format!("{alias}.value"))
+                ));
             } else {
                 axis_cols.push(format!(
                     "(SELECT {} FROM {} ax WHERE ax.stack_id = ch.k AND ax.axis = {ax}) AS {col}",
-                    self.sql.sorted_list("ax.value"),
+                    self.sql.sorted_list(&self.stored_form(axis, "ax.value")),
                     self.q("classification_axis")
                 ));
             }
+            axis_keys.insert(axis.to_string(), axis.to_string());
             by_sql.push(format!("ch.{col}"));
         }
         let source = if axis_cols.is_empty() {
@@ -1966,8 +2135,8 @@ impl<'a> Builder<'a> {
             group_cols.join(", ")
         );
         for (b, col) in post {
-            let c = set.bind.get(&b).expect("a binding");
-            let e = self.expr(c, &terms, "q", &format!("{path}.bind.{b}"))?;
+            let c = self.key_values(set.bind.get(&b).expect("a binding"), &axis_keys);
+            let e = self.expr(&c, &terms, "q", &format!("{path}.bind.{b}"))?;
             layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", e.sql);
             frame.bindings.push((b.clone(), col.clone()));
             terms.push((b, Term::plain(col)));
@@ -1987,8 +2156,9 @@ impl<'a> Builder<'a> {
         if !set.where_.is_empty() {
             let mut preds = Vec::new();
             for (i, c) in set.where_.iter().enumerate() {
+                let c = self.key_values(c, &axis_keys);
                 preds.push(
-                    self.expr(c, &terms, "q", &format!("{path}.where[{i}]"))?
+                    self.expr(&c, &terms, "q", &format!("{path}.where[{i}]"))?
                         .sql,
                 );
             }
@@ -2114,6 +2284,7 @@ impl<'a> Builder<'a> {
             prec: t.prec.as_deref().map(dot),
             ci: t.ci.as_deref().map(dot),
             param: None,
+            members: t.members,
         })
     }
 
@@ -2179,6 +2350,7 @@ impl<'a> Builder<'a> {
             prec: None,
             ci: None,
             param: Some((param, ty)),
+            members: false,
         })
     }
 
@@ -2189,8 +2361,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn list_placeholders(&mut self, a: &Arg, at: &str) -> R<String> {
-        let items: Vec<Param> = match a {
+    /// The literals of a list, or of a list parameter's value, as
+    /// parameters, not yet bound.
+    fn list_params(&self, a: &Arg, at: &str) -> R<Vec<Param>> {
+        Ok(match a {
             Arg::List(items) => items
                 .iter()
                 .map(|i| match i {
@@ -2226,7 +2400,21 @@ impl<'a> Builder<'a> {
                 }
             }
             _ => return Err(err(at, "in takes a list or a list parameter")),
+        })
+    }
+
+    /// One item of a list, bound as its own placeholder.
+    fn item_placeholder(&mut self, i: Param) -> String {
+        let ty = match &i {
+            Param::Int(_) => Type::Int,
+            Param::Double(_) => Type::Double,
+            _ => Type::Text,
         };
+        self.p(i, ty)
+    }
+
+    fn list_placeholders(&mut self, a: &Arg, at: &str) -> R<String> {
+        let items = self.list_params(a, at)?;
         if items.is_empty() {
             return Ok("(NULL)".into());
         }
@@ -2235,12 +2423,7 @@ impl<'a> Builder<'a> {
         }
         let mut ph = Vec::with_capacity(items.len());
         for i in items {
-            let ty = match &i {
-                Param::Int(_) => Type::Int,
-                Param::Double(_) => Type::Double,
-                _ => Type::Text,
-            };
-            ph.push(self.p(i, ty));
+            ph.push(self.item_placeholder(i));
         }
         Ok(format!("({})", ph.join(", ")))
     }
@@ -2394,6 +2577,7 @@ impl<'a> Builder<'a> {
                     prec: None,
                     ci: None,
                     param: None,
+                    members: false,
                 })
             }
             "voxel" | "voxel_max" => {
@@ -2485,6 +2669,128 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A row's value of an axis read in the one form the pack stores (Wave
+    /// 7a): every other name a row may hold for a value (its identity where
+    /// the pack stores the label, an identity it had before a rename) reads
+    /// as the stored one, so a group's key and a level's signature hold each
+    /// value once, whichever form its rows hold.
+    fn stored_form(&self, axis: &str, x: &str) -> String {
+        let synonyms = self
+            .ctx
+            .names
+            .axis_names(axis)
+            .map(|a| a.synonyms())
+            .unwrap_or_default();
+        if synonyms.is_empty() {
+            return x.to_string();
+        }
+        let whens: String = synonyms
+            .iter()
+            .map(|(name, stored)| format!(" WHEN {} THEN {}", sql_text(name), sql_text(stored)))
+            .collect();
+        format!("(CASE {x}{whens} ELSE {x} END)")
+    }
+
+    /// Every text a row may hold for the value of an axis a document's text
+    /// names (Wave 7a); none when it names no value of the axis.
+    fn held_texts(&self, axis: &str, text: &str) -> Option<Vec<String>> {
+        let names = self.ctx.names.axis_names(axis)?;
+        names.named(text).map(|v| names.held(v))
+    }
+
+    /// What a row's value of an axis (`ax.value`) is held against when a
+    /// document names one (Wave 7a): every text a row may hold for the value
+    /// named, by its identity, an identity it had before a rename or its
+    /// label, so the value is found whichever form its rows hold. A value
+    /// is always text, so a number a document wrote is read as its digits;
+    /// a text that names no value is compared as written, and a value an
+    /// expression works out is compared as it comes.
+    fn axis_held(
+        &mut self,
+        axis: &str,
+        value: &Arg,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<String> {
+        let text = match value {
+            Arg::Text(t) => Some(t.clone()),
+            Arg::Int(n) => Some(n.to_string()),
+            Arg::Number(n) => Some(n.to_string()),
+            Arg::Clause(c) if c.op == "param" => c
+                .ref_name()
+                .and_then(|n| self.ask.params.get(n))
+                .and_then(|d| match (d.type_, d.value.as_ref()) {
+                    (ParamType::Text, Some(Value::String(s))) => Some(s.clone()),
+                    (ParamType::Integer, Some(Value::Number(n))) if n.is_i64() => {
+                        Some(n.to_string())
+                    }
+                    _ => None,
+                }),
+            _ => None,
+        };
+        let Some(text) = text else {
+            let v = self.arg(value, terms, alias, at)?;
+            return Ok(format!("ax.value = {}", v.sql));
+        };
+        let held = self
+            .held_texts(axis, &text)
+            .unwrap_or_else(|| vec![text.clone()]);
+        let list: Vec<String> = held
+            .into_iter()
+            .map(|h| self.p(Param::from(h), Type::Text))
+            .collect();
+        Ok(format!("ax.value IN ({})", list.join(", ")))
+    }
+
+    /// A clause over a group's keys with each value it names of a key read
+    /// by an axis written as the key holds it (Wave 7a): `=`, `<>`, `in` and
+    /// `not_in` on such a key compare with the name the pack stores,
+    /// whichever name of the value the document wrote.
+    fn key_values(&self, c: &Clause, keys: &BTreeMap<String, String>) -> Clause {
+        let mut out = c.clone();
+        if matches!(c.op.as_str(), "=" | "<>" | "in" | "not_in")
+            && let Some(Arg::Clause(l)) = c.args.first()
+            && l.op == "field"
+            && let Some(axis) = l.ref_name().and_then(|p| keys.get(p))
+            && let Some(names) = self.ctx.names.axis_names(axis)
+        {
+            let stored = |a: &Arg| -> Option<Arg> {
+                let text = match a {
+                    Arg::Text(t) => t.clone(),
+                    Arg::Int(n) => n.to_string(),
+                    Arg::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                names
+                    .named(&text)
+                    .map(|v| Arg::Text(names.stored(v).to_string()))
+            };
+            match out.args.get_mut(1) {
+                Some(Arg::List(items)) => {
+                    for i in items.iter_mut() {
+                        if let Some(s) = stored(i) {
+                            *i = s;
+                        }
+                    }
+                }
+                Some(r) => {
+                    if let Some(s) = stored(r) {
+                        *r = s;
+                    }
+                }
+                None => {}
+            }
+            return out;
+        }
+        for a in out.args.iter_mut() {
+            if let Arg::Clause(inner) = a {
+                *inner = self.key_values(inner, keys);
+            }
+        }
+        out
+    }
+
     /// One member of a level's signature, as text that is the same on both
     /// backends: an axis as its sorted values, the acquisition type and the
     /// orientation as read, a physics number as an integer at a step.
@@ -2499,7 +2805,7 @@ impl<'a> Builder<'a> {
     ) -> R<String> {
         if self.ctx.names.axis_values(member).is_some() {
             let ax = self.p(Param::from(member), Type::Text);
-            let list = self.sql.sorted_list("ax.value");
+            let list = self.sql.sorted_list(&self.stored_form(member, "ax.value"));
             return Ok(format!(
                 "COALESCE((SELECT {list} FROM {} ax WHERE ax.stack_id = {key} AND ax.axis = {ax}), '')",
                 self.q("classification_axis")
@@ -2577,12 +2883,11 @@ impl<'a> Builder<'a> {
                         .get(1)
                         .ok_or_else(|| err(at, "an axis comparison needs a value"))?;
                     let ax = self.p(Param::from(axis), Type::Text);
-                    let v = self.arg(value, terms, alias, at)?;
+                    let held = self.axis_held(axis, value, terms, alias, at)?;
                     let exists = format!(
-                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value = {})",
+                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND {held})",
                         self.q("classification_axis"),
                         dot("k"),
-                        v.sql
                     );
                     return plain(if op == "<>" {
                         format!("NOT {exists}")
@@ -2606,6 +2911,18 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
+                // Wave 7a: a subject or a session is of a dataset when one of
+                // its stacks is, so = and <> ask whether the name is among
+                // its datasets
+                if matches!(op, "=" | "<>") && a.members != b.members {
+                    let (list, name) = if a.members { (&a, &b) } else { (&b, &a) };
+                    let among = self.sql.member(&list.sql, &name.sql);
+                    return plain(if op == "=" {
+                        among
+                    } else {
+                        format!("(NOT {among})")
+                    });
+                }
                 plain(self.compare(op, a, b, strict))
             }
             "~=" => {
@@ -2638,6 +2955,52 @@ impl<'a> Builder<'a> {
                 plain(format!("(ABS({} - {}) <= {tol})", a.sql, b.sql))
             }
             "in" | "not_in" => {
+                if let Some(Arg::Clause(l)) = c.args.first()
+                    && l.op == "axis"
+                {
+                    // Wave 7a: one of an axis's values, each named by any of
+                    // its names and found in any form a row holds it
+                    let axis = l.ref_name().unwrap_or("");
+                    let listed = c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?;
+                    let mut held: Vec<Param> = Vec::new();
+                    for item in self.list_params(listed, at)? {
+                        let text = match item {
+                            Param::Text(t) => t,
+                            Param::Int(n) => n.to_string(),
+                            Param::Double(n) => n.to_string(),
+                            _ => continue,
+                        };
+                        let texts = self
+                            .held_texts(axis, &text)
+                            .unwrap_or_else(|| vec![text.clone()]);
+                        for t in texts {
+                            let p = Param::from(t);
+                            if !held.contains(&p) {
+                                held.push(p);
+                            }
+                        }
+                    }
+                    let ax = self.p(Param::from(axis), Type::Text);
+                    let list = if held.is_empty() {
+                        "(NULL)".to_string()
+                    } else if held.len() > LIST_BIND_MAX {
+                        self.long_list(held, at)?
+                    } else {
+                        let ph: Vec<String> =
+                            held.into_iter().map(|h| self.item_placeholder(h)).collect();
+                        format!("({})", ph.join(", "))
+                    };
+                    let exists = format!(
+                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value IN {list})",
+                        self.q("classification_axis"),
+                        dot("k"),
+                    );
+                    return plain(if op == "in" {
+                        exists
+                    } else {
+                        format!("NOT {exists}")
+                    });
+                }
                 let a = self.arg(
                     c.args
                         .first()
@@ -2646,10 +3009,36 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let list = self.list_placeholders(
-                    c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?,
-                    at,
-                )?;
+                let listed = c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?;
+                if a.members {
+                    // Wave 7a: one of the names among a subject's or a
+                    // session's datasets
+                    let items = self.list_params(listed, at)?;
+                    if items.len() > LIST_BIND_MAX {
+                        return Err(err(
+                            at,
+                            format!(
+                                "a list of more than {LIST_BIND_MAX} datasets is not one to ask for"
+                            ),
+                        ));
+                    }
+                    let mut among = Vec::with_capacity(items.len());
+                    for i in items {
+                        let ph = self.item_placeholder(i);
+                        among.push(self.sql.member(&a.sql, &ph));
+                    }
+                    let any = if among.is_empty() {
+                        "(1 = 0)".to_string()
+                    } else {
+                        format!("({})", among.join(" OR "))
+                    };
+                    return plain(if op == "in" {
+                        any
+                    } else {
+                        format!("(NOT {any})")
+                    });
+                }
+                let list = self.list_placeholders(listed, at)?;
                 plain(format!(
                     "({} {}IN {list})",
                     a.sql,
@@ -2661,21 +3050,36 @@ impl<'a> Builder<'a> {
                     return Err(err(at, "has takes an axis and a value"));
                 };
                 if l.op != "axis" {
-                    return Err(err(at, "has takes an axis"));
+                    // Wave 7a: the datasets of a subject or a session are
+                    // many names, read as an axis of many values is
+                    let list = self.expr(l, terms, alias, at)?;
+                    if !list.members {
+                        return Err(err(
+                            at,
+                            "has takes an axis, or a field of several names: a subject's or a session's dataset",
+                        ));
+                    }
+                    let v = self.arg(
+                        c.args.get(1).ok_or_else(|| err(at, "has needs a value"))?,
+                        terms,
+                        alias,
+                        at,
+                    )?;
+                    return plain(self.sql.member(&list.sql, &v.sql));
                 }
                 let axis = l.ref_name().unwrap_or("");
                 let ax = self.p(Param::from(axis), Type::Text);
-                let v = self.arg(
+                let held = self.axis_held(
+                    axis,
                     c.args.get(1).ok_or_else(|| err(at, "has needs a value"))?,
                     terms,
                     alias,
                     at,
                 )?;
                 plain(format!(
-                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value = {})",
+                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND {held})",
                     self.q("classification_axis"),
                     dot("k"),
-                    v.sql
                 ))
             }
             "picked" => {
@@ -3015,6 +3419,7 @@ impl<'a> Builder<'a> {
                     prec: None,
                     ci: None,
                     param: None,
+                    members: false,
                 })
             }
             "share" => {
@@ -3099,6 +3504,7 @@ impl<'a> Builder<'a> {
         let mut cols = vec!["o.k AS _key".to_string(), "o.subj AS _subject".to_string()];
         let mut names = vec!["_key".to_string(), "_subject".to_string()];
         let mut code_columns = Vec::new();
+        let mut shaped_columns = Vec::new();
         match out.level {
             crate::ast::Level::Count => {
                 let subjects = if frame.has_subj {
@@ -3166,6 +3572,9 @@ impl<'a> Builder<'a> {
             if name == "code" || name == "subject.code" {
                 code_columns.push(cols.len());
             }
+            if self.shaped.contains(&i) {
+                shaped_columns.push(cols.len());
+            }
             cols.push(format!("{rendered} AS c{i}"));
             names.push(name);
         }
@@ -3205,6 +3614,7 @@ impl<'a> Builder<'a> {
         }
         self.answer_columns = names;
         self.code_columns = code_columns;
+        self.shaped_columns = shaped_columns;
         Ok(sql)
     }
 }
@@ -3232,6 +3642,8 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         external: external_paths(ask),
         answer_columns: Vec::new(),
         code_columns: Vec::new(),
+        shaped: validated.shaped.clone(),
+        shaped_columns: Vec::new(),
         small_cells: validated.small_cells.clone(),
     };
     for name in &validated.order {
@@ -3246,5 +3658,6 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         params: b.params,
         columns: b.answer_columns.clone(),
         code_columns: b.code_columns.clone(),
+        shaped_columns: b.shaped_columns.clone(),
     })
 }

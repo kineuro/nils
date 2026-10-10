@@ -1025,6 +1025,27 @@ pub(crate) struct Doors {
 }
 
 impl Doors {
+    /// The locations `@name` names now: those the deployment gave, then
+    /// every active source place by its own name, read from the registry
+    /// on each call, so a dataset added while the engine runs is read by
+    /// its name without a restart. A given name wins over a place's, and a
+    /// place whose folder a given location already is stays that location.
+    pub(crate) fn ingest_roots_now(
+        &self,
+        store: &mut nils_registry::store::Store,
+    ) -> std::collections::BTreeMap<String, PathBuf> {
+        let real =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let given: Vec<PathBuf> = self.ingest_roots.values().map(|p| real(p)).collect();
+        let mut roots = self.ingest_roots.clone();
+        for (name, path) in crate::dataset::place_roots(store) {
+            if !given.contains(&real(&path)) {
+                roots.entry(name).or_insert(path);
+            }
+        }
+        roots
+    }
+
     /// Record 48 R2: whether a caller's principal is an identity the engine
     /// verified (a token it holds, or a trusted issuer's subject), and not
     /// the local user name `--auth off` takes.
@@ -1150,10 +1171,13 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     let stop_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Record 49 A1: pipeline runs have a lane of their own beside it, so a
     // long run never holds up a digest, a classify or a release.
+    // Record 55 H2: and the pictures lane, the pyramids built in the
+    // background after a sort, at a low priority and with half the workers.
     let queue: Vec<std::thread::JoinHandle<()>> = if args.worker {
         [
             nils_registry::job::Lane::Main,
             nils_registry::job::Lane::Pipelines,
+            nils_registry::job::Lane::Pictures,
         ]
         .into_iter()
         .map(|lane| {
@@ -1163,7 +1187,11 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             // lab 26b, finding 4: a job this engine queues runs with the
             // workers the engine was started with, where the caller
             // named none
-            let workers = args.workers.max(1);
+            let workers = if lane == nils_registry::job::Lane::Pictures {
+                (args.workers / 2).max(1)
+            } else {
+                args.workers.max(1)
+            };
             std::thread::spawn(move || queue_worker(&home, &roots, workers, lane, &stop))
         })
         .collect()
@@ -1466,6 +1494,7 @@ fn health_doc(health: &Health) -> serde_json::Value {
             "cache_cap": slab_cap,
         },
         "renders": { "cache_bytes": render_bytes, "cache_cap": render_cap },
+        "previews": { "open": crate::preview::open_count(), "cap": crate::preview::OPEN_FILES },
         "trouble": {
             "accept_errors": t.accept_errors.load(Ordering::Relaxed),
             "panics": t.panics.load(Ordering::Relaxed),
@@ -1807,11 +1836,37 @@ fn handle(
         let _ = respond(request, reply);
         return;
     }
-    let reply = match caller {
+    let asked_etag = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("If-None-Match"))
+        .map(|h| h.value.as_str().to_string());
+    let mut reply = match caller {
         Ok(caller) => route(doors, registry, ask, &caller, &method, path, &query, &body),
         Err(reply) => reply,
     };
     nils_registry::actor::clear();
+    // record 55 H2: a door that wrote may have queued a job, which a worker
+    // of this process starts now rather than at its next look
+    if method != Method::Get && reply.status < 400 {
+        crate::worker::wake();
+    }
+    // record 55 H2: a picture the browser holds already, by its ETag, is
+    // answered 304 with no body
+    if reply.status == 200
+        && let Some(asked) = asked_etag
+        && let Some((_, etag)) = reply.headers.iter().find(|(k, _)| k == "ETag")
+        && asked.split(',').any(|t| t.trim() == etag)
+    {
+        let headers: Vec<(String, String)> = reply
+            .headers
+            .iter()
+            .filter(|(k, _)| matches!(k.as_str(), "ETag" | "Cache-Control"))
+            .cloned()
+            .collect();
+        reply = Reply::nothing(304);
+        reply.headers = headers;
+    }
     let _ = respond(request, reply);
 }
 
@@ -2009,6 +2064,66 @@ fn routed(
                 None => Err(Reply::error(404, format!("no pack named {name}"))),
             }
         }
+        // record 55 H3 (2026-10-09): what the pack cannot rank, for whoever
+        // tunes it, by rule pair; never a review item
+        ["api", "packs", name, "disagreements"] if get => {
+            let reads_sealed = crate::sealed::reads(&caller.access);
+            Ok(Reply::ok(crate::disagreements::document(
+                registry.store(),
+                name,
+                reads_sealed,
+            )?))
+        }
+        // record 56 §5.4, §5.5 (2026-10-09): what a rule change does to the
+        // sorting, before anyone decides; nothing is written
+        ["api", "packs", name, "rehearse"] if post => {
+            let doc = json_body(body)?;
+            let dir = doors
+                .pack_dir
+                .as_ref()
+                .map(|d| d.join(name))
+                .filter(|d| d.join("pack.yml").is_file())
+                .ok_or_else(|| Reply::error(404, format!("no pack named {name}")))?;
+            let patch = crate::rehearse::patch_of("the body", Some(name), &doc)
+                .map_err(|e| Reply::error(400, e))?;
+            if patch.pack != *name {
+                return Err(Reply::error(
+                    400,
+                    format!(
+                        "the operations amend {}, and this door is {name}'s",
+                        patch.pack
+                    ),
+                ));
+            }
+            let scope = match doc.get("scope").filter(|v| !v.is_null()) {
+                None => None,
+                Some(v) => Some(nils_pack::patch::Scope::of(v).map_err(|e| Reply::error(400, e))?),
+            };
+            let examples = doc["examples"]
+                .as_u64()
+                .map(|n| (n as usize).clamp(1, 50))
+                .unwrap_or(5);
+            // the replay shares the machine with the doors that serve: half
+            // its threads at most
+            let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+            let settings = nils_classify::effect::Settings {
+                scope,
+                examples,
+                workers,
+            };
+            match crate::rehearse::report(registry, &dir, &patch, &settings) {
+                Ok(mut answer) => {
+                    // record 55 K7: a station name is quasi-identifying, and
+                    // below detail quasi a scanner is answered as its shape
+                    if caller.access.detail < crate::grants::Detail::Quasi {
+                        crate::rehearse::shape_scanners(&mut answer);
+                    }
+                    Ok(Reply::ok(answer))
+                }
+                Err(nils_classify::effect::Error::Refused(m)) => Err(Reply::error(400, m)),
+                Err(e) => Err(Reply::error(500, e.to_string())),
+            }
+        }
         ["api", "batches"] if get => {
             let limit = query
                 .get("limit")
@@ -2047,7 +2162,17 @@ fn routed(
         ))),
         ["api", "cohorts", name] if get => {
             match nils_registry::cohort::show(registry.store(), name)? {
-                Some(doc) => Ok(Reply::ok(doc)),
+                Some(mut doc) => {
+                    // Wave 7a, the Data page: its members' scans sorted, and
+                    // body part and post-contrast over them (record 56)
+                    if let (Some(id), Some(named)) = (doc["id"].as_i64(), doc["name"].as_str()) {
+                        let named = named.to_string();
+                        doc["steps"] = serde_json::Value::Array(crate::operations::of_cohort(
+                            registry, id, &named,
+                        )?);
+                    }
+                    Ok(Reply::ok(doc))
+                }
                 None => Err(Reply::error(404, format!("no cohort named {name}"))),
             }
         }
@@ -2162,6 +2287,28 @@ fn routed(
                                 }
                             }
                         }
+                        // record 55 H3: and in what the sort noted
+                        if let Some(notes) = doc["notes"].as_object_mut() {
+                            let overrides =
+                                notes.get_mut("overrides").and_then(|o| o.as_array_mut());
+                            for o in overrides.into_iter().flatten() {
+                                for side in ["by", "over"] {
+                                    if let Some(m) = o.get_mut(side).and_then(|v| v.as_object_mut())
+                                    {
+                                        m.remove("matched");
+                                    }
+                                }
+                            }
+                            let equal = notes.get_mut("equal_rank").and_then(|o| o.as_array_mut());
+                            for e in equal.into_iter().flatten() {
+                                let sides = e.get_mut("sides").and_then(|v| v.as_array_mut());
+                                for side in sides.into_iter().flatten() {
+                                    if let Some(m) = side.as_object_mut() {
+                                        m.remove("matched");
+                                    }
+                                }
+                            }
+                        }
                     }
                     Ok(Reply::ok(doc))
                 }
@@ -2179,8 +2326,10 @@ fn routed(
             let scope =
                 nils_classify::scope::Scope::parse(scope).map_err(|e| Reply::error(400, e))?;
             let mut doc = nils_classify::signals::signals(registry.store(), &scope)?;
-            // kineuro/nils#94: the text each unresolved axis was matched
-            // against, under the pack the engine serves, over a bounded sample
+            // kineuro/nils#94: the text each axis was matched against, under
+            // the pack the engine serves, over one bounded sample: per axis
+            // for the stacks it left unresolved, and per axis and value for
+            // the stacks the rules resolved it on
             let name = query
                 .get("pack")
                 .cloned()
@@ -2191,7 +2340,7 @@ fn routed(
                     .into_iter()
                     .find(|p| p.file_name().is_some_and(|f| *f == *name))
             });
-            doc["unresolved_texts"] = match found {
+            let (unresolved, resolved) = match found {
                 Some(dir) => {
                     let pack = nils_pack::load(&dir, None)
                         .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
@@ -2199,15 +2348,14 @@ fn routed(
                     let sample = nils_classify::rehearse::sample_of(
                         query.get("sample").and_then(|s| s.parse().ok()),
                     );
-                    nils_classify::signals::unresolved_texts(
-                        registry.store(),
-                        &pack,
-                        &scope,
-                        sample,
-                    )?
+                    let texts =
+                        nils_classify::signals::texts(registry.store(), &pack, &scope, sample)?;
+                    (texts.unresolved, texts.resolved)
                 }
-                None => serde_json::Value::Null,
+                None => (serde_json::Value::Null, serde_json::Value::Null),
             };
+            doc["unresolved_texts"] = unresolved;
+            doc["resolved_texts"] = resolved;
             Ok(Reply::ok(doc))
         }
         ["api", "classify", "try"] if post => {
@@ -2240,6 +2388,18 @@ fn routed(
                         })?,
                 )
             };
+            // record 55 H2: the preview a sort made, beside the pyramid
+            if rest.first() == Some(&"preview") {
+                return crate::preview::door(
+                    registry,
+                    caller,
+                    &doors.home,
+                    stack,
+                    through,
+                    rest,
+                    query,
+                );
+            }
             crate::pyramid::door(registry, caller, stack, through, rest, query)
         }
         ["api", "backups"] if get => {
@@ -2351,12 +2511,111 @@ fn routed(
                     .map_err(|e| Reply::error(500, e.to_string()))?,
             ))
         }
+        ["api", "datasets", _, "scans"] if get => {
+            // Wave 7a (record 55 H2): a dataset's scans a page at a time,
+            // read from the registry, never through a cohort; quasi
+            // identifying fields shaped below detail quasi (K7)
+            let scope = crate::viewer::Scope::dataset(registry, &decoded(segs[2]))?;
+            scans_door(doors, registry, caller, &scope, query)
+        }
+        // the dataset viewer (2026-10-09): a cohort's scans, every stack of
+        // a current member from any dataset, as a dataset's are paged
+        ["api", "cohorts", _, "scans"] if get => {
+            let scope = crate::viewer::Scope::cohort(registry, &decoded(segs[2]))?;
+            scans_door(doors, registry, caller, &scope, query)
+        }
+        // the dataset viewer (2026-10-09): the subjects of a dataset or a
+        // cohort as the Grid's folders, and one subject's visits
+        ["api", kind @ ("datasets" | "cohorts"), _, "subjects"] if get => {
+            let scope = viewer_scope(registry, kind, segs[2])?;
+            Ok(Reply::ok(crate::viewer::subjects(
+                registry, caller, &scope, query,
+            )?))
+        }
+        [
+            "api",
+            kind @ ("datasets" | "cohorts"),
+            _,
+            "subjects",
+            subject,
+            "visits",
+        ] if get => {
+            let scope = viewer_scope(registry, kind, segs[2])?;
+            let subject = subject
+                .parse::<i64>()
+                .map_err(|_| Reply::error(400, "a subject is named by its id"))?;
+            let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+            Ok(Reply::ok(crate::viewer::visits(
+                registry,
+                caller,
+                pack.as_deref(),
+                &scope,
+                subject,
+                query,
+            )?))
+        }
+        ["api", "datasets", _, "summary"] if get => {
+            // Wave 7a, the Data page (2026-10-09): what a dataset holds and
+            // where it is, step by step, in counts
+            let dataset = crate::scans::dataset_named(registry, &decoded(segs[2]))?;
+            Ok(Reply::ok(crate::dataset_summary::document(
+                registry,
+                &caller.access,
+                &dataset,
+            )?))
+        }
+        // 2026-10-10: the body-part or post-contrast step of a dataset or a
+        // cohort run from its rail: its scans frozen into a handle and the
+        // step's pipeline queued over them for it (crate::operations)
+        [
+            "api",
+            kind @ ("datasets" | "cohorts"),
+            _,
+            "steps",
+            step,
+            "run",
+        ] if post => crate::operations::run_door(
+            doors,
+            registry,
+            caller,
+            kind,
+            &decoded(segs[2]),
+            &decoded(step),
+        ),
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
             // every active place again first.
             use nils_registry::place;
             let refresh = query.get("probe").is_some_and(|p| p == "1" || p == "true");
+            // Wave 7a: `?explore=1` makes each source place's folder what
+            // it is first: a root's datasets found and settled, a dataset
+            // settled, the moves aside, which are a person's word
+            if query
+                .get("explore")
+                .is_some_and(|p| p == "1" || p == "true")
+            {
+                let tops: Vec<place::Place> = place::active(registry.store())?
+                    .into_iter()
+                    .filter(|p| p.role == place::Role::Source && p.dataset["root"].is_null())
+                    .collect();
+                for p in tops {
+                    let path = std::path::PathBuf::from(&p.path);
+                    if let Ok((d, _)) = crate::dataset::shape_place(
+                        registry.store(),
+                        &p.name,
+                        &path,
+                        &serde_json::json!({}),
+                        Some(&p),
+                        &p.guarantees,
+                    ) {
+                        place::set(registry.store(), p.id, None, None, Some(&d.probed))?;
+                        place::set_dataset(registry.store(), p.id, &d.dataset)?;
+                    }
+                }
+                // every dataset's state read again; nothing is added
+                let _ = crate::dataset::refresh(registry.store(), None);
+            }
             let mut rows = place::list(registry.store())?;
             if refresh {
                 let mut fresh = Vec::with_capacity(rows.len());
@@ -2392,6 +2651,41 @@ fn routed(
                 .iter()
                 .map(|p| {
                     let mut doc = p.as_json();
+                    // Wave 7a §5.3: what a dataset's folder holds and what a
+                    // declaration would move, read from its own listing
+                    if p.role == place::Role::Source && p.retired_at.is_none() {
+                        let folder = std::path::Path::new(&p.path);
+                        if p.dataset["kind"] == "root" {
+                            // a root's datasets, by name, each its own row
+                            let under: Vec<&str> = rows
+                                .iter()
+                                .filter(|c| {
+                                    c.retired_at.is_none()
+                                        && c.dataset["root"].as_str() == Some(p.name.as_str())
+                                })
+                                .map(|c| c.name.as_str())
+                                .collect();
+                            doc["layout"] = serde_json::json!({
+                                "root": true,
+                                "datasets": under.len(),
+                            });
+                            doc["datasets"] = serde_json::json!(under);
+                        } else if p.dataset["kind"] == "legacy" {
+                            doc["layout"] = serde_json::json!({
+                                "legacy": true, "state": "anonymised", "reads": ".", "question": false,
+                            });
+                        } else {
+                            doc["layout"] = crate::dataset::layout_doc_listed(
+                                folder,
+                                &crate::dataset::detect(folder),
+                            );
+                        }
+                        // what keeps it from being read, in words; null when
+                        // it is read
+                        doc["not_read"] = serde_json::json!(
+                            nils_registry::place::incomplete(&p.dataset)
+                        );
+                    }
                     doc["bound"] = serde_json::json!(crate::places::bound_paths(p, &configured));
                     doc["holds"] = serde_json::json!(p.role.holds());
                     doc["must"] = serde_json::json!(p.role.must());
@@ -2404,6 +2698,53 @@ fn routed(
                 "places": places,
                 "bindings": crate::places::bindings_doc(),
             })))
+        }
+        ["api", "places", _, "folders"] if get => {
+            // Wave 7a (Nima, 2026-10-08): a root's folders a page at a
+            // time, found by name; one read of the root's listing, never a
+            // look inside a folder
+            let root =
+                crate::dataset::root_named(registry.store(), segs[2]).map_err(declare_refused)?;
+            let limit = match query.get("limit") {
+                Some(l) => l
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=crate::dataset::FOLDERS_MOST).contains(n))
+                    .ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            format!("limit is 1 to {}", crate::dataset::FOLDERS_MOST),
+                        )
+                    })?,
+                None => crate::dataset::FOLDERS_PAGE,
+            };
+            let (folders, matching, next) = crate::dataset::folders(
+                registry.store(),
+                &root,
+                query.get("q").map(String::as_str),
+                limit,
+                query.get("after").map(String::as_str),
+            )
+            .map_err(declare_refused)?;
+            Ok(Reply::ok(serde_json::json!({
+                "root": root.name,
+                "root_id": root.id,
+                "path": root.path,
+                "q": query.get("q"),
+                "matching": matching,
+                "count": folders.len(),
+                "folders": folders,
+                "next": next,
+            })))
+        }
+        ["api", "places", _, "folders", _] if get => {
+            // Wave 7a: one folder looked at before it is added, nothing
+            // changed: what a bounded look finds and the structure it has
+            let root =
+                crate::dataset::root_named(registry.store(), segs[2]).map_err(declare_refused)?;
+            let look = crate::dataset::folder_look(registry.store(), &root, segs[4])
+                .map_err(declare_refused)?;
+            Ok(Reply::ok(look))
         }
         ["api", "places", _, "originals"] if get => {
             // record 26 §1: what a vault or a purge would do, without doing
@@ -2476,6 +2817,42 @@ fn routed(
             if let Some(refused) = crate::dataset::engine_written_refused(&doc) {
                 return Err(Reply::error(refused.status, refused.message));
             }
+            // Wave 7a (Nima, 2026-10-08): a folder under a root becomes a
+            // dataset by a person's act, named by the root and the folder,
+            // or by a path under a root; only then is its structure read
+            if doc["role"].as_str() == Some("source")
+                && let Some((root, folder)) = dataset_under_root(registry, &doc)?
+            {
+                caller.allowed(
+                    "POST /api/places with a root's folder",
+                    Need::One("data:work"),
+                    Detail::Plain,
+                )?;
+                let asked = dataset_asked(&doc);
+                let f = crate::dataset::add_dataset(
+                    registry.store(),
+                    &root,
+                    &folder,
+                    doc["name"].as_str().filter(|n| !n.trim().is_empty()),
+                    &asked,
+                )
+                .map_err(declare_refused)?;
+                nils_registry::audit::record(
+                    registry,
+                    &nils_registry::audit::Entry {
+                        principal,
+                        action: nils_registry::audit::Action::PlaceAdd,
+                        scope: serde_json::json!({"place": f.place.id, "name": f.place.name, "role": "source", "root": root.name}),
+                        policy: None,
+                        job_id: None,
+                        details: Some(serde_json::json!({"layout": f.layout})),
+                    },
+                )?;
+                let mut answer = f.place.as_json();
+                answer["layout"] = f.layout;
+                answer["not_read"] = serde_json::json!(place::incomplete(&f.place.dataset));
+                return Ok(Reply::created(answer));
+            }
             let name = doc["name"]
                 .as_str()
                 .filter(|n| !n.trim().is_empty())
@@ -2539,8 +2916,17 @@ fn routed(
                         format!("a place is already named {name}"),
                     ));
                 }
-                let d = crate::dataset::declare(registry.store(), &path, &asked, None)
-                    .map_err(|r| Reply::error(r.status, r.message))?;
+                // Wave 7a: a root explored, its datasets settled; a dataset
+                // settled; each by its folder
+                let (d, _) = crate::dataset::shape_place(
+                    registry.store(),
+                    name,
+                    &path,
+                    &asked,
+                    None,
+                    &guarantees,
+                )
+                .map_err(declare_refused)?;
                 (d.probed, d.dataset, d.layout)
             } else {
                 (
@@ -2656,8 +3042,15 @@ fn routed(
                 let folder = path
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from(&current.path));
-                let d = crate::dataset::declare(registry.store(), &folder, &asked, Some(&current))
-                    .map_err(|r| Reply::error(r.status, r.message))?;
+                let (d, _) = crate::dataset::shape_place(
+                    registry.store(),
+                    &current.name,
+                    &folder,
+                    &asked,
+                    Some(&current),
+                    &current.guarantees,
+                )
+                .map_err(declare_refused)?;
                 (Some(d.probed.clone()), Some(d))
             } else {
                 (path.as_deref().map(crate::places::probe), None)
@@ -2904,20 +3297,16 @@ fn routed(
             })?;
             let location = location.trim().trim_start_matches('@');
             let (name, rel) = location.split_once('/').unwrap_or((location, ""));
-            if !doors.ingest_roots.contains_key(name) {
+            let known = doors.ingest_roots_now(registry.store());
+            if !known.contains_key(name) {
                 return Err(Reply::error(
                     400,
                     format!(
                         "location {name} is not registered; this deployment names {}",
-                        if doors.ingest_roots.is_empty() {
+                        if known.is_empty() {
                             "none".to_string()
                         } else {
-                            doors
-                                .ingest_roots
-                                .keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            known.keys().cloned().collect::<Vec<_>>().join(", ")
                         }
                     ),
                 ));
@@ -2991,13 +3380,39 @@ fn routed(
         }
         ["api", "jobs"] if get => {
             let all = query.get("all").is_some_and(|a| a == "1" || a == "true");
+            // Wave 7a, the Data page (2026-10-09): a dataset's jobs alone,
+            // the ones its steps ran as (crate::dataset_summary)
+            let dataset = match query.get("dataset").filter(|d| !d.is_empty()) {
+                Some(name) => Some(crate::scans::dataset_named(
+                    registry,
+                    name.trim_start_matches('@'),
+                )?),
+                None => None,
+            };
             // the queue's worker is a row of its own kind, and not a job a
             // person queued or would cancel: listed with ?all only
-            let jobs: Vec<_> = nils_registry::job::list(registry.store(), all, limit)
-                .map_err(job_err)?
-                .into_iter()
-                .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
-                .collect();
+            let jobs: Vec<_> = match dataset {
+                Some(place) => {
+                    let mut mine = Vec::new();
+                    for id in crate::dataset_summary::job_ids(registry.store(), &place)? {
+                        if mine.len() >= limit {
+                            break;
+                        }
+                        if let Some(j) =
+                            nils_registry::job::show(registry.store(), id).map_err(job_err)?
+                            && (all || !j.state.is_over())
+                        {
+                            mine.push(j);
+                        }
+                    }
+                    mine
+                }
+                None => nils_registry::job::list(registry.store(), all, limit)
+                    .map_err(job_err)?
+                    .into_iter()
+                    .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
+                    .collect(),
+            };
             let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
             // record 49 R4: a run's result below detail quasi is its totals
             if !quasi {
@@ -3078,14 +3493,24 @@ fn routed(
                             ),
                         )
                     })?;
+                if let Some(why) = crate::dataset::undeclared_refusal(&place) {
+                    return Err(Reply::error(409, why));
+                }
                 // a tree holding files no digest has read is digested
                 // first, so the pseudonymiser knows what the tree holds
                 let unread = crate::chain::unread_in_tree(registry.store(), &place);
+                // record 55 H2: a pick run ends the thread where the
+                // dataset feeds a cohort and the pack declares picks
+                let picks = crate::chain::pack_has_picks(
+                    doors.pack_dir.as_deref(),
+                    asked.pack.as_deref().unwrap_or("mri"),
+                );
                 let (first, mut rest) = crate::chain::bring_in(
                     &place,
                     asked.name.as_deref(),
                     asked.pack.as_deref(),
                     unread.is_some(),
+                    picks,
                 );
                 command = first;
                 rest.append(&mut then);
@@ -3376,6 +3801,20 @@ fn routed(
                 }
                 None => None,
             };
+            // record 55 H2 (round 4): a dataset keeps the items about its
+            // stacks, its series, its batches or its subjects, which is
+            // what the Data card's Review button opens
+            let keep = match query.get("dataset").filter(|d| !d.is_empty()) {
+                Some(name) => {
+                    let place = crate::scans::dataset_named(registry, name)?;
+                    let of = crate::certainty::items_of(registry.store(), &place, status)?;
+                    Some(match keep {
+                        Some(k) => k.intersection(&of).copied().collect(),
+                        None => of,
+                    })
+                }
+                None => keep,
+            };
             let mut rows = review_list(
                 registry.store(),
                 status,
@@ -3415,6 +3854,31 @@ fn routed(
                 return Err(Reply::error(404, format!("no cohort named {name}")));
             }
             let mut doc = nils_registry::cohort::review_summary(registry.store(), cohort)?;
+            // record 55 H2 (round 4): with a dataset, `by_kind` counts the
+            // open items about it (of the cohort too, when one is named)
+            if let Some(name) = query.get("dataset").filter(|d| !d.is_empty()) {
+                let place = crate::scans::dataset_named(registry, name)?;
+                let of = crate::certainty::items_of(registry.store(), &place, Some("open"))?;
+                let members = match cohort {
+                    Some(c) => nils_registry::cohort::open_members_of(registry.store(), c)?,
+                    None => None,
+                };
+                let mut by_kind: std::collections::BTreeMap<String, i64> =
+                    std::collections::BTreeMap::new();
+                for it in nils_registry::cohort::open_items(registry.store())? {
+                    if !of.contains(&it.id) {
+                        continue;
+                    }
+                    if let Some(m) = &members
+                        && !it.subjects.iter().any(|s| m.contains(s))
+                    {
+                        continue;
+                    }
+                    *by_kind.entry(it.kind).or_insert(0) += 1;
+                }
+                doc["by_kind"] = serde_json::json!(by_kind);
+                doc["dataset"] = serde_json::json!(place.name);
+            }
             // record 49 R4b: the open pipeline items are units; 1 to 4 held
             if !quasi {
                 crate::pipelines::hold_count(
@@ -3752,6 +4216,112 @@ fn routed(
                 serde_json::to_value(picked).unwrap_or(serde_json::Value::Null),
             ))
         }
+        // Record 55 H2 (round 4): what picking main scans found for a
+        // dataset's subjects, per role, and the last run with its report
+        ["api", "picks", "summary"] if get => {
+            let scheme = query
+                .get("scheme")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty());
+            // Wave 7a, the Data page (2026-10-09): a cohort's open members,
+            // in place of a dataset's subjects
+            if let Some(cohort) = query.get("cohort").filter(|c| !c.is_empty()) {
+                return match crate::pick_after::cohort_summary(registry.store(), cohort, scheme)? {
+                    Some(doc) => Ok(Reply::ok(doc)),
+                    None => Err(Reply::error(404, format!("no cohort named {cohort}"))),
+                };
+            }
+            let name = query
+                .get("dataset")
+                .filter(|d| !d.is_empty())
+                .ok_or_else(|| {
+                    Reply::error(
+                        400,
+                        "dataset names the dataset, by name or id, or cohort the cohort",
+                    )
+                })?;
+            let place = crate::scans::dataset_named(registry, name.trim_start_matches('@'))?;
+            Ok(Reply::ok(crate::pick_after::summary(
+                registry.store(),
+                &place,
+                scheme,
+            )?))
+        }
+        // Record 55 H2: a pick run started from the desk, for a cohort's
+        // members or a dataset's subjects (or the whole registry), queued
+        // as a job; the button a cohort's or a dataset's page carries
+        ["api", "picks", "run"] if post => {
+            let doc = json_body(body)?;
+            let text = |key: &str| -> Result<Option<String>, Reply> {
+                match doc.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(None),
+                    Some(v) => v
+                        .as_str()
+                        .map(|t| Some(t.trim().trim_start_matches('@').to_string()))
+                        .filter(|t| t.as_ref().is_some_and(|t| !t.is_empty()))
+                        .ok_or_else(|| Reply::error(400, format!("{key}: a name"))),
+                }
+            };
+            let (cohort, dataset) = (text("cohort")?, text("dataset")?);
+            let pack = text("pack")?.unwrap_or_else(|| "mri".to_string());
+            let scheme = text("scheme")?;
+            let mut command = vec!["pick".to_string(), "run".to_string()];
+            let target = match (&cohort, &dataset) {
+                (Some(_), Some(_)) => {
+                    return Err(Reply::error(
+                        400,
+                        "a pick run is for a cohort or a dataset, not both",
+                    ));
+                }
+                (Some(c), None) => {
+                    if nils_registry::cohort::by_name(registry.store(), c)?.is_none() {
+                        return Err(Reply::error(404, format!("no cohort named {c}")));
+                    }
+                    command.extend(["--cohort".to_string(), c.clone()]);
+                    format!("cohort:{c}")
+                }
+                (None, Some(d)) => {
+                    let is_dataset = nils_registry::place::by_name(registry.store(), d)?
+                        .is_some_and(|p| {
+                            p.role == nils_registry::place::Role::Source && p.retired_at.is_none()
+                        });
+                    if !is_dataset {
+                        return Err(Reply::error(404, format!("no dataset named {d}")));
+                    }
+                    command.extend(["--dataset".to_string(), d.clone()]);
+                    format!("dataset:{d}")
+                }
+                (None, None) => "registry".to_string(),
+            };
+            if !crate::chain::pack_has_picks(doors.pack_dir.as_deref(), &pack) {
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "no pack named {pack} that declares picks is served, so there is nothing to pick"
+                    ),
+                ));
+            }
+            command.extend(["--pack".to_string(), pack]);
+            if let Some(n) = scheme
+                && n != "default"
+                && n != "day"
+            {
+                crate::stored_scheme(registry, &n).map_err(Reply::from)?;
+                command.extend(["--scheme-name".to_string(), n]);
+            }
+            let command = located(doors, registry.store(), command)?;
+            let id = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                Some(&target),
+                Some(principal),
+                queued_by(caller),
+            )
+            .map_err(job_err)?;
+            Ok(Reply::accepted(serde_json::json!({
+                "job": id, "state": "queued", "for": target, "command": command,
+            })))
+        }
         ["api", "picks", _, "withdraw"] if post => {
             // a person's pick is a person's to withdraw, as it is theirs to
             // write
@@ -3881,6 +4451,112 @@ const JOB_GRANTS: &[&str] = &[
     "release:work",
 ];
 
+/// The scope a viewer door names: a dataset by its name or id, or a
+/// cohort by its name, the segment decoded once.
+fn viewer_scope(
+    registry: &mut Registry,
+    kind: &str,
+    name: &str,
+) -> Result<crate::viewer::Scope, Reply> {
+    let name = decoded(name);
+    match kind {
+        "cohorts" => crate::viewer::Scope::cohort(registry, &name),
+        _ => crate::viewer::Scope::dataset(registry, &name),
+    }
+}
+
+/// A page of a scope's scans (record 55 H2, and the dataset viewer since
+/// 2026-10-09): `limit`, `after` and `pictures` as they were, and at most
+/// one of `session` (a session the cache holds) and `studies` (the studies
+/// of a visit it does not hold), which narrow the page to one visit. Each
+/// scan has its names, datatype and axes, the viewer's facts and its open
+/// questions; with `pictures`, its picture.
+fn scans_door(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    scope: &crate::viewer::Scope,
+    query: &HashMap<String, String>,
+) -> Result<Reply, Reply> {
+    let limit = match query.get("limit") {
+        Some(l) => l
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=crate::scans::SCANS_MOST).contains(n))
+            .ok_or_else(|| {
+                Reply::error(400, format!("limit is 1 to {}", crate::scans::SCANS_MOST))
+            })?,
+        None => crate::scans::SCANS_PAGE,
+    };
+    let after = match query.get("after").filter(|a| !a.is_empty()) {
+        Some(a) => Some(
+            a.parse::<i64>()
+                .map_err(|_| Reply::error(400, "after is a scan's stack id, as `next` gave it"))?,
+        ),
+        None => None,
+    };
+    let pictures = query
+        .get("pictures")
+        .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
+    let session = query.get("session").filter(|s| !s.is_empty());
+    let studies = query.get("studies").filter(|s| !s.is_empty());
+    let visit = match (session, studies) {
+        (Some(_), Some(_)) => {
+            return Err(Reply::error(
+                400,
+                "session or studies: one visit, named one way",
+            ));
+        }
+        (Some(s), None) => Some(crate::scans::Visit::Session(s.parse::<i64>().map_err(
+            |_| Reply::error(400, "session is a session's id, as the visits door gave it"),
+        )?)),
+        (None, Some(list)) => {
+            let ids = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<i64>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| {
+                    Reply::error(
+                        400,
+                        "studies is a comma list of study ids, as the visits door gave them",
+                    )
+                })?;
+            if ids.is_empty() || ids.len() > crate::viewer::VISIT_STUDIES_MOST {
+                return Err(Reply::error(
+                    400,
+                    format!(
+                        "studies names 1 to {} studies",
+                        crate::viewer::VISIT_STUDIES_MOST
+                    ),
+                ));
+            }
+            Some(crate::scans::Visit::Studies(ids))
+        }
+        (None, None) => None,
+    };
+    let mut doc = crate::scans::page(
+        registry,
+        &caller.access,
+        scope,
+        visit.as_ref(),
+        limit,
+        after,
+    )?;
+    // the dataset view: each scan's names, datatype and axes
+    let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
+    // the dataset viewer: its family, its physics and its main roles
+    crate::viewer::with_facts(registry, &mut doc)?;
+    // record 55 H2: each scan's picture inline and its open questions, so
+    // a page of the grid is one request
+    if pictures {
+        crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
+    }
+    Ok(Reply::ok(doc))
+}
+
 /// What a door needs (the suite contract, version 2): a grant, any of two,
 /// or two at once, and the lowest detail. A door not named here needs a
 /// grant, any grant: the capabilities, the status, the summary, the
@@ -3896,7 +4572,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             [
                 "api",
                 "ask",
-                "schema" | "catalog" | "guide" | "documents" | "handles",
+                "schema" | "catalog" | "guide" | "documents" | "handles" | "selections",
             ],
         )
         | ("GET", ["api", "ask", "catalog", _])
@@ -3931,10 +4607,23 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "sources" | "packs" | "batches"])
         | ("GET", ["api", "packs" | "batches", _]) => (Need::One("data:see"), Plain),
         ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
+        // Wave 7a: a dataset's scans, read as its card is, and what it
+        // holds and where it is (2026-10-09)
+        ("GET", ["api", "datasets", _, "scans" | "summary"]) => (Need::One("data:see"), Plain),
+        // the dataset viewer (2026-10-09): a dataset's or a cohort's
+        // subjects, one subject's visits and a cohort's scans, read as a
+        // dataset's scans are, quasi-identifying fields shaped below quasi
+        ("GET", ["api", "datasets" | "cohorts", _, "subjects"])
+        | ("GET", ["api", "datasets" | "cohorts", _, "subjects", _, "visits"])
+        | ("GET", ["api", "cohorts", _, "scans"]) => (Need::One("data:see"), Plain),
         // record 26 §1: what becomes of a dataset's originals. What an act
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
         ("GET", ["api", "places", _, "originals"]) => (Need::One("data:see"), Plain),
+        // Wave 7a: a root's folders, read, nothing changed
+        ("GET", ["api", "places", _, "folders"]) | ("GET", ["api", "places", _, "folders", _]) => {
+            (Need::AnyOf(&["data:see", "places:see"]), Plain)
+        }
         ("POST", ["api", "places", _, "originals"]) => (Need::One("data:work"), Detail::Sensitive),
         ("POST", ["api", "ingest", "folders" | "look" | "probe"]) => {
             (Need::One("data:work"), Plain)
@@ -3951,17 +4640,37 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // and shapes; the map applied, the held reveal and the merge read
         // identifiers. The imports door answers a dry run at plain and
         // checks sensitive itself for the apply.
-        ("GET", ["api", "linkage", "types" | "held"]) => (Need::One("data:see"), Plain),
+        ("GET", ["api", "linkage", "types" | "held"])
+        | ("GET", ["api", "linkage", "held", "ids"]) => (Need::One("data:see"), Plain),
         ("POST", ["api", "linkage", "types" | "imports"])
         | ("POST", ["api", "linkage", "held", "code"]) => (Need::One("data:work"), Plain),
         ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
             (Need::One("data:work"), Detail::Sensitive)
         }
+        // record 55 H2: a pick run is the pick verb queued, which is
+        // Pipelines work as at the jobs door
+        ("POST", ["api", "picks", "run"]) => (Need::One("pipelines:work"), Plain),
+        // 2026-10-10: a step's run is a pipeline run queued, which reads
+        // pixels: Pipelines work at detail quasi, as `run` at the jobs door
+        ("POST", ["api", "datasets" | "cohorts", _, "steps", _, "run"]) => {
+            (Need::One("pipelines:work"), Quasi)
+        }
+        // record 55 H2 (round 4): counts of a dataset's picks, for its card
+        ("GET", ["api", "picks", "summary"]) => {
+            (Need::AnyOf(&["data:see", "pipelines:see"]), Plain)
+        }
         // the Review page, and the knob engine of Wave 4c §6.6; record 26
         // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
         | ("GET", ["api", "review" | "overlays" | "explain", _])
-        | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
+        | ("GET", ["api", "classify", "signals"])
+        | ("GET", ["api", "packs", _, "disagreements"]) => (Need::One("review:see"), Plain),
+        // record 56 §5.4: rehearsing a rule change writes nothing; it is the
+        // work of whoever proposes one, a pipeline's operator or the
+        // reviewer an overlay is proposed by
+        ("POST", ["api", "packs", _, "rehearse"]) => {
+            (Need::AnyOf(&["pipelines:work", "review:work"]), Plain)
+        }
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
         | ("POST", ["api", "picks"])
@@ -4090,15 +4799,56 @@ pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
 /// takes them, a null among them (no cohort, no rule) as much as a value;
 /// `handling.arrives` stands for `arrives` for a caller from before, when
 /// the body names no `arrives` of its own.
+/// The root and the folder a `POST /api/places` names for a dataset (Wave
+/// 7a): `root` (its name or id) with `folder` (a name or a path under it),
+/// or a `path` under an active root. None for any other place.
+fn dataset_under_root(
+    registry: &mut Registry,
+    doc: &serde_json::Value,
+) -> Result<Option<(nils_registry::place::Place, String)>, Reply> {
+    if let Some(root) = doc["root"].as_str().filter(|r| !r.trim().is_empty()) {
+        let root = crate::dataset::root_named(registry.store(), root).map_err(declare_refused)?;
+        let folder = doc["folder"]
+            .as_str()
+            .or_else(|| doc["path"].as_str())
+            .filter(|f| !f.trim().is_empty())
+            .ok_or_else(|| Reply::error(400, "folder: the folder under the root, by its name"))?;
+        return Ok(Some((root, folder.to_string())));
+    }
+    let Some(path) = doc["path"].as_str().filter(|p| p.starts_with('/')) else {
+        return Ok(None);
+    };
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let root = nils_registry::place::active(registry.store())?
+        .into_iter()
+        .find(|p| {
+            p.role == nils_registry::place::Role::Source && p.dataset["kind"] == "root" && {
+                let mine = std::fs::canonicalize(&p.path)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&p.path));
+                path != mine && path.starts_with(&mine)
+            }
+        });
+    Ok(root.map(|r| (r, path.display().to_string())))
+}
+
+/// A declaration refused, as a door answers it: with the layout when the
+/// refusal is the question of Wave 7a §5.3, so a desk can name the entries
+/// and the tree and ask for the confirmation.
+fn declare_refused(r: crate::dataset::Refused) -> Reply {
+    let mut reply = Reply::error(r.status, r.message);
+    if let Some(layout) = r.layout {
+        reply.body["layout"] = layout;
+        reply.body["confirm"] = serde_json::json!("confirm_move");
+    }
+    reply
+}
+
 fn dataset_asked(doc: &serde_json::Value) -> serde_json::Value {
     let mut asked = serde_json::Map::new();
     for key in crate::dataset::FIELDS {
         if let Some(v) = doc.get(key) {
             asked.insert(key.to_string(), v.clone());
         }
-    }
-    if !asked.contains_key("arrives") && doc["handling"]["arrives"].is_string() {
-        asked.insert("arrives".into(), doc["handling"]["arrives"].clone());
     }
     serde_json::Value::Object(asked)
 }
@@ -4389,12 +5139,16 @@ fn capabilities(
         "POST /api/models/{id}/promote",
         "POST /api/models/{id}/retire",
         "POST /api/picks",
+        "POST /api/picks/run",
+        "GET /api/picks/summary",
         "POST /api/picks/{id}/withdraw",
         "GET /api/timeline/{kind}/{id}",
         "GET /api/depends/{kind}/{id}",
         "GET /api/events",
         "GET /api/packs",
         "GET /api/packs/{name}",
+        "GET /api/packs/{name}/disagreements",
+        "POST /api/packs/{name}/rehearse",
         "GET /api/batches",
         "GET /api/batches/{id}",
         "GET /api/quarantine",
@@ -4415,6 +5169,15 @@ fn capabilities(
         "POST /api/ingest/folders",
         "POST /api/ingest/look",
         "GET /api/sources",
+        "GET /api/datasets/{name}/scans",
+        "GET /api/datasets/{name}/subjects",
+        "GET /api/datasets/{name}/subjects/{subject}/visits",
+        "GET /api/cohorts/{name}/scans",
+        "GET /api/cohorts/{name}/subjects",
+        "GET /api/cohorts/{name}/subjects/{subject}/visits",
+        "GET /api/datasets/{name}/summary",
+        "POST /api/datasets/{name}/steps/{step}/run",
+        "POST /api/cohorts/{name}/steps/{step}/run",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -4430,6 +5193,8 @@ fn capabilities(
         "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
         "GET /api/instances/{stack}/render/{level}/{z}",
         "GET /api/instances/{stack}/thumb",
+        "GET /api/instances/{stack}/preview",
+        "GET /api/instances/{stack}/preview/planes",
     ]
     .iter()
     .chain(crate::derivatives::DOORS.iter())
@@ -4710,13 +5475,19 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         // record 45 E1: a pyramid names a stack, a selection or a handle, and
         // the deployment's packs where a selection is frozen; never a path
         "pyramid" => return crate::pyramid::located(doors.pack_dir.as_deref(), command),
+        // record 55 H2: a pick run reads the deployment's packs and names a
+        // cohort or a dataset by name; never a path a caller composes
+        "pick" if command.get(1).is_some_and(|w| w == "run") => {
+            return pick_run_located(doors.pack_dir.as_deref(), command);
+        }
         _ => {}
     }
     let takes_a_tree =
         verb == "digest" || (verb == "linkage" && command.get(1).is_some_and(|c| c == "import"));
     // record 26: `@name` is the dataset's pseudonymised tree, and its
     // originals, `@name/originals`, are the pseudonymiser's alone
-    let roots = crate::dataset::roots(store, &doors.ingest_roots);
+    let given = doors.ingest_roots_now(store);
+    let roots = crate::dataset::roots(store, &given);
     let digests = verb == "digest";
     // record 26 §3 and §1: the pseudonymiser reads a dataset by its name,
     // both trees at once, and an act on a dataset's originals names it the
@@ -4766,6 +5537,10 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
                     ),
                 ));
             }
+            // Wave 7a §5.3: never read without the layout
+            if digests && let Some(why) = crate::dataset::not_read(store, &path) {
+                return Err(Reply::error(409, why));
+            }
             out.push(path.display().to_string());
         } else if takes_a_tree
             && !arg.starts_with('-')
@@ -4780,6 +5555,45 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         } else {
             out.push(arg);
         }
+    }
+    Ok(out)
+}
+
+/// A pick run as the jobs door queues it (record 55 H2): the flags that
+/// name no path, and the deployment's packs.
+fn pick_run_located(
+    pack_dir: Option<&std::path::Path>,
+    command: Vec<String>,
+) -> Result<Vec<String>, Reply> {
+    const TAKES: &[&str] = &[
+        "--pack",
+        "--scheme-name",
+        "--subject",
+        "--cohort",
+        "--dataset",
+    ];
+    let mut out = vec!["pick".to_string(), "run".to_string()];
+    let mut it = command.into_iter().skip(2);
+    while let Some(arg) = it.next() {
+        if arg == "--json" {
+            out.push(arg);
+            continue;
+        }
+        if !TAKES.contains(&arg.as_str()) {
+            return Err(Reply::error(
+                400,
+                format!("pick run takes {}, not {arg}", TAKES.join(", ")),
+            ));
+        }
+        let value = it
+            .next()
+            .ok_or_else(|| Reply::error(400, format!("pick run {arg} takes a value")))?;
+        out.push(arg);
+        out.push(value.trim_start_matches('@').to_string());
+    }
+    if let Some(d) = pack_dir {
+        out.push("--pack-dir".into());
+        out.push(d.display().to_string());
     }
     Ok(out)
 }
@@ -5039,6 +5853,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Picked a stack",
         ),
         row(
+            "POST /api/picks/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Starting a pick run",
+            "Started a pick run",
+        ),
+        row(
+            "GET /api/picks/summary",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading a dataset's picks",
+            "Read a dataset's picks",
+        ),
+        row(
             "POST /api/picks/{id}/withdraw",
             true,
             false,
@@ -5146,6 +5978,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading a pack",
             "Read a pack",
+        ),
+        row(
+            "GET /api/packs/{name}/disagreements",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what a pack cannot rank",
+            "Read what a pack cannot rank",
+        ),
+        row(
+            "POST /api/packs/{name}/rehearse",
+            false,
+            false,
+            "bounded",
+            "one report",
+            "Rehearsing a rule change",
+            "Rehearsed a rule change",
         ),
         row(
             "GET /api/batches",
@@ -5301,6 +6151,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Drew a stack small",
         ),
         row(
+            "GET /api/instances/{stack}/preview",
+            false,
+            false,
+            "bounded",
+            "three small images",
+            "Reading a stack's preview",
+            "Read a stack's preview",
+        ),
+        row(
+            "GET /api/instances/{stack}/preview/planes",
+            false,
+            false,
+            "bounded",
+            "every plane of one stack, small",
+            "Reading a stack's planes",
+            "Read a stack's planes",
+        ),
+        row(
             "GET /api/places",
             false,
             false,
@@ -5317,6 +6185,87 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading the sources",
             "Read the sources",
+        ),
+        row(
+            "GET /api/datasets/{name}/scans",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 scans",
+            "Reading a dataset's scans",
+            "Read a dataset's scans",
+        ),
+        row(
+            "GET /api/datasets/{name}/subjects",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 subjects",
+            "Reading a dataset's subjects",
+            "Read a dataset's subjects",
+        ),
+        row(
+            "GET /api/datasets/{name}/subjects/{subject}/visits",
+            false,
+            false,
+            "bounded",
+            "one subject's visits",
+            "Reading a subject's visits",
+            "Read a subject's visits",
+        ),
+        row(
+            "GET /api/cohorts/{name}/scans",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 scans",
+            "Reading a cohort's scans",
+            "Read a cohort's scans",
+        ),
+        row(
+            "GET /api/cohorts/{name}/subjects",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 subjects",
+            "Reading a cohort's subjects",
+            "Read a cohort's subjects",
+        ),
+        row(
+            "GET /api/cohorts/{name}/subjects/{subject}/visits",
+            false,
+            false,
+            "bounded",
+            "one subject's visits",
+            "Reading a member's visits",
+            "Read a member's visits",
+        ),
+        row(
+            "GET /api/datasets/{name}/summary",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what a dataset holds",
+            "Read what a dataset holds",
+        ),
+        row(
+            "POST /api/datasets/{name}/steps/{step}/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Running a dataset's step",
+            "Ran a dataset's step",
+        ),
+        row(
+            "POST /api/cohorts/{name}/steps/{step}/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Running a cohort's step",
+            "Ran a cohort's step",
         ),
         row(
             "POST /api/places",
@@ -5389,6 +6338,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one dataset's shapes",
             "Reading the held files",
             "Read the held files",
+        ),
+        row(
+            "GET /api/linkage/held/ids",
+            false,
+            false,
+            "bounded",
+            "one dataset's identifiers, by shape",
+            "Reading the held identifiers",
+            "Read the held identifiers",
         ),
         row(
             "POST /api/linkage/held/code",
@@ -5713,6 +6671,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading a document",
             "Read a document",
+        ),
+        row(
+            "GET /api/ask/selections",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing selections",
+            "Listed selections",
         ),
         row(
             "PUT /api/ask/selections/{name}",

@@ -160,12 +160,12 @@ pub struct Report {
     /// not invent one. `identity.no_study` is the open question that says
     /// the same thing about the same subjects.
     pub without_a_session: BTreeMap<String, i64>,
-    /// Record 37 S2, the three numbers behind every `run-` index the tree
-    /// carries: how many BIDS names two or more stacks of one subject,
-    /// session and datatype built; how many of those stacks are one
+    /// Record 37 S2 and Wave 7a §8.1, the numbers behind every `run-` index
+    /// the tree carries: how many BIDS names two or more stacks of one
+    /// subject, session and datatype built; how many of those stacks are one
     /// acquisition measured again, which is what `run-` says; and how many
-    /// are not, and were refused the name and written to `sourcedata/` under
-    /// their informative ones instead, each with a question against it.
+    /// are not, and were told apart by what differs or by a plain number.
+    /// None is refused its name.
     ///
     /// Said out loud because the failure it replaces was silent: a counter
     /// writes `run-2` whether or not there was a second run, and two thirds
@@ -175,8 +175,17 @@ pub struct Report {
     pub shared_names: i64,
     pub repeats: i64,
     pub not_repeats: i64,
+    /// Of `not_repeats`, the stacks nothing that can be spelled told apart,
+    /// which carry the plain fallback number (Wave 7a §8.1).
+    pub numbered: i64,
+    /// Wave 7a §8.1: every name a difference or a number decided, with the
+    /// property and the value, which is the release's record of them.
+    pub decided: Vec<DecidedName>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
+    /// The folders of their own under `anat/` this version wrote into
+    /// (record 55 C4, 2026-10-09: SyMRI), each a `.bidsignore` line.
+    pub folders: std::collections::BTreeSet<String>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
     pub nowhere: BTreeMap<String, i64>,
     /// How many stacks those are, in one number (lab 26b, finding 5): a tree
@@ -366,6 +375,9 @@ struct Job {
     fallback: Place,
     /// Which of §9.3's routes it took. In the descriptive layout there is one.
     route: String,
+    /// Whether its slices go into the DICOM export as well (record 55 C4,
+    /// 2026-10-09).
+    dicom: bool,
     content: String,
     change: crate::version::Change,
     /// What the state said, when the stack was there.
@@ -394,6 +406,12 @@ struct State {
     extensions: Vec<String>,
 }
 
+/// The entry in a converted stack's `extensions` that says its slices are
+/// in the DICOM export too (record 55 C4, 2026-10-09). Not a suffix of the
+/// stem: the export is a directory of its own under `sourcedata/dicom/`,
+/// which [`crate::bids::place::dicom_dir`] names from the place.
+pub(crate) const DICOM_EXPORT: &str = "@dicom";
+
 impl State {
     /// The files this state describes, as far as the state knows them.
     fn files(&self) -> Files {
@@ -401,18 +419,27 @@ impl State {
             Some(stem) => Files::Named(
                 self.extensions
                     .iter()
+                    .filter(|e| *e != DICOM_EXPORT)
                     .map(|e| format!("{}/{stem}{e}", self.place.dir))
                     .collect(),
+                self.has_dicom()
+                    .then(|| crate::bids::place::dicom_dir(&self.place.dir, stem)),
             ),
             None => Files::Directory(self.place.dir.clone()),
         }
     }
+
+    /// Whether the DICOM export holds this stack's slices.
+    fn has_dicom(&self) -> bool {
+        self.extensions.iter().any(|e| e == DICOM_EXPORT)
+    }
 }
 
-/// What a stack's files are on disk: a directory it owns, or named files.
+/// What a stack's files are on disk: a directory it owns, or named files
+/// and, where the DICOM export carries it, the export's directory.
 enum Files {
     Directory(String),
-    Named(Vec<String>),
+    Named(Vec<String>, Option<String>),
 }
 
 /// What one version knows about the version before it.
@@ -547,14 +574,25 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let with_a_study = subjects_with_a_study(registry.store())?;
     let Placements {
         by_stack: named,
-        shared,
+        mut shared,
     } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
+    let named_by = std::mem::take(&mut shared.decided);
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
     // other; this is the slot the standard keeps the fact in.
     let body_parts: HashMap<i64, String> = named
         .iter()
         .filter_map(|(stack, p)| p.body_part.clone().map(|b| (*stack, b)))
+        .collect();
+    // Record 55 C4: the sidecar's `NILS` object and the descriptive name, by
+    // stack, whatever the name spells.
+    let cards: HashMap<i64, serde_json::Value> = named
+        .iter()
+        .map(|(stack, p)| (*stack, p.card.clone()))
+        .collect();
+    let nils_names: HashMap<i64, String> = named
+        .iter()
+        .map(|(stack, p)| (*stack, p.descriptive.name.clone()))
         .collect();
     // What every volume of an ASL image is, by stack, for the aslcontext.tsv
     // BIDS requires beside it (MRI pack 0.11.0).
@@ -580,6 +618,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         placements.insert(
             "synthetic".to_string(),
             settings.places.synthetic.name().to_string(),
+        );
+        placements.insert(
+            "dicom".to_string(),
+            settings.places.dicom.name().to_string(),
         );
     }
     let mut report = Report {
@@ -611,7 +653,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             Layout::Descriptive => 0,
         },
         not_repeats: match settings.layout {
-            Layout::Bids => shared.refused,
+            Layout::Bids => shared.separated.len() as i64,
+            Layout::Descriptive => 0,
+        },
+        numbered: match settings.layout {
+            Layout::Bids => shared.numbered.len() as i64,
             Layout::Descriptive => 0,
         },
         ..Report::default()
@@ -781,6 +827,18 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             // often: a number here is a place the standard has no slot for
             // something the archive states, which is the evidence a pack
             // extension or a specification issue is argued from.
+            // Wave 7a §8.1: a name a difference or a number decided is listed
+            // with what decided it.
+            if route == crate::bids::place::Route::Raw
+                && let Some(d) = named_by.get(&stack)
+            {
+                report.decided.push(DecidedName {
+                    stack,
+                    name: place.key(),
+                    marks: d.marks.clone(),
+                    differs: d.differs.clone(),
+                });
+            }
             if let Some(name) = placed.and_then(|p| p.bids.as_ref().ok()) {
                 for key in &name.refused {
                     *report
@@ -850,6 +908,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 place = planned.fallback.clone();
             }
             *report.routes.entry(route.clone()).or_insert(0) += 1;
+            if route == "folder"
+                && let Some((_, name)) = place.dir.rsplit_once('/')
+            {
+                report.folders.insert(name.to_string());
+            }
             let key = place.key();
             let mut change = crate::version::compare(
                 was.as_ref()
@@ -885,16 +948,26 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             if let (true, Some(w)) = (
                 !change.is_work() || change == crate::version::Change::Moved,
                 was.as_ref(),
-            ) && !place_on_disk(settings.root, &w.place)
+            ) && (!place_on_disk(settings.root, &w.place) || !export_on_disk(settings.root, w))
             {
                 change = crate::version::Change::Rewritten;
                 report.restored += 1;
+            }
+            // Record 55 C4 (2026-10-09): a stack whose DICOM export the last
+            // version wrote and this one does not, or the other way round,
+            // is written again, because its files are not the same files.
+            let dicom = settings.layout == Layout::Bids && settings.places.dicom.carries(&route);
+            if (!change.is_work() || change == crate::version::Change::Moved)
+                && was.as_ref().is_some_and(|w| w.has_dicom() != dicom)
+            {
+                change = crate::version::Change::Rewritten;
             }
             jobs.push(Job {
                 stack: planned.stack,
                 place,
                 fallback: planned.fallback,
                 route,
+                dicom,
                 content: planned.content,
                 change,
                 was,
@@ -959,6 +1032,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 let code = job.code.clone();
                 let policy = &policies.all[job.policy];
                 let plan = Plan {
+                    writer: scrub::Writer::Release,
                     policy,
                     categories: &settings.categories,
                     private: settings.private,
@@ -981,6 +1055,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                         &mut report,
                         body_parts.get(&job.stack).map(String::as_str),
                         asl_contexts.get(&job.stack).map(String::as_str),
+                        cards.get(&job.stack),
                     ),
                 };
                 let mut wrote: Vec<Wrote> = Vec::new();
@@ -1067,6 +1142,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     .push(crate::bids::dataset::Scan {
                         filename: file.to_string(),
                         acq_time: acq_times.get(&job.stack).map(acquisition_time),
+                        nils_name: nils_names.get(&job.stack).cloned(),
                     });
             }
         }
@@ -1089,6 +1165,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     forget_stacks(registry.store(), dataset, &gone)?;
     report.models = models_in_force(registry.store(), dataset)?;
 
+    // Wave 7a §8.1: the record of decided names in a fixed order, so two runs
+    // of one version say the same thing.
+    report.decided.sort_by(|a, b| a.name.cmp(&b.name));
     // §9.5. The files that make the tree a dataset rather than a pile of
     // correctly named images. v0 writes none of them.
     if settings.layout == Layout::Bids {
@@ -1367,8 +1446,13 @@ fn roll_up(job: &Job, wrote: &[Wrote]) -> State {
     let mut extensions: Vec<String> = Vec::new();
     if let Some(stem) = &job.place.stem {
         let prefix = format!("{}/{stem}", job.place.dir);
+        let export = format!("{}/", crate::bids::place::dicom_dir(&job.place.dir, stem));
         for w in &sorted {
-            if let Some(ext) = w.path.strip_prefix(&prefix)
+            if w.path.starts_with(&export) {
+                if !extensions.iter().any(|e| e == DICOM_EXPORT) {
+                    extensions.push(DICOM_EXPORT.to_string());
+                }
+            } else if let Some(ext) = w.path.strip_prefix(&prefix)
                 && !extensions.iter().any(|e| e == ext)
             {
                 extensions.push(ext.to_string());
@@ -1405,6 +1489,17 @@ fn place_on_disk(root: &Path, place: &Place) -> bool {
                 .flatten()
                 .any(|e| e.file_name().to_string_lossy().starts_with(stem.as_str()))
         }),
+    }
+}
+
+/// Whether a stack's DICOM export, where the last version wrote one, is
+/// still on the disk (record 55 C4, 2026-10-09).
+fn export_on_disk(root: &Path, state: &State) -> bool {
+    match (&state.place.stem, state.has_dicom()) {
+        (Some(stem), true) => root
+            .join(crate::bids::place::dicom_dir(&state.place.dir, stem))
+            .is_dir(),
+        _ => true,
     }
 }
 
@@ -1613,7 +1708,9 @@ fn write_dataset(
             crate::bids::dataset::Repeats {
                 names: report.shared_names,
                 repeats: report.repeats,
-                refused: report.not_repeats,
+                separated: report.not_repeats,
+                numbered: report.numbered,
+                naming: settings.naming,
             },
         ),
     )?;
@@ -1651,6 +1748,8 @@ fn write_dataset(
             dataset::scans(rows),
         )?;
     }
+    // Record 55 C4: what the `nils_name` column of every `scans.tsv` is.
+    std::fs::write(root.join("scans.json"), dataset::scans_description())?;
     for (code, mut sessions) in by_subject {
         sessions.sort_by(|a, b| a.label.cmp(&b.label));
         let dir = root.join(format!("sub-{code}"));
@@ -1666,10 +1765,16 @@ fn write_dataset(
     // own choices need.
     let mut ignore: Vec<String> = Vec::new();
     if report.routes.contains_key("beside") {
-        ignore.push("*/*/localizer/".to_string());
+        ignore.push("*/*/localizer".to_string());
     }
     if report.routes.contains_key("unofficial") {
         ignore.push("*_localizer.*".to_string());
+    }
+    // Record 55 C4 (2026-10-09): a folder of its own under `anat/` (SyMRI).
+    // Without a trailing slash: the official validator (3.0.2) matches a
+    // directory line only so.
+    for name in &report.folders {
+        ignore.push(format!("*/*/anat/{name}"));
     }
     if !ignore.is_empty() {
         std::fs::write(root.join(".bidsignore"), dataset::bidsignore(&ignore))?;
@@ -1856,6 +1961,8 @@ impl Planner<'_> {
             Layout::Bids => crate::bids::place::route(
                 placed.and_then(|p| p.disposition.as_deref()),
                 placed.is_some_and(|p| p.synthetic),
+                placed.is_some_and(|p| p.derived),
+                placed.and_then(|p| p.folder.as_deref()),
                 &placed
                     .map(|p| p.bids.clone())
                     .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
@@ -1865,16 +1972,42 @@ impl Planner<'_> {
         if let crate::bids::place::Route::Nowhere(why) = route {
             return Decision::Nowhere { unjudged, why };
         }
-        let place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
-        let fallback = place_of(
-            &crate::bids::place::Route::SourceData,
-            self.layout,
-            code,
-            &label,
-            &folder,
-            &stem,
-            placed,
-        );
+        let mut place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
+        // Record 55 C4 (2026-10-09): the working scan of a stack set in a
+        // folder of its own, SyMRI's multi-dynamic multi-echo acquisition,
+        // is not an image to convert and is what SyMRI's pipeline reads. It
+        // is kept as DICOM where the export puts the rest of SyMRI.
+        if route == crate::bids::place::Route::SourceData
+            && self.options.synthetic == crate::bids::place::Synthetic::Folder
+            && placed.and_then(|p| p.disposition.as_deref()) == Some("working_scan")
+            && let Some(name) = placed.and_then(|p| p.folder.as_deref())
+        {
+            // By its descriptive name, which §9.1 made unique in the
+            // session: a working scan takes no part in a BIDS name conflict.
+            place = Place::dir(crate::bids::place::dicom_dir(
+                &format!("sub-{code}/ses-{label}/anat/{name}"),
+                &unofficial(code, &label, &stem),
+            ));
+        }
+        let fallback = match (&route, &place.stem) {
+            // Record 55 C4 (2026-10-09): a stack in a folder of its own that
+            // the converter refuses is DICOM where the export would have put
+            // it, so SyMRI's slices are in one place whether or not they
+            // converted.
+            (crate::bids::place::Route::Folder(_), Some(name)) => {
+                Place::dir(crate::bids::place::dicom_dir(&place.dir, name))
+            }
+            (crate::bids::place::Route::SourceData, None) => place.clone(),
+            _ => place_of(
+                &crate::bids::place::Route::SourceData,
+                self.layout,
+                code,
+                &label,
+                &folder,
+                &stem,
+                placed,
+            ),
+        };
         Decision::Placed {
             unjudged,
             label,
@@ -1928,7 +2061,7 @@ pub fn plan_picked(
     let pixels = pixel_verdicts(registry.store())?;
     let Placements {
         by_stack: named, ..
-    } = places(registry.store(), &by_study, pack, name::Naming::Bids)?;
+    } = places(registry.store(), &by_study, pack, name::Naming::Full)?;
     let planner = Planner {
         layout: Layout::Bids,
         options: crate::bids::place::Options::default(),
@@ -2019,7 +2152,8 @@ pub fn plan_picked(
 /// The BIDS suffix a pick role names, where the standard has one spelt the
 /// same but for case: `t1w` is `T1w`, `flair` is `FLAIR` (record 49 A3). A
 /// role the standard has no suffix for names none, and any stack placed in
-/// the raw tree stands for it.
+/// the raw tree stands for it. A stack stands under the suffix as
+/// [`stem_holds`] says, which is not always as its own suffix.
 pub fn role_suffix(role: &str) -> Option<&'static str> {
     crate::bids::schema::GROUPS
         .iter()
@@ -2031,6 +2165,32 @@ pub fn role_suffix(role: &str) -> Option<&'static str> {
 /// The suffix of a BIDS stem: its last `_` word.
 pub fn stem_suffix(stem: &str) -> &str {
     stem.rsplit('_').next().unwrap_or(stem)
+}
+
+/// The tokens of a BIDS stem's `acq-` label, which the release joins with
+/// `+` (record 55 C4): `Ax`, `2D`, `FLAIR` and `IRTSE` of
+/// `sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w`.
+pub fn stem_acq_tokens(stem: &str) -> impl Iterator<Item = &str> {
+    stem.split('_')
+        .filter_map(|entity| entity.strip_prefix("acq-"))
+        .flat_map(|label| label.split('+'))
+}
+
+/// The suffixes the standard defines that the release spells as a modifier
+/// inside `acq-`, beside the base contrast's suffix, and never as the
+/// suffix: record 55 C4 (Nima's ruling of 2026-10-08, "FLAIR is always a
+/// modifier") names a T2 FLAIR `acq-Ax+2D+FLAIR+IRTSE_T2w`, not `_FLAIR`.
+const SPELT_AS_MODIFIER: &[&str] = &["FLAIR"];
+
+/// Whether the stack a release names `stem` in the raw tree is there under
+/// the BIDS suffix `suffix` (a pick role's, [`role_suffix`]) for a pipeline
+/// that looks for it (record 49 A3): as its own suffix, or, for a suffix the
+/// release spells as a modifier, among its `acq-` tokens. Only those: the
+/// full style spells the base contrast in `acq-` too where it is not the
+/// suffix, and a T2w named `..._MESE` is no `_T2w` to a pipeline.
+pub fn stem_holds(stem: &str, suffix: &str) -> bool {
+    stem_suffix(stem) == suffix
+        || (SPELT_AS_MODIFIER.contains(&suffix) && stem_acq_tokens(stem).any(|t| t == suffix))
 }
 
 /// Where a stack's files go, given the route it took (§9.3).
@@ -2059,13 +2219,34 @@ fn place_of(
         },
         // Kept as DICOM, one directory per stack, which is what a reader of
         // them wants anyway. Named by §9.1, which is most of why §9.1 names
-        // everything.
-        Route::SourceData => Place::dir(format!("sourcedata/{session}/{folder}/{stem}")),
+        // everything. Under `sourcedata/dicom/` with every other DICOM the
+        // release writes (record 55 C4, 2026-10-09).
+        Route::SourceData => Place::dir(format!("sourcedata/dicom/{session}/{folder}/{stem}")),
         // A dataset in its own right, so the tree stays valid and the data
         // stays present.
-        Route::Derivatives => Place::file(
-            format!("derivatives/nils/{session}/{folder}"),
-            unofficial(code, label, stem),
+        // Record 55 C4: the name the raw tree would give it, with `desc-`,
+        // which BIDS keeps for derivatives; where the standard has no name
+        // for it, the descriptive one as `desc-` and its folder as suffix.
+        Route::Derivatives => {
+            let desc = placed.and_then(|p| p.desc.clone());
+            match placed.and_then(|p| p.bids.as_ref().ok()) {
+                Some(n) => Place::file(
+                    format!("derivatives/nils/{}", n.dir(code, label)),
+                    n.stem_with_desc(code, label, desc.as_deref().unwrap_or(stem)),
+                ),
+                None => Place::file(
+                    format!("derivatives/nils/{session}/{folder}"),
+                    derivative_stem(code, label, stem, placed.and_then(|p| p.base.as_deref())),
+                ),
+            }
+        }
+        // Record 55 C4 (2026-10-09): under `anat/`, in the folder of its own
+        // the pack names, by its BIDS name where it has one; the folder is
+        // outside the standard, so one it cannot name keeps its descriptive
+        // name in `acq-`, its base contrast as the suffix.
+        Route::Folder(name) => Place::file(
+            format!("{session}/anat/{name}"),
+            folder_stem(code, label, stem, placed),
         ),
         // Outside the standard, so the entity set is ours and a `.bidsignore`
         // line says the standard does not know it.
@@ -2083,12 +2264,51 @@ fn place_of(
     }
 }
 
+/// The name of a stack in a folder of its own (record 55 C4, 2026-10-09):
+/// its BIDS name where it has one; the folder is outside the standard, so
+/// one it cannot name keeps its descriptive name in `acq-`, its base
+/// contrast as the suffix.
+fn folder_stem(code: &str, label: &str, stem: &str, placed: Option<&Placed>) -> String {
+    match placed.and_then(|p| p.bids.as_ref().ok()) {
+        Some(n) => n.stem(code, label),
+        None => {
+            let base: String = placed
+                .and_then(|p| p.base.as_deref())
+                .unwrap_or("")
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect();
+            match base.is_empty() {
+                true => unofficial(code, label, stem),
+                false => format!("{}_{base}", unofficial(code, label, stem)),
+            }
+        }
+    }
+}
+
 /// A BIDS-shaped name for something BIDS has no name for.
 ///
 /// The descriptive name of §9.1 carried in `acq-`, which is where a label that
 /// describes an acquisition belongs, reduced to what a BIDS label may spell.
 /// Uniqueness comes from §9.1's own disambiguation, which already ran over the
 /// session as the registry holds it.
+/// A derivative the standard has no name for (record 55 C4): its descriptive
+/// name, which is unique in its folder, as `desc-`, and its base contrast as
+/// the suffix (`desc-AxSWI3DGRESWI_SWI`). Where the stack states no base,
+/// the unofficial name of §9.3.
+fn derivative_stem(code: &str, label: &str, stem: &str, base: Option<&str>) -> String {
+    let desc: String = stem.chars().filter(char::is_ascii_alphanumeric).collect();
+    let suffix: String = base
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    match (desc.is_empty(), suffix.is_empty()) {
+        (false, false) => format!("sub-{code}_ses-{label}_desc-{desc}_{suffix}"),
+        _ => unofficial(code, label, stem),
+    }
+}
+
 fn unofficial(code: &str, label: &str, stem: &str) -> String {
     let acq: String = stem
         .chars()
@@ -2322,13 +2542,13 @@ fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
         let Some(was) = &job.was else { continue };
         let pairs: Vec<(PathBuf, PathBuf)> = match (was.files(), &job.place.stem) {
             (Files::Directory(dir), _) => vec![(root.join(dir), root.join(&job.place.dir))],
-            (Files::Named(paths), Some(stem)) => {
+            (Files::Named(paths, export), Some(stem)) => {
                 let old = format!(
                     "{}/{}",
                     was.place.dir,
                     was.place.stem.clone().unwrap_or_default()
                 );
-                paths
+                let mut pairs: Vec<(PathBuf, PathBuf)> = paths
                     .iter()
                     .map(|p| {
                         let ext = p.strip_prefix(&old).unwrap_or("");
@@ -2337,9 +2557,17 @@ fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
                             root.join(format!("{}/{stem}{ext}", job.place.dir)),
                         )
                     })
-                    .collect()
+                    .collect();
+                // The DICOM export moves with the file it is named after.
+                if let Some(export) = export {
+                    pairs.push((
+                        root.join(export),
+                        root.join(crate::bids::place::dicom_dir(&job.place.dir, stem)),
+                    ));
+                }
+                pairs
             }
-            (Files::Named(_), None) => Vec::new(),
+            (Files::Named(..), None) => Vec::new(),
         };
         let mut mine = Vec::new();
         let mut whole = !pairs.is_empty();
@@ -2399,10 +2627,15 @@ fn drop_files(root: &Path, files: &Files) {
             std::fs::remove_dir_all(&full).ok();
             prune(root, full.parent());
         }
-        Files::Named(paths) => {
+        Files::Named(paths, export) => {
             for p in paths {
                 let full = root.join(p);
                 std::fs::remove_file(&full).ok();
+                prune(root, full.parent());
+            }
+            if let Some(export) = export {
+                let full = root.join(export);
+                std::fs::remove_dir_all(&full).ok();
                 prune(root, full.parent());
             }
         }
@@ -2939,7 +3172,7 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
 /// refusing the whole release over a metadata field would be the wrong answer
 /// to it. The field is added after the conversion and before the digest, so a
 /// tree's own state covers it and a re-run sees no change.
-fn add_to_sidecar(path: &Path, key: &str, value: &str) {
+fn add_to_sidecar(path: &Path, key: &str, value: serde_json::Value) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
@@ -2949,7 +3182,7 @@ fn add_to_sidecar(path: &Path, key: &str, value: &str) {
     let Some(fields) = doc.as_object_mut() else {
         return;
     };
-    fields.insert(key.to_string(), serde_json::Value::from(value));
+    fields.insert(key.to_string(), value);
     if let Ok(out) = serde_json::to_string_pretty(&doc) {
         std::fs::write(path, format!("{out}\n")).ok();
     }
@@ -2979,6 +3212,7 @@ fn write_bids(
     report: &mut Report,
     body_part: Option<&str>,
     aslcontext: Option<&str>,
+    card: Option<&serde_json::Value>,
 ) -> Vec<Result<Written, String>> {
     let root = settings.root;
     let staging = root.join(".nils-convert").join(job.stack.to_string());
@@ -3023,6 +3257,18 @@ fn write_bids(
     );
     match made {
         Ok(made) => {
+            // Record 55 C4 (2026-10-09), after v0's `bids-dcm` tree: the
+            // slices the converter read, already scrubbed, in a folder named
+            // after the file they made. Moved out of the staging directory
+            // rather than written again.
+            let exported = match job.dicom {
+                true => export_dicom(
+                    &staged,
+                    root,
+                    &crate::bids::place::dicom_dir(&job.place.dir, &stem),
+                ),
+                false => Vec::new(),
+            };
             std::fs::remove_dir_all(&staging).ok();
             // §9.2 with record 37 S6: where in the body, in the slot the
             // standard keeps it in. `dcm2niix` writes the sidecar from the
@@ -3030,10 +3276,38 @@ fn write_bids(
             // vendor wrote; this is the pack's own answer, the one the axis
             // decided and the one `acq-` spells.
             if let Some(part) = body_part {
-                add_to_sidecar(&into.join(format!("{stem}.json")), "BodyPart", part);
+                add_to_sidecar(
+                    &into.join(format!("{stem}.json")),
+                    "BodyPart",
+                    serde_json::Value::from(part),
+                );
+            }
+            // Record 55 C4: everything NILS knows about the stack, whatever
+            // the name spells.
+            if let Some(card) = card {
+                add_to_sidecar(&into.join(format!("{stem}.json")), "NILS", card.clone());
             }
             let mut out = refused;
+            out.extend(exported);
             let mut files = made.files;
+            // Wave 7a §8.2, the official validator's first finding: dcm2niix
+            // writes a `.bval` and a `.bvec` beside every image of a diffusion
+            // series, and the standard admits them beside `dwi` only. A trace
+            // or an ADC map carrying them is an error, so a file whose
+            // extension the suffix's group does not admit is not kept.
+            let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
+            if let Some(group) = crate::bids::schema::group_of(datatype, stem_suffix(&stem)) {
+                files.retain(|file| {
+                    let admitted = group
+                        .extensions
+                        .iter()
+                        .any(|ext| file.strip_prefix(stem.as_str()) == Some(*ext));
+                    if !admitted {
+                        std::fs::remove_file(into.join(file)).ok();
+                    }
+                    admitted
+                });
+            }
             // BIDS requires an `aslcontext.tsv` beside an ASL image, one row
             // per volume the converter wrote. It shares the image's stem
             // with `context.tsv` after it, so the version's state names it
@@ -3087,6 +3361,41 @@ fn write_bids(
             out
         }
     }
+}
+
+/// The DICOM export of one converted stack (record 55 C4, 2026-10-09): its
+/// staged, scrubbed slices moved into `dir`, one file per slice under the
+/// name it was staged with.
+fn export_dicom(staged: &[PathBuf], root: &Path, dir: &str) -> Vec<Result<Written, String>> {
+    let into = root.join(dir);
+    std::fs::remove_dir_all(&into).ok();
+    if std::fs::create_dir_all(&into).is_err() {
+        return vec![Err("no directory for the DICOM export".to_string())];
+    }
+    staged
+        .iter()
+        .map(|from| {
+            let name = from
+                .file_name()
+                .ok_or_else(|| "a staged slice without a name".to_string())?;
+            let relative = PathBuf::from(dir).join(name);
+            let target = root.join(&relative);
+            if std::fs::rename(from, &target).is_err() {
+                std::fs::copy(from, &target)
+                    .map_err(|_| "could not be put in the DICOM export".to_string())?;
+            }
+            let bytes =
+                std::fs::read(&target).map_err(|_| "unreadable in the DICOM export".to_string())?;
+            Ok(Written {
+                wrote: Wrote {
+                    path: relative.display().to_string(),
+                    digest: hex::encode(digest_of(&bytes)),
+                    bytes: bytes.len() as i64,
+                },
+                applied: scrub::Applied::default(),
+            })
+        })
+        .collect()
 }
 
 /// Scrub one instance into the staging directory, ready to convert.
@@ -3370,6 +3679,258 @@ fn write_rows(
     }
 }
 
+/// What a scan is called, from its own facts alone, for the list of a
+/// dataset's scans (Wave 7a, the dataset view, 2026-10-09).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanName {
+    /// The descriptive name, v0's grammar (§9.1).
+    pub name: String,
+    /// The BIDS name in the full style, without its `sub-` and `ses-`
+    /// entities, which the tree it sits in already says
+    /// (`acq-Ax+2D+FLAIR+IRTSE_T2w`). None where the standard has no name.
+    pub bids: Option<String>,
+    /// The BIDS datatype: `anat`, `dwi`, `func`, `perf`, `fmap`, or `other`
+    /// for everything else (scouts, working scans, what nothing sorted).
+    pub datatype: &'static str,
+    /// The folder the descriptive layout puts it in (`anat`, `anat/SyMRI`,
+    /// `dwi`, `localizer`, `misc`, ...).
+    pub folder: String,
+    /// Every decided axis, as the registry stores it, joined by `,`.
+    pub axes: BTreeMap<String, String>,
+    /// The series number the scanner gave it, the order it was acquired in.
+    pub series_number: Option<i64>,
+}
+
+/// The datatype a scan is shown under: the BIDS name's where it has one,
+/// otherwise the pack's intent where BIDS knows it, otherwise `other`.
+fn datatype_of(bids: Option<&'static str>, intent: Option<&str>) -> &'static str {
+    const KNOWN: &[&str] = &["anat", "dwi", "func", "perf", "fmap"];
+    if let Some(d) = bids.filter(|d| KNOWN.contains(d)) {
+        return d;
+    }
+    match intent {
+        Some(i) => KNOWN.iter().find(|k| **k == i).copied().unwrap_or("other"),
+        None => "other",
+    }
+}
+
+/// The names of `stacks`, each from its own facts, as a release would
+/// build them before it compares a session's names (Wave 7a, the dataset
+/// view). A release adds what separates two stacks of one session that
+/// build one name; this does not, since a page of a list holds part of a
+/// session. Reads only the axes and fingerprints of the stacks asked for.
+/// Without a pack, `name` is still v0's grammar over the stored values and
+/// `bids` is None.
+pub fn scan_names(
+    store: &mut Store,
+    pack: Option<&nils_pack::pack::Pack>,
+    stacks: &[i64],
+) -> Result<HashMap<i64, ScanName>, Error> {
+    let mut out = HashMap::new();
+    if stacks.is_empty() {
+        return Ok(out);
+    }
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut axes: HashMap<i64, BTreeMap<String, String>> = HashMap::new();
+    for r in store.query(
+        &format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({list}) ORDER BY id",
+            store.qualified("classification_axis")
+        ),
+        &[],
+    )? {
+        if let Some(v) = r.opt_text(2)? {
+            axes.entry(r.int(0)?)
+                .or_default()
+                .entry(r.text(1)?.to_string())
+                .and_modify(|held| {
+                    held.push(',');
+                    held.push_str(v);
+                })
+                .or_insert_with(|| v.to_string());
+        }
+    }
+    let t = table("stack_fingerprint");
+    let d = store.dialect();
+    let text = |c: &str| {
+        d.text_of_qualified(
+            Some("f"),
+            t.column(c)
+                .unwrap_or_else(|| panic!("stack_fingerprint.{c} is not a column")),
+        )
+    };
+    let sql = format!(
+        "SELECT f.stack_id, f.stacks_in_series, {}, {}, {}, {}, f.dwi_b_value, f.dwi_directions, f.series_number \
+         FROM {} f WHERE f.stack_id IN ({list})",
+        text("orientation"),
+        text("echo_numbers"),
+        text("mr_acquisition_type"),
+        text("dwi_pe_direction"),
+        store.qualified("stack_fingerprint"),
+    );
+    let empty = BTreeMap::new();
+    for r in store.query(&sql, &[])? {
+        let stack = r.int(0)?;
+        let facts = nils_classify::effect::NameFacts {
+            stacks_in_series: r.opt_int(1)?,
+            orientation: r.opt_text(2)?.map(str::to_string),
+            echo_numbers: r.opt_text(3)?.map(str::to_string),
+            mr_acquisition_type: r.opt_text(4)?.map(str::to_string),
+            dwi_pe_direction: r.opt_text(5)?.map(str::to_string),
+            dwi_b_value: r.double(6).ok(),
+            dwi_directions: r.opt_int(7)?,
+            series_number: r.opt_int(8)?,
+        };
+        out.insert(
+            stack,
+            name_of(pack, axes.get(&stack).unwrap_or(&empty), &facts),
+        );
+    }
+    Ok(out)
+}
+
+/// What a scan is called from its axes as the registry stores them and the
+/// fingerprint's facts, with no registry at hand: the one grammar
+/// [`scan_names`] reads the registry for, and record 56's effect report
+/// asks of a stack before and after a rule change.
+pub fn name_of(
+    pack: Option<&nils_pack::pack::Pack>,
+    a: &BTreeMap<String, String>,
+    facts: &nils_classify::effect::NameFacts,
+) -> ScanName {
+    let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
+    let id_of = |axis: &str, stored: &str| -> Option<String> {
+        pack?
+            .axes
+            .iter()
+            .find(|x| x.name == axis)
+            .and_then(|x| x.id_of_stored(stored))
+            .map(str::to_string)
+    };
+    let ids_of = |axis: &str, stored: Option<&str>| -> Vec<String> {
+        stored
+            .into_iter()
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .filter_map(|v| id_of(axis, v))
+            .collect()
+    };
+    let orientation = facts.orientation.as_deref();
+    let acquisition_type = facts.mr_acquisition_type.as_deref();
+    let pe_direction = facts.dwi_pe_direction.as_deref();
+    // without a pack the stored value says it, as v0's column did
+    let contrast = match pack {
+        Some(_) => {
+            get("post_contrast")
+                .and_then(|v| id_of("post_contrast", v))
+                .as_deref()
+                == Some("given")
+        }
+        None => get("post_contrast") == Some("1"),
+    };
+    let fields = name::Fields {
+        body_part: get("body_part"),
+        spinal_cord: get("body_part") == Some("spine"),
+        orientation,
+        base: get("base"),
+        acquisition_type,
+        modifier: get("modifier"),
+        technique: get("technique"),
+        acceleration: get("acceleration"),
+        construct: get("construct"),
+        post_contrast: contrast,
+        datatype: get("directory_type"),
+        dwi_b_value: facts.dwi_b_value,
+        dwi_pe_direction: pe_direction,
+        dwi_directions: facts.dwi_directions,
+    };
+    let descriptive = name::describe(&fields, true, true);
+    let folder = folder_of(get("directory_type"), get("provenance"));
+    let built = match pack {
+        Some(pack) => {
+            let constructs = ids_of("construct", get("construct"));
+            let modifiers = ids_of("modifier", get("modifier"));
+            let technique = get("technique").and_then(|v| id_of("technique", v));
+            let base = get("base").and_then(|v| id_of("base", v));
+            let provenance = get("provenance").and_then(|v| id_of("provenance", v));
+            let mut said: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (axis, stored) in a {
+                let ids = ids_of(axis, Some(stored.as_str()));
+                if !ids.is_empty() {
+                    said.insert(axis.clone(), ids);
+                }
+            }
+            for (field, value) in [
+                ("orientation", orientation),
+                ("acquisition_type", acquisition_type),
+            ] {
+                if let Some(v) = value.filter(|v| !v.is_empty()) {
+                    said.insert(field.to_string(), vec![v.to_string()]);
+                }
+            }
+            let facts = crate::bids::name::Facts {
+                intent: get("directory_type"),
+                constructs: constructs.iter().map(String::as_str).collect(),
+                technique: technique.as_deref(),
+                modifiers: modifiers.iter().map(String::as_str).collect(),
+                base: base.as_deref(),
+                provenance: provenance.as_deref(),
+                axes: said
+                    .iter()
+                    .map(|(axis, values)| {
+                        (axis.as_str(), values.iter().map(String::as_str).collect())
+                    })
+                    .collect(),
+                post_contrast: contrast,
+                task: get("task"),
+                echo: match facts.stacks_in_series.unwrap_or(1) > 1 {
+                    true => facts.echo_numbers.as_deref().and_then(first_int),
+                    false => None,
+                },
+                pe_direction,
+            };
+            // a derivative takes the raw tree's name with `desc-`, as a
+            // release writes it under `derivatives/nils/`; one the
+            // standard has no name for has none here either
+            let construct_ids: Vec<&str> = constructs.iter().map(String::as_str).collect();
+            let derived_by = pack.bids.derived_by(&construct_ids);
+            let derived = get("disposition") == Some("reformat") || derived_by.is_some();
+            let desc = derived_by
+                .or_else(|| construct_ids.iter().find(|c| **c != "ND").copied())
+                .map(str::to_string);
+            // a scout or a working scan never takes its BIDS name
+            match get("disposition") {
+                Some("scout" | "working_scan") => None,
+                _ => crate::bids::name::build(&facts, &pack.bids, name::Naming::Full)
+                    .ok()
+                    .and_then(|n| match (derived, &desc) {
+                        (false, _) => Some((n.datatype, n.label())),
+                        (true, Some(d)) => Some((n.datatype, n.label_with_desc(d))),
+                        (true, None) => None,
+                    }),
+            }
+        }
+        None => None,
+    };
+    let datatype = match get("disposition") {
+        Some("scout" | "working_scan") => "other",
+        _ => datatype_of(built.as_ref().map(|(d, _)| *d), get("directory_type")),
+    };
+    ScanName {
+        name: descriptive,
+        bids: built.map(|(_, label)| label),
+        datatype,
+        folder,
+        axes: a.clone(),
+        series_number: facts.series_number,
+    }
+}
+
 /// Where every stack in the registry goes, in both layouts (§9).
 ///
 /// **Every** stack, and not only the selected ones. A name has to be unique in
@@ -3386,6 +3947,7 @@ fn places(
     naming: crate::name::Naming,
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
+    let tiers = axis_tiers(store)?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
     let text = |c: &str| {
@@ -3468,10 +4030,11 @@ fn places(
     // then its id (record 38, S2), so that `run-1` is the one made first and
     // two runs of one version assign the same numbers.
     let mut bids_buckets: BidsBuckets = BTreeMap::new();
-    let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
+    let mut extra: HashMap<i64, Extra> = HashMap::new();
     // Record 37 S2: what the repeat test reads of each stack, kept for the
     // stacks that turn out to collide, which is the only place it is asked.
     let mut acquisitions: HashMap<i64, crate::bids::repeat::Acquisition> = HashMap::new();
+    let mut stated: HashMap<i64, BTreeMap<String, Vec<String>>> = HashMap::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -3581,16 +4144,42 @@ fn places(
             pe_direction: r.opt_text(10)?,
         };
         let built = crate::bids::name::build(&facts, &pack.bids, naming);
+        // Wave 7a §8.1: what the stack says, kept for the stacks that turn
+        // out to share a name, whose axes are the first thing that may tell
+        // them apart.
+        stated.insert(stack, said.clone());
         let synthetic = pack.bids.is_synthetic(
             provenance.as_deref(),
             &constructs.iter().map(String::as_str).collect::<Vec<_>>(),
         );
+        // Record 55 C4: what makes the stack a derivative, and the `desc-`
+        // its name takes there: a construct the pack lists, or a synthetic
+        // contrast's own construct.
+        let construct_ids: Vec<&str> = constructs.iter().map(String::as_str).collect();
+        let derived_by = pack.bids.derived_by(&construct_ids);
+        let desc = derived_by
+            .or_else(|| {
+                construct_ids
+                    .iter()
+                    .find(|c| pack.bids.synthetic_construct.iter().any(|s| s == *c))
+                    .copied()
+            })
+            .or_else(|| construct_ids.iter().find(|c| **c != "ND").copied())
+            .map(str::to_string);
+        let own_folder = pack
+            .bids
+            .folder_of(provenance.as_deref(), technique.as_deref())
+            .map(str::to_string);
         extra.insert(
             stack,
             (
                 synthetic,
                 get("disposition").map(str::to_string),
                 body_part.clone(),
+                derived_by.is_some(),
+                desc,
+                base.clone(),
+                own_folder,
             ),
         );
         let acquired_date = r.opt_text(45)?.map(str::to_string);
@@ -3664,9 +4253,32 @@ fn places(
                 sequence_variant: r.opt_text(30)?.map(str::to_string),
             },
         );
-        if let Ok(n) = &built {
+        // A scout or a working scan never takes its BIDS name (§9.3 routes it
+        // by the release's choice), so it does not share one either: a
+        // localizer must not put `acq-3D` on the session's MPRAGE.
+        //
+        // A derivative (record 55 C4) shares a name only with derivatives:
+        // a MIP that shared the TOF's name would put a token on the TOF, and
+        // three MIPs of one TOF still need telling apart from each other.
+        let derivative = get("disposition") == Some("reformat")
+            || pack
+                .bids
+                .derived_by(
+                    &ids_of("construct", get("construct"))
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+                .is_some();
+        let bucket_label = match derivative {
+            true => format!("{label}#derivatives"),
+            false => label.clone(),
+        };
+        if let Ok(n) = &built
+            && !matches!(get("disposition"), Some("scout" | "working_scan"))
+        {
             bids_buckets
-                .entry((subject, label.clone(), n.datatype))
+                .entry((subject, bucket_label, n.datatype))
                 .or_default()
                 .push((
                     (
@@ -3698,114 +4310,98 @@ fn places(
             });
     }
 
-    // Record 37 S2. Where two stacks of one subject, session and datatype
-    // build one name, `run-` is written only when they are measurably one
-    // acquisition done twice (`bids::repeat`). Where they are not, no name is
-    // written at all: the stack is refused with what differs, `§9.3` routes it
-    // to `sourcedata/` under its informative name, and a person is asked.
+    // Record 37 S2 and Wave 7a §8.1. Where two stacks of one subject, session
+    // and datatype build one name, `run-` is written only when they are
+    // measurably one acquisition done twice (`bids::repeat`). Where they are
+    // not, the name is never refused: it carries what separates them, an
+    // axis's value first, then a measured property and its value, and last a
+    // plain number that is never called a run (`bids::separate`).
     //
-    // What this replaces is a counter, and the counter is why: of the 403
-    // stacks that took a `run-` index over record 34's corpus, 270 sat in a
-    // name that covered more than one acquisition. A `run-2` that is really a
-    // different echo time is a claim no validator can catch.
+    // What this replaces is first a counter, which wrote `run-2` on 270 of the
+    // 403 stacks of record 34's corpus that were not one acquisition twice,
+    // and then a refusal, which routed 434 stacks of the same corpus to
+    // `sourcedata/` because a thin name could not tell them apart.
     //
-    // In a fixed order, so that `run-1` is the one made first and two runs of
-    // one version agree: by the earliest acquisition, then by the series
-    // number, then by the stack's id.
+    // In a fixed order, so that `run-1` and the fallback's `1` are the ones
+    // made first and two runs of one version agree: by the earliest
+    // acquisition, then by the series number, then by the stack's id. The
+    // marks go on one at a time and the bucket is grouped again after each,
+    // so that two true repeats inside a wider group still end as runs.
     let mut shared = Shared::default();
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
-        let mut groups: BTreeMap<&String, Vec<i64>> = BTreeMap::new();
-        for (_, stack, stem) in bucket.iter() {
-            groups.entry(stem).or_default().push(*stack);
-        }
-        for (_, group) in groups.iter().filter(|(_, g)| g.len() > 1) {
-            shared.names += 1;
-            let members: Vec<&crate::bids::repeat::Acquisition> =
-                group.iter().filter_map(|s| acquisitions.get(s)).collect();
-            // A stack with no fingerprint row is one nothing can be measured
-            // about, and a claim nothing was measured for is not one to make.
-            let measurable = members.len() == group.len();
-            let differs = match measurable {
-                true => crate::bids::repeat::one_acquisition(&members),
-                false => vec!["one of them has no fingerprint".to_string()],
-            };
-            // A group the standard gives no `run` to has no answer even when
-            // it is a true repeat: the second stack would rewrite the first,
-            // silently, which is the bug this slice exists to stop.
-            let admits_run = group.iter().all(|stack| {
+        let order: Vec<i64> = bucket.iter().map(|(_, stack, _)| *stack).collect();
+        let stem_of =
+            |bids: &HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+             stack: &i64|
+             -> Option<String> {
                 bids.get(stack)
                     .and_then(|b| b.as_ref().ok())
-                    .is_some_and(|n| n.with_run(1).is_some())
-            });
-            let refuse = if !measurable {
-                Some(
-                    "one of them has no fingerprint, so nothing about them can be compared"
-                        .to_string(),
-                )
-            } else if !differs.is_empty() {
-                Some(crate::bids::repeat::why(&differs))
-            } else if !admits_run {
-                Some(format!(
-                    "they are one acquisition measured {} times, and BIDS gives this suffix no \
-                     run entity, so one of them would rewrite the other",
-                    group.len()
-                ))
-            } else {
-                None
+                    .map(|n| n.stem("s", "s"))
             };
-            match refuse {
-                None => {
-                    shared.repeats += group.len() as i64;
-                    for (n, stack) in group.iter().enumerate() {
-                        if let Some(name) = bids.get(stack).and_then(|b| b.as_ref().ok())
-                            && let Some(with) = name.with_run(n as i64 + 1)
-                        {
-                            bids.insert(*stack, Ok(with));
-                        }
-                    }
-                }
-                Some(why) => {
-                    shared.refused += group.len() as i64;
-                    let suffix = group
-                        .iter()
-                        .find_map(|s| bids.get(s).and_then(|b| b.as_ref().ok()))
-                        .map(|n| n.suffix)
-                        .unwrap_or("");
-                    shared.groups.push(SharedGroup {
-                        stacks: group.clone(),
-                        suffix: suffix.to_string(),
-                        differs: differs.clone(),
-                        why: why.clone(),
-                    });
-                    for stack in group {
-                        bids.insert(
-                            *stack,
-                            Err(crate::bids::name::Why::Shared {
-                                others: group.len() - 1,
-                                differs: why.clone(),
-                            }),
-                        );
-                    }
+        // Each round settles at least one group for good or adds a mark that
+        // splits it, and a stack carries at most one mark per axis and per
+        // property, so this ends; the bound is a guard, not a rule.
+        let mut first = true;
+        for _ in 0..64 {
+            let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+            for stack in &order {
+                if let Some(stem) = stem_of(&bids, stack) {
+                    groups.entry(stem).or_default().push(*stack);
                 }
             }
+            let colliding: Vec<Vec<i64>> = groups.into_values().filter(|g| g.len() > 1).collect();
+            if colliding.is_empty() {
+                break;
+            }
+            for group in colliding {
+                if first {
+                    shared.names += 1;
+                }
+                settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
+            }
+            first = false;
         }
     }
 
     let mut out = HashMap::new();
     for bucket in buckets.values_mut() {
-        name::disambiguate(bucket);
+        // Wave 7a §8.1, record 55 C4: a descriptive name a measured
+        // difference separates says it in a slot of its own before any
+        // counter, from the same marks a BIDS name takes.
+        name::disambiguate_by(bucket, |stacks| {
+            let members: Vec<crate::bids::separate::Member> = stacks
+                .iter()
+                .map(|s| crate::bids::separate::Member {
+                    acquisition: acquisitions.get(s),
+                    said: stated.get(s),
+                })
+                .collect();
+            crate::bids::separate::separator(&members, &pack.bids)
+                .map(|marks| marks.into_iter().map(|m| m.map(|m| m.token)).collect())
+        });
         for n in bucket.iter() {
-            let (synthetic, disposition, body_part) =
-                extra.remove(&n.stack).unwrap_or((false, None, None));
+            let (synthetic, disposition, body_part, derived, desc, base, own_folder) = extra
+                .remove(&n.stack)
+                .unwrap_or((false, None, None, false, None, None, None));
             out.insert(
                 n.stack,
                 Placed {
+                    card: crate::bids::card::card(
+                        &n.name,
+                        stated.get(&n.stack),
+                        tiers.get(&n.stack),
+                        acquisitions.get(&n.stack),
+                    ),
                     descriptive: n.clone(),
                     bids: bids
                         .remove(&n.stack)
                         .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
                     synthetic,
+                    derived,
+                    desc,
+                    folder: own_folder,
+                    base,
                     disposition,
                     body_part,
                 },
@@ -3817,6 +4413,19 @@ fn places(
         shared,
     })
 }
+
+/// What [`places`] keeps of a stack beside its names: whether it is a
+/// synthetic contrast, its disposition, its body part, whether a construct
+/// makes it a derivative, the `desc-` it takes there, and its base contrast.
+type Extra = (
+    bool,
+    Option<String>,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// What [`places`] worked out for a run: where every stack goes, and what the
 /// collision test of record 37 S2 found.
@@ -3840,10 +4449,39 @@ struct Shared {
     /// Stacks under those names that are one acquisition measured again, and
     /// took a `run-` index.
     repeats: i64,
-    /// Stacks that are not, refused the name and routed to `sourcedata/`.
-    refused: i64,
-    /// One per refused group, for the questions.
+    /// Stacks that are not, and were told apart by what differs or by the
+    /// fallback number (Wave 7a §8.1). Never refused.
+    separated: std::collections::BTreeSet<i64>,
+    /// Of those, the stacks the fallback number told apart.
+    numbered: std::collections::BTreeSet<i64>,
+    /// What decided each such stack's name, by stack, for the release record.
+    decided: HashMap<i64, Decided>,
+    /// One per group a person is asked about: two or more stacks that differ
+    /// in nothing the engine can see and are not a repeat.
     groups: Vec<SharedGroup>,
+}
+
+/// What decided one stack's name where it shared one with others
+/// (Wave 7a §8.1): the marks in the order they went on, and what the repeat
+/// test found between the stacks of its group.
+#[derive(Debug, Clone, Default)]
+struct Decided {
+    marks: Vec<crate::bids::separate::Mark>,
+    differs: Vec<String>,
+}
+
+/// One entry of the release record's list of names a difference or a number
+/// decided (Wave 7a §8.1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DecidedName {
+    pub stack: i64,
+    /// Where its files are, as `<dir>/<stem>`.
+    pub name: String,
+    /// What was added to the name, with the property and the value.
+    pub marks: Vec<crate::bids::separate::Mark>,
+    /// What the repeat test found between it and the stacks it shared a name
+    /// with, in words; never a text's value.
+    pub differs: Vec<String>,
 }
 
 /// A name more than one acquisition wanted.
@@ -3852,12 +4490,123 @@ struct SharedGroup {
     stacks: Vec<i64>,
     suffix: String,
     /// What the test found between them, field by field, which is also the
-    /// evidence a pack extension would need: "these four differ in their
-    /// velocity encoding, which the pack has no axis for" arrives from the
-    /// data rather than from a chair.
+    /// evidence a pack extension would need.
     differs: Vec<String>,
     /// The same thing as a sentence, which is what a person reads.
     why: String,
+}
+
+/// Settle one group of stacks that built one BIDS name (Wave 7a §8.1): a true
+/// repeat takes `run-`, anything else a mark that tells its members apart,
+/// and the last fallback is a plain number. Never a refusal.
+fn settle(
+    group: &[i64],
+    acquisitions: &HashMap<i64, crate::bids::repeat::Acquisition>,
+    stated: &HashMap<i64, BTreeMap<String, Vec<String>>>,
+    pack: &nils_pack::pack::Pack,
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    shared: &mut Shared,
+) {
+    use crate::bids::repeat::SAME_MOMENT;
+    use crate::bids::separate::{Mark, Member, separator};
+    let members: Vec<&crate::bids::repeat::Acquisition> =
+        group.iter().filter_map(|s| acquisitions.get(s)).collect();
+    // A stack with no fingerprint row is one nothing can be measured about,
+    // and a claim nothing was measured for is not one to make.
+    let measurable = members.len() == group.len();
+    let differs = match measurable {
+        true => crate::bids::repeat::one_acquisition(&members),
+        false => vec!["one of them has no fingerprint".to_string()],
+    };
+    // A group the standard gives no `run` to cannot say a true repeat as one,
+    // and the second stack would rewrite the first: it falls to the number.
+    let admits_run = group.iter().all(|stack| {
+        bids.get(stack)
+            .and_then(|b| b.as_ref().ok())
+            .is_some_and(|n| n.with_run(1).is_some())
+    });
+    let name_of = |bids: &HashMap<_, Result<crate::bids::name::Name, _>>, stack: &i64| {
+        bids.get(stack).and_then(|b| b.as_ref().ok()).cloned()
+    };
+    if measurable && differs.is_empty() && admits_run {
+        shared.repeats += group.len() as i64;
+        for (n, stack) in group.iter().enumerate() {
+            if let Some(name) = name_of(bids, stack)
+                && let Some(with) = name.with_run(n as i64 + 1)
+            {
+                bids.insert(*stack, Ok(with));
+            }
+        }
+        return;
+    }
+    let said: Vec<Member> = group
+        .iter()
+        .map(|s| Member {
+            acquisition: acquisitions.get(s),
+            said: stated.get(s),
+        })
+        .collect();
+    if let Some(marks) = separator(&said, &pack.bids) {
+        // A member that says nothing on the deciding axis keeps its name, and
+        // is still one of the stacks a difference told apart.
+        for (stack, m) in group.iter().zip(marks) {
+            record(bids, shared, *stack, m, &differs);
+        }
+        return;
+    }
+    // Nothing that can be spelled separates them: the plain number, in the
+    // order they were made.
+    for (n, stack) in group.iter().enumerate() {
+        record(
+            bids,
+            shared,
+            *stack,
+            Some(Mark::number(n as i64 + 1)),
+            &differs,
+        );
+        shared.numbered.insert(*stack);
+    }
+    // A person is asked only where the engine sees no difference at all and
+    // they are not a repeat: no fingerprint, or one moment written twice.
+    // A true repeat the suffix gives no `run` to is a repeat, and a pair the
+    // texts alone separate is a difference the engine sees and never spells.
+    let unseen = !measurable || (!differs.is_empty() && differs.iter().all(|d| d == SAME_MOMENT));
+    if unseen {
+        let suffix = group
+            .iter()
+            .find_map(|s| bids.get(s).and_then(|b| b.as_ref().ok()))
+            .map(|n| n.suffix)
+            .unwrap_or("");
+        shared.groups.push(SharedGroup {
+            stacks: group.to_vec(),
+            suffix: suffix.to_string(),
+            differs: differs.clone(),
+            why: crate::bids::repeat::why(&differs),
+        });
+    }
+}
+
+/// Put one mark on a stack's name, and remember what decided it.
+fn record(
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    shared: &mut Shared,
+    stack: i64,
+    mark: Option<crate::bids::separate::Mark>,
+    differs: &[String],
+) {
+    shared.separated.insert(stack);
+    let d = shared.decided.entry(stack).or_default();
+    for why in differs {
+        if !d.differs.contains(why) {
+            d.differs.push(why.clone());
+        }
+    }
+    let Some(mark) = mark else { return };
+    if let Some(Ok(name)) = bids.get(&stack) {
+        let marked = name.marked(&mark);
+        bids.insert(stack, Ok(marked));
+    }
+    d.marks.push(mark);
 }
 
 /// The stacks of one subject, session and datatype, ordered by when they
@@ -3887,12 +4636,25 @@ struct Placed {
     bids: Result<crate::bids::name::Name, crate::bids::name::Why>,
     /// A vendor's synthetic contrast, which §9.3 lets a release place.
     synthetic: bool,
+    /// A construct the pack lists as a derivative made it one (record 55 C4).
+    derived: bool,
+    /// The `desc-` its name takes in `derivatives/`.
+    desc: Option<String>,
+    /// The folder of its own the pack gives it under `anat/` (record 55 C4,
+    /// 2026-10-09: SyMRI).
+    folder: Option<String>,
+    /// Its base contrast, the suffix of a derivative the standard has no
+    /// name for.
+    base: Option<String>,
     disposition: Option<String>,
     /// Where in the body, as the pack's axis states it. It is in `acq-`
     /// because names must be unique, and it is here because the standard
     /// keeps the fact in the sidecar, as `BodyPart`, and that is where a
     /// reader looks it up (record 37 S6).
     body_part: Option<String>,
+    /// The sidecar's `NILS` object: every axis, the descriptive name and the
+    /// acquisition (record 55 C4).
+    card: serde_json::Value,
 }
 
 /// `EchoNumbers` may carry several values; the first is this stack's.
@@ -3938,6 +4700,25 @@ fn axis_values(store: &mut Store) -> Result<HashMap<i64, BTreeMap<String, String
                 })
                 .or_insert_with(|| v.to_string());
         }
+    }
+    Ok(out)
+}
+
+/// How each stack's axes were decided: the tier and the confidence, by axis
+/// (record 55 C4), for the sidecar's `NILS` object. One row per value; the
+/// first row of an axis speaks for it, since every value of one axis is
+/// decided at once.
+fn axis_tiers(store: &mut Store) -> Result<HashMap<i64, crate::bids::card::Tiers>, Error> {
+    let sql = format!(
+        "SELECT stack_id, axis, tier, confidence FROM {} ORDER BY id",
+        store.qualified("classification_axis")
+    );
+    let mut out: HashMap<i64, crate::bids::card::Tiers> = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        out.entry(r.int(0)?)
+            .or_default()
+            .entry(r.text(1)?.to_string())
+            .or_insert((r.text(2)?.to_string(), r.double(3)?));
     }
     Ok(out)
 }
@@ -4190,7 +4971,7 @@ fn raise_shared(store: &mut Store, report: &Report, groups: &[SharedGroup]) -> R
                         "suffix": g.suffix,
                         "differs": g.differs,
                         "why": g.why,
-                        "placed": "sourcedata",
+                        "placed": "numbered",
                     })
                     .to_string(),
                 ),
@@ -4249,6 +5030,7 @@ mod tests {
             place: Place::dir(dir.to_string()),
             fallback: Place::dir(dir.to_string()),
             route: "raw".to_string(),
+            dicom: false,
             content: "same".to_string(),
             change: crate::version::Change::Moved,
             was: Some(state(Place::dir(was.to_string()), &[])),
@@ -4418,7 +5200,13 @@ mod tests {
         ));
         assert!(matches!(
             state(Place::file("a/b".into(), "c".into()), &[".nii.gz", ".json"]).files(),
-            Files::Named(v) if v == vec!["a/b/c.nii.gz".to_string(), "a/b/c.json".to_string()]
+            Files::Named(v, None) if v == vec!["a/b/c.nii.gz".to_string(), "a/b/c.json".to_string()]
+        ));
+        // Record 55 C4 (2026-10-09): the DICOM export is the stack's too.
+        assert!(matches!(
+            state(Place::file("a/b".into(), "c".into()), &[".nii.gz", DICOM_EXPORT]).files(),
+            Files::Named(v, Some(d)) if v == vec!["a/b/c.nii.gz".to_string()]
+                && d == "sourcedata/dicom/a/b/c"
         ));
         assert_eq!(Place::dir("a/b".into()).key(), "a/b");
         assert_eq!(Place::file("a/b".into(), "c".into()).key(), "a/b/c");
@@ -4487,7 +5275,7 @@ mod tests {
             "{\"SliceTiming\": [0, 212.91890726713459, 479.60756426982596], \"EchoTime\": 0.0029}\n",
         )
         .unwrap();
-        add_to_sidecar(&path, "BodyPart", "BRAIN");
+        add_to_sidecar(&path, "BodyPart", serde_json::Value::from("BRAIN"));
         let text = std::fs::read_to_string(&path).unwrap();
         for exact in ["212.91890726713459", "479.60756426982596", "0.0029"] {
             assert!(text.contains(exact), "{exact} not kept: {text}");

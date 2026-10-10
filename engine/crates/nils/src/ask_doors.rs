@@ -68,6 +68,12 @@ impl AskState {
             let catalog = Catalog::build(registry, pack)
                 .map_err(|e| Reply::error(500, format!("the catalog: {e}")))?;
             self.catalog = Some((epoch, catalog));
+        } else if let Some((_, catalog)) = self.catalog.as_mut() {
+            // Wave 7a: a dataset is added, moved or retired without the
+            // epoch moving, and the dataset fields read the places in force
+            catalog
+                .refresh_datasets(registry.store())
+                .map_err(|e| Reply::error(500, format!("the datasets: {e}")))?;
         }
         if self.reader.is_none() {
             let r = registry
@@ -157,6 +163,35 @@ pub(crate) fn not_reproducible(
         )));
     }
     Ok(None)
+}
+
+/// Record 55 H2: the selection a handle answered whole, when it did: its
+/// answer is the set that read the selection, or a set of another grain
+/// made of that set and nothing more (how a campaign, a run or a pyramid
+/// job freezes a selection), so its row count is the selection's size.
+fn whole_selection(h: &handle::Handle) -> Option<&str> {
+    let ask = h.ask.as_ref()?;
+    let out = ask.out.set.as_str();
+    let pins = h.selection_versions.as_array()?;
+    pins.iter().find_map(|p| {
+        let set = p["set"].as_str()?;
+        let whole = set == out
+            || ask.sets.get(out).is_some_and(|s| {
+                s.of.as_deref() == Some(set)
+                    && serde_json::to_value(s)
+                        .ok()
+                        .and_then(|v| v.as_object().map(|o| o.len() == 2))
+                        .unwrap_or(false)
+            });
+        whole.then(|| p["selection"].as_str()).flatten()
+    })
+}
+
+/// Whether a handle's fields are all within the caller's detail.
+fn classes_within(h: &handle::Handle, scope: &Scope) -> bool {
+    let classes: BTreeSet<Class> =
+        serde_json::from_value(h.suppression["classes"].clone()).unwrap_or_default();
+    classes.iter().all(|c| scope.classes.contains(c))
 }
 
 fn handle_within_scope(h: &handle::Handle, scope: &Scope, id: i64) -> Result<(), Reply> {
@@ -1339,6 +1374,132 @@ fn answer(
                 "ask": d.ask,
             })))
         }
+        ["api", "ask", "selections"] if get => {
+            // record 55 H2: the saved selections as a list, by name, a page
+            // at a time: each with its versions, who made it and the last
+            // version, when, and its size as the newest answer this caller
+            // may open that froze it whole says it
+            let limit = query
+                .get("limit")
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(50)
+                .clamp(1, caps.page_rows_max as usize);
+            let after = query.get("after").map(String::as_str);
+            let needle = query
+                .get("q")
+                .map(|q| q.trim().to_lowercase())
+                .filter(|q| !q.is_empty());
+            let store = registry.store();
+            let all = selection::list(store).map_err(|e| Reply::error(500, e.to_string()))?;
+            let total = all.len();
+            let matching: Vec<&selection::Listed> = all
+                .iter()
+                .filter(|l| {
+                    needle
+                        .as_ref()
+                        .is_none_or(|q| l.name.to_lowercase().contains(q))
+                })
+                .collect();
+            let page: Vec<&selection::Listed> = matching
+                .iter()
+                .filter(|l| after.is_none_or(|a| l.name.as_str() > a))
+                .take(limit)
+                .copied()
+                .collect();
+            let cohorts: HashMap<i64, String> = nils_registry::cohort::all(store)
+                .map_err(|e| Reply::error(500, e.to_string()))?
+                .into_iter()
+                .map(|c| (c.id, c.name))
+                .collect();
+            // the newest handle of each selection that froze it whole: its
+            // answer is the selection's set. Its fields must be within the
+            // caller's detail; a frozen handle keeps the stacks of a sample
+            // sealed now, which a caller who does not read them has left out
+            // of the count, as a run of the question would
+            let mut handles =
+                handle::list(store, false).map_err(|e| Reply::error(500, e.to_string()))?;
+            handles.sort_by_key(|h| std::cmp::Reverse(h.id));
+            let mut sized: HashMap<String, (&handle::Handle, i64)> = HashMap::new();
+            for h in &handles {
+                let Some(name) = whole_selection(h) else {
+                    continue;
+                };
+                if sized.contains_key(name) || !page.iter().any(|l| l.name == name) {
+                    continue;
+                }
+                if !classes_within(h, &scope) {
+                    continue;
+                }
+                let rows = if scope.unsealed || h.suppression["sealed"] == "withheld" {
+                    h.row_count
+                } else if h.grain == Grain::Stack && h.has_rows() {
+                    let keys: Vec<i64> = crate::campaigns::handle_keys(store, h.id, Grain::Stack)?
+                        .into_iter()
+                        .map(|(k, _)| k)
+                        .collect();
+                    let sealed = crate::sealed::now(store, &keys)?;
+                    (keys.len() - sealed.len()) as i64
+                } else {
+                    continue;
+                };
+                sized.insert(name.to_string(), (h, rows));
+            }
+            let mut rows = Vec::with_capacity(page.len());
+            for l in &page {
+                let current = selection::get(store, &l.name, None)
+                    .map_err(|e| Reply::error(500, e.to_string()))?;
+                let grain = current.as_ref().and_then(|v| {
+                    v.ask
+                        .sets
+                        .get(&v.ask.out.set)
+                        .map(|s| s.grain.name().to_string())
+                });
+                let size = sized.get(l.name.as_str()).map(|(h, count)| {
+                    let version = h
+                        .selection_versions
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|p| p["selection"].as_str() == Some(l.name.as_str()))
+                        .and_then(|p| p["version"].as_u64());
+                    json!({
+                        "rows": count, "grain": h.grain, "version": version,
+                        "handle": h.id, "at": h.created_at, "truncated": h.truncated,
+                    })
+                });
+                rows.push(json!({
+                    "id": l.id,
+                    "name": l.name,
+                    "spec": format!("selection:{}@{}", l.name, l.current_version),
+                    "description": l.description,
+                    "versions": l.current_version,
+                    "grain": grain,
+                    "owner": l.owner,
+                    "created_at": l.created_at,
+                    "updated_at": current.as_ref().map(|v| v.created_at.clone()),
+                    "updated_by": current.as_ref().map(|v| v.actor.clone()),
+                    "note": current.as_ref().and_then(|v| v.note.clone()),
+                    "cohort": l.cohort_id.and_then(|c| cohorts.get(&c).cloned()),
+                    "size": size,
+                }));
+            }
+            let next = if page.len() == limit
+                && matching
+                    .iter()
+                    .any(|l| page.last().is_some_and(|p| l.name > p.name))
+            {
+                page.last().map(|l| l.name.clone())
+            } else {
+                None
+            };
+            Ok(Reply::ok(json!({
+                "count": rows.len(),
+                "total": total,
+                "matching": matching.len(),
+                "selections": rows,
+                "next": next,
+            })))
+        }
         ["api", "ask", "selections", name] if put => {
             let (ask, _) = document_of(registry, &doc)?;
             let prepared = prepare(ask, catalog, &scope).map_err(ask_err)?;
@@ -1607,6 +1768,7 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/ask/documents",
     "POST /api/ask/documents",
     "GET /api/ask/documents/{id}",
+    "GET /api/ask/selections",
     "PUT /api/ask/selections/{name}",
     "GET /api/ask/selections/{name}",
     "GET /api/ask/handles",

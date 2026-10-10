@@ -37,11 +37,11 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `sop_class_uid` | SOPClassUID (0008,0016), else meta MediaStorageSOPClassUID | text | technical | the file meta when the element is absent (v0) |
 | `implementation_version_name` | ImplementationVersionName (0002,0013), else meta ImplementationVersionName | text | technical | the file meta when the element is absent (v0) |
 | `sequence_name` | SequenceName (0018,0024) | text | technical | a vendor's sequence name: technical, shown at every detail (2026-10-01; quasi-identifying before) |
-| `protocol_name` | ProtocolName (0018,1030) | text | quasi-identifying |  |
+| `protocol_name` | ProtocolName (0018,1030) | text | technical | a sequence name: technical, shown at every detail (2026-10-01; quasi-identifying before) |
 | `series_date` | SeriesDate (0008,0021) | date | quasi-identifying |  |
 | `series_time` | SeriesTime (0008,0031) | time | quasi-identifying |  |
 | `series_number` | SeriesNumber (0020,0011) | int | technical | addition: the order the scanner gave its series, which a run- index follows after the acquisition time (record 38) |
-| `series_description` | SeriesDescription (0008,103E) | text | quasi-identifying |  |
+| `series_description` | SeriesDescription (0008,103E) | text | technical | a sequence name: technical, shown at every detail (2026-10-01; quasi-identifying before) |
 | `body_part_examined` | BodyPartExamined (0018,0015) | text | technical |  |
 | `burned_in_annotation` | BurnedInAnnotation (0028,0301) | text | technical | addition: what the file says about text in its own pixels (Wave 3 §8.4); v0 never reads it |
 | `scanning_sequence` | ScanningSequence, then private per-frame .ScanningSequence | text | technical | the private per-frame sequences are the Philips (2005,140F) and the Siemens (0021,1201) one, read without a creator check (v0) |

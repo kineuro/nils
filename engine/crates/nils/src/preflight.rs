@@ -22,9 +22,11 @@
 //! keeps in `sourcedata/` or holds is left out as the run leaves it out. A
 //! session is missing an input when no stack picked for a role the
 //! descriptor names under `x-nils.input.roles` is released under that
-//! role's own BIDS suffix (a `t1w` pick the release names `FLAIR` is no
-//! T1w), and the run skips it; a stack when the registry holds no file of
-//! it, or no derivative a typed input needs.
+//! role's own BIDS suffix, or, for a suffix the release spells as a
+//! modifier, with it in its `acq-` (a `flair` pick as
+//! `acq-Ax+2D+FLAIR+IRTSE_T2w`, record 55 C4; a `t1w` pick the release
+//! names `T2w` is no T1w), and the run skips it; a stack when the registry
+//! holds no file of it, or no derivative a typed input needs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -255,13 +257,15 @@ fn unit_of_dir(dir: &str, level: Level) -> Option<String> {
 
 /// What a unit lacks of the roles a descriptor names (record 49 A3), from
 /// what the release makes of the stacks picked for each role in it: the
-/// BIDS suffix of each in the raw tree, none for one the release puts
+/// BIDS stem of each in the raw tree, none for one the release puts
 /// elsewhere. A role is there when a stack picked for it is released under
-/// the role's own suffix (`t1w` as `T1w`); a role the standard spells no
-/// suffix for is there when a stack picked for it is in the raw tree. The
-/// pre-flight and the runner both judge a unit by this, so a session whose
-/// T1w pick the release writes as a FLAIR is missing its T1w before the
-/// run, and is not run.
+/// the role's own suffix (`t1w` as `T1w`), or, for a suffix the release
+/// spells as a modifier, with it in its `acq-` (`flair` as
+/// `acq-Ax+2D+FLAIR+IRTSE_T2w`, record 55 C4); a role the standard spells
+/// no suffix for is there when a stack picked for it is in the raw tree.
+/// The pre-flight and the runner both judge a unit by this, so a session
+/// whose T1w pick the release writes as a T2w is missing its T1w before
+/// the run, and is not run.
 pub(crate) fn roles_missing(
     roles: &[String],
     held: &BTreeMap<String, Vec<Option<String>>>,
@@ -278,13 +282,16 @@ pub(crate) fn roles_missing(
         let raw: Vec<&str> = got.iter().filter_map(|s| s.as_deref()).collect();
         let want = nils_release::run::role_suffix(role);
         let ok = match want {
-            Some(w) => raw.contains(&w),
+            Some(w) => raw.iter().any(|s| nils_release::run::stem_holds(s, w)),
             None => !raw.is_empty(),
         };
         if ok {
             continue;
         }
-        let mut as_: Vec<&str> = raw.clone();
+        let mut as_: Vec<&str> = raw
+            .iter()
+            .map(|s| nils_release::run::stem_suffix(s))
+            .collect();
         as_.sort_unstable();
         as_.dedup();
         out.push(match (want, as_.is_empty()) {
@@ -361,14 +368,14 @@ fn bids_units(
                     ..Unit::default()
                 });
                 u.stacks.push(p.stack);
-                let suffix = (p.route == "raw").then(|| p.suffix.clone()).flatten();
+                let stem = (p.route == "raw").then(|| p.stem.clone()).flatten();
                 for role in roles {
                     u.roles.insert(role.clone());
                     held.entry(id.clone())
                         .or_default()
                         .entry(role.clone())
                         .or_default()
-                        .push(suffix.clone());
+                        .push(stem.clone());
                 }
             }
         }
@@ -956,8 +963,9 @@ mod tests {
     }
 
     /// A role is there when a stack picked for it is released under the
-    /// role's own suffix; a role the standard spells no suffix for, when a
-    /// stack picked for it is in the raw tree at all.
+    /// role's own suffix, or with it in its `acq-` where the release spells
+    /// it as a modifier (a FLAIR, record 55 C4); a role the standard spells
+    /// no suffix for, when a stack picked for it is in the raw tree at all.
     #[test]
     fn a_role_is_there_only_under_its_own_suffix() {
         let roles = vec!["t1w".to_string(), "flair".to_string()];
@@ -967,6 +975,25 @@ mod tests {
         let why = roles_missing(&roles, &as_flair);
         assert_eq!(why.len(), 1);
         assert!(why[0].contains("released as FLAIR, not T1w"), "{why:?}");
+        // as the release names them since record 55 C4: a FLAIR is a
+        // modifier in `acq-` on its base contrast's suffix
+        let named = held(&[
+            ("t1w", &[Some("sub-a_ses-b_acq-Sag+3D+MPRAGE_T1w")]),
+            ("flair", &[Some("sub-a_ses-b_acq-Ax+2D+FLAIR+IRTSE_T2w")]),
+        ]);
+        assert!(roles_missing(&roles, &named).is_empty());
+        let no_flair = held(&[
+            ("t1w", &[Some("sub-a_ses-b_acq-Sag+3D+MPRAGE_T1w")]),
+            ("flair", &[Some("sub-a_ses-b_acq-Ax+2D+IRTSE_T2w")]),
+        ]);
+        let why = roles_missing(&roles, &no_flair);
+        assert!(why[0].contains("released as T2w, not FLAIR"), "{why:?}");
+        // only a modifier is looked for in `acq-`: a base contrast spelt
+        // there beside another suffix is not the role's suffix
+        let t2w = vec!["t2w".to_string()];
+        let mese = held(&[("t2w", &[Some("sub-a_ses-b_acq-Ax+T2w+2D_MESE")])]);
+        let why = roles_missing(&t2w, &mese);
+        assert!(why[0].contains("released as MESE, not T2w"), "{why:?}");
         let elsewhere = held(&[("t1w", &[None]), ("flair", &[Some("FLAIR")])]);
         assert!(roles_missing(&roles, &elsewhere)[0].contains("outside"));
         let none = held(&[("flair", &[Some("FLAIR")])]);

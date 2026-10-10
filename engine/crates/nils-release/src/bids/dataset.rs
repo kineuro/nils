@@ -42,6 +42,24 @@ pub struct Scan {
     /// The path, relative to the subject and session directory.
     pub filename: String,
     pub acq_time: Option<String>,
+    /// The stack's descriptive name, v0's grammar (record 55 C4), so a
+    /// minimal BIDS name can be read back to what the scan is.
+    pub nils_name: Option<String>,
+}
+
+/// `scans.json` at the root, which describes the `nils_name` column every
+/// `scans.tsv` of the tree carries (the inheritance principle).
+pub fn scans_description() -> String {
+    let doc = serde_json::json!({
+        "nils_name": {
+            "LongName": "NILS descriptive name",
+            "Description": "The stack's name in the NILS descriptive grammar (v0's): body part, orientation, base contrast, 2D or 3D, modifiers, technique, acceleration and construct joined by underscores, then _CE for a post-contrast stack and the diffusion and echo suffixes. The sidecar's NILS object holds every axis it is built from."
+        }
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&doc).unwrap_or_default()
+    )
 }
 
 /// A registered model whose answers are in force on the tree's stacks
@@ -203,9 +221,15 @@ pub fn sessions(rows: &[Session]) -> String {
 pub fn scans(rows: &[Scan]) -> String {
     let mut sorted = rows.to_vec();
     sorted.sort_by(|a, b| a.filename.cmp(&b.filename));
-    let mut out = String::from("filename\tacq_time\n");
+    let mut out = String::from("filename\tacq_time\tnils_name\n");
     for r in &sorted {
-        let _ = writeln!(out, "{}\t{}", r.filename, cell(r.acq_time.as_deref()));
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}",
+            r.filename,
+            cell(r.acq_time.as_deref()),
+            cell(r.nils_name.as_deref())
+        );
     }
     out
 }
@@ -223,7 +247,8 @@ pub fn bidsignore(lines: &[String]) -> String {
     out
 }
 
-/// Record 37 S2: the three numbers behind every `run-` index in the tree.
+/// Record 37 S2 and Wave 7a §8.1: the numbers behind every `run-` index and
+/// every name a difference or a number decided.
 ///
 /// In the `README` because the reader of a tree is exactly the person a false
 /// `run-2` fools: a validator passes it, and nothing else in a BIDS dataset
@@ -234,8 +259,12 @@ pub struct Repeats {
     pub names: i64,
     /// Stacks under those names that are one acquisition measured again.
     pub repeats: i64,
-    /// Stacks that are not, and have no name in this tree.
-    pub refused: i64,
+    /// Stacks that are not, told apart by what differs or by a number.
+    pub separated: i64,
+    /// Of those, the ones only the plain fallback number told apart.
+    pub numbered: i64,
+    /// How the names spell a difference.
+    pub naming: crate::name::Naming,
 }
 
 /// The `README`, which BIDS requires and which is the one file in the tree
@@ -297,15 +326,20 @@ pub fn readme(
     // until this was measured two thirds of them were a different acquisition
     // wearing one name. So the tree says what its own indices are worth.
     if repeats.names > 0 {
+        let (difference, number) = (
+            "the value of the axis or the property that differs, in its own slot of `acq-`",
+            "a plain number, the last slot of `acq-`",
+        );
         let _ = writeln!(
             out,
             "## What `run-` means here\n\n\
              {} name(s) here were built by more than one stack. {} of those stacks are \
              measurably one acquisition made again, which is what `run-` says, and they are \
-             told apart by it. {} are not, so they have no name in this tree at all: they are \
-             under `sourcedata/` with their informative names, and each carries a question \
-             saying what differs. A `run-` index in this tree is never a counter.\n",
-            repeats.names, repeats.repeats, repeats.refused
+             told apart by it. {} are not, and each carries what separates it: {difference}. \
+             {} of them differ in nothing a name may spell and carry {number}, which is never \
+             a run. The release's report lists every such name with what decided it. A `run-` \
+             index in this tree is never a counter.\n",
+            repeats.names, repeats.repeats, repeats.separated, repeats.numbered
         );
     }
     out.push_str(
@@ -316,6 +350,25 @@ pub fn readme(
          run reports anything it could place nowhere. The files here are NIfTI and their\n\
          sidecars, so there are fewer of them than the DICOM a descriptive tree holds.\n",
     );
+    // Record 55 C4 (2026-10-09), after v0's DICOM tree.
+    if let Some(which) = made_by
+        .placements
+        .get("dicom")
+        .filter(|w| w.as_str() != "none")
+    {
+        let _ = writeln!(
+            out,
+            "\n## The DICOM export\n\n\
+             `sourcedata/dicom/` holds the de-identified DICOM of {}, at the path its NIfTI \
+             file has, in a folder named after that file without its extension, one file \
+             per slice. SyMRI's images are under `anat/SyMRI/`, because its pipeline reads \
+             them together and as DICOM.",
+            match which.as_str() {
+                "folders" => "each stack in a folder of its own",
+                _ => "every converted stack",
+            }
+        );
+    }
     out
 }
 
@@ -422,10 +475,12 @@ mod tests {
             Scan {
                 filename: "anat/b.nii.gz".into(),
                 acq_time: None,
+                nils_name: None,
             },
             Scan {
                 filename: "anat/a.nii.gz".into(),
                 acq_time: Some("t".into()),
+                nils_name: Some("Ax_T1w_3D_MPRAGE".into()),
             },
         ];
         let a = scans(&rows);
@@ -433,7 +488,7 @@ mod tests {
         reversed.reverse();
         assert_eq!(a, scans(&reversed));
         assert!(
-            a.starts_with("filename\tacq_time\nanat/a.nii.gz\tt\n"),
+            a.starts_with("filename\tacq_time\tnils_name\nanat/a.nii.gz\tt\tAx_T1w_3D_MPRAGE\n"),
             "{a}"
         );
     }
@@ -471,7 +526,9 @@ mod tests {
             Repeats {
                 names: 2,
                 repeats: 2,
-                refused: 3,
+                separated: 3,
+                numbered: 1,
+                naming: crate::name::Naming::Full,
             },
         );
         assert!(!text.contains("What is not here"), "{text}");
@@ -483,6 +540,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("never a counter"), "{text}");
+        // Wave 7a §8.1: nothing is refused, and the number is never a run.
+        assert!(text.contains("3 are not, and each carries"), "{text}");
+        assert!(text.contains("slot of `acq-`"), "{text}");
+        assert!(text.contains("1 of them differ in nothing"), "{text}");
     }
 
     #[test]

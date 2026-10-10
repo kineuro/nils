@@ -73,6 +73,16 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     fn start(home: &TempDir, requests: usize, extra: &[&str]) -> Server {
         let mut cmd = nils();
@@ -95,13 +105,15 @@ impl Server {
             // Never the test's own stderr: a server that outlives a
             // panic would hold the pipe open and hang the whole run.
             .stderr(Stdio::null());
-        let mut child = cmd.spawn().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let child = cmd.spawn().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let first = lines.next().unwrap().unwrap();
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     fn request(
@@ -2369,4 +2381,635 @@ fn the_catalog_lists_only_the_kinds_the_callers_detail_opens() {
     let (status, valid) = server.request("POST", "/api/ask/validate", Some(&request), ops);
     assert_eq!(status, 200, "{valid}");
     server.finish();
+}
+
+/// Record 55 K7 (spec §7.1, T13): the quasi-identifier rule at every door
+/// that runs a question. A run, a preview and a queued job answer a quasi
+/// identifying column (the station name, the stack's day, the subject's
+/// code) as its shape below detail quasi and raw at quasi and above; the
+/// series description and the protocol name are sequence names, answered
+/// raw at every detail, and the value sampler lists them as values.
+#[test]
+fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        12,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let ops = Some("an-operator-token-of-len");
+    let doc = serde_json::json!({
+        "ast_version": 1,
+        "name": "k7 doors",
+        "sets": {"s": {"grain": "stack", "where": [["not_null", {}, ["field", {}, "station_name"]]]}},
+        "out": {
+            "set": "s",
+            "level": "record",
+            "columns": [
+                ["field", {}, "text_series_description"],
+                ["field", {}, "text_protocol_name"],
+                ["field", {}, "station_name"],
+                ["field", {}, "day"],
+                ["field", {}, "subject.code"],
+                ["field", {}, "n_instances"]
+            ],
+            "order": [[["field", {}, "id"], "asc"]],
+            "limit": 40
+        }
+    });
+    // the named columns of an answer, by name
+    fn column(answer: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+        let names = answer["columns"].as_array().unwrap();
+        let i = names
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column {name} in {answer}"));
+        answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    }
+    fn shapes(raw: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        raw.iter()
+            .map(|v| match v {
+                serde_json::Value::Null => serde_json::Value::Null,
+                serde_json::Value::String(t) => nils_ask::validate::shape(t).into(),
+                other => nils_ask::validate::shape(&other.to_string()).into(),
+            })
+            .collect()
+    }
+    let held = ["station_name", "day", "subject.code"];
+    let shown = [
+        "text_series_description",
+        "text_protocol_name",
+        "n_instances",
+    ];
+    // what each door answers, checked against the sensitive caller's raw rows
+    let check = |door: &str,
+                 plain: &serde_json::Value,
+                 quasi: &serde_json::Value,
+                 raw: &serde_json::Value| {
+        assert!(
+            !raw["rows"].as_array().unwrap().is_empty(),
+            "{door}: no rows to compare: {raw}"
+        );
+        for name in held {
+            let r = column(raw, name);
+            assert!(
+                r.iter().any(|v| !v.is_null()),
+                "{door}: {name} is never filled: {raw}"
+            );
+            assert_eq!(column(plain, name), shapes(&r), "{door}: {name} at plain");
+            assert_ne!(column(plain, name), r, "{door}: {name} at plain is raw");
+            assert_eq!(column(quasi, name), r, "{door}: {name} at quasi");
+        }
+        for name in shown {
+            let r = column(raw, name);
+            assert!(r.iter().any(|v| !v.is_null()), "{door}: {name}: {raw}");
+            assert_eq!(column(plain, name), r, "{door}: {name} at plain");
+            assert_eq!(column(quasi, name), r, "{door}: {name} at quasi");
+        }
+    };
+    // the run door, at each detail
+    let ran = |token: Option<&str>| {
+        let (status, answer) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": doc, "fresh": true}))),
+            token,
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer
+    };
+    let (plain, quasi, raw) = (ran(reader), ran(reviewer), ran(ops));
+    check("run", &plain, &quasi, &raw);
+    // the preview door
+    let previewed = |token: Option<&str>| {
+        let (status, answer) = server.request(
+            "POST",
+            "/api/ask/preview",
+            Some(&body(serde_json::json!({"document": doc, "rows": 40}))),
+            token,
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer
+    };
+    let (p_plain, p_quasi, p_raw) = (previewed(reader), previewed(reviewer), previewed(ops));
+    check("preview", &p_plain, &p_quasi, &p_raw);
+    // the value sampler: sequence names are values at every detail, the
+    // station name a shape
+    for token in [reader, reviewer] {
+        for field in ["text_series_description", "text_protocol_name"] {
+            let (status, sample) = server.request(
+                "GET",
+                &format!("/api/ask/catalog/stack/{field}/values"),
+                None,
+                token,
+            );
+            assert_eq!(status, 200, "{sample}");
+            assert_eq!(sample["kind"], "values", "{field}: {sample}");
+        }
+    }
+    let (status, sample) = server.request(
+        "GET",
+        "/api/ask/catalog/stack/station_name/values",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{sample}");
+    assert_eq!(sample["kind"], "shapes", "{sample}");
+    // the job door: each job runs under the detail its door recorded
+    let queued = |token: Option<&str>, name: &str| {
+        let (status, q) = server.request(
+            "POST",
+            "/api/ask/jobs",
+            Some(&body(serde_json::json!({"document": doc, "name": name}))),
+            token,
+        );
+        assert_eq!(status, 202, "{q}");
+        q["job"].as_i64().unwrap()
+    };
+    let jobs = [queued(reader, "k7-plain"), queued(reviewer, "k7-quasi")];
+    server.finish();
+    for _ in jobs {
+        run(&home, &["jobs", "work", "--once"], None);
+    }
+    let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let handle_of = |id: i64| -> i64 {
+        let job = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == id)
+            .unwrap_or_else(|| panic!("no job {id}: {listed}"));
+        assert_eq!(job["state"], "done", "{job}");
+        job["result"]["handle"].as_i64().unwrap()
+    };
+    let handles: Vec<i64> = jobs.iter().map(|j| handle_of(*j)).collect();
+    let server = Server::start(
+        &home,
+        2,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let page = |h: i64| {
+        let (status, page) = server.request(
+            "GET",
+            &format!("/api/ask/handles/{h}/rows?page=0"),
+            None,
+            ops,
+        );
+        assert_eq!(status, 200, "{page}");
+        // a page's columns are objects with a name
+        let mut page = page;
+        if let Some(cols) = page["columns"].as_array() {
+            let names: Vec<serde_json::Value> = cols
+                .iter()
+                .map(|c| c.get("name").cloned().unwrap_or_else(|| c.clone()))
+                .collect();
+            page["columns"] = names.into();
+        }
+        page
+    };
+    let (j_plain, j_quasi) = (page(handles[0]), page(handles[1]));
+    server.finish();
+    check("job", &j_plain, &j_quasi, &raw);
+}
+
+/// Wave 7a: two datasets planted on a synthetic home, as the ask reads
+/// them. Two source places, each with a digest root and its batch under
+/// its folder, and a root place above both; the stacks of every subject
+/// whose id is 1 modulo 3 first read under the first, 2 modulo 3 under the
+/// second, the rest under neither; and one stack of a subject of the first
+/// read under the second. What a door must answer, per dataset: its T1w
+/// stacks (rows and subjects), its stacks, its subjects; the subject of
+/// both; and the second dataset's place.
+struct Planted {
+    t1w: std::collections::BTreeMap<&'static str, (i64, i64)>,
+    stacks: std::collections::BTreeMap<Option<&'static str>, i64>,
+    subjects: std::collections::BTreeMap<&'static str, std::collections::BTreeSet<i64>>,
+    shared: i64,
+    small: i64,
+}
+
+fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
+    use nils_registry::place::{self, New, Role};
+    use nils_registry::schema::table;
+    use nils_registry::{Insert, Param};
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut registry = nils_registry::home::Home::new(home.path()).open().unwrap();
+    let store = registry.store();
+    let add = |store: &mut nils_registry::Store, name: &str, path: &Path, d: serde_json::Value| {
+        place::add(
+            store,
+            &New {
+                name,
+                role: Role::Source,
+                path: &path.display().to_string(),
+                guarantees: serde_json::json!({}),
+                probed: serde_json::Value::Null,
+                handling: serde_json::Value::Null,
+                dataset: d,
+            },
+        )
+        .unwrap()
+    };
+    add(
+        store,
+        "archive",
+        dir.path(),
+        serde_json::json!({"kind": "root"}),
+    );
+    let mut batches = Vec::new();
+    let mut small = 0;
+    for name in ["study-big", "study-small"] {
+        let tree = dir.path().join(name).join("derivatives/dcm-anon");
+        std::fs::create_dir_all(&tree).unwrap();
+        let id = add(store, name, &dir.path().join(name), serde_json::Value::Null);
+        if name == "study-small" {
+            small = id;
+        }
+        let root = tree.canonicalize().unwrap().display().to_string();
+        let now = "2026-10-09T08:00:00Z";
+        let source = store
+            .insert(
+                &Insert::new(
+                    table("source"),
+                    &["root", "root_canonical", "first_seen_at"],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from(root.as_str()),
+                    Param::from(root.as_str()),
+                    Param::from(now),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let batch = store
+            .insert(
+                &Insert::new(
+                    table("ingest_batch"),
+                    &[
+                        "source_id",
+                        "name",
+                        "config",
+                        "started_at",
+                        "finished_at",
+                        "state",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::Int(source),
+                    Param::from("read"),
+                    Param::from("{}"),
+                    Param::from(now),
+                    Param::from(now),
+                    Param::from("done"),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        batches.push(batch);
+    }
+    // the stacks a stack set sees, with their subject, session, T1w or not
+    let seen = |store: &mut nils_registry::Store| -> Vec<(i64, i64, Option<i64>, i64, bool)> {
+        store
+            .query(
+                "SELECT st.id, se.subject_id, sc.id, st.first_batch_id, \
+                 EXISTS (SELECT 1 FROM classification_axis b WHERE b.stack_id = st.id AND b.axis = 'base' AND b.value = 'T1w') \
+                 FROM stack st JOIN series se ON se.id = st.series_id JOIN study sy ON sy.id = se.study_id \
+                 JOIN subject su ON su.id = se.subject_id JOIN stack_fingerprint f ON f.stack_id = st.id \
+                 LEFT JOIN session_cache_study scs ON scs.study_id = sy.id AND scs.window_days = 0 \
+                 LEFT JOIN session_cache sc ON sc.id = scs.session_id AND sc.subject_id = se.subject_id \
+                 WHERE NOT EXISTS (SELECT 1 FROM classification_axis x WHERE x.stack_id = st.id AND x.axis = 'disposition' AND x.value = 'excluded') \
+                 ORDER BY st.id",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.int(0).unwrap(),
+                    r.int(1).unwrap(),
+                    r.opt_int(2).unwrap(),
+                    r.int(3).unwrap(),
+                    r.int(4).unwrap() == 1,
+                )
+            })
+            .collect()
+    };
+    let all = seen(store);
+    let (mut big, mut small_stacks) = (Vec::new(), Vec::new());
+    let mut by_session: BTreeMap<i64, Vec<(i64, i64)>> = BTreeMap::new();
+    for (stack, subject, session, _, _) in &all {
+        match subject % 3 {
+            1 => big.push(*stack),
+            2 => small_stacks.push(*stack),
+            _ => {}
+        }
+        if let Some(s) = session
+            && subject % 3 == 1
+        {
+            by_session.entry(*s).or_default().push((*stack, *subject));
+        }
+    }
+    let (moved, shared) = *by_session
+        .values()
+        .find(|v| v.len() >= 2)
+        .expect("a session of two stacks")
+        .last()
+        .unwrap();
+    big.retain(|s| *s != moved);
+    small_stacks.push(moved);
+    for (batch, ids) in [(batches[0], &big), (batches[1], &small_stacks)] {
+        let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE stack SET first_batch_id = {batch} WHERE id IN ({})",
+                    ids.join(", ")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let mut planted = Planted {
+        t1w: BTreeMap::new(),
+        stacks: BTreeMap::new(),
+        subjects: BTreeMap::new(),
+        shared,
+        small,
+    };
+    let mut t1w_subjects: BTreeMap<&'static str, BTreeSet<i64>> = BTreeMap::new();
+    for (_, subject, _, batch, t1w) in seen(store) {
+        let ds = if batch == batches[0] {
+            Some("study-big")
+        } else if batch == batches[1] {
+            Some("study-small")
+        } else {
+            None
+        };
+        *planted.stacks.entry(ds).or_default() += 1;
+        if let Some(ds) = ds {
+            planted.subjects.entry(ds).or_default().insert(subject);
+            if t1w {
+                planted.t1w.entry(ds).or_default().0 += 1;
+                t1w_subjects.entry(ds).or_default().insert(subject);
+            }
+        }
+    }
+    for (ds, subjects) in t1w_subjects {
+        planted.t1w.entry(ds).or_default().1 = subjects.len() as i64;
+    }
+    planted
+}
+
+/// Wave 7a: the ask's `dataset` field at the doors, for a reader at detail
+/// plain, since a dataset's name is technical: the catalog lists it on the
+/// stack, session and subject levels and names the datasets (the root
+/// above them is none); the run and the preview count a dataset's T1w
+/// stacks; the value sampler lists the names as values; a subject of both
+/// datasets is found under each; a queued job groups the stacks by
+/// dataset and its handle's rows say so; and a dataset retired while the
+/// engine runs, which moves no epoch, is no dataset at the next request.
+#[test]
+fn the_dataset_field_answers_at_every_door_that_runs_a_question() {
+    let home = synthetic();
+    let dir = TempDir::new("ask-serve-datasets");
+    let planted = plant_datasets(&home, &dir);
+    let tokens = [
+        "--auth",
+        "token",
+        "--token",
+        "a-reader-token-of-length=reader@lab:reader",
+    ];
+    let reader = Some("a-reader-token-of-length");
+    let server = Server::start(&home, 12, &tokens);
+    // the catalog names the datasets, and each level's page from just
+    // before the field starts with it
+    let (status, catalog) = server.request("GET", "/api/ask/catalog", None, reader);
+    assert_eq!(status, 200, "{catalog}");
+    assert_eq!(
+        catalog["datasets"],
+        serde_json::json!(["study-big", "study-small"]),
+        "{}",
+        catalog["datasets"]
+    );
+    for level in ["stack", "session", "subject"] {
+        let (status, page) = server.request(
+            "GET",
+            &format!("/api/ask/catalog/{level}?after=data"),
+            None,
+            reader,
+        );
+        assert_eq!(status, 200, "{page}");
+        let f = &page["fields"][0];
+        assert_eq!(f["path"], "dataset", "{level}: {page}");
+        assert_eq!(f["class"], "technical", "{f}");
+        assert_eq!(f["type"], "text", "{f}");
+        assert!(
+            f["description"].as_str().unwrap().contains("dataset"),
+            "{f}"
+        );
+    }
+    let t1w = serde_json::json!({
+        "ast_version": 1,
+        "name": "T1w of study-big",
+        "sets": {"t1": {"grain": "stack", "where": [
+            ["=", {}, ["field", {}, "dataset"], "study-big"],
+            ["=", {}, ["axis", {}, "base"], "T1w"]
+        ]}},
+        "out": {"set": "t1", "level": "count"}
+    });
+    let (n, subjects) = planted.t1w["study-big"];
+    assert!(n > 0, "nothing planted");
+    // the run door
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": t1w, "fresh": true}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{ran}");
+    assert_eq!(ran["rows"][0], serde_json::json!([n, subjects]), "{ran}");
+    // the preview door
+    let (status, shown) = server.request(
+        "POST",
+        "/api/ask/preview",
+        Some(&body(serde_json::json!({"document": t1w}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(
+        shown["rows"][0],
+        serde_json::json!([n, subjects]),
+        "{shown}"
+    );
+    // the value sampler: names, as values, at plain
+    let (status, sample) =
+        server.request("GET", "/api/ask/catalog/stack/dataset/values", None, reader);
+    assert_eq!(status, 200, "{sample}");
+    assert_eq!(sample["kind"], "values", "{sample}");
+    for ds in ["study-big", "study-small"] {
+        let n = planted.stacks[&Some(ds)];
+        assert!(
+            sample["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i[0] == ds && i[1] == n),
+            "{ds} {n}: {sample}"
+        );
+    }
+    // a subject of both datasets is of each
+    for ds in ["study-big", "study-small"] {
+        let (status, people) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": {
+                "ast_version": 1,
+                "sets": {"people": {"grain": "subject", "where": [["=", {}, ["field", {}, "dataset"], ds]]}},
+                "out": {"set": "people", "level": "record", "columns": [["field", {}, "id"]],
+                        "order": [[["field", {}, "id"], "asc"]]}
+            }, "fresh": true}))),
+            reader,
+        );
+        assert_eq!(status, 200, "{people}");
+        let i = people["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|c| c == "id" || c["name"] == "id")
+            .unwrap();
+        let got: std::collections::BTreeSet<i64> = people["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].as_i64().unwrap())
+            .collect();
+        assert_eq!(got, planted.subjects[ds], "{ds}");
+        assert!(got.contains(&planted.shared), "{ds}");
+    }
+    // a queued job groups the stacks by dataset
+    let grouped = serde_json::json!({
+        "ast_version": 1,
+        "name": "stacks by dataset",
+        "sets": {
+            "t": {"grain": "stack"},
+            "g": {"grain": "group", "group": {"of": "t", "by": [["field", {}, "dataset"]]}}
+        },
+        "out": {"set": "g", "level": "aggregate", "columns": [["field", {}, "dataset"], ["field", {}, "_rows"]]}
+    });
+    let (status, queued) = server.request(
+        "POST",
+        "/api/ask/jobs",
+        Some(&body(
+            serde_json::json!({"document": grouped, "name": "by-dataset"}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    // the second dataset retired while the engine runs: no epoch moves,
+    // and the next request reads the places in force
+    run(
+        &home,
+        &["place", "retire", &planted.small.to_string()],
+        None,
+    );
+    let (status, catalog) = server.request("GET", "/api/ask/catalog", None, reader);
+    assert_eq!(status, 200, "{catalog}");
+    assert_eq!(catalog["datasets"], serde_json::json!(["study-big"]));
+    let (status, refused) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({"document": {
+            "ast_version": 1,
+            "sets": {"t": {"grain": "stack", "where": [["=", {}, ["field", {}, "dataset"], "study-small"]]}},
+            "out": {"set": "t", "level": "count"}
+        }}))),
+        reader,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused.to_string().contains("study-small is not a dataset"),
+        "{refused}"
+    );
+    server.finish();
+    // the worker runs the job; its handle's rows group the stacks, the
+    // retired dataset's under none
+    run(&home, &["jobs", "work", "--once"], None);
+    let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let done = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == job)
+        .unwrap_or_else(|| panic!("no job {job}: {listed}"));
+    assert_eq!(done["state"], "done", "{done}");
+    let handle = done["result"]["handle"].as_i64().unwrap();
+    let server = Server::start(&home, 1, &tokens);
+    let (status, page) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{handle}/rows?page=0"),
+        None,
+        reader,
+    );
+    server.finish();
+    assert_eq!(status, 200, "{page}");
+    let names: Vec<String> = page["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    let at = |n: &str| names.iter().position(|c| c == n).unwrap();
+    let rows: std::collections::BTreeMap<Option<String>, i64> = page["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r[at("dataset")].as_str().map(str::to_string),
+                r[at("_rows")].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        std::collections::BTreeMap::from([
+            (
+                None,
+                planted.stacks[&None] + planted.stacks[&Some("study-small")]
+            ),
+            (
+                Some("study-big".to_string()),
+                planted.stacks[&Some("study-big")]
+            ),
+        ]),
+        "{page}"
+    );
 }

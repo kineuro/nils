@@ -13,6 +13,7 @@ use std::fmt;
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 
+use crate::personnummer;
 use crate::pseudonym::{self, ENCRYPT_DOMAIN, LOOKUP_DOMAIN};
 use crate::schema::table;
 use crate::store::{Error, Insert, Param, Row, Store};
@@ -49,9 +50,38 @@ impl Subkeys {
         }
     }
 
-    /// The lookup of an identifier of a type (§7.4 step 2).
+    /// The lookup of an identifier of a type (§7.4 step 2). A personnummer
+    /// is looked up as its twelve digits however it was written, so that a
+    /// number typed into a selection or a map finds the identity the digest
+    /// filed; a value of that type that is no personnummer is looked up as
+    /// given, and finds nothing the digest or a map filed.
     pub fn lookup(&self, id_type: &str, value: &str) -> Vec<u8> {
+        let normal = personnummer::is_type(id_type)
+            .then(|| personnummer::normalise(value).ok())
+            .flatten();
+        let value = normal.as_deref().unwrap_or(value);
         pseudonym::lookup(&self.k_lookup, id_type, value).to_vec()
+    }
+
+    /// What an identity row keeps of its identifier (Wave 7a, Nima
+    /// 2026-10-08: a personnummer is never saved anywhere in the registry):
+    /// the identifier sealed, or nothing for a personnummer, whose identity
+    /// is its keyed lookup alone and whose subject is shown by its code.
+    pub fn seal_kept(&self, id_type: &str, value: &str) -> Vec<u8> {
+        if personnummer::is_type(id_type) {
+            Vec::new()
+        } else {
+            self.seal(value)
+        }
+    }
+
+    /// The identifier a row kept, opened; none where nothing was kept.
+    pub fn open_kept(&self, ciphertext: &[u8]) -> Result<Option<String>, Error> {
+        if ciphertext.is_empty() {
+            Ok(None)
+        } else {
+            self.open(ciphertext).map(Some)
+        }
     }
 
     /// The identifier under XChaCha20-Poly1305 with a fresh nonce prefixed.
@@ -334,7 +364,11 @@ pub struct Revealed {
     pub identity_id: i64,
     pub id_type: String,
     pub source: String,
+    /// The identifier, or empty where none is kept (a personnummer).
     pub value: String,
+    /// Whether the store kept the identifier at all; a personnummer is
+    /// never kept, and its subject is shown by its code.
+    pub kept: bool,
 }
 
 /// Decrypt every identifier of a subject (`nils linkage show`), writing one
@@ -383,10 +417,96 @@ pub fn reveal(
                 identity_id: r.int(0)?,
                 id_type: r.text(1)?.to_string(),
                 source: r.text(2)?.to_string(),
-                value: keys.open(r.bytes(3)?)?,
+                value: keys.open_kept(r.bytes(3)?)?.unwrap_or_default(),
+                kept: !r.bytes(3)?.is_empty(),
             })
         })
         .collect()
+}
+
+/// The value of one id type that each of `subjects` holds, opened, for the
+/// pseudonymiser that writes it into PatientID (Wave 7a §5.4); a subject
+/// that holds none is not in the answer. Every value read is audited as
+/// [`reveal`] audits it, with `actor` and `why`.
+pub fn values_of_type(
+    store: &mut Store,
+    keys: &Subkeys,
+    subjects: &[i64],
+    id_type_id: i64,
+    actor: &str,
+    why: &str,
+) -> Result<std::collections::HashMap<i64, String>, Error> {
+    let mut out = std::collections::HashMap::new();
+    let mut audit: Vec<Vec<Param>> = Vec::new();
+    let now = now_iso();
+    for chunk in subjects.chunks(crate::store::SQLITE_KEY_CHUNK) {
+        let d = store.dialect();
+        let marks: Vec<String> = (0..chunk.len())
+            .map(|i| d.param(i + 2, crate::schema::Type::Int))
+            .collect();
+        let sql = format!(
+            "SELECT id, subject_id, ciphertext FROM {} WHERE id_type_id = {} AND subject_id IN ({}) ORDER BY id",
+            store.qualified("identity"),
+            d.param(1, crate::schema::Type::Int),
+            marks.join(", ")
+        );
+        let mut params = vec![Param::from(id_type_id)];
+        params.extend(chunk.iter().map(|s| Param::from(*s)));
+        for r in store.query(&sql, &params)? {
+            let subject = r.int(1)?;
+            if out.contains_key(&subject) {
+                continue;
+            }
+            let Some(value) = keys.open_kept(r.bytes(2)?)? else {
+                continue;
+            };
+            out.insert(subject, value);
+            audit.push(vec![
+                Param::from(now.as_str()),
+                Param::from(actor),
+                Param::from(r.int(0)?),
+                Param::from(why),
+            ]);
+        }
+    }
+    if !audit.is_empty() {
+        store.begin()?;
+        match store.insert(&Insert::all(table("read_audit")), &audit) {
+            Ok(_) => store.commit()?,
+            Err(e) => {
+                let _ = store.rollback();
+                return Err(e);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Which of `subjects` hold a value of one id type, nothing opened.
+pub fn subjects_with_type(
+    store: &mut Store,
+    subjects: &[i64],
+    id_type_id: i64,
+) -> Result<std::collections::HashSet<i64>, Error> {
+    let mut out = std::collections::HashSet::new();
+    for chunk in subjects.chunks(crate::store::SQLITE_KEY_CHUNK) {
+        let d = store.dialect();
+        let marks: Vec<String> = (0..chunk.len())
+            .map(|i| d.param(i + 2, crate::schema::Type::Int))
+            .collect();
+        let sql = format!(
+            "SELECT DISTINCT subject_id FROM {} WHERE id_type_id = {} AND subject_id IN ({})",
+            store.qualified("identity"),
+            d.param(1, crate::schema::Type::Int),
+            marks.join(", ")
+        );
+        let mut params = vec![Param::from(id_type_id)];
+        params.extend(chunk.iter().map(|s| Param::from(*s)));
+        for r in store.query(&sql, &params)? {
+            out.insert(r.int(0)?);
+        }
+    }
+    Ok(out)
 }
 
 /// Record that two subjects are one person (`nils linkage link`): `a` is

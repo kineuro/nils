@@ -110,6 +110,8 @@ nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 
 The descriptor is checked and kept whole with its digest. The image must be pinned by its registry manifest digest, `repository@sha256:<hex>`; a tag or an image id is refused. Adding the same descriptor again changes nothing; one that differs becomes the name's next version.
 
+A descriptor of the bids layout finds each pick's image by the name the release gives it. The suffix is the base contrast and FLAIR is always a modifier, so the T1w is `*_T1w.nii.gz` and the FLAIR is a T2w with `FLAIR` among the `+` tokens of its `acq-` (`sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz`), never `*_FLAIR.nii.gz`, which only older releases wrote. A T2w without the token is the `t2w` pick. The segcsvd and SAMSEG starters find their FLAIR this way.
+
 ```sh
 nils pipeline list
 nils pipeline show n4-bias-correction
@@ -344,6 +346,14 @@ nils pyramid build --select selection:every-t1@1
 
 The job's result counts what it built, skipped and failed, with why for each failure. Run it again after a failure and it builds only what is missing. A campaign made from a selection says how many of its stacks have their picture (`pictures {have, missing}`) and names the job that builds the rest, `pyramid build --handle <id>`. Each manifest names the stack's `orientation`, `origin` and `frame`, so a viewer draws the planes where they are in the patient.
 
+A picture is also built when it is first asked for: a reader that opens a stack with no pyramid gets an answer that it is being built, and the engine queues the build itself. Building the pictures of a selection ahead is still worth it before many people read at once.
+
+To build again pyramids that are built, for example after a fix to the reader, add `--force`:
+
+```sh
+nils pyramid build --select selection:every-t1@1 --force
+```
+
 ## Ask several axes of a stack at once
 
 1. Make an `axes` campaign. The served pack's legal combinations are frozen into the question:
@@ -484,7 +494,7 @@ What a run does, in order:
 
 | step | what |
 |---|---|
-| input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session. `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
+| input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session, named as the release names it (a FLAIR is a T2w with `FLAIR` in its `acq-`, never `_FLAIR`). `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
 | lane | a run is one job in the pipeline lane, beside the runs whose stacks it does not share; its containers start while the cores and memory each declares fit in what the running units of every run leave of the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
 | container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
 | GPU | the lane's card alone, passed through CDI (`nvidia.com/gpu=<card>`, podman), `--nv` with `CUDA_VISIBLE_DEVICES=<card>` (apptainer) or `--gpus device=<card>` (docker) where the descriptor needs one, the host has one and the lane names a card; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |

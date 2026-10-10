@@ -75,9 +75,19 @@ struct Server {
     port: u16,
 }
 
+/// The server goes when the test is done with it, whether the test
+/// passed, failed or never stopped it: `--requests` ends a server only
+/// when the count is right, and one nobody stops outlives the run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Server {
     fn start(home: &TempDir, pack_dir: &Path, extra: &[&str]) -> Server {
-        let mut child = nils()
+        let child = nils()
             .arg("--registry")
             .arg(home.path())
             .args([
@@ -99,13 +109,13 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let first = BufReader::new(stdout).lines().next().unwrap().unwrap();
         let addr = first.split_whitespace().nth(2).unwrap();
-        Server {
-            child,
-            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
-        }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     /// One request, with its status, its headers and its body.
@@ -495,7 +505,7 @@ fn model_content_ships_with_the_pack() {
     let caps: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(caps["mcp"]["content_version"], "2");
     assert_eq!(
-        caps["contracts"]["pack"], "8",
+        caps["contracts"]["pack"], "9",
         "the pack contract carries the model content"
     );
     server.stop();
@@ -560,4 +570,129 @@ fn every_listed_tool_s_input_schema_is_the_contract_s() {
         );
         assert!(name.starts_with("nils_"), "{name}");
     }
+}
+
+/// Record 55 K7 (spec §7.1, T13): MCP proxies the doors, so it holds a quasi
+/// identifying column to the caller's detail as they do: through the run,
+/// the preview and the rows of the run's handle, the station name and the
+/// stack's day come back as shapes to a reader (detail plain) and raw to a
+/// reviewer (detail quasi), and the series description and the protocol
+/// name raw to both.
+#[test]
+fn mcp_holds_quasi_identifying_columns_to_the_callers_detail() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        &packs(),
+        &[
+            "--ask-caps",
+            r#"{"page_rows_mcp": 50}"#,
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=rev@lab:reviewer",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let doc = json!({
+        "ast_version": 1,
+        "name": "k7 through mcp",
+        "sets": {"s": {"grain": "stack", "where": [["not_null", {}, ["field", {}, "station_name"]]]}},
+        "out": {
+            "set": "s",
+            "level": "record",
+            "columns": [
+                ["field", {}, "text_series_description"],
+                ["field", {}, "text_protocol_name"],
+                ["field", {}, "station_name"],
+                ["field", {}, "day"]
+            ],
+            "order": [[["field", {}, "id"], "asc"]],
+            "limit": 20
+        }
+    });
+    fn column(answer: &Value, name: &str) -> Vec<Value> {
+        let names: Vec<Value> = answer["columns"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no columns: {answer}"))
+            .iter()
+            .map(|c| c.get("name").cloned().unwrap_or_else(|| c.clone()))
+            .collect();
+        let i = names
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column {name} in {answer}"));
+        answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    }
+    let shape = |v: &Value| -> Value {
+        match v {
+            Value::Null => Value::Null,
+            Value::String(t) => nils_ask::validate::shape(t).into(),
+            other => nils_ask::validate::shape(&other.to_string()).into(),
+        }
+    };
+    let mut answers: Vec<(&str, Value, Value)> = Vec::new();
+    // the run, and the rows of its handle
+    let ran = |token, name: &str| {
+        let r = server.call("nils_run", json!({"document": doc, "name": name}), token);
+        assert_eq!(r["isError"], false, "{r}");
+        r["structuredContent"].clone()
+    };
+    let (plain, quasi) = (ran(reader, "k7-plain"), ran(reviewer, "k7-quasi"));
+    let rows = |answer: &Value, token| {
+        let handle = answer["handle"].as_i64().unwrap();
+        let r = server.call("nils_rows", json!({"handle": handle, "page": 0}), token);
+        assert_eq!(r["isError"], false, "{r}");
+        r["structuredContent"].clone()
+    };
+    answers.push(("rows", rows(&plain, reader), rows(&quasi, reviewer)));
+    answers.push(("run", plain, quasi));
+    // the preview
+    let previewed = |token| {
+        let r = server.call("nils_preview", json!({"document": doc, "rows": 20}), token);
+        assert_eq!(r["isError"], false, "{r}");
+        r["structuredContent"].clone()
+    };
+    answers.push(("preview", previewed(reader), previewed(reviewer)));
+    for (tool, plain, quasi) in &answers {
+        assert!(
+            !quasi["rows"].as_array().unwrap().is_empty(),
+            "{tool}: no rows: {quasi}"
+        );
+        for name in ["station_name", "day"] {
+            let raw = column(quasi, name);
+            let shaped: Vec<Value> = raw.iter().map(shape).collect();
+            assert_eq!(column(plain, name), shaped, "{tool}: {name} at plain");
+            assert_ne!(column(plain, name), raw, "{tool}: {name} at plain is raw");
+        }
+        for name in ["text_series_description", "text_protocol_name"] {
+            assert_eq!(
+                column(plain, name),
+                column(quasi, name),
+                "{tool}: {name} is a sequence name"
+            );
+        }
+    }
+    // and a reader may not read the reviewer's handle, which holds raw values
+    let quasi_handle = answers[1].2["handle"].as_i64().unwrap();
+    let refused = server.rpc(
+        json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+               "params": {"name": "nils_rows", "arguments": {"handle": quasi_handle, "page": 0}}}),
+        reader,
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("does not reach")),
+        "{refused}"
+    );
+    server.stop();
 }

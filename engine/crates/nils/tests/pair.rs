@@ -94,7 +94,7 @@ impl Server {
             "issuer={ISSUER},audience=nils,jwks={}",
             fixtures().join("jwks.json").display()
         );
-        let mut child = nils()
+        let child = nils()
             .arg("--registry")
             .arg(home.path())
             .args([
@@ -115,15 +115,16 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let Some(Ok(first)) = lines.next() else {
-            let _ = child.kill();
             panic!("nils serve did not listen");
         };
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
-        Server { child, port }
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held
     }
 
     /// A call: the status, and the body as JSON, or its length for bytes.
