@@ -1592,7 +1592,7 @@ pub(crate) fn build_as(
         },
     };
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(root.join("manifest.json"), text).map_err(|e| e.to_string())?;
+    write_manifest(root, &text)?;
     if layout == Layout::Packed {
         // a pyramid built again over the layout before keeps no tile files
         for d in loose_levels(root) {
@@ -1608,6 +1608,37 @@ pub(crate) fn build_as(
         let _ = thumb_cached(root, &manifest, THUMB_SIZE, 3, true);
     }
     Ok(manifest)
+}
+
+/// Write a pyramid's manifest whole or not at all, as a level's packed
+/// file is written: a part file of its own, flushed to the storage, then
+/// renamed over `manifest.json`. The manifest says the pyramid is built,
+/// and the doors read it while a build runs (the manifest door holds a
+/// request for it): written in place, it was read empty or half written,
+/// and the door answered 500 to a picture that was being built.
+fn write_manifest(root: &Path, text: &str) -> Result<(), String> {
+    // a part of its own per writer: two builds of one stack at once must
+    // not write one part file together
+    static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let k = PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let part = root.join(format!("manifest.json.part.{}.{k}", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&part)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&part, root.join("manifest.json"))?;
+        // the rename itself is durable once the folder is
+        if let Ok(d) = std::fs::File::open(root) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("the manifest was not written: {e}"));
+    }
+    Ok(())
 }
 
 /// The manifest of a built pyramid, or none.
@@ -4682,6 +4713,58 @@ mod tests {
             assert!(!crate::tilepack::level_path(&loose, level).exists());
         }
         assert_eq!(every_answer(&loose, &ml), every_answer(&packed, &mp));
+    }
+
+    /// The manifest says a pyramid is built, and the doors read it while a
+    /// build runs: a pyramid built again and again is read whole every
+    /// time, never empty or half written, and no part file is left.
+    #[test]
+    fn a_manifest_is_read_whole_while_its_pyramid_is_built_again() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let vol = packing_volume(2, 40, 32);
+        let dir = nils_dicom::synth::TempDir::new("pyramid-manifest-whole");
+        let root = dir.path().join("p");
+        build(&vol, 3, &root, 1, None).unwrap();
+        let (reads, done) = (AtomicU64::new(0), AtomicBool::new(false));
+        let (whole, torn) = std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                let (mut whole, mut torn) = (0u64, Vec::new());
+                loop {
+                    match manifest(&root) {
+                        Ok(Some(_)) => whole += 1,
+                        Ok(None) => torn.push("no manifest".to_string()),
+                        Err(e) => torn.push(e),
+                    }
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    if done.load(Ordering::Relaxed) {
+                        break (whole, torn);
+                    }
+                }
+            });
+            // the builds start once the reader reads
+            while reads.load(Ordering::Relaxed) == 0 {
+                std::thread::yield_now();
+            }
+            for _ in 0..8 {
+                build(&vol, 3, &root, 1, None).unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            reader.join().unwrap()
+        });
+        assert!(
+            torn.is_empty(),
+            "{} of {} reads: {:?}",
+            torn.len(),
+            whole + torn.len() as u64,
+            &torn[..torn.len().min(3)]
+        );
+        assert!(whole > 0);
+        let parts: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part."))
+            .collect();
+        assert!(parts.is_empty(), "{parts:?}");
     }
 
     /// E6: `pyramid pack` turns a pyramid of tile files into one file per
