@@ -571,7 +571,34 @@ fn session_err(e: nils_session::Error) -> Error {
 
 /// Every stack that holds a role, with the values this model reads.
 fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<Vec<Row>, Error> {
-    let reads = carried(model);
+    read_named(store, &carried(model), subject, None)
+}
+
+/// Every stack that holds a role, with the values of `reads`: of one
+/// subject by code, of a set of subjects by id, or of every subject.
+pub(crate) fn read_named(
+    store: &mut Store,
+    reads: &[String],
+    subject: Option<&str>,
+    subjects: Option<&BTreeSet<i64>>,
+) -> Result<Vec<Row>, Error> {
+    if let Some(ids) = subjects {
+        let mut out = Vec::new();
+        let ids: Vec<i64> = ids.iter().copied().collect();
+        for chunk in ids.chunks(SCANS_CHUNK) {
+            out.extend(read_some(store, reads, subject, Some(chunk))?);
+        }
+        return Ok(out);
+    }
+    read_some(store, reads, subject, None)
+}
+
+fn read_some(
+    store: &mut Store,
+    reads: &[String],
+    subject: Option<&str>,
+    ids: Option<&[i64]>,
+) -> Result<Vec<Row>, Error> {
     // A name is either a fingerprint column or an axis. The fingerprint half
     // is read in one pass over the table; the axes in one pass over theirs.
     let mut columns = vec![
@@ -580,14 +607,14 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         "f.study_id".to_string(),
     ];
     let mut fields: Vec<String> = Vec::new();
-    for name in &reads {
+    for name in reads {
         let Some(field) = crate::classify::FIELDS.iter().find(|(n, _)| n == name) else {
             continue;
         };
         columns.push(crate::classify::field_sql(store, Some("f"), *field));
         fields.push(name.clone());
     }
-    let filter = match subject {
+    let mut filter = match subject {
         Some(code) => format!(
             " JOIN {} su ON su.id = f.subject_id AND su.code = '{}'",
             store.qualified("subject"),
@@ -595,6 +622,9 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         ),
         None => String::new(),
     };
+    if let Some(ids) = ids {
+        filter.push_str(&format!(" WHERE f.subject_id IN ({})", id_list(ids)));
+    }
     let sql = format!(
         "SELECT {} FROM {} f{filter} ORDER BY f.stack_id",
         columns.join(", "),
@@ -621,14 +651,23 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
     }
 
     // The axes, including `role`, which is what says a stack is a candidate.
-    let sql = format!(
-        "SELECT stack_id, axis, value FROM {}",
-        store.qualified("classification_axis")
-    );
     let mut by_stack: HashMap<i64, usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         by_stack.insert(r.stack, i);
     }
+    let sql = match ids {
+        // the stacks of some subjects, by their own ids
+        Some(_) if rows.is_empty() => return Ok(Vec::new()),
+        Some(_) => format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({})",
+            store.qualified("classification_axis"),
+            id_list(&rows.iter().map(|r| r.stack).collect::<Vec<_>>())
+        ),
+        None => format!(
+            "SELECT stack_id, axis, value FROM {}",
+            store.qualified("classification_axis")
+        ),
+    };
     for r in store.query(&sql, &[])? {
         let Some(i) = by_stack.get(&r.int(0)?).copied() else {
             continue;
