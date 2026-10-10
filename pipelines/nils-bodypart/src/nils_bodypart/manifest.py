@@ -58,9 +58,12 @@ class Stack:
     # the stack's (from 0), or None for every frame the file holds.
     files: list[tuple[str, list[int] | None]] = field(default_factory=list)
     # Each file's geometry as the registry holds it, where the manifest
-    # gives it (``geometry`` on a file: ``ipp``, ``ps``, ``rows``, ``cols``,
-    # ``inum``, ``frames``), else None; the reduced reader chooses frames
-    # from it without reading headers.
+    # gives it (``geometry`` on a file, which the engine writes when the
+    # descriptor sets ``x-nils.input.geometry``), in the reader's names
+    # (``ipp``, ``ps``, ``rows``, ``cols``, ``inum``, ``frames``), else
+    # None; the reduced reader chooses frames from it without reading
+    # headers. The stack's own is ``extra["geometry"]`` (``iop``,
+    # ``thick``, ``modality``).
     file_geo: list[dict | None] = field(default_factory=list)
 
     @property
@@ -109,6 +112,41 @@ def _safe_join(mount: Path, rel: str) -> str:
 
 KNOWN = {"unit", "stack_id", "files", "orientation", "body_part", "technique", "slices"}
 
+# A file's geometry as the engine names it (stacks.schema.json, record 55
+# E2), and the reader's name for each.
+_FILE_GEOMETRY = {
+    "image_position_patient": "ipp",
+    "pixel_spacing": "ps",
+    "rows": "rows",
+    "columns": "cols",
+    "instance_number": "inum",
+    "number_of_frames": "frames",
+}
+
+
+def file_geometry(g) -> dict | None:
+    """A file's geometry in the reader's names: the engine's geometry
+    object mapped, or one already in the reader's names (as the one-hour
+    study's manifests wrote it) as it is; None without one."""
+    if not isinstance(g, dict):
+        return None
+    if "image_position_patient" in g:
+        return {short: g.get(name) for name, short in _FILE_GEOMETRY.items()}
+    return g
+
+
+def stack_geometry(s: dict) -> dict | None:
+    """A stack's geometry in the reader's names (``iop``, ``thick``,
+    ``modality``): the engine's (the stack's orientation and its
+    fingerprint's slice thickness, beside the entry's modality) mapped, or
+    one already in the reader's names as it is; None without one."""
+    g = s.get("geometry")
+    if not isinstance(g, dict):
+        return None
+    if "image_orientation_patient" in g:
+        return {"iop": g.get("image_orientation_patient"), "thick": g.get("slice_thickness"), "modality": s.get("modality")}
+    return g
+
 
 def parse(
     doc: dict,
@@ -149,8 +187,7 @@ def parse(
                 raise ManifestError(f"stack {sid}: a file names source {src}, which the manifest does not mount")
             path = _safe_join(mounts[src], f["path"])
             frames = f.get("frames")
-            g = f.get("geometry")
-            geos.append(g if isinstance(g, dict) else None)
+            geos.append(file_geometry(f.get("geometry")))
             if frames is None:
                 n = (counted or frames_of(path)) if len(files) == 1 else 1
                 slices.extend(Slice(path, i) for i in range(n))
@@ -159,6 +196,10 @@ def parse(
                 chosen = parse_frames(str(frames))
                 slices.extend(Slice(path, i) for i in chosen)
                 listed.append((path, chosen))
+        extra = {k: v for k, v in s.items() if k not in KNOWN}
+        sg = stack_geometry(s)
+        if sg is not None:
+            extra["geometry"] = sg
         out.append(
             Stack(
                 stack_id=sid,
@@ -167,7 +208,7 @@ def parse(
                 orientation=s.get("orientation"),
                 body_part=s.get("body_part") or None,
                 technique=s.get("technique"),
-                extra={k: v for k, v in s.items() if k not in KNOWN},
+                extra=extra,
                 files=listed,
                 file_geo=geos,
             )

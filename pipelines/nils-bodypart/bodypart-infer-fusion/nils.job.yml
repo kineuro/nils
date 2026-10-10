@@ -30,15 +30,23 @@
 # A stack's time is reading its files and decoding its frames, not the
 # network: the tool scores stacks in worker processes, one BLAS thread each,
 # and reads the next stack's files ahead, so a run is held by how fast its
-# files can be read. Sixteen workers reach that on a network file system;
-# more add nothing there. The answers are the same whatever the workers.
+# files can be read. The answers are the same whatever the workers.
+#
+# Since 0.4.0 it reads, by default, only the frames the encoder's six planes
+# interpolate from (reader reduced:touched, about 39 files a stack where the
+# full reader reads about 78), chosen from each file's geometry in the
+# manifest (x-nils.input.geometry), which the one-hour study found gives the
+# certified answers within its equivalence bar. A file the manifest gives no
+# geometry for, a multi-frame file and a stack of mixed orientations have
+# their headers read as before. On a card the decoded files' headers are
+# read too, so the card's answers are the CPU's.
 #
 # The image runs offline and never reaches the network; the runner runs it
 # with --network none. The image is pinned as bodypart-embed/nils.job.yml
 # says.
 name: bodypart-infer-fusion
 schema-version: "0.5"
-tool-version: "0.3.0"
+tool-version: "0.4.0"
 description: >-
   Propose body_part (fine) and body_region (coarse) per stack with the
   certified body-part model: an image encoder and a LightGBM head over its
@@ -60,8 +68,33 @@ inputs:
     command-line-flag: --threads
     default-value: 16
     optional: true
+  - id: reader
+    name: Reader
+    type: String
+    description: >-
+      Which frames are read: reduced:touched decodes only the frames the
+      encoder's six planes interpolate from, chosen from each file's
+      geometry in the manifest, and gives the certified answers within the
+      one-hour study's equivalence bar; full reads every file as the model
+      was certified.
+    value-key: "[READER]"
+    command-line-flag: --reader
+    value-choices: [reduced:touched, full]
+    default-value: reduced:touched
+    optional: true
+  - id: readahead
+    name: Read-ahead
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 16
+    description: With the reduced reader, how many stacks ahead a worker asks the kernel to read.
+    value-key: "[READAHEAD]"
+    command-line-flag: --readahead
+    default-value: 4
+    optional: true
 
-command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS]"
+command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS] [READER] [READAHEAD]"
 
 output-files:
   - id: scores
@@ -79,6 +112,7 @@ x-nils:
   input:
     layout: stacks
     header: true
+    geometry: true
   inputs:
     - id: encoder
       type: model

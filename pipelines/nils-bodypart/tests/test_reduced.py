@@ -156,3 +156,90 @@ def test_a_stack_of_mixed_orientations_is_read_from_its_headers(world, tmp_path)
     assert red.stats.get("header_reads") == 4
     assert red.meta == full.meta
     assert np.array_equal(red.vol[reduced._MASK], full.vol[reduced._MASK])
+
+
+def engine_named(doc: dict) -> dict:
+    """The same manifest as the engine writes it with x-nils.input.geometry
+    (stacks.schema.json): its names, and numbers where the registry's text
+    held DS values."""
+    import copy
+
+    def nums(x, n):
+        v = reduced._floats(x, n)
+        return [float(a) for a in v] if v is not None else None
+
+    out = copy.deepcopy(doc)
+    for st in out["stacks"]:
+        sg = st.get("geometry") or {}
+        st["modality"] = sg.get("modality")  # every entry carries it
+        st["geometry"] = {
+            "image_orientation_patient": nums(sg.get("iop"), 6),
+            "slice_thickness": sg.get("thick"),
+            "spacing_between_slices": None,
+        }
+        for f in st["files"]:
+            g = f["geometry"]
+            f["geometry"] = {
+                "image_position_patient": nums(g.get("ipp"), 3),
+                "pixel_spacing": nums(g.get("ps"), 2),
+                "rows": g.get("rows"),
+                "columns": g.get("cols"),
+                "instance_number": g.get("inum"),
+                "number_of_frames": g.get("frames") if g.get("frames", 1) > 1 else None,
+            }
+    return out
+
+
+def test_the_engines_geometry_reads_as_the_registrys_text(world, tmp_path):
+    """The engine's geometry (record 55 E2) is the reader's under its own
+    names: every policy builds the same planes and geometry from it as from
+    the manifest the one-hour study wrote."""
+    doc = json.loads(Path(world["stacks_geo"]).read_text())
+    eng = tmp_path / "engine.json"
+    eng.write_text(json.dumps(engine_named(doc)))
+    ours = {s.stack_id: s for s in manifest.load(eng, source_root=world["source_root"])}
+    for st in stacks(world):
+        e = ours[st.stack_id]
+        sg = e.extra["geometry"]
+        assert set(sg) == {"iop", "thick", "modality"}
+        assert sg["modality"] == st.extra["geometry"].get("modality")
+        assert reduced._floats(sg["iop"], 6) == reduced._floats(st.extra["geometry"].get("iop"), 6)
+        for a, b in zip(e.file_geo, st.file_geo):
+            assert set(a) == {"ipp", "ps", "rows", "cols", "inum", "frames"}
+            assert reduced._floats(a["ipp"], 3) == reduced._floats(b["ipp"], 3)
+            assert (a["rows"], a["cols"], a["inum"]) == (b["rows"], b["cols"], b["inum"])
+        if st.stack_id not in (11, 12, 13):
+            continue
+        orient = st.extra["header"]["fingerprint"]["orientation"]
+        for policy in ("full", "touched", "b8"):
+            x = reduced.build(st.files, st.file_geo, st.extra.get("geometry"), orient, policy)
+            y = reduced.build(e.files, e.file_geo, e.extra.get("geometry"), orient, policy)
+            assert np.array_equal(x.vol, y.vol), (st.stack_id, policy)
+            assert x.meta == y.meta and np.array_equal(x.geo(), y.geo())
+            assert x.stats == y.stats
+
+
+def test_a_manifest_without_geometry_has_none():
+    assert manifest.file_geometry(None) is None
+    assert manifest.stack_geometry({"modality": "MR"}) is None
+    assert manifest.file_geometry({"ipp": "1\\2\\3"}) == {"ipp": "1\\2\\3"}
+
+
+def test_a_card_decoder_gives_the_cpu_paths_answer(world):
+    """A card's decoder returns pixels alone; the reader reads each decoded
+    file's header for its own orientation and thickness, as the CPU path
+    does, so the card's answer is the CPU's (the speed study, round 2)."""
+    import copy
+
+    st = next(s for s in stacks(world) if s.stack_id == 12)
+    sg = copy.deepcopy(st.extra.get("geometry"))
+    sg["thick"] = 9.5  # the registry's value is not the files'
+
+    def pixels_only(todo):
+        return reduced._decode_with_headers(todo, {})
+
+    cpu = reduced.build(st.files, st.file_geo, sg, "sagittal", "b8")
+    card = reduced.build(st.files, st.file_geo, sg, "sagittal", "b8", decode=pixels_only)
+    assert card.meta == cpu.meta == volume.build(st.files, "sagittal").meta
+    assert np.array_equal(card.vol, cpu.vol)
+    assert card.stats.get("thick_from_file") == cpu.stats.get("thick_from_file") == 1

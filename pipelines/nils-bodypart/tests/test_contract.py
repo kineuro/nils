@@ -177,7 +177,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     yaml = pytest.importorskip("yaml")
     doc = yaml.safe_load((HERE / "bodypart-infer-fusion" / "nils.job.yml").read_text())
     x = doc["x-nils"]
-    assert x["input"] == {"layout": "stacks", "header": True}
+    assert x["input"] == {"layout": "stacks", "header": True, "geometry": True}
     assert [(t["id"], t["type"], t.get("optional", False)) for t in x["inputs"]] == [
         ("encoder", "model", False), ("head", "model", False), ("coarse", "model", True)
     ]
@@ -194,11 +194,15 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     assert all(cols[c] == "number" for c in fine + coarse + ["fine_confidence", "coarse_confidence"])
     assert cols["fine_answers"] == cols["coarse_answers"] == "integer"
     assert all(cols[c] == "text" for c in ("fine_value", "coarse_value", "head_digest", "coarse_digest", "encoder_digest"))
-    assert doc["tool-version"] == "0.3.0"
+    assert doc["tool-version"] == "0.4.0"
     # the image offline: the command names no host, and the entry point
-    # parses what the engine writes
+    # parses what the engine writes: since 0.4.0 the reduced reader, from
+    # each file's geometry, four stacks ahead
     a = cli.parser().parse_args(container_argv(doc)[1:])
     assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 16)
+    assert (a.reader, a.readahead) == ("reduced:touched", 4)
+    reader = next(p for p in doc["inputs"] if p["id"] == "reader")
+    assert set(reader["value-choices"]) == {"reduced:touched", "full"}
 
 
 def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
