@@ -5100,6 +5100,28 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(dry["result"]["files"]["seen"], 6, "{dry}");
     assert_eq!(dry["result"]["files"]["unchanged"], 6, "{dry}");
 
+    // Wave 7a (2026-10-10): the pseudonymise run counted the dataset's
+    // trees again when it ended, so the copy is counted with no probe, and
+    // the dataset's step says it is done
+    let source = &sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "ds")
+        .unwrap()["dataset"];
+    assert_eq!(source["trees"]["anon"]["files"], 6, "{sources}");
+    let (status, summary) = ask("GET", "/api/datasets/ds/summary", None, reader);
+    assert_eq!(status, 200, "{summary}");
+    let step = summary["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == "pseudonymised")
+        .unwrap_or_else(|| panic!("{summary}"));
+    assert_eq!(step["state"], "done", "{step}");
+    assert_eq!(step["files"], 6, "{step}");
+    assert_eq!(step["waiting"], 0, "{step}");
+
     // a step the caller may not queue ends the chain, and the job says why
     let (status, queued) = ask(
         "POST",

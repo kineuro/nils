@@ -5182,6 +5182,19 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         !text.contains("199001011234") && !text.contains("Doe"),
         "{text}"
     );
+    // Wave 7a (2026-10-10): the run counts the dataset's trees again when
+    // it ends, so the copy is counted without a probe
+    let places: serde_json::Value =
+        serde_json::from_str(&run(&["place", "list", "--json"])).unwrap();
+    let ds = places
+        .as_array()
+        .or_else(|| places["places"].as_array())
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ds")
+        .unwrap_or_else(|| panic!("{places}"));
+    assert_eq!(ds["dataset"]["trees"]["anon"]["files"], 6, "{ds}");
+    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 6, "{ds}");
     let codes: Vec<String> = std::fs::read_dir(&anon)
         .unwrap()
         .flatten()

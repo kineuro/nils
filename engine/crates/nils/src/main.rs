@@ -4872,6 +4872,12 @@ fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
     let cancel = stop_on_signal()?;
     match nils_pseudonymize::pseudonymize_with(&settings, &mut registry, &cancel) {
         Ok(report) => {
+            // Wave 7a (2026-10-10): the run counts its dataset's trees again
+            // when it ends, as a probe does, so Data shows the copy it wrote
+            // at once and not after the next probe. A dry run wrote nothing.
+            if !settings.dry_run {
+                recount_dataset(&mut registry, dataset.id);
+            }
             if settings.json {
                 let text = serde_json::to_string_pretty(&report)
                     .map_err(|e| fail(format!("cannot render the report: {e}")))?;
@@ -4902,6 +4908,19 @@ fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
             message: e.to_string(),
         }),
         Err(e) => Err(fail(e.to_string())),
+    }
+}
+
+/// A dataset's place measured again and the measure kept, its trees
+/// counted (bounded), as `?probe=1` does. Best effort: a count that cannot
+/// be kept leaves the last probe's, and the run that asked stands.
+fn recount_dataset(registry: &mut Registry, place_id: i64) {
+    use nils_registry::place;
+    if let Ok(Some(p)) = place::show(registry.store(), place_id) {
+        let probed = dataset::probe_place(&p);
+        if let Err(e) = place::set(registry.store(), p.id, None, None, Some(&probed)) {
+            eprintln!("nils: the dataset's trees were not counted again: {e}");
+        }
     }
 }
 
