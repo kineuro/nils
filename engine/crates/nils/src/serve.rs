@@ -4429,18 +4429,21 @@ fn routed(
         ["api", "picks", "map"] if post => crate::main_scans::map(
             doors,
             registry,
+            caller,
             &crate::main_scans::sized(body).and_then(|_| json_body(body))?,
             crate::main_scans::Door::Map,
         ),
         ["api", "picks", "map", "subjects"] if post => crate::main_scans::map(
             doors,
             registry,
+            caller,
             &crate::main_scans::sized(body).and_then(|_| json_body(body))?,
             crate::main_scans::Door::Subjects,
         ),
         ["api", "picks", "map", "strips"] if post => crate::main_scans::map(
             doors,
             registry,
+            caller,
             &crate::main_scans::sized(body).and_then(|_| json_body(body))?,
             crate::main_scans::Door::Strips,
         ),

@@ -393,6 +393,7 @@ fn datasets(
 pub(crate) fn map(
     doors: &Doors,
     registry: &mut Registry,
+    caller: &crate::serve::Caller,
     doc: &Value,
     door: Door,
 ) -> Result<Reply, Reply> {
@@ -427,6 +428,23 @@ pub(crate) fn map(
         Columns::Dataset => datasets(registry, &subjects)?,
         Columns::Scanner => HashMap::new(),
     };
+    // a stack of a sample sealed now is no part of the map for a caller
+    // who may not read it (record 48)
+    let withheld: BTreeSet<i64> = if crate::sealed::reads(&caller.access) {
+        BTreeSet::new()
+    } else {
+        let store = registry.store();
+        let sql = format!(
+            "SELECT stack_id FROM {} WHERE unsealed_at IS NULL",
+            store.qualified("sealed_stack")
+        );
+        store
+            .query(&sql, &[])
+            .map_err(failed)?
+            .iter()
+            .filter_map(|r| r.int(0).ok())
+            .collect()
+    };
     let read = main_scans::read(
         registry,
         &Ask {
@@ -436,6 +454,7 @@ pub(crate) fn map(
             subjects: &subjects,
             reading: reading.as_ref(),
             datasets: &datasets,
+            withheld: &withheld,
         },
     )
     .map_err(failed)?;
@@ -460,7 +479,23 @@ pub(crate) fn map(
             };
             let page = doc["page"].as_u64().unwrap_or(0) as usize;
             let per_page = doc["per_page"].as_u64().unwrap_or(24).clamp(1, 48) as usize;
-            main_scans::subjects(&read, &cmp, by, &group, by_changes, page, per_page)
+            let mut page =
+                main_scans::subjects(&read, &cmp, by, &group, by_changes, page, per_page);
+            // below detail quasi a subject's code and a person's words are
+            // shown by their shape, as the viewer shows them (record 55 K7)
+            if caller.access.detail < crate::grants::Detail::Quasi {
+                for s in page["subjects"].as_array_mut().into_iter().flatten() {
+                    if let Some(code) = s["subject"].as_str() {
+                        s["subject"] = Value::from(crate::scans::shape(code));
+                    }
+                    for v in s["visits"].as_array_mut().into_iter().flatten() {
+                        if let Some(why) = v["why"].as_str() {
+                            v["why"] = Value::from(crate::scans::shape(why));
+                        }
+                    }
+                }
+            }
+            page
         }
     };
     Ok(Reply::ok(out))

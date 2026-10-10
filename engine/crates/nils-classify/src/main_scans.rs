@@ -44,6 +44,9 @@ pub struct Ask<'a> {
     pub reading: Option<&'a Reading>,
     /// The dataset of each stack, for columns by dataset.
     pub datasets: &'a HashMap<i64, String>,
+    /// Stacks the caller is not shown (of a sample sealed now): no part of
+    /// any visit.
+    pub withheld: &'a BTreeSet<i64>,
 }
 
 /// A pick stored on a visit, applying: a person's or a run's.
@@ -123,7 +126,8 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
     names.extend(COLUMNS.iter().map(|n| n.to_string()));
     names.sort();
     names.dedup();
-    let rows = picking::read_named(store, &names, None, Some(ask.subjects))?;
+    let mut rows = picking::read_named(store, &names, None, Some(ask.subjects))?;
+    rows.retain(|r| !ask.withheld.contains(&r.stack));
     let mine: Vec<&Row> = picking::of_role(ask.model, ask.role, &rows);
     let mut by_subject: BTreeMap<i64, BTreeMap<i64, (Day, Vec<&Row>)>> = BTreeMap::new();
     for r in &mine {
@@ -835,8 +839,8 @@ pub fn subjects(
                 .enumerate()
                 .map(|(vi, ((v, x), (col, field)))| {
                     let stored = v.stored.as_ref();
+                    // no date leaves the door: a visit is its session's id
                     json!({
-                        "session": v.day.to_string(),
                         "session_id": v.session_id,
                         "visit": vi + 1,
                         "column": col,

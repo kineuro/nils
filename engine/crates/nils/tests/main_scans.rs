@@ -394,7 +394,11 @@ fn a_cohort_s_own_rules_make_its_picks_and_a_release_records_them() {
     let visit = &subject["visits"][0];
     assert!(subject["subject"].is_string(), "{page}");
     assert_eq!(visit["visit"], 1, "{page}");
-    assert!(visit["session"].is_string(), "{page}");
+    assert!(visit["session_id"].is_i64(), "{page}");
+    assert!(
+        visit.get("session").is_none(),
+        "no date leaves the door: {page}"
+    );
     assert!(
         !visit["candidates"].as_array().unwrap().is_empty(),
         "{page}"
@@ -414,13 +418,13 @@ fn a_cohort_s_own_rules_make_its_picks_and_a_release_records_them() {
 
     // a person's pick of nothing on a visit, in the cohort's scope
     let subject_id = subject["subject_id"].as_i64().unwrap();
-    let session = visit["session"].as_str().unwrap().to_string();
+    let session_id = visit["session_id"].as_i64().unwrap();
     let (status, person) = server.call(
         "POST",
         "/api/picks",
         Some(json!({
             "role": "t1w", "stacks": [], "why": "no usable T1w on this visit",
-            "cohort": "quad", "subject_id": subject_id, "session": session,
+            "cohort": "quad", "subject_id": subject_id, "session_id": session_id,
         })),
         CURATOR,
     );
