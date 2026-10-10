@@ -505,7 +505,7 @@ fn model_content_ships_with_the_pack() {
     let caps: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(caps["mcp"]["content_version"], "2");
     assert_eq!(
-        caps["contracts"]["pack"], "9",
+        caps["contracts"]["pack"], "10",
         "the pack contract carries the model content"
     );
     server.stop();
