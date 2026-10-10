@@ -2615,7 +2615,11 @@ pub fn let_go(
             Param::Int(id),
         ],
     )?;
-    Ok(LetGo { item: id, files, keep })
+    Ok(LetGo {
+        item: id,
+        files,
+        keep,
+    })
 }
 
 /// A study row that holds no series. The row is a fact in a file, so it

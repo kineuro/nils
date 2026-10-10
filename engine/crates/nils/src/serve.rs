@@ -4176,6 +4176,50 @@ fn routed(
             })?;
             Ok(Reply::ok(done.to_json()))
         }
+        // record 55, the duplicate policy's defaults (2026-10-10): a scan
+        // held under another study or series of its subject is let go by a
+        // person, kept as another location of its instance or left out of
+        // the read; a scan held under another subject is a merge's
+        ["api", "review", _, "let-go"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            unsealed_item(registry, caller, id)?;
+            not_held(registry, id)?;
+            let keep = doc["keep"].as_bool().ok_or_else(|| {
+                Reply::error(
+                    400,
+                    "keep: true keeps the files as another location of their scan, false leaves them out of the read",
+                )
+            })?;
+            let why = doc["why"]
+                .as_str()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .ok_or_else(|| Reply::error(400, "why: what shows this, in a few words"))?;
+            let now = nils_registry::time::now_iso();
+            let done = nils_registry::review::let_go(registry.store(), id, keep, principal, &now)
+                .map_err(|e| match e {
+                nils_registry::review::LetGoError::Missing(m) => Reply::error(404, m),
+                nils_registry::review::LetGoError::Refused(m) => Reply::error(409, m),
+                nils_registry::review::LetGoError::Store(e) => Reply::error(500, e.to_string()),
+            })?;
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::ReviewLetGo,
+                    scope: serde_json::json!({
+                        "review_item": id, "keep": keep, "files": done.files,
+                    }),
+                    policy: None,
+                    job_id: None,
+                    details: Some(serde_json::json!({ "why": why })),
+                },
+            )?;
+            Ok(Reply::ok(serde_json::json!({
+                "item": id, "keep": keep, "files": done.files,
+            })))
+        }
         ["api", "decisions", _, "commit"] if post => {
             let id = id_at(2)?;
             let doc = json_body(body)?;
@@ -4778,7 +4822,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "packs", _, "rehearse"]) => {
             (Need::AnyOf(&["pipelines:work", "review:work"]), Plain)
         }
-        ("POST", ["api", "review", _, "apply" | "accept"])
+        ("POST", ["api", "review", _, "apply" | "accept" | "let-go"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
         | ("POST", ["api", "picks"])
         | ("POST", ["api", "picks", _, "withdraw"])
@@ -5335,6 +5379,7 @@ fn capabilities(
         "GET /api/review/{id}",
         "POST /api/review/{id}/apply",
         "POST /api/review/{id}/accept",
+        "POST /api/review/{id}/let-go",
         "POST /api/decisions/{id}/commit",
         "POST /api/decisions/{id}/withdraw",
         "GET /api/models",
@@ -5976,6 +6021,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one item",
             "Acknowledging",
             "Acknowledged",
+        ),
+        row(
+            "POST /api/review/{id}/let-go",
+            true,
+            true,
+            "free",
+            "one item",
+            "Letting go",
+            "Let go",
         ),
         row(
             "POST /api/decisions/{id}/commit",

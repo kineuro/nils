@@ -595,6 +595,31 @@ pub(crate) fn items_of(
     )? {
         out.insert(r.int(0)?);
     }
+    // record 55 (the duplicate policy, 2026-10-10): a question about the
+    // dataset's held files names its source in the group key; those files
+    // are held, so no stack of the dataset is about them
+    let status_on = |at: usize| match status {
+        Some(_) => format!(" AND ri.status = {}", d.param(at, Type::Text)),
+        None => String::new(),
+    };
+    for source in &ids {
+        let sql = format!(
+            "SELECT ri.id FROM {item} ri WHERE ri.kind = {} AND ri.group_key LIKE {}{}",
+            d.param(1, Type::Text),
+            d.param(2, Type::Text),
+            status_on(3),
+        );
+        let mut p = vec![
+            Param::from(nils_registry::review::SAME_INSTANCE_KIND),
+            Param::from(format!("source:{source}|%")),
+        ];
+        if let Some(s) = status {
+            p.push(Param::from(s));
+        }
+        for r in store.query(&sql, &p)? {
+            out.insert(r.int(0)?);
+        }
+    }
     // the items that are no group, by what their `ref` names
     let rows = store.query(
         &format!(

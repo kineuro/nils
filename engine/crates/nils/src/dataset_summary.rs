@@ -477,6 +477,10 @@ pub(crate) fn document(
     // a file of already (`twice`), and the files held because the registry
     // holds their instance UID under another subject, study or series
     let (mut new, mut known, mut twice, mut same_instance) = (0, 0, 0, 0);
+    // and the files a person let go out of the read, the files gone from the
+    // tree since a read, and the open questions about the dataset's held
+    // files (the duplicate policy's defaults, 2026-10-10)
+    let (mut left_out, mut gone, mut identity_questions) = (0, 0, 0);
     let mut refused_batch: Option<i64> = None;
     let mut certainty = crate::certainty::Certainty::default();
     let mut passes = 0;
@@ -545,7 +549,36 @@ pub(crate) fn document(
             store,
             &format!(
                 "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
-                 AND (reason IS NULL OR reason <> '{same}')"
+                 AND (reason IS NULL OR reason NOT LIKE '{same}%')"
+            ),
+        )
+        .map_err(failed)?;
+        let drop = nils_registry::review::SAME_INSTANCE_DROP;
+        left_out = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                 AND reason = '{drop}'"
+            ),
+        )
+        .map_err(failed)?;
+        gone = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'gone'"
+            ),
+        )
+        .map_err(failed)?;
+        let item = store.qualified("review_item");
+        let keys: Vec<String> = ids
+            .iter()
+            .map(|id| format!("ri.group_key LIKE 'source:{id}|%'"))
+            .collect();
+        identity_questions = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {item} ri WHERE ri.kind = '{same}' AND ri.status = 'open' AND ({})",
+                keys.join(" OR ")
             ),
         )
         .map_err(failed)?;
@@ -713,7 +746,8 @@ pub(crate) fn document(
         open.or_else(|| newest_of(&["digest", "ingest"])),
         json!({
             "files": read, "new": new, "known": known, "twice": twice,
-            "same_instance": same_instance, "refused": refused, "reads": reads,
+            "same_instance": same_instance, "left_out": left_out, "gone": gone,
+            "refused": refused, "reads": reads,
         }),
     );
     if read_step["job"].is_null()
@@ -853,6 +887,7 @@ pub(crate) fn document(
         "need_a_look": certainty.to_sort,
         "unsorted": unsorted,
         "look_kinds": certainty.need_a_look,
+        "identity_questions": identity_questions,
         "kinds": pairs(kinds, "kind"),
         "body_regions": pairs(regions, "region"),
         "files": {
@@ -863,6 +898,8 @@ pub(crate) fn document(
             "known": known,
             "twice": twice,
             "same_instance": same_instance,
+            "left_out": left_out,
+            "gone": gone,
             "refused": refused,
             "refused_batch": refused_batch,
             "held": held,

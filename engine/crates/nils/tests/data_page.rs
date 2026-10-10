@@ -1889,6 +1889,20 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
         "derivatives/dcm-anon/a/two.dcm",
     );
     scan_file(&second, "S-0001", "1.2.9.C", "1.2.9.C.1", "20260407", "dwi");
+    // and a file of the first subject's first scan, its instance UID, filed
+    // under another series of the same subject: no merge answers that, a
+    // person lets it go (the duplicate policy's defaults, 2026-10-10)
+    {
+        let sop = "1.2.9.A.1.1";
+        let mut e = synth::minimal_mr("1.2.9.A", "1.2.9.A.7", sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, "S-0001"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        second.file(
+            "derivatives/dcm-anon/a/other-series.dcm",
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
     add("second", &second);
 
     let server = Worked::serve(&home, false);
@@ -1909,7 +1923,7 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
     assert_eq!(two["totals"]["subjects"], 1, "{two}");
     assert_eq!(two["totals"]["studies"], 1, "{two}");
     assert_eq!(two["totals"]["refused_files"], 0, "{two}");
-    assert_eq!(two["totals"]["same_instance_files"], 1, "{two}");
+    assert_eq!(two["totals"]["same_instance_files"], 2, "{two}");
     let files = &two["digests"]["recent"][0]["files"];
     assert_eq!(
         (
@@ -1918,7 +1932,7 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
             files["twice"].as_i64(),
             files["same_instance"].as_i64()
         ),
-        (Some(0), Some(2), Some(1), Some(1)),
+        (Some(0), Some(2), Some(1), Some(2)),
         "{two}"
     );
 
@@ -1934,10 +1948,19 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
             read["same_instance"].as_i64(),
             read["refused"].as_i64()
         ),
-        (Some(0), Some(2), Some(1), Some(1), Some(0)),
+        (Some(0), Some(2), Some(1), Some(2), Some(0)),
         "{summary}"
     );
     assert_eq!(summary["files"]["known"], 2, "{summary}");
+    assert_eq!(summary["identity_questions"], 2, "{summary}");
+    assert_eq!(
+        (
+            summary["files"]["left_out"].as_i64(),
+            summary["files"]["gone"].as_i64()
+        ),
+        (Some(0), Some(0)),
+        "{summary}"
+    );
     let page = server.get("/api/datasets/second/scans?limit=200", READS);
     assert_eq!(page["total"], 2, "{page}");
     let grid = server.get("/api/datasets/second/subjects", READS);
@@ -1960,7 +1983,82 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
         .unwrap()[0]
         .int(0)
         .unwrap();
-    assert_eq!(open, 1);
+    assert_eq!(open, 2);
+
+    // the dataset's Review lists both, as its summary counts them
+    let listed = server.get("/api/review?dataset=second&status=open", OPS);
+    let same: Vec<&Value> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "identity.same_instance")
+        .collect();
+    assert_eq!(same.len(), 2, "{listed}");
+    let by_kind = server.get("/api/review/summary?dataset=second", OPS);
+    assert_eq!(by_kind["by_kind"]["identity.same_instance"], 2, "{by_kind}");
+    // a scan under another subject is a merge's, not a let-go's
+    let of = |differs: &str| -> i64 {
+        same.iter()
+            .find(|i| i["evidence"]["differs"][differs].is_i64())
+            .and_then(|i| i["id"].as_i64())
+            .unwrap_or_else(|| panic!("no item differing by {differs}: {listed}"))
+    };
+    let (by_subject, by_series) = (of("subject"), of("series"));
+    let (status, refused) = server.call(
+        "POST",
+        &format!("/api/review/{by_subject}/let-go"),
+        Some(serde_json::json!({"keep": true, "why": "the same scan"})),
+        OPS,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap_or("").contains("merge"),
+        "{refused}"
+    );
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/review/{by_series}/let-go"),
+        Some(serde_json::json!({"keep": true})),
+        OPS,
+    );
+    assert_eq!(status, 400, "a let-go says why");
+    let (status, done) = server.call(
+        "POST",
+        &format!("/api/review/{by_series}/let-go"),
+        Some(serde_json::json!({"keep": true, "why": "a resend of the same scan"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(
+        (done["files"].as_i64(), done["keep"].as_bool()),
+        (Some(1), Some(true)),
+        "{done}"
+    );
+    // the next read files it as a copy; the other question stays
+    let before = step(&server.get("/api/datasets/second/summary", READS), "read");
+    drop(server);
+    home.ok(&["digest", "--name", "second", "--no-private", "@second"]);
+    let server = Worked::serve(&home, false);
+    let summary = server.get("/api/datasets/second/summary", READS);
+    let read = step(&summary, "read");
+    assert_eq!(read["same_instance"], 1, "{summary}");
+    assert_eq!(
+        read["twice"].as_i64().unwrap() + read["known"].as_i64().unwrap(),
+        before["twice"].as_i64().unwrap() + before["known"].as_i64().unwrap() + 1,
+        "{summary}"
+    );
+    assert_eq!(summary["identity_questions"], 1, "{summary}");
+    let mut store = home.store();
+    let audit = store.qualified("audit");
+    let acts = store
+        .query(
+            &format!("SELECT COUNT(*) FROM {audit} WHERE action = 'review.let_go'"),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(acts, 1);
     drop(server);
 }
 
