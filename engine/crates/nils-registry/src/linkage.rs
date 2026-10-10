@@ -980,7 +980,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["patient-id", "study-instance-uid", "subject-code", "personnummer"]
+            [
+                "patient-id",
+                "study-instance-uid",
+                "subject-code",
+                "personnummer"
+            ]
         );
         assert_eq!(id_type_id(&mut store, "patient-id").unwrap(), Some(1));
         assert_eq!(id_type_id(&mut store, "nope").unwrap(), None);

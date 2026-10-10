@@ -340,7 +340,9 @@ fn imports(
                     }),
                     policy: None,
                     job_id: None,
-                    details: Some(serde_json::json!({ "inline": "a column of IDs that are the same everywhere" })),
+                    details: Some(
+                        serde_json::json!({ "inline": "a column of IDs that are the same everywhere" }),
+                    ),
                 },
             )?;
         }
@@ -1356,7 +1358,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["patient-id", "study-instance-uid", "subject-code", "personnummer"]
+            [
+                "patient-id",
+                "study-instance-uid",
+                "subject-code",
+                "personnummer"
+            ]
         );
         assert_eq!(r.body[0]["identifiers"], 0);
         let r = call(

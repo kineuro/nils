@@ -2421,7 +2421,8 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
             [
-                65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86
+                65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85,
+                86
             ],
             "{name}"
         );
@@ -2714,7 +2715,9 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86],
+            [
+                71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86
+            ],
             "{name}"
         );
         for table in ["series_mr", "stack_fingerprint"] {

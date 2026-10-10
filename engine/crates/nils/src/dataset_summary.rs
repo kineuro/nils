@@ -656,7 +656,11 @@ pub(crate) fn document(
         let open = open_of(&["pseudonymize"]);
         steps.push(step(
             "pseudonymised",
-            chain_state(open, newest_of(&["pseudonymize"]), copied > 0 && waiting == 0),
+            chain_state(
+                open,
+                newest_of(&["pseudonymize"]),
+                copied > 0 && waiting == 0,
+            ),
             open.or_else(|| newest_of(&["pseudonymize"])),
             json!({"files": copied, "waiting": waiting, "held": held}),
         ));
@@ -901,7 +905,10 @@ mod tests {
         // a failure is said even where an earlier run had done the step
         assert_eq!(chain_state(None, Some(&failed), true), "failed");
         // a run of it going again is what the step is
-        assert_eq!(chain_state(Some(&running), Some(&running), false), "running");
+        assert_eq!(
+            chain_state(Some(&running), Some(&running), false),
+            "running"
+        );
         // the newest that ended well, or none, is done or waiting as before
         assert_eq!(chain_state(None, Some(&done), true), "done");
         assert_eq!(chain_state(None, Some(&done), false), "waiting");

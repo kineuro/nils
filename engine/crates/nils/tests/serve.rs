@@ -7055,7 +7055,10 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
         .iter()
         .find(|t| t["name"] == "personnummer")
         .unwrap_or_else(|| panic!("the generator's type is built in: {types}"));
-    assert_eq!(built_in["label"], "ID that is the same everywhere", "{types}");
+    assert_eq!(
+        built_in["label"], "ID that is the same everywhere",
+        "{types}"
+    );
 
     // added without saying what PatientID holds: added, not read
     let (status, two) = server.request(
