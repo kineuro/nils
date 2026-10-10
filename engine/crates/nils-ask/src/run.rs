@@ -164,13 +164,17 @@ const MAX_DEPTH: usize = 4;
 /// is opened only by a scope that reads them. Record 55 K7: `quasi` says
 /// whether a quasi identifying column was answered `raw` or as its `shape`,
 /// so no cached answer from before the rule held at every door is answered
-/// again below detail quasi.
+/// again below detail quasi. Wave 7a: `axis_values` says a value of an axis
+/// was found by every name a row may hold it under, so no answer cached
+/// while a document's identity missed the rows that store the label is
+/// answered again.
 pub fn suppression_of(scope: &Scope) -> Value {
     let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
     json!({
         "classes": scope.classes,
         "sealed": if scope.unsealed { "read" } else { "withheld" },
         "quasi": if raw { "raw" } else { "shape" },
+        "axis_values": "any_name",
     })
 }
 

@@ -364,7 +364,8 @@ use crate::validate::shape as shape_of;
 
 /// Sample the values of one field at one level, as a grouped count under
 /// the caller's own scope and bounds: values for a technical or clinical
-/// field, shapes for the rest, the distinct count either way.
+/// field, shapes for the rest, the distinct count either way. A stack's
+/// classification axis is sampled the same way, by its name (Wave 7a).
 pub fn values(
     registry: &mut Registry,
     level: &str,
@@ -373,13 +374,27 @@ pub fn values(
     cap: usize,
     reader: Option<&mut Store>,
 ) -> Result<Sample, AffordanceError> {
-    let info = s.names.field(level, field).ok_or_else(|| {
-        AffordanceError::Message(format!("no field {field} at {level} in this scope"))
-    })?;
-    let shapes = matches!(
-        info.class,
-        Class::QuasiIdentifying | Class::Sensitive | Class::Identifying
-    );
+    // Wave 7a: a stack's axis is sampled as a field is, each value once in
+    // the form the pack stores, a stack of several values under each
+    let axis = level == "stack"
+        && s.names.field(level, field).is_none()
+        && s.names.axis_names(field).is_some();
+    let shapes = if axis {
+        false
+    } else {
+        let info = s.names.field(level, field).ok_or_else(|| {
+            AffordanceError::Message(format!("no field {field} at {level} in this scope"))
+        })?;
+        matches!(
+            info.class,
+            Class::QuasiIdentifying | Class::Sensitive | Class::Identifying
+        )
+    };
+    let key = if axis {
+        serde_json::json!(["axis", {"each": true}, field])
+    } else {
+        serde_json::json!(["field", {}, field])
+    };
     let fetch = if shapes {
         cap.saturating_mul(20).max(cap)
     } else {
@@ -390,7 +405,7 @@ pub fn values(
         "name": format!("values of {level}.{field}"),
         "sets": {
             "v": {"grain": level},
-            "g": {"grain": "group", "group": {"of": "v", "by": [["field", {}, field]]}}
+            "g": {"grain": "group", "group": {"of": "v", "by": [key.clone()]}}
         },
         "keep": ["g"],
         "out": {
@@ -407,7 +422,7 @@ pub fn values(
         "name": format!("distinct of {level}.{field}"),
         "sets": {
             "v": {"grain": level},
-            "g": {"grain": "group", "group": {"of": "v", "by": [["field", {}, field]]}}
+            "g": {"grain": "group", "group": {"of": "v", "by": [key]}}
         },
         "keep": ["g"],
         "out": {"set": "g", "level": "count"}

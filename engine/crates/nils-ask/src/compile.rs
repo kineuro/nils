@@ -322,6 +322,12 @@ pub fn like_escape(s: &str) -> String {
     out
 }
 
+/// A text as an SQL literal, its quotes doubled: for the names of a pack's
+/// vocabulary, which are the same on every run.
+fn sql_text(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 // ---------------------------------------------------------------- the frame
 
 /// One expression with what it is, so a comparison can tell a coarse date.
@@ -1968,6 +1974,9 @@ impl<'a> Builder<'a> {
         let mut axis_cols: Vec<String> = Vec::new();
         let mut axis_joins: Vec<String> = Vec::new();
         let mut by_sql: Vec<String> = Vec::new();
+        // Wave 7a: the keys read by an axis, by their column's name, which
+        // hold each value in the form the pack stores
+        let mut axis_keys: BTreeMap<String, String> = BTreeMap::new();
         for (i, c) in g.by.iter().enumerate() {
             let at = format!("{path}.group.by[{i}]");
             if c.op != "axis" {
@@ -2021,14 +2030,18 @@ impl<'a> Builder<'a> {
                     "LEFT JOIN {} {alias} ON {alias}.stack_id = ch.k AND {alias}.axis = {ax}",
                     self.q("classification_axis")
                 ));
-                axis_cols.push(format!("{alias}.value AS {col}"));
+                axis_cols.push(format!(
+                    "{} AS {col}",
+                    self.stored_form(axis, &format!("{alias}.value"))
+                ));
             } else {
                 axis_cols.push(format!(
                     "(SELECT {} FROM {} ax WHERE ax.stack_id = ch.k AND ax.axis = {ax}) AS {col}",
-                    self.sql.sorted_list("ax.value"),
+                    self.sql.sorted_list(&self.stored_form(axis, "ax.value")),
                     self.q("classification_axis")
                 ));
             }
+            axis_keys.insert(axis.to_string(), axis.to_string());
             by_sql.push(format!("ch.{col}"));
         }
         let source = if axis_cols.is_empty() {
@@ -2122,8 +2135,8 @@ impl<'a> Builder<'a> {
             group_cols.join(", ")
         );
         for (b, col) in post {
-            let c = set.bind.get(&b).expect("a binding");
-            let e = self.expr(c, &terms, "q", &format!("{path}.bind.{b}"))?;
+            let c = self.key_values(set.bind.get(&b).expect("a binding"), &axis_keys);
+            let e = self.expr(&c, &terms, "q", &format!("{path}.bind.{b}"))?;
             layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", e.sql);
             frame.bindings.push((b.clone(), col.clone()));
             terms.push((b, Term::plain(col)));
@@ -2143,8 +2156,9 @@ impl<'a> Builder<'a> {
         if !set.where_.is_empty() {
             let mut preds = Vec::new();
             for (i, c) in set.where_.iter().enumerate() {
+                let c = self.key_values(c, &axis_keys);
                 preds.push(
-                    self.expr(c, &terms, "q", &format!("{path}.where[{i}]"))?
+                    self.expr(&c, &terms, "q", &format!("{path}.where[{i}]"))?
                         .sql,
                 );
             }
@@ -2655,6 +2669,128 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A row's value of an axis read in the one form the pack stores (Wave
+    /// 7a): every other name a row may hold for a value (its identity where
+    /// the pack stores the label, an identity it had before a rename) reads
+    /// as the stored one, so a group's key and a level's signature hold each
+    /// value once, whichever form its rows hold.
+    fn stored_form(&self, axis: &str, x: &str) -> String {
+        let synonyms = self
+            .ctx
+            .names
+            .axis_names(axis)
+            .map(|a| a.synonyms())
+            .unwrap_or_default();
+        if synonyms.is_empty() {
+            return x.to_string();
+        }
+        let whens: String = synonyms
+            .iter()
+            .map(|(name, stored)| format!(" WHEN {} THEN {}", sql_text(name), sql_text(stored)))
+            .collect();
+        format!("(CASE {x}{whens} ELSE {x} END)")
+    }
+
+    /// Every text a row may hold for the value of an axis a document's text
+    /// names (Wave 7a); none when it names no value of the axis.
+    fn held_texts(&self, axis: &str, text: &str) -> Option<Vec<String>> {
+        let names = self.ctx.names.axis_names(axis)?;
+        names.named(text).map(|v| names.held(v))
+    }
+
+    /// What a row's value of an axis (`ax.value`) is held against when a
+    /// document names one (Wave 7a): every text a row may hold for the value
+    /// named, by its identity, an identity it had before a rename or its
+    /// label, so the value is found whichever form its rows hold. A value
+    /// is always text, so a number a document wrote is read as its digits;
+    /// a text that names no value is compared as written, and a value an
+    /// expression works out is compared as it comes.
+    fn axis_held(
+        &mut self,
+        axis: &str,
+        value: &Arg,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<String> {
+        let text = match value {
+            Arg::Text(t) => Some(t.clone()),
+            Arg::Int(n) => Some(n.to_string()),
+            Arg::Number(n) => Some(n.to_string()),
+            Arg::Clause(c) if c.op == "param" => c
+                .ref_name()
+                .and_then(|n| self.ask.params.get(n))
+                .and_then(|d| match (d.type_, d.value.as_ref()) {
+                    (ParamType::Text, Some(Value::String(s))) => Some(s.clone()),
+                    (ParamType::Integer, Some(Value::Number(n))) if n.is_i64() => {
+                        Some(n.to_string())
+                    }
+                    _ => None,
+                }),
+            _ => None,
+        };
+        let Some(text) = text else {
+            let v = self.arg(value, terms, alias, at)?;
+            return Ok(format!("ax.value = {}", v.sql));
+        };
+        let held = self
+            .held_texts(axis, &text)
+            .unwrap_or_else(|| vec![text.clone()]);
+        let list: Vec<String> = held
+            .into_iter()
+            .map(|h| self.p(Param::from(h), Type::Text))
+            .collect();
+        Ok(format!("ax.value IN ({})", list.join(", ")))
+    }
+
+    /// A clause over a group's keys with each value it names of a key read
+    /// by an axis written as the key holds it (Wave 7a): `=`, `<>`, `in` and
+    /// `not_in` on such a key compare with the name the pack stores,
+    /// whichever name of the value the document wrote.
+    fn key_values(&self, c: &Clause, keys: &BTreeMap<String, String>) -> Clause {
+        let mut out = c.clone();
+        if matches!(c.op.as_str(), "=" | "<>" | "in" | "not_in")
+            && let Some(Arg::Clause(l)) = c.args.first()
+            && l.op == "field"
+            && let Some(axis) = l.ref_name().and_then(|p| keys.get(p))
+            && let Some(names) = self.ctx.names.axis_names(axis)
+        {
+            let stored = |a: &Arg| -> Option<Arg> {
+                let text = match a {
+                    Arg::Text(t) => t.clone(),
+                    Arg::Int(n) => n.to_string(),
+                    Arg::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                names
+                    .named(&text)
+                    .map(|v| Arg::Text(names.stored(v).to_string()))
+            };
+            match out.args.get_mut(1) {
+                Some(Arg::List(items)) => {
+                    for i in items.iter_mut() {
+                        if let Some(s) = stored(i) {
+                            *i = s;
+                        }
+                    }
+                }
+                Some(r) => {
+                    if let Some(s) = stored(r) {
+                        *r = s;
+                    }
+                }
+                None => {}
+            }
+            return out;
+        }
+        for a in out.args.iter_mut() {
+            if let Arg::Clause(inner) = a {
+                *inner = self.key_values(inner, keys);
+            }
+        }
+        out
+    }
+
     /// One member of a level's signature, as text that is the same on both
     /// backends: an axis as its sorted values, the acquisition type and the
     /// orientation as read, a physics number as an integer at a step.
@@ -2669,7 +2805,7 @@ impl<'a> Builder<'a> {
     ) -> R<String> {
         if self.ctx.names.axis_values(member).is_some() {
             let ax = self.p(Param::from(member), Type::Text);
-            let list = self.sql.sorted_list("ax.value");
+            let list = self.sql.sorted_list(&self.stored_form(member, "ax.value"));
             return Ok(format!(
                 "COALESCE((SELECT {list} FROM {} ax WHERE ax.stack_id = {key} AND ax.axis = {ax}), '')",
                 self.q("classification_axis")
@@ -2747,12 +2883,11 @@ impl<'a> Builder<'a> {
                         .get(1)
                         .ok_or_else(|| err(at, "an axis comparison needs a value"))?;
                     let ax = self.p(Param::from(axis), Type::Text);
-                    let v = self.arg(value, terms, alias, at)?;
+                    let held = self.axis_held(axis, value, terms, alias, at)?;
                     let exists = format!(
-                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value = {})",
+                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND {held})",
                         self.q("classification_axis"),
                         dot("k"),
-                        v.sql
                     );
                     return plain(if op == "<>" {
                         format!("NOT {exists}")
@@ -2820,6 +2955,52 @@ impl<'a> Builder<'a> {
                 plain(format!("(ABS({} - {}) <= {tol})", a.sql, b.sql))
             }
             "in" | "not_in" => {
+                if let Some(Arg::Clause(l)) = c.args.first()
+                    && l.op == "axis"
+                {
+                    // Wave 7a: one of an axis's values, each named by any of
+                    // its names and found in any form a row holds it
+                    let axis = l.ref_name().unwrap_or("");
+                    let listed = c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?;
+                    let mut held: Vec<Param> = Vec::new();
+                    for item in self.list_params(listed, at)? {
+                        let text = match item {
+                            Param::Text(t) => t,
+                            Param::Int(n) => n.to_string(),
+                            Param::Double(n) => n.to_string(),
+                            _ => continue,
+                        };
+                        let texts = self
+                            .held_texts(axis, &text)
+                            .unwrap_or_else(|| vec![text.clone()]);
+                        for t in texts {
+                            let p = Param::from(t);
+                            if !held.contains(&p) {
+                                held.push(p);
+                            }
+                        }
+                    }
+                    let ax = self.p(Param::from(axis), Type::Text);
+                    let list = if held.is_empty() {
+                        "(NULL)".to_string()
+                    } else if held.len() > LIST_BIND_MAX {
+                        self.long_list(held, at)?
+                    } else {
+                        let ph: Vec<String> =
+                            held.into_iter().map(|h| self.item_placeholder(h)).collect();
+                        format!("({})", ph.join(", "))
+                    };
+                    let exists = format!(
+                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value IN {list})",
+                        self.q("classification_axis"),
+                        dot("k"),
+                    );
+                    return plain(if op == "in" {
+                        exists
+                    } else {
+                        format!("NOT {exists}")
+                    });
+                }
                 let a = self.arg(
                     c.args
                         .first()
@@ -2888,17 +3069,17 @@ impl<'a> Builder<'a> {
                 }
                 let axis = l.ref_name().unwrap_or("");
                 let ax = self.p(Param::from(axis), Type::Text);
-                let v = self.arg(
+                let held = self.axis_held(
+                    axis,
                     c.args.get(1).ok_or_else(|| err(at, "has needs a value"))?,
                     terms,
                     alias,
                     at,
                 )?;
                 plain(format!(
-                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value = {})",
+                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND {held})",
                     self.q("classification_axis"),
                     dot("k"),
-                    v.sql
                 ))
             }
             "picked" => {

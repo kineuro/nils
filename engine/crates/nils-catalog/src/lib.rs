@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use nils_ask::ast::Grain;
 use nils_ask::hash::Locale;
 use nils_ask::validate::{
-    Class, ColumnRef, DATASET_TABLE, Dataset, DerivedInfo, FieldInfo, KindInfo, LevelSpec, Names,
-    Scope,
+    AxisNames, AxisValueNames, Class, ColumnRef, DATASET_TABLE, Dataset, DerivedInfo, FieldInfo,
+    KindInfo, LevelSpec, Names, Scope,
 };
 use nils_dicom::catalogue::{self, Level as CatalogueLevel, Sensitivity};
 use nils_pack::pack::{Pack, Visibility};
@@ -116,13 +116,25 @@ pub struct Field {
 pub struct AxisRecord {
     pub name: String,
     pub multi: bool,
+    /// Wave 7a: which name of a value a row stores, `id` or `label` (the
+    /// pack's `stores`): the form a group's key and the value sampler
+    /// answer. A document may name a value by either, or by an alias.
+    #[serde(default = "stores_id")]
+    pub stores: String,
     pub values: Vec<AxisValueRecord>,
+}
+
+fn stores_id() -> String {
+    "id".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AxisValueRecord {
     pub id: String,
     pub label: String,
+    /// The identities the value had before a rename, which still name it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1613,12 +1625,14 @@ impl Catalog {
             .map(|a| AxisRecord {
                 name: a.name.clone(),
                 multi: a.multi,
+                stores: if a.stores_label { "label" } else { "id" }.to_string(),
                 values: a
                     .values
                     .iter()
                     .map(|v| AxisValueRecord {
                         id: v.id.clone(),
                         label: v.label.clone(),
+                        aliases: v.aliases.clone(),
                     })
                     .collect(),
             })
@@ -1966,6 +1980,24 @@ impl Names for Catalog {
             .iter()
             .find(|a| a.name == axis)
             .map(|a| a.values.iter().map(|v| v.id.clone()).collect())
+    }
+
+    fn axis_names(&self, axis: &str) -> Option<AxisNames> {
+        self.axes
+            .iter()
+            .find(|a| a.name == axis)
+            .map(|a| AxisNames {
+                stores_label: a.stores == "label",
+                values: a
+                    .values
+                    .iter()
+                    .map(|v| AxisValueNames {
+                        id: v.id.clone(),
+                        label: v.label.clone(),
+                        aliases: v.aliases.clone(),
+                    })
+                    .collect(),
+            })
     }
 
     fn kind(&self, name: &str) -> Option<KindInfo> {

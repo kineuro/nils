@@ -1068,3 +1068,65 @@ fn a_quasi_identifying_column_is_shaped_below_detail_quasi() {
         format!("{}~", "a".repeat(40))
     );
 }
+
+/// Wave 7a: a value of an axis is named by its identity, an identity it had
+/// before a rename, or its label; a row may hold any of them for it, a
+/// group's key holds the one the pack stores, and a name that is another
+/// value's is never read as this one.
+#[test]
+fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
+    use nils_ask::validate::{AxisNames, AxisValueNames};
+    let v = |id: &str, label: &str, aliases: &[&str]| AxisValueNames {
+        id: id.into(),
+        label: label.into(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+    };
+    let id_of = |a: &AxisNames, t: &str| a.named(t).map(|x| x.id.clone());
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    // base stores the label: T2*w is what a row holds for T2starw
+    let base = AxisNames {
+        stores_label: true,
+        values: vec![v("T2starw", "T2*w", &[]), v("T2w", "T2w", &[])],
+    };
+    assert_eq!(id_of(&base, "T2*w").as_deref(), Some("T2starw"));
+    assert_eq!(id_of(&base, "T2starw").as_deref(), Some("T2starw"));
+    assert_eq!(id_of(&base, "T2"), None);
+    assert_eq!(base.held(&base.values[0]), vec!["T2*w", "T2starw"]);
+    assert_eq!(base.held(&base.values[1]), vec!["T2w"]);
+    assert_eq!(base.synonyms(), vec![pair("T2starw", "T2*w")]);
+    // a former identity names its value, and a row may hold it
+    let technique = AxisNames {
+        stores_label: true,
+        values: vec![v("ASL", "ASL", &["ASL-EPI"]), v("3D-TSE", "SPACE", &[])],
+    };
+    assert_eq!(id_of(&technique, "ASL-EPI").as_deref(), Some("ASL"));
+    assert_eq!(technique.held(&technique.values[0]), vec!["ASL", "ASL-EPI"]);
+    assert_eq!(
+        technique.synonyms(),
+        vec![pair("ASL-EPI", "ASL"), pair("3D-TSE", "SPACE")]
+    );
+    // an axis that stores the identity reads a label as it
+    let ids = AxisNames {
+        stores_label: false,
+        values: vec![v("given", "1", &[]), v("not_given", "0", &[])],
+    };
+    assert_eq!(ids.held(&ids.values[0]), vec!["given", "1"]);
+    assert_eq!(
+        ids.synonyms(),
+        vec![pair("1", "given"), pair("0", "not_given")]
+    );
+    // a label that is another value's identity names that value, and is
+    // never held for this one
+    let clash = AxisNames {
+        stores_label: false,
+        values: vec![v("a", "b", &[]), v("b", "c", &[])],
+    };
+    assert_eq!(id_of(&clash, "b").as_deref(), Some("b"));
+    assert_eq!(clash.held(&clash.values[0]), vec!["a"]);
+    assert_eq!(clash.synonyms(), vec![pair("c", "b")]);
+    // a catalog that knows identities alone names a value by its identity
+    let fixture = Fixture.axis_names("base").unwrap();
+    assert!(!fixture.stores_label);
+    assert_eq!(id_of(&fixture, "T1w").as_deref(), Some("T1w"));
+    assert!(fixture.synonyms().is_empty());
+}

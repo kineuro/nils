@@ -39,16 +39,21 @@ fn aged(mut sessions: Value) -> Value {
 
 /// The case ladder that reads a stack's base as a value. A group is keyed by
 /// fields and never by an axis, so each value the pack gives the axis is a
-/// branch, and a stack with no base is keyed by nothing.
-fn base_ladder(values: &[String]) -> Value {
-    values.iter().rev().fold(Value::Null, |otherwise, v| {
-        let when = json!(["=", {}, ["axis", {}, "base"], v]);
-        if otherwise.is_null() {
-            json!(["case", {}, when, v])
-        } else {
-            json!(["case", {}, when, v, otherwise])
-        }
-    })
+/// branch, and a stack with no base is keyed by nothing. Each value is named
+/// by its identity and shown as the pack stores it (Wave 7a), the form a
+/// group keyed by the axis answers: `T2*w` for `T2starw`.
+fn base_ladder(values: &[(String, String)]) -> Value {
+    values
+        .iter()
+        .rev()
+        .fold(Value::Null, |otherwise, (id, shown)| {
+            let when = json!(["=", {}, ["axis", {}, "base"], id]);
+            if otherwise.is_null() {
+                json!(["case", {}, when, shown])
+            } else {
+                json!(["case", {}, when, shown, otherwise])
+            }
+        })
 }
 
 /// A set name the document leaves free.
@@ -246,7 +251,16 @@ pub(crate) fn document(
         Grain::Subject | Grain::Session => Some(json!({"grain": "stack", "of": t})),
         _ => None,
     };
-    let ladder = base_ladder(&names.axis_values("base").unwrap_or_default());
+    let bases: Vec<(String, String)> = names
+        .axis_names("base")
+        .map(|a| {
+            a.values
+                .iter()
+                .map(|v| (v.id.clone(), a.stored(v).to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let ladder = base_ladder(&bases);
     let stack_types = if !under || ladder.is_null() {
         Value::Null
     } else {
@@ -375,14 +389,20 @@ mod tests {
 
     #[test]
     fn a_base_is_read_through_a_ladder_of_the_values_the_pack_gives_it() {
+        let named = |id: &str, shown: &str| (id.to_string(), shown.to_string());
         assert_eq!(
-            base_ladder(&["T1w".into(), "T2w".into()]),
+            base_ladder(&[named("T1w", "T1w"), named("T2starw", "T2*w")]),
             json!([
                 "case",
                 {},
                 ["=", {}, ["axis", {}, "base"], "T1w"],
                 "T1w",
-                ["case", {}, ["=", {}, ["axis", {}, "base"], "T2w"], "T2w"]
+                [
+                    "case",
+                    {},
+                    ["=", {}, ["axis", {}, "base"], "T2starw"],
+                    "T2*w"
+                ]
             ])
         );
         assert!(base_ladder(&[]).is_null());

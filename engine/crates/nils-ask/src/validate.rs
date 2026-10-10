@@ -84,13 +84,110 @@ pub fn is_dataset_path(path: &str) -> bool {
     path == "dataset" || (path.ends_with(".dataset") && !is_measure_path(path))
 }
 
+/// One value of a classification axis by its names (Wave 7a): the
+/// identity, the label, and the identities it had before a rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisValueNames {
+    pub id: String,
+    pub label: String,
+    pub aliases: Vec<String>,
+}
+
+/// A classification axis as a document names its values (Wave 7a). A
+/// document may name a value by its identity, by an identity it had before
+/// a rename, or by its label, and a row may hold any of them: the rules
+/// write the name the pack stores (with `stores: label`, post_contrast's
+/// `given` is `1` and base's `T2starw` is `T2*w`), and a person's decision
+/// may hold the identity. Whichever a document writes, it is answered with
+/// every row that holds the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisNames {
+    /// Whether a row stores a value's label rather than its identity.
+    pub stores_label: bool,
+    pub values: Vec<AxisValueNames>,
+}
+
+impl AxisNames {
+    /// The value a document's text names: by its identity first, then by
+    /// an identity it had before a rename, then by its label.
+    pub fn named(&self, text: &str) -> Option<&AxisValueNames> {
+        self.values
+            .iter()
+            .find(|v| v.id == text)
+            .or_else(|| {
+                self.values
+                    .iter()
+                    .find(|v| v.aliases.iter().any(|a| a == text))
+            })
+            .or_else(|| self.values.iter().find(|v| v.label == text))
+    }
+
+    /// The name the pack stores for a value: the one form a group's key
+    /// and the value sampler answer.
+    pub fn stored<'a>(&self, v: &'a AxisValueNames) -> &'a str {
+        if self.stores_label { &v.label } else { &v.id }
+    }
+
+    /// Every text a row may hold for a value: the name the pack stores,
+    /// then each other name of it that names no other value of the axis.
+    pub fn held(&self, v: &AxisValueNames) -> Vec<String> {
+        let mut out = vec![self.stored(v).to_string()];
+        let others = std::iter::once(&v.id)
+            .chain(std::iter::once(&v.label))
+            .chain(v.aliases.iter());
+        for name in others {
+            let elsewhere = self.values.iter().any(|w| {
+                w.id != v.id && (w.id == *name || w.label == *name || w.aliases.contains(name))
+            });
+            if !elsewhere && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
+    /// Each text a row may hold that is not the name the pack stores, with
+    /// the name it stores: how a group's key and the value sampler read a
+    /// value in one form whichever form its rows hold.
+    pub fn synonyms(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for v in &self.values {
+            let stored = self.stored(v);
+            for name in self.held(v) {
+                if name != stored {
+                    out.push((name, stored.to_string()));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// What validation asks the catalog (§9).
 pub trait Names {
     /// A field of a level (`subject`, `study`, `series`, `session`, `stack`,
     /// `instance`, `event`, `cohort`), by its catalog path.
     fn field(&self, level: &str, path: &str) -> Option<FieldInfo>;
-    /// The values of a classification axis; none for an unknown axis.
+    /// The values of a classification axis, by identity; none for an
+    /// unknown axis.
     fn axis_values(&self, axis: &str) -> Option<Vec<String>>;
+    /// The values of a classification axis by their names, and which name
+    /// a row stores (Wave 7a); none for an unknown axis. A catalog that
+    /// knows the identities alone (a fixture) answers them, each its own
+    /// label.
+    fn axis_names(&self, axis: &str) -> Option<AxisNames> {
+        self.axis_values(axis).map(|values| AxisNames {
+            stores_label: false,
+            values: values
+                .into_iter()
+                .map(|id| AxisValueNames {
+                    label: id.clone(),
+                    id,
+                    aliases: Vec::new(),
+                })
+                .collect(),
+        })
+    }
     fn kind(&self, name: &str) -> Option<KindInfo>;
     fn level(&self, name: &str) -> bool;
     /// A library set shipped by the pack, and its grain.
@@ -1424,26 +1521,37 @@ fn check_clause(
 ) {
     let mut all: Vec<&Clause> = Vec::new();
     c.walk(&mut all);
-    // an equality on an axis checks the value against the pack
+    // an equality on an axis checks the value against the pack: a value is
+    // named by its identity, an identity it had before a rename, or its
+    // label (Wave 7a)
     for cl in &all {
         if (COMPARISONS.contains(&cl.op.as_str()) || cl.op == "has")
             && let (Some(Arg::Clause(l)), Some(r)) = (cl.args.first(), cl.args.get(1))
             && l.op == "axis"
             && let Some(axis) = l.ref_name()
-            && let Some(values) = names.axis_values(axis)
+            && let Some(values) = names.axis_names(axis)
         {
-            let literals: Vec<&str> = match r {
-                Arg::Text(t) => vec![t.as_str()],
-                Arg::List(items) => items.iter().filter_map(Arg::as_text).collect(),
-                _ => Vec::new(),
+            // a value is text, so a number a document wrote is read as its
+            // digits, as the compiler reads it
+            let literal = |a: &Arg| match a {
+                Arg::Text(t) => Some(t.clone()),
+                Arg::Int(n) => Some(n.to_string()),
+                Arg::Number(n) => Some(n.to_string()),
+                _ => None,
+            };
+            let literals: Vec<String> = match r {
+                Arg::List(items) => items.iter().filter_map(literal).collect(),
+                other => literal(other).into_iter().collect(),
             };
             for v in literals {
-                if !values.iter().any(|x| x == v) {
+                if values.named(&v).is_none() {
                     issues.push(issue(
                         Code::UnknownValue,
                         path,
                         format!("{v} is not a value of axis {axis}"),
-                        format!("GET /api/ask/catalog for the values of {axis}"),
+                        format!(
+                            "GET /api/ask/catalog for the values of {axis}, each named by its id or its label"
+                        ),
                     ));
                 }
             }
