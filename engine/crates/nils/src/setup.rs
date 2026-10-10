@@ -9809,9 +9809,10 @@ fn install_packs(
     }
     let taken = crate::packs::bundled(&base, &version).and_then(|carried| {
         let engine = crate::packs::Engine::this();
+        let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
         let found = crate::rules::find_all(
             &crate::rules::base(plan.channel.as_deref()),
-            &carried,
+            &packs,
             &engine,
         );
         let packs = crate::packs::plan(
@@ -16889,13 +16890,22 @@ fn mend_packs(state: &mut State, channel: Option<&str>, rules: bool) -> bool {
         Ok(carried) => carried,
         Err(why) => {
             println!("packs: the ones engine {version} was released with could not be read: {why}");
-            return false;
+            if !rules {
+                return false;
+            }
+            // the rules are measured against what is in place instead
+            Vec::new()
         }
     };
     let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
     let engine = crate::packs::Engine::of_release(&version, &packs);
     let found = if rules {
-        crate::rules::find_all(&crate::rules::base(channel), &carried, &engine)
+        let measured = if packs.is_empty() {
+            crate::packs::first_party_in(&dir, &FIRST_PARTY_PACKS)
+        } else {
+            packs
+        };
+        crate::rules::find_all(&crate::rules::base(channel), &measured, &engine)
     } else {
         Vec::new()
     };
@@ -16912,10 +16922,12 @@ fn mend_packs(state: &mut State, channel: Option<&str>, rules: bool) -> bool {
         }
     }
     if !plan.behind() {
-        println!(
-            "packs: the ones engine {version} was released with, in {}",
-            dir.display()
-        );
+        if !plan.status.bundled.is_empty() {
+            println!(
+                "packs: the ones engine {version} was released with, in {}",
+                dir.display()
+            );
+        }
         if !plan.status.edited.is_empty() {
             println!(
                 "packs: {} changed on this machine and kept as it is",
@@ -17794,7 +17806,7 @@ pub(crate) struct UninstallArgs {
 /// The first-party packs a release carries. A pack directory holding only
 /// these was put there by an install; any other pack is a person's own and
 /// is never removed.
-const FIRST_PARTY_PACKS: [&str; 2] = ["mri", "clinical"];
+pub(crate) const FIRST_PARTY_PACKS: [&str; 2] = ["mri", "clinical"];
 
 /// Everything an uninstall would touch, gathered before anything is.
 struct Removal {
@@ -25987,6 +25999,29 @@ mod tests {
             ..SystemUnits::default()
         };
         assert!(helper_of(Some(&unnamed), true).is_none());
+    }
+
+    /// Record 55 B5: the rules are a part the helper updates where the
+    /// engine reads its packs from a directory this install keeps, and never
+    /// where the engine's image carries them.
+    #[test]
+    fn the_rules_are_updated_through_the_helper_where_the_engine_is_a_binary() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let own = updatable_parts(&state);
+        assert!(own.contains(&"rules"), "{own:?}");
+        let helper = plan.helper.clone().expect("a deployment keeps one");
+        let rule = sudoers_text(&helper, &state);
+        assert!(
+            rule.contains("/usr/local/sbin/nils-manage update rules"),
+            "{rule}"
+        );
+        let mut boxed = state.clone();
+        boxed.parts.get_mut("engine").expect("an engine").kind = "podman".to_string();
+        assert!(!updatable_parts(&boxed).contains(&"rules"));
     }
 
     /// The account that keeps the parts running is named outright, and is

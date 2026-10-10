@@ -195,10 +195,12 @@ pub(crate) fn versions(base: &str) -> Result<Vec<String>, Exit> {
 /// Every release of one kind a GitHub base lists, newest first: the versions
 /// of the tags that start with `prefix` (`pack-mri-v` for the MRI pack's own
 /// releases). `None` for a channel of a deployment's own, which has no
-/// listing; a refusal is said as one.
+/// listing; a refusal is said as one. A pack's releases share the listing
+/// with the engine's, so it is read a hundred deep, the most one request
+/// gives, where the engine's newest is always near the top.
 pub(crate) fn tagged(base: &str, prefix: &str) -> Option<Result<Vec<String>, String>> {
     let repo = github_repo(base)?;
-    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
     Some(match ask(&url) {
         Ok(answer) if answer.refused() => Err(answer.refusal(&url)),
         Ok(answer) => Ok(listed_as(&answer.body, Some(prefix))),
@@ -641,13 +643,32 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
             .or_else(|| crate::setup::engine_version(&state));
         let dir = crate::setup::engine_pack_dir(&state);
         match (dir, release) {
-            (Some(dir), Some(release)) => match crate::packs::bundled(base, &release) {
-                Ok(carried) => {
+            (Some(dir), Some(release)) => {
+                // where the engine's release cannot be read, a pack's own
+                // releases are still measured, against what is in place
+                let carried = match crate::packs::bundled(base, &release) {
+                    Ok(carried) => Some(carried),
+                    Err(why) => {
+                        println!(
+                            "  packs in {}: the ones engine {release} was released with could not be read: {why}",
+                            dir.display()
+                        );
+                        None
+                    }
+                };
+                if carried.is_some() || rules {
+                    let read = carried.is_some();
+                    let carried = carried.unwrap_or_default();
                     let carried_packs: Vec<crate::packs::Pack> =
                         carried.iter().map(|o| o.pack.clone()).collect();
                     let engine = crate::packs::Engine::of_release(&release, &carried_packs);
                     let found = if rules {
-                        crate::rules::find_all(&crate::rules::base(channel), &carried, &engine)
+                        let measured = if read {
+                            carried_packs
+                        } else {
+                            crate::packs::first_party_in(&dir, &crate::setup::FIRST_PARTY_PACKS)
+                        };
+                        crate::rules::find_all(&crate::rules::base(channel), &measured, &engine)
                     } else {
                         Vec::new()
                     };
@@ -658,7 +679,7 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
                         crate::rules::takes(&found),
                         &engine,
                     );
-                    if packs {
+                    if packs && read {
                         for line in plan.status.lines() {
                             println!("  {line}");
                         }
@@ -676,11 +697,7 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
                         }
                     }
                 }
-                Err(why) => println!(
-                    "  packs in {}: the ones engine {release} was released with could not be read: {why}",
-                    dir.display()
-                ),
-            },
+            }
             (None, _) if rules && !args.parts.is_empty() => println!(
                 "  rules: this install's engine runs in a container, whose image carries its packs"
             ),
