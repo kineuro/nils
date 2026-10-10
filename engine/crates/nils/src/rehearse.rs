@@ -271,21 +271,25 @@ pub(crate) fn text(doc: &Value) -> String {
         Some(why) => out.push_str(&format!("\npicks: not replayed: {why}\n")),
         None => {
             out.push_str(&format!(
-                "\npicks: {} of {} occasions change\n",
-                count(&picks["changed"]),
-                count(&picks["occasions"])
+                "\npicks: {} of {} occasions move; borders {} raised, {} settled\n",
+                count(&picks["moved"]),
+                count(&picks["occasions"]),
+                count(&picks["borders"]["raised"]),
+                count(&picks["borders"]["settled"]),
             ));
             for m in picks["models"].as_array().into_iter().flatten() {
                 for (role, r) in m["by_role"].as_object().into_iter().flatten() {
                     out.push_str(&format!(
-                        "  {} {role}: {} changed, {} appear, {} go, {} held by a person's pick; borders {} appear, {} go\n",
+                        "  {} {role}: {} kept, {} changed, {} removed, {} added, {} held by a person's pick; borders {} raised, {} settled, {} still\n",
                         m["model"].as_str().unwrap_or(""),
+                        count(&r["kept"]),
                         count(&r["changed"]),
-                        count(&r["appear"]),
-                        count(&r["disappear"]),
+                        count(&r["removed"]),
+                        count(&r["added"]),
                         count(&r["held_by_a_person"]),
-                        count(&r["borders"]["appear"]),
-                        count(&r["borders"]["disappear"]),
+                        count(&r["borders"]["raised"]),
+                        count(&r["borders"]["settled"]),
+                        count(&r["borders"]["still"]),
                     ));
                 }
             }

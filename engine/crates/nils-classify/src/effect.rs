@@ -935,7 +935,16 @@ pub fn run(
     tick(&mut seconds, "dispose", &mut lap);
 
     // --- the main scans
-    let picks = picks(store, base, &packs, &at, &finals, &place, &sealed, settings)?;
+    let picks = picks(
+        store,
+        base,
+        &whole.pack,
+        &at,
+        &finals,
+        &place,
+        &sealed,
+        settings,
+    )?;
     tick(&mut seconds, "picks", &mut lap);
 
     // --- the settled answers
@@ -1446,18 +1455,23 @@ fn name_facts(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, NameFact
 /// Per (role, subject, session): the stacks the pick chose, and its borders.
 type Occasions = BTreeMap<(String, i64, i64), (Option<Vec<i64>>, Vec<String>)>;
 
+/// The main-scan picks both ways: each side by its own pack's pick (the
+/// 2026-10-10 study of the pick borders: a change to the pick file shows its
+/// effect too), over the axes each side decided, and per role and pick how
+/// many picks are kept, changed, removed and added and how many occasions'
+/// borders are raised, settled or still there.
 #[allow(clippy::too_many_arguments)]
 fn picks(
     store: &mut Store,
     base: &Pack,
-    packs: &[Pack],
+    after: &Pack,
     at: &HashMap<i64, usize>,
     finals: &HashMap<i64, [BTreeMap<String, String>; 2]>,
     place: &BTreeMap<i64, Place>,
     sealed: &BTreeSet<i64>,
     settings: &Settings,
 ) -> Result<Value, Error> {
-    if base.picks.is_empty() {
+    if base.picks.is_empty() && after.picks.is_empty() {
         return Ok(json!({"models": [], "why": "the pack declares no picks"}));
     }
     let scheme = nils_registry::session::Scheme::default();
@@ -1536,12 +1550,24 @@ fn picks(
         })
         .collect();
     let scans = crate::picking::scans(store, &holding)?;
+    let mut names: Vec<&str> = base.picks.iter().map(|m| m.name.as_str()).collect();
+    for m in &after.picks {
+        if !names.contains(&m.name.as_str()) {
+            names.push(&m.name);
+        }
+    }
     let mut models = Vec::new();
-    let mut changed_total = 0i64;
-    let mut occasions_total = 0i64;
-    for model in &base.picks {
-        let reads = model.reads();
-        // the fields the model reads, for every stack
+    let mut total = Counts::default();
+    for name in names {
+        // each side by its own pack's pick, where it has one
+        let pair = [
+            base.picks.iter().find(|m| m.name == name),
+            after.picks.iter().find(|m| m.name == name),
+        ];
+        let mut reads: Vec<String> = pair.iter().flatten().flat_map(|m| m.reads()).collect();
+        reads.sort();
+        reads.dedup();
+        // the fields either side reads, for every stack
         let fields: Vec<&str> = reads
             .iter()
             .filter(|n| FIELDS.iter().any(|(f, _)| f == n))
@@ -1621,6 +1647,9 @@ fn picks(
         let scoped_studies: BTreeSet<i64> = at.keys().map(|id| place[id].study).collect();
         let mut result: [Occasions; 2] = Default::default();
         for si in 0..2 {
+            let Some(model) = pair[si] else {
+                continue;
+            };
             for role in &model.roles {
                 let mine = crate::picking::of_role(model, role, &sides[si]);
                 let reference = crate::picking::build_reference(model, "registry", &mine);
@@ -1661,73 +1690,126 @@ fn picks(
             .collect();
         let keys: BTreeSet<&(String, i64, i64)> =
             result[0].keys().chain(result[1].keys()).collect();
-        let mut by_role: BTreeMap<String, Value> = BTreeMap::new();
+        let mut by_role: BTreeMap<String, Counts> = BTreeMap::new();
+        let mut counts = Counts::default();
         let mut examples = Vec::new();
-        let mut occasions = 0i64;
-        let mut changed = 0i64;
         for key in keys {
             let (role, subject, session) = key;
-            occasions += 1;
             let none = (None, Vec::new());
             let b = result[0].get(key).unwrap_or(&none);
             let a = result[1].get(key).unwrap_or(&none);
             let held = standing.contains(&(
-                model.name.clone(),
+                name.to_string(),
                 role.clone(),
                 *subject,
                 day_of.get(session).cloned().unwrap_or_default(),
             ));
-            let entry = by_role.entry(role.clone()).or_insert_with(|| {
-                json!({"occasions": 0, "changed": 0, "appear": 0, "disappear": 0, "held_by_a_person": 0,
-                       "borders": {"appear": 0, "disappear": 0}})
-            });
-            entry["occasions"] = json!(entry["occasions"].as_i64().unwrap_or(0) + 1);
-            let bump = |e: &mut Value, k: &str| {
-                e[k] = json!(e[k].as_i64().unwrap_or(0) + 1);
-            };
-            if b.0 != a.0 {
-                if held {
-                    bump(entry, "held_by_a_person");
-                } else {
-                    changed += 1;
-                    match (&b.0, &a.0) {
-                        (None, Some(_)) => bump(entry, "appear"),
-                        (Some(_), None) => bump(entry, "disappear"),
-                        _ => bump(entry, "changed"),
-                    }
-                    if examples.len() < settings.examples {
-                        examples.push(json!({
-                            "role": role, "subject": subject, "session": session,
-                            "before": b.0, "after": a.0,
-                        }));
-                    }
-                }
-            }
-            if !held {
-                match (b.1.is_empty(), a.1.is_empty()) {
-                    (true, false) => bump(&mut entry["borders"], "appear"),
-                    (false, true) => bump(&mut entry["borders"], "disappear"),
-                    _ => {}
-                }
+            let one = Counts::of(b, a, held);
+            by_role.entry(role.clone()).or_default().add(&one);
+            counts.add(&one);
+            if !held && (b.0 != a.0 || b.1 != a.1) && examples.len() < settings.examples {
+                examples.push(json!({
+                    "role": role, "subject": subject, "session": session,
+                    "before": b.0, "after": a.0,
+                    "borders": {"before": b.1, "after": a.1},
+                }));
             }
         }
-        changed_total += changed;
-        occasions_total += occasions;
-        models.push(json!({
-            "model": model.name,
-            "occasions": occasions,
-            "changed": changed,
-            "by_role": by_role,
-            "examples": examples,
-        }));
+        total.add(&counts);
+        let mut doc = counts.json();
+        doc["model"] = json!(name);
+        doc["by_role"] = Value::Object(
+            by_role
+                .iter()
+                .map(|(role, c)| (role.clone(), c.json()))
+                .collect(),
+        );
+        doc["examples"] = json!(examples);
+        models.push(doc);
     }
-    let _ = packs;
-    Ok(json!({
-        "scheme": "default",
-        "occasions": occasions_total,
-        "changed": changed_total,
-        "models": models,
-    }))
+    let mut doc = total.json();
+    doc["scheme"] = json!("default");
+    doc["models"] = json!(models);
+    Ok(doc)
+}
+
+/// What a pick change did on some occasions: the picks kept, changed,
+/// removed and added, and the borders raised, settled and still there.
+/// `changed` alone is a pick on both sides naming other stacks; `moved` is
+/// every occasion whose pick differs. An occasion a person's pick stands on
+/// is held by it: counted there where its pick would differ, and in nothing
+/// else.
+#[derive(Debug, Clone, Default)]
+struct Counts {
+    occasions: i64,
+    kept: i64,
+    changed: i64,
+    removed: i64,
+    added: i64,
+    held_by_a_person: i64,
+    raised: i64,
+    settled: i64,
+    still: i64,
+}
+
+impl Counts {
+    /// One occasion's: its pick and borders before, after, and whether a
+    /// person's pick holds it.
+    fn of(
+        before: &(Option<Vec<i64>>, Vec<String>),
+        after: &(Option<Vec<i64>>, Vec<String>),
+        held: bool,
+    ) -> Counts {
+        let mut c = Counts {
+            occasions: 1,
+            ..Counts::default()
+        };
+        if held {
+            if before.0 != after.0 {
+                c.held_by_a_person = 1;
+            }
+            return c;
+        }
+        match (&before.0, &after.0) {
+            (Some(x), Some(y)) if x == y => c.kept = 1,
+            (Some(_), Some(_)) => c.changed = 1,
+            (Some(_), None) => c.removed = 1,
+            (None, Some(_)) => c.added = 1,
+            (None, None) => {}
+        }
+        match (before.1.is_empty(), after.1.is_empty()) {
+            (true, false) => c.raised = 1,
+            (false, true) => c.settled = 1,
+            (false, false) => c.still = 1,
+            (true, true) => {}
+        }
+        c
+    }
+
+    fn add(&mut self, o: &Counts) {
+        self.occasions += o.occasions;
+        self.kept += o.kept;
+        self.changed += o.changed;
+        self.removed += o.removed;
+        self.added += o.added;
+        self.held_by_a_person += o.held_by_a_person;
+        self.raised += o.raised;
+        self.settled += o.settled;
+        self.still += o.still;
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "occasions": self.occasions,
+            "kept": self.kept,
+            "changed": self.changed,
+            "removed": self.removed,
+            "added": self.added,
+            "moved": self.changed + self.removed + self.added,
+            "held_by_a_person": self.held_by_a_person,
+            "borders": {"raised": self.raised, "settled": self.settled, "still": self.still},
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

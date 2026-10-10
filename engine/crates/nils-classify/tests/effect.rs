@@ -595,3 +595,206 @@ fn a_pack_s_vote_never_fills_a_stack_of_another_modality() {
         );
     }
 }
+
+/// One MR series of `files` files, one stack: a stack of two images or
+/// fewer is a fragment a pick sets aside.
+fn images(dir: &TempDir, study: &str, n: u32, patient: &str, extra: &[synth::Elem], files: u32) {
+    let series = format!("{study}.{n}");
+    for f in 1..=files {
+        let sop = format!("{series}.{f}");
+        let mut e = synth::minimal_mr(study, &series, &sop);
+        e.push(text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(text(tags::SERIES_NUMBER, VR::IS, &n.to_string()));
+        e.extend(extra.iter().cloned());
+        dir.file(
+            &format!("{study}/{n}/{f}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+}
+
+/// A registry of dated studies, so that a pick has occasions: an ACME and a
+/// Siemens MPRAGE on one day, the ACME one of more images and so the
+/// winner; an ACME one alone; and a Siemens one written twice.
+fn dated_tree() -> TempDir {
+    let dir = TempDir::new("effect-dated");
+    let on = |date: &str, mut e: Vec<synth::Elem>| {
+        e.push(text(tags::STUDY_DATE, VR::DA, date));
+        e
+    };
+    let study = |s: u32| format!("1.2.9.8.{s}");
+    let mut acme = on("20240115", mprage("ACME MR", "ax t1 mprage"));
+    acme.push(text(tags::ECHO_TIME, VR::DS, "3.5"));
+    images(&dir, &study(0), 1, "P1", &acme, 8);
+    let siemens = on("20240115", mprage("SIEMENS", "sag t1 mprage"));
+    images(&dir, &study(1), 1, "P1", &siemens, 4);
+    let alone = on("20240201", mprage("ACME MR", "ax t1 mprage"));
+    images(&dir, &study(2), 1, "P2", &alone, 4);
+    for n in [1, 2] {
+        let twice = on("20240301", mprage("SIEMENS", "sag t1 mprage"));
+        images(&dir, &study(3), n, "P3", &twice, 4);
+    }
+    dir
+}
+
+/// What a pick run writes, per occasion (role, subject, day): the stacks
+/// it picked and whether it raised a border. The runs before it are
+/// forgotten first, so what stands is this run's alone.
+type Run = BTreeMap<(String, i64, String), (Vec<i64>, bool)>;
+
+fn pick_run(reg: &mut Registry, pack: &nils_pack::Pack) -> Run {
+    let pick = reg.store().qualified("pick");
+    let pick_stack = reg.store().qualified("pick_stack");
+    reg.store()
+        .batch(&format!(
+            "DELETE FROM {pick_stack} WHERE pick_id IN (SELECT id FROM {pick} WHERE author_kind = 'agent'); \
+             DELETE FROM {pick} WHERE author_kind = 'agent'"
+        ))
+        .unwrap();
+    nils_classify::picking::run(
+        reg,
+        pack,
+        &nils_registry::session::Scheme::default(),
+        None,
+        "a test",
+    )
+    .unwrap();
+    let day = reg.store().dialect().text_of(
+        nils_registry::schema::table("pick")
+            .column("session_day")
+            .unwrap(),
+    );
+    let mut out: Run = BTreeMap::new();
+    for r in reg
+        .store()
+        .query(
+            &format!(
+                "SELECT p.role, p.subject_id, {day}, p.borders, ps.stack_id FROM {pick} p \
+                 JOIN {pick_stack} ps ON ps.pick_id = p.id WHERE p.author_kind = 'agent' \
+                 ORDER BY ps.stack_id"
+            ),
+            &[],
+        )
+        .unwrap()
+    {
+        let e = out
+            .entry((
+                r.text(0).unwrap().to_string(),
+                r.int(1).unwrap(),
+                r.text(2).unwrap().to_string(),
+            ))
+            .or_insert_with(|| (Vec::new(), false));
+        e.0.push(r.int(4).unwrap());
+        e.1 = r.opt_text(3).unwrap().is_some_and(|b| !b.is_empty());
+    }
+    out
+}
+
+/// The counts the report gives, from two runs.
+fn counted(before: &Run, after: &Run) -> BTreeMap<&'static str, i64> {
+    let mut c: BTreeMap<&'static str, i64> = BTreeMap::new();
+    let keys: BTreeSet<&(String, i64, String)> = before.keys().chain(after.keys()).collect();
+    for k in keys {
+        let (b, a) = (before.get(k), after.get(k));
+        *c.entry("occasions").or_insert(0) += 1;
+        let pick = match (b, a) {
+            (Some(x), Some(y)) if x.0 == y.0 => "kept",
+            (Some(_), Some(_)) => "changed",
+            (Some(_), None) => "removed",
+            (None, Some(_)) => "added",
+            (None, None) => unreachable!(),
+        };
+        *c.entry(pick).or_insert(0) += 1;
+        let border = match (b.is_some_and(|x| x.1), a.is_some_and(|y| y.1)) {
+            (false, true) => "raised",
+            (true, false) => "settled",
+            (true, true) => "still",
+            (false, false) => continue,
+        };
+        *c.entry(border).or_insert(0) += 1;
+    }
+    c
+}
+
+#[test]
+fn a_change_to_the_pick_file_is_scored_by_the_patched_pick_and_equals_two_pick_runs() {
+    // The 2026-10-10 study of the pick borders: a pick change rehearsed is
+    // scored by the patched pack's pick, and what the report counts is what
+    // a pick run by each pack writes.
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let p = Patch::parse(
+        "ops",
+        "patch: 1\npack: mri\nreason: the planted registry's pick\nevidence: this test\noperations:\n\
+         \x20 - {op: set_candidates, role: t1w, unless: [{tag: manufacturer, is: ACME MR}]}\n\
+         \x20 - {op: set_runner_up_within, within: 0}\n\
+         \x20 - {op: remove_border, border: rare}\n",
+    )
+    .unwrap();
+    let patched = patch::apply(&mri(), &p, &|_| true).unwrap();
+    assert_eq!(patched.pack.contract, 9);
+    for lab in labs() {
+        let name = lab.name;
+        let dir = dated_tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let before = pick_run(&mut reg, &pack);
+        assert!(!before.is_empty(), "{name}: the planted registry has picks");
+        let settings = nils_classify::effect::Settings {
+            scope: None,
+            examples: 50,
+            workers: 2,
+        };
+        let doc = nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &settings, &names)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let after = pick_run(&mut reg, &patched.pack);
+        let want = counted(&before, &after);
+        let picks = &doc["picks"];
+        for k in ["occasions", "kept", "changed", "removed", "added"] {
+            assert_eq!(
+                picks[k].as_i64().unwrap(),
+                want.get(k).copied().unwrap_or(0),
+                "{name}: {k}: {picks}"
+            );
+        }
+        for k in ["raised", "settled", "still"] {
+            assert_eq!(
+                picks["borders"][k].as_i64().unwrap(),
+                want.get(k).copied().unwrap_or(0),
+                "{name}: borders {k}: {picks}"
+            );
+        }
+        // the change reaches the picks: ACME's T1w compete no more, so the
+        // occasion it won goes to the Siemens one and the one it had alone
+        // has no pick
+        assert_eq!(want.get("changed"), Some(&1), "{name}: {want:?}");
+        assert_eq!(want.get("removed"), Some(&1), "{name}: {want:?}");
+        // and the Siemens one written twice is a retake both ways
+        assert_eq!(want.get("still"), Some(&1), "{name}: {want:?}");
+        assert_eq!(
+            picks["moved"].as_i64().unwrap(),
+            picks["changed"].as_i64().unwrap()
+                + picks["removed"].as_i64().unwrap()
+                + picks["added"].as_i64().unwrap(),
+            "{name}"
+        );
+        // the roles add up to the model, and an example says what moved
+        let model = &picks["models"][0];
+        let roles: i64 = model["by_role"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|r| r["occasions"].as_i64().unwrap())
+            .sum();
+        assert_eq!(roles, model["occasions"].as_i64().unwrap(), "{name}");
+        assert!(
+            model["examples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["before"] != e["after"]
+                    || e["borders"]["before"] != e["borders"]["after"]),
+            "{name}: {model}"
+        );
+    }
+}
