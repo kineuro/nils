@@ -5122,13 +5122,39 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(step["files"], 6, "{step}");
     assert_eq!(step["waiting"], 0, "{step}");
 
-    // a step the caller may not queue ends the chain, and the job says why
+    // a read that adds and changes nothing ends its chain: what it would
+    // sort is sorted already, so the sort and the pick are not queued, and
+    // the read says which steps it left and why
     let (status, queued) = ask(
         "POST",
         "/api/jobs",
         Some(
             r#"{"command": ["digest", "@ds", "--name", "chain-2"], "then": [["fingerprint"], ["classify"]]}"#,
         ),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let second = queued["job"].as_i64().unwrap();
+    let job = wait(second);
+    assert_eq!(job["state"], "done", "{job}");
+    let ended = marked(second, |j| j["result"]["chain_ended"].clone());
+    assert_eq!(
+        ended["skipped"],
+        serde_json::json!([["fingerprint"], ["classify"]]),
+        "{ended}"
+    );
+    assert!(
+        ended["why"].as_str().unwrap().contains("nothing new"),
+        "{ended}"
+    );
+    let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
+    assert_eq!(again["chain"]["after"], serde_json::Value::Null, "{again}");
+
+    // a step the caller may not queue ends the chain, and the job says why
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds", "--name", "chain-3"], "then": [["session"]]}"#),
         data,
     );
     assert_eq!(status, 202, "{queued}");
@@ -5136,7 +5162,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let job = wait(second);
     assert_eq!(job["state"], "done", "{job}");
     let stopped = marked(second, |j| j["result"]["chain_stopped"].clone());
-    assert_eq!(stopped["step"], serde_json::json!(["fingerprint"]), "{job}");
+    assert_eq!(stopped["step"], serde_json::json!(["session"]), "{job}");
     assert!(
         stopped["why"].as_str().unwrap().contains("pipelines:work"),
         "{stopped}"

@@ -5261,38 +5261,78 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     );
     assert!(queued.contains("then nils classify --pack mri"), "{queued}");
     run(&["jobs", "work", "--once"]);
-    let listed: serde_json::Value =
-        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
-    let jobs = listed.as_array().unwrap();
-    // the chain, followed link by link from the queued job
-    let first = jobs
-        .iter()
-        .find(|j| j["kind"] == "pseudonymize" && j["name"] == "second")
-        .unwrap_or_else(|| panic!("{listed}"));
-    let mut ran: Vec<(String, String, Option<i64>, Option<i64>)> = Vec::new();
-    let mut next = Some(first["id"].as_i64().unwrap());
-    while let Some(id) = next {
-        let j = jobs.iter().find(|j| j["id"] == id).unwrap();
-        ran.push((
-            j["kind"].as_str().unwrap().to_string(),
-            j["state"].as_str().unwrap().to_string(),
-            j["chain"]["before"].as_i64(),
-            j["chain"]["after"].as_i64(),
-        ));
-        next = j["chain"]["after"].as_i64();
-    }
-    let kinds: Vec<&str> = ran.iter().map(|r| r.0.as_str()).collect();
+    // the chain, followed link by link from its first job
+    let chain_of = |name: &str| -> (Vec<serde_json::Value>, serde_json::Value) {
+        let listed: serde_json::Value =
+            serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+        let jobs = listed.as_array().unwrap();
+        let first = jobs
+            .iter()
+            .find(|j| j["kind"] == "pseudonymize" && j["name"] == name)
+            .unwrap_or_else(|| panic!("{listed}"));
+        let mut ran = Vec::new();
+        let mut next = first["id"].as_i64();
+        while let Some(id) = next {
+            let j = jobs.iter().find(|j| j["id"] == id).unwrap();
+            ran.push(j.clone());
+            next = j["chain"]["after"].as_i64();
+        }
+        (ran, listed)
+    };
+    let kinds = |ran: &[serde_json::Value]| -> Vec<String> {
+        ran.iter()
+            .map(|j| j["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Wave 7a (2026-10-10): every file was read already, so the read added
+    // and changed nothing, and the chain ends with it: no sort and no pick
+    // over what is there, and the read says what it left and why
+    let (ran, listed) = chain_of("second");
+    assert_eq!(kinds(&ran), ["pseudonymize", "digest"], "{listed}");
+    assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
+    assert_eq!(ran[0]["then"].as_array().unwrap().len(), 3, "{listed}");
+    let ended = &ran[1]["result"]["chain_ended"];
+    assert_eq!(
+        ended["skipped"],
+        serde_json::json!([["fingerprint"], ["classify", "--pack", "mri"]]),
+        "{listed}"
+    );
+    assert!(
+        ended["why"].as_str().unwrap().contains("nothing new"),
+        "{ended}"
+    );
+    assert_eq!(
+        ran[1]["chain"]["after"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
+
+    // a file that arrives later is new: the whole thread runs for it
+    dir.file(
+        "derivatives/dcm-original/sub-0/IM_0004",
+        &identified("199001011234", 1, 4),
+    );
+    run(&["bring-in", "@ds", "--name", "third", "--pack", "mri"]);
+    run(&["jobs", "work", "--once"]);
+    let (ran, listed) = chain_of("third");
     // record 55 H2: the sort is followed by picking main scans, a pipeline
     // step of its own that the chain did not name
     assert_eq!(
-        kinds,
+        kinds(&ran),
         ["pseudonymize", "digest", "fingerprint", "classify", "pick"],
         "{listed}"
     );
-    assert!(ran.iter().all(|r| r.1 == "done"), "{listed}");
-    assert!(ran[0].2.is_none() && ran[0].3.is_some(), "{listed}");
-    assert!(ran[4].2.is_some() && ran[4].3.is_none(), "{listed}");
-    assert_eq!(first["then"].as_array().unwrap().len(), 3, "{first}");
+    assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
+    assert_eq!(ran[0]["result"]["files"]["written"], 1, "{listed}");
+    assert!(
+        ran[0]["chain"]["before"].is_null() && ran[0]["chain"]["after"].is_i64(),
+        "{listed}"
+    );
+    assert!(
+        ran[4]["chain"]["before"].is_i64() && ran[4]["chain"]["after"].is_null(),
+        "{listed}"
+    );
+    assert!(ran[1]["result"]["chain_ended"].is_null(), "{listed}");
 }
 
 fn packs_dir() -> std::path::PathBuf {
