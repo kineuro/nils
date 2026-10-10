@@ -992,3 +992,46 @@ fn rules_are_a_part_with_releases_of_their_own() {
         o.stderr
     );
 }
+
+/// Where the engine's own release cannot be read (a development channel
+/// keeps its newest build alone), a pack's own release is still taken,
+/// measured against what is in place, and never one older than that.
+#[test]
+fn a_rules_release_is_taken_where_the_engines_own_release_cannot_be_read() {
+    let engine = Releases::new();
+    engine.publish(ENGINE, false);
+    engine.publish_rules("mri", "1.0.2", MRI_1_0_2);
+    let desk = TempDir::new("nils-desk-releases-rules-unread");
+    publish_desk(desk.path(), ENGINE, None);
+    let install = Install::new(ENGINE, ENGINE);
+    let packs = install.with_packs(&[("mri", MRI_1_0_1)]);
+    let roots = [
+        install.base.path(),
+        install.config.path(),
+        engine.dir.path(),
+        desk.path(),
+    ];
+    let mri = || std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap();
+
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("could not be read"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("rules mri 1.0.1: 1.0.2 is out"),
+        "{}",
+        o.stdout
+    );
+    only_inside(&o.stdout, &roots);
+
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_2, "{}", o.stdout);
+    assert!(install.record().contains("version = \"1.0.2\""));
+    only_inside(&o.stdout, &roots);
+
+    // a release older than what is in place is never put over it
+    engine.publish_rules("mri", "1.0.0", &MRI_1_0_1.replace("1.0.1", "1.0.0"));
+    let o = install.run(&["update", "--part", "rules"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(mri(), MRI_1_0_2, "{}", o.stdout);
+}

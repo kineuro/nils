@@ -612,11 +612,20 @@ impl Status {
                         None => format!("{}: the release brings {}", i.said(), b.said()),
                     }
                 }
-                Some(i) if self.ahead.contains(&b.name) => format!(
-                    "{}: kept over the release's {}, as its own release",
-                    i.said(),
-                    b.said()
-                ),
+                Some(i) if self.ahead.contains(&b.name) => {
+                    let same = match (&i.version, &b.version) {
+                        (Some(x), Some(y)) => nils_pack::engines::order(x, y) == Ordering::Equal,
+                        _ => false,
+                    };
+                    if same {
+                        format!(
+                            "{}: its own release of that version, kept over the release's copy",
+                            i.said()
+                        )
+                    } else {
+                        format!("{}: newer than the release's {}, kept", i.said(), b.said())
+                    }
+                }
                 Some(i) => format!("{}: the release's", i.said()),
             };
             out.push(format!("  {line}"));
@@ -941,6 +950,24 @@ fn swap_in(fresh: &Path, dir: &Path, aside: &Path) -> Result<Swapped, String> {
     })
 }
 
+/// The first-party packs in a directory that state a version: those a
+/// refresh put there, by its manifest, and those named in `also`. What a
+/// pack's own releases are measured against where the engine's release
+/// cannot be read.
+pub(crate) fn first_party_in(dir: &Path, also: &[&str]) -> Vec<Pack> {
+    let manifest = Manifest::read(dir);
+    on_disk(dir)
+        .into_iter()
+        .filter(|p| p.version.is_some())
+        .filter(|p| {
+            also.contains(&p.name.as_str())
+                || manifest
+                    .as_ref()
+                    .is_some_and(|m| m.packs.contains_key(&p.name))
+        })
+        .collect()
+}
+
 /// The rules in use in a pack directory, as the setup record notes them:
 /// each pack that states a version and that a refresh put there, or that is
 /// one of `first_party`, with the release it came from where that is known.
@@ -1190,7 +1217,7 @@ mod tests {
         assert!(
             s.lines()
                 .join("\n")
-                .contains("mri 1.0.2: kept over the release's mri 1.0.1, as its own release"),
+                .contains("mri 1.0.2: newer than the release's mri 1.0.1, kept"),
             "{:?}",
             s.lines()
         );
@@ -1203,6 +1230,13 @@ mod tests {
             &m,
         );
         assert_eq!(s.ahead, ["mri"], "{s:?}");
+        assert!(
+            s.lines().join("\n").contains(
+                "mri 1.0.1: its own release of that version, kept over the release's copy"
+            ),
+            "{:?}",
+            s.lines()
+        );
         // a newer copy in the engine's release replaces it
         let m = manifest(own("1.0.2", "m2"));
         let s = compare_with(

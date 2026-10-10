@@ -1118,8 +1118,9 @@ fn cached_rules(
     {
         return found.clone();
     }
+    let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
     let found: Vec<crate::rules::Found> =
-        crate::rules::find_all(&crate::rules::base(None), carried, engine)
+        crate::rules::find_all(&crate::rules::base(None), &packs, engine)
             .iter()
             .map(crate::rules::Found::described)
             .collect();

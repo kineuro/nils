@@ -22,7 +22,7 @@
 //! floor ([`crate::packs::plan`]).
 use serde_json::{Value, json};
 
-use crate::packs::{Engine, Offer, Plan};
+use crate::packs::{Engine, Offer, Pack, Plan};
 use crate::update;
 
 /// The part's name where an update names its parts: `nils update --part
@@ -160,13 +160,15 @@ pub(crate) fn find(base: &str, pack: &str, engine: &Engine, floor: Option<&str>)
     found
 }
 
-/// Each pack the engine's release carries with a version, beside its own
-/// releases at `base`.
-pub(crate) fn find_all(base: &str, carried: &[Offer], engine: &Engine) -> Vec<Found> {
-    carried
+/// Each pack given that states a version, beside its own releases at
+/// `base`: the packs the engine's release carries, or where that cannot be
+/// read, the first-party packs in place ([`crate::packs::first_party_in`]),
+/// each version the floor of its walk.
+pub(crate) fn find_all(base: &str, packs: &[Pack], engine: &Engine) -> Vec<Found> {
+    packs
         .iter()
-        .filter(|o| o.pack.version.is_some())
-        .map(|o| find(base, &o.pack.name, engine, o.pack.version.as_deref()))
+        .filter(|p| p.version.is_some())
+        .map(|p| find(base, &p.name, engine, p.version.as_deref()))
         .collect()
 }
 
