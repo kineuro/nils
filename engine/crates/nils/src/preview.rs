@@ -883,7 +883,8 @@ pub fn every_stack(store: &mut Store) -> Result<Vec<i64>, String> {
         .collect()
 }
 
-/// The stacks a dataset's digests created first, as its scans are.
+/// The stacks a dataset's tree holds a file of, as its scans are (record
+/// 55, 2026-10-10).
 pub fn dataset_stacks(
     store: &mut Store,
     dataset: &nils_registry::place::Place,
@@ -898,10 +899,9 @@ pub fn dataset_stacks(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT st.id FROM {} st JOIN {} b ON b.id = st.first_batch_id \
-         WHERE b.source_id IN ({list}) ORDER BY st.id",
+        "SELECT st.id FROM {} st WHERE {} ORDER BY st.id",
         store.qualified("stack"),
-        store.qualified("ingest_batch"),
+        crate::operations::held_by(store, "st", &list),
     );
     store
         .query(&sql, &[])

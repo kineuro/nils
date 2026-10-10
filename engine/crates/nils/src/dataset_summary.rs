@@ -235,11 +235,10 @@ fn seeds(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, StoreError
     }
     for r in store.query(
         &format!(
-            "SELECT DISTINCT cl.job_id FROM {} cl JOIN {} x ON x.id = cl.stack_id \
-             JOIN {} b ON b.id = x.first_batch_id WHERE b.source_id IN ({ids})",
+            "SELECT DISTINCT cl.job_id FROM {} cl JOIN {} x ON x.id = cl.stack_id WHERE {}",
             store.qualified("classification"),
             store.qualified("stack"),
-            store.qualified("ingest_batch"),
+            crate::operations::held_by(store, "x", &ids),
         ),
         &[],
     )? {
@@ -314,11 +313,11 @@ fn by_axis(
     axis: &str,
     sealed: Option<&str>,
 ) -> Result<Vec<(String, i64)>, StoreError> {
-    let (class_axis, stack, batch) = (
+    let (class_axis, stack) = (
         store.qualified("classification_axis"),
         store.qualified("stack"),
-        store.qualified("ingest_batch"),
     );
+    let held = crate::operations::held_by(store, "x", sources);
     let label = if axis == KIND_AXIS {
         format!(
             "CASE WHEN EXISTS (SELECT 1 FROM {class_axis} m WHERE m.stack_id = a.stack_id \
@@ -337,9 +336,9 @@ fn by_axis(
         .unwrap_or_default();
     let sql = format!(
         "SELECT k.label, COUNT(*) FROM (SELECT {label} AS label FROM {class_axis} a \
-         JOIN {stack} x ON x.id = a.stack_id JOIN {batch} b ON b.id = x.first_batch_id \
+         JOIN {stack} x ON x.id = a.stack_id \
          WHERE a.axis = '{axis}' AND a.value IS NOT NULL AND a.value <> '' \
-         AND b.source_id IN ({sources}){hidden}) k GROUP BY k.label"
+         AND {held}{hidden}) k GROUP BY k.label"
     );
     let mut out: Vec<(String, i64)> = store
         .query(&sql, &[])?
@@ -473,6 +472,11 @@ pub(crate) fn document(
     // a count of it where somebody has
     let (mut subjects, mut studies, mut stacks, mut sessions) = (0, 0, 0, window.map(|_| 0));
     let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
+    // record 55 (2026-10-10): the files read as their instance's own, the
+    // copies of an instance another dataset read (`known`) or this one holds
+    // a file of already (`twice`), and the files held because the registry
+    // holds their instance UID under another subject, study or series
+    let (mut new, mut known, mut twice, mut same_instance) = (0, 0, 0, 0);
     let mut refused_batch: Option<i64> = None;
     let mut certainty = crate::certainty::Certainty::default();
     let mut passes = 0;
@@ -491,27 +495,28 @@ pub(crate) fn document(
             q("series"),
             q("classification"),
         );
-        let of_source =
-            format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
+        // record 55 (2026-10-10): every scan its tree has a file of, whoever
+        // read it first
+        let in_tree = crate::operations::held_by(store, "x", &sources);
+        let studies_in_tree = crate::operations::studies_held_by(store, "x", &sources);
         // as the sources door counts them, so the card and its detail agree
         subjects = count(
             store,
             &format!(
-                "SELECT COUNT(DISTINCT se.subject_id) FROM {file} f \
-                 JOIN {instance} i ON i.id = f.instance_id JOIN {series} se ON se.id = i.series_id \
-                 JOIN {subject} su ON su.id = se.subject_id \
-                 WHERE f.source_id IN ({sources}) AND su.merged_into IS NULL"
+                "SELECT COUNT(DISTINCT se.subject_id) FROM {stack} x \
+                 JOIN {series} se ON se.id = x.series_id JOIN {subject} su ON su.id = se.subject_id \
+                 WHERE {in_tree} AND su.merged_into IS NULL"
             ),
         )
         .map_err(failed)?;
         studies = count(
             store,
-            &format!("SELECT COUNT(*) FROM {study} x {of_source}"),
+            &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
         )
         .map_err(failed)?;
         stacks = count(
             store,
-            &format!("SELECT COUNT(*) FROM {stack} x {of_source}"),
+            &format!("SELECT COUNT(*) FROM {stack} x WHERE {in_tree}"),
         )
         .map_err(failed)?;
         if let Some(window) = window {
@@ -520,7 +525,8 @@ pub(crate) fn document(
                     store,
                     &format!(
                         "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
-                         JOIN {study} x ON x.id = scs.study_id {of_source} AND scs.window_days = {window}"
+                         JOIN {study} x ON x.id = scs.study_id WHERE {studies_in_tree} \
+                         AND scs.window_days = {window}"
                     ),
                 )
                 .map_err(failed)?,
@@ -534,13 +540,50 @@ pub(crate) fn document(
             ),
         )
         .map_err(failed)?;
+        let same = nils_registry::review::SAME_INSTANCE_KIND;
         refused = count(
             store,
             &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                 AND (reason IS NULL OR reason <> '{same}')"
             ),
         )
         .map_err(failed)?;
+        same_instance = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                 AND reason = '{same}'"
+            ),
+        )
+        .map_err(failed)?;
+        new = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'ingested'"
+            ),
+        )
+        .map_err(failed)?;
+        let copies = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'duplicate'"
+            ),
+        )
+        .map_err(failed)?;
+        // one copy of each instance whose own file is no live file of this
+        // dataset is known; every other copy is this dataset's second file
+        known = count(
+            store,
+            &format!(
+                "SELECT COUNT(DISTINCT f.instance_id) FROM {file} f \
+                 JOIN {instance} i ON i.id = f.instance_id LEFT JOIN {file} o ON o.id = i.source_file_id \
+                 WHERE f.source_id IN ({sources}) AND f.status = 'duplicate' \
+                 AND (o.id IS NULL OR o.source_id NOT IN ({sources}) OR o.status NOT IN ('ingested', 'duplicate'))"
+            ),
+        )
+        .map_err(failed)?;
+        twice = (copies - known).max(0);
         refused_batch = store
             .query(
                 &format!(
@@ -584,9 +627,7 @@ pub(crate) fn document(
             .map_err(failed)?;
         classified = count(
             store,
-            &format!(
-                "SELECT COUNT(*) FROM {stack} x JOIN {class} cl ON cl.stack_id = x.id {of_source}"
-            ),
+            &format!("SELECT COUNT(*) FROM {stack} x JOIN {class} cl ON cl.stack_id = x.id WHERE {in_tree}"),
         )
         .map_err(failed)?;
         // record 56: how sure the sort is counts what the sort asks, never
@@ -670,7 +711,10 @@ pub(crate) fn document(
         "read",
         chain_state(open, newest_of(&["digest", "ingest"]), reads > 0),
         open.or_else(|| newest_of(&["digest", "ingest"])),
-        json!({"files": read, "refused": refused, "reads": reads}),
+        json!({
+            "files": read, "new": new, "known": known, "twice": twice,
+            "same_instance": same_instance, "refused": refused, "reads": reads,
+        }),
     );
     if read_step["job"].is_null()
         && let Some((started, finished)) = &last_digest
@@ -815,6 +859,10 @@ pub(crate) fn document(
             "found": found_files,
             "bytes": tree(found_tree, "bytes"),
             "read": read,
+            "new": new,
+            "known": known,
+            "twice": twice,
+            "same_instance": same_instance,
             "refused": refused,
             "refused_batch": refused_batch,
             "held": held,

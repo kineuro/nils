@@ -140,6 +140,7 @@ fn source(
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
         doc["totals"] = json!({
             "subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
+            "same_instance_files": 0,
             "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {}, "noted": {},
         });
         return Ok(doc);
@@ -155,9 +156,11 @@ fn source(
         q("session_cache_study"),
         q("classification"),
     );
-    let (instance, series) = (q("instance"), q("series"));
-    let of_source =
-        format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
+    let series = q("series");
+    // record 55 (2026-10-10): what the dataset holds is every scan its tree
+    // has a file of, whoever read it first
+    let in_tree = crate::operations::held_by(store, "x", &sources);
+    let studies_in_tree = crate::operations::studies_held_by(store, "x", &sources);
 
     // the digests: a pseudonymise step is not one, and shows on the
     // digest it shares a name with (record 26 §14)
@@ -196,6 +199,13 @@ fn source(
                 "files": {
                     "seen": n(&["seen"]),
                     "new": n(&["written", "ingested"]),
+                    // record 55 (2026-10-10): copies of an instance the
+                    // registry held, another dataset's or this one's, and
+                    // files held because it holds their instance UID under
+                    // another subject, study or series
+                    "known": n(&["written", "known"]),
+                    "twice": n(&["written", "twice"]),
+                    "same_instance": n(&["written", "same_instance"]),
                     "changed": n(&["written", "changed"]),
                     "unchanged": n(&["unchanged"]),
                     "refused": n(&["quarantined"]),
@@ -277,35 +287,46 @@ fn source(
     // record 26 §14: the subjects whose files this dataset's tree holds,
     // whoever made them. A map makes the subjects of a dataset and its
     // digests meet them, so counting what a digest created answers nothing
-    // for exactly the dataset that has a map.
+    // for exactly the dataset that has a map. Record 55 (2026-10-10): and
+    // so are its studies, scans and visits, whoever read them first.
     let subjects = count(
         store,
         &format!(
-            "SELECT COUNT(DISTINCT se.subject_id) FROM {file} f \
-             JOIN {instance} i ON i.id = f.instance_id JOIN {series} se ON se.id = i.series_id \
-             JOIN {subject} su ON su.id = se.subject_id \
-             WHERE f.source_id IN ({sources}) AND su.merged_into IS NULL"
+            "SELECT COUNT(DISTINCT se.subject_id) FROM {stack} x \
+             JOIN {series} se ON se.id = x.series_id JOIN {subject} su ON su.id = se.subject_id \
+             WHERE {in_tree} AND su.merged_into IS NULL"
         ),
     )?;
     let studies = count(
         store,
-        &format!("SELECT COUNT(*) FROM {study} x {of_source}"),
+        &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
     )?;
     let stacks = count(
         store,
-        &format!("SELECT COUNT(*) FROM {stack} x {of_source}"),
+        &format!("SELECT COUNT(*) FROM {stack} x WHERE {in_tree}"),
     )?;
     let sessions = count(
         store,
         &format!(
             "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs JOIN {study} x ON x.id = scs.study_id \
-             {of_source} AND scs.window_days = {window}"
+             WHERE {studies_in_tree} AND scs.window_days = {window}"
         ),
     )?;
+    // a file held because the registry holds its instance under another
+    // subject, study or series waits for a person, and is no refusal
+    let same = nils_registry::review::SAME_INSTANCE_KIND;
     let refused = count(
         store,
         &format!(
-            "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
+            "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+             AND (reason IS NULL OR reason <> '{same}')"
+        ),
+    )?;
+    let same_instance = count(
+        store,
+        &format!(
+            "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+             AND reason = '{same}'"
         ),
     )?;
     // record 55 H2 (round 4): how sure the sort is, "N scans · N sure ·
@@ -324,6 +345,7 @@ fn source(
         "sessions": sessions,
         "stacks": stacks,
         "refused_files": refused,
+        "same_instance_files": same_instance,
         "to_sort": certainty.to_sort,
         "sure": certainty.sure,
         "unsorted": certainty.unsorted,

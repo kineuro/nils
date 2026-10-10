@@ -133,22 +133,24 @@ impl Scope {
     }
 
     /// The condition that keeps the scope's stacks, over a stack aliased
-    /// `st`, its first batch `b` and its series `se`, with the sealed rule
-    /// for this caller; none for a dataset nothing has read.
+    /// `st` and its series `se`, with the sealed rule for this caller; none
+    /// for a dataset nothing has read. A dataset's are the stacks its tree
+    /// holds a file of (record 55, 2026-10-10).
     pub(crate) fn holds(
         &self,
         store: &Store,
         access: &Access,
         st: &str,
-        b: &str,
         se: &str,
     ) -> Option<String> {
         let mut out = match self {
+            // record 55 (2026-10-10): every scan the dataset's tree has a
+            // file of, whoever read it first
             Scope::Dataset { sources, .. } => {
                 if sources.is_empty() {
                     return None;
                 }
-                format!("{b}.source_id IN ({})", list(sources))
+                crate::operations::held_by(store, st, &list(sources))
             }
             Scope::Cohort(c) => format!(
                 "{se}.subject_id IN (SELECT cm.subject_id FROM {} cm \
@@ -744,7 +746,7 @@ pub(crate) fn subjects(
             }
         }
     }
-    let holds = scope.holds(store, access, "st", "b", "se");
+    let holds = scope.holds(store, access, "st", "se");
     if let Some(holds) = &holds {
         let from = stacks_from(store);
         let q = |t: &str| store.qualified(t);
@@ -1024,7 +1026,7 @@ pub(crate) fn visits(
     };
 
     let store = registry.store();
-    let holds = scope.holds(store, access, "st", "b", "se");
+    let holds = scope.holds(store, access, "st", "se");
     let from = stacks_from(store);
     // the subject's scans in the scope, by study
     let stacks: Vec<(i64, i64)> = match &holds {
