@@ -1162,7 +1162,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "a longhand rule's words"
     );
     assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
-    assert_eq!(packs_doc["packs"][0]["contract"], 8, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 9, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -7099,8 +7099,9 @@ fn the_viewer_lists_subjects_visits_and_a_visit_s_scans_on_postgres_too() {
 
 /// Review of 2026-10-10: a visit's scans are its subject's alone. Two
 /// patients whose files name one study share it in the registry, which files
-/// the study under the first; a visit of the first, named by its session or
-/// by its studies, lists the first's scans and never the second's.
+/// the study under whichever patient it read first; a visit of that one,
+/// named by its session or by its studies, lists its scans and never the
+/// other's.
 #[test]
 fn a_visit_s_scans_are_its_subject_s_alone() {
     let home = TempDir::new("viewer-shared-home");
@@ -7165,18 +7166,26 @@ fn a_visit_s_scans_are_its_subject_s_alone() {
     );
     run(&home, &["fingerprint"], None);
     run(&home, &["session", "rebuild"], None);
-    let first = {
+    // the digest reads in parallel, so either patient may own the study
+    let (first, code) = {
         let mut store =
             nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
-        let subject = store.qualified("subject");
-        store
+        let [study, subject] = ["study", "subject"].map(|t| store.qualified(t));
+        let r = &store
             .query(
-                &format!("SELECT id FROM {subject} WHERE code = 'mapped-0001'"),
+                &format!(
+                    "SELECT s.id, s.code FROM {study} sy JOIN {subject} s ON s.id = sy.subject_id \
+                     WHERE sy.study_instance_uid = '1.2.9.S'"
+                ),
                 &[],
             )
-            .unwrap()[0]
-            .int(0)
-            .unwrap()
+            .unwrap()[0];
+        (r.int(0).unwrap(), r.text(1).unwrap().to_string())
+    };
+    let own = if code == "mapped-0001" {
+        "t1 mprage"
+    } else {
+        "t2 tse"
     };
     let server = Server::start(
         &home,
@@ -7198,8 +7207,12 @@ fn a_visit_s_scans_are_its_subject_s_alone() {
     );
     assert_eq!(status, 200, "{v}");
     let visit = &v["visits"][0];
-    let session = visit["session"].as_i64().expect("the visit's session");
-    let study = visit["studies"][0].as_i64().expect("the visit's study");
+    let session = visit["session"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the visit's session: {v}"));
+    let study = visit["studies"][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the visit's study: {v}"));
     for path in [
         format!("/api/datasets/shared/scans?session={session}"),
         format!("/api/datasets/shared/scans?studies={study}"),
@@ -7212,7 +7225,7 @@ fn a_visit_s_scans_are_its_subject_s_alone() {
             .iter()
             .filter_map(|s| s["series_description"].as_str())
             .collect();
-        assert_eq!(named, ["t1 mprage"], "{path}: {scans}");
+        assert_eq!(named, [own], "{path}: {scans}");
         assert_eq!(scans["total"], 1, "{path}: {scans}");
     }
 }

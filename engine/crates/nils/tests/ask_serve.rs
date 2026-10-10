@@ -2138,7 +2138,11 @@ fn a_profile_counts_what_is_under_a_set_and_withholds_what_the_role_may_not_read
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["count"].as_i64().unwrap())
+        .map(|t| {
+            t["count"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("a type with no count: {t}\n{p}"))
+        })
         .sum();
     assert_eq!(typed, stacks, "every stack is under one base or none: {p}");
     assert!(p["demographics"]["withheld"].is_string(), "{p}");

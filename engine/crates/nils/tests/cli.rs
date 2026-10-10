@@ -37,8 +37,22 @@ fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// A home with the key `k` stored and a SQLite registry initialised.
+/// A home with the key `k` stored and a SQLite registry initialised, its
+/// codes `blake2b-32` of ten characters.
 fn home() -> TempDir {
+    home_with(&["--scheme", "blake2b-32", "--display-length", "10"])
+}
+
+/// A home whose registry makes its codes with the subject code generator's
+/// scheme: a personnummer is read only into such a registry (the review of
+/// Wave 7a's merge, 2026-10-10).
+fn generator_home() -> TempDir {
+    home_with(&["--scheme", "blake2b-8"])
+}
+
+/// A home with the key `k` stored and a SQLite registry initialised with
+/// these `nils init` arguments beside the key.
+fn home_with(scheme: &[&str]) -> TempDir {
     let home = TempDir::new("cli-home");
     let out = nils()
         .args(["--registry"])
@@ -61,15 +75,8 @@ fn home() -> TempDir {
     let out = nils()
         .args(["--registry"])
         .arg(home.path())
-        .args([
-            "init",
-            "--key",
-            "k",
-            "--scheme",
-            "blake2b-32",
-            "--display-length",
-            "10",
-        ])
+        .args(["init", "--key", "k"])
+        .args(scheme)
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1792,10 +1799,9 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert_eq!(shown["modality"], "MR");
     assert_eq!(shown["flags"], 584);
     assert_eq!(
-        shown["contract"], 8,
-        "record 53: a session pass, a fallback border over several values and the private \
-         elements a reader is shown (contract 8), after record 51's nine pick borders \
-         (contract 7)"
+        shown["contract"], 9,
+        "pack 1.0.2: review.by_model (contract 9), after record 53's session pass, fallback \
+         border over several values and private elements a reader is shown (contract 8)"
     );
     // record 53: what a packet must carry to replay the pack: the private
     // elements it shows, with where a builder reads them, and what the
@@ -6433,7 +6439,7 @@ fn a_place_on_a_pseudonymised_tree_is_legacy_and_read_as_that_tree() {
 /// pseudonymised. The numbers are the tax agency's published test numbers.
 #[test]
 fn a_dataset_writes_the_declared_id_type_and_its_digest_reads_it_back() {
-    let home = home();
+    let home = generator_home();
     let registry = ["--registry", home.path().to_str().unwrap()];
     let go = |args: &[&str]| {
         let out = nils().args(registry).args(args).output().unwrap();

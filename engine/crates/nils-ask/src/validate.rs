@@ -2152,8 +2152,9 @@ fn measure_filtered(ask: &Ask) -> BTreeSet<String> {
 
 /// How deep clauses may nest in an ask. The shapes check traces a value
 /// through every level, so it is bounded, and validate refuses a document
-/// deeper than the bound.
-pub const MAX_CLAUSE_DEPTH: usize = 12;
+/// deeper than the bound. Deep enough for a case ladder over every value of
+/// an axis, which the profile door writes (one level per value).
+pub const MAX_CLAUSE_DEPTH: usize = 64;
 
 /// Derived fields whose value is a date of the record, and so read a quasi
 /// identifying field.

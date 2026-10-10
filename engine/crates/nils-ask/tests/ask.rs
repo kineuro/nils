@@ -1070,9 +1070,9 @@ fn a_quasi_identifying_column_is_shaped_below_detail_quasi() {
 }
 
 /// Record 55 K7, review of 2026-10-10: the shapes check traces a value
-/// through every level of clauses, so a quasi identifying field wrapped
-/// deeper than the bound is refused at validate, never answered unshaped,
-/// while one wrapped within it is still shaped.
+/// through every level of clauses, so a quasi identifying field wrapped in
+/// thirteen coalesces, which it once gave up on, is shaped, and one wrapped
+/// deeper than the bound is refused at validate, never answered unshaped.
 #[test]
 fn a_quasi_column_nested_past_the_bound_is_refused_not_answered_unshaped() {
     let wrapped = |levels: usize| {
@@ -1089,17 +1089,20 @@ fn a_quasi_column_nested_past_the_bound_is_refused_not_answered_unshaped() {
         .to_string()
     };
     let plain = Scope::default();
-    let refused = prepare(parse(&wrapped(13)).unwrap(), &Fixture, &plain).unwrap_err();
+    for levels in [10, 13, 40] {
+        let within = prepare(parse(&wrapped(levels)).unwrap(), &Fixture, &plain)
+            .unwrap_or_else(|e| panic!("{levels}: {e}"));
+        assert_eq!(
+            within.validated.shaped.into_iter().collect::<Vec<_>>(),
+            vec![0],
+            "{levels} coalesces"
+        );
+    }
+    let refused = prepare(parse(&wrapped(70)).unwrap(), &Fixture, &plain).unwrap_err();
     let text = refused.to_string();
     assert!(
         text.contains("not_compilable") && text.contains("nest"),
         "{text}"
-    );
-    let within =
-        prepare(parse(&wrapped(10)).unwrap(), &Fixture, &plain).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(
-        within.validated.shaped.into_iter().collect::<Vec<_>>(),
-        vec![0]
     );
 }
 
