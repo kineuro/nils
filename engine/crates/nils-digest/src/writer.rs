@@ -1714,6 +1714,32 @@ impl<'a> Writer<'a> {
         if held.is_empty() && first.len() == parsed.len() {
             return Ok(out);
         }
+        // the files a person let go as another location of their instance,
+        // which differ from it by study or series alone (the duplicate
+        // policy's defaults, 2026-10-10): filed as copies, not held again
+        let mut kept: BTreeSet<String> = BTreeSet::new();
+        let paths: Vec<&str> = parsed.iter().map(|p| p.path.as_str()).collect();
+        for chunk in paths.chunks(500) {
+            let store = self.registry.store();
+            let d = store.dialect();
+            let marks: Vec<String> = (0..chunk.len())
+                .map(|n| d.param(n + 3, Type::Text))
+                .collect();
+            let sql = format!(
+                "SELECT path FROM {} WHERE source_id = {} AND reason = {} AND path IN ({})",
+                store.qualified("source_file"),
+                d.param(1, Type::Int),
+                d.param(2, Type::Text),
+                marks.join(", ")
+            );
+            let mut params: Vec<Param> = Vec::with_capacity(chunk.len() + 2);
+            params.push(Param::Int(self.source_id));
+            params.push(Param::from(nils_registry::review::SAME_INSTANCE_KEEP));
+            params.extend(chunk.iter().map(|p| Param::from(*p)));
+            for r in store.query(&sql, &params)? {
+                kept.insert(r.text(0)?.to_string());
+            }
+        }
         // a merge points the alias at the canonical subject: follow it, a
         // few steps at most
         let mut merged: HashMap<i64, i64> = HashMap::new();
@@ -1775,6 +1801,9 @@ impl<'a> Writer<'a> {
             } else {
                 continue;
             };
+            if what != "subject" && kept.contains(p.path.as_str()) {
+                continue;
+            }
             out[i] = Some(format!(
                 "subject:{}|holder:{subject}|differs:{what}",
                 subject_ids[i]

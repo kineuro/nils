@@ -81,6 +81,10 @@ pub struct Recorded {
     /// copy's subject, study and series ([`status::UNCHECKED`]): read again
     /// once, whatever the run was asked.
     pub unchecked: bool,
+    /// A held file a person let go out of the read (record 55, the duplicate
+    /// policy's defaults, 2026-10-10): kept as it is, whatever the run was
+    /// asked, until the file itself changes.
+    pub dropped: bool,
 }
 
 /// What to do with a file, given its record.
@@ -130,6 +134,12 @@ pub fn decide(
             id: r.id,
             quarantined: false,
         },
+        // a held file a person let go out of the read stays out, whatever the
+        // run was asked; only a change of the file reads it again
+        status::QUARANTINED if same && r.dropped => Decision::Unchanged {
+            id: r.id,
+            quarantined: true,
+        },
         // a file held for want of a map is read again whatever the run was
         // asked, since the map that releases it is filed elsewhere
         status::QUARANTINED if same && r.held => Decision::Parse(None),
@@ -175,8 +185,8 @@ impl Records {
         let batch = store.qualified("ingest_batch");
         let sql = format!(
             "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id, \
-             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason IN ('{held}', '{same}'), \
-             f.reason = '{unchecked}' \
+             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason IN ('{held}', '{same}', '{keep}'), \
+             f.reason = '{unchecked}', f.reason = '{drop}' \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
              LEFT JOIN {batch} AS b ON b.id = f.batch_id \
              WHERE f.source_id = {} AND f.dir = {}",
@@ -184,7 +194,9 @@ impl Records {
             d.param(2, Type::Text),
             held = nils_registry::review::UNMAPPED_KIND,
             same = nils_registry::review::SAME_INSTANCE_KIND,
-            unchecked = status::UNCHECKED
+            unchecked = status::UNCHECKED,
+            keep = nils_registry::review::SAME_INSTANCE_KEEP,
+            drop = nils_registry::review::SAME_INSTANCE_DROP,
         );
         Ok(Records {
             store,
@@ -226,6 +238,7 @@ impl Records {
                         reparse: flag(7),
                         held: flag(8),
                         unchecked: flag(9),
+                        dropped: flag(10),
                     },
                 );
             }
@@ -365,6 +378,7 @@ mod tests {
             reparse: false,
             held: false,
             unchecked: false,
+            dropped: false,
         }
     }
 
@@ -408,10 +422,31 @@ mod tests {
             decide(Some(&held), 10, 5, false, false),
             Decision::Parse(None)
         );
+        // a held file a person let go out of the read stays out, even when
+        // the run retries quarantine; a change of the file reads it again
+        let dropped = Recorded {
+            dropped: true,
+            ..quarantined.clone()
+        };
+        for retry in [false, true] {
+            assert_eq!(
+                decide(Some(&dropped), 10, 5, retry, false),
+                Decision::Unchanged {
+                    id: 1,
+                    quarantined: true
+                },
+                "retry {retry}"
+            );
+        }
+        assert!(matches!(
+            decide(Some(&dropped), 10, 6, false, false),
+            Decision::Parse(Some(_))
+        ));
         // a copy filed by its instance UID alone, before record 55, is read
         // again once to compare its subject, study and series
         let unchecked = Recorded {
             unchecked: true,
+            dropped: false,
             ..rec(status::DUPLICATE, Some(7))
         };
         assert_eq!(
@@ -584,6 +619,7 @@ mod tests {
                 reparse: false,
                 held: false,
                 unchecked: false,
+                dropped: false,
             })
         );
         // the failed batch's last second is read again, the one before not

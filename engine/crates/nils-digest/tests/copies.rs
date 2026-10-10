@@ -394,3 +394,179 @@ fn a_copy_filed_before_the_policy_is_compared_on_its_next_read() {
         assert_eq!(r.parsed, 1, "{name}: only the held file");
     }
 }
+
+/// The open `identity.same_instance` item, the only one there is.
+fn same_instance_item(reg: &mut nils_registry::Registry) -> i64 {
+    one(
+        reg,
+        &format!(
+            "SELECT id FROM {{review_item}} WHERE kind = '{SAME_INSTANCE_KIND}' AND status = 'open'"
+        ),
+    )
+}
+
+/// Record 55, the duplicate policy's defaults (Nima, 2026-10-10): a file of
+/// the same subject whose instance UID the registry holds under another
+/// series is held, and a person lets it go as another location of the
+/// instance. The item closes as accepted with the choice, and the next read
+/// files the file as a copy of the instance, which keeps its stack.
+#[test]
+fn a_scan_held_under_another_series_is_let_go_as_another_location() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        let stack = stack_of(&mut reg, "A.1.1");
+        let p1 = [birth("19800101"), sex("M"), description("Brain")];
+        let other = TempDir::new("copies-let-go-keep");
+        other.file("z/IM_0001", &mr("A", "A.9", "A.1.1", "P1", &p1));
+        let w = digest(&settings(&other), &mut reg)
+            .unwrap()
+            .written
+            .unwrap();
+        assert_eq!(w.same_instance, 1, "{name}");
+        let item = same_instance_item(&mut reg);
+        let done = nils_registry::review::let_go(
+            reg.store(),
+            item,
+            true,
+            "anna@lab",
+            "2026-10-10T12:00:00Z",
+        )
+        .unwrap();
+        assert_eq!((done.files, done.keep), (1, true), "{name}");
+        assert_eq!(
+            texts(
+                &mut reg,
+                &format!("SELECT status FROM {{review_item}} WHERE id = {item}")
+            ),
+            ["accepted"],
+            "{name}"
+        );
+        // the next read files it as a copy, not held again
+        let w = digest(&settings(&other), &mut reg)
+            .unwrap()
+            .written
+            .unwrap();
+        assert_eq!(
+            (w.same_instance, w.duplicate, w.ingested),
+            (0, 1, 0),
+            "{name}"
+        );
+        assert_eq!(w.known, 1, "{name}");
+        assert_eq!(stack_of(&mut reg, "A.1.1"), stack, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!(
+                    "SELECT COUNT(*) FROM {{review_item}} WHERE kind = '{SAME_INSTANCE_KIND}' AND status = 'open'"
+                )
+            ),
+            0,
+            "{name}"
+        );
+        // the series its own UIDs named holds nothing and is not left behind
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack} x JOIN {series} se ON se.id = x.series_id \
+                 WHERE se.series_instance_uid = 'A.9'"
+            ),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// The same held file let go out of the read: it stays quarantined, no run
+/// reads it again, even one that retries quarantine, and nothing asks again.
+#[test]
+fn a_scan_held_under_another_series_is_let_go_out_of_the_read() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        let p1 = [birth("19800101"), sex("M"), description("Brain")];
+        let other = TempDir::new("copies-let-go-drop");
+        other.file("z/IM_0001", &mr("A", "A.9", "A.1.1", "P1", &p1));
+        digest(&settings(&other), &mut reg).unwrap();
+        let item = same_instance_item(&mut reg);
+        let done = nils_registry::review::let_go(
+            reg.store(),
+            item,
+            false,
+            "anna@lab",
+            "2026-10-10T12:00:00Z",
+        )
+        .unwrap();
+        assert_eq!((done.files, done.keep), (1, false), "{name}");
+        let mut again = settings(&other);
+        again.retry_quarantine = true;
+        let w = digest(&again, &mut reg).unwrap().written.unwrap();
+        assert_eq!(
+            (w.same_instance, w.duplicate, w.quarantine_kept),
+            (0, 0, 1),
+            "{name}"
+        );
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT reason FROM {source_file} WHERE status = 'quarantined' \
+                 AND reason LIKE 'identity.same_instance%'"
+            ),
+            [nils_registry::review::SAME_INSTANCE_DROP],
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!(
+                    "SELECT COUNT(*) FROM {{review_item}} WHERE kind = '{SAME_INSTANCE_KIND}' AND status = 'open'"
+                )
+            ),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// A scan read under another subject is no let-go's: a merge of the two
+/// subjects answers it, and the refusal says so and changes nothing.
+#[test]
+fn a_scan_held_under_another_subject_is_not_let_go() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        let p1 = [birth("19800101"), sex("M"), description("Brain")];
+        let other = TempDir::new("copies-let-go-subject");
+        other.file("y/IM_0001", &mr("A", "A.1", "A.1.1", "P9", &p1));
+        digest(&settings(&other), &mut reg).unwrap();
+        let item = same_instance_item(&mut reg);
+        match nils_registry::review::let_go(
+            reg.store(),
+            item,
+            true,
+            "anna@lab",
+            "2026-10-10T12:00:00Z",
+        ) {
+            Err(nils_registry::review::LetGoError::Refused(why)) => {
+                assert!(why.contains("a merge"), "{name}: {why}")
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT reason FROM {source_file} WHERE status = 'quarantined' \
+                 AND reason LIKE 'identity.same_instance%'"
+            ),
+            [SAME_INSTANCE_KIND],
+            "{name}"
+        );
+        assert_eq!(same_instance_item(&mut reg), item, "{name}");
+    }
+}
