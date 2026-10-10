@@ -32,6 +32,14 @@ order:
   - derived_construct
   - derived_provenance
   - scanner_computed
+  # The pick borders study of 2026-10-10, R2a: last, so they take only a
+  # stack no rule above claimed, which would be an acquisition.
+  - planning_named_loc
+  - planning_named_localizer
+  - planning_named_scout
+  - planning_named_survey
+  - planning_named_sikt
+  - planning_tri_plane
 
 rules:
 
@@ -214,3 +222,83 @@ rules:
       - {flag: is_derived_moco, tier: stated}
       - {flag: is_subtraction, tier: stated}
     set: {disposition: scanner_derived, convertible: 'yes'}
+
+  # The pick borders study of 2026-10-10 (record 55, R2a; the design
+  # repository's `studies/2026-10-10-pick-borders/`): a planning scan the
+  # provenance reads as an acquisition is still not raw material. Pack
+  # 0.21.0 made a series named for planning a Localizer only at 5 slices a
+  # plane or fewer (`planning_word_too_many_slices`), and 0.11.0 took a
+  # tri-plane split only where its slice positions were counted
+  # (`is_tri_plane_scout`), so a 6-slice and a 9-slice planning series and a
+  # tri-plane scout split into single images with no slice positions stood
+  # as T1w and T2w candidates for the main-scan pick. What they are stays as
+  # the rules read it; only what to do with them changes. They are written
+  # as `nils pack apply` writes a typed `add_rule` (patch format 1), so the
+  # rehearsal that measured them measured this. Convertible keeps its
+  # default, which is a scout's `yes`.
+  #
+  # A series named loc, localizer, scout, survey or sikt (the technique text,
+  # where the normalizer has already spelled `loc`, `scout` and `surv` as
+  # `localizer`) of at most 12 slice positions. One rule a word, each word a
+  # condition of the header tier rather than a list of the keywords tier:
+  # a campaign derives the disposition and the role from a rater's answer,
+  # and may not derive an axis a keywords rule writes (nils-pack derive.rs).
+  planning_named_loc:
+    clauses:
+      - when: {all: [{text: technique_text, substring: 'loc '}, {field: n_slices, le: 12}]}
+        cite: 'technique_text has loc  and n_slices <= 12'
+        source: header
+        tier: exclusive
+    set: {disposition: scout}
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+  planning_named_localizer:
+    clauses:
+      - when: {all: [{text: technique_text, substring: 'localizer'}, {field: n_slices, le: 12}]}
+        cite: 'technique_text has localizer and n_slices <= 12'
+        source: header
+        tier: exclusive
+    set: {disposition: scout}
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+  planning_named_scout:
+    clauses:
+      - when: {all: [{text: technique_text, substring: 'scout'}, {field: n_slices, le: 12}]}
+        cite: 'technique_text has scout and n_slices <= 12'
+        source: header
+        tier: exclusive
+    set: {disposition: scout}
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+  planning_named_survey:
+    clauses:
+      - when: {all: [{text: technique_text, substring: 'survey'}, {field: n_slices, le: 12}]}
+        cite: 'technique_text has survey and n_slices <= 12'
+        source: header
+        tier: exclusive
+    set: {disposition: scout}
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+  planning_named_sikt:
+    clauses:
+      - when: {all: [{text: technique_text, substring: 'sikt'}, {field: n_slices, le: 12}]}
+        cite: 'technique_text has sikt and n_slices <= 12'
+        source: header
+        tier: exclusive
+    set: {disposition: scout}
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+
+  # A series split by orientation into stacks of at most 5 images each.
+  # Where the positions were counted, more than 5 of them is no planning
+  # plane (an enhanced file holds its frames in one instance), and a
+  # cholangiography's radial slabs are left out, as `is_tri_plane_scout`
+  # leaves them out.
+  planning_tri_plane:
+    clauses:
+      - when:
+          all:
+            - {text: split_reason, equals: multi_orientation}
+            - {field: n_instances, le: 5}
+            - not: {field: n_slices, gt: 5}
+            - not: mrcp_named
+        cite: 'split_reason is multi_orientation and n_instances <= 5 and not n_slices > 5 and not mrcp_named'
+        source: header
+        tier: exclusive
+    set: {disposition: scout}
+    why: 'a series split by orientation into stacks of at most 5 images is a tri-plane planning scan where the slice positions were not counted'

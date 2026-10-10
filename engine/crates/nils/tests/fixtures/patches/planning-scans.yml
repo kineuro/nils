@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pick borders study of 2026-10-10, R2a, as typed operations (patch
+# format 1): what `rules/disposition.yml` gained, written so that `nils pack
+# rehearse` measures it (tests/not_main_scans.rs). The study drafted the
+# name as one list of words; a list of words is a rule of the keywords tier,
+# and a campaign may not derive an axis such a rule writes (derive.rs), so
+# each word is a condition on the technique text, one rule each.
+
+patch: 1
+pack: mri
+version: 1.0.2
+reason: a planning scan is no main scan
+evidence: the pick borders study of 2026-10-10 (the design repository's studies/2026-10-10-pick-borders), R2a
+operations:
+  - op: add_rule
+    axis: disposition
+    value: scout
+    set: disposition
+    rule: planning_named_loc
+    position: last
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+    when:
+      - {tag: technique_text, has: 'loc '}
+      - {tag: n_slices, le: 12}
+  - op: add_rule
+    axis: disposition
+    value: scout
+    set: disposition
+    rule: planning_named_localizer
+    position: last
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+    when:
+      - {tag: technique_text, has: 'localizer'}
+      - {tag: n_slices, le: 12}
+  - op: add_rule
+    axis: disposition
+    value: scout
+    set: disposition
+    rule: planning_named_scout
+    position: last
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+    when:
+      - {tag: technique_text, has: 'scout'}
+      - {tag: n_slices, le: 12}
+  - op: add_rule
+    axis: disposition
+    value: scout
+    set: disposition
+    rule: planning_named_survey
+    position: last
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+    when:
+      - {tag: technique_text, has: 'survey'}
+      - {tag: n_slices, le: 12}
+  - op: add_rule
+    axis: disposition
+    value: scout
+    set: disposition
+    rule: planning_named_sikt
+    position: last
+    why: 'a series named for planning (loc, localizer, scout, survey, sikt) of at most 12 slices is a planning scan, whatever the provenance read: no role takes it'
+    when:
+      - {tag: technique_text, has: 'sikt'}
+      - {tag: n_slices, le: 12}
+  - op: add_rule
+    axis: disposition
+    value: scout
+    set: disposition
+    rule: planning_tri_plane
+    position: last
+    why: 'a series split by orientation into stacks of at most 5 images is a tri-plane planning scan where the slice positions were not counted'
+    when:
+      - {tag: split_reason, is: multi_orientation}
+      - {tag: n_instances, le: 5}
+      - {not: {tag: n_slices, gt: 5}}
+      - {not: {flag: mrcp_named}}
