@@ -285,7 +285,7 @@ paths:
       summary: The audit log, newest first (nils audit list --json)
       parameters:
         - {name: principal, in: query, schema: {type: string}}
-        - {name: action, in: query, schema: {type: string}, description: An action, or every action under a dotted prefix such as linkage.}
+        - {name: action, in: query, schema: {type: string}, description: "An action, or every action under a dotted prefix such as linkage."}
         - {name: since, in: query, schema: {type: string}, description: An ISO stamp}
         - {name: limit, in: query, schema: {type: integer, default: 50}}
       responses:
@@ -295,7 +295,7 @@ paths:
       summary: The jobs not over, newest first (nils jobs list)
       description: "Each job's `args.queued` is its command line as queued at a door, or as claimed at the keyboard: the words after `nils` and its registry, whoever ran it, which is what a card reads and a cancel's grant is found by; a chain's steps carry theirs when the step before queues them. `args.argv` is what ran: the words as queued until a worker's verb adopts the row, then the process's own line, binary and registry included. The queue's worker is a row of kind `worker` and no job a person queued or would cancel: it is listed with `all` only."
       parameters:
-        - {name: all, in: query, schema: {type: boolean}, description: The finished ones too, and the queue's worker}
+        - {name: all, in: query, schema: {type: boolean}, description: "The finished ones too, and the queue's worker"}
         - {name: limit, in: query, schema: {type: integer, default: 50}}
         - {name: dataset, in: query, schema: {type: string}, description: "Added in place, additively, on 2026-10-09 (the Data page): one dataset's jobs alone, by its name (with or without @) or id, newest first and `limit` of them: the jobs whose command line names it (`@name` or a tree under it, a path in its folder as the door locates `@name`, `--dataset name`, `dataset:name`, `place originals name`) or that carry its name and a day as a bring-in names its steps (`name-YYYY-MM-DD`), the jobs its digests ran under, the sorts that judged its stacks, the runs of a body-part or post-contrast model over its stacks (record 56), and every job queued after any of those (the next step of a chain, the pictures and the pick run after a sort), among the newest 2,000 jobs of the kinds a dataset's steps are made of. The queue's workers are never among them. 404 for no such dataset."}
       responses:
@@ -316,8 +316,8 @@ paths:
                 then: {type: array, items: {type: array, items: {type: string}}, description: "The command lines queued after this one, in order, when it ends done"}
       responses:
         "202": {description: "{job, state: queued, command, then, digest_first: {files, why} | null}, the command and the chain as located"}
-        "400": {description: Not a verb the door queues, a chain step that is not one, a tree that is not a registered location, or bring-in of a name that is not a dataset}
-        "403": {description: The caller does not hold the grant of the verb, or the detail it needs}
+        "400": {description: "Not a verb the door queues, a chain step that is not one, a tree that is not a registered location, or bring-in of a name that is not a dataset"}
+        "403": {description: "The caller does not hold the grant of the verb, or the detail it needs"}
         "409": {description: A digest of a dataset's originals}
   /api/jobs/{id}:
     get:
@@ -355,7 +355,7 @@ paths:
               required: [name, out]
               properties:
                 name: {type: string}
-                out: {type: string, description: The directory to write, on the engine's host}
+                out: {type: string, description: "The directory to write, on the engine's host"}
                 layout: {type: string, enum: [descriptive, bids]}
                 dates: {type: string, enum: [keep], description: "Accepted as keep alone, for a caller from before record 38; every release keeps the real date. Given, the run's policy applies to every file, as uids does"}
                 uids: {type: string, enum: [remap, preserve], description: "The run's UID policy for every file; absent with dates absent, each dataset's applies"}
@@ -438,7 +438,7 @@ paths:
       description: "Record 48, D1 of the move: an item about a stack of a sample sealed now (until a certificate unseals it) is answered as not there (404), here and at its apply and accept doors, to every caller but a holder of sealed:see, a rater, an adjudicator, a holder of review:work and an admin alike; a group that holds such a stack among others keeps the others, its `members` and `member_stacks` without the sealed ones and `withheld_members` saying how many went. A sealed stack never becomes a review item: a classification leaves it out and System 1's question on it is refused. The summary does not count them either."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
-        "200": {description: The item, and member_stacks for a grouped one}
+        "200": {description: "The item, and member_stacks for a grouped one"}
         "404": {description: No such item}
   /api/review/{id}/apply:
     post:
@@ -454,7 +454,7 @@ paths:
                 value: {type: string}
                 values: {type: object, description: "Record 45: every axis of an item that asks several, {axis: value | [values] | null}"}
                 nothing: {type: boolean, description: The axis has no value here}
-                member: {type: integer, description: One member of a grouped item, a stack id}
+                member: {type: integer, description: "One member of a grouped item, a stack id"}
                 scope: {type: string, enum: [stack, series, subject, origin], default: stack}
                 stage: {type: boolean, default: false}
                 author_kind: {type: string, enum: [person, agent, model], description: "Record 42 S1: the author is the verified actor (X-Nils-Actor as the token allows it; a person when there is none), never the body. A body may still say it, for an older client; one that says something else is refused with 403"}
@@ -465,7 +465,7 @@ paths:
         "200": {description: "{decision, axis, scope, ref, closed, members, staged, model: {id, name, version, digest, state} | null}"}
         "404": {description: "No review item, or no registered model answers to the one X-Nils-Actor names"}
         "403": {description: "The body names an author the verified actor is not, or the header asks for more than the token proves: a token acting for an agent cannot be made a person"}
-        "409": {description: Refused, with why}
+        "409": {description: "Refused, with why"}
   /api/review/{id}/accept:
     post:
       summary: Acknowledge an item without a decision (nils review accept)
@@ -582,7 +582,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [role, stacks, why], properties: {role: {type: string}, stacks: {type: array, items: {type: integer}}, why: {type: string}, pick: {type: string}, pack: {type: string}, scheme: {type: string}}}}}}
       responses:
         "201": {description: "{id, model, role, subject_id, session_day, stacks, overruled, replaced, answered}"}
-        "403": {description: No review:work, or an agent or a model acting for the principal}
+        "403": {description: "No review:work, or an agent or a model acting for the principal"}
         "409": {description: "Refused in words: a role no pick declares, a stack the fingerprint has not read, stacks of more than one subject or occasion, no why, or no pack served"}
   /api/picks/{id}/withdraw:
     post:
@@ -609,9 +609,9 @@ paths:
                 scheme: {type: string, description: A stored session scheme's name}
       responses:
         "202": {description: "{job, state: queued, for: cohort:NAME | dataset:NAME | registry, command}, the command as queued"}
-        "400": {description: Both a cohort and a dataset, or a name that is not text}
+        "400": {description: "Both a cohort and a dataset, or a name that is not text"}
         "403": {description: No pipelines:work}
-        "404": {description: No such cohort, dataset or stored scheme}
+        "404": {description: "No such cohort, dataset or stored scheme"}
         "409": {description: No pack of that name that declares picks is served}
   /api/picks/summary:
     get:
@@ -625,7 +625,7 @@ paths:
         "200": {description: "{dataset, dataset_id, picks: after_sort | off, subjects, scheme, roles: {role: {picked, clear, tied, borders: {reason: n}, review_items, subjects}}, review_items, last_run: {job, state, finished_at, report} | null}; added in place 2026-10-09, each role's `subjects`, the subjects with a pick that applies on at least one occasion, and with `cohort` {cohort, subjects, scheme, roles, review_items, last_run}"}
         "400": {description: No dataset or cohort named}
         "403": {description: Neither data:see nor pipelines:see}
-        "404": {description: No dataset of that name or id, or no cohort of that name}
+        "404": {description: "No dataset of that name or id, or no cohort of that name"}
   /api/timeline/{kind}/{id}:
     get:
       summary: Every event on one object in order, typed, each with the object it produced (Wave 5 section 12.2)
@@ -635,7 +635,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
         "200": {description: "{kind, id, count, events: [{at, kind, actor, summary, produced: {kind, id} | {kind, name, ...} | null, source}]}"}
-        "404": {description: Not a kind the door serves, or no object with that id}
+        "404": {description: "Not a kind the door serves, or no object with that id"}
   /api/depends/{kind}/{id}:
     get:
       summary: The closure of a change before it is made (Wave 5 section 12.4)
@@ -645,13 +645,13 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:
         "200": {description: "{kind, id, stacks: {count, sample: [up to fifty ids]}, review: {opens, closes}, handles: [{handle, name, reason}], releases: [{release, name, version}]}"}
-        "404": {description: Not a kind the door serves, or no object with that id}
+        "404": {description: "Not a kind the door serves, or no object with that id"}
         "409": {description: The overlay amends a pack this engine does not serve}
   /api/events:
     get:
       summary: Server-sent events with the open jobs and the epoch, every second, for display
       parameters:
-        - {name: all, in: query, schema: {type: boolean}, description: The queue's worker too, which the stream leaves out otherwise as GET /api/jobs leaves it out}
+        - {name: all, in: query, schema: {type: boolean}, description: "The queue's worker too, which the stream leaves out otherwise as GET /api/jobs leaves it out"}
       responses:
         "200": {description: "text/event-stream: an event hello, then jobs events, each open job as GET /api/jobs/{id} answers it, its `then` and `chain` included"}
   /api/ask/schema:
@@ -705,7 +705,7 @@ paths:
       summary: A set's typed moves with stable ids, templates and legal fillers; no query (Wave 4b section 10)
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, set: {type: string}}}}}}
       responses:
-        "200": {description: The options, with the token apply takes}
+        "200": {description: "The options, with the token apply takes"}
   /api/ask/apply:
     post:
       summary: Apply moves by id to a document handle, atomically; a handle comes back, never a document
@@ -748,13 +748,13 @@ paths:
         "200": {description: "{document, set, grain, count, subjects, sessions, epoch}"}
         "400": {description: The starting point does not resolve}
         "403": {description: "An uploaded list without query:work and detail quasi, or a handle beyond the caller's detail"}
-        "404": {description: No such selection, handle or document}
+        "404": {description: "No such selection, handle or document"}
   /api/ask/documents:
     get:
       summary: The documents, folded into lineages by their parent chain, newest first (Wave 5 section 12.1)
       parameters:
-        - {name: limit, in: query, schema: {type: integer, default: 100}, description: At most this many lineages, capped at page_rows_max}
-        - {name: after, in: query, schema: {type: integer}, description: Lineages whose latest document id is below this, for the next page}
+        - {name: limit, in: query, schema: {type: integer, default: 100}, description: "At most this many lineages, capped at page_rows_max"}
+        - {name: after, in: query, schema: {type: integer}, description: "Lineages whose latest document id is below this, for the next page"}
       responses:
         "200": {description: "{count, documents: [{document, root, name, grain, out, level, versions, author, created_at, updated_at, last_used_at, hash, last_run: {handle, at} | null}], next}"}
     post:
@@ -763,7 +763,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, parent: {type: integer, description: The id of the document this one follows}}}}}}
       responses:
         "200": {description: "{document, hash, digest, parent}"}
-        "400": {description: A document that is refused, or a parent that is not a document id}
+        "400": {description: "A document that is refused, or a parent that is not a document id"}
         "404": {description: No document with that parent id}
   /api/ask/documents/{id}:
     get:
@@ -778,8 +778,8 @@ paths:
       summary: The saved selections, by name, a page at a time (query:see; record 55 H2)
       description: "Every saved selection, in name order, after `after` and matching `q` (part of the name, any case). Each row: its id and name, `spec` (selection:NAME@V of the current version, as a campaign, a run or a pyramid job takes it), its description, `versions` (the current version's number; every version stays), the `grain` its current version answers at, `owner` (who made it) and `created_at`, `updated_at` and `updated_by` (when the current version was saved and by whom), the current version's `note`, `cohort` (the cohort whose source ask it is, or null), and `size`: what the newest answer that froze it whole says, an answer this caller may open (one with the stacks of a sealed sample or fields beyond the caller's detail is passed over), `{rows, grain, version, handle, at, truncated}`, or null where none was run. The grain of `size` is the answer's: a selection of subjects frozen for a campaign of stacks counts stacks."
       parameters:
-        - {name: limit, in: query, schema: {type: integer, default: 50}, description: At most this many, capped at page_rows_max}
-        - {name: after, in: query, schema: {type: string}, description: The name the page starts after, the last page's `next`}
+        - {name: limit, in: query, schema: {type: integer, default: 50}, description: "At most this many, capped at page_rows_max"}
+        - {name: after, in: query, schema: {type: string}, description: "The name the page starts after, the last page's `next`"}
         - {name: q, in: query, schema: {type: string}, description: Only names holding this text}
       responses:
         "200": {description: "{count, total, matching, selections: [{id, name, spec, description, versions, grain, owner, created_at, updated_at, updated_by, note, cohort, size: {rows, grain, version, handle, at, truncated} | null}], next: name | null}"}
@@ -794,6 +794,8 @@ paths:
         "409": {description: The name is a cohort's}
     get:
       summary: A selection's current version, or one named as name@version
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
       responses:
         "200": {description: The version with its document}
         "404": {description: No such selection}
@@ -802,7 +804,7 @@ paths:
       summary: The result handles this caller may open, newest first, within the caller's scope (Wave 4c section 7.4)
       parameters:
         - {name: withdrawn, in: query, schema: {type: boolean, default: false}, description: Include the withdrawn handles}
-        - {name: limit, in: query, schema: {type: integer, default: 100}, description: At most this many, capped at page_rows_max}
+        - {name: limit, in: query, schema: {type: integer, default: 100}, description: "At most this many, capped at page_rows_max"}
       responses:
         "200": {description: "{count, handles: [{id, name, grain, row_count, content_hash, principal, actor, created_at, epoch, pack_version, disclosure, truncated, limit, kept, last_read_at, withdrawn_at, ask_hash, columns, stale, invalidated}]}; since Wave 5 (section 12.8) `invalidated` says whether an adoption, a pack bump or an erasure named the handle, and `stale` whether the answer no longer reproduces (invalidated, or the registry moved on)"}
   /api/ask/handles/{id}:
@@ -826,11 +828,13 @@ paths:
         "200": {description: "{handle, page, pages, columns, rows}"}
         "409": {description: "The purpose is export, promote, release or pin and the answer does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order"}
         "403": {description: The handle holds fields beyond this caller's detail}
-        "404": {description: No such page, or the rows were dropped by retention}
+        "404": {description: "No such page, or the rows were dropped by retention"}
   /api/ask/handles/{id}/promote:
     post:
       summary: Promote a handle into a cohort, as a job (data:work since version 5; Wave 4b section 8.3, record 26 section 9)
       description: "A complete handle at subject, session or stack grain: the distinct subjects of its rows join, each interval recording the handle, its epoch, scheme digest, ask hash and selection version, and since version 5 the grain and the row count beside the parameters as bound. A cohort named that is a selection's name, or is retired, is refused by the job."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
       requestBody: {content: {application/json: {schema: {type: object, required: [cohort], properties: {cohort: {type: string}, create: {type: boolean}, reason: {type: string}}}}}}
       responses:
         "202": {description: "{job, state}"}
@@ -886,7 +890,7 @@ paths:
   /api/packs/{name}:
     get:
       summary: One pack, as nils pack show --json prints it (Wave 4c section 6.5; data:see)
-      description: Every axis in the order it is decided, with its values in the order they are tried. Each value carries its name and label, its family, whether the axis tries it, its keywords after any overlay, its terms (record 48: other names a person knows it by, display only, which no rule reads) and its description where the pack gives one, the bucket they came from, the list an overlay amends it by (axis.value, or null when no word reaches it), the detection clauses in words (the exclusive flag, the alternative flags, the flag combinations as a+b, the physics windows as written with their confidence and why), and site, the terms the registry's adopted overlays put on that list. Beside the axes, the flags count, the review thresholds (the default and per axis, the axes asked about when missing, whether some stacks are silent), the buckets, the lists a site may amend, site per list, and the adopted overlays. Added in place, additively, on 2026-10-09 by record 55 (H3, what is sent to Review): the thresholds say which answers are weak and no longer raise anything; `review.by_model` names the axes their own operation answers, about which a sort raises no question (the MRI pack's body part, body region and, by record 56 section 2, post-contrast); `review.matters` is {axis: [why]}, the axes that matter as the engine works them out from what reads them (the release's descriptive name and layout, the pack's BIDS mapping, its pick models and the axis a pick finds its candidates by, and what a release does with a stack); `review.asks_missing` the axes where a missing answer is a question: those that matter, hold one value, have no default and are not an image model's; and each axis's `asks_when_missing` says whether it is one of them, where it said the pack's `missing` list before (`review.missing`, still answered, is that list).
+      description: "Every axis in the order it is decided, with its values in the order they are tried. Each value carries its name and label, its family, whether the axis tries it, its keywords after any overlay, its terms (record 48: other names a person knows it by, display only, which no rule reads) and its description where the pack gives one, the bucket they came from, the list an overlay amends it by (axis.value, or null when no word reaches it), the detection clauses in words (the exclusive flag, the alternative flags, the flag combinations as a+b, the physics windows as written with their confidence and why), and site, the terms the registry's adopted overlays put on that list. Beside the axes, the flags count, the review thresholds (the default and per axis, the axes asked about when missing, whether some stacks are silent), the buckets, the lists a site may amend, site per list, and the adopted overlays. Added in place, additively, on 2026-10-09 by record 55 (H3, what is sent to Review): the thresholds say which answers are weak and no longer raise anything; `review.by_model` names the axes their own operation answers, about which a sort raises no question (the MRI pack's body part, body region and, by record 56 section 2, post-contrast); `review.matters` is {axis: [why]}, the axes that matter as the engine works them out from what reads them (the release's descriptive name and layout, the pack's BIDS mapping, its pick models and the axis a pick finds its candidates by, and what a release does with a stack); `review.asks_missing` the axes where a missing answer is a question: those that matter, hold one value, have no default and are not an image model's; and each axis's `asks_when_missing` says whether it is one of them, where it said the pack's `missing` list before (`review.missing`, still answered, is that list)."
       parameters:
         - {name: name, in: path, required: true, schema: {type: string}}
       responses:
@@ -952,7 +956,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}, owner: {type: string}, description: {type: string}}}}}}
       responses:
         "201": {description: "The cohort, as GET /api/cohorts/{name} answers it"}
-        "400": {description: No name, or not a name}
+        "400": {description: "No name, or not a name"}
         "409": {description: The name is a cohort's or a selection's}
   /api/cohorts/{name}:
     get:
@@ -968,7 +972,7 @@ paths:
       parameters: [{name: name, in: path, required: true, schema: {type: string}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, owner: {type: string}, description: {type: string, nullable: true}, retired: {type: boolean}}}}}}
       responses:
-        "200": {description: The cohort, as GET answers it}
+        "200": {description: "The cohort, as GET answers it"}
         "400": {description: A field that is not what it should be}
         "404": {description: No cohort so named}
         "409": {description: The new name is a cohort's or a selection's}
@@ -1063,7 +1067,7 @@ paths:
               type: object
               required: [columns, rows]
               properties:
-                place: {type: string, description: The dataset the map is for, by place name; recorded on the job, never a filter}
+                place: {type: string, description: "The dataset the map is for, by place name; recorded on the job, never a filter"}
                 columns:
                   type: array
                   items:
@@ -1073,16 +1077,16 @@ paths:
                       header: {type: string}
                       role: {type: string, enum: [identifier, canonical, code, ignore]}
                       id_type: {type: string, description: The type an identifier or canonical column files under}
-                rows: {type: array, items: {type: array, items: {type: [string, number, "null"]}}, description: At most 100,000 in one call, in the columns' order}
+                rows: {type: array, items: {type: array, items: {type: [string, number, "null"]}}, description: "At most 100,000 in one call, in the columns' order"}
                 dry_run: {type: boolean, default: false}
                 make_types: {type: boolean, default: false, description: Make the types the columns name that the store has not got; a conflict otherwise}
       responses:
         "200": {description: "The dry run's report: {rows, subjects: {named, known, new}, identifiers: {filed, known, new, types_new}, held_released, held_released_by: [{type, held_as, files}], merges: [{alias, canonical}], conflicts: [{row, why}], dry_run: true, written: false}. Added in place additively on 2026-10-09 (Wave 7a, the pseudonymise step): rehearsed for a dataset (`place`), also `held_ids: [{id, code, also_in}]`, each held identifier of that dataset the map names, by the row GET /api/linkage/held/ids gives it, with the code the map gives it (below detail quasi, as its shape) and the datasets that code's subject is in already"}
         "202": {description: "{job, state: queued, rows}; the job's result is the same report, written: true, or with the conflicts and the job failed"}
-        "400": {description: A column without a role or a type, a header named twice, more cells than columns, or a map with no identifier column}
-        "403": {description: The caller does not hold data:work, or applies the map below detail sensitive}
+        "400": {description: "A column without a role or a type, a header named twice, more cells than columns, or a map with no identifier column"}
+        "403": {description: "The caller does not hold data:work, or applies the map below detail sensitive"}
         "404": {description: No place of that name}
-        "413": {description: More than 100,000 rows in one call; a larger map goes in as a file under a registered location through POST /api/jobs}
+        "413": {description: "More than 100,000 rows in one call; a larger map goes in as a file under a registered location through POST /api/jobs"}
   /api/linkage/held:
     get:
       summary: The held files of a dataset, by shape (data:see)
@@ -1130,20 +1134,20 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [canonical, alias, why], properties: {canonical: {type: string, description: The canonical subject's code}, alias: {type: string, description: The alias subject's code}, why: {type: string, description: What shows they are one person; written to the audit}}}}}}
       responses:
         "202": {description: "{job, state: queued}"}
-        "400": {description: A code missing, the two the same, or no why}
+        "400": {description: "A code missing, the two the same, or no why"}
         "403": {description: The caller does not hold data:work at detail sensitive}
         "404": {description: No subject with one of the codes (gated)}
         "409": {description: One of the subjects was merged already (gated)}
   /api/classify/signals:
     get:
       summary: The classifier's own signals over a scope (Wave 4c section 6.6; review:see)
-      description: "Per axis over a batch, an origin or a pack version, how many stacks resolved at each tier, the confidence spread, the open review items by kind, the shadowed keywords, the unused overlay terms, and the terms that carried the most decisions that disagreed with the rules. And the same by value, so a person tuning one value's words sees what reaches it, with the origins of the scope for the scope chips. Bounded as before, at most twelve words per value and twelve origins per kind, two hundred values per axis. Since record 41 S4 (kineuro/nils#94) `unresolved_texts` samples the text each unresolved axis was matched against: over a bounded sample of the stacks in scope, the served pack's verdict on each, read with the overlay the site adopted for that pack last, since adopting it reclassified under it (`overlay` names it, null when none is adopted), and per axis, for the stacks it leaves axis_unresolved, the pack's own normalised search_text folded into distinct texts with the stacks each covers, the most common first and at most ten. A text is shown only when it covers at least five stacks of at least three distinct subjects in the sample (`shown_when`); the others are withheld, and the axis counts the texts and stacks it withheld. Counts and texts, never a stack; null when the engine serves no such pack. Record 48, D1 of the move: a stack of a sample sealed now is in no scope, and its classification adds nothing to the batch diagnostics."
+      description: "Per axis over a batch, an origin or a pack version, how many stacks resolved at each tier, the confidence spread, the open review items by kind, the shadowed keywords, the unused overlay terms, and the terms that carried the most decisions that disagreed with the rules. And the same by value, so a person tuning one value's words sees what reaches it, with the origins of the scope for the scope chips. Bounded as before, at most twelve words per value and twelve origins per kind, two hundred values per axis. Since record 41 S4 (kineuro/nils#94) `unresolved_texts` samples the text each unresolved axis was matched against: over a bounded sample of the stacks in scope, the served pack's verdict on each, read with the overlay the site adopted for that pack last, since adopting it reclassified under it (`overlay` names it, null when none is adopted), and per axis, for the stacks it leaves axis_unresolved, the pack's own normalised search_text folded into distinct texts with the stacks each covers, the most common first and at most ten. A text is shown only when it covers at least five stacks of at least three distinct subjects in the sample (`shown_when`); the others are withheld, and the axis counts the texts and stacks it withheld. Counts and texts, never a stack; null when the engine serves no such pack. Record 48, D1 of the move: a stack of a sample sealed now is in no scope, and its classification adds nothing to the batch diagnostics. Added in place, additively, on 2026-10-10 (kineuro/nils#94, the part that remained): `resolved_texts` samples the same for the axes the rules resolved, over the same sample, with the same overlay and under the same threshold: per axis, `stacks` the stacks the rules gave a value (a value the pack's default gave is none of theirs), and per value the search texts of the stacks resolved to it, folded, bounded and withheld as in `unresolved_texts`, each with `words`, the words the rules cited in it for that value, none where a flag, the physics or another axis decided; at most two hundred values per axis, the most common kept; null when the engine serves no such pack."
       parameters:
         - {name: scope, in: query, required: true, schema: {type: string}, description: "batch:<id> | origin:<name> | pack:<version>"}
-        - {name: pack, in: query, schema: {type: string}, description: "The pack whose verdict unresolved_texts reads, among those the engine serves; the ask's pack when not given"}
-        - {name: sample, in: query, schema: {type: integer, default: 2000, maximum: 20000}, description: "The most stacks unresolved_texts reads"}
+        - {name: pack, in: query, schema: {type: string}, description: "The pack whose verdict unresolved_texts and resolved_texts read, among those the engine serves; the ask's pack when not given"}
+        - {name: sample, in: query, schema: {type: integer, default: 2000, maximum: 20000}, description: "The most stacks unresolved_texts and resolved_texts read"}
       responses:
-        "200": {description: "The signals, per axis, plus by_value{axis: {value: {decided, by_flag, by_word, by_physics, unsure, shadowed[words], overrode_with[{word, count}]}}} (decided counts the rows that store the value whoever decided it; by_flag, by_word and by_physics the rows the rules decided by that kind of clause; unsure the stacks a person is still asked about on that axis; shadowed the words that matched on the way to it and were never cited, from the batch samples; overrode_with the words the rule cited on stacks a person then decided otherwise) and origins[{name, kind: manufacturer|model|station, stacks}], and unresolved_texts{pack, overlay, text, sample, read, complete, shown_when{stacks, subjects}, axes{axis: {stacks, distinct, texts[{text, stacks}], withheld{texts, stacks}}}} | null"}
+        "200": {description: "The signals, per axis, plus by_value{axis: {value: {decided, by_flag, by_word, by_physics, unsure, shadowed[words], overrode_with[{word, count}]}}} (decided counts the rows that store the value whoever decided it; by_flag, by_word and by_physics the rows the rules decided by that kind of clause; unsure the stacks a person is still asked about on that axis; shadowed the words that matched on the way to it and were never cited, from the batch samples; overrode_with the words the rule cited on stacks a person then decided otherwise) and origins[{name, kind: manufacturer|model|station, stacks}], and unresolved_texts{pack, overlay, text, sample, read, complete, shown_when{stacks, subjects}, axes{axis: {stacks, distinct, texts[{text, stacks}], withheld{texts, stacks}}}} | null, and resolved_texts{pack, overlay, text, sample, read, complete, shown_when{stacks, subjects}, axes{axis: {stacks, values{value: {stacks, distinct, texts[{text, stacks, words[]}], withheld{texts, stacks}}}}}} | null"}
   /api/classify/try:
     post:
       summary: A candidate overlay rehearsed over a sample, writing nothing (Wave 4c section 6.6; review:work)
@@ -1151,7 +1155,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [overlay, scope], properties: {overlay: {type: object, description: "{overlay, version, pack, scope, buckets?, lists?, cases}"}, scope: {type: string}, sample: {type: integer}}}}}}
       responses:
         "200": {description: "{moves[{axis, from, to, stacks}], review_items{close, open}, cases{passed, failed, failures}, sample{asked, read}, overlay, pack}"}
-        "400": {description: The overlay is refused, and the answer says why}
+        "400": {description: "The overlay is refused, and the answer says why"}
   /api/overlays:
     get:
       summary: The overlay objects (Wave 4c section 6.6; review:see)
@@ -1163,7 +1167,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [name, overlay, scope], properties: {name: {type: string}, overlay: {type: object, description: "{overlay, version, pack, scope, buckets?, lists?, cases}"}, scope: {type: string}, sample: {type: integer}, why: {type: string}}}}}}
       responses:
         "201": {description: "{overlay, review_item, status: proposed}"}
-        "400": {description: The overlay is refused, and the answer says why}
+        "400": {description: "The overlay is refused, and the answer says why"}
   /api/overlays/{id}:
     get:
       summary: One overlay with its try result (Wave 4c section 6.6)
@@ -1179,7 +1183,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
         "202": {description: "{job, overlay, status: adopted}"}
-        "409": {description: A lower author than the one who decided, or not proposed}
+        "409": {description: "A lower author than the one who decided, or not proposed"}
   /api/ingest/probe:
     post:
       summary: Candidate identity rules probed over a sample of a pre-registered ingest location, as a job, shapes only (Wave 4c section 6.6; data:work)
@@ -1193,17 +1197,17 @@ paths:
       description: "Without `at`: {at: null, roots: [{name, path, given, originals, place: {name, role} | null}], timed_out}, the ingest locations the engine was started with, sources first and then by name, each with the place in force that holds it (a source place before any other, then the nearest). Since version 5 `path` is where @name points, the pseudonymised tree of the dataset declared on the location or the folder itself, `given` the folder the engine was started with, and `originals` the dataset's originals or null, which @name/originals names. With `at`, a folder named as @root/relative the way a queued digest names it: {at, root, rel, path, parent, exists, directory, readable, place, folders: [{name, readable, place}], next, total, files: {count, more}, partial, timed_out}. Nothing outside the ingest locations is listed: an unknown location, a parent step, a leading slash, and a path whose real path, links followed, leaves its location are refused; a folder that is not there says exists false, and a file says directory false. Each entry's type is read from the directory itself and links are left out, as the digest leaves them out. The folders are sorted by name without regard to case; `filter` keeps those whose name holds it, without regard to case; a page holds the folders after the name `after`, `limit` of them (200 when absent, at most 1,000), and `next` names the last of the page when more remain. `total` counts the folders that hold the filter once the folder was read to its end, and is null otherwise. Files are counted to 10,000 and `more` says there were more; a folder is read to 500,000 entries and `partial` says it held more. A folder's names are kept for a minute while the folder does not change, so the next page does not read it again. The disk is read for at most five seconds; past them `timed_out` is true and the answer holds the folders read by then, each with `readable` null."
       requestBody: {content: {application/json: {schema: {type: object, properties: {at: {type: string, description: "@root/relative"}, filter: {type: string}, after: {type: string}, limit: {type: integer, minimum: 1, maximum: 1000, default: 200}}}}}}
       responses:
-        "200": {description: The ingest locations, or a page of the folders inside the folder}
-        "400": {description: An unknown location, or a path that steps outside its location}
+        "200": {description: "The ingest locations, or a page of the folders inside the folder"}
+        "400": {description: "An unknown location, or a path that steps outside its location"}
         "403": {description: Without data:work}
   /api/ingest/look:
     post:
       summary: What a folder of an ingest location holds directly, and what a sample of sixteen files of each folder inside it is, within a budget, for the desk's picker (data:work)
       description: "{at, root, rel, path, exists, directory, readable, layout: {v0: {original_files, raw_files, partial, renamed} | null, originals, anon, loose} | null, here: {sampled, dicom, modalities, scanners, files: {count, more}} | null, folders: [{name, looked: true, sampled, dicom, modalities, scanners, files: {count, more}} | {name, looked: false}], timed_out}. `at` is named and kept inside its location as the folders door keeps it. Since version 5 a call may give `path` instead, the absolute path of a folder on the engine's host under no location, which is how the desk looks at a folder before a dataset is declared on it: the layout look and the sampled look are the same and bounded the same way, the answer names no location (`at`, `root` and `rel` null), and a path that is not absolute or that steps through `..` is refused. A call gives one of the two and is refused naming both when it gives neither. Since version 5 `layout` says what a dataset declared on the folder would find (record 26): `v0` when the folder holds derivatives/dcm-raw, a v0 cohort folder, with the files of derivatives/dcm-original and of dcm-raw counted by a bounded walk (`partial` when it stopped short) and `renamed` false since nothing is renamed here; `originals` and `anon` whether derivatives/dcm-original and derivatives/dcm-anon are there; `loose` how many top-level entries sit beside derivatives/. `names` are folders directly inside it, at most 64; when absent, the first 64 in the order the folders door lists them. `here` is the files directly inside `at`. Each folder named is read breadth first, at most 2,000 entries of a directory and 20,000 of the folder, a few files taken from each directory until sixteen are, and those are sniffed: only the equipment fields of a header are read, never a person's, and links are not followed. `modalities` counts the sampled DICOM files by modality and `scanners` counts the scanners among them. The folders share `budget_ms` (8,000 when absent, at most 20,000) fairly, each given a quarter second at least; a folder the budget did not reach says looked false and nothing else, so it can be asked for again, and a name that is not a folder there says directory false. `files` counts the files the look read, to 10,000, and `more` says it left some unread. The answer comes within the budget and two seconds more; past them `timed_out` is true, with what was looked at by then."
-      requestBody: {content: {application/json: {schema: {type: object, properties: {at: {type: string}, path: {type: string, description: An absolute path on the engine's host, for a folder under no location}, names: {type: array, maxItems: 64, items: {type: string}}, budget_ms: {type: integer, minimum: 1, maximum: 20000, default: 8000}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {at: {type: string}, path: {type: string, description: "An absolute path on the engine's host, for a folder under no location"}, names: {type: array, maxItems: 64, items: {type: string}}, budget_ms: {type: integer, minimum: 1, maximum: 20000, default: 8000}}}}}}
       responses:
         "200": {description: What the folder and the folders named hold}
-        "400": {description: Neither at nor path, an unknown location, a path that steps outside it or is not absolute, a name that is not one folder's own, or more than 64 names}
+        "400": {description: "Neither at nor path, an unknown location, a path that steps outside it or is not absolute, a name that is not one folder's own, or more than 64 names"}
         "403": {description: Without data:work}
   /api/supervise/capabilities:
     get:
@@ -1220,7 +1224,7 @@ paths:
       responses:
         "200": {description: "{applied: {at, part, from, to, digest, ok, why}, by}"}
         "404": {description: Not a part this supervisor manages}
-        "409": {description: The verifier's or the settle's named reason, or an update already running}
+        "409": {description: "The verifier's or the settle's named reason, or an update already running"}
   /api/supervise/log:
     get:
       summary: Every apply and every refusal, one row each (Wave 5 section 10.4)
@@ -1281,7 +1285,7 @@ paths:
       description: "With a path: {path, parent, exists, directory, readable, mount, folders: [{name, readable, hidden, link, mount, unmounted}], files, partial, timed_out}. `mount` is {point, fs, source, network, free_bytes, total_bytes}: the disk the folder is on, or, for a folder inside, the disk mounted at it. `unmounted` is {fs, source, network}: a disk /etc/fstab names for a folder inside that nothing is mounted for. `readable` says whether the supervisor's account may open the folder, `link` that it is a link to a folder, and `hidden` that its name starts with a dot. At most 500 folders are listed and 10,000 files counted, and `partial` says there were more. Without a path: {path: null, roots: [{path, kind: root | home | mount | fstab, mount, unmounted}], timed_out}, the root, the supervisor's home folder, every disk mounted that holds data, then every disk /etc/fstab names that is not mounted. The disk is read for at most five seconds, since the supervisor serves one call at a time; past them `timed_out` is true and the answer holds only what was known without the disk, with exists, directory and readable null."
       requestBody: {content: {application/json: {schema: {type: object, properties: {path: {type: string}}}}}}
       responses:
-        "200": {description: The folders inside the folder, or where a browser starts}
+        "200": {description: "The folders inside the folder, or where a browser starts"}
         "400": {description: A path that is not absolute}
   /api/derivatives:
     get:
@@ -1334,8 +1338,8 @@ paths:
       responses:
         "200": {description: "The file, or with transport=share the path it is read at"}
         "400": {description: A transport that is neither door nor share}
-        "403": {description: No pipelines:see, or below detail quasi}
-        "404": {description: No such derivative, or its file is not in its place}
+        "403": {description: "No pipelines:see, or below detail quasi"}
+        "404": {description: "No such derivative, or its file is not in its place"}
         "409": {description: "Its place is retired or gone, its file is not the size registered, or transport=share and its place declares no share path"}
   /api/pipelines:
     get:
@@ -1367,7 +1371,7 @@ paths:
       summary: The pipeline runs, newest first (record 43 S2; nils pipeline runs)
       description: "Each as GET /api/pipeline-runs/{id} answers it. pipelines:see. A caller below detail quasi reads no unit named by its subject or session (`sub-<s>`, `sub-<s>_ses-<t>`): each such text is null, in this listing and in one run."
       parameters:
-        - {name: pipeline, in: query, schema: {type: integer}, description: One catalog entry's runs, by its id}
+        - {name: pipeline, in: query, schema: {type: integer}, description: "One catalog entry's runs, by its id"}
         - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 500}, description: "At most 500 a page"}
       responses:
         "200": {description: "{runs: [...], limit}"}
@@ -1403,7 +1407,7 @@ paths:
       responses:
         "200": {description: The plane's tiles in one container}
         "403": {description: Below the disclosure class (gated)}
-        "404": {description: No such stack, no such level, or a plane past the stack}
+        "404": {description: "No such stack, no such level, or a plane past the stack"}
         "202": {description: "Record 55 H2: the stack has no pyramid yet, and its build is queued (by this call, or before it) or running: {stack, building: true, job, state: queued | running | cancelling, progress, place, retry_after, retry_after_ms, message}, with `Retry-After` in seconds; the reader asks again then (added in place 2026-10-09: `retry_after_ms`, 250 while the build is young, 500 after two seconds, 1000 after six; the manifest door holds the request up to three seconds while the build runs and answers 200 as it ends). The door queues `pyramid build --stack ID --place NAME` under the caller's principal and detail, one per stack however many tiles are asked at once"}
         "422": {description: "Record 55 H2: the stack's build failed: {error, stack, building: false, job, reason}, reason the class of why (no_files, compressed, undecodable, unsupported_pixels, mixed_matrix, unreadable, build_failed); the door does not queue it again, `pyramid build --stack ID` at the jobs door does"}
   /api/instances/{stack}/slab/{level}/{z0}-{z1}:
@@ -1416,11 +1420,11 @@ paths:
         - {name: z0, in: path, required: true, schema: {type: integer}}
         - {name: z1, in: path, required: true, schema: {type: integer}}
       responses:
-        "200": {description: The slab's planes, each a container of tiles}
+        "200": {description: "The slab's planes, each a container of tiles"}
         "403": {description: Below the disclosure class (gated)}
         "202": {description: "Record 55 H2: the stack has no pyramid yet, and its build is queued (by this call, or before it) or running: {stack, building: true, job, state: queued | running | cancelling, progress, place, retry_after, retry_after_ms, message}, with `Retry-After` in seconds; the reader asks again then (added in place 2026-10-09: `retry_after_ms`, 250 while the build is young, 500 after two seconds, 1000 after six; the manifest door holds the request up to three seconds while the build runs and answers 200 as it ends). The door queues `pyramid build --stack ID --place NAME` under the caller's principal and detail, one per stack however many tiles are asked at once"}
         "422": {description: "Record 55 H2: the stack's build failed: {error, stack, building: false, job, reason}, reason the class of why (no_files, compressed, undecodable, unsupported_pixels, mixed_matrix, unreadable, build_failed); the door does not queue it again, `pyramid build --stack ID` at the jobs door does"}
-        "416": {description: More than thirty-two planes, or past the stack}
+        "416": {description: "More than thirty-two planes, or past the stack"}
   /api/instances/{stack}/render/{level}/{z}:
     get:
       summary: One plane with window and level applied, as JPEG (Wave 5 section 12.7)
@@ -1435,7 +1439,7 @@ paths:
       responses:
         "200": {description: "image/jpeg"}
         "403": {description: Below detail quasi the pixels do not open (gated)}
-        "404": {description: No such stack, or no such level}
+        "404": {description: "No such stack, or no such level"}
         "202": {description: "Record 55 H2: the stack has no pyramid yet, and its build is queued (by this call, or before it) or running: {stack, building: true, job, state: queued | running | cancelling, progress, place, retry_after, retry_after_ms, message}, with `Retry-After` in seconds; the reader asks again then (added in place 2026-10-09: `retry_after_ms`, 250 while the build is young, 500 after two seconds, 1000 after six; the manifest door holds the request up to three seconds while the build runs and answers 200 as it ends). The door queues `pyramid build --stack ID --place NAME` under the caller's principal and detail, one per stack however many tiles are asked at once"}
         "422": {description: "Record 55 H2: the stack's build failed: {error, stack, building: false, job, reason}, reason the class of why (no_files, compressed, undecodable, unsupported_pixels, mixed_matrix, unreadable, build_failed); the door does not queue it again, `pyramid build --stack ID` at the jobs door does"}
   /api/instances/{stack}/thumb:
@@ -1564,10 +1568,10 @@ paths:
       description: "The path is probed on creation. The registry role is refused (409) on a place whose guarantees name no backup place, or name one that is not a backup place; the rules of section 10.2 are checked here and at every path-taking door, not documented. Since version 5 a source place is a dataset (record 26) and the body may declare it: `arrives` (identified, deidentified or coded; deidentified when not said), `identity` (the rule's identity block, as nils digest --identity-rule reads a file's, or null), `unmapped` (hold or code; hold for identified arrivals, code otherwise), `cohort` (a name or null), `tags` ({keep_demographics: true unless said, remove: [gggg,eeee], keep: [gggg,eeee]}), and `move_into_anon: true`. Any of these needs data:work beside places:work and is refused (400) on another role. `originals_kept` and `originals_vault` are not among them: they say what an act did to the originals, the acts on /api/places/{id}/originals write them, and a body naming either is refused (400) in words naming the act that sets it, since a dataset declared `purged` while its identified files sit on disk would have every page say they are gone. Declaring a source place looks at its folder, whatever was given: derivatives/dcm-raw, a v0 cohort folder's, is renamed derivatives/dcm-anon and nothing else is rewritten; derivatives/dcm-original and derivatives/dcm-anon are recognised as the trees; when the data arrives identified, the loose entries beside derivatives/ are moved into derivatives/dcm-original and an empty derivatives/dcm-anon is made; when it arrives deidentified or coded and `move_into_anon` is true, the loose entries are moved into derivatives/dcm-anon; with neither layout and nothing moved the folder itself is the pseudonymised tree. Every move is a rename inside the folder, top-level entries only, the one write the engine makes under a source place beside the pseudonymiser's. A folder that is a tree of another dataset is refused (409), as is a folder holding both dcm-raw and dcm-anon. The answer carries `layout` ({v0: {original_files, raw_files, partial, renamed} | null, originals, anon, loose}), and the place's `dataset` with its trees counted. `handling.arrives` stands for `arrives` for a caller from before. Since Wave 7a a source place's folder is a root unless it holds derivatives/ (a dataset) or names a dataset's derivatives/dcm-raw or dcm-anon (legacy); adding a root adds the root alone. A folder under a root becomes a dataset with {role: source, root, folder} (or a path under a root, and `name` optional), and only then is its structure read: `dataset.state` is identified, anonymised, both or unknown, `arrives` is refused (400), and an unknown dataset's entries move only with `move_into` (originals or anon) and `confirm_move: true`, else 409 with `layout` and `confirm`."
       requestBody: {content: {application/json: {schema: {type: object, required: [name, role, path], properties: {name: {type: string}, role: {type: string}, path: {type: string}, guarantees: {type: object}, handling: {type: object, description: "How what leaves is handled: {arrives: identified|deidentified|coded, on_release: {uids: remap|preserve, deface: boolean}}; a key not given takes its default. Since record 38 S3 the dates are not a choice: on_release.dates keep, from a caller from before, is taken and not stored, and shift or year is refused (400); a handling stored before is read without it (migration 50). arrives lives on the dataset since version 5 and is mirrored here"}, arrives: {type: string, enum: [identified, deidentified, coded]}, identity: {type: object, nullable: true}, unmapped: {type: string, enum: [hold, code]}, cohort: {type: string, nullable: true}, tags: {type: object}, move_into_anon: {type: boolean}}}}}}
       responses:
-        "201": {description: The place, with `layout`}
-        "400": {description: A missing name, an unknown role, a relative path, a dataset field that is not one or on a place that is not a source}
-        "403": {description: Without places:work, or a dataset field without data:work}
-        "409": {description: The name is taken, the registry role has no backup place, the folder is a tree of another dataset, or the folder could not be arranged}
+        "201": {description: "The place, with `layout`"}
+        "400": {description: "A missing name, an unknown role, a relative path, a dataset field that is not one or on a place that is not a source"}
+        "403": {description: "Without places:work, or a dataset field without data:work"}
+        "409": {description: "The name is taken, the registry role has no backup place, the folder is a tree of another dataset, or the folder could not be arranged"}
   /api/places/{id}:
     put:
       summary: Change a place's path or guarantees, a dataset's fields, or retire it (Wave 5 section 10.2; places:work, and data:work for the dataset fields)
@@ -1576,11 +1580,11 @@ paths:
         - {name: id, in: path, required: true, schema: {type: integer}}
       requestBody: {content: {application/json: {schema: {type: object, properties: {path: {type: string}, guarantees: {type: object}, handling: {type: object}, retired: {type: boolean}, arrives: {type: string}, identity: {type: object, nullable: true}, unmapped: {type: string}, cohort: {type: string, nullable: true}, tags: {type: object}, move_into_anon: {type: boolean}}}}}}
       responses:
-        "200": {description: The place, with `layout` when the folder was looked at}
-        "400": {description: A handling or a dataset field that is not one, with the choices, or a dataset field on a place that is not a source}
-        "403": {description: Without places:work, or a dataset field without data:work}
+        "200": {description: "The place, with `layout` when the folder was looked at"}
+        "400": {description: "A handling or a dataset field that is not one, with the choices, or a dataset field on a place that is not a source"}
+        "403": {description: "Without places:work, or a dataset field without data:work"}
         "404": {description: No such place}
-        "409": {description: The registry role would lose its backup, or the folder could not be arranged}
+        "409": {description: "The registry role would lose its backup, or the folder could not be arranged"}
   /api/places/{id}/folders:
     get:
       summary: A page of a source root's folders, found by name (Wave 7a; data:see or places:see)
@@ -1592,7 +1596,7 @@ paths:
         - {name: after, in: query, required: false, schema: {type: string}}
       responses:
         "200": {description: "{root, root_id, path, q, matching, count, folders: [{name, path, added, dataset_id, dataset}], next}"}
-        "400": {description: The place is not a source root, or the limit is out of range}
+        "400": {description: "The place is not a source root, or the limit is out of range"}
         "404": {description: No such place}
         "409": {description: The root's folder cannot be listed}
   /api/places/{id}/folders/{name}:
@@ -1604,8 +1608,8 @@ paths:
         - {name: name, in: path, required: true, schema: {type: string}}
       responses:
         "200": {description: "{name, path, added, dataset_id, dataset, holds_dicom, has_derivatives, layout}"}
-        "400": {description: The place is not a source root, or the name is no folder's name}
-        "404": {description: No such place, or no such folder under the root}
+        "400": {description: "The place is not a source root, or the name is no folder's name"}
+        "404": {description: "No such place, or no such folder under the root"}
   /api/places/{id}/originals:
     get:
       summary: What a vault or a purge of a dataset's originals would do, without doing it (record 26 section 1; data:see)
@@ -1662,7 +1666,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {timezone: {type: string}, week_start: {type: string, enum: ["monday", "sunday", "saturday"]}}}}}}
       responses:
         "200": {description: "The calendar, as GET /api/settings says it"}
-        "400": {description: A timezone this engine does not know, or a day a week does not start on}
+        "400": {description: "A timezone this engine does not know, or a day a week does not start on"}
   /api/campaigns:
     get:
       summary: Every campaign, newest first, each with its counts (record 42 S5; campaigns:see)
@@ -1694,9 +1698,9 @@ paths:
                 inputs: {type: object}
       responses:
         "201": {description: "The campaign as GET /api/campaigns/{id} names it, and `pictures` {stacks, have, missing, place, build?}: how many of the stacks its items stand on have their pyramid in the working place (record 45 E1), and, where some are missing and the campaign pins a handle, `build`, the command line of the job that builds them (`pyramid build --handle <id>`), for POST /api/jobs"}
-        "400": {description: A question, a source, an adjudication or a close that does not fit}
-        "403": {description: Without campaigns:work, or without query:see for a selection}
-        "404": {description: No such selection, handle or review item}
+        "400": {description: "A question, a source, an adjudication or a close that does not fit"}
+        "403": {description: "Without campaigns:work, or without query:see for a selection"}
+        "404": {description: "No such selection, handle or review item"}
         "409": {description: "A campaign of that name exists, a review item is asked by an open campaign already, or an axes question where no pack is served"}
   /api/campaigns/{id}:
     get:
@@ -1735,8 +1739,8 @@ paths:
       responses:
         "200": {description: The candidates}
         "400": {description: The item is a stack's}
-        "403": {description: Below detail quasi, or without campaigns:see}
-        "404": {description: No such campaign, or no such item in it}
+        "403": {description: "Below detail quasi, or without campaigns:see"}
+        "404": {description: "No such campaign, or no such item in it"}
   /api/campaigns/{id}/claim:
     post:
       summary: Claim the next item under a lease (record 42 S5; campaigns:work)
@@ -1748,7 +1752,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {role: {type: string, enum: [rater, adjudicator], default: rater}, order: {type: string, enum: [position, value], default: position}, alone: {type: boolean, default: false}}}}}}
       responses:
         "200": {description: "{assignment, item, held, next, ahead}, or {assignment: null, item: null, why} when nothing is left for the caller. Added in place by record 48 (the post-contrast reading): a rater's `ahead` lists up to five items, [{item, position, stacks}], that claims in the same order would offer after this one as it stands now, each with the stacks a reader shows for it (the item's stack, an anchored item's panels in their order, a pair's left then right) and nothing else of them, so a page warms their pictures; `next` is its first as {item, stack}; hints, nothing is held for them"}
-        "400": {description: An order that is not position or value, or an alone that is not a boolean}
+        "400": {description: "An order that is not position or value, or an alone that is not a boolean"}
         "403": {description: The campaign names its raters or adjudicators and the caller is not one}
         "409": {description: The campaign is closed}
   /api/campaigns/{id}/assignments/{assignment}/answer:
@@ -1773,9 +1777,8 @@ paths:
         "200": {description: "{answer, item, state, adjudication}: the item's state after it, and the adjudicator assignment it opened, if any"}
         "400": {description: "An answer that does not fit the question, or a model acting that names no registered model"}
         "403": {description: Another principal's assignment}
-        "404": {description: "No registered model answers to the one X-Nils-Actor names"}
-        "404": {description: No such assignment in this campaign}
-        "409": {description: The lease ran out, the assignment is not leased, or the campaign is closed}
+        "404": {description: "No such assignment in this campaign, or no registered model answers to the one X-Nils-Actor names"}
+        "409": {description: "The lease ran out, the assignment is not leased, or the campaign is closed"}
   /api/campaigns/{id}/assignments/{assignment}/release:
     post:
       summary: Give a claimed item back unanswered (record 42 S5; campaigns:work)
@@ -1784,7 +1787,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {name: assignment, in: path, required: true, schema: {type: integer}}
       responses:
-        "200": {description: The assignment, released}
+        "200": {description: "The assignment, released"}
         "403": {description: Another principal's assignment}
         "409": {description: The assignment is not leased}
   /api/campaigns/{id}/items/{item}/metric:
@@ -1797,7 +1800,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [value], properties: {name: {type: string, default: external}, value: {type: number}}}}}}
       responses:
         "200": {description: "{item, state, adjudication}"}
-        "409": {description: The campaign measures agreement itself, or the item's raters have not all answered}
+        "409": {description: "The campaign measures agreement itself, or the item's raters have not all answered"}
   /api/campaigns/{id}/close:
     post:
       summary: Close a campaign (record 42 S6; campaigns:work and review:work)
@@ -1870,7 +1873,7 @@ paths:
       responses:
         "200": {description: The evidence line and the suggestion}
         "400": {description: The item is a session's}
-        "404": {description: No such campaign, or no such item in it}
+        "404": {description: "No such campaign, or no such item in it"}
   /api/campaigns/{id}/items/{item}/header:
     get:
       summary: The whole stored header of an item's stack, less what names a person (record 48; campaigns:see)
@@ -1881,7 +1884,7 @@ paths:
       responses:
         "200": {description: The stored header}
         "400": {description: The item is a session's}
-        "404": {description: No such campaign or item, or the stack is not in the registry}
+        "404": {description: "No such campaign or item, or the stack is not in the registry"}
         "409": {description: "The campaign was made to show the pictures alone (hide_header): no text of the header is served"}
   /api/campaigns/{id}/items/{item}/derive:
     post:
@@ -1893,9 +1896,9 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {value: {oneOf: [{type: object}, {type: string}]}}}}}}
       responses:
         "200": {description: The derived axes}
-        "400": {description: The value is not an object, or the item is a session's}
+        "400": {description: "The value is not an object, or the item is a session's"}
         "404": {description: No such campaign or item}
-        "409": {description: The question derives nothing, or the stack has no fingerprint}
+        "409": {description: "The question derives nothing, or the stack has no fingerprint"}
   /api/campaigns/{id}/combinations:
     get:
       summary: How common each combination of an axes question's answered axes is across the registry (record 48, the reader's search; campaigns:see)
@@ -1957,7 +1960,7 @@ paths:
                 source: {type: string}
                 dry_run: {type: boolean}
       responses:
-        "200": {description: What was brought in, as counts}
+        "200": {description: "What was brought in, as counts"}
         "400": {description: "Neither suggestions nor tsv, a file whose first line names no column to match or no value, an author that is not a word, or a question that is not an axis or axes question"}
         "403": {description: Not the campaign's maker nor a holder of review:work}
         "409": {description: "The campaign is not open, or was not made to suggest imported"}
@@ -1990,7 +1993,7 @@ paths:
       responses:
         "200": {description: What was accepted}
         "400": {description: "No answers, a value the question does not take, a body that says what is the engine's, or a question with more than one axis"}
-        "404": {description: No such campaign, or an item not in it}
+        "404": {description: "No such campaign, or an item not in it"}
         "409": {description: "An item of a sealed sample, or one held back to be read alone"}
   /api/campaigns/{id}/mine:
     get:
@@ -2002,7 +2005,7 @@ paths:
         - {name: limit, in: query, schema: {type: integer, default: 200, maximum: 1000}}
       responses:
         "200": {description: The caller's answers}
-        "404": {description: No such campaign, or not one of the caller's}
+        "404": {description: "No such campaign, or not one of the caller's"}
   /api/campaigns/{id}/answers/{answer}/amend:
     post:
       summary: Correct one's own answer while the campaign is open (record 48, after the first gold campaign; campaigns:work)
@@ -2025,7 +2028,7 @@ paths:
         "200": {description: The correction}
         "400": {description: "A value the question does not take, or a body that says what is the engine's"}
         "403": {description: Another's answer}
-        "404": {description: No such campaign, or no such answer in it}
+        "404": {description: "No such campaign, or no such answer in it"}
         "409": {description: "The campaign is not open, the answer was corrected already, or its item went to an adjudicator"}
   /api/campaigns/{id}/raters:
     post:
@@ -2042,9 +2045,9 @@ paths:
                 remove: {oneOf: [{type: string}, {type: array, items: {type: string}}]}
       responses:
         "200": {description: The raters now}
-        "400": {description: Nothing named, or one principal both added and removed}
+        "400": {description: "Nothing named, or one principal both added and removed"}
         "403": {description: Neither the campaign's maker nor a holder of review:work}
-        "404": {description: No such campaign, or not one of the caller's}
+        "404": {description: "No such campaign, or not one of the caller's"}
         "409": {description: "The campaign is not open, names no raters, or would be left with none"}
   /api/campaigns/{id}/stats:
     get:
@@ -2061,7 +2064,7 @@ paths:
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: How the campaign goes}
-        "404": {description: No such campaign, or not one of the caller's}
+        "404": {description: "No such campaign, or not one of the caller's"}
         "409": {description: The campaign settles no candidates}
   /api/campaigns/{id}/ab/decisions:
     get:
@@ -2070,7 +2073,7 @@ paths:
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: The decisions}
-        "404": {description: No such campaign, or not one of the caller's}
+        "404": {description: "No such campaign, or not one of the caller's"}
         "409": {description: The campaign settles no candidates}
   /api/campaigns/{id}/items/{item}/ab:
     get:
@@ -2082,7 +2085,7 @@ paths:
       responses:
         "200": {description: The sheet}
         "403": {description: The caller holds no assignment of the item}
-        "404": {description: No such item, or no candidates for it}
+        "404": {description: "No such item, or no candidates for it"}
         "409": {description: The campaign settles no candidates}
   /api/campaigns/{id}/answers/{answer}/cause:
     post:

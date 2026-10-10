@@ -97,6 +97,8 @@ fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
         "decision",
         "stack",
         "diagnostic",
+        "instance",
+        "series",
     ] {
         text = text.replace(&format!("{{{t}}}"), &reg.store().qualified(t));
     }
@@ -1131,14 +1133,16 @@ cases:
     }
 }
 
-/// A phase-contrast study, as the archive writes one: a series whose echo
-/// number varies per image, so every stack holds one image, and an echo time
-/// of 0.0, which is the scanner saying it has nothing to say (record 35, S4).
-/// Beside it, the same split over a series whose stacks hold two images each,
-/// which is what an ordinary multi-echo acquisition looks like.
+/// A split that leaves one image in every stack: a series of six echoes of
+/// one slice, each echo stating its echo time, so every stack holds one
+/// image; beside it the same split over two slices, whose stacks hold two
+/// images each. And the phase-contrast study as the archive writes one, whose
+/// echo number counts its frames under an echo time of 0.0, the scanner
+/// saying it has nothing to say (record 35, S4): since wave 7a the digest
+/// makes that one stack.
 fn flow_tree() -> TempDir {
     let dir = TempDir::new("classify-flow");
-    let write = |series: &str, echo: u32, instance: &str, file: &str| {
+    let write = |series: &str, echo: u32, instance: &str, te: &str, file: &str| {
         let sop = format!("A.{series}.{echo}.{instance}");
         let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
         e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
@@ -1148,16 +1152,18 @@ fn flow_tree() -> TempDir {
             elem(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
             elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
             elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
-            elem(tags::ECHO_TIME, VR::DS, "0.0"),
+            elem(tags::ECHO_TIME, VR::DS, te),
             elem(tags::REPETITION_TIME, VR::DS, "30.0"),
             elem(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
         ]);
         dir.file(file, &synth::part10(&MetaFields::mr(&sop), &e, true));
     };
     for echo in 1..=6 {
-        write("1", echo, "1", &format!("one/{echo}"));
-        write("2", echo, "1", &format!("two/{echo}-1"));
-        write("2", echo, "2", &format!("two/{echo}-2"));
+        let te = format!("{}", 2 * echo);
+        write("1", echo, "1", &te, &format!("one/{echo}"));
+        write("2", echo, "1", &te, &format!("two/{echo}-1"));
+        write("2", echo, "2", &te, &format!("two/{echo}-2"));
+        write("3", echo, "1", "0.0", &format!("flow/{echo}"));
     }
     dir
 }
@@ -1176,7 +1182,9 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
                 .unwrap();
 
-        // The split fired on both series, and the reason is the echo number.
+        // The split fired on the two series that state their echo times, and
+        // the reason is the echo; the flow study is one stack, whose echo
+        // time is a zero the file carries, not an absence.
         assert_eq!(
             one(
                 &mut reg,
@@ -1185,13 +1193,15 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             12,
             "{name}"
         );
-        // The echo time is a zero the file carries, not an absence.
         assert_eq!(
-            one(
+            rows(
                 &mut reg,
-                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE echo_time = 0"
-            ),
-            12,
+                "SELECT n_instances, stacks_in_series FROM {stack_fingerprint} WHERE echo_time = 0"
+            )
+            .iter()
+            .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+            .collect::<Vec<_>>(),
+            [(6, 1)],
             "{name}"
         );
 
@@ -1206,7 +1216,8 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             "{name}"
         );
         // The note, on the six stacks of the series the split left holding
-        // one image and on none of the six whose stacks hold two.
+        // one image, on none of the six whose stacks hold two, and not on the
+        // flow study, which is no longer split.
         assert_eq!(report.split_notes, 6, "{name}");
         let noted = rows(
             &mut reg,
@@ -1235,12 +1246,13 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
         }
         assert_eq!(with_note, 6, "{name}");
 
-        // And a zero echo time decided nothing: not one of the twelve is
-        // called an anatomical T1w on the strength of it.
+        // And a zero echo time decided nothing: the flow study is not called
+        // an anatomical T1w on the strength of it.
         assert_eq!(
             one(
                 &mut reg,
-                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base'"
+                "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
+                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.echo_time = 0"
             ),
             0,
             "{name}: a zero echo time is not a short one"
@@ -1249,6 +1261,123 @@ fn a_split_that_leaves_one_image_in_every_stack_is_noted_and_not_asked() {
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// The ruling of 2026-10-09 for the fold: the stack a fold keeps is judged
+/// anew. A registry holding the flow study as the split left it, one stack
+/// per frame, and sorted so, folds on a re-read of one of its files; the
+/// next sort judges the one stack that stays with all six frames, and notes
+/// no split on it.
+#[test]
+fn a_stack_a_fold_keeps_is_judged_anew_by_the_next_sort() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_tree();
+        let mut reg = prepare(&lab, &dir);
+        // the flow study as the split left it: a stack per frame
+        let first = one(
+            &mut reg,
+            "SELECT s.id FROM {stack} s JOIN {series} se ON se.id = s.series_id \
+             WHERE se.series_instance_uid = 'A.3'",
+        );
+        for echo in 2..=6 {
+            rows(
+                &mut reg,
+                &format!(
+                    "INSERT INTO {{stack}} (series_id, stack_index, stack_key, modality, \
+                     orientation, image_type, echo_numbers, echo_time, repetition_time, \
+                     orientation_confidence, n_instances, first_batch_id) \
+                     SELECT series_id, {index}, '{echo:016x}', modality, orientation, image_type, \
+                     '{echo}', echo_time, repetition_time, orientation_confidence, 1, first_batch_id \
+                     FROM {{stack}} WHERE id = {first}",
+                    index = 100 + echo
+                ),
+            );
+            rows(
+                &mut reg,
+                &format!(
+                    "UPDATE {{instance}} SET stack_id = \
+                     (SELECT id FROM {{stack}} WHERE stack_key = '{echo:016x}') \
+                     WHERE sop_instance_uid = 'A.3.{echo}.1'"
+                ),
+            );
+        }
+        rows(
+            &mut reg,
+            &format!("UPDATE {{stack}} SET n_instances = 1 WHERE id = {first}"),
+        );
+        rows(
+            &mut reg,
+            "UPDATE {series} SET n_stacks = 6 WHERE series_instance_uid = 'A.3'",
+        );
+        let sort = |reg: &mut Registry| {
+            nils_classify::run(reg, &nils_classify::Settings::default(), &Cancel::new()).unwrap();
+            nils_classify::classify::classify(reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap()
+        };
+        // sorted so, the six one-image stacks of the flow study carry the
+        // split note beside the six of the first series
+        assert_eq!(sort(&mut reg).split_notes, 12, "{name}");
+
+        // a re-read of one file of each series folds the flow study
+        let mut s = nils_digest::Settings::new(dir.path());
+        s.name = "t".into();
+        s.workers = 2;
+        s.walk_threads = 2;
+        s.reread_every = true;
+        s.reread_one = true;
+        let read = digest(&s, &mut reg).unwrap();
+        assert_eq!(read.written.unwrap().echo_stacks_folded, 5, "{name}");
+        // nothing the sort said of the stacks of the study is left
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!("SELECT COUNT(*) FROM {{classification}} WHERE stack_id = {first}")
+            ),
+            0,
+            "{name}"
+        );
+
+        // and the next sort judges the stack that stays anew, with all its
+        // frames, and notes no split on it
+        assert_eq!(sort(&mut reg).split_notes, 6, "{name}");
+        let fingerprint = rows(
+            &mut reg,
+            &format!(
+                "SELECT n_instances, stacks_in_series FROM {{stack_fingerprint}} \
+                 WHERE stack_id = {first}"
+            ),
+        );
+        assert_eq!(
+            (
+                fingerprint[0].int(0).unwrap(),
+                fingerprint[0].int(1).unwrap()
+            ),
+            (6, 1),
+            "{name}"
+        );
+        let notes = rows(
+            &mut reg,
+            &format!("SELECT CAST(notes AS TEXT) FROM {{classification}} WHERE stack_id = {first}"),
+        );
+        assert_eq!(notes.len(), 1, "{name}");
+        let notes: serde_json::Value = notes[0]
+            .opt_text(0)
+            .unwrap()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(serde_json::Value::Null);
+        assert!(notes["split"].is_null(), "{name}: {notes}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification} c WHERE NOT EXISTS \
+                 (SELECT 1 FROM {stack} s WHERE s.id = c.stack_id)"
             ),
             0,
             "{name}"
@@ -1805,10 +1934,12 @@ fn a_stack_carrying_two_items_is_one_stack_in_the_line() {
     }
 }
 
-/// The flow study as the archive holds it: the series the split broke into
-/// one-image stacks, and beside it the same protocol's series it did not,
-/// whose echo time is a measurement and which the rules therefore judge.
-/// Those judged stacks are what the vote reads as neighbours.
+/// The flow study as the archive holds it: the series whose echo number
+/// counts its frames under an echo time of zero, which the split broke into
+/// one-image stacks until the digest learned to read it as one (wave 7a), and
+/// beside it the same protocol's series whose echo time is a measurement and
+/// which the rules therefore judge. Those judged stacks are what the vote
+/// reads as neighbours.
 fn flow_with_neighbours() -> TempDir {
     let dir = TempDir::new("classify-flow-pool");
     let image = |series: &str, echo: Option<u32>, instance: u32, te: &str, file: &str| {
@@ -1854,8 +1985,7 @@ fn flow_with_neighbours() -> TempDir {
 /// the vote reads the same number through its key. A zero bins with the
 /// short echo times of gradient-echo anatomy, and the neighbours the vote
 /// found were the flow study's own whole series. A zero is a hole now, so
-/// the fragments are named by nothing and stay the question the split
-/// raised about them.
+/// the study's frames, one stack since wave 7a, are named by nothing.
 #[test]
 fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
@@ -1866,26 +1996,25 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
         nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
             .unwrap();
 
-        // The six fragments are the stacks holding one image, and they have
-        // no echo time to speak of.
+        // The six frames are one stack, and it has no echo time to speak of.
         assert_eq!(
             one(
                 &mut reg,
-                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE n_instances = 1 AND echo_time = 0"
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE n_instances = 6 AND echo_time = 0"
             ),
-            6,
+            1,
             "{name}"
         );
-        // Nothing wrote a base on any of them: not a rule, whose window the
-        // guard closes, and not the pass, whose bin no longer holds them.
+        // Nothing wrote a base on it: not a rule, whose window the guard
+        // closes, and not the pass, whose bin no longer holds it.
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
-                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.n_instances = 1"
+                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.echo_time = 0"
             ),
             0,
-            "{name}: a flow fragment is not an anatomical T1w"
+            "{name}: a flow study is not an anatomical T1w"
         );
         assert_eq!(
             one(
@@ -1895,17 +2024,16 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             0,
             "{name}: and the vote answered none of them"
         );
-        // What the study does say about them is unchanged: the technique is
-        // the flow sequence, and the split is noted on the six (record 55
-        // H3: information, no longer a question).
+        // What the study does say about it is unchanged: the technique is
+        // the flow sequence. No split is left to note.
         assert_eq!(
             one(
                 &mut reg,
                 "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
                  ON f.stack_id = a.stack_id \
-                 WHERE a.axis = 'technique' AND a.value = 'PC' AND f.n_instances = 1"
+                 WHERE a.axis = 'technique' AND a.value = 'PC' AND f.echo_time = 0"
             ),
-            6,
+            1,
             "{name}"
         );
         let split = rows(&mut reg, "SELECT CAST(notes AS TEXT) FROM {classification}")
@@ -1914,7 +2042,7 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
             .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .filter(|n| n["split"]["kind"] == "split:one_image_per_stack")
             .count();
-        assert_eq!(split, 6, "{name}");
+        assert_eq!(split, 0, "{name}");
         assert_eq!(
             one(
                 &mut reg,
@@ -2051,6 +2179,136 @@ fn the_text_an_unresolved_axis_was_matched_against_is_sampled_bounded_and_withhe
         let two = nils_classify::signals::unresolved_texts(reg.store(), &pack, &scope, 2).unwrap();
         assert_eq!(two["read"], 2, "{name}: {two}");
         assert_eq!(two["complete"], false, "{name}: {two}");
+    }
+}
+
+/// kineuro/nils#94, the part that remained: the text an axis the rules
+/// resolved was matched against, per value. Stacks whose description
+/// carries a word the pack knows resolve the base by that word: per axis
+/// and value the signals fold their search texts into distinct texts with
+/// the stacks each covers and the words the rules cited in it, under the
+/// same bounds and showing threshold as the unresolved texts. A text on
+/// one subject's stacks is withheld and counted. A stack the rules left
+/// unresolved is in the unresolved sample and not in this one.
+#[test]
+fn the_text_a_resolved_axis_was_matched_against_is_sampled_by_value() {
+    let dir = TempDir::new("classify-resolved");
+    // (description, subject): one spelling of a T1w on three subjects, in
+    // two cases; a T2w on three subjects; the same T1w words with one
+    // subject's own word beside them; and one stack with no word at all
+    let mut planted: Vec<(&str, &str)> = Vec::new();
+    for who in ["P1", "P2", "P3", "P1", "P2", "P3"] {
+        planted.push(("t1 mprage", who));
+    }
+    for who in ["P1", "P2", "P3", "P1", "P2"] {
+        planted.push(("T2 TSE", who));
+    }
+    for _ in 0..6 {
+        planted.push(("t1 mprage zzzlone", "P4"));
+    }
+    planted.push(("zzzunknown", "P5"));
+    for (i, (word, who)) in planted.iter().enumerate() {
+        let study = format!("S{who}");
+        let sop = format!("{study}.{i}.1");
+        let mut e = synth::minimal_mr(&study, &format!("{study}.{i}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, who));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, word),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        ]);
+        dir.file(
+            &format!("{who}/{i}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
+        let both = nils_classify::signals::texts(reg.store(), &pack, &scope, 2_000).unwrap();
+        let resolved = &both.resolved;
+        assert_eq!(resolved["read"], planted.len(), "{name}: {resolved}");
+        assert_eq!(resolved["complete"], true, "{name}: {resolved}");
+        assert_eq!(resolved["text"], "search_text", "{name}: {resolved}");
+        assert_eq!(
+            resolved["shown_when"], both.unresolved["shown_when"],
+            "{name}: {resolved}"
+        );
+        // the base: every stack but the one with no word, which is the
+        // unresolved sample's
+        let base = &resolved["axes"]["base"];
+        assert_eq!(base["stacks"], planted.len() - 1, "{name}: {base}");
+        assert_eq!(
+            both.unresolved["axes"]["base"]["stacks"], 1,
+            "{name}: {}",
+            both.unresolved
+        );
+        // a value a word decided: its text, its stacks and the word
+        assert_eq!(
+            base["values"]["T2w"],
+            serde_json::json!({
+                "stacks": 5, "distinct": 1,
+                "texts": [{"text": "t2w tse", "stacks": 5, "words": ["t2w"]}],
+                "withheld": {"texts": 0, "stacks": 0},
+            }),
+            "{name}: {base}"
+        );
+        // folded by the normalised text, the one subject's word withheld
+        // and counted, never shown
+        let mprage = &resolved["axes"]["technique"]["values"]["MPRAGE"];
+        assert_eq!(mprage["stacks"], 12, "{name}: {mprage}");
+        assert_eq!(mprage["distinct"], 2, "{name}: {mprage}");
+        assert_eq!(
+            mprage["texts"],
+            serde_json::json!([{"text": "t1w mprage", "stacks": 6, "words": ["mprage"]}]),
+            "{name}: {mprage}"
+        );
+        assert_eq!(
+            mprage["withheld"],
+            serde_json::json!({"texts": 1, "stacks": 6}),
+            "{name}: {mprage}"
+        );
+        assert!(
+            !resolved.to_string().contains("zzzlone"),
+            "{name}: {resolved}"
+        );
+        // every word shown is one the rules cited in that text
+        for (axis, doc) in resolved["axes"].as_object().unwrap() {
+            for (value, v) in doc["values"].as_object().unwrap() {
+                for t in v["texts"].as_array().unwrap() {
+                    let text = t["text"].as_str().unwrap();
+                    for w in t["words"].as_array().unwrap() {
+                        assert!(
+                            text.contains(w.as_str().unwrap()),
+                            "{name} {axis}={value}: {t}"
+                        );
+                    }
+                }
+            }
+        }
+        // the unresolved sample reads as it did, with no words
+        assert!(
+            !both.unresolved.to_string().contains("\"words\""),
+            "{name}: {}",
+            both.unresolved
+        );
+        assert_eq!(
+            nils_classify::signals::unresolved_texts(reg.store(), &pack, &scope, 2_000).unwrap(),
+            both.unresolved,
+            "{name}"
+        );
+        assert_eq!(
+            nils_classify::signals::resolved_texts(reg.store(), &pack, &scope, 2_000).unwrap(),
+            both.resolved,
+            "{name}"
+        );
+        // a smaller sample says it did not read everything
+        let two = nils_classify::signals::texts(reg.store(), &pack, &scope, 2).unwrap();
+        assert_eq!(two.resolved["read"], 2, "{name}: {}", two.resolved);
+        assert_eq!(two.resolved["complete"], false, "{name}: {}", two.resolved);
     }
 }
 

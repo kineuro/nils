@@ -397,6 +397,11 @@ struct Slice {
     position: Option<[f64; 3]>,
     orientation: Option<[f64; 6]>,
     instance: i64,
+    /// What orders the planes at one place, a cine's frames or a time
+    /// series' points, before the instance number: the trigger time in
+    /// microseconds, the temporal position and the echo number, where the
+    /// file writes them.
+    time: (Option<i64>, Option<i64>, Option<i64>),
     /// The file's place in the stack's list, and the frame's in the file,
     /// from zero: the order when nothing says where a plane is.
     file: usize,
@@ -941,6 +946,14 @@ fn read_frames(
         .ok()
         .and_then(|e| e.items());
     let instance = int(obj, tags::INSTANCE_NUMBER).unwrap_or(0);
+    let time = (
+        f64s(obj, tags::TRIGGER_TIME)
+            .and_then(|t| t.first().copied())
+            .filter(|t| t.is_finite())
+            .map(|t| (t * 1000.0).round() as i64),
+        int(obj, tags::TEMPORAL_POSITION_IDENTIFIER),
+        int(obj, tags::ECHO_NUMBERS),
+    );
     let burned_in = text(obj, tags::BURNED_IN_ANNOTATION).map(|s| s.eq_ignore_ascii_case("YES"));
     let mut out = Vec::with_capacity(frames.len());
     for (&i, pixels) in frames.iter().zip(pixels) {
@@ -1002,6 +1015,7 @@ fn read_frames(
             position,
             orientation,
             instance,
+            time,
             file: file_index,
             frame: i,
             multiframe,
@@ -1105,7 +1119,10 @@ pub fn read_stack_at(files: &[StackFile], reduce_to: Option<u32>) -> Result<Volu
     // where it is and how it is turned, which for an axial stack is the
     // third coordinate as before; else by that coordinate; else by the
     // instance number, and a multi-frame file's frames in the file's order.
-    // Each plane's distance along the normal is its z.
+    // Each plane's distance along the normal is its z. Planes at one place
+    // (a cine's frames, a time series' points) go by their trigger time,
+    // their temporal position, their echo number and their instance number,
+    // as far as the files write them (wave 7a).
     let oriented = slices
         .iter()
         .all(|s| s.position.is_some() && s.orientation.is_some());
@@ -1118,8 +1135,13 @@ pub fn read_stack_at(files: &[StackFile], reduce_to: Option<u32>) -> Result<Volu
     }
     let placed = slices.iter().all(|s| s.z.is_finite());
     let order = if placed {
-        // stable: planes at one place keep the files' and frames' order
-        slices.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
+        // stable: planes at one place and one time keep the files' and
+        // frames' order
+        slices.sort_by(|a, b| {
+            a.z.partial_cmp(&b.z)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (a.time, a.instance).cmp(&(b.time, b.instance)))
+        });
         ORDER_POSITION
     } else {
         slices.sort_by_key(|s| (s.instance, s.file, s.frame));
@@ -3765,6 +3787,69 @@ mod tests {
         }
         files.reverse();
         files
+    }
+
+    /// A cine's frames at one place, as one vendor writes them: frame `n`
+    /// numbered `n` in EchoNumbers and InstanceNumber, every pixel `100 * n`,
+    /// and where `trigger` is given, a trigger time of its own. Handed over
+    /// out of their order.
+    fn cine_frames(dir: &nils_dicom::synth::TempDir, trigger: &[f64]) -> Vec<PathBuf> {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields};
+        let (ny, nx) = (8u32, 8u32);
+        let mut files = Vec::new();
+        for n in [3u16, 1, 4, 2] {
+            let sop = format!("1.2.3.12.{n}");
+            let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+            let mut e = synth::minimal_mr("1.2.3", "1.2.3.12", &sop);
+            e.push(synth::text(tags::ECHO_NUMBERS, VR::IS, &n.to_string()));
+            e.push(synth::text(tags::INSTANCE_NUMBER, VR::IS, &n.to_string()));
+            if let Some(t) = trigger.get(usize::from(n) - 1) {
+                e.push(synth::text(tags::TRIGGER_TIME, VR::DS, &t.to_string()));
+            }
+            e.push(synth::text(
+                tags::IMAGE_POSITION_PATIENT,
+                VR::DS,
+                "-90\\-76.8\\-32.8",
+            ));
+            e.push(synth::text(
+                tags::IMAGE_ORIENTATION_PATIENT,
+                VR::DS,
+                "0\\1\\0\\0\\0\\-1",
+            ));
+            e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"));
+            e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+            e.push(us(tags::ROWS, ny as u16));
+            e.push(us(tags::COLUMNS, nx as u16));
+            e.push(us(tags::BITS_ALLOCATED, 16));
+            e.push(us(tags::BITS_STORED, 16));
+            e.push(us(tags::HIGH_BIT, 15));
+            e.push(us(tags::PIXEL_REPRESENTATION, 0));
+            let px: Vec<u8> = (0..ny * nx).flat_map(|_| (100 * n).to_le_bytes()).collect();
+            e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, px));
+            files.push(dir.file(&sop, &synth::part10(&MetaFields::mr(&sop), &e, true)));
+        }
+        files
+    }
+
+    /// The frame each plane of a volume of [`cine_frames`] holds.
+    fn frames_of(vol: &Volume) -> Vec<u16> {
+        (0..vol.shape[0] as usize)
+            .map(|z| vol.plane(z)[0] / 100)
+            .collect()
+    }
+
+    #[test]
+    fn a_cine_s_frames_at_one_place_are_in_their_order() {
+        // no trigger time: the echo number the vendor counts the frames in
+        let dir = nils_dicom::synth::TempDir::new("pyramid-cine");
+        let vol = read_files(&cine_frames(&dir, &[])).unwrap();
+        assert_eq!(frames_of(&vol), [1, 2, 3, 4]);
+        assert_eq!(vol.order, ORDER_POSITION);
+        // a trigger time, where the files write one, goes first
+        let dir = nils_dicom::synth::TempDir::new("pyramid-cine-trigger");
+        let vol = read_files(&cine_frames(&dir, &[300.5, 200.0, 100.25, 0.0])).unwrap();
+        assert_eq!(frames_of(&vol), [4, 3, 2, 1]);
     }
 
     /// The row of each plane of a cut where it is brightest.

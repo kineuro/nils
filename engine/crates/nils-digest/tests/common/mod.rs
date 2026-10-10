@@ -157,6 +157,16 @@ pub fn rows_sql(reg: &mut Registry, sql: &str) -> String {
         // held it, and the dataset it belongs to
         "pseudonym_file",
         "place",
+        // the wave 7a fold: what holds a group and what goes with it
+        "review_member",
+        "decision",
+        "sealed_stack",
+        "classification",
+        "stack_fingerprint",
+        "pipeline_run",
+        "pipeline",
+        "derivative",
+        "measure",
     ] {
         text = text.replace(&format!("{{{t}}}"), &reg.store().qualified(t));
     }

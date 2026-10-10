@@ -1403,7 +1403,7 @@ impl Server {
             format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
         ]
         .join(",");
-        let mut child = lab
+        let child = lab
             .command(&lab.path)
             .args([
                 "serve",
@@ -1423,17 +1423,18 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        // held from here, so that a panic below kills it too
+        let mut held = Server { child, port: 0 };
+        let stdout = held.child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         let Some(Ok(first)) = lines.next() else {
-            let _ = child.kill();
             panic!("nils serve did not listen");
         };
         let addr = first.split_whitespace().nth(2).unwrap();
-        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+        held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
         // the worker prints a line a job; nobody need read them
         std::thread::spawn(move || for _ in lines {});
-        Server { child, port }
+        held
     }
 
     fn raw(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Vec<u8>) {
