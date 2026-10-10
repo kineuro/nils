@@ -3213,3 +3213,186 @@ fn an_uninstall_naming_another_directory_than_the_record_s_removes_nothing() {
         "the record is as it was"
     );
 }
+
+/// A tarball holding `packs/<name>/pack.yml` for each pack given.
+fn packs_tarball(packs: &[(&str, &str)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (name, manifest) in packs {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("packs/{name}/pack.yml"),
+            manifest.as_bytes(),
+        )
+        .unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+impl Releases {
+    /// The engine's release carrying the packs given in place of its own.
+    fn carrying(&self, version: &str, packs: &[(&str, &str)]) {
+        let into = self.dir.path().join("download").join(format!("v{version}"));
+        let tar = packs_tarball(packs);
+        std::fs::write(into.join("packs.tar.gz"), &tar).unwrap();
+        let sums: String = std::fs::read_to_string(into.join("SHA256SUMS"))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.ends_with("packs.tar.gz"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!("{sums}{}  packs.tar.gz\n", sha256_hex(&tar)),
+        )
+        .unwrap();
+    }
+
+    /// A pack's own release beside the engine's, and the channel's pointer
+    /// to it.
+    fn rules(&self, pack: &str, version: &str, manifest: &str) {
+        let into = self
+            .dir
+            .path()
+            .join("download")
+            .join(format!("pack-{pack}-v{version}"));
+        std::fs::create_dir_all(&into).unwrap();
+        let tar = packs_tarball(&[(pack, manifest)]);
+        std::fs::write(into.join(format!("pack-{pack}.tar.gz")), &tar).unwrap();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!("{}  pack-{pack}.tar.gz\n", sha256_hex(&tar)),
+        )
+        .unwrap();
+        std::fs::write(
+            self.dir
+                .path()
+                .join("latest")
+                .join("download")
+                .join(format!("pack-{pack}.VERSION")),
+            format!("{version}\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// Every absolute path in a plan or a run's words is inside the test's own
+/// directories: nothing of the machine's own is named, so nothing of it is
+/// touched.
+fn names_only(said: &str, roots: &[&Path]) {
+    for word in said.split_whitespace() {
+        let word = word.trim_start_matches("file://");
+        let word = word.trim_matches(|c: char| ",;:()'\"".contains(c));
+        if word.starts_with('/') {
+            assert!(
+                roots.iter().any(|r| Path::new(word).starts_with(r)),
+                "{word} is outside the test's own directories:\n{said}"
+            );
+        }
+    }
+}
+
+/// Record 55 B5: a machine install takes the MRI pack's own newest release
+/// where it stands above the copy the engine's release carries, and the
+/// setup record notes the rules in use. An uninstall that keeps the data
+/// keeps that note with the data and takes the packs as it always has, and
+/// the setup after it takes the rules again. Every path either names is the
+/// test's own.
+#[test]
+fn a_machine_install_takes_a_rules_release_and_keeping_the_data_keeps_its_note() {
+    let mri = |version: &str| format!("pack: mri\nversion: {version}\ncontract: 8\nmodality: MR\n");
+    let releases = Releases::new("99.0.0");
+    releases.carrying("99.0.0", &[("mri", &mri("1.0.1"))]);
+    releases.rules("mri", "1.0.2", &mri("1.0.2"));
+    let nils = Installed::new("nils-setup-rules");
+    let config = TempDir::new("nils-setup-rules-config");
+    let base = TempDir::new("nils-setup-rules-base");
+    let dir = base.path().join("nils");
+    let roots = [
+        nils.dir.path(),
+        config.path(),
+        base.path(),
+        releases.dir.path(),
+    ];
+    let install = |binary: &Path| {
+        setup(
+            binary,
+            config.path(),
+            &[
+                "--yes",
+                "--parts",
+                "engine",
+                "--dir",
+                dir.to_str().unwrap(),
+                "--no-service",
+                "--channel",
+                &releases.url(),
+            ],
+        )
+    };
+    let o = install(&nils.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    names_only(&o.stdout, &roots);
+    let packs = nils.dir.path().join("share").join("nils").join("packs");
+    assert_eq!(
+        std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap(),
+        mri("1.0.2"),
+        "{}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("[rules.mri]"), "{state}");
+    assert!(state.contains("version = \"1.0.2\""), "{state}");
+    assert!(state.contains("from = \"pack-mri-v1.0.2\""), "{state}");
+
+    // the plan of an uninstall that keeps the data names only what is the
+    // test's own, and changes nothing
+    let plan = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--print"],
+    );
+    assert!(plan.ok, "{}", plan.stderr);
+    names_only(&plan.stdout, &roots);
+    let (removing, _) = plan.stdout.split_once("Keeping").unwrap();
+    assert!(
+        removing.contains(&packs.join("mri").display().to_string()),
+        "the first-party packs go as before:\n{removing}"
+    );
+    assert!(packs.join("mri").is_dir());
+
+    let gone = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--yes"],
+    );
+    assert!(gone.ok, "{}\n{}", gone.stdout, gone.stderr);
+    names_only(&gone.stdout, &roots);
+    assert!(!packs.join("mri").exists(), "{}", gone.stdout);
+    assert!(!config.path().join("nils").join("setup.toml").exists());
+    let kept = std::fs::read_to_string(dir.join("setup.kept.toml")).unwrap();
+    assert!(
+        kept.contains("[rules.mri]") && kept.contains("version = \"1.0.2\""),
+        "the rules in use are kept with the data: {kept}"
+    );
+
+    // the setup after it takes the rules again, and notes them again
+    let nils = Installed::new("nils-setup-rules-again");
+    let o = install(&nils.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let packs = nils.dir.path().join("share").join("nils").join("packs");
+    assert_eq!(
+        std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap(),
+        mri("1.0.2")
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("from = \"pack-mri-v1.0.2\""), "{state}");
+}

@@ -471,6 +471,26 @@ days.
 - **Versions.** The certified rules are MRI pack 1.0.0, the paper's named release;
   production fixes ship as 1.0.1, 1.0.2 and on.
 
+**As built (2026-10-10).** The pack contract is the compatibility key: every
+engine already refuses a pack whose contract is above its own, so a rules
+release that needs a later engine declares the contract that engine
+introduced. The `engine` range is pack contract 10, an optional key for what
+a contract cannot say (an engine fix a rules fix relies on, an upper bound);
+the loader refuses it in a pack that declares less, so an engine at 9 refuses
+such a pack by its contract. The MRI pack names no range yet; it gains one
+with the release that needs it. A release carries `pack-<name>.tar.gz` (holding
+`packs/<name>/`), `pack-<name>.VERSION` and `SHA256SUMS`, is published by
+`rules-release.yml` and is never the repository's latest release. The engine
+finds a pack's releases in the GitHub listing by their tag, or on a channel of
+a deployment's own by `latest/download/pack-<name>.VERSION`. The update path
+reads a release's `pack.yml` before it installs it; the engine's own release
+stays the floor, and a pack's own release goes in where it is at least as new
+as the copy the engine carries, in the same single swap. `nils update --part
+rules` takes the rules alone and starts nothing again, since the engine reads
+a pack again whenever its files change. The setup record notes the rules in
+use (`[rules.<name>]`). An engine in a container reads the packs its image
+carries.
+
 ### 9.3 The release discipline (C2)
 
 Three standing rules, written into the release procedure:

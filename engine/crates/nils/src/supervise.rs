@@ -1098,6 +1098,37 @@ fn cached_bundled(every: Duration, version: &str) -> Result<Vec<crate::packs::Pa
     found
 }
 
+/// The packs' own releases looked at for one engine release, and when.
+type Found = (Instant, Vec<crate::rules::Found>);
+static RULES: OnceLock<Mutex<HashMap<String, Found>>> = OnceLock::new();
+
+/// Each first-party pack the engine release `release` carries beside its own
+/// releases, looked at once in a while, as the newest releases are: without
+/// the files of a release it would take, which only an update fetches.
+fn cached_rules(
+    every: Duration,
+    release: &str,
+    carried: &[crate::packs::Offer],
+    engine: &crate::packs::Engine,
+) -> Vec<crate::rules::Found> {
+    let held = RULES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = held.lock()
+        && let Some((at, found)) = guard.get(release)
+        && at.elapsed() < every
+    {
+        return found.clone();
+    }
+    let found: Vec<crate::rules::Found> =
+        crate::rules::find_all(&crate::rules::base(None), carried, engine)
+            .iter()
+            .map(crate::rules::Found::described)
+            .collect();
+    if let Ok(mut guard) = held.lock() {
+        guard.insert(release.to_string(), (Instant::now(), found.clone()));
+    }
+    found
+}
+
 /// A slow look kept for a while: the newest release, the card.
 fn cached(slot: &'static Slot, every: Duration, make: impl FnOnce() -> Value) -> Value {
     let held = slot.get_or_init(|| Mutex::new(None));
@@ -1180,7 +1211,10 @@ fn install(config: &Config) -> (u16, Value) {
     doc["release"] = crate::releases::release_doc(&rows, None);
     // The rule packs beside the ones the engine's release carries: the
     // release an update takes, or the one installed. What is on disk is read
-    // on every call; a release's packs never change, so they are kept.
+    // on every call; a release's packs never change, so they are kept. Each
+    // first-party pack beside its own releases too (record 55 B5), as a row
+    // of the parts in every other part's shape, so a desk that knows nothing
+    // of rules releases still offers the update that takes one.
     if let Some(dir) = crate::setup::engine_pack_dir(&state) {
         let engine = rows.iter().find(|r| r.part == "engine");
         let release = engine
@@ -1189,13 +1223,24 @@ fn install(config: &Config) -> (u16, Value) {
         if let Some(release) = release {
             let packs = match cached_bundled(every, &release) {
                 Ok(bundled) => {
-                    let status = crate::packs::compare(
+                    let reads = crate::packs::Engine::of_release(&release, &bundled);
+                    let carried: Vec<crate::packs::Offer> = bundled
+                        .into_iter()
+                        .map(|pack| crate::packs::Offer {
+                            pack,
+                            from: format!("v{release}"),
+                            files: std::collections::BTreeMap::new(),
+                        })
+                        .collect();
+                    let found = cached_rules(every, &release, &carried, &reads);
+                    let plan = crate::packs::plan(
                         &dir,
                         &release,
-                        crate::packs::on_disk(&dir),
-                        bundled,
-                        crate::packs::Manifest::read(&dir).as_ref(),
+                        carried,
+                        crate::rules::takes(&found),
+                        &reads,
                     );
+                    let status = &plan.status;
                     if status.behind() {
                         if let Some(list) = doc["release"]["behind"].as_array_mut() {
                             list.push(json!("packs"));
@@ -1206,6 +1251,25 @@ fn install(config: &Config) -> (u16, Value) {
                             doc["release"]["newer"] = json!(format!("packs of {release}"));
                         }
                     }
+                    let rules = crate::rules::rows(&plan, &found);
+                    if let Some(first) = rules.iter().find(|r| r.behind()) {
+                        if let Some(list) = doc["release"]["behind"].as_array_mut() {
+                            list.push(json!(crate::rules::PART));
+                        }
+                        if doc["release"]["newer"].is_null() {
+                            doc["release"]["newer"] = json!(format!(
+                                "{} {} {}",
+                                crate::rules::PART,
+                                first.pack,
+                                first.takes.as_deref().unwrap_or_default()
+                            ));
+                        }
+                    }
+                    if let Some(list) = doc["release"]["parts"].as_array_mut() {
+                        list.extend(rules.iter().map(crate::rules::Row::doc));
+                    }
+                    doc["release"]["rules"] =
+                        json!(rules.iter().map(crate::rules::Row::doc).collect::<Vec<_>>());
                     status.doc()
                 }
                 Err(e) => json!({

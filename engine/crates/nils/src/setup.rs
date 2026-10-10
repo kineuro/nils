@@ -2144,11 +2144,15 @@ pub(crate) fn update_by_helper(only: &[String]) -> Option<Result<(), Exit>> {
 }
 
 /// The parts of a record an update may take one at a time: those with
-/// releases of their own.
+/// releases of their own, and the rules where the engine reads its packs
+/// from a directory this install keeps, which a container's image does not.
 fn updatable_parts(state: &State) -> Vec<&'static str> {
     crate::releases::OWN_RELEASES
         .into_iter()
-        .filter(|p| state.parts.contains_key(*p))
+        .filter(|p| {
+            state.parts.contains_key(*p)
+                || (*p == crate::rules::PART && engine_pack_dir(state).is_some())
+        })
         .collect()
 }
 
@@ -4027,6 +4031,44 @@ pub(crate) struct State {
     /// it and seal the key again from the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model_server: Option<ModelServer>,
+    /// The rules in use (record 55 B5): each first-party pack where the
+    /// engine reads its packs, by the version it states and the release it
+    /// came from, the pack's own (`pack-mri-v1.0.2`) or the engine's
+    /// (`v1.0.0-alpha.80`). Written by every setup and update that puts packs
+    /// in place, so what an install classifies with is on its record.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) rules: BTreeMap<String, RulesState>,
+}
+
+/// One pack's rules as the record keeps them: the version its `pack.yml`
+/// states, and the release it came from where that is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RulesState {
+    pub(crate) version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) from: String,
+}
+
+/// The rules in use in a pack directory, as the record keeps them.
+pub(crate) fn rules_of(dir: &Path) -> BTreeMap<String, RulesState> {
+    crate::packs::rules_in(dir, &FIRST_PARTY_PACKS)
+        .into_iter()
+        .map(|(name, (version, from))| (name, RulesState { version, from }))
+        .collect()
+}
+
+/// After an update moved the packs the record's engine reads, the record
+/// says which rules are in use. Only the directory the record's engine reads
+/// is noted, and the answer is whether the record was written.
+pub(crate) fn record_rules(dir: &Path) -> bool {
+    let Some(mut state) = read_state() else {
+        return false;
+    };
+    if engine_pack_dir(&state).as_deref() != Some(dir) {
+        return false;
+    }
+    state.rules = rules_of(dir);
+    write_state(&state).is_ok()
 }
 
 /// A model server the stations use (record 47): its OpenAI address, the file
@@ -8141,6 +8183,11 @@ fn do_it(
             .map(|node| node.display().to_string())
             .unwrap_or_default(),
         model_server: plan.model_server.clone(),
+        // the rules in use, until the packs this run puts in place say again
+        rules: existing
+            .as_ref()
+            .map(|s| s.rules.clone())
+            .unwrap_or_default(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -8303,7 +8350,7 @@ fn place(
             pull_or_build(plan, console, "nils-desk", DESK_IMAGE, &desk, &desk_binary)?;
         }
     } else {
-        install_packs(plan, &me, console)?;
+        state.rules = install_packs(plan, &me, console)?;
     }
 
     state.parts.insert(
@@ -9742,22 +9789,51 @@ fn install_desk(into: &Path, channel: Option<&str>, version: &str) -> Result<Pat
 
 /// The rule packs, which a machine install has no other way of getting: the
 /// binary carries none and the release keeps them in one tarball beside it.
-/// A container run needs none of this, because the image holds them.
+/// A container run needs none of this, because the image holds them. Each
+/// first-party pack's own newest release this engine reads goes in where it
+/// stands above the release's copy (record 55 B5), as an update would put it.
 ///
 /// They go where the engine looks by default, so that `nils digest` finds
 /// them with no flag whoever runs it, not only the service this wizard
-/// wrote.
-fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Exit> {
+/// wrote. The answer is the rules in use, for the record.
+fn install_packs(
+    plan: &Plan,
+    me: &Path,
+    console: &mut Console,
+) -> Result<BTreeMap<String, RulesState>, Exit> {
     let dir = pack_destination(plan, me);
     let base = update::engine_base(plan.channel.as_deref());
     let version = update::newest_version(&base).unwrap_or_else(|_| update::VERSION.to_string());
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| fail(format!("{}: {e}", parent.display())))?;
     }
-    match crate::packs::refresh(&base, &version, &dir) {
-        Ok(_) => {
+    let taken = crate::packs::bundled(&base, &version).and_then(|carried| {
+        let engine = crate::packs::Engine::this();
+        let found = crate::rules::find_all(
+            &crate::rules::base(plan.channel.as_deref()),
+            &carried,
+            &engine,
+        );
+        let packs = crate::packs::plan(
+            &dir,
+            &version,
+            carried,
+            crate::rules::takes(&found),
+            &engine,
+        );
+        let said: Vec<String> = crate::rules::rows(&packs, &found)
+            .iter()
+            .filter_map(crate::rules::Row::update_line)
+            .collect();
+        crate::packs::apply(&dir, &packs).map(|_| said)
+    });
+    match taken {
+        Ok(said) => {
             console.note(&format!("packs at {}", dir.display()));
-            Ok(())
+            for line in said {
+                console.note(&format!("{}: {line}", crate::rules::PART));
+            }
+            Ok(rules_of(&dir))
         }
         // The engine runs, digests and answers questions without packs, but
         // it cannot say what a scan is, which is most of what it is installed
@@ -9772,7 +9848,7 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
                 "put a packs directory at {} or pass --pack-dir",
                 dir.display()
             ));
-            Ok(())
+            Ok(rules_of(&dir))
         }
     }
 }
@@ -16728,9 +16804,12 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
     // The packs go with the engine: the ones its release carries, whichever
     // binary replaced the engine, since one older than this put them where
     // the engine does not read them (1.0.0-alpha.53 and before, where a site
-    // named its pack directory).
-    if chosen("engine") {
-        changed |= mend_packs(&state, channel);
+    // named its pack directory). The rules come with them where they are
+    // asked for: each first-party pack's own newest release this engine
+    // reads, with no engine release beside it (record 55 B5).
+    let rules = chosen(crate::rules::PART);
+    if chosen("engine") || rules {
+        changed |= mend_packs(&mut state, channel, rules);
     }
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
@@ -16783,11 +16862,19 @@ pub(crate) fn engine_version(state: &State) -> Option<String> {
 }
 
 /// The packs of the engine's release put where the engine reads them, where
-/// they are not there already, with what was done said on one line. The
-/// answer is whether the directory changed, so the engine is started again
-/// and reads them.
-fn mend_packs(state: &State, channel: Option<&str>) -> bool {
+/// they are not there already, with what was done said on one line, and with
+/// `rules` each first-party pack's own newest release this engine reads,
+/// where it stands above them. The record notes the rules in use. The answer
+/// is whether the directory changed, so the engine is started again and
+/// reads them.
+fn mend_packs(state: &mut State, channel: Option<&str>, rules: bool) -> bool {
     let Some(dir) = engine_pack_dir(state) else {
+        if rules {
+            println!(
+                "rules: this install's engine runs in a container, whose image carries its packs; \
+                 a rules release reaches it with the engine's next image"
+            );
+        }
         return false;
     };
     let Some(version) = engine_version(state) else {
@@ -16798,35 +16885,64 @@ fn mend_packs(state: &State, channel: Option<&str>) -> bool {
     if let Some(parent) = dir.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match crate::packs::status(&base, &version, &dir) {
-        Ok(status) if !status.behind() => {
-            println!(
-                "packs: the ones engine {version} was released with, in {}",
-                dir.display()
-            );
-            if !status.edited.is_empty() {
-                println!(
-                    "packs: {} changed on this machine and kept as it is",
-                    status.edited.join(", ")
-                );
-            }
-            false
-        }
-        Ok(_) => match crate::packs::refresh(&base, &version, &dir) {
-            Ok(said) => {
-                println!("packs: {said}");
-                true
-            }
-            Err(why) => {
-                println!("packs: left as they were: {why}");
-                false
-            }
-        },
+    let carried = match crate::packs::bundled(&base, &version) {
+        Ok(carried) => carried,
         Err(why) => {
             println!("packs: the ones engine {version} was released with could not be read: {why}");
-            false
+            return false;
+        }
+    };
+    let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
+    let engine = crate::packs::Engine::of_release(&version, &packs);
+    let found = if rules {
+        crate::rules::find_all(&crate::rules::base(channel), &carried, &engine)
+    } else {
+        Vec::new()
+    };
+    let plan = crate::packs::plan(
+        &dir,
+        &version,
+        carried,
+        crate::rules::takes(&found),
+        &engine,
+    );
+    for row in crate::rules::rows(&plan, &found) {
+        if let Some(line) = row.update_line() {
+            println!("{}: {line}", crate::rules::PART);
         }
     }
+    if !plan.behind() {
+        println!(
+            "packs: the ones engine {version} was released with, in {}",
+            dir.display()
+        );
+        if !plan.status.edited.is_empty() {
+            println!(
+                "packs: {} changed on this machine and kept as it is",
+                plan.status.edited.join(", ")
+            );
+        }
+        if !plan.status.ahead.is_empty() {
+            println!(
+                "packs: {} kept over the copy engine {version} carries",
+                plan.status.ahead.join(", ")
+            );
+        }
+        state.rules = rules_of(&dir);
+        return false;
+    }
+    let changed = match crate::packs::apply(&dir, &plan) {
+        Ok(said) => {
+            println!("packs: {said}");
+            true
+        }
+        Err(why) => {
+            println!("packs: left as they were: {why}");
+            false
+        }
+    };
+    state.rules = rules_of(&dir);
+    changed
 }
 
 /// A part's unit stopped before an update switches its files, said on the
@@ -17173,6 +17289,7 @@ pub(crate) fn install_doc(state: &State) -> serde_json::Value {
         "services": services,
         "unfinished": state.unfinished,
         "node": node_doc(state),
+        "rules": state.rules,
     })
 }
 

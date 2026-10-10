@@ -581,6 +581,7 @@ once it runs, under the same id and with the key its key file holds.
 nils update --check
 nils update --all
 nils update --part desk
+nils update --part rules
 ```
 
 The engine, the desk, the assistant and Kvasir each release on their own, so
@@ -620,6 +621,39 @@ first-party pack changed on the machine afterwards is kept and said to be
 changed; remove it and update again to take the release's. `--check` lists
 each pack beside the release's, and the install door's `release.packs` gives
 the desk's Parts page the same.
+
+### Rules releases
+
+The rules ship on their own as well. A first-party pack is released under a
+tag of its own, `pack-mri-v1.0.2`, with no engine release beside it, so a
+rules fix reaches an install the way a desk release does. Its release
+carries `pack-mri.tar.gz`, holding `packs/mri/` as the engine's
+`packs.tar.gz` holds every pack, and `pack-mri.VERSION`, both named in its
+`SHA256SUMS`. `--check` says each pack beside its own newest release,
+`--part rules` takes the newest one this engine reads and nothing else, with
+nothing started again, since the engine reads a pack again whenever its
+files change, and `--all` takes it with the rest. The engine's own release is
+the floor: a pack's own release is put in place where it is at least as new
+as the copy the engine's release carries, and an engine update never puts an
+older copy over it. The pack it replaces is kept in `<dir>.previous`, one
+update deep, as always, and the setup record notes the rules in use
+(`[rules.mri]`, its version and the release it came from).
+
+What a release works with is read from the `pack.yml` it carries. Its
+`contract` is the key every engine checks: an engine that implements a lower
+pack contract refuses the pack. From pack contract 10 a pack may also name
+the engines it works with, `engine: ">=1.0.0-alpha.80, <2.0.0"`, for what a
+contract cannot say, such as an engine fix the rules rely on. A release this
+engine would refuse is never installed, and `--check` says it waits and why;
+a newer engine takes it. The certified rules are MRI pack 1.0.0, the paper's
+named release; production fixes ship as 1.0.1, 1.0.2 and on.
+
+On GitHub the releases are found in the repository's listing by their tags.
+A channel of a deployment's own lays each out as GitHub does, under
+`download/pack-mri-v<version>/`, and names its newest in
+`latest/download/pack-mri.VERSION`; `NILS_RULES_RELEASES` names a channel for
+the rules alone. An engine in a container reads the packs its image carries,
+so rules releases reach it with the engine's next image.
 
 ### A model server for the stations
 
