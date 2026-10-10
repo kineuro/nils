@@ -243,6 +243,24 @@ impl Lab {
         .ok()
         .map(|t| serde_json::from_str(&t).unwrap())
     }
+
+    /// The stack the registry made of a series: the stacks take their ids
+    /// in the order the digest's parsers hand in their series, so which id
+    /// is which is read, never assumed.
+    fn stack_of(&self, series: &str) -> i64 {
+        let mut store =
+            nils_registry::Store::open_sqlite_read_only(&self.home.path().join("registry.db"))
+                .unwrap();
+        let sql = format!(
+            "SELECT st.id FROM {} st JOIN {} se ON se.id = st.series_id \
+             WHERE se.series_instance_uid = '{series}'",
+            store.qualified("stack"),
+            store.qualified("series")
+        );
+        let rows = store.query(&sql, &[]).unwrap();
+        assert_eq!(rows.len(), 1, "one stack of series {series}");
+        rows[0].int(0).unwrap()
+    }
 }
 
 fn close(a: f64, b: f64) -> bool {
@@ -568,17 +586,28 @@ impl Server {
             OPERATOR,
         );
         assert_eq!(status, 202, "{doc}");
-        let job = doc["job"].as_i64().unwrap();
-        for _ in 0..600 {
+        self.over(doc["job"].as_i64().unwrap())
+    }
+
+    /// A job once it is over, as the jobs door has it: the job's own state
+    /// is what is waited on. [`HANG`] bounds the wait as a guard against a
+    /// hang alone, never as a budget a slow runner can use up.
+    fn over(&self, job: i64) -> Value {
+        let since = std::time::Instant::now();
+        loop {
             let (_, j) = self.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
             if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
                 return j;
             }
+            assert!(since.elapsed() < HANG, "job {job} did not end: {j}");
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        panic!("job {job} did not end");
     }
 }
+
+/// How long a job may take before the test calls it hung: five minutes,
+/// where a build of these small stacks takes seconds on a loaded runner.
+const HANG: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// E1 through the door: the build over a selection is queued at the jobs
 /// door as one job, the deployment's packs added and a caller's path
@@ -1106,11 +1135,16 @@ impl Server {
 #[test]
 fn a_picture_is_built_when_it_is_first_asked_for() {
     let lab = lab("pyramids-demand");
+    // the stack whose files went, as the registry has it, and one that
+    // builds, asked for first
+    let gone = lab.stack_of("1.2.3.C.1");
+    let one = (1..=3i64).find(|s| *s != gone).unwrap();
     let server = Server::start(&lab.home);
-    let (status, headers, first) = server.headed("/api/instances/1/tiles/0/0", OPERATOR);
+    let (status, headers, first) =
+        server.headed(&format!("/api/instances/{one}/tiles/0/0"), OPERATOR);
     assert_eq!(status, 202, "{first}");
     assert_eq!(first["building"], true, "{first}");
-    assert_eq!(first["stack"], 1, "{first}");
+    assert_eq!(first["stack"], one, "{first}");
     assert_eq!(first["place"], "scratch", "{first}");
     assert!(
         first["retry_after"].as_u64().is_some_and(|s| s > 0),
@@ -1122,7 +1156,12 @@ fn a_picture_is_built_when_it_is_first_asked_for() {
     // the manifest asked at once is held for the same build, and answers
     // as soon as it is built
     let t = std::time::Instant::now();
-    let (status, again) = server.call("GET", "/api/instances/1/manifest", None, OPERATOR);
+    let (status, again) = server.call(
+        "GET",
+        &format!("/api/instances/{one}/manifest"),
+        None,
+        OPERATOR,
+    );
     assert!(status == 202 || status == 200, "{status} {again}");
     if status == 202 {
         assert_eq!(again["job"], job, "{again}");
@@ -1132,25 +1171,23 @@ fn a_picture_is_built_when_it_is_first_asked_for() {
             t.elapsed().as_secs_f64() * 1000.0
         );
     }
-    // every stack asked for: two are built by the worker, the one whose
+    // every stack asked for, and asked again once the build the door names
+    // is over, as its job says: two are built by the worker, the one whose
     // files went answers 422 with the reason's class
     let mut answers = std::collections::BTreeMap::new();
     for stack in 1..=3i64 {
-        let mut last = (0, Value::Null);
-        for _ in 0..600 {
-            let (status, doc) = server.call(
-                "GET",
-                &format!("/api/instances/{stack}/manifest"),
-                None,
-                OPERATOR,
+        let manifest = format!("/api/instances/{stack}/manifest");
+        let (mut status, mut doc) = server.call("GET", &manifest, None, OPERATOR);
+        if status == 202 {
+            assert_eq!(doc["building"], true, "{doc}");
+            let build = server.over(doc["job"].as_i64().unwrap());
+            assert!(
+                matches!(build["state"].as_str(), Some("done" | "failed")),
+                "{build}"
             );
-            last = (status, doc);
-            if last.0 != 202 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            (status, doc) = server.call("GET", &manifest, None, OPERATOR);
         }
-        answers.insert(stack, last);
+        answers.insert(stack, (status, doc));
     }
     let built: Vec<i64> = answers
         .iter()
@@ -1163,8 +1200,7 @@ fn a_picture_is_built_when_it_is_first_asked_for() {
         .map(|(k, _)| *k)
         .collect();
     assert_eq!(built.len(), 2, "{answers:?}");
-    assert_eq!(failed.len(), 1, "{answers:?}");
-    let gone = failed[0];
+    assert_eq!(failed, [gone], "{answers:?}");
     let refused = &answers[&gone].1;
     assert_eq!(refused["building"], false, "{refused}");
     assert_eq!(refused["stack"], gone, "{refused}");

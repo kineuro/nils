@@ -4678,13 +4678,14 @@ fn the_grants_vectors_hold() {
 }
 
 /// Record 26 §7 and §14 through the doors: `bring-in @dataset` queues the
-/// thread of a dataset as a chain the serve worker runs step by step,
-/// each job naming the one before and after it; the batch page reads the
-/// five stages off the thread and the timeline serves the batch; the
+/// thread of a dataset as a chain the serve worker runs step by step, each
+/// job naming the one before and after it, the sort followed by the pick
+/// run after it (record 55 H2) and nothing after that; the batch page reads
+/// the five stages off the thread and the timeline serves the batch; the
 /// sources door fills the pseudonymise step in and the machine's rates; a
 /// step the caller who queued the chain may not queue ends the chain and
-/// the job says why; a chain that is not one is refused at the door; and
-/// a dataset's originals are never digested.
+/// the job says why; a chain that is not one is refused at the door; and a
+/// dataset's originals are never digested.
 #[test]
 fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let home = registry();
@@ -4738,7 +4739,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     );
     // The requests the door answers before the server stops. Waiting on a
     // job reads the registry from the command line and asks the door once,
-    // when the job is over, so the test asks the same 25 however slow the
+    // when the job is over, so the test asks the same 26 however slow the
     // runner is; the rest are capabilities at the end.
     const LIMIT: usize = 32;
     let used = std::cell::Cell::new(0usize);
@@ -4790,6 +4791,21 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         assert_eq!(status, 200, "{shown}");
         shown
     };
+    // What the worker writes on a job once the job is over: the job it
+    // queued after it, or why the chain stopped there. The verb ends the
+    // job's row and the worker goes on from it a moment later, so the mark
+    // is waited for, read beside the server, two minutes at most.
+    let marked = |job: i64, mark: fn(&serde_json::Value) -> serde_json::Value| {
+        let since = std::time::Instant::now();
+        loop {
+            let found = mark(&look(job));
+            if !found.is_null() || since.elapsed().as_secs() >= 120 {
+                return found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    let after = |j: &serde_json::Value| j["chain"]["after"].clone();
 
     // the originals are the pseudonymiser's: a digest of them is refused
     let (status, refused) = ask(
@@ -4872,15 +4888,9 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(job["chain"]["before"], serde_json::Value::Null, "{job}");
     // the chain, step by step, each job naming the one before
     for expected in ["digest", "fingerprint", "classify"] {
-        let mut next = job["chain"]["after"].as_i64();
-        for _ in 0..300 {
-            if next.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            next = look(*ids.last().unwrap())["chain"]["after"].as_i64();
-        }
-        let next = next.unwrap_or_else(|| panic!("no job after {expected}: {job}"));
+        let next = marked(*ids.last().unwrap(), after)
+            .as_i64()
+            .unwrap_or_else(|| panic!("no {expected} queued after {job}"));
         job = wait(next);
         assert_eq!(job["state"], "done", "{job}");
         assert_eq!(job["kind"], expected, "{job}");
@@ -4893,8 +4903,32 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         assert_eq!(job["args"]["detail"], "sensitive", "{job}");
         ids.push(next);
     }
+    // the chain the door queued ends with the sort; record 55 H2 (round 4):
+    // a sort that judged stacks is followed by picking main scans for the
+    // subjects it judged, which the worker queues and links once the sort
+    // is over, and nothing comes after the pick run
     assert_eq!(job["then"], serde_json::json!([]), "{job}");
-    assert_eq!(job["chain"]["after"], serde_json::Value::Null, "{job}");
+    let sort = *ids.last().unwrap();
+    let pick = marked(sort, after)
+        .as_i64()
+        .unwrap_or_else(|| panic!("no pick run queued after the sort {job}"));
+    let picked = wait(pick);
+    assert_eq!(picked["state"], "done", "{picked}");
+    assert_eq!(picked["kind"], "pick", "{picked}");
+    assert_eq!(
+        picked["args"]["queued"],
+        serde_json::json!(["pick", "run", "--after-sort", sort.to_string()]),
+        "{picked}"
+    );
+    assert_eq!(picked["chain"]["before"], sort, "{picked}");
+    assert_eq!(picked["args"]["principal"], "ops@lab", "{picked}");
+    assert_eq!(picked["args"]["detail"], "sensitive", "{picked}");
+    assert_eq!(picked["then"], serde_json::json!([]), "{picked}");
+    assert_eq!(
+        picked["chain"]["after"],
+        serde_json::Value::Null,
+        "{picked}"
+    );
 
     // the batch is the thread: the two batches of one name, the stages
     let (status, batches) = ask("GET", "/api/batches", None, reader);
@@ -5079,14 +5113,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let second = queued["job"].as_i64().unwrap();
     let job = wait(second);
     assert_eq!(job["state"], "done", "{job}");
-    let mut stopped = job["result"]["chain_stopped"].clone();
-    for _ in 0..300 {
-        if !stopped.is_null() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        stopped = look(second)["result"]["chain_stopped"].clone();
-    }
+    let stopped = marked(second, |j| j["result"]["chain_stopped"].clone());
     assert_eq!(stopped["step"], serde_json::json!(["fingerprint"]), "{job}");
     assert!(
         stopped["why"].as_str().unwrap().contains("pipelines:work"),
