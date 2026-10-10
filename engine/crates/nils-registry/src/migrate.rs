@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 85;
+pub const SCHEMA_VERSION: i64 = 86;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,7 +394,40 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 85,
         apply: a_classification_notes_what_was_not_asked,
     },
+    Migration {
+        version: 86,
+        apply: the_same_everywhere_id_type_is_built_in,
+    },
 ];
+
+/// Wave 7a (2026-10-10, found trying the desk): a dataset whose PatientID
+/// held an identifying ID that is the same everywhere failed at its first
+/// run, because the registry's linkage store had no id type for it. Every linkage store has
+/// it now: a fresh one from the seed ([`ID_TYPES`]), one from before from
+/// here, once. A store where a person made the type already keeps theirs.
+fn the_same_everywhere_id_type_is_built_in(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Linkage {
+        return Ok(());
+    }
+    if crate::linkage::id_type_id(store, schema::GENERATOR_ID_TYPE)?.is_some() {
+        return Ok(());
+    }
+    let table = store.qualified("id_type");
+    let d = store.dialect();
+    let sql = format!(
+        "INSERT INTO {table} (name, description) VALUES ({}, {})",
+        d.param(1, crate::schema::Type::Text),
+        d.param(2, crate::schema::Type::Text)
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::from(schema::GENERATOR_ID_TYPE),
+            Param::from(schema::GENERATOR_ID_DESCRIPTION),
+        ],
+    )?;
+    Ok(())
+}
 
 /// Record 55 H3 (Nima's ruling of 2026-10-09): what the sort decided without
 /// asking anybody is kept on the stack's classification. `notes` holds who
@@ -2714,12 +2747,64 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|r| r.text(0).unwrap()).collect();
         assert_eq!(
             names,
-            vec!["patient-id", "study-instance-uid", "subject-code"]
+            vec![
+                "patient-id",
+                "study-instance-uid",
+                "subject-code",
+                "personnummer"
+            ]
         );
         assert_eq!(
             standing(&mut store, Kind::Linkage).unwrap(),
             Standing::Current
         );
+    }
+
+    /// A linkage store from before migration 86 gains the type of an ID
+    /// that is the same everywhere once; one where a person had made it
+    /// keeps theirs (2026-10-10: a dataset declared one and its run failed).
+    #[test]
+    fn a_linkage_store_from_before_gains_the_same_everywhere_id_type() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 85) {
+            (m.apply)(&mut store, Kind::Linkage).unwrap();
+            set_version(&mut store, Kind::Linkage, m.version).unwrap();
+        }
+        store
+            .execute("DELETE FROM id_type WHERE name = 'personnummer'", &[])
+            .unwrap();
+        assert_eq!(
+            standing(&mut store, Kind::Linkage).unwrap(),
+            Standing::Behind(85)
+        );
+        migrate(&mut store, Kind::Linkage).unwrap();
+        let count = |store: &mut Store| {
+            store
+                .query(
+                    "SELECT COUNT(*) FROM id_type WHERE name = 'personnummer'",
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        assert_eq!(count(&mut store), 1);
+        let described = store
+            .query(
+                "SELECT description FROM id_type WHERE name = 'personnummer'",
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string();
+        assert_eq!(described, schema::GENERATOR_ID_DESCRIPTION);
+        // once: running it again adds nothing
+        the_same_everywhere_id_type_is_built_in(&mut store, Kind::Linkage).unwrap();
+        assert_eq!(count(&mut store), 1);
+        // the registry store has nothing to do
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        the_same_everywhere_id_type_is_built_in(&mut registry, Kind::Registry).unwrap();
     }
 
     /// A linkage store seeded before record 26 gains `subject-code` from
@@ -3090,8 +3175,9 @@ mod column_migration {
         let keys = crate::linkage::Subkeys::derive(b"a test key");
         let mut linkage = Store::sqlite_in_memory().unwrap();
         migrate(&mut linkage, Kind::Linkage).unwrap();
-        let pnr = crate::linkage::add_id_type(&mut linkage, "personnummer", None)
+        let pnr = crate::linkage::ensure_id_type(&mut linkage, "personnummer", None)
             .unwrap()
+            .0
             .id;
         let other = crate::linkage::id_type_id(&mut linkage, "patient-id")
             .unwrap()

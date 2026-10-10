@@ -340,7 +340,7 @@ fn imports(
                     }),
                     policy: None,
                     job_id: None,
-                    details: Some(serde_json::json!({ "inline": "a personnummer column" })),
+                    details: Some(serde_json::json!({ "inline": "a column of IDs that are the same everywhere" })),
                 },
             )?;
         }
@@ -1354,7 +1354,10 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["patient-id", "study-instance-uid", "subject-code"]);
+        assert_eq!(
+            names,
+            ["patient-id", "study-instance-uid", "subject-code", "personnummer"]
+        );
         assert_eq!(r.body[0]["identifiers"], 0);
         let r = call(
             &home,

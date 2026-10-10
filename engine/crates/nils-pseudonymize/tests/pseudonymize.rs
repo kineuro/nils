@@ -1297,7 +1297,7 @@ fn generator_lab() -> (Lab, TempDir) {
     .unwrap();
     let registry = home.open().unwrap();
     let mut store = registry.open_linkage().unwrap();
-    linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+    linkage::ensure_id_type(&mut store, "personnummer", None).unwrap();
     let data = TempDir::new("pseudonymize-ds");
     let originals = Path::new("derivatives/dcm-original");
     let mut n = 0;

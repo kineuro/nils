@@ -2078,7 +2078,7 @@ enum LinkageCommand {
 struct ImportArgs {
     /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it; a personnummer column is read as twelve digits and a cell that is no personnummer refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the subject code derives from it; a column of IDs that are the same everywhere is read as twelve digits and a cell that is none refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
     #[arg(long, value_name = "HEADER=ROLE")]
     column: Vec<String>,
     /// The type the identifiers are filed under, without --column
@@ -3133,6 +3133,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     fast,
                     share.as_deref(),
                 );
+                // an ID type the registry lacks is refused when it is declared, never
+                // at the dataset's first run (2026-10-10)
+                if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
+                    return Err(fail(why));
+                }
                 let (d, under) =
                     dataset::shape_place(registry.store(), &name, &path, &asked, None, &g, true)
                         .map_err(|r| refused(r, json))?;
@@ -3365,6 +3370,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             // Wave 7a: a folder becomes a dataset by a person's act, and
             // only then is its structure read
             let asked = dataset.asked()?;
+            // an ID type the registry lacks is refused when it is declared, never
+            // at the dataset's first run (2026-10-10)
+            if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
+                return Err(fail(why));
+            }
             let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
             let f = dataset::add_dataset(registry.store(), &r, &under, name.as_deref(), &asked)
                 .map_err(|r| refused(r, json))?;
@@ -3426,6 +3436,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             // record 26: a dataset's fields, and its folder looked at again
             // when they or its path change
             let asked = dataset.asked()?;
+            // an ID type the registry lacks is refused when it is declared, never
+            // at the dataset's first run (2026-10-10)
+            if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
+                return Err(fail(why));
+            }
             let dataset_given = dataset::fields_given(&asked);
             if dataset_given && current.role != Role::Source {
                 return Err(usage(format!(

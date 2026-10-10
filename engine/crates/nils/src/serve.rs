@@ -2915,6 +2915,13 @@ fn routed(
                     Detail::Plain,
                 )?;
                 let asked = dataset_asked(&doc);
+                // an ID type the registry lacks is refused here, when it is declared,
+                // never at the dataset's first run (2026-10-10)
+                if let Some(why) = crate::dataset::id_types_refused(registry, &asked)
+                    .map_err(|e| Reply::error(500, e))?
+                {
+                    return Err(Reply::error(400, why));
+                }
                 let f = crate::dataset::add_dataset(
                     registry.store(),
                     &root,
@@ -2984,6 +2991,13 @@ fn routed(
             // whichever were given, so a v0 folder is recognised and the
             // trees are set before anything reads it.
             let asked = dataset_asked(&doc);
+            // an ID type the registry lacks is refused here, when it is declared,
+            // never at the dataset's first run (2026-10-10)
+            if let Some(why) = crate::dataset::id_types_refused(registry, &asked)
+                .map_err(|e| Reply::error(500, e))?
+            {
+                return Err(Reply::error(400, why));
+            }
             if crate::dataset::fields_given(&asked) {
                 if role != PlaceRole::Source {
                     return Err(Reply::error(
@@ -3111,6 +3125,13 @@ fn routed(
             // places:work; a source place whose dataset, path or arrival
             // changes has its folder looked at again
             let asked = dataset_asked(&doc);
+            // an ID type the registry lacks is refused here, when it is declared,
+            // never at the dataset's first run (2026-10-10)
+            if let Some(why) = crate::dataset::id_types_refused(registry, &asked)
+                .map_err(|e| Reply::error(500, e))?
+            {
+                return Err(Reply::error(400, why));
+            }
             let dataset_given = crate::dataset::fields_given(&asked);
             if dataset_given {
                 if current.role != place::Role::Source {

@@ -2706,9 +2706,13 @@ fn build_linkage() -> Vec<Table> {
 /// The id type a merge files the alias's code under (record 26 §6).
 pub const SUBJECT_CODE_TYPE: &str = "subject-code";
 
-/// The id types seeded at `nils init` (§7.2), and the one a merge needs,
-/// which migration 39 adds to a store from before it.
-pub const ID_TYPES: [(&str, &str); 3] = [
+/// The id types seeded at `nils init` (§7.2), the one a merge needs,
+/// which migration 39 adds to a store from before it, and the type of an
+/// identifying ID that is the same everywhere, which migration 86 adds
+/// (2026-10-10: a dataset whose PatientID held such an ID failed at its
+/// first run on a registry that lacked the type). Its internal name stays
+/// the one the rules, the maps and the generator read.
+pub const ID_TYPES: [(&str, &str); 4] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (
         "study-instance-uid",
@@ -2716,9 +2720,28 @@ pub const ID_TYPES: [(&str, &str); 3] = [
     ),
     (
         SUBJECT_CODE_TYPE,
-        "the code of a subject merged into this one",
+        "the subject code of a subject merged into this one",
     ),
+    (GENERATOR_ID_TYPE, GENERATOR_ID_DESCRIPTION),
 ];
+
+/// The id type of an identifying ID that is the same everywhere (a
+/// personnummer, a national ID), which the subject code generator codes
+/// with the key and no map, by its internal name.
+pub const GENERATOR_ID_TYPE: &str = crate::personnummer::ID_TYPE;
+
+/// What a person reads of that type.
+pub const GENERATOR_ID_DESCRIPTION: &str = "An identifying ID that is the same everywhere (personnummer, national ID, social security number), coded by the subject code generator";
+
+/// An id type as a person reads it: the generator's as an ID that is the
+/// same everywhere, every other type (a hospital or study ID) by its name.
+pub fn id_type_label(name: &str) -> &str {
+    if name == GENERATOR_ID_TYPE {
+        "ID that is the same everywhere"
+    } else {
+        name
+    }
+}
 
 #[cfg(test)]
 mod tests {

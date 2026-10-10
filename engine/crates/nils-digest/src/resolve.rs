@@ -174,7 +174,7 @@ impl Resolver {
         let scheme = registry.meta().pseudonym_scheme;
         if rule.normalises() && scheme != Scheme::SUBJECT_CODE_GENERATOR {
             return Err(HomeError::Message(format!(
-                "a personnummer's code is the subject code generator's, and this registry makes its codes with {}; read personnummer into a registry made with the generator's scheme (nils init --scheme subject-code-generator)",
+                "an ID that is the same everywhere is coded by the subject code generator, and this registry makes its subject codes with {}; read such IDs into a registry made with the generator's scheme (nils init --scheme subject-code-generator)",
                 scheme.name()
             )));
         }

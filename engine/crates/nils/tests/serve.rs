@@ -3612,6 +3612,36 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             .is_file()
     );
 
+    // the type its rule names is the registry's before a dataset declares
+    // it (2026-10-10): refused while the registry lacks it, nothing moved,
+    // then made
+    let early = body(
+        "ds",
+        "source",
+        identified.path(),
+        serde_json::json!({
+            "move_into": "originals",
+            "confirm_move": true,
+            "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]},
+        }),
+    );
+    let (status, refused) = ask("POST", "/api/places", Some(&early), ops);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no ID type named study-id"),
+        "{refused}"
+    );
+    let (status, made) = ask(
+        "POST",
+        "/api/linkage/types",
+        Some(r#"{"name": "study-id"}"#),
+        ops,
+    );
+    assert_eq!(status, 201, "{made}");
+
     // the person's word: the study goes into the originals, and the
     // structure says identified
     let (status, ds) = ask(
@@ -6959,7 +6989,7 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
     // names the places it had then
     let server = Server::start(
         &home,
-        9,
+        12,
         &[
             "--auth",
             "token",
@@ -7000,6 +7030,32 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
         look["layout"]["settings"]["subjects"]["required"], true,
         "{look}"
     );
+
+    // an ID type the registry lacks is refused when it is declared, never
+    // at the dataset's first run, in words naming the types there are; the
+    // generator's type is built in and read as an ID that is the same
+    // everywhere (2026-10-10)
+    for body in [
+        r#"{"role": "source", "root": "data-test", "folder": "study-two", "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]}}"#,
+        r#"{"role": "source", "root": "data-test", "folder": "study-two", "patient_id": "id-type:study-id", "subjects": "generated"}"#,
+    ] {
+        let (status, refused) = server.request("POST", "/api/places", Some(body), ops);
+        assert_eq!(status, 400, "{refused}");
+        let why = refused["error"].as_str().unwrap_or_default();
+        assert!(why.contains("no ID type named study-id"), "{refused}");
+        assert!(why.contains("ID that is the same everywhere"), "{refused}");
+        assert!(why.contains("patient-id"), "{refused}");
+        assert!(!why.contains("subject-code"), "{refused}");
+    }
+    let (status, types) = server.request("GET", "/api/linkage/types", None, ops);
+    assert_eq!(status, 200, "{types}");
+    let built_in = types
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "personnummer")
+        .unwrap_or_else(|| panic!("the generator's type is built in: {types}"));
+    assert_eq!(built_in["label"], "ID that is the same everywhere", "{types}");
 
     // added without saying what PatientID holds: added, not read
     let (status, two) = server.request(
@@ -7060,8 +7116,8 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
         refused["error"].as_str().unwrap().contains("study-big"),
         "{refused}"
     );
-    let (status, _) = server.request("GET", "/api/places", None, ops);
-    assert_eq!(status, 200);
+    let (status, places) = server.request("GET", "/api/places", None, ops);
+    assert_eq!(status, 200, "{places}");
     let (status, _) = server.request("GET", "/api/capabilities", None, ops);
     assert_eq!(status, 200);
     server.finish();

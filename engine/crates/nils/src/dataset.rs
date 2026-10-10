@@ -545,8 +545,8 @@ fn layout_doc_with(path: &Path, layout: &Layout, counted: bool) -> Value {
             "subjects": anonymised.then(|| json!({
                 "choices": place::SUBJECTS,
                 "required": true,
-                "map": "a map of subject codes to the dataset's ids, given or already in the registry; a file whose id no map names is held",
-                "generated": "the subject code generator makes each code from the id, as from a personnummer; every subject is a subject, never provisional",
+                "map": "a map of subject codes to the dataset's IDs, given or already in the registry; a file whose ID no map names is held",
+                "generated": "the subject code generator makes each subject code from the ID; every subject is a subject, never provisional",
             })),
             "copy_folder": {"choices": place::FOLDERS, "default": place::FOLDERS[0]},
         },
@@ -683,6 +683,62 @@ pub(crate) struct Declared {
 
 /// Why `arrives` is refused: the structure says it.
 const ARRIVES_IS_READ: &str = "how a dataset's files arrive is read from its folder, never declared: derivatives/dcm-original is identified data, derivatives/dcm-anon (or dcm-raw) is anonymised, both is identified with its anonymised copy; an unknown dataset's entries go into one of them with move_into (originals or anon) and confirm_move";
+
+/// The id types a dataset's settings name, refused unless the registry's
+/// linkage store holds each (2026-10-10: a dataset declared an identifying
+/// ID whose type the registry lacked, and its first run failed with nothing
+/// on the page). `asked` is the declaration as given: its identity rule's
+/// `id_type`, and the type PatientID gets (`patient_id: id-type:<name>`).
+/// `Ok(None)` where every type named is there; `Ok(Some(why))` names the
+/// missing ones and the types there are, as a person reads them.
+pub(crate) fn id_types_refused(
+    registry: &nils_registry::Registry,
+    asked: &Value,
+) -> Result<Option<String>, String> {
+    let mut named: Vec<String> = Vec::new();
+    if let Some(t) = asked
+        .get("identity")
+        .and_then(|i| i.get("id_type"))
+        .and_then(Value::as_str)
+    {
+        named.push(t.trim().to_string());
+    }
+    if let Some(t) = asked
+        .get("patient_id")
+        .and_then(Value::as_str)
+        .and_then(|p| p.strip_prefix(place::PATIENT_ID_TYPE))
+    {
+        named.push(t.trim().to_string());
+    }
+    named.retain(|t| !t.is_empty() && t != nils_registry::schema::SUBJECT_CODE_TYPE);
+    if named.is_empty() {
+        return Ok(None);
+    }
+    let mut store = registry.open_linkage().map_err(|e| e.to_string())?;
+    let mut missing = Vec::new();
+    for t in &named {
+        if nils_registry::linkage::id_type_id(&mut store, t)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            missing.push(t.clone());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let there: Vec<String> = nils_registry::linkage::id_types(&mut store)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|t| t.name != nils_registry::schema::SUBJECT_CODE_TYPE)
+        .map(|t| nils_registry::schema::id_type_label(&t.name).to_string())
+        .collect();
+    Ok(Some(format!(
+        "the registry has no ID type named {}; its ID types are {}. Add the type in Pseudonyms first, or choose one of these",
+        missing.join(" or "),
+        there.join(", ")
+    )))
+}
 
 /// A dataset's settings and its folder settled (Wave 7a): the settings
 /// asked for (what PatientID holds, how subjects are found, the folder of

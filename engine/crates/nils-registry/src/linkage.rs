@@ -202,6 +202,9 @@ impl TypeCount {
         serde_json::json!({
             "id": self.id,
             "name": self.name,
+            // what a person reads: the generator's type as an ID that is
+            // the same everywhere, every other type by its name (2026-10-10)
+            "label": crate::schema::id_type_label(&self.name),
             "description": self.description,
             "identifiers": self.identifiers,
             "subjects": self.subjects,
@@ -975,21 +978,25 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        assert_eq!(names, ["patient-id", "study-instance-uid", "subject-code"]);
+        assert_eq!(
+            names,
+            ["patient-id", "study-instance-uid", "subject-code", "personnummer"]
+        );
         assert_eq!(id_type_id(&mut store, "patient-id").unwrap(), Some(1));
         assert_eq!(id_type_id(&mut store, "nope").unwrap(), None);
         let t = add_id_type(&mut store, "personal-number", Some("the Swedish one")).unwrap();
-        assert_eq!(t.id, 4);
+        // after the four seeded types, the generator's last of them
+        assert_eq!(t.id, 5);
         assert!(add_id_type(&mut store, "personal-number", None).is_err());
         assert!(add_id_type(&mut store, "Personal Number", None).is_err());
         // made once, found after
         let (again, made) = ensure_id_type(&mut store, "personal-number", None).unwrap();
-        assert_eq!((again.id, made), (4, false));
+        assert_eq!((again.id, made), (5, false));
         let (t, made) = ensure_id_type(&mut store, "study-id", Some("a study's own")).unwrap();
-        assert_eq!((t.id, made), (5, true));
+        assert_eq!((t.id, made), (6, true));
         assert!(ensure_id_type(&mut store, "Bad Name", None).is_err());
         let counts = id_type_counts(&mut store).unwrap();
-        assert_eq!(counts.len(), 5);
+        assert_eq!(counts.len(), 6);
         assert_eq!((counts[0].identifiers, counts[0].subjects), (0, 0));
         assert!(valid_id_type_name("a1-b2"));
         assert!(!valid_id_type_name("-a"));

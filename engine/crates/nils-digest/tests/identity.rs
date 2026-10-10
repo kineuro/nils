@@ -482,7 +482,7 @@ fn a_personnummer_rule_is_refused_where_the_codes_are_not_the_generators() {
         let name = lab.name;
         let mut reg = lab.open();
         let mut store = reg.open_linkage().unwrap();
-        linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+        linkage::ensure_id_type(&mut store, "personnummer", None).unwrap();
         let dir = TempDir::new("identity-pnr-old");
         dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "19850101-2382", &[]));
         let mut s = settings(&dir);
@@ -510,7 +510,7 @@ fn a_personnummer_rule_gives_the_generators_code_of_the_twelve_digits() {
         let name = lab.name;
         let mut reg = lab.open();
         let mut store = reg.open_linkage().unwrap();
-        linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+        linkage::ensure_id_type(&mut store, "personnummer", None).unwrap();
         let dir = TempDir::new("identity-pnr");
         // one person written three ways, another, and a study id that is no number
         dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "19850101-2382", &[]));

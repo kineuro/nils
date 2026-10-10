@@ -595,7 +595,7 @@ impl PatientId {
         }
         if crate::personnummer::is_type(name) {
             return Err(format!(
-                "patient_id: a pseudonymised file never holds a {name}; write the subject's code or another id type"
+                "patient_id: a pseudonymised file never holds an ID that is the same everywhere ({name}); write the subject code or a hospital or study ID"
             ));
         }
         Ok(PatientId::IdType(name.to_string()))
@@ -717,7 +717,7 @@ pub fn generator_refused(dataset: &Value, scheme: crate::pseudonym::Scheme) -> O
     let generated = d["subjects"] == "generated";
     (personnummer || generated).then(|| {
         format!(
-            "its subject codes are the subject code generator's, and this registry makes its codes with {}; a registry made with the generator's scheme reads it (nils init --scheme subject-code-generator), or the dataset takes its codes from a map",
+            "its subject codes are the subject code generator's, and this registry makes its subject codes with {}; a registry made with the generator's scheme reads it (nils init --scheme subject-code-generator), or the dataset takes its subject codes from a map",
             scheme.name()
         )
     })

@@ -474,10 +474,11 @@ fn import_digest_show_and_link_go_round() {
         "hospital number",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "added id type mrn (id 4)\n");
+    // after the four seeded types, the generator's the last of them
+    assert_eq!(stdout(&out), "added id type mrn (id 5)\n");
     let out = run(&["linkage", "id-type", "list"]);
     assert!(
-        stdout(&out).contains("  4  mrn                      hospital number"),
+        stdout(&out).contains("  5  mrn                      hospital number"),
         "{}",
         stdout(&out)
     );
@@ -1556,7 +1557,7 @@ fn custody_quarantine_review_and_purge_go_round() {
         stdout(&out)
     );
     let rows = store.query("SELECT COUNT(*) FROM id_type", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 3);
+    assert_eq!(rows[0].int(0).unwrap(), 4);
     // status lists the purges as the jobs they were
     let out = run(&["status", "--json"]);
     let doc = json(&out);
@@ -4615,6 +4616,28 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
     );
     let elsewhere = TempDir::new("cli-dataset-out");
     let registry = ["--registry", home.path().to_str().unwrap()];
+    // a type the rule names is the registry's before the dataset declares
+    // it: a declaration naming a type it lacks is refused (2026-10-10)
+    let refused = nils()
+        .args(registry)
+        .args(["place", "add", "ds-early"])
+        .arg(dir.path())
+        .args(["--role", "source", "--identity"])
+        .arg(&rule)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("no ID type named study-id"),
+        "{}",
+        stderr(&refused)
+    );
+    let made = nils()
+        .args(registry)
+        .args(["linkage", "id-type", "add", "study-id"])
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{}", stderr(&made));
 
     // the rule file is a loose entry too, and moves with the rest
     let added = nils()
@@ -4674,7 +4697,7 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
     // for its originals
     assert!(
         text.contains("as subject-code")
-            && text.contains("the value read is the code itself")
+            && text.contains("the value read is the subject code itself")
             && text.contains("from the pseudonymised tree of the dataset ds"),
         "{text}"
     );
