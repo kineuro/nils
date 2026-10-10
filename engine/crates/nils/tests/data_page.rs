@@ -85,6 +85,11 @@ impl Home {
 const OPS: &str = "an-operator-token-of-length";
 const READS: &str = "a-reader-token-of-its-length";
 const PLACES: &str = "a-places-token-of-its-length";
+/// Data work at detail plain: it may mark held files, never queue the
+/// pseudonymiser, which reads the identifiers it replaces.
+const WORKS: &str = "a-data-work-token-of-length";
+/// A reader with the certificate's grant, who reads a sample sealed now.
+const SEALED: &str = "a-sealed-token-of-its-length";
 
 /// A `nils serve` with its worker, killed when dropped.
 struct Worked {
@@ -111,6 +116,8 @@ impl Worked {
             format!("{OPS}=ops@lab:operator"),
             format!("{READS}=lou@lab:reader"),
             format!("{PLACES}=pia@lab:places:see"),
+            format!("{WORKS}=wes@lab:data:work,data:see"),
+            format!("{SEALED}=sam@lab:reader,sealed:see"),
         ]
         .join(",");
         let child = nils()
@@ -970,7 +977,7 @@ fn round(pg: Option<(String, String)>) {
             )
             .unwrap();
     }
-    let shown = server.get("/api/cohorts/fed", READS);
+    let shown = server.get("/api/cohorts/fed", SEALED);
     let joins = shown["joins"].as_array().unwrap();
     assert_eq!(joins[0]["what"], "digest", "{shown}");
     assert_eq!(joins[0]["dataset"], "ds", "{shown}");
@@ -1004,8 +1011,18 @@ fn round(pg: Option<(String, String)>) {
     let pc = step(&shown, "post_contrast");
     assert_eq!(pc["state"], "off", "{shown}");
     assert_eq!(pc["look"], 1, "{shown}");
+    // the review of Wave 7a's merge (2026-10-10): for a caller who does not
+    // read sealed stacks, the cohort's steps leave the sample sealed above
+    // out, its scan and the model's answers on it alike
+    let unsealed = server.get("/api/cohorts/fed", READS);
+    assert_eq!(step(&unsealed, "sorted")["of"], 2, "{unsealed}");
+    assert_eq!(step(&unsealed, "body_part")["of"], 2, "{unsealed}");
+    assert!(
+        step(&unsealed, "body_part")["answered"].as_i64() <= bp["answered"].as_i64(),
+        "{unsealed}"
+    );
     // a cohort of one subject counts that subject's scans
-    let one = server.get("/api/cohorts/hands", READS);
+    let one = server.get("/api/cohorts/hands", SEALED);
     assert_eq!(
         step(&one, "body_part")["of"],
         hands["datasets"][0]["scans"],
@@ -1200,6 +1217,48 @@ fn held_ids(pg: Option<(String, String)>) {
     let before = (0..IDS).filter(|&i| anyway(i)).count();
     assert_eq!(generated.len(), before + 40, "{doc}");
     assert!(chosen.iter().all(|c| generated.contains(c)));
+    // the review of Wave 7a's merge (2026-10-10): a run queues the
+    // pseudonymiser, which needs detail sensitive as at the jobs door, so
+    // Data work at plain is refused before anything is marked; marking
+    // alone stays open to it
+    let more: Vec<i64> = (0..IDS)
+        .zip(&rows)
+        .filter(|&(i, _)| !released(i) && !anyway(i))
+        .skip(40)
+        .take(5)
+        .map(|(_, r)| *r)
+        .collect();
+    let (status, refused) = served.call(
+        "POST",
+        "/api/linkage/held/code",
+        Some(json!({"place": "ward", "ids": more, "run": true})),
+        WORKS,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("sensitive"),
+        "{refused}"
+    );
+    let doc = served.get("/api/linkage/held/ids?place=ward", OPS);
+    let after = doc["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| h["state"] == "generated")
+        .count();
+    assert_eq!(
+        after,
+        before + 40,
+        "nothing marked by the refused run: {doc}"
+    );
+    let (status, marked) = served.call(
+        "POST",
+        "/api/linkage/held/code",
+        Some(json!({"place": "ward", "ids": more, "run": false})),
+        WORKS,
+    );
+    assert_eq!(status, 200, "{marked}");
+    assert_eq!(marked["job"], Value::Null, "{marked}");
 }
 
 #[test]

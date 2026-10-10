@@ -3165,3 +3165,51 @@ fn keep_data_then_setup_then_purge_drops_the_schemas_the_first_install_made() {
     assert_eq!(schemas_left(), 0, "{}", purged.stdout);
     assert!(!dir.exists(), "{}", purged.stdout);
 }
+
+/// Review of 2026-10-10: an uninstall whose `--dir` names another directory
+/// than the setup on record is refused, and nothing is removed. Before, the
+/// `--dir` was ignored where a record existed, so `--purge --yes --dir OLD`
+/// purged the recorded install and its key.
+#[test]
+fn an_uninstall_naming_another_directory_than_the_record_s_removes_nothing() {
+    let nils = Installed::new("nils-setup-other-dir");
+    let config = TempDir::new("nils-setup-other-dir-config");
+    let base = TempDir::new("nils-setup-other-dir-base");
+    let recorded = base.path().join("nils");
+    let other = base.path().join("old-nils");
+    for dir in [&recorded, &other] {
+        std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+        std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+    }
+    std::fs::create_dir_all(config.path().join("nils")).unwrap();
+    let record = format!(
+        "dir = \"{d}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n",
+        d = recorded.display()
+    );
+    std::fs::write(config.path().join("nils").join("setup.toml"), &record).unwrap();
+    let o = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--purge", "--yes", "--dir", other.to_str().unwrap()],
+    );
+    assert!(!o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stderr.contains("the setup on record is at") && o.stderr.contains("nothing was removed"),
+        "{}",
+        o.stderr
+    );
+    assert!(
+        recorded
+            .join("registry")
+            .join("keys")
+            .join("nils")
+            .is_file()
+    );
+    assert!(other.join("registry").join("keys").join("nils").is_file());
+    assert_eq!(
+        std::fs::read_to_string(config.path().join("nils").join("setup.toml")).unwrap(),
+        record,
+        "the record is as it was"
+    );
+}

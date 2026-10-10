@@ -1889,9 +1889,16 @@ pub fn door(
     let h = &open.header;
     pyramid::note_open(registry, caller, stack, through, 0, "preview")
         .map_err(|e| Reply::error(500, e))?;
+    // Immutable only for an address that names the version and the held
+    // state this caller is served: the held and the whole picture of one
+    // stack share a digest, so an address naming the digest alone could
+    // hand one to a caller cleared for the other (the review of Wave 7a's
+    // merge, 2026-10-10). The scans door gives each picture its `held`.
+    let held_named = query.get("held").map(|h| h == "1" || h == "true");
     let named = query
         .get("v")
-        .is_some_and(|v| !v.is_empty() && h.digest.starts_with(v.as_str()));
+        .is_some_and(|v| !v.is_empty() && h.digest.starts_with(v.as_str()))
+        && held_named == Some(held);
     let headers = |etag: String| {
         vec![
             ("ETag".to_string(), format!("\"{etag}\"")),

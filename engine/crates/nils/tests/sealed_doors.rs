@@ -500,6 +500,45 @@ fn sweep(dsn: Option<&str>) {
     assert!(done, "{stderr}");
     let seal: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(seal["stacks"].as_i64(), Some(2), "{seal}");
+    // the review of Wave 7a's merge (2026-10-10): a cohort of everyone has
+    // its steps count the sample sealed now only for the certificate's
+    // grant; the sweep below knocks its door too
+    let codes: Vec<String> = {
+        let mut store = match dsn {
+            Some(d) => nils_registry::store::Store::connect_postgres(d, SCHEMA).unwrap(),
+            None => {
+                nils_registry::store::Store::open_sqlite(&home.path().join("registry.db")).unwrap()
+            }
+        };
+        let subject = store.qualified("subject");
+        store
+            .query(&format!("SELECT code FROM {subject} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.text(0).unwrap().to_string())
+            .collect()
+    };
+    assert!(!codes.is_empty());
+    let (done, _, stderr) = cli(&home, &["clinical", "cohort", "make", "a"]);
+    assert!(done, "{stderr}");
+    let mut add = vec!["clinical", "cohort", "add", "a"];
+    add.extend(codes.iter().map(String::as_str));
+    add.extend(["--why", "the sweep's cohort"]);
+    let (done, _, stderr) = cli(&home, &add);
+    assert!(done, "{stderr}");
+    let scans_of = |token: &str| {
+        let doc = server.ok("GET", "/api/cohorts/a", None, token);
+        doc["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["step"] == "sorted")
+            .unwrap()["of"]
+            .as_i64()
+            .unwrap()
+    };
+    assert_eq!(scans_of(ADMIN), 2, "the open stacks alone");
+    assert_eq!(scans_of(CERT), 4, "every stack, the sealed among them");
     // classified again once sealed: the batch diagnostics and the review
     // queue leave the sealed stacks out
     let (done, _, stderr) = cli(

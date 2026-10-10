@@ -9332,6 +9332,9 @@ fn declare_in(
                 &serde_json::json!({}),
                 None,
                 &guarantees,
+                // setup looks and never writes: a v0 folder keeps the
+                // dcm-raw v0 reads (review of 2026-10-10)
+                false,
             ) {
                 Ok(s) => Some(s),
                 Err(r) => {
@@ -9435,6 +9438,7 @@ fn shape_source(
         &serde_json::json!({}),
         Some(there),
         &there.guarantees,
+        false,
     ) {
         Ok((d, found)) => {
             if place::set_dataset(registry.store(), there.id, &d.dataset).is_ok() {
@@ -17949,6 +17953,17 @@ fn remove_outside(doing: &Doing, registry: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether two directories are one, as the file system resolves them, or
+/// as written where either cannot be resolved.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let resolved = |p: &Path| {
+        std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    resolved(a) == resolved(b)
+}
+
 pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     let mut console = Console::new(args.yes);
     println!("{}", console.bold("NILS uninstall"));
@@ -17956,6 +17971,23 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     // directory: what it names is still this install's to remove, the
     // registry's schemas among them.
     let (state, from_kept) = match read_state() {
+        // A --dir that names another directory than the setup on record is
+        // refused, never ignored: a purge would otherwise remove the
+        // recorded install and its key while the person named an old one
+        // (review of 2026-10-10).
+        Some(state)
+            if args
+                .dir
+                .as_ref()
+                .is_some_and(|d| !same_dir(d, Path::new(&state.dir))) =>
+        {
+            let named = args.dir.as_ref().expect("a --dir was given");
+            return Err(fail(format!(
+                "the setup on record is at {}, and --dir names {}, another directory; nothing was removed. Leave --dir out to uninstall the one on record, or give its directory",
+                state.dir,
+                named.display()
+            )));
+        }
         Some(state) => (state, false),
         None => {
             let dir = args

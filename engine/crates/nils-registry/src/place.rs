@@ -701,6 +701,35 @@ pub fn incomplete(dataset: &Value) -> Option<String> {
     None
 }
 
+/// Why a dataset's subject codes cannot be made on this registry (the
+/// review of Wave 7a's merge, 2026-10-10): its declaration has the subject
+/// code generator make them (a personnummer rule, or subjects `generated`)
+/// while the registry makes codes with another scheme, so they would not be
+/// the generator's. A provisional code for an identifier no map names
+/// (`unmapped: code`) is the registry's own and stays. None when they can
+/// be made.
+pub fn generator_refused(dataset: &Value, scheme: crate::pseudonym::Scheme) -> Option<String> {
+    if scheme == crate::pseudonym::Scheme::SUBJECT_CODE_GENERATOR {
+        return None;
+    }
+    let d = dataset_of(dataset, None).ok()?;
+    let personnummer = d["identity"]["id_type"] == "personnummer";
+    let generated = d["subjects"] == "generated";
+    (personnummer || generated).then(|| {
+        format!(
+            "its subject codes are the subject code generator's, and this registry makes its codes with {}; a registry made with the generator's scheme reads it (nils init --scheme subject-code-generator), or the dataset takes its codes from a map",
+            scheme.name()
+        )
+    })
+}
+
+/// [`incomplete`], and on a registry whose code scheme is not the
+/// generator's, a dataset whose codes the generator would make
+/// ([`generator_refused`]).
+pub fn incomplete_on(dataset: &Value, scheme: crate::pseudonym::Scheme) -> Option<String> {
+    incomplete(dataset).or_else(|| generator_refused(dataset, scheme))
+}
+
 /// The arrival of a dataset nobody has declared: the default of
 /// [`handling_of`], [`dataset_of`] and [`default_dataset`]. Such a dataset
 /// has no tree and is never digested, brought in or pseudonymised.
@@ -982,6 +1011,38 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
 
 /// A dataset's tag lists: whether sex, weight and size are kept, the tags
 /// removed beside the four groups the pseudonymiser always removes, and the
+/// The direct identifiers a dataset's `keep` list never holds: what may
+/// never survive a release (`nils_release::tags::NEVER_LEAVES`) less the
+/// device and the institution, which an option of the standard retains by
+/// name, and less the accession number and the study id, which every writer
+/// removes whatever a list says. A list that kept the patient's name would
+/// leave copies that say their identity was removed (the review of Wave 7a's
+/// merge, 2026-10-10). Held equal to the release's list by a test there.
+pub const UNKEEPABLE: [&str; 22] = [
+    "0008,0090",
+    "0008,1050",
+    "0008,1070",
+    "0010,0010",
+    "0010,0030",
+    "0010,1000",
+    "0010,1001",
+    "0010,1005",
+    "0010,1040",
+    "0010,2154",
+    "0010,4000",
+    "0012,0040",
+    "0032,1032",
+    "0038,0010",
+    "0038,0300",
+    "0038,0400",
+    "0040,0242",
+    "0040,2008",
+    "0040,2010",
+    "0040,2016",
+    "0040,2017",
+    "0040,A123",
+];
+
 /// tags kept out of them. A tag is `gggg,eeee` in hex, upper-cased here; a
 /// tag on both lists is refused.
 fn tags_of(doc: Option<&Value>, current: Option<&Value>) -> Result<Value, String> {
@@ -1044,6 +1105,11 @@ fn tags_of(doc: Option<&Value>, current: Option<&Value>) -> Result<Value, String
     let keep = list("keep")?;
     if let Some(both) = remove.iter().find(|t| keep.contains(t)) {
         return Err(format!("tags: {both} is on both remove and keep"));
+    }
+    if let Some(direct) = keep.iter().find(|t| UNKEEPABLE.contains(&t.as_str())) {
+        return Err(format!(
+            "tags.keep: {direct} names the person or the examination; a copy that kept it could not say its identity was removed, so no dataset keeps it"
+        ));
     }
     Ok(json!({"keep_demographics": keep_demographics, "remove": remove, "keep": keep}))
 }
@@ -1243,9 +1309,34 @@ pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Erro
 mod tests {
     use super::{
         ANON_TREE, ORIGINALS_TREE, PatientId, SUBJECTS, UNDECLARED, dataset_of, default_dataset,
-        default_handling, handling_of, incomplete, is_root, is_undeclared,
+        default_handling, handling_of, incomplete, incomplete_on, is_root, is_undeclared,
     };
+    use crate::pseudonym::Scheme;
     use serde_json::json;
+
+    #[test]
+    fn a_dataset_whose_codes_the_generator_makes_is_not_read_on_another_scheme() {
+        // the review of Wave 7a's merge (2026-10-10): codes made with
+        // blake2b-32 would not be the subject code generator's
+        let generated = json!({
+            "arrives": "deidentified",
+            "trees": {"originals": null, "anon": "derivatives/dcm-anon"},
+            "patient_id": "id-type:study-id",
+            "subjects": "generated",
+        });
+        // a provisional code for an identifier no map names is the
+        // registry's own, on any scheme
+        let held = json!({
+            "arrives": "identified",
+            "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
+            "unmapped": "code",
+        });
+        assert_eq!(incomplete(&generated), None);
+        assert_eq!(incomplete_on(&generated, Scheme::Blake2b8), None);
+        let why = incomplete_on(&generated, Scheme::Blake2b32).unwrap();
+        assert!(why.contains("subject code generator"), "{why}");
+        assert_eq!(incomplete_on(&held, Scheme::Blake2b32), None);
+    }
 
     #[test]
     fn a_dataset_not_declared_is_undeclared_and_has_no_tree() {
@@ -1469,6 +1560,16 @@ mod tests {
             (
                 json!({"tags": {"keep_demographics": "yes"}}),
                 "true or false",
+            ),
+            // the review of Wave 7a's merge (2026-10-10): a person's direct
+            // identifiers are never kept, so a copy's marks stay true
+            (
+                json!({"tags": {"keep": ["0010,0040", "0010,0010"]}}),
+                "0010,0010 names the person",
+            ),
+            (
+                json!({"tags": {"keep": ["0040,a123"]}}),
+                "0040,A123 names the person",
             ),
             (json!({"originals_kept": "lost"}), "kept, vaulted, purged"),
             (

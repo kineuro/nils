@@ -346,6 +346,41 @@ fn the_sort_makes_previews_and_a_second_build_makes_none() {
     );
 }
 
+/// Review of 2026-10-10: the sort's job stays running while its previews
+/// are made, its heartbeat counting them, and ends done after them; a stack
+/// whose preview cannot be made is counted and fails neither the sort nor
+/// its job. Before, the job was done before its first preview, so a queue
+/// waited behind a job shown done that no cancel reached.
+#[test]
+fn the_sort_s_job_ends_after_its_previews_and_a_failed_one_fails_nothing() {
+    let b = bed("open", None);
+    // the files of one stack are gone: its preview cannot be made
+    std::fs::remove_dir_all(
+        b._src
+            .path()
+            .join("derivatives")
+            .join("dcm-anon")
+            .join("1.2.3.B"),
+    )
+    .unwrap();
+    let err = classify(&b.home);
+    assert!(
+        err.contains("previews: 1 made, 0 current, 1 failed"),
+        "{err}"
+    );
+    let (out, _) = ok(&b.home, &["jobs", "list", "--all", "--json"]);
+    let jobs: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let sort = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "classify")
+        .unwrap();
+    assert_eq!(sort["state"], "done", "{sort}");
+    assert_eq!(sort["progress"]["previews"]["total"], 2, "{sort}");
+    assert_eq!(sort["result"]["previews"]["failed"], 1, "{sort}");
+}
+
 #[test]
 fn a_classify_with_no_working_place_or_no_previews_makes_none() {
     let b = bed("none", None);
@@ -580,12 +615,16 @@ fn doors_sweep(name: &str, dsn: Option<&str>) {
     let etag = header(&headers, "etag").unwrap().to_string();
     assert!(etag.contains(&digest), "{etag}");
     assert_eq!(header(&headers, "cache-control"), Some("private, no-cache"));
-    // named by its digest, it is immutable
-    let (_, headers, _) = server.get(&format!("{base}?v={digest}"), REVIEWER);
+    // named by its digest and the held state it is served in, it is
+    // immutable; by its digest alone it is not, since a held and a whole
+    // picture share the digest (the review of Wave 7a's merge, 2026-10-10)
+    let (_, headers, _) = server.get(&format!("{base}?v={digest}&held=0"), REVIEWER);
     assert_eq!(
         header(&headers, "cache-control"),
         Some("private, max-age=31536000, immutable")
     );
+    let (_, headers, _) = server.get(&format!("{base}?v={digest}"), REVIEWER);
+    assert_eq!(header(&headers, "cache-control"), Some("private, no-cache"));
     // asked again with its ETag: 304 and no body
     let (status, headers, body) =
         server.send("GET", &base, REVIEWER, &[("If-None-Match", &etag)], None);
@@ -642,6 +681,23 @@ fn doors_sweep(name: &str, dsn: Option<&str>) {
     assert_eq!(doc["burned_in"], true, "{doc}");
     let (_, doc) = server.json(&held, ADMIN);
     assert_eq!(doc["held"], false, "{doc}");
+    // an address naming the whole picture's state never caches the held one
+    // as immutable, nor the reverse
+    let version = doc["digest"].as_str().unwrap().to_string();
+    let cache = |token: &str, h: u8| {
+        let (_, headers, _) = server.get(&format!("{held}?v={version}&held={h}"), token);
+        header(&headers, "cache-control").map(str::to_string)
+    };
+    assert_eq!(cache(REVIEWER, 0).as_deref(), Some("private, no-cache"));
+    assert_eq!(
+        cache(REVIEWER, 1).as_deref(),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert_eq!(cache(ADMIN, 1).as_deref(), Some("private, no-cache"));
+    assert_eq!(
+        cache(ADMIN, 0).as_deref(),
+        Some("private, max-age=31536000, immutable")
+    );
 
     // one audit row for the stack opened, whatever was asked
     let (status, doc) = server.json("/api/audit?action=instance.open&principal=rev@lab", ADMIN);

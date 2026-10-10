@@ -72,9 +72,13 @@ impl Mark {
     }
 }
 
-/// Axes that say what a release does with a stack, or what a person said
-/// about it, and not what the scan is: they never separate two names.
+/// Axes that say what a release does with a stack, what a person said about
+/// it, or how the rules came to an answer, and not what the scan is: they
+/// never separate two names. `base_basis` says whether the name or the
+/// physics decided the base, a decision trail driven by protocol text, so
+/// two scans told apart by it alone take the number (review of 2026-10-10).
 const NOT_A_DIFFERENCE: &[&str] = &[
+    "base_basis",
     "convertible",
     "directory_type",
     "disposition",
@@ -456,6 +460,29 @@ mod tests {
         assert_eq!(m.by, By::Axis);
         assert_eq!(m.token, "Distorted");
         assert_eq!(m.slot, 0, "in the quality group's own slot");
+    }
+
+    #[test]
+    fn how_the_base_was_decided_never_names_a_scan() {
+        // two stacks the rules call T2w alike, one by its name and one by its
+        // physics: the decision trail is no difference, so they take the
+        // number, and no +Name or +Physics enters acq-
+        let one = said(&[("base", "T2w"), ("base_basis", "name")]);
+        let two = said(&[("base", "T2w"), ("base_basis", "physics")]);
+        let marks = separator(
+            &[
+                Member {
+                    acquisition: None,
+                    said: Some(&one),
+                },
+                Member {
+                    acquisition: None,
+                    said: Some(&two),
+                },
+            ],
+            &mapping(),
+        );
+        assert!(marks.is_none(), "{marks:?}");
     }
 
     #[test]

@@ -644,22 +644,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         // Record 37 S2. Only a BIDS run spells a `run-`, so only a BIDS run
         // reports on one: the descriptive layout names every stack and needs
         // no index at all.
-        shared_names: match settings.layout {
-            Layout::Bids => shared.names,
-            Layout::Descriptive => 0,
-        },
-        repeats: match settings.layout {
-            Layout::Bids => shared.repeats,
-            Layout::Descriptive => 0,
-        },
-        not_repeats: match settings.layout {
-            Layout::Bids => shared.separated.len() as i64,
-            Layout::Descriptive => 0,
-        },
-        numbered: match settings.layout {
-            Layout::Bids => shared.numbered.len() as i64,
-            Layout::Descriptive => 0,
-        },
         ..Report::default()
     };
     // one remapping for the run, hung from the run's root, handed to the
@@ -732,6 +716,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         pixels: &pixels,
         named: &named,
     };
+    // The stacks this version places, which its counts of shared names are
+    // about: places() names every stack of the registry, so that a name never
+    // depends on what else a release took.
+    let mut in_version: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
         let mine = select_subject(registry.store(), &settings.selection, subject)?;
         if mine.is_empty() {
@@ -796,6 +784,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     fallback,
                 } => (unjudged, label, route, place, fallback),
             };
+            in_version.insert(stack);
             if unjudged {
                 report.unjudged += 1;
             }
@@ -828,8 +817,12 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             // something the archive states, which is the evidence a pack
             // extension or a specification issue is argued from.
             // Wave 7a §8.1: a name a difference or a number decided is listed
-            // with what decided it.
-            if route == crate::bids::place::Route::Raw
+            // with what decided it, whatever route it took, so the record
+            // names the same stacks `not_repeats` counts (review of
+            // 2026-10-10: a derivative or a folder of its own was counted
+            // and not listed).
+            if (route == crate::bids::place::Route::Raw || settings.layout == Layout::Bids)
+                && shared.separated.contains(&stack)
                 && let Some(d) = named_by.get(&stack)
             {
                 report.decided.push(DecidedName {
@@ -1168,6 +1161,22 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // Wave 7a §8.1: the record of decided names in a fixed order, so two runs
     // of one version say the same thing.
     report.decided.sort_by(|a, b| a.name.cmp(&b.name));
+    // Record 37 S2 and Wave 7a §8.1: the shared names, the repeats and the
+    // stacks told apart, of what this version holds. Only a BIDS run spells a
+    // `run-`, so only a BIDS run reports on one.
+    if settings.layout == Layout::Bids {
+        let held = |set: &std::collections::BTreeSet<i64>| -> i64 {
+            set.iter().filter(|s| in_version.contains(*s)).count() as i64
+        };
+        report.repeats = held(&shared.repeated);
+        report.not_repeats = held(&shared.separated);
+        report.numbered = held(&shared.numbered);
+        report.shared_names = shared
+            .name_groups
+            .iter()
+            .filter(|g| g.iter().filter(|s| in_version.contains(*s)).count() > 1)
+            .count() as i64;
+    }
     // §9.5. The files that make the tree a dataset rather than a pile of
     // correctly named images. v0 writes none of them.
     if settings.layout == Layout::Bids {
@@ -4356,7 +4365,7 @@ fn places(
             }
             for group in colliding {
                 if first {
-                    shared.names += 1;
+                    shared.name_groups.push(group.clone());
                 }
                 settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
             }
@@ -4443,12 +4452,12 @@ struct Placements {
 /// shared, and how many stacks it would not name at all.
 #[derive(Debug, Default)]
 struct Shared {
-    /// BIDS names that two or more stacks of one subject, session and
-    /// datatype built.
-    names: i64,
+    /// The groups of stacks of one subject, session and datatype that built
+    /// one BIDS name, as the first round found them.
+    name_groups: Vec<Vec<i64>>,
     /// Stacks under those names that are one acquisition measured again, and
-    /// took a `run-` index.
-    repeats: i64,
+    /// took a `run-` index. A stack is here or in `separated`, never both.
+    repeated: std::collections::BTreeSet<i64>,
     /// Stacks that are not, and were told apart by what differs or by the
     /// fallback number (Wave 7a §8.1). Never refused.
     separated: std::collections::BTreeSet<i64>,
@@ -4529,7 +4538,16 @@ fn settle(
         bids.get(stack).and_then(|b| b.as_ref().ok()).cloned()
     };
     if measurable && differs.is_empty() && admits_run {
-        shared.repeats += group.len() as i64;
+        // A stack an earlier round marked, and this one finds to be one
+        // acquisition made again, ends as a run: it is counted as a repeat
+        // alone, never also as told apart, and the record of decided names
+        // leaves it out (review of 2026-10-10).
+        for stack in group {
+            shared.repeated.insert(*stack);
+            shared.separated.remove(stack);
+            shared.numbered.remove(stack);
+            shared.decided.remove(stack);
+        }
         for (n, stack) in group.iter().enumerate() {
             if let Some(name) = name_of(bids, stack)
                 && let Some(with) = name.with_run(n as i64 + 1)

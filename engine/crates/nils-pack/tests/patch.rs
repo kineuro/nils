@@ -419,7 +419,8 @@ fn the_pick_file_is_reached_by_four_operations() {
     // A value named by its label is the stored value: post-contrast's 1.
     assert_eq!(m.near_tie[2].rank, Rank::Avoid(vec!["1".into()]));
     assert_eq!(m.near_tie[3].rank, Rank::Lowest);
-    // The keys are contract 9's, and the pack was raised to declare it.
+    // The keys are contract 9's, which the shipped pack declares since
+    // 1.0.2, so nothing had to raise it.
     assert_eq!(p.pack.contract, 9);
     let candidacy = p.applied[3].changes.join("; ");
     assert!(
@@ -427,7 +428,7 @@ fn the_pick_file_is_reached_by_four_operations() {
         "{candidacy}"
     );
     assert!(
-        candidacy.contains("declares contract 9 now, 8 before"),
+        !candidacy.contains("declares contract 9 now"),
         "{candidacy}"
     );
     assert!(
@@ -442,7 +443,7 @@ fn the_pick_file_is_reached_by_four_operations() {
     // And a patched pack is written, its pick file where it changed.
     let out = std::env::temp_dir().join(format!("nils-patch-pick-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
-    p.docs.write(&out, Some("1.0.2")).unwrap();
+    p.docs.write(&out, Some("1.0.3")).unwrap();
     let (written, _) = nils_pack::load_patched(&out, &Default::default(), &[]).unwrap();
     assert_eq!(main_pick(&written).candidates, m.candidates);
     assert_eq!(main_pick(&written).near_tie, m.near_tie);
@@ -605,4 +606,49 @@ fn a_rule_may_say_nothing_of_an_axis_that_holds_several_values() {
         "  - {op: add_rule, axis: role, nothing: true, when: [{axis: body_part, is: spine}], position: last}\n",
     );
     assert!(e.contains("runs first in its set"), "{e}");
+}
+
+/// A pack that declares contract 8 is raised to 9 by an operation that
+/// writes one of 9's keys, and the change says so. The shipped pack
+/// declares 9 since 1.0.2, so a copy of it declaring 8 stands in.
+#[test]
+fn an_operation_that_writes_a_later_contract_s_key_raises_the_pack_s_contract() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.path().is_dir() {
+                copy(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let at_8 = std::env::temp_dir().join(format!("nils-patch-contract-8-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&at_8);
+    copy(&mri(), &at_8);
+    let manifest = std::fs::read_to_string(at_8.join("pack.yml")).unwrap();
+    assert!(manifest.contains("\ncontract: 9\n"));
+    std::fs::write(
+        at_8.join("pack.yml"),
+        manifest.replace("\ncontract: 9\n", "\ncontract: 8\n"),
+    )
+    .unwrap();
+    let p = patch::apply(
+        &at_8,
+        &patch_of(concat!(
+            "  - op: set_candidates\n",
+            "    role: t1w\n",
+            "    unless: [{axis: body_part, is: [spine]}]\n",
+        )),
+        &|_| true,
+    )
+    .unwrap();
+    assert_eq!(p.pack.contract, 9);
+    let changes = p.applied[0].changes.join("; ");
+    assert!(
+        changes.contains("declares contract 9 now, 8 before"),
+        "{changes}"
+    );
+    let _ = std::fs::remove_dir_all(&at_8);
 }

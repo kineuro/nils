@@ -1069,6 +1069,40 @@ fn a_quasi_identifying_column_is_shaped_below_detail_quasi() {
     );
 }
 
+/// Record 55 K7, review of 2026-10-10: the shapes check traces a value
+/// through every level of clauses, so a quasi identifying field wrapped
+/// deeper than the bound is refused at validate, never answered unshaped,
+/// while one wrapped within it is still shaped.
+#[test]
+fn a_quasi_column_nested_past_the_bound_is_refused_not_answered_unshaped() {
+    let wrapped = |levels: usize| {
+        let mut c = json!(["field", {}, "code"]);
+        for _ in 0..levels {
+            c = json!(["coalesce", {}, c, "none"]);
+        }
+        json!({
+            "ast_version": 1,
+            "name": "deep",
+            "sets": {"people": {"grain": "subject"}},
+            "out": {"set": "people", "level": "record", "columns": [c]}
+        })
+        .to_string()
+    };
+    let plain = Scope::default();
+    let refused = prepare(parse(&wrapped(13)).unwrap(), &Fixture, &plain).unwrap_err();
+    let text = refused.to_string();
+    assert!(
+        text.contains("not_compilable") && text.contains("nest"),
+        "{text}"
+    );
+    let within =
+        prepare(parse(&wrapped(10)).unwrap(), &Fixture, &plain).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        within.validated.shaped.into_iter().collect::<Vec<_>>(),
+        vec![0]
+    );
+}
+
 /// Wave 7a: a value of an axis is named by its identity, an identity it had
 /// before a rename, or its label; a row may hold any of them for it, a
 /// group's key holds the one the pack stores, and a name that is another

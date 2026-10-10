@@ -388,6 +388,37 @@ fn decide(reg: &mut Registry, stack: i64, axis: &str, value: &str) {
         .unwrap();
 }
 
+/// A person's decision that `axis` holds nothing on one stack.
+fn decide_nothing(reg: &mut Registry, stack: i64, axis: &str) {
+    reg.store()
+        .insert(
+            &Insert::new(
+                nils_registry::schema::table("decision"),
+                &[
+                    "scope",
+                    "ref",
+                    "axis",
+                    "value",
+                    "actor",
+                    "author_kind",
+                    "why",
+                    "decided_at",
+                ],
+            ),
+            &[vec![
+                Param::from("stack"),
+                Param::from(stack.to_string()),
+                Param::from(axis),
+                Param::Null,
+                Param::from("a person"),
+                Param::from("person"),
+                Param::from("read by eye"),
+                Param::from(nils_registry::time::now_iso()),
+            ]],
+        )
+        .unwrap();
+}
+
 fn stack_named(reg: &mut Registry, maker: &str, name: &str, nth: usize) -> i64 {
     let sql = format!(
         "SELECT stack_id FROM {} WHERE manufacturer = '{maker}' AND text_series_description LIKE '%{name}%' ORDER BY stack_id",
@@ -525,7 +556,7 @@ fn the_report_s_moves_and_questions_equal_a_full_re_sort_and_a_sealed_stack_is_n
         assert_eq!(answers["breaks"], 1, "{name}");
         // what it ships as, and what was replayed
         assert_eq!(doc["ships"]["as"], "rules release", "{name}");
-        assert_eq!(doc["ships"]["version"], "1.0.2", "{name}");
+        assert_eq!(doc["ships"]["version"], "1.0.3", "{name}");
         assert_eq!(doc["scope"]["replayed"], "pack", "{name}");
     }
 }
@@ -795,6 +826,86 @@ fn a_change_to_the_pick_file_is_scored_by_the_patched_pick_and_equals_two_pick_r
                 .all(|e| e["before"] != e["after"]
                     || e["borders"]["before"] != e["borders"]["after"]),
             "{name}: {model}"
+        );
+    }
+}
+
+/// Review of 2026-10-10: a person's decision that an axis holds nothing
+/// answers it, in a sort and in the report's replay alike. Before, the row
+/// such a decision writes carries no value and was read as no answer, so
+/// every sort asked `<axis>:missing` about the stack again, and the report
+/// counted it as asked on both sides.
+#[test]
+fn a_decision_of_nothing_answers_the_axis_in_a_sort_and_in_the_replay() {
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let p = Patch::parse(
+        "ops",
+        "patch: 1\npack: mri\nreason: a check\nevidence: this test\noperations:\n  - {op: add_words, axis: technique, value: TSE, words: [zqzq]}\n",
+    )
+    .unwrap();
+    let settings = nils_classify::effect::Settings {
+        scope: None,
+        examples: 10,
+        workers: 2,
+    };
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("effect-nothing");
+        series(
+            &dir,
+            "1.2.9.7.1",
+            1,
+            "P7",
+            &mprage("SIEMENS", "sag t1 mprage"),
+            false,
+        );
+        // nothing weights it, so its base, which matters, is missing
+        series(
+            &dir,
+            "1.2.9.7.1",
+            2,
+            "P7",
+            &[
+                text(tags::SERIES_DESCRIPTION, VR::LO, "ax mystery"),
+                text(tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                text(tags::MANUFACTURER, VR::LO, "SIEMENS"),
+            ],
+            false,
+        );
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let mystery = stack_named(&mut reg, "SIEMENS", "mystery", 0);
+        let missing = |reg: &mut Registry| {
+            open_questions(reg)
+                .get("base:missing")
+                .copied()
+                .unwrap_or(0)
+        };
+        assert_eq!(missing(&mut reg), 1, "{name}: the missing base is asked");
+        let asked = |reg: &mut Registry| -> i64 {
+            let doc = nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &settings, &names)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            doc["review"]["stacks_asked"]["before"].as_i64().unwrap()
+        };
+        let before_decision = asked(&mut reg);
+        assert!(before_decision >= 1, "{name}");
+
+        decide_nothing(&mut reg, mystery, "base");
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(missing(&mut reg), 0, "{name}: the decision answered it");
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(
+            missing(&mut reg),
+            0,
+            "{name}: and every later sort keeps it answered"
+        );
+        assert_eq!(
+            asked(&mut reg),
+            before_decision - 1,
+            "{name}: the replay asks nothing about it either"
         );
     }
 }

@@ -5,8 +5,8 @@
 # reason and evidence stand for an operation that states none.
 patch: 1
 pack: mri
-version: 1.0.1
-ships: 1.0.2
+version: 1.0.2
+ships: 1.0.3
 reason: an example of each kind of operation
 evidence: contracts/patch/v1
 operations:

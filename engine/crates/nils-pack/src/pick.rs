@@ -1651,8 +1651,8 @@ mod tests {
                 None,
             )
         };
-        let morning = Some("2026-01-05 09:56:57.105000");
-        let later = Some("2026-01-05 10:09:12.000000");
+        let morning = Some("2026-01-05 09:30:00.000000");
+        let later = Some("2026-01-05 10:00:00.000000");
         let p = pick(&m, "t1w", &[taken(pair(), &[morning, morning])], &r);
         assert!(p.borders.is_empty(), "one moment: {:?}", p.borders);
         let p = pick(&m, "t1w", &[taken(pair(), &[morning, later])], &r);

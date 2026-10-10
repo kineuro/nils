@@ -2066,7 +2066,7 @@ mod tests {
         // of 2, 19 and 1 images is one candidate of 19, and fragments alone
         // are no candidate at all.
         let m = model(None);
-        let at = Some("2026-01-05 09:56:57.105000");
+        let at = Some("2026-01-05 09:30:00.000000");
         let of = |stack, images, series| {
             scanned(
                 row(stack, &[("technique", "SE"), ("echo_time", "15")]),
@@ -2090,7 +2090,7 @@ mod tests {
         // and the candidate keeps the scanner's original, the series it
         // wrote first.
         let m = model(None);
-        let at = Some("2026-01-05 13:48:19.795000");
+        let at = Some("2026-01-05 13:30:00.000000");
         let of = |stack, series: (i64, i64), moment, derived| {
             scanned(
                 row(stack, &[("technique", "SPACE"), ("echo_time", "386")]),

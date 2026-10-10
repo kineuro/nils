@@ -30,15 +30,32 @@ pub const WRITE_BUF: usize = 256 << 10;
 /// The copy buffer the pixel tail goes through, one per worker.
 pub const COPY_BUF: usize = 256 << 10;
 
-/// The four groups the pseudonymiser always removes: v0's list, tag for
-/// tag (record 26 §3). Never the times, and never the dates, which are the
+/// The groups the pseudonymiser always removes: v0's four, tag for tag
+/// (record 26 §3), and the identifiers v0's four never named (`ids`, record
+/// 35), since a copy that says its identity was removed must not hold an
+/// admission id, an order number or a birth name (the review of Wave 7a's
+/// merge, 2026-10-10). Never the times, and never the dates, which are the
 /// science.
-pub const CATEGORIES: [Category; 4] = [
+pub const CATEGORIES: [Category; 5] = [
     Category::Patient,
     Category::Trial,
     Category::Provider,
     Category::Institution,
+    Category::Ids,
 ];
+
+/// What the pseudonymiser keeps of the `ids` category because the rules
+/// read it from the copy: the image's comments, part of the pack's search
+/// text, kept and cleaned of the file's own identifiers as every
+/// description is (`nils_release::scrub::DESCRIPTORS`).
+pub const RULES_READ: [Tag; 1] = [tags::IMAGE_COMMENTS];
+
+/// The device's identity, kept in the copy by default and claimed as the
+/// Retain Device Identity Option (113109): the rules read the station name,
+/// a decision for "this scanner" is scoped by it, the pack declares it
+/// local, and v0 kept the serial number. The rest of the `ids` category
+/// goes. A default until Nima rules on it (2026-10-10).
+pub const DEVICE_KEPT: [Tag; 6] = nils_release::scrub::DEVICE;
 
 /// A file read and understood, ready to be resolved and written.
 pub struct Prepared {
@@ -105,19 +122,29 @@ pub fn prepare(path: &Path, rel: &str, rule: &Rule) -> Result<Prepared, Refusal>
 pub struct Scrub<'a> {
     pub policy: Policy,
     pub private: &'a [Allowed],
-    pub keep: &'a [Tag],
+    /// The dataset's own `keep` list, what the rules read (`RULES_READ`) and
+    /// the device's identity (`DEVICE_KEPT`).
+    pub keep: Vec<Tag>,
     pub remove: &'a [Tag],
 }
 
 impl<'a> Scrub<'a> {
-    pub fn new(private: &'a [Allowed], keep: &'a [Tag], remove: &'a [Tag]) -> Scrub<'a> {
+    pub fn new(private: &'a [Allowed], keep: &[Tag], remove: &'a [Tag]) -> Scrub<'a> {
+        // what the copy keeps by default yields to a dataset that names it
+        // to remove
+        let mut kept = keep.to_vec();
+        for tag in RULES_READ.into_iter().chain(DEVICE_KEPT) {
+            if !kept.contains(&tag) && !remove.contains(&tag) {
+                kept.push(tag);
+            }
+        }
         Scrub {
             policy: Policy {
                 uids: Uids::Preserve,
                 ..Policy::default()
             },
             private,
-            keep,
+            keep: kept,
             remove,
         }
     }
@@ -136,7 +163,7 @@ impl<'a> Scrub<'a> {
             private: self.private,
             code,
             remap: None,
-            keep: self.keep,
+            keep: &self.keep,
             remove: self.remove,
         }
     }
@@ -388,9 +415,9 @@ mod tests {
             "1.2.3.3"
         );
         assert!(outcome.applied.total("removed") >= 4);
-        // the marks of spec Wave 7a §6.1: the dates, the covariates, the
-        // device serial number and the UIDs kept, and the private element
-        // the allowlist names
+        // the marks of spec Wave 7a §6.1: the descriptions cleaned, the
+        // dates, the covariates, the device's identity and the UIDs kept,
+        // and the private element the allowlist names
         assert_eq!(
             text(ds, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
             Some("YES")
@@ -413,7 +440,9 @@ mod tests {
             .collect();
         assert_eq!(
             codes,
-            ["113100", "113106", "113108", "113109", "113110", "113111"]
+            [
+                "113100", "113105", "113106", "113108", "113109", "113110", "113111"
+            ]
         );
         // the pixels read back as an element of the right length
         let whole = dicom_object::OpenFileOptions::new()

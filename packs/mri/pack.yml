@@ -9,8 +9,8 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 1.0.1
-contract: 8
+version: 1.0.2
+contract: 9
 modality: MR
 
 parsers:

@@ -187,6 +187,27 @@ fn whole_selection(h: &handle::Handle) -> Option<&str> {
     })
 }
 
+/// How many rows a handle that froze a selection holds for the caller,
+/// where it can say: the count it kept, where the caller reads sealed stacks
+/// or it withheld them, else its stack keys less the sealed ones. None where
+/// it cannot, a handle cut short or whose keys are gone among them, so such
+/// a handle leaves its own selection unsized and never fails the whole list
+/// (review of 2026-10-10: one truncated handle made the list answer 409).
+fn sized_rows(store: &mut Store, h: &handle::Handle, scope: &Scope) -> Result<Option<i64>, Reply> {
+    if scope.unsealed || h.suppression["sealed"] == "withheld" {
+        return Ok(Some(h.row_count));
+    }
+    if h.grain != Grain::Stack || !h.has_rows() || h.truncated || h.withdrawn_at.is_some() {
+        return Ok(None);
+    }
+    let Ok(keys) = crate::campaigns::handle_keys(store, h.id, Grain::Stack) else {
+        return Ok(None);
+    };
+    let keys: Vec<i64> = keys.into_iter().map(|(k, _)| k).collect();
+    let sealed = crate::sealed::now(store, &keys)?;
+    Ok(Some((keys.len() - sealed.len()) as i64))
+}
+
 /// Whether a handle's fields are all within the caller's detail.
 fn classes_within(h: &handle::Handle, scope: &Scope) -> bool {
     let classes: BTreeSet<Class> =
@@ -1430,16 +1451,7 @@ fn answer(
                 if !classes_within(h, &scope) {
                     continue;
                 }
-                let rows = if scope.unsealed || h.suppression["sealed"] == "withheld" {
-                    h.row_count
-                } else if h.grain == Grain::Stack && h.has_rows() {
-                    let keys: Vec<i64> = crate::campaigns::handle_keys(store, h.id, Grain::Stack)?
-                        .into_iter()
-                        .map(|(k, _)| k)
-                        .collect();
-                    let sealed = crate::sealed::now(store, &keys)?;
-                    (keys.len() - sealed.len()) as i64
-                } else {
+                let Some(rows) = sized_rows(store, h, &scope)? else {
                     continue;
                 };
                 sized.insert(name.to_string(), (h, rows));
@@ -1796,4 +1808,46 @@ pub(crate) fn capabilities(doors: &Doors, registry: &mut Registry, state: &mut A
         "reader": if doors.ask_dsn.is_some() { "a dedicated role" } else { "the registry, read only" },
         "doors": DOORS,
     })
+}
+
+#[cfg(test)]
+mod sized_tests {
+    use super::*;
+
+    /// A handle as the list reads one, frozen over a selection's stacks.
+    fn handle(truncated: bool) -> handle::Handle {
+        serde_json::from_value(json!({
+            "id": 7, "name": null, "grain": "stack", "columns": [], "row_count": 3,
+            "content_hash": null, "ast_version": 1, "ask": null, "params": {},
+            "selection_versions": [], "principal": "p", "created_at": "2026-10-10T00:00:00Z",
+            "node": "n", "pack_version": null, "epoch": 1, "scheme_digest": null,
+            "disclosure": "plain", "suppression": {}, "truncated": truncated,
+            "values_unresolved": [], "last_read_at": null, "rows_dropped_at": null,
+            "withdrawn_at": null, "withdrawn_by": null, "withdrawn_why": null, "actor": {}
+        }))
+        .unwrap()
+    }
+
+    /// Review of 2026-10-10: a handle cut short leaves its selection
+    /// unsized, and the list goes on; before, its keys were asked for, the
+    /// refusal of a truncated handle's keys came back, and the whole list
+    /// answered 409.
+    #[test]
+    fn a_truncated_handle_sizes_nothing_and_fails_nothing() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        let scope = Scope::default();
+        assert!(matches!(
+            sized_rows(&mut store, &handle(true), &scope),
+            Ok(None)
+        ));
+        // the caller who reads sealed stacks is told the count it kept
+        let unsealed = Scope {
+            unsealed: true,
+            ..Scope::default()
+        };
+        assert!(matches!(
+            sized_rows(&mut store, &handle(true), &unsealed),
+            Ok(Some(3))
+        ));
+    }
 }

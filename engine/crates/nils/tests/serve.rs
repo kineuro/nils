@@ -372,12 +372,13 @@ fn the_door_serves_what_the_command_line_has() {
     }
 
     // Record 28: the engine serves the tag policy it owns, so that nothing
-    // reading it has to keep a copy. A hundred elements in four categories,
-    // never the times, which are a release's.
+    // reading it has to keep a copy. v0's four categories and the ids
+    // category (the review of Wave 7a's merge, 2026-10-10), never the times,
+    // which are a release's.
     assert!(doors.contains(&"GET /api/pseudonymize/tags"), "{doors:?}");
     let (status, policy) = server.request("GET", "/api/pseudonymize/tags", None, None);
     assert_eq!(status, 200, "{policy}");
-    assert_eq!(policy["count"], 100, "{policy}");
+    assert_eq!(policy["count"], 145, "{policy}");
     assert_eq!(
         policy["categories"],
         serde_json::json!([
@@ -385,6 +386,7 @@ fn the_door_serves_what_the_command_line_has() {
             {"category": "trial", "count": 23},
             {"category": "provider", "count": 38},
             {"category": "institution", "count": 5},
+            {"category": "ids", "count": 47},
         ]),
         "{policy}"
     );
@@ -3135,7 +3137,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
     loose.file("sub-9/a.dcm", &dicom("1.2.3.F", "1.2.3.F.1.1"));
     loose.file("sub-8/notes.txt", b"no dicom here");
-    const LIMIT: usize = 60;
+    const LIMIT: usize = 100;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -3149,6 +3151,10 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "an-operator-token-of-len=ops@lab:operator",
             "--token",
             "a-places-token-of-length=pl@lab:places:work,data:see",
+            "--token",
+            "an-admin-token-of-length=ad@lab:admin",
+            "--token",
+            "a-plain-work-token-of-ln=pw@lab:places:work,data:work,data:see",
             "--ingest-root",
             &format!("ds={}", identified.path().display()),
             "--ingest-root",
@@ -3161,6 +3167,8 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     let reader = Some("a-reader-token-of-length");
     let ops = Some("an-operator-token-of-len");
     let places_only = Some("a-places-token-of-length");
+    let admin = Some("an-admin-token-of-length");
+    let plain_work = Some("a-plain-work-token-of-ln");
     let ask = |method: &str, path: &str, body: Option<&str>, token: Option<&str>| {
         used.set(used.get() + 1);
         server.request(method, path, body, token)
@@ -3387,8 +3395,68 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     let (status, look) = ask("GET", "/api/places/loose/folders/sub-8", None, reader);
     assert_eq!(status, 200, "{look}");
     assert_eq!(look["holds_dicom"], "no", "{look}");
-    // looking at the roots again adds no dataset
-    let (status, again) = ask("GET", "/api/places?explore=1", None, ops);
+    // looking at the roots again adds no dataset; it writes, so it is a
+    // POST that needs Places and Data work and is audited (the review of
+    // Wave 7a's merge, 2026-10-10), and a read never explores
+    let (status, refused) = ask("GET", "/api/places?explore=1", None, ops);
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask("POST", "/api/places/explore", Some("{}"), reader);
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = ask("POST", "/api/places/explore", Some("{}"), places_only);
+    assert_eq!(status, 403, "{refused}");
+    let (status, explored) = ask("POST", "/api/places/explore", Some("{}"), ops);
+    assert_eq!(status, 200, "{explored}");
+    assert_eq!(explored["errors"], serde_json::json!([]), "{explored}");
+    assert!(
+        explored["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "loose"),
+        "{explored}"
+    );
+    let (_, audit) = ask("GET", "/api/audit?action=place.set", None, admin);
+    assert!(
+        audit["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["scope"]["explore"] == true),
+        "{audit}"
+    );
+    // an error's words may name a folder: shaped for a caller who may not
+    // read a folder's names, and always in the audit row (2026-10-10)
+    let person = TempDir::new("ds-person");
+    person.file(
+        "Svensson Anna 1912/derivatives/dcm-anon/a.dcm",
+        &dicom("1.2.3.P", "1.2.3.P.1.1"),
+    );
+    let folder = person.path().join("Svensson Anna 1912");
+    let (status, made) = ask(
+        "POST",
+        "/api/places",
+        Some(
+            &serde_json::json!({"role": "source", "name": "person", "path": folder.display().to_string()})
+                .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 201, "{made}");
+    std::fs::rename(&folder, person.path().join("gone")).unwrap();
+    let (status, shaped) = ask("POST", "/api/places/explore", Some("{}"), plain_work);
+    assert_eq!(status, 200, "{shaped}");
+    let words = shaped["errors"].to_string();
+    assert!(words.contains("Aaaaaaaa Aaaa 9999"), "{shaped}");
+    assert!(!words.contains("Svensson"), "{shaped}");
+    let (_, named) = ask("POST", "/api/places/explore", Some("{}"), ops);
+    assert!(
+        named["errors"].to_string().contains("Svensson Anna 1912"),
+        "{named}"
+    );
+    let (_, audit) = ask("GET", "/api/audit?action=place.set", None, admin);
+    assert!(!audit.to_string().contains("Svensson"), "{audit}");
+    std::fs::rename(person.path().join("gone"), &folder).unwrap();
+    let (status, again) = ask("GET", "/api/places", None, ops);
     assert_eq!(status, 200, "{again}");
     assert!(
         !again["places"]
@@ -3434,7 +3502,45 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         serde_json::json!(["a.dcm"]),
         "{under}"
     );
+    assert_eq!(under["layout"]["entry_names"], "names", "{under}");
     assert!(loose.path().join("sub-9/a.dcm").is_file());
+    // the review of Wave 7a's merge (2026-10-10): a loose entry may be
+    // named after a person, so its name goes only to Data work at detail
+    // sensitive; a reader sees its shape, and no audit row keeps the name
+    let (status, read) = ask("GET", "/api/places", None, reader);
+    assert_eq!(status, 200, "{read}");
+    let row = read["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "sub-9")
+        .unwrap();
+    assert_eq!(
+        row["layout"]["loose_dicom"],
+        serde_json::json!(["a.aaa"]),
+        "{row}"
+    );
+    assert_eq!(row["layout"]["entry_names"], "shapes", "{row}");
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-9", None, reader);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(
+        look["layout"]["loose_dicom"],
+        serde_json::json!(["a.aaa"]),
+        "{look}"
+    );
+    let (status, look) = ask("GET", "/api/places/loose/folders/sub-9", None, ops);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(
+        look["layout"]["loose_dicom"],
+        serde_json::json!(["a.dcm"]),
+        "{look}"
+    );
+    let (status, audit) = ask("GET", "/api/audit?action=place.add", None, admin);
+    assert_eq!(status, 200, "{audit}");
+    let text = audit.to_string();
+    assert!(text.contains("a.aaa"), "{audit}");
+    assert!(!text.contains("a.dcm"), "{audit}");
+    assert!(!text.contains("notes.txt"), "{audit}");
     for command in [
         r#"["digest", "@loose"]"#,
         r#"["digest", "@loose/sub-9"]"#,
@@ -3867,6 +3973,32 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         .unwrap();
     assert_eq!(row["grant"], "places:work", "{row}");
     assert_eq!(row["dataset"], "data:work", "{row}");
+    // the review of Wave 7a's merge (2026-10-10): a folder's name in the
+    // address is percent-encoded, so one with a space or å, ä, ö is found;
+    // a name that leads out of the root by a symbolic link is refused, and
+    // nothing past it is looked at
+    loose.file("Åsa Öberg 7/a.dcm", &dicom("1.2.3.G", "1.2.3.G.1.1"));
+    let outside = TempDir::new("ds-outside");
+    outside.file("x/a.dcm", &dicom("1.2.3.H", "1.2.3.H.1.1"));
+    std::os::unix::fs::symlink(outside.path().join("x"), loose.path().join("escape")).unwrap();
+    let (status, look) = ask(
+        "GET",
+        "/api/places/loose/folders/%C3%85sa%20%C3%96berg%207",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["name"], "Åsa Öberg 7", "{look}");
+    assert_eq!(look["holds_dicom"], "yes", "{look}");
+    let (status, refused) = ask("GET", "/api/places/loose/folders/escape", None, reader);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the root"),
+        "{refused}"
+    );
     while used.get() < LIMIT {
         ask("GET", "/api/capabilities", None, reader);
     }
@@ -5744,7 +5876,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@1.0.1", "{classified}");
+    assert_eq!(classified["pack"], "mri@1.0.2", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the
@@ -6963,6 +7095,126 @@ fn the_viewer_lists_subjects_visits_and_a_visit_s_scans_on_postgres_too() {
             "DROP SCHEMA IF EXISTS {VIEWER_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {VIEWER_SCHEMA}_linkage CASCADE"
         ))
         .unwrap();
+}
+
+/// Review of 2026-10-10: a visit's scans are its subject's alone. Two
+/// patients whose files name one study share it in the registry, which files
+/// the study under the first; a visit of the first, named by its session or
+/// by its studies, lists the first's scans and never the second's.
+#[test]
+fn a_visit_s_scans_are_its_subject_s_alone() {
+    let home = TempDir::new("viewer-shared-home");
+    let tree = TempDir::new("viewer-shared");
+    viewer_file(
+        &tree,
+        "S-0001",
+        "1.2.9.S",
+        "1.2.9.S.1",
+        "20260102",
+        "t1 mprage",
+        "SIEMENS",
+    );
+    viewer_file(
+        &tree,
+        "S-0002",
+        "1.2.9.S",
+        "1.2.9.S.2",
+        "20260102",
+        "t2 tse",
+        "SIEMENS",
+    );
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "shared",
+            tree.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,mapped-0001\nS-0002,mapped-0002\n",
+    );
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "shared", "--no-private", "@shared"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(&home, &["session", "rebuild"], None);
+    let first = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let subject = store.qualified("subject");
+        store
+            .query(
+                &format!("SELECT id FROM {subject} WHERE code = 'mapped-0001'"),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    let server = Server::start(
+        &home,
+        8,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+        ],
+        &[],
+    );
+    let reviewer = Some("a-reviewer-token-of-len");
+    let (status, v) = server.request(
+        "GET",
+        &format!("/api/datasets/shared/subjects/{first}/visits"),
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 200, "{v}");
+    let visit = &v["visits"][0];
+    let session = visit["session"].as_i64().expect("the visit's session");
+    let study = visit["studies"][0].as_i64().expect("the visit's study");
+    for path in [
+        format!("/api/datasets/shared/scans?session={session}"),
+        format!("/api/datasets/shared/scans?studies={study}"),
+    ] {
+        let (status, scans) = server.request("GET", &path, None, reviewer);
+        assert_eq!(status, 200, "{path}: {scans}");
+        let named: Vec<&str> = scans["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["series_description"].as_str())
+            .collect();
+        assert_eq!(named, ["t1 mprage"], "{path}: {scans}");
+        assert_eq!(scans["total"], 1, "{path}: {scans}");
+    }
 }
 
 const VIEWER_SCHEMA: &str = "nils_viewer_doors";

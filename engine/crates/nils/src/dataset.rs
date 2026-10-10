@@ -364,6 +364,109 @@ pub(crate) fn shape_of(path: &Path) -> Shape {
 /// The most loose entries an answer names; the count is always whole.
 const NAMED_ENTRIES: usize = 100;
 
+/// Whether a caller reads the names of a folder's loose entries. A raw
+/// export often names its folders after the patient or by personnummer,
+/// so the names go only to Data work at detail sensitive (the review of
+/// Wave 7a's merge, 2026-10-10); everyone else reads their shapes.
+pub(crate) fn sees_entry_names(access: &crate::grants::Access) -> bool {
+    access.holds("data:work") && access.detail >= crate::grants::Detail::Sensitive
+}
+
+/// Every loose entry's name in a document put as its shape
+/// (`scans::shape`), wherever a layout sits in it, with `entry_names`
+/// saying `shapes` beside them: what a caller who may not read the names
+/// is answered, and what every audit row keeps.
+pub(crate) fn entry_shapes(doc: &mut Value) {
+    match doc {
+        Value::Object(map) => {
+            let mut shaped = false;
+            for (key, value) in map.iter_mut() {
+                if key == "loose_entries" || key == "loose_dicom" {
+                    if let Some(names) = value.as_array_mut() {
+                        for name in names.iter_mut() {
+                            if let Some(text) = name.as_str() {
+                                *name = Value::String(crate::scans::shape(text));
+                            }
+                        }
+                        shaped = true;
+                    }
+                } else {
+                    entry_shapes(value);
+                }
+            }
+            if shaped {
+                map.insert("entry_names".into(), Value::String("shapes".into()));
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(entry_shapes),
+        _ => {}
+    }
+}
+
+/// A document as a caller reads it: the loose entries named for one who
+/// may read them, shaped for anyone else.
+pub(crate) fn entries_for(mut doc: Value, access: &crate::grants::Access) -> Value {
+    if !sees_entry_names(access) {
+        entry_shapes(&mut doc);
+    }
+    doc
+}
+
+/// Words about a folder put for a caller who may not read its names, and for
+/// an audit row: the folder's path, its top-level entries and a layout's
+/// loose entries, wherever the words name them, each as its shape
+/// (2026-10-10). The longest first, so a name inside another is not cut.
+pub(crate) fn shaped_words(message: &str, folder: &Path, layout: Option<&Value>) -> String {
+    let shaped_path: Vec<String> = folder
+        .components()
+        .map(|c| match c {
+            std::path::Component::Normal(s) => crate::scans::shape(&s.to_string_lossy()),
+            other => other.as_os_str().to_string_lossy().into_owned(),
+        })
+        .collect();
+    let full = folder.display().to_string();
+    let mut out = message.replace(&full, &shaped_path.join("/").replace("//", "/"));
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(folder) {
+        names.extend(
+            entries
+                .take(NAMED_ENTRIES * 10)
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(name) = folder.file_name() {
+        names.push(name.to_string_lossy().into_owned());
+    }
+    if let Some(layout) = layout {
+        for key in ["loose_entries", "loose_dicom"] {
+            names.extend(
+                layout[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+    }
+    names.retain(|n| n.chars().count() > 2);
+    names.sort_by_key(|n| std::cmp::Reverse(n.chars().count()));
+    names.dedup();
+    for name in &names {
+        out = out.replace(name.as_str(), &crate::scans::shape(name));
+    }
+    out
+}
+
+/// A copy of a document for an audit row, its loose entries shaped: an
+/// audit row never keeps a folder's name that may be a person's.
+pub(crate) fn entries_for_audit(doc: &Value) -> Value {
+    let mut doc = doc.clone();
+    entry_shapes(&mut doc);
+    doc
+}
+
 /// The trees a move may put an unknown dataset's entries into, by the word
 /// a person gives.
 pub(crate) const MOVE_INTO: [(&str, &str); 2] =
@@ -424,6 +527,7 @@ fn layout_doc_with(path: &Path, layout: &Layout, counted: bool) -> Value {
         "loose": layout.loose.len(),
         "loose_entries": layout.loose.iter().take(NAMED_ENTRIES).collect::<Vec<_>>(),
         "loose_dicom": layout.loose_dicom.iter().take(NAMED_ENTRIES).collect::<Vec<_>>(),
+        "entry_names": "names",
         "question": state == State::Unknown,
         "move_into": (state == State::Unknown).then(|| json!({
             "choices": MOVE_INTO.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
@@ -449,6 +553,27 @@ fn layout_doc_with(path: &Path, layout: &Layout, counted: bool) -> Value {
         "moved": layout.moved.map(|(into, n)| json!({"into": into, "entries": n})),
         "renamed": layout.renamed,
     })
+}
+
+/// What settling a folder would write, where it would write anything:
+/// renaming a v0 folder's `dcm-raw`, or making the `dcm-anon` an
+/// identified dataset's pseudonymiser writes into. None where the folder
+/// is settled already, or unknown and waiting for a person's word.
+pub(crate) fn would_write(layout: &Layout) -> Option<&'static str> {
+    if layout.state() == State::Unknown {
+        return None;
+    }
+    if layout.raw && !layout.anon {
+        return Some(
+            "adding it renames derivatives/dcm-raw to derivatives/dcm-anon, and v0 reads dcm-raw",
+        );
+    }
+    if !layout.anon && !layout.raw {
+        return Some(
+            "adding it makes an empty derivatives/dcm-anon for the pseudonymiser to write into",
+        );
+    }
+    None
 }
 
 /// The one write the engine makes under a source place outside the
@@ -572,6 +697,7 @@ pub(crate) fn declare(
     path: &Path,
     asked: &Value,
     current: Option<&Place>,
+    write: bool,
 ) -> Result<Declared, Refused> {
     if asked.get("arrives").is_some_and(|a| !a.is_null()) {
         return Err(bad(ARRIVES_IS_READ));
@@ -625,6 +751,26 @@ pub(crate) fn declare(
                 "trees": {"originals": null, "anon": "."},
             }),
             json!({"legacy": true, "state": "anonymised", "reads": ".", "question": false}),
+        )
+    } else if let Some(waits) = (!write)
+        .then(|| detect(path))
+        .and_then(|found| would_write(&found).map(|w| (found, w)))
+    {
+        // A look that may not write (setup's, review of 2026-10-10: v0
+        // still reads `dcm-raw`): the folder is reported as it is, the
+        // dataset stays unknown and is not read, and what adding it would
+        // do is said, for a person to do from Data.
+        let (found, what) = waits;
+        let mut layout = layout_doc(path, &found);
+        layout["waits"] = json!(what);
+        (
+            json!({
+                "kind": "dataset",
+                "arrives": place::UNDECLARED,
+                "state": "unknown",
+                "trees": {"originals": null, "anon": null},
+            }),
+            layout,
         )
     } else {
         let (state, trees, found) = settle(path, move_into, confirm)?;
@@ -731,6 +877,7 @@ pub(crate) fn shape_place(
     asked: &Value,
     current: Option<&Place>,
     _guarantees: &Value,
+    write: bool,
 ) -> Result<(Declared, Vec<Found>), Refused> {
     if asked.get("arrives").is_some_and(|a| !a.is_null()) {
         return Err(bad(ARRIVES_IS_READ));
@@ -746,7 +893,7 @@ pub(crate) fn shape_place(
                 && (c.dataset["state"] != "unknown" || !c.dataset["root"].is_null())
         });
     if one || shape_of(path) != Shape::Root {
-        return Ok((declare(store, path, asked, current)?, Vec::new()));
+        return Ok((declare(store, path, asked, current, write)?, Vec::new()));
     }
     // a root is never a dataset's tree, nor inside one
     if let Some((other, tree)) =
@@ -950,7 +1097,7 @@ fn added_places(store: &mut Store, under: &Path) -> Result<Vec<(PathBuf, Place)>
 /// it as a dataset: its state, what would be read, and the question an
 /// unknown one would ask. The folder is named as it is under the root.
 pub(crate) fn folder_look(store: &mut Store, root: &Place, name: &str) -> Result<Value, Refused> {
-    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+    if name.is_empty() || name.contains(['/', '\0']) || name == "." || name == ".." {
         return Err(bad(format!("{name}: a folder's name under the root")));
     }
     let root_path = PathBuf::from(&root.path);
@@ -962,8 +1109,18 @@ pub(crate) fn folder_look(store: &mut Store, root: &Place, name: &str) -> Result
             layout: None,
         });
     }
-    let added = added_places(store, &root_path)?;
+    // what the name resolves to stays under the root: a symbolic link out of
+    // it is no folder of the root's, and nothing past it is looked at (the
+    // review of Wave 7a's merge, 2026-10-10)
+    let real_root = std::fs::canonicalize(&root_path).unwrap_or_else(|_| root_path.clone());
     let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    if real == real_root || !real.starts_with(&real_root) {
+        return Err(bad(format!(
+            "{name} leads outside the root {}; a folder under a root is looked at where it lies",
+            root.name
+        )));
+    }
+    let added = added_places(store, &root_path)?;
     let p = added.iter().find(|(at, _)| *at == real).map(|(_, p)| p);
     let layout = match shape_of(&path) {
         Shape::Legacy => {
@@ -1057,7 +1214,7 @@ pub(crate) fn add_dataset(
             }
         }
     };
-    let d = declare(store, &path, asked, None)?;
+    let d = declare(store, &path, asked, None, true)?;
     let mut dataset = d.dataset;
     dataset["root"] = json!(root.name);
     let id = place::add(
@@ -1107,9 +1264,18 @@ pub(crate) fn refresh(store: &mut Store, only: Option<&str>) -> Result<Vec<Found
         })
         .collect();
     let mut out = Vec::new();
-    for p in places {
+    for listed in places {
+        // read again just before it is written: a person's change since the
+        // list was read (a declaration, an act on the originals) stands
+        // (the review of Wave 7a's merge, 2026-10-10)
+        let Some(p) = place::show(store, listed.id).map_err(failed)? else {
+            continue;
+        };
+        if p.retired_at.is_some() {
+            continue;
+        }
         let path = PathBuf::from(&p.path);
-        match declare(store, &path, &json!({}), Some(&p)) {
+        match declare(store, &path, &json!({}), Some(&p), true) {
             Ok(d) => {
                 place::set(store, p.id, None, None, Some(&d.probed)).map_err(failed)?;
                 let mut dataset = d.dataset;
@@ -1203,6 +1369,11 @@ pub(crate) fn layout_lines(id: i64, dataset: &Value, layout: &Value) -> Vec<Stri
     }
     if layout["renamed"].as_bool() == Some(true) {
         out.push(format!("{RAW_TREE} is now {ANON_TREE}"));
+    }
+    if let Some(waits) = layout["waits"].as_str() {
+        out.push(format!(
+            "nothing in it was moved or made, and nothing is read: {waits}; add it from Data when that is right"
+        ));
     }
     if let Some(m) = layout["moved"].as_object() {
         out.push(format!(
@@ -1363,14 +1534,17 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
 /// undeclared (Wave 7a §5.3), or its declaration is not whole (Wave 7a,
 /// Nima 2026-10-08: a de-identified or coded dataset says what PatientID
 /// holds and how its subjects are found).
-pub(crate) fn undeclared_refusal(p: &Place) -> Option<String> {
+pub(crate) fn undeclared_refusal(
+    p: &Place,
+    scheme: nils_registry::pseudonym::Scheme,
+) -> Option<String> {
     if place::is_undeclared(&p.dataset) {
         return Some(format!(
             "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Add a dataset",
             p.name, p.id
         ));
     }
-    place::incomplete(&p.dataset).map(|why| {
+    place::incomplete_on(&p.dataset, scheme).map(|why| {
         format!(
             "the dataset {} is not read yet: {why}. Declare it whole with nils place set {} or the desk's Add a dataset",
             p.name, p.id
@@ -1983,6 +2157,65 @@ mod tests {
         assert!(why.message.contains("keep one"), "{}", why.message);
     }
 
+    /// Review of 2026-10-10: a look that may not write, setup's, reports a
+    /// folder as it is. A v0 folder keeps its dcm-raw, which v0 reads, and an
+    /// identified one gets no dcm-anon made; each is unknown, read by
+    /// nothing, and says what adding it would do. A person's add writes as
+    /// before.
+    #[test]
+    fn a_look_that_may_not_write_moves_and_makes_nothing() {
+        let dir = TempDir::new("dataset-look");
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        dir.file("v0study/derivatives/dcm-raw/s1/IM_1", &dicom_bytes());
+        dir.file("idstudy/derivatives/dcm-original/p1/IM_1", &dicom_bytes());
+        for (folder, says) in [
+            ("v0study", "dcm-raw"),
+            ("idstudy", "empty derivatives/dcm-anon"),
+        ] {
+            let path = dir.path().join(folder);
+            let (d, _) = shape_place(
+                &mut store,
+                folder,
+                &path,
+                &json!({}),
+                None,
+                &json!({}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(d.dataset["state"], "unknown", "{folder}: {}", d.dataset);
+            assert_eq!(d.dataset["arrives"], place::UNDECLARED, "{folder}");
+            assert!(
+                d.layout["waits"].as_str().is_some_and(|w| w.contains(says)),
+                "{folder}: {}",
+                d.layout
+            );
+            assert!(!path.join(ANON_TREE).exists(), "{folder}: nothing was made");
+            let lines = layout_lines(1, &d.dataset, &d.layout).join("; ");
+            assert!(lines.contains("nothing in it was moved or made"), "{lines}");
+        }
+        assert!(
+            dir.path().join("v0study").join(RAW_TREE).is_dir(),
+            "v0's tree stays"
+        );
+        // a person adding the v0 folder settles it, as before
+        let path = dir.path().join("v0study");
+        let (d, _) = shape_place(
+            &mut store,
+            "v0study",
+            &path,
+            &json!({}),
+            None,
+            &json!({}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(d.dataset["state"], "anonymised", "{}", d.dataset);
+        assert!(path.join(ANON_TREE).is_dir() && !path.join(RAW_TREE).exists());
+    }
+
     /// Wave 7a (Nima, 2026-10-08: "the only assumption is when we add data
     /// and expect the structure"): adding a root adds the root alone; its
     /// folders are listed as they are, with no DICOM where there is none;
@@ -2017,8 +2250,16 @@ mod tests {
         dir.file("papers/notes.txt", b"no dicom here");
         dir.file("readme.txt", b"r");
         // the root alone
-        let (d, found) =
-            shape_place(&mut store, "src", dir.path(), &json!({}), None, &json!({})).unwrap();
+        let (d, found) = shape_place(
+            &mut store,
+            "src",
+            dir.path(),
+            &json!({}),
+            None,
+            &json!({}),
+            true,
+        )
+        .unwrap();
         assert!(found.is_empty());
         assert_eq!(d.dataset["kind"], "root");
         assert_eq!(d.layout["folders"], 8);

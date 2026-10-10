@@ -683,6 +683,9 @@ pub(crate) fn document(
             &format!("dataset:{}", dataset.name),
             stacks,
             &plans,
+            // counted as the card counts them (record 48: never by kind); a
+            // cohort's steps leave a sealed sample out
+            false,
         )
         .map_err(failed)?,
     );

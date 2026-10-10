@@ -121,17 +121,25 @@ pub(crate) fn page(
     let Some(mut filter) = scope.holds(store, access, "st", "b", "se") else {
         return Ok(empty(0));
     };
+    // A visit is one subject's: a study two patients' files name is filed
+    // under the first, and the other's series under it are not this visit's
+    // (review of 2026-10-10). A session's subject is the session's; a
+    // visit named by its studies is their own subject's.
     match visit {
         Some(Visit::Session(id)) => filter.push_str(&format!(
-            " AND se.study_id IN (SELECT scs.study_id FROM {} scs WHERE scs.session_id = {id})",
-            store.qualified("session_cache_study")
+            " AND se.study_id IN (SELECT scs.study_id FROM {} scs WHERE scs.session_id = {id}) \
+             AND se.subject_id = (SELECT sc.subject_id FROM {} sc WHERE sc.id = {id})",
+            store.qualified("session_cache_study"),
+            store.qualified("session_cache")
         )),
         Some(Visit::Studies(ids)) => filter.push_str(&format!(
-            " AND se.study_id IN ({})",
+            " AND se.study_id IN ({}) \
+             AND se.subject_id = (SELECT vs.subject_id FROM {} vs WHERE vs.id = se.study_id)",
             ids.iter()
                 .map(i64::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            store.qualified("study")
         )),
         None => {}
     }

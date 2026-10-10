@@ -834,7 +834,9 @@ fn ask_missing(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT stack_id, axis FROM {} WHERE stack_id IN ({list}) AND value IS NOT NULL AND value <> ''",
+            // a person's decision answers the axis, a decision that it holds
+            // nothing too, whose row carries no value (review of 2026-10-10)
+            "SELECT stack_id, axis FROM {} WHERE stack_id IN ({list}) AND ((value IS NOT NULL AND value <> '') OR tier = 'decision')",
             store.qualified("classification_axis")
         );
         for r in store.query(&sql, &[])? {
@@ -980,18 +982,25 @@ pub(crate) fn notes_of(
 /// every review item ever written once for each window's members, and a
 /// full re-classification of the archive spent most of its time there.
 /// What this run asks itself is written after the read, and a stack is
-/// judged once in a run, so none of it is ever here.
-fn open_questions(store: &mut Store) -> Result<HashMap<i64, Vec<i64>>, Error> {
+/// judged once in a run, so none of it is ever here. A question a sort
+/// does not ask is not its to supersede: a model's (`<axis>:model`), and
+/// any about an axis an operation of its own answers (the pack's
+/// `review.by_model`), which only that operation's next run replaces
+/// (review of 2026-10-10: a re-sort closed the body-part step's questions).
+fn open_questions(store: &mut Store, by_model: &[String]) -> Result<HashMap<i64, Vec<i64>>, Error> {
     let mut asked: HashMap<i64, Vec<i64>> = HashMap::new();
     let review = store.qualified("review_item");
     let members = store.qualified("review_member");
     for r in store.query(
         &format!(
-            "SELECT id, CAST(ref AS TEXT) FROM {review} \
+            "SELECT id, CAST(ref AS TEXT), kind FROM {review} \
              WHERE status = 'open' AND scope = 'stack' AND kind LIKE '%:%'"
         ),
         &[],
     )? {
+        if !sorts_own(r.text(2)?, by_model) {
+            continue;
+        }
         // The ref a classifier question is written with, and nothing else.
         let stack = r
             .opt_text(1)?
@@ -1006,14 +1015,27 @@ fn open_questions(store: &mut Store) -> Result<HashMap<i64, Vec<i64>>, Error> {
     }
     for r in store.query(
         &format!(
-            "SELECT m.stack_id, m.item_id FROM {members} m JOIN {review} i ON i.id = m.item_id \
+            "SELECT m.stack_id, m.item_id, i.kind FROM {members} m JOIN {review} i ON i.id = m.item_id \
              WHERE i.status = 'open' AND i.scope = 'group'"
         ),
         &[],
     )? {
+        if !sorts_own(r.text(2)?, by_model) {
+            continue;
+        }
         asked.entry(r.int(0)?).or_default().push(r.int(1)?);
     }
     Ok(asked)
+}
+
+/// Whether a question of this kind is one a sort asks, and so supersedes
+/// when it judges the stack again: not a model's, and not one about an axis
+/// the pack leaves to an operation of its own.
+fn sorts_own(kind: &str, by_model: &[String]) -> bool {
+    match kind.split_once(':') {
+        Some((axis, what)) => what != "model" && !by_model.iter().any(|a| a == axis),
+        None => true,
+    }
 }
 
 /// Classify every stack in scope.
@@ -1045,6 +1067,8 @@ pub fn classify(
     }
     let store = registry.store();
     match &result {
+        // the caller's own step finishes it (`Settings::leave_open`)
+        Ok(report) if settings.leave_open && !report.cancelled => {}
         Ok(report) => {
             let state = if report.cancelled {
                 "cancelled"
@@ -1096,7 +1120,7 @@ fn run(
 
     // The questions still open from an earlier run, by the stack they stand
     // on, read once. A first run has none, and then no window pays for them.
-    let asked = open_questions(store)?;
+    let asked = open_questions(store, &pack.review.by_model)?;
 
     // Record 55 H3: the axes where an answer that is missing is a question,
     // worked out from what reads them, and the stacks found missing one,

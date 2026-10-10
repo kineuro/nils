@@ -1265,7 +1265,7 @@ mod tests {
             &["S-2", "19850101-2382"],
             &["S-3", "201501012395"],
             &["S-4", "850101-2383"],
-            &["S-5", "BROMS-0042"],
+            &["S-5", "TRIAL-0042"],
         ]);
         let apply = |registry: &mut Store, linkage: &mut Store, data: &[Row]| {
             import(
@@ -1297,7 +1297,7 @@ mod tests {
         );
         assert_eq!(r.conflicts[1].row, 6);
         let text = r.to_string();
-        assert!(!text.contains("2383") && !text.contains("BROMS"), "{text}");
+        assert!(!text.contains("2383") && !text.contains("TRIAL"), "{text}");
         assert!(!r.written());
         // without the two bad rows: two people, one of them written twice
         let r = apply(&mut registry, &mut linkage, &data[..3]);

@@ -1282,14 +1282,19 @@ fn the_full_style_spells_every_slot_and_the_minimal_one_the_type_modifiers_and_t
 /// in the archive. Both pairs build one BIDS name each. Nothing here is read
 /// from a corpus: the shapes are the ones the 2026-09-19 studies described.
 fn colliding() -> TempDir {
-    let dir = TempDir::new("bids-collide");
-    let series = [
+    collide(&[
         ("1", "t1_mprage_sag", "T1 MPRAGE", "3D", 4),
         ("2", "t1_mprage_sag", "T1 MPRAGE", "3D", 4),
         ("3", "t2_flair_tra", "T2 FLAIR", "2D", 4),
         ("4", "t2_flair_tra", "T2 FLAIR", "2D", 6),
-    ];
-    for (n, description, protocol, acquisition, slices) in series {
+    ])
+}
+
+/// Series of one study that differ in what is given: their number, name,
+/// protocol, acquisition type and slice count.
+fn collide(series: &[(&str, &str, &str, &str, u32)]) -> TempDir {
+    let dir = TempDir::new("bids-collide");
+    for &(n, description, protocol, acquisition, slices) in series {
         for slice in 1..=slices {
             let sop = format!("1.2.3.{n}.{slice}");
             let mut e = synth::minimal_mr("1.2.3.0", &format!("1.2.3.{n}.0"), &sop);
@@ -1460,6 +1465,57 @@ fn two_acquisitions_that_want_one_name_are_both_named_by_what_differs() {
     assert!(
         shared_differs(&mut reg).is_empty(),
         "nobody is asked about a difference the name says"
+    );
+}
+
+#[test]
+fn a_repeat_an_earlier_mark_left_together_is_counted_once() {
+    // Review of 2026-10-10. Three FLAIRs want one name: two are one
+    // acquisition made again and the third has more slices. The slice count
+    // tells the third apart first, and the two left sharing a name are then
+    // a repeat and take run-. They are counted as repeats alone, never also
+    // as told apart, and the record of decided names lists the third only,
+    // as many as `not_repeats` counts.
+    let Some(converter) = converter() else { return };
+    let source = collide(&[
+        ("3", "t2_flair_tra", "T2 FLAIR", "2D", 4),
+        ("4", "t2_flair_tra", "T2 FLAIR", "2D", 4),
+        ("5", "t2_flair_tra", "T2 FLAIR", "2D", 6),
+    ]);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(
+        &mut reg,
+        &settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+    let written = files_under(out.path());
+    let runs: Vec<&String> = written
+        .iter()
+        .filter(|f| f.contains("_run-") && f.ends_with(".nii.gz"))
+        .collect();
+    assert_eq!(runs.len(), 2, "{written:?}");
+    assert_eq!(report.shared_names, 1, "{report:?}");
+    assert_eq!(report.repeats, 2, "{report:?}");
+    assert_eq!(report.not_repeats, 1, "{report:?}");
+    assert_eq!(report.numbered, 0, "{report:?}");
+    assert_eq!(report.decided.len(), 1, "{:?}", report.decided);
+    assert!(
+        report.decided[0]
+            .marks
+            .iter()
+            .any(|m| m.property == "Slices" && m.value == "6"),
+        "{:?}",
+        report.decided
     );
 }
 

@@ -1778,7 +1778,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@1.0.1"),
+            .any(|p| p["pack"] == "mri@1.0.2"),
         "{listed}"
     );
 
@@ -6074,7 +6074,7 @@ fn a_pack_is_replayed_over_header_packets() {
         assert_eq!(got[0]["stack"], 1);
         assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
         assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
-        assert!(stderr(&out).contains("2 packets replayed through mri@1.0.1"));
+        assert!(stderr(&out).contains("2 packets replayed through mri@1.0.2"));
     }
     let bad = dir.file("bad.jsonl", b"{not json\n");
     let out = nils()

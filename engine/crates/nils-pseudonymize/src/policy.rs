@@ -2,11 +2,13 @@
 
 //! The pseudonymiser's tag policy, as numbers (decision record 28).
 //!
-//! What it does to the standard elements it acts on: the four categories it
-//! removes tag for tag, the element the subject's code goes into, the two
-//! that are never removed, and the covariates a dataset keeps unless it opts
-//! out. The times are a release's and not the pseudonymiser's, so they are
-//! not here.
+//! What it does to the standard elements it acts on: the categories it
+//! removes tag for tag (v0's four, and since the review of Wave 7a's merge on
+//! 2026-10-10 the `ids` v0's four never named), the element the subject's
+//! code goes into, the two that are never removed, the covariates a dataset
+//! keeps unless it opts out, and the image's comments the rules read, kept
+//! and cleaned. The times are a release's and not the pseudonymiser's, so
+//! they are not here.
 //!
 //! The engine holds no tag names and this states none. A number, its
 //! category and what becomes of it are the policy, which is the engine's;
@@ -17,8 +19,8 @@
 //!
 //! The examination's numbers, the accession number and the study id, are
 //! removed from every file whatever the categories and a dataset's lists say
-//! (Nima's ruling of 2026-10-09); they are served on their own rows, since
-//! no category the pseudonymiser removes holds them.
+//! (Nima's ruling of 2026-10-09); they are served on their own rows and not
+//! among the `ids` category's, since no list can keep them.
 //!
 //! Spec Wave 7a §6.2 mends the five findings record 28 made by using the
 //! door: every row carries the reason for its fate, so a covariate is named
@@ -64,14 +66,19 @@ fn meaning(fate: &str) -> &'static str {
 /// `computed`, the age, written from two dates; `covariate`, kept unless the
 /// dataset opts out; `code`, the subject's code; `mandatory`, what makes a
 /// file a file; `examination`, the accession number and the study id,
-/// removed from every file whatever a category or a dataset's list says.
-pub const REASONS: [&str; 6] = [
+/// removed from every file whatever a category or a dataset's list says;
+/// `rules`, kept because the rules read it from the copy, and cleaned of the
+/// file's own identifiers; `device`, the device's identity, kept and claimed
+/// as the Retain Device Identity Option.
+pub const REASONS: [&str; 8] = [
     "category",
     "computed",
     "covariate",
     "code",
     "mandatory",
     "examination",
+    "rules",
+    "device",
 ];
 
 /// A tag as a dataset's own lists are written, `gggg,eeee`.
@@ -96,6 +103,24 @@ fn fate(tag: Tag) -> (&'static str, &'static str, Option<&'static str>) {
             "kept",
             "covariate",
             Some("a covariate, kept unless the dataset opts out"),
+        );
+    }
+    if crate::rewrite::DEVICE_KEPT.contains(&tag) {
+        return (
+            "kept",
+            "device",
+            Some(
+                "the scanner's identity: the rules read the station name and a decision for this scanner is scoped by it; kept, and the marks say so (113109)",
+            ),
+        );
+    }
+    if crate::rewrite::RULES_READ.contains(&tag) {
+        return (
+            "kept",
+            "rules",
+            Some(
+                "the rules read it from the copy; kept, with the file's own IDs, accession number, birth date and the words of its names taken out",
+            ),
         );
     }
     ("removed", "category", None)
@@ -166,6 +191,7 @@ pub fn document() -> Value {
     let mut listed: Vec<(Tag, Category)> = CATEGORIES
         .iter()
         .flat_map(|c| c.tags().iter().map(move |(g, e)| (Tag(*g, *e), *c)))
+        .filter(|(tag, _)| !EXAMINATION_IDS.contains(tag))
         .collect();
     listed.sort_unstable_by_key(|(tag, _)| *tag);
     let tags_of: Vec<Value> = listed
@@ -247,9 +273,12 @@ mod tests {
     }
 
     #[test]
-    fn the_hundred_are_v0_s_four_categories_and_never_the_times() {
+    fn the_rows_are_v0_s_four_categories_and_the_ids_and_never_the_times() {
         let doc = document();
-        assert_eq!(doc["count"], 100);
+        // v0's hundred and the ids category's 47 (the review of Wave 7a's
+        // merge, 2026-10-10), less the examination's two, which are served
+        // on rows of their own
+        assert_eq!(doc["count"], 145);
         assert_eq!(
             doc["categories"],
             json!([
@@ -257,10 +286,11 @@ mod tests {
                 {"category": "trial", "count": 23},
                 {"category": "provider", "count": 38},
                 {"category": "institution", "count": 5},
+                {"category": "ids", "count": 47},
             ])
         );
         let tags = list(&doc, "tags");
-        assert_eq!(tags.len(), 100);
+        assert_eq!(tags.len(), 145);
         // The times belong to a release and not to the pseudonymiser: the
         // fifth category is here neither by name nor by number.
         assert!(!doc.to_string().contains("times"), "{doc}");
@@ -324,7 +354,13 @@ mod tests {
             .iter()
             .filter(|r| r["fate"] == "removed")
             .count();
-        assert_eq!(removed, 96);
+        // every row but the age, the three covariates, the image's
+        // comments, which the rules read and which are cleaned instead, and
+        // the device's identity
+        assert_eq!(removed, 134);
+        assert_eq!(fate_of(&doc, "0020,4000"), "kept");
+        assert_eq!(fate_of(&doc, "0008,1010"), "kept");
+        assert_eq!(fate_of(&doc, "0018,1000"), "kept");
         // The code's element is replaced and is in no category, which is why
         // a person is never offered it to keep.
         assert_eq!(doc["code"]["tag"], "0010,0020");
@@ -364,8 +400,10 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| r["reason"] == "computed").count(), 1);
         assert_eq!(
             rows.iter().filter(|r| r["reason"] == "category").count(),
-            96
+            134
         );
+        assert_eq!(rows.iter().filter(|r| r["reason"] == "rules").count(), 1);
+        assert_eq!(rows.iter().filter(|r| r["reason"] == "device").count(), 6);
         assert_eq!(doc["code"]["reason"], "code");
         for row in list(&doc, "examination") {
             assert_eq!(row["reason"], "examination", "{row}");
@@ -432,16 +470,20 @@ mod tests {
             writers[0]["method"],
             format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION"))
         );
-        // the UIDs and the device serial number kept, the covariates kept
+        // the descriptions cleaned, the dates, the covariates, the device's
+        // identity and the UIDs kept
         assert_eq!(
             defaults(&writers[0]),
-            ["113100", "113106", "113108", "113109", "113110"]
+            ["113100", "113105", "113106", "113108", "113109", "113110"]
         );
         assert_eq!(writers[1]["writer"], "release");
         // a release by default remaps and removes every category
-        assert_eq!(defaults(&writers[1]), ["113100", "113106", "113108"]);
+        assert_eq!(
+            defaults(&writers[1]),
+            ["113100", "113105", "113106", "113108"]
+        );
         for w in writers {
-            assert_eq!(w["options"].as_array().unwrap().len(), 7);
+            assert_eq!(w["options"].as_array().unwrap().len(), 8);
             for o in w["options"].as_array().unwrap() {
                 assert_eq!(o["scheme"], "DCM");
                 assert!(!o["when"].as_str().unwrap().is_empty(), "{o}");
@@ -511,8 +553,8 @@ mod tests {
             }
         }
         // Nima's ruling of 2026-10-09: the accession number and the study
-        // id leave every file, though no category of the pseudonymiser holds
-        // them, so the basic profile the marks name holds.
+        // id leave every file, whatever a dataset's lists say, so the basic
+        // profile the marks name holds.
         let examination: Vec<&str> = doc["examination"]
             .as_array()
             .unwrap()
@@ -536,7 +578,16 @@ mod tests {
                 "{row} is served twice"
             );
         }
-        assert_eq!(applied.total("removed"), 98);
+        assert_eq!(applied.total("removed"), 136);
+        // the station name survives, for the rules and this scanner's scope
+        assert_eq!(
+            value(&object, tags::STATION_NAME).as_deref(),
+            Some("something identifying")
+        );
+        // the image's comments stay for the rules, cleaned of what names the
+        // person: here the file's own other IDs, written into them whole
+        assert_eq!(value(&object, tags::IMAGE_COMMENTS).as_deref(), Some("X"));
+        assert_eq!(applied.total("cleaned"), 1);
         assert_eq!(value(&object, tags::PATIENT_AGE).as_deref(), Some("041Y"));
         assert_eq!(
             value(&object, tags::PATIENT_ID).as_deref(),

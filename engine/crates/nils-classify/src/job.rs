@@ -53,6 +53,12 @@ pub struct Settings {
     /// default; off, a run writes no votes and removes the ones it would
     /// have replaced, so what is stored never outlives the verdict it heard.
     pub votes: bool,
+    /// Leave the run's job running when the sort ends well, for a step the
+    /// caller makes part of the run and then finishes the job itself: the
+    /// classify command's previews, so the job is not shown done while the
+    /// step still runs, and a cancel still reaches it (review of
+    /// 2026-10-10). A cancelled or failed sort finishes its job as before.
+    pub leave_open: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +70,7 @@ impl Default for Settings {
             review_below: None,
             window: WINDOW,
             votes: true,
+            leave_open: false,
         }
     }
 }

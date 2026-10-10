@@ -472,6 +472,33 @@ fn the_subject_code_generator_reproduces_the_prototypes_codes() {
 }
 
 #[test]
+fn a_personnummer_rule_is_refused_where_the_codes_are_not_the_generators() {
+    // The review of Wave 7a's merge (2026-10-10): a registry that makes its
+    // codes with blake2b-32 would give a person a code no other registry
+    // gives them, so it reads no personnummer, and says why.
+    let rule = Rule::parse("identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n")
+        .unwrap();
+    for lab in labs_keyed(Scheme::Blake2b32, 12, b"test-reg-key-not-real") {
+        let name = lab.name;
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "personnummer", None).unwrap();
+        let dir = TempDir::new("identity-pnr-old");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "19850101-2382", &[]));
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        let refused = match digest(&s, &mut reg) {
+            Ok(_) => panic!("{name}: a personnummer was read under blake2b-32"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            refused.contains("subject code generator"),
+            "{name}: {refused}"
+        );
+    }
+}
+
+#[test]
 fn a_personnummer_rule_gives_the_generators_code_of_the_twelve_digits() {
     // The tax agency's published test numbers, which nobody holds, under a
     // made-up key; the codes are the subject code generator's of the twelve digits,
@@ -490,7 +517,7 @@ fn a_personnummer_rule_gives_the_generators_code_of_the_twelve_digits() {
         dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "850101-2382", &[]));
         dir.file("c/IM_0001", &mr("C", "C.1", "C.1.1", "198501012382", &[]));
         dir.file("d/IM_0001", &mr("D", "D.1", "D.1.1", "150101-2395", &[]));
-        dir.file("e/IM_0001", &mr("E", "E.1", "E.1.1", "BROMS-0042", &[]));
+        dir.file("e/IM_0001", &mr("E", "E.1", "E.1.1", "TRIAL-0042", &[]));
         let mut s = settings(&dir);
         s.identity = rule.clone();
         s.batch_rows = 1;

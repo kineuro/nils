@@ -608,6 +608,19 @@ fn a_source_place_nobody_declared_is_undeclared(
 /// keeps a personnummer identity as its keyed lookup alone, and a held
 /// file's row keeps its shape and lookup; what a store from before sealed
 /// of one is dropped. The subject's code stands for the person.
+///
+/// A gap, written down after the review of Wave 7a's merge (2026-10-10):
+/// before Wave 7a a personnummer was filed under the keyed lookup of the
+/// number as written, and lookups now take its twelve digits, so a number
+/// filed as `850101-2382` is not found again as `198501012382`, and with its
+/// sealed value dropped here its lookup cannot be derived again. Deriving it
+/// needs the registry's key, which a migration does not hold. Only a
+/// registry that read personnummer before Wave 7a holds such identities:
+/// the pre-production one is archived for research as migrated and never
+/// read into again (record 55 B1, and the ruling of 2026-10-09), and
+/// production starts empty. A store that must go on reading personnummer
+/// would be keyed again with its key before it migrates; no tool does that
+/// yet.
 fn a_personnummer_is_never_kept(store: &mut Store, kind: Kind) -> Result<(), Error> {
     let d = store.dialect();
     match kind {

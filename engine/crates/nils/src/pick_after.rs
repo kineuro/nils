@@ -101,7 +101,16 @@ pub(crate) fn step_after(store: &mut Store, job: &Job) -> Option<Vec<String>> {
     {
         return None;
     }
-    let sorted = sorted_by(store, job.id).ok()?;
+    let sorted = match sorted_by(store, job.id) {
+        Ok(sorted) => sorted,
+        Err(e) => {
+            eprintln!(
+                "nils: job {}: the stacks it sorted were not read, so no pick follows it: {e}",
+                job.id
+            );
+            return None;
+        }
+    };
     if sorted.subjects.is_empty() {
         return None;
     }

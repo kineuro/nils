@@ -904,8 +904,24 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
         _ => return Err(Reply::error(400, "run: true or false")),
     };
     let p = place_named(registry, name)?;
-    if let Some(why) = crate::dataset::undeclared_refusal(&p) {
+    if let Some(why) = crate::dataset::undeclared_refusal(&p, registry.meta().pseudonym_scheme) {
         return Err(Reply::error(409, why));
+    }
+    // The job a run queues is held to what its verb needs at the jobs door,
+    // checked before anything is marked: the pseudonymiser reads the
+    // identifiers it replaces, so queueing it needs detail sensitive (the
+    // review of Wave 7a's merge, 2026-10-10); `run: false` only marks.
+    let verb = if p.dataset["arrives"].as_str() == Some("identified") {
+        "pseudonymize"
+    } else {
+        "digest"
+    };
+    if run && let Some((grant, detail)) = crate::serve::verb_needs(&[verb.to_string()]) {
+        caller.allowed(
+            &format!("POST /api/linkage/held/code with run, which queues {verb}"),
+            Need::One(grant),
+            detail,
+        )?;
     }
     let nothing = || {
         Ok(Reply::ok(serde_json::json!({
@@ -960,10 +976,10 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
         })));
     }
     let at = format!("@{}", p.name);
-    let command: Vec<String> = if p.dataset["arrives"].as_str() == Some("identified") {
-        vec!["pseudonymize".into(), at, "--held".into()]
+    let command: Vec<String> = if verb == "pseudonymize" {
+        vec![verb.into(), at, "--held".into()]
     } else {
-        vec!["digest".into(), at]
+        vec![verb.into(), at]
     };
     let job = nils_registry::job::enqueue_with(
         registry.store(),

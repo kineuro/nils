@@ -400,7 +400,9 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
             .collect();
         assert_eq!(
             codes,
-            ["113100", "113106", "113108", "113109", "113110", "113111"],
+            [
+                "113100", "113105", "113106", "113108", "113109", "113110", "113111"
+            ],
             "{}",
             path.display()
         );

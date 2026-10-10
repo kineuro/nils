@@ -754,7 +754,8 @@ pub fn run(
             }
             for a in c.unresolved.clone() {
                 let name = &pack.axes[a].name;
-                if asked.contains(name) && c.axes[a].values.is_empty() {
+                // a decision answers the axis, one that it holds nothing too
+                if asked.contains(name) && c.axes[a].values.is_empty() && !c.decided.contains(&a) {
                     c.questions.push(format!("{name}:missing"));
                 }
             }

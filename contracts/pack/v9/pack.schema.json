@@ -117,6 +117,13 @@
           },
           "description": "The axes whose absence is itself a question."
         },
+        "by_model": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The axes an operation of their own answers, an image model in its own run with its own review of what it is unsure of: sorting raises no question about them at all, and what the rules state of them is kept as they state it (added in place on 2026-10-10; the MRI pack names body_part, body_region and post_contrast)."
+        },
         "silent_when": {
           "type": "object",
           "description": "A condition under which nobody is asked about a stack at all."

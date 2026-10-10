@@ -167,6 +167,17 @@ impl Drop for Resolver {
 
 impl Resolver {
     pub fn new(registry: &mut Registry, rule: &Rule, batch_id: i64) -> Result<Resolver, HomeError> {
+        // A personnummer's code is the subject code generator's (record 54),
+        // so a registry that makes its codes with another scheme makes none
+        // from one: it would give the person a code no other registry gives
+        // them (the review of Wave 7a's merge, 2026-10-10).
+        let scheme = registry.meta().pseudonym_scheme;
+        if rule.normalises() && scheme != Scheme::SUBJECT_CODE_GENERATOR {
+            return Err(HomeError::Message(format!(
+                "a personnummer's code is the subject code generator's, and this registry makes its codes with {}; read personnummer into a registry made with the generator's scheme (nils init --scheme subject-code-generator)",
+                scheme.name()
+            )));
+        }
         let key = registry.pseudonym_key()?;
         let keys = Subkeys::derive(&key);
         let mut linkage = registry.open_linkage()?;

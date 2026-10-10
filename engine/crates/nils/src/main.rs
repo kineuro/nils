@@ -1118,6 +1118,9 @@ impl DatasetFlags {
         }
         if let Some(m) = &self.move_into {
             asked.insert("move_into".into(), serde_json::json!(m));
+        } else if self.move_into_anon {
+            // its old name: the anonymised tree, and the confirmation
+            asked.insert("move_into".into(), serde_json::json!("anon"));
         }
         if let Some(file) = &self.identity {
             asked.insert(
@@ -2548,6 +2551,11 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 
     let cancel = stop_on_signal()?;
     let mut registry = open(home)?;
+    // record 55 H2: the stacks judged get their previews in the same run,
+    // while the sort is still the job, so no picture waits for a queue; the
+    // job stays running until they are made, so it is never shown done
+    // while they run and a cancel reaches them (review of 2026-10-10)
+    settings.leave_open = !args.no_previews;
     let report = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel)
         .map_err(|e| match e {
             nils_classify::Error::Busy { .. } => Exit {
@@ -2556,43 +2564,79 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
             },
             other => fail(other.to_string()),
         })?;
-    if args.json {
-        let text = serde_json::to_string_pretty(&report)
-            .map_err(|e| fail(format!("the report will not serialize: {e}")))?;
-        println!("{text}");
+    let printed = if args.json {
+        serde_json::to_string_pretty(&report)
+            .map(|text| println!("{text}"))
+            .map_err(|e| fail(format!("the report will not serialize: {e}")))
     } else {
         print!("{report}");
-    }
+        Ok(())
+    };
     if report.cancelled {
+        printed?;
         return Err(Exit {
             code: STOPPED,
             message: "stopped: what was judged is written; run again to go on".into(),
         });
     }
-    // record 55 H2: the stacks judged get their previews in the same run,
-    // while the sort is still the job, so no picture waits for a queue
-    if !args.no_previews {
-        classify_previews(&mut registry, report.job_id, &cancel)?;
+    if settings.leave_open {
+        // a preview that fails is counted in the job's result and never
+        // fails the sort or the chain after it; a stop ends the job stopped
+        let stopped = classify_previews(&mut registry, report.job_id, &cancel);
+        let state = if stopped { "cancelled" } else { "done" };
+        nils_classify::job::finish(registry.store(), report.job_id, state, None)
+            .map_err(|e| fail(e.to_string()))?;
+        printed?;
+        if stopped {
+            return Err(Exit {
+                code: STOPPED,
+                message: "stopped: what was judged and made is written; run again to go on".into(),
+            });
+        }
+        return Ok(());
     }
-    Ok(())
+    printed
 }
 
 /// The preview step of a classify run (record 55 H2): the previews of the
 /// stacks the run judged, each made only where its files changed, under the
 /// first working place; none where the deployment binds no working place.
 /// What it did is said on stderr and kept in the job's result as
-/// `previews`; a stop keeps what was made.
-fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> Result<(), Exit> {
+/// `previews`; a stop keeps what was made. Whether it was stopped, by a
+/// signal or by a cancel asked of the job, whose heartbeat it keeps; a
+/// preview that fails, or a list that cannot be read, is said and counted
+/// and never an error of the run (review of 2026-10-10).
+fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> bool {
     let store = registry.store();
     let Ok(working) = crate::pyramid::working_place(store, None) else {
-        return Ok(());
+        return false;
     };
-    let stacks = crate::preview::classified_by(store, job).map_err(fail)?;
+    let stacks = match crate::preview::classified_by(store, job) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("previews: the stacks judged were not read, so none was made: {e}");
+            return false;
+        }
+    };
     if stacks.is_empty() {
-        return Ok(());
+        return false;
     }
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let mut go_on = |_: &mut nils_registry::Store, _: &crate::preview::Many| !cancel.stop();
+    let total = stacks.len();
+    let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::preview::Many| {
+        let done = so_far.built.len() + so_far.current.len() + so_far.failed.len();
+        // the job's heartbeat, every tenth stack and the last, which is also
+        // where a cancel asked of it is heard
+        if !done.is_multiple_of(10) && done != total {
+            return !cancel.stop();
+        }
+        let progress = serde_json::json!({"previews": {"done": done, "total": total}});
+        !cancel.stop()
+            && !matches!(
+                nils_registry::job::beat(store, job, Some(&progress)),
+                Ok(nils_registry::job::Asked::Cancel)
+            )
+    };
     let many = crate::preview::make_many(
         store,
         Path::new(&working.path),
@@ -2617,13 +2661,7 @@ fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> Resu
             let _ = nils_registry::job::set_result(store, job, &result);
         }
     }
-    if many.stopped {
-        return Err(Exit {
-            code: STOPPED,
-            message: "stopped: what was judged and made is written; run again to go on".into(),
-        });
-    }
-    Ok(())
+    many.stopped
 }
 
 /// `nils explain` (Wave 2 §12): small, and load-bearing. It is the answer to
@@ -3096,7 +3134,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     share.as_deref(),
                 );
                 let (d, under) =
-                    dataset::shape_place(registry.store(), &name, &path, &asked, None, &g)
+                    dataset::shape_place(registry.store(), &name, &path, &asked, None, &g, true)
                         .map_err(|r| refused(r, json))?;
                 found = under;
                 (d.probed, d.dataset, d.layout)
@@ -3132,7 +3170,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 serde_json::json!({"place": id, "name": name, "role": role.name()}),
                 layout
                     .is_object()
-                    .then(|| serde_json::json!({"layout": layout})),
+                    .then(|| serde_json::json!({"layout": dataset::entries_for_audit(&layout)})),
             )?;
             let p = place::show(registry.store(), id)
                 .map_err(|e| fail(e.to_string()))?
@@ -3181,6 +3219,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     &serde_json::json!({}),
                     Some(&p),
                     &p.guarantees,
+                    true,
                 )
                 .map_err(|r| refused(r, json))?;
                 place::set(registry.store(), p.id, None, None, Some(&d.probed))
@@ -3333,7 +3372,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 &mut registry,
                 nils_registry::audit::Action::PlaceAdd,
                 serde_json::json!({"place": f.place.id, "name": f.place.name, "role": "source", "root": r.name}),
-                Some(serde_json::json!({"layout": f.layout})),
+                Some(serde_json::json!({"layout": dataset::entries_for_audit(&f.layout)})),
             )?;
             if json {
                 let mut doc = f.place.as_json();
@@ -3405,6 +3444,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     &asked,
                     Some(&current),
                     &current.guarantees,
+                    true,
                 )
                 .map_err(|r| refused(r, json))?;
                 found = under;
@@ -3433,7 +3473,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 nils_registry::audit::Action::PlaceSet,
                 serde_json::json!({"place": id, "name": p.name}),
                 declared.as_ref().map(|d| {
-                    serde_json::json!({"dataset": {"before": current.as_json()["dataset"], "after": d.dataset, "layout": d.layout}})
+                    serde_json::json!({"dataset": {
+                        "before": current.as_json()["dataset"],
+                        "after": d.dataset,
+                        "layout": dataset::entries_for_audit(&d.layout),
+                    }})
                 }),
             )?;
             let layout = declared
@@ -5034,7 +5078,7 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     use nils_registry::job;
     let mut registry = open(home)?;
     let dataset = dataset_named(&mut registry, &args.dataset)?;
-    if let Some(why) = dataset::undeclared_refusal(&dataset) {
+    if let Some(why) = dataset::undeclared_refusal(&dataset, registry.meta().pseudonym_scheme) {
         return Err(fail(why));
     }
     // a tree holding files no digest has read is digested first, so the

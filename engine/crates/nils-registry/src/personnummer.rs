@@ -94,6 +94,12 @@ pub fn normalise_on(value: &str, today: Day) -> Result<String, Invalid> {
 /// The clock is read only for a ten digit number.
 fn normal(value: &str, today: impl FnOnce() -> Day) -> Result<String, Invalid> {
     let compact: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    // a personnummer is ASCII; anything else is no shape of one, and slicing
+    // it by bytes below would cut a character in two (the review of Wave
+    // 7a's merge, 2026-10-10: "12345ä789" panicked a digest's reader)
+    if !compact.is_ascii() {
+        return Err(Invalid::Shape);
+    }
     let bytes = compact.as_bytes();
     let (date, plus, serial) = match bytes.len() {
         10 | 12 => (
@@ -215,6 +221,21 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_is_not_ascii_is_no_shape_and_never_a_panic() {
+        // the review of Wave 7a's merge (2026-10-10): a multibyte character
+        // across the byte the date ends at panicked the parser's slicing
+        for value in [
+            "12345ä789",
+            "123456789ä",
+            "1234567890ö1",
+            "ååååååå-åååå",
+            "١٢٣٤٥٦٧٨٩٠",
+        ] {
+            assert_eq!(normalise_on(value, TODAY), Err(Invalid::Shape), "{value}");
+        }
+    }
+
+    #[test]
     fn twelve_digits_stay_as_they_are() {
         for written in [
             ADULT.to_string(),
@@ -287,7 +308,7 @@ mod tests {
         assert_eq!(normalise_on("198501012383", TODAY), Err(Invalid::Checksum));
         assert_eq!(normalise_on("850101-2383", TODAY), Err(Invalid::Checksum));
         assert_eq!(normalise_on("", TODAY), Err(Invalid::Shape));
-        assert_eq!(normalise_on("BROMS-0042", TODAY), Err(Invalid::Shape));
+        assert_eq!(normalise_on("TRIAL-0042", TODAY), Err(Invalid::Shape));
         assert_eq!(normalise_on("12345", TODAY), Err(Invalid::Shape));
         assert_eq!(normalise_on("85010123821", TODAY), Err(Invalid::Shape));
         assert_eq!(normalise_on("850101:2382", TODAY), Err(Invalid::Shape));

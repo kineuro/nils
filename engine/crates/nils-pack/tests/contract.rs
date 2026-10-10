@@ -86,6 +86,23 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
         .collect();
     assert_eq!(required, ["pack", "version", "contract", "modality"]);
     assert_eq!(schema["additionalProperties"], false);
+    // The review block, key by key: the loader reads these four, and the
+    // schema closes the block on them.
+    let mut review: Vec<&str> = schema["properties"]["review"]["properties"]
+        .as_object()
+        .expect("review's properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    review.sort_unstable();
+    assert_eq!(
+        review,
+        ["by_model", "low_confidence", "missing", "silent_when"]
+    );
+    assert_eq!(
+        schema["properties"]["review"]["additionalProperties"],
+        false
+    );
     // Every property says what it is for: the description is what a reader
     // and an agent get.
     for (key, p) in properties {
@@ -214,10 +231,11 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
     let _ = std::fs::remove_dir_all(&dir);
     let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
     let pack = nils_pack::load(&mri, None).expect("the MRI pack loads");
-    // Contract 9 added only pick keys the shipped pack does not write yet,
-    // so it declares 8, which writes exclusions and hints.
+    // The shipped pack declares 9 since 1.0.2, whose review block names the
+    // axes an operation of their own answers (`review.by_model`); it writes
+    // exclusions and hints, which 6 added.
     assert!(
-        (8..=nils_pack::CONTRACT).contains(&pack.contract),
+        (9..=nils_pack::CONTRACT).contains(&pack.contract),
         "the shipped pack writes exclusions and hints: {}",
         pack.contract
     );
@@ -286,6 +304,47 @@ fn the_mri_pack_s_manifest_keeps_to_the_contract() {
             keys.iter().any(|k| k == key),
             "packs/mri/pack.yml lacks {key}"
         );
+    }
+    // And below the top: every key of an object the schema closes
+    // (`additionalProperties: false`) is one of its properties, at every
+    // depth the schema spells out. `review.by_model` was read by the engine
+    // and refused by the schema until 2026-10-10.
+    let value: serde_json::Value = serde_saphyr::from_str(&manifest).expect("pack.yml is YAML");
+    let mut stray = Vec::new();
+    keys_keep_to(&schema, &value, "", &mut stray);
+    assert!(
+        stray.is_empty(),
+        "packs/mri/pack.yml has keys its contract does not: {stray:?}"
+    );
+}
+
+/// Every key of `value` that `schema` closes with `additionalProperties:
+/// false` is one of its properties, at every depth the schema describes
+/// inline; what it names a stray is pushed to `out`.
+fn keys_keep_to(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    at: &str,
+    out: &mut Vec<String>,
+) {
+    let (Some(object), Some(properties)) = (
+        value.as_object(),
+        schema.get("properties").and_then(|p| p.as_object()),
+    ) else {
+        return;
+    };
+    let closed = schema.get("additionalProperties") == Some(&serde_json::Value::Bool(false));
+    for (key, v) in object {
+        let here = if at.is_empty() {
+            key.clone()
+        } else {
+            format!("{at}.{key}")
+        };
+        match properties.get(key) {
+            Some(s) => keys_keep_to(s, v, &here, out),
+            None if closed => out.push(here),
+            None => {}
+        }
     }
 }
 

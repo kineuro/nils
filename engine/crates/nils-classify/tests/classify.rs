@@ -2831,3 +2831,105 @@ fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
         assert_eq!(stated[0].opt_text(0).unwrap(), Some("1"), "{name}: given");
     }
 }
+
+/// Review of 2026-10-10: a sort supersedes the questions it asks itself and
+/// no others. A body-part model's grouped question about a stack, and a
+/// question about an axis the pack leaves to an operation of its own, stay
+/// open through a re-sort; the sort's own missing base is superseded and
+/// asked again, once.
+#[test]
+fn a_sort_leaves_the_questions_of_other_operations_open() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert!(pack.review.by_model.iter().any(|a| a == "post_contrast"));
+    for lab in labs() {
+        let name = lab.name;
+        let dir = some_stacks(&[("ax mystery", &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")])]);
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let stack = one(&mut reg, "SELECT stack_id FROM {classification}");
+        let item = |reg: &mut Registry, kind: &str, scope: &str| -> i64 {
+            let reference = if scope == "stack" {
+                serde_json::json!({"stack_id": stack}).to_string()
+            } else {
+                serde_json::json!({"run": 1}).to_string()
+            };
+            reg.store()
+                .insert(
+                    &Insert::new(
+                        nils_registry::schema::table("review_item"),
+                        &[
+                            "kind",
+                            "scope",
+                            "ref",
+                            "evidence",
+                            "status",
+                            "created_at",
+                            "members",
+                        ],
+                    ),
+                    &[vec![
+                        Param::from(kind),
+                        Param::from(scope),
+                        Param::from(reference),
+                        Param::from("{}"),
+                        Param::from("open"),
+                        Param::from(nils_registry::time::now_iso()),
+                        Param::Int(1),
+                    ]],
+                )
+                .unwrap();
+            let id = one(reg, "SELECT MAX(id) FROM {review_item}");
+            if scope == "group" {
+                reg.store()
+                    .insert(
+                        &Insert::new(
+                            nils_registry::schema::table("review_member"),
+                            &["item_id", "stack_id"],
+                        ),
+                        &[vec![Param::Int(id), Param::Int(stack)]],
+                    )
+                    .unwrap();
+            }
+            id
+        };
+        let model = item(&mut reg, "body_part:model", "group");
+        let step = item(&mut reg, "post_contrast:missing", "stack");
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let status = |reg: &mut Registry, id: i64| -> String {
+            rows(
+                reg,
+                &format!("SELECT status FROM {{review_item}} WHERE id = {id}"),
+            )[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+        };
+        assert_eq!(
+            status(&mut reg, model),
+            "open",
+            "{name}: the model's question"
+        );
+        assert_eq!(
+            status(&mut reg, step),
+            "open",
+            "{name}: the step's question"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:missing' AND status = 'open'"
+            ),
+            1,
+            "{name}: the sort's own question, asked again once"
+        );
+        assert!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:missing' AND status = 'superseded'"
+            ) >= 1,
+            "{name}: and the earlier one superseded"
+        );
+    }
+}

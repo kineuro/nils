@@ -109,6 +109,22 @@ impl Scope<'_> {
     }
 }
 
+/// A scope's condition with a sample sealed now left out where the caller
+/// does not read sealed stacks (record 48): a step counts neither those
+/// scans nor its model's answers on them for such a caller (the review of
+/// Wave 7a's merge, 2026-10-10). A freeze for a run keeps them, and never
+/// asks this.
+fn shown(store: &Store, holds: String, hide_sealed: bool) -> String {
+    if hide_sealed {
+        format!(
+            "({holds}) AND NOT EXISTS (SELECT 1 FROM {} sst WHERE sst.stack_id = x.id AND sst.unsealed_at IS NULL)",
+            store.qualified("sealed_stack")
+        )
+    } else {
+        holds
+    }
+}
+
 fn list(ids: &[i64]) -> String {
     ids.iter()
         .map(i64::to_string)
@@ -582,8 +598,9 @@ pub(crate) fn steps(
     target: &str,
     scans: i64,
     plans: &Plans,
+    hide_sealed: bool,
 ) -> Result<Vec<Value>, StoreError> {
-    let holds = scope.holds(store);
+    let holds = shown(store, scope.holds(store), hide_sealed);
     let (member, item, stack, model, unit) = (
         store.qualified("review_member"),
         store.qualified("review_item"),
@@ -723,11 +740,12 @@ pub(crate) fn of_cohort(
     registry: &mut Registry,
     cohort: i64,
     name: &str,
+    hide_sealed: bool,
 ) -> Result<Vec<Value>, StoreError> {
     let plans = plans(registry)?;
     let store = registry.store();
     let scope = Scope::Cohort(cohort);
-    let holds = scope.holds(store);
+    let holds = shown(store, scope.holds(store), hide_sealed);
     let (stack, class) = (store.qualified("stack"), store.qualified("classification"));
     let scans = count(
         store,
@@ -764,6 +782,7 @@ pub(crate) fn of_cohort(
         &format!("cohort:{name}"),
         scans,
         &plans,
+        hide_sealed,
     )?);
     Ok(out)
 }

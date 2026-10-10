@@ -733,7 +733,7 @@ identity:
             assert_eq!(traced.sources[0].1, Outcome::Answered);
         }
         // a study's own id is no personnummer: unparsed, then the next field
-        let mut x = extracted(vec![Some("BROMS-0042"), Some(PN_OTHER)]);
+        let mut x = extracted(vec![Some("TRIAL-0042"), Some(PN_OTHER)]);
         let ident = rule.apply(&mut x, "s/1.dcm");
         assert_eq!(ident.value, PN_OTHER);
         assert_eq!(x.diagnostics.len(), 1);

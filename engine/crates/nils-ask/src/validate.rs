@@ -523,6 +523,23 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     let mut issues: Vec<Issue> = Vec::new();
     let mut out = Validated::default();
 
+    // clauses nest at most MAX_CLAUSE_DEPTH deep: what reads a quasi field
+    // is traced through every level below it, so a deeper document is
+    // refused rather than answered unshaped (record 55 K7, review of
+    // 2026-10-10)
+    let depth = serde_json::to_value(ask)
+        .map(|v| crate::ast::clause_depth(&v))
+        .unwrap_or(usize::MAX);
+    if depth > MAX_CLAUSE_DEPTH {
+        issues.push(issue(
+            Code::NotCompilable,
+            "sets",
+            format!("clauses nest {depth} deep; an ask nests them at most {MAX_CLAUSE_DEPTH} deep"),
+            "bind an inner value to a name and use the name",
+        ));
+        return Err(issues);
+    }
+
     if !ask.pipeline.is_empty() {
         issues.push(issue(
             Code::GrainMismatch,
@@ -2133,6 +2150,11 @@ fn measure_filtered(ask: &Ask) -> BTreeSet<String> {
     filtered
 }
 
+/// How deep clauses may nest in an ask. The shapes check traces a value
+/// through every level, so it is bounded, and validate refuses a document
+/// deeper than the bound.
+pub const MAX_CLAUSE_DEPTH: usize = 12;
+
 /// Derived fields whose value is a date of the record, and so read a quasi
 /// identifying field.
 const QUASI_DERIVED: &[&str] = &["study_day"];
@@ -2158,7 +2180,13 @@ impl Shapes<'_> {
     /// distinct count a number, as a filter does, so neither carries it.
     fn clause(&self, c: &Clause, set: &str, depth: u8) -> bool {
         let op = c.op.as_str();
-        if depth > 12 || COMPARISONS.contains(&op) || PREDICATES.contains(&op) {
+        // past the bound nothing is traced, so the value counts as carrying
+        // the field: validate refuses such a document first, and this keeps
+        // the check closed if it ever is not
+        if usize::from(depth) >= MAX_CLAUSE_DEPTH {
+            return true;
+        }
+        if COMPARISONS.contains(&op) || PREDICATES.contains(&op) {
             return false;
         }
         match op {
@@ -2193,7 +2221,8 @@ impl Shapes<'_> {
             return false;
         };
         if depth > 6 {
-            return false;
+            // resolve_field refuses a path this deep; closed if it ever does not
+            return true;
         }
         let own = self.tainted.get(set_name);
         if exposed.bindings.iter().any(|b| b == path) {
