@@ -24,8 +24,10 @@ The encoders are pinned to Hugging Face commits in `src/nils_bodypart/encoders.p
 
 ```sh
 podman build -t nils-bodypart pipelines/nils-bodypart
-podman build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 -t nils-bodypart:cuda pipelines/nils-bodypart
+podman build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu129 -t nils-bodypart:cuda pipelines/nils-bodypart
 ```
+
+Both builds take torch 2.13.0 and torchvision 0.28.0 (the Dockerfile's `TORCH_VERSION` and `TORCHVISION_VERSION`): the newest torch with a CUDA 12 build, since the nvImageCodec wheels are CUDA 12 ones. Its CUDA build has kernels for Blackwell cards (sm_120), which torch 2.5.1's had not.
 
 The image has no entry point: each descriptor's command line names the program, `nils-bodypart <entry> ...`. A descriptor is pinned to the image's registry manifest digest before `nils pipeline add`.
 

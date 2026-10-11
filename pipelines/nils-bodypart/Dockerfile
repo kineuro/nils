@@ -8,13 +8,17 @@
 # CPU by default, which is how it runs until the laptop has a rootless GPU
 # path (record 43 R5). infer-fusion decodes lossless JPEG 2000 on a card where
 # the runner gives it one, with the nvImageCodec wheels in requirements.txt,
-# in this same image. A CUDA build of torch, for embed and for infer-fusion's
-# encoder on the card, takes the wheel index of a CUDA torch; the wheels carry
-# the CUDA runtime, so the base stays the same:
+# in this same image. A CUDA build of torch, for embed, for infer-fusion's
+# encoder on the card and for the cascade's student, takes the wheel index of
+# a CUDA torch; the wheels carry the CUDA runtime, so the base stays the same:
 #
 #   docker build -t nils-bodypart pipelines/nils-bodypart
-#   docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 \
+#   docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu129 \
 #       -t nils-bodypart:cuda pipelines/nils-bodypart
+#
+# Both builds take one torch version. It is the newest with a CUDA 12 build
+# (the nvImageCodec wheels are CUDA 12 ones), and its CUDA wheels carry
+# kernels for Blackwell cards (sm_120), which torch 2.5.1 lacked.
 #
 # The weights are baked in at build time at pinned Hugging Face commits
 # (src/nils_bodypart/encoders.py, PINS), and the image runs with
@@ -25,8 +29,8 @@ ARG BASE=python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc0
 FROM ${BASE}
 
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
-ARG TORCH_VERSION=2.5.1
-ARG TORCHVISION_VERSION=0.20.1
+ARG TORCH_VERSION=2.13.0
+ARG TORCHVISION_VERSION=0.28.0
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
