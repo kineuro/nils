@@ -192,7 +192,7 @@ impl Of {
     }
 
     /// The main scans of a scope a reader is about, or of none.
-    pub fn of(store: &mut Store, scope: Option<&Scope>) -> Result<Of, StoreError> {
+    pub fn of_scope(store: &mut Store, scope: Option<&Scope>) -> Result<Of, StoreError> {
         match scope {
             Some(s) => Of::scope(store, s),
             None => Of::own(store),
@@ -555,7 +555,7 @@ pub fn for_release(
         ([], [one]) => Scope::dataset(store, one)?,
         _ => None,
     };
-    let of = Of::of(store, named.as_ref())?;
+    let of = Of::of_scope(store, named.as_ref())?;
     let pinned = of.pinned(store)?;
     let doc = pinned.record(store, pack, pack_version)?;
     Ok((pinned, doc))

@@ -8987,7 +8987,7 @@ fn pick_list(
         ),
         (None, None) => None,
     };
-    let picks = nils_registry::pick_truth::Of::of(store, named.as_ref())
+    let picks = nils_registry::pick_truth::Of::of_scope(store, named.as_ref())
         .map_err(|e| fail(e.to_string()))?
         .picks(store);
     let mut where_parts = vec!["1 = 1".to_string()];
