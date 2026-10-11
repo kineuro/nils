@@ -610,11 +610,19 @@ fn finish(
         report.joined = joined;
         report.cancelled = cancelled;
         // one review item per class the run quarantined into (§5.3): the
-        // count is the evidence, the paths stay in the quarantine list
+        // count is the evidence, the paths stay in the quarantine list.
+        // Record 56 (2026-10-11): a file the knobs set aside by policy (a
+        // screen capture, a report, another modality) asks nobody anything;
+        // it is counted on the report and the dataset's summary, and only a
+        // file the reader could not take files an item.
         let items: Vec<Vec<Param>> = report
             .quarantine
             .iter()
             .filter(|c| c.count > 0)
+            .filter(|c| {
+                nils_dicom::QuarantineClass::from_name(&c.class)
+                    .is_none_or(|class| !class.is_policy_class())
+            })
             .map(|c| {
                 let reference = serde_json::json!({ "batch_id": run.batch_id, "class": c.class });
                 // record 37 S9: what was set aside, by kind, so a reader of

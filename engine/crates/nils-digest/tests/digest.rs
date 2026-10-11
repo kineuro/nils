@@ -974,6 +974,69 @@ fn a_batch_files_one_review_item_per_quarantine_class() {
     }
 }
 
+/// Record 56 (2026-10-11): a file the knobs set aside by policy, a screen
+/// capture, a presentation state or another modality, asks nobody anything:
+/// it is recorded and counted, and no review item is filed for its class. A
+/// file the reader could not take keeps its item.
+#[test]
+fn a_file_set_aside_by_policy_files_no_review_item() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let p = [birth("19800101"), sex("M")];
+        let mut sc = with_patient(synth::minimal_mr("A", "A.3", "A.3.1"), "P1");
+        sc.retain(|e| e.tag != tags::SOP_CLASS_UID);
+        sc.push(synth::text(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            "1.2.840.10008.5.1.4.1.1.7",
+        ));
+        sc.extend(p.iter().cloned());
+        dir.file(
+            "sub1/SC_0001",
+            &synth::part10(
+                &synth::MetaFields::with(
+                    "1.2.840.10008.1.2.1",
+                    "1.2.840.10008.5.1.4.1.1.7",
+                    "A.3.1",
+                ),
+                &sc,
+                true,
+            ),
+        );
+        let mut us = with_patient(synth::minimal_mr("A", "A.4", "A.4.1"), "P1");
+        us.retain(|e| e.tag != tags::MODALITY);
+        us.push(synth::text(tags::MODALITY, VR::CS, "US"));
+        dir.file(
+            "sub1/US_0001",
+            &synth::part10(&synth::MetaFields::mr("A.4.1"), &us, true),
+        );
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.class("unsupported_sop_class"), 1, "{name}");
+        assert_eq!(report.class("unsupported_modality"), 1, "{name}");
+        assert_eq!(report.class("not_dicom"), 1, "{name}");
+        // the refused files are rows as before, with their class and detail
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT reason FROM {source_file} WHERE status = 'quarantined' ORDER BY reason",
+            ),
+            ["not_dicom", "unsupported_modality", "unsupported_sop_class"],
+            "{name}"
+        );
+        // and only the reader's refusal asks a person
+        let refs = texts(
+            &mut reg,
+            "SELECT CAST(ref AS TEXT) FROM {review_item} WHERE kind = 'ingest.quarantine'",
+        );
+        assert_eq!(refs.len(), 1, "{name}");
+        let reference: serde_json::Value = serde_json::from_str(&refs[0]).unwrap();
+        assert_eq!(reference["class"], "not_dicom", "{name}");
+    }
+}
+
 #[test]
 fn a_disagreed_field_is_decided_by_value_not_by_order() {
     // Two series that carry the same three sequence names and body parts in
