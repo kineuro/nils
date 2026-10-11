@@ -6069,6 +6069,17 @@ fn repair_closes_the_review_items_on_sealed_stacks_and_audits_them() {
 /// Record 53 S3: `nils pack replay` reads packets as a file of lines or a
 /// directory of files, and says what the pack decides of each, the private
 /// elements it shows included.
+/// The version a pack folder ships, as its `pack.yml` names it, so a test of
+/// a replay does not name a release the pack has moved past.
+fn shipped_version(pack: &std::path::Path) -> String {
+    std::fs::read_to_string(pack.join("pack.yml"))
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("version:"))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .expect("pack.yml names its version")
+}
+
 #[test]
 fn a_pack_is_replayed_over_header_packets() {
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
@@ -6105,7 +6116,8 @@ fn a_pack_is_replayed_over_header_packets() {
         assert_eq!(got[0]["stack"], 1);
         assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
         assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
-        assert!(stderr(&out).contains("2 packets replayed through mri@1.0.2"));
+        let want = format!("2 packets replayed through mri@{}", shipped_version(&packs));
+        assert!(stderr(&out).contains(&want), "{}", stderr(&out));
     }
     let bad = dir.file("bad.jsonl", b"{not json\n");
     let out = nils()
