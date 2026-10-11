@@ -89,11 +89,16 @@
           "geometry": {
             "type": ["object", "null"],
             "description": "Record 55 E2: present on every stack only when the descriptor sets x-nils.input.geometry, beside each file's own geometry, so a pipeline chooses which frames to read without reading a header first. Each member is null where the registry holds none",
-            "required": ["image_orientation_patient", "slice_thickness", "spacing_between_slices"],
+            "required": ["image_orientation_patient", "slice_thickness", "spacing_between_slices", "study", "image_type", "sop_class_uid", "n_instances", "sealed"],
             "properties": {
               "image_orientation_patient": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 6, "maxItems": 6, "description": "The direction cosines of the stack's rows and columns, ImageOrientationPatient as the stack's own images give it"},
               "slice_thickness": {"type": ["number", "null"], "description": "The slice thickness of the stack's fingerprint row, in mm; null for a stack not fingerprinted"},
-              "spacing_between_slices": {"type": ["number", "null"], "description": "The spacing between slices of the stack's fingerprint row, in mm; null for a stack not fingerprinted"}
+              "spacing_between_slices": {"type": ["number", "null"], "description": "The spacing between slices of the stack's fingerprint row, in mm; null for a stack not fingerprinted"},
+              "study": {"type": "integer", "description": "The study the stack's series is part of, as an id to group a session's stacks by, and nothing else: it names no study outside this registry"},
+              "image_type": {"type": ["string", "null"], "description": "ImageType as the stack's own images give it, DICOM's backslash list as read"},
+              "sop_class_uid": {"type": ["string", "null"], "description": "The SOP class of the stack's fingerprint row; null for a stack not fingerprinted"},
+              "n_instances": {"type": ["integer", "null"], "minimum": 0, "description": "How many instances the registry holds of the stack"},
+              "sealed": {"type": "boolean", "description": "Whether the stack is in a sample sealed now (record 48): a pipeline leaves it out of its session and answers it as sealed"}
             }
           },
           "files": {

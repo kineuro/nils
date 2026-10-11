@@ -1825,7 +1825,8 @@ fn materialise_stacks(
             .join(", ");
         let sql = format!(
             "SELECT st.id, st.series_id, se.subject_id, st.modality, st.orientation, \
-             st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices FROM {} st \
+             st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
+             se.study_id, st.image_type, fp.sop_class_uid, st.n_instances FROM {} st \
              JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
              WHERE st.id IN ({list})",
             store.qualified("stack"),
@@ -1844,14 +1845,20 @@ fn materialise_stacks(
                 ),
             );
             if geometry {
-                geometry_of.insert(
-                    id,
-                    stack_geometry(
-                        r.opt_text(5).map_err(err)?,
-                        r.opt_double(6).map_err(err)?,
-                        r.opt_double(7).map_err(err)?,
-                    ),
+                let mut g = stack_geometry(
+                    r.opt_text(5).map_err(err)?,
+                    r.opt_double(6).map_err(err)?,
+                    r.opt_double(7).map_err(err)?,
                 );
+                // what the few-slice student reads of the stack beside its
+                // geometry (record 55 E2, P1b): the session it is part of,
+                // what its images are, how many there are; sealed below
+                g["study"] = json!(r.int(8).map_err(err)?);
+                g["image_type"] = json!(r.opt_text(9).map_err(err)?);
+                g["sop_class_uid"] = json!(r.opt_text(10).map_err(err)?);
+                g["n_instances"] = json!(r.opt_int(11).map_err(err)?);
+                g["sealed"] = json!(false);
+                geometry_of.insert(id, g);
             }
         }
         // the axes an image reads, as the registry holds them now
@@ -1917,6 +1924,17 @@ fn materialise_stacks(
         }
     }
     let _ = d;
+    // a stack of a sample sealed now says so, so an image leaves it out of
+    // its session and answers it `sealed` (record 55 E2, P1b)
+    if geometry {
+        let (sealed, _) =
+            nils_registry::labels::sealed_now(store, stacks, &[]).map_err(|e| e.to_string())?;
+        for id in sealed {
+            if let Some(g) = geometry_of.get_mut(&id) {
+                g["sealed"] = json!(true);
+            }
+        }
+    }
     let mut headers = if header {
         let subjects: BTreeMap<i64, i64> = info.iter().map(|(k, v)| (*k, v.1)).collect();
         stack_headers(store, &subjects)?
@@ -6143,7 +6161,10 @@ fn file_geometry(r: &nils_registry::store::Row, at: usize) -> Result<Value, nils
 /// A stack's geometry object for `stacks.json` (record 55 E2): the
 /// orientation of its images (the stack's own, six numbers) and the slice
 /// thickness and spacing of its fingerprint row, each null where the
-/// registry holds none (a stack not fingerprinted has neither).
+/// registry holds none (a stack not fingerprinted has neither). The stacks
+/// query adds the stack's facts beside it (P1b): `study`, the series'
+/// study to group a session by, `image_type`, `sop_class_uid` (the
+/// fingerprint's), `n_instances` and whether it is `sealed` now.
 fn stack_geometry(
     orientation: Option<&str>,
     thickness: Option<f64>,

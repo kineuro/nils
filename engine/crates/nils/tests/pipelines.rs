@@ -6195,6 +6195,8 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
             let instance_t = store.qualified("instance");
             let file_t = store.qualified("source_file");
             let frame_t = store.qualified("instance_frame");
+            let series_t = store.qualified("series");
+            let mut studies: std::collections::BTreeSet<i64> = Default::default();
             let mut orientations: Vec<Value> = Vec::new();
             let mut framed = 0;
             for e in entries {
@@ -6207,20 +6209,42 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                     keys,
                     [
                         "image_orientation_patient",
+                        "image_type",
+                        "n_instances",
+                        "sealed",
                         "slice_thickness",
-                        "spacing_between_slices"
+                        "sop_class_uid",
+                        "spacing_between_slices",
+                        "study"
                     ],
                     "{g}"
                 );
                 let row = store
                     .query(
                         &format!(
-                            "SELECT st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices \
-                             FROM {stack_t} st LEFT JOIN {fp_t} fp ON fp.stack_id = st.id WHERE st.id = {stack}"
+                            "SELECT st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
+                             se.study_id, st.image_type, fp.sop_class_uid, st.n_instances \
+                             FROM {stack_t} st JOIN {series_t} se ON se.id = st.series_id \
+                             LEFT JOIN {fp_t} fp ON fp.stack_id = st.id WHERE st.id = {stack}"
                         ),
                         &[],
                     )
                     .unwrap();
+                // P1b: the stack's study, image type, SOP class and count,
+                // as the registry holds them, and unsealed
+                assert_eq!(g["study"], json!(row[0].int(3).unwrap()), "{g}");
+                assert_eq!(g["image_type"], json!(row[0].opt_text(4).unwrap()), "{g}");
+                assert!(g["image_type"].is_string(), "{g}");
+                assert_eq!(
+                    g["sop_class_uid"],
+                    json!(row[0].opt_text(5).unwrap()),
+                    "{g}"
+                );
+                assert!(g["sop_class_uid"].is_string(), "{g}");
+                assert_eq!(g["n_instances"], json!(row[0].opt_int(6).unwrap()), "{g}");
+                assert!(g["n_instances"].as_i64().unwrap() >= 1, "{g}");
+                assert_eq!(g["sealed"], json!(false), "{g}");
+                studies.insert(g["study"].as_i64().unwrap());
                 let iop = numbers(row[0].opt_text(0).unwrap());
                 assert_eq!(iop.as_array().map(Vec::len), Some(6), "{iop}");
                 assert_eq!(g["image_orientation_patient"], iop, "{g}");
@@ -6305,6 +6329,7 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 }
             }
             assert_eq!(framed, 2, "both stacks of the file of frames");
+            assert!(studies.len() >= 2, "the tree's studies apart: {studies:?}");
             for want in [
                 json!([0.0, 1.0, 0.0, 0.0, 0.0, -1.0]),
                 json!([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
@@ -6340,6 +6365,49 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
             {
                 assert_eq!(a["geometry"], b["geometry"]);
                 assert_eq!(a["files"], b["files"]);
+            }
+
+            // P1b: a stack of a sample sealed now says so, and only it; one
+            // unsealed again does not
+            let sealed = entries[0]["stack_id"].as_i64().unwrap();
+            let sealed_t = store.qualified("sealed_stack");
+            let subject = store
+                .query(
+                    &format!(
+                        "SELECT se.subject_id FROM {stack_t} st JOIN {series_t} se ON se.id = st.series_id \
+                         WHERE st.id = {sealed}"
+                    ),
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {sealed_t} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                         VALUES ('test-sample@1', {sealed}, {subject}, 'test', '2026-10-11T00:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let after = stacks_json(lab, run("stack-geo"), None);
+            for e in after["stacks"].as_array().unwrap() {
+                let is = e["stack_id"].as_i64() == Some(sealed);
+                assert_eq!(e["geometry"]["sealed"], json!(is), "{e}");
+            }
+            store
+                .execute(
+                    &format!(
+                        "UPDATE {sealed_t} SET unsealed_at = '2026-10-11T01:00:00Z', unsealed_by = 'test' \
+                         WHERE stack_id = {sealed}"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let again = stacks_json(lab, run("stack-geo"), None);
+            for e in again["stacks"].as_array().unwrap() {
+                assert_eq!(e["geometry"]["sealed"], json!(false), "{e}");
             }
         },
     );

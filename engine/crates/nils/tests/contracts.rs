@@ -429,8 +429,29 @@ fn the_job_contract_is_the_runner_s() {
         [
             "image_orientation_patient",
             "slice_thickness",
-            "spacing_between_slices"
+            "spacing_between_slices",
+            "study",
+            "image_type",
+            "sop_class_uid",
+            "n_instances",
+            "sealed"
         ]
+    );
+    // P1b: the stack's facts a few-slice model reads, as the runner
+    // writes them
+    let facts = &stack["geometry"]["properties"];
+    assert_eq!(facts["study"]["type"], "integer");
+    assert_eq!(facts["sealed"]["type"], "boolean");
+    for key in ["image_type", "sop_class_uid"] {
+        assert_eq!(
+            facts[key]["type"],
+            serde_json::json!(["string", "null"]),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        facts["n_instances"]["type"],
+        serde_json::json!(["integer", "null"])
     );
     let file = &stack["files"]["items"]["properties"];
     assert_eq!(
