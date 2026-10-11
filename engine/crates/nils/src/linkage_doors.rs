@@ -2452,8 +2452,9 @@ mod tests {
         values.sort_unstable();
         assert_eq!(values, ["P1", "P2"]);
 
-        // coded anyway: the next digest of the dataset codes them, marks the
-        // subjects provisional, and the door empties
+        // coded anyway: the next digest of the dataset codes them, and the
+        // door empties; since 2026-10-10 a subject code made from the ID is
+        // final, so no subject is marked provisional
         let r = call(
             &home,
             &mut registry,
@@ -2480,12 +2481,16 @@ mod tests {
             sources["sources"][0]["held"],
             serde_json::json!({"files": 0, "identifiers": 0})
         );
-        let provisional = registry
-            .store()
-            .query("SELECT COUNT(*) FROM subject WHERE provisional = 1", &[])
-            .unwrap()[0]
-            .int(0)
-            .unwrap();
-        assert_eq!(provisional, 2);
+        let count = |registry: &mut Registry, sql: &str| -> i64 {
+            registry.store().query(sql, &[]).unwrap()[0].int(0).unwrap()
+        };
+        assert_eq!(
+            count(
+                &mut registry,
+                "SELECT COUNT(*) FROM subject WHERE provisional = 1"
+            ),
+            0
+        );
+        assert!(count(&mut registry, "SELECT COUNT(*) FROM subject") >= 2);
     }
 }
