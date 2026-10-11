@@ -643,10 +643,7 @@ mod tests {
         assert!(reading(&mut s, &scope).unwrap().is_none());
         let run = run_started(&mut s, &scope, 2, Some(9), true).unwrap();
         assert!(reading(&mut s, &scope).unwrap().is_none());
-        assert_eq!(
-            state(&mut s, &scope).unwrap()["pending"]["state"],
-            "queued"
-        );
+        assert_eq!(state(&mut s, &scope).unwrap()["pending"]["state"], "queued");
         run_ended(&mut s, run, None).unwrap();
         let r = reading(&mut s, &scope).unwrap().unwrap();
         assert_eq!((r.version, r.job), (2, Some(9)));

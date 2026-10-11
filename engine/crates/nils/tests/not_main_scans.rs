@@ -616,7 +616,11 @@ fn packs_without(home: &Home, name: &str, rules: &[(&str, &[&str])], fixtures: &
     let text = std::fs::read_to_string(&manifest).unwrap();
     let line = format!("version: {}", shipped());
     assert!(text.contains(&line), "{}: {line}", manifest.display());
-    std::fs::write(&manifest, text.replacen(&line, &format!("version: {BEFORE}"), 1)).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replacen(&line, &format!("version: {BEFORE}"), 1),
+    )
+    .unwrap();
     for f in fixtures {
         std::fs::remove_file(dir.join("mri/corpus").join(f)).unwrap();
     }
