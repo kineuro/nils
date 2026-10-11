@@ -625,6 +625,51 @@ impl<'a> Builder<'a> {
         qualified(self.ctx.schema.as_deref(), table)
     }
 
+    /// One place of truth for the main scans (Nima, 2026-10-11): the picks
+    /// `picked` and a role set read, as a relation in place of the table
+    /// (`nils_registry::pick_truth`). A dataset or a cohort named
+    /// (`{dataset: NAME}`, `{cohort: NAME}`) reads its own once a run of its
+    /// saved rules finished, else the pack's; none named, each subject reads
+    /// its own dataset's by the same rule, else the pack's, as the Main
+    /// scans page, the viewer and a release do.
+    fn main_picks(&self, opts: Option<&BTreeMap<String, Value>>, at: &str) -> R<String> {
+        use nils_registry::pick_truth::{Holder, Of, Version};
+        let named = |k: &str| opts.and_then(|o| o.get(k));
+        let of = match (named("dataset"), named("cohort")) {
+            (None, None) => Of::own_of(self.ctx.names.datasets().into_iter().map(|d| Holder {
+                id: d.id,
+                name: d.name,
+                sources: d.sources,
+                version: Version::Now,
+            })),
+            (Some(Value::String(d)), None) => {
+                let name = d.trim_start_matches('@');
+                let found = self
+                    .ctx
+                    .names
+                    .datasets()
+                    .into_iter()
+                    .find(|x| x.name == name)
+                    .ok_or_else(|| err(at, format!("picked reads no dataset named {name}")))?;
+                Of::dataset(found.id, &found.name, found.sources)
+            }
+            (None, Some(Value::String(c))) => {
+                if !self.ctx.names.cohorts().iter().any(|x| x == c) {
+                    return Err(err(at, format!("picked reads no cohort named {c}")));
+                }
+                Of::cohort_named(c)
+            }
+            (Some(_), Some(_)) => {
+                return Err(err(
+                    at,
+                    "picked reads one scope: a dataset or a cohort, not both",
+                ));
+            }
+            _ => return Err(err(at, "picked names its dataset or its cohort by name")),
+        };
+        Ok(of.relation(self.ctx.schema.as_deref()))
+    }
+
     /// Record 48, D1 of the move: the standing predicate that leaves out a
     /// stack of a sample sealed now, when the context withholds them.
     fn not_sealed(&self, stack: &str) -> Option<String> {
@@ -1245,11 +1290,11 @@ impl<'a> Builder<'a> {
                     return Err(err(format!("{path}.from"), "a role is a stack set"));
                 }
                 let role = self.p(Param::from(r.as_str()), Type::Text);
+                // the main scans, as `picked` reads them with no scope named
+                let picks = self.main_picks(None, &format!("{path}.from"))?;
                 from.push_str(&format!(
-                    " JOIN {} ps ON ps.stack_id = st.id JOIN {} p ON p.id = ps.pick_id AND p.role = {role} AND p.withdrawn_at IS NULL \
-                     AND p.rules_scope_kind IS NULL",
+                    " JOIN {} ps ON ps.stack_id = st.id JOIN {picks} p ON p.id = ps.pick_id AND p.role = {role}",
                     self.q("pick_stack"),
-                    self.q("pick")
                 ));
             }
             Some(Src::Handle { id, .. }) => {
@@ -3088,10 +3133,10 @@ impl<'a> Builder<'a> {
                     .opt_placeholder(&c.opts, "role", at)?
                     .ok_or_else(|| err(at, "picked names its role: {role}"))?;
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
+                let picks = self.main_picks(Some(&c.opts), at)?;
                 let mut sql = format!(
-                    "EXISTS (SELECT 1 FROM {} p JOIN {} ps ON ps.pick_id = p.id WHERE ps.stack_id = {} AND p.role = {role} \
-                     AND p.withdrawn_at IS NULL AND p.rules_scope_kind IS NULL AND p.scheme_digest = {digest}",
-                    self.q("pick"),
+                    "EXISTS (SELECT 1 FROM {picks} p JOIN {} ps ON ps.pick_id = p.id WHERE ps.stack_id = {} AND p.role = {role} \
+                     AND p.scheme_digest = {digest}",
                     self.q("pick_stack"),
                     dot("k")
                 );

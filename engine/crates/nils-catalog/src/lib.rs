@@ -2134,6 +2134,7 @@ impl Names for Catalog {
             .map(|d| Dataset {
                 name: d.name.clone(),
                 sources: d.sources.clone(),
+                id: d.id,
             })
             .collect()
     }

@@ -1456,6 +1456,12 @@ enum PickCommand {
         /// Only this subject
         #[arg(long, value_name = "CODE")]
         subject: Option<String>,
+        /// A dataset's main scans: its own once a run of its rules finished, else the pack's (the default: each subject's own dataset's)
+        #[arg(long, value_name = "NAME", conflicts_with = "cohort")]
+        dataset: Option<String>,
+        /// A cohort's main scans: its own once a run of its rules finished, else the pack's
+        #[arg(long, value_name = "NAME")]
+        cohort: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -8705,8 +8711,17 @@ fn pick_command(home: &Home, command: PickCommand) -> Result<(), Exit> {
             role,
             borders,
             subject,
+            dataset,
+            cohort,
             json,
-        } => pick_list(home, role, borders, subject, json),
+        } => pick_list(
+            home,
+            role,
+            borders,
+            subject,
+            (dataset.as_deref(), cohort.as_deref()),
+            json,
+        ),
         PickCommand::Explain { id, json } => pick_explain(home, id, json),
         PickCommand::Set(args) => pick_set(home, args),
         PickCommand::Withdraw { id, why, json } => pick_withdraw(home, id, why, json),
@@ -8952,16 +8967,30 @@ fn pick_list(
     role: Option<String>,
     borders: bool,
     subject: Option<String>,
+    scope: (Option<&str>, Option<&str>),
     json: bool,
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let store = registry.store();
-    // record 55, decision 6: the pack's picks, as every reader but a
-    // scope's own reads them
-    let mut where_parts = vec![
-        "p.withdrawn_at IS NULL".to_string(),
-        "p.rules_scope_kind IS NULL".to_string(),
-    ];
+    // one place of truth (2026-10-11): the main scans as every reader reads
+    // them, a scope's named or each subject's own dataset's
+    let named = match scope {
+        (Some(d), _) => Some(
+            nils_registry::pick_rules::Scope::dataset(store, d)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no dataset named {d}")))?,
+        ),
+        (None, Some(c)) => Some(
+            nils_registry::pick_rules::Scope::cohort(store, c)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no cohort named {c}")))?,
+        ),
+        (None, None) => None,
+    };
+    let picks = nils_registry::pick_truth::Of::of(store, named.as_ref())
+        .map_err(|e| fail(e.to_string()))?
+        .picks(store);
+    let mut where_parts = vec!["1 = 1".to_string()];
     if let Some(r) = &role {
         where_parts.push(format!("p.role = '{}'", r.replace('\'', "''")));
     }
@@ -8974,13 +9003,12 @@ fn pick_list(
     let sql = format!(
         "SELECT p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, \
                 p.author_kind, COUNT(ps.stack_id), p.why \
-         FROM {} p JOIN {} su ON su.id = p.subject_id \
+         FROM {picks} p JOIN {} su ON su.id = p.subject_id \
          LEFT JOIN {} ps ON ps.pick_id = p.id \
          WHERE {} \
          GROUP BY p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, p.author_kind, p.why \
          ORDER BY su.code, {}, p.role",
         text_of(store, "pick", "session_day"),
-        store.qualified("pick"),
         store.qualified("subject"),
         store.qualified("pick_stack"),
         where_parts.join(" AND "),

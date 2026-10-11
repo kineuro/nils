@@ -47,6 +47,7 @@ pub mod overlay;
 pub mod pair;
 pub mod personnummer;
 pub mod pick_rules;
+pub mod pick_truth;
 pub mod pipeline;
 pub mod place;
 pub mod principal;

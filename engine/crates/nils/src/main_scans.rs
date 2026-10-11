@@ -510,7 +510,9 @@ pub(crate) fn map(
         d => Some(Rules::from_json(d, &Rules::defaults(model)).map_err(refused)?),
     };
     let subjects = crate::pick_scopes::subjects_of(registry.store(), &scope).map_err(failed)?;
-    let reading = pick_rules::reading(registry.store(), &scope).map_err(failed)?;
+    // one place of truth (2026-10-11): the scope's own picks once read,
+    // else the pack's, as every other reader of this scope reads them
+    let picks = nils_registry::pick_truth::Of::scope(registry.store(), &scope).map_err(failed)?;
     // and what the rules door says of them
     let datasets = match by {
         Columns::Dataset => datasets(registry, &subjects)?,
@@ -540,7 +542,7 @@ pub(crate) fn map(
             role,
             scheme: &scheme,
             subjects: &subjects,
-            reading: reading.as_ref(),
+            picks: &picks,
             datasets: &datasets,
             withheld: &withheld,
         },

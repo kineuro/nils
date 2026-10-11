@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use nils_pack::pick::{Candidate, Model, Reference};
 use nils_pack::pick_rules::{self, Chooser, Chosen, Rules};
-use nils_registry::pick_rules::{Reading, reading_filter};
+use nils_registry::pick_truth::Of;
 use nils_registry::schema::{Type, table};
 use nils_registry::session::Scheme;
 use nils_registry::store::{Error as StoreError, Param, Store};
@@ -39,9 +39,10 @@ pub struct Ask<'a> {
     pub role: &'a str,
     pub scheme: &'a Scheme,
     pub subjects: &'a BTreeSet<i64>,
-    /// The scope whose stored picks are read (a person's picks among them):
-    /// the scope's own when it has rules saved, else the pack's.
-    pub reading: Option<&'a Reading>,
+    /// Whose stored picks are read (a person's picks among them), as the
+    /// one resolver says (`nils_registry::pick_truth`): the scope's own once
+    /// read, else the pack's.
+    pub picks: &'a Of,
     /// The dataset of each stack, for columns by dataset.
     pub datasets: &'a HashMap<i64, String>,
     /// Stacks the caller is not shown (of a sample sealed now): no part of
@@ -201,14 +202,12 @@ fn stored(store: &mut Store, ask: &Ask<'_>) -> Result<HashMap<(i64, String), Sto
     let mut out: HashMap<(i64, String), Stored> = HashMap::new();
     for chunk in ids.chunks(500) {
         let sql = format!(
-            "SELECT id, subject_id, {day}, author_kind, why FROM {} WHERE role = {} \
-             AND model = {} AND scheme_digest = {} AND withdrawn_at IS NULL AND {} \
-             AND subject_id IN ({}) ORDER BY id",
-            store.qualified("pick"),
+            "SELECT id, subject_id, {day}, author_kind, why FROM {} p WHERE role = {} \
+             AND model = {} AND scheme_digest = {} AND subject_id IN ({}) ORDER BY id",
+            ask.picks.picks(store),
             d.param(1, Type::Text),
             d.param(2, Type::Text),
             d.param(3, Type::Text),
-            reading_filter("", ask.reading),
             list(chunk)
         );
         let rows = store.query(
@@ -308,13 +307,16 @@ pub fn reference(
 impl Read {
     /// What each visit takes under `rules`: a person's pick where one
     /// stands, else the rules' choice; the scan within the kind when a
-    /// reference is given.
+    /// reference is given. With `stored`, the saved side: what the picks
+    /// stored say, as every other reader of the scope reads them (one place
+    /// of truth, 2026-10-11), the rules' choice standing only beside it.
     fn taken(
         &self,
         rules: &Rules,
         model: &Model,
         role: &str,
         reference: Option<&Reference>,
+        stored: bool,
     ) -> Vec<Vec<Taken>> {
         let chooser = Chooser::new(rules, model);
         self.subjects
@@ -327,7 +329,7 @@ impl Read {
                     .iter()
                     .zip(chosen)
                     .map(|(v, c)| match &v.stored {
-                        Some(p) if p.person => Taken {
+                        Some(p) if p.person || stored => Taken {
                             kind: p.stacks.first().and_then(|first| {
                                 v.candidates
                                     .iter()
@@ -335,7 +337,14 @@ impl Read {
                                     .map(pick_rules::kind_of)
                             }),
                             stacks: p.stacks.clone(),
-                            by: "person",
+                            by: if p.person { "person" } else { "rules" },
+                            chosen: c,
+                        },
+                        // nothing stored: no pick, as every reader says
+                        None if stored => Taken {
+                            kind: None,
+                            stacks: Vec::new(),
+                            by: "rules",
                             chosen: c,
                         },
                         _ => Taken {
@@ -516,9 +525,11 @@ impl Compare {
         draft: Option<Rules>,
         reference: Option<&Reference>,
     ) -> Compare {
-        let taken = read.taken(&saved, model, role, reference);
+        // the saved side is what the stored picks say; a draft is the
+        // rules' choice, beside them
+        let taken = read.taken(&saved, model, role, reference, true);
         let draft = draft.map(|rules| Side {
-            taken: read.taken(&rules, model, role, reference),
+            taken: read.taken(&rules, model, role, reference, false),
             rules,
         });
         Compare {
