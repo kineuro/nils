@@ -15,13 +15,15 @@
 //!   or named): that scope's picks once the scope is read, that is once a
 //!   run of a saved version of its rules finished over all its subjects
 //!   ([`crate::pick_rules::reading`]), the latest such version and the
-//!   persons' picks of the scope; else the pack's.
+//!   persons' picks of the scope; else the pack's. Either way, of the
+//!   scope's subjects alone: a cohort's open members, a dataset's subjects
+//!   with a stack its tree holds a file of.
 //! - **A reader about no scope**: each subject's own dataset's picks by the
-//!   same rule, else the pack's. A subject's dataset is the dataset of its
-//!   stacks, the one whose source a stack's first digest read (as the ask's
-//!   `dataset` field says); a subject whose stacks lie in two datasets with
-//!   rules read reads the one with the lower id. A cohort's rules are read
-//!   only by a reader about that cohort.
+//!   same rule, else the pack's. A subject's dataset is one whose tree holds
+//!   a file of one of its stacks (record 55's duplicate policy: a dataset
+//!   holds every scan its tree has a file of); a subject of two datasets
+//!   with rules read reads the one with the lower id. A cohort's rules are
+//!   read only by a reader about that cohort.
 //!
 //! Whether a scope is read is asked in the statement itself, so a reader
 //! never holds an answer that a finished run has since changed. A release
