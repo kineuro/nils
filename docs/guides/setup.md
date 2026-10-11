@@ -645,6 +645,41 @@ written down: the record keeps the address, the file's path and the model,
 so a later update or repair seals it again from the file. `--print` shows
 the plan with all three and without the key.
 
+## Starting again from an empty registry
+
+```
+nils --registry <registry> place export --out places.json
+nils setup --new-registry --reg-key-file /etc/nils/reg-key --print
+nils setup --new-registry --reg-key-file /etc/nils/reg-key --yes
+nils --registry <registry> place import places.json --print
+```
+
+A site that has tried NILS out and now starts its real work keeps its setup
+and starts its registry again. `--new-registry` stops the engine, sets the
+registry aside, makes a new one on the key a key file gives (or a
+passphrase, with `--key-file`), under the subject code generator's scheme
+unless `--scheme` names another, declares the places the setup record names,
+carries the timezone and the week start, and writes and starts every part
+again, as a repair does. The configuration, the sign-in, the desk's people
+and groups, and Kvasir's models and sealed credentials stay as they are.
+Nothing is deleted: on Postgres the registry's two schemas are renamed
+`<schema>_before_<stamp>` and `<schema>_before_<stamp>_linkage`, and on
+SQLite its databases move; either way its `nils.toml` and key store go into
+`before-new-registry-<stamp>/` in the registry's folder, where the old
+registry still opens with `nils --registry <that folder>`. Dump it and keep
+the dump before you remove anything, and drop the renamed schemas yourself
+once you no longer need to go back. With no terminal it runs only with
+`--yes`, and `--print` says every step and changes nothing.
+
+The new registry has no jobs, no data, no ID types and no places but the
+setup's. `nils place export` writes every place in force, a dataset with how
+it is declared, to one file, and `nils place import` declares them in the new
+registry as they were written: it looks into no folder, moves nothing and
+measures nothing, so `nils place list --probe` measures them afterwards. A
+place the registry already has by the same name, role and path is kept as it
+is, `--skip NAME` leaves one out, and anything it cannot take is said for
+every place before one is declared.
+
 ## Removing it
 
 ```
@@ -720,6 +755,7 @@ directory is NILS's.
 | `--yes`, `-y` | Take every default without asking |
 | `--print` | Say what it would do, with every command and unit, and change nothing |
 | `--update` | Straight to the installs, for the parts already there |
+| `--new-registry` | Set the registry aside and start an empty one under the same setup; with `--reg-key-file` or `--key-file`, `--print` and `--yes` |
 | `--channel URL` | Where releases come from |
 | `--model-server URL`, `--model-key-file FILE` | A model server the stations use, such as a Kvasir serving a card: on an install or with `--update`, Kvasir seals the key from the file and holds the server as one backend |
 | `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, else the server's default or only model. On the first add, every model the server offers is admitted beside it, up to eight |

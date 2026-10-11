@@ -61,6 +61,7 @@ mod pair;
 mod pick_after;
 mod pick_scopes;
 mod pipelines;
+mod place_transfer;
 mod places;
 mod preflight;
 mod preview;
@@ -1035,6 +1036,31 @@ enum PlaceCommand {
     },
     /// Retire a place: it binds nothing from now on and stays as history
     Retire { id: i64 },
+    /// Every place in force written to one JSON document, a source place
+    /// with the dataset it is declared as (Wave 7a section 15.3), for nils
+    /// place import to declare in a new registry. Nothing is changed
+    Export {
+        /// The file to write; the standard output where none is named
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Declare the places of a document nils place export wrote, as they
+    /// were written: no folder is looked at, moved or probed. A place this
+    /// registry has by the same name, role and path is kept as it is;
+    /// anything else the import cannot take is said for every place before
+    /// one is declared
+    Import {
+        /// The document nils place export wrote
+        file: PathBuf,
+        /// A place of the document to leave out, by name (repeatable)
+        #[arg(long, value_name = "NAME")]
+        skip: Vec<String>,
+        /// Say what would be declared, and declare nothing
+        #[arg(long)]
+        print: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// The verbs that take a path and the role each needs, and where @name
     /// points for each dataset
     Bindings {
@@ -3695,6 +3721,60 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     for line in lines_of(&layout) {
                         println!("  {line}");
                     }
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::Export { out } => {
+            let doc = place_transfer::export(&mut registry).map_err(fail)?;
+            let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
+            match out {
+                Some(path) => {
+                    fs::write(&path, format!("{text}\n"))
+                        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+                    eprintln!(
+                        "{} places written to {}{}",
+                        doc["places"].as_array().map_or(0, Vec::len),
+                        path.display(),
+                        match doc["retired_left_out"].as_u64() {
+                            Some(n) if n > 0 => format!(" ({n} retired left out)"),
+                            _ => String::new(),
+                        }
+                    );
+                }
+                None => println!("{text}"),
+            }
+            Ok(())
+        }
+        PlaceCommand::Import {
+            file,
+            skip,
+            print,
+            json,
+        } => {
+            let text =
+                fs::read_to_string(&file).map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let doc: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let done = place_transfer::import(&mut registry, &doc, &skip, print).map_err(fail)?;
+            if json {
+                let doc: Vec<_> = done.iter().map(place_transfer::Planned::as_json).collect();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                for p in &done {
+                    let id = p.id.map(|i| format!("place {i}: ")).unwrap_or_default();
+                    let what = match (&p.outcome, print) {
+                        (place_transfer::Outcome::Added, true) => "would be added",
+                        (place_transfer::Outcome::Added, false) => "added",
+                        (place_transfer::Outcome::Kept, _) => "already here, kept as it is",
+                        (place_transfer::Outcome::Skipped, _) => "skipped",
+                    };
+                    println!("  {id}{} ({}) at {}: {what}", p.name, p.role, p.path);
+                }
+                if print {
+                    println!("nothing was declared");
+                } else {
+                    println!("measure them with nils place list --probe");
                 }
             }
             Ok(())
