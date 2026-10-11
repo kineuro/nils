@@ -114,6 +114,10 @@ def test_the_reduced_readers_run_answers_as_the_full_one_with_full_policy(world,
         da = json.loads(p.read_text())
         db = json.loads((tmp_path / "b" / "bodypart-fusion" / p.name).read_text())
         assert db.pop("reader")["policy"] == "full"
+        # P1b: the stage and the files each read opened differ, and only they
+        assert (da.pop("stage"), db.pop("stage")) == ("full", "reduced:full")
+        fa, fb = da.pop("files_read"), db.pop("files_read")
+        assert 0 < fb <= fa
         assert da == db
     assert b["metrics"]["reader"]["frames_decoded"] > 0
     c = run(tmp_path / "c", "--threads", "2", "--reader", "reduced:b8")

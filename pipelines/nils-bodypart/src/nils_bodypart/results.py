@@ -48,6 +48,9 @@ class Unit:
     outputs: list[dict] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
     error: str | None = None
+    # members beside the contract's, such as the sha256 of each file a
+    # stack's reads took whole (``read``, record 55 E5 R3)
+    extra: dict = field(default_factory=dict)
 
     def as_json(self) -> dict:
         return {
@@ -58,6 +61,7 @@ class Unit:
             "outputs": self.outputs,
             "metrics": self.metrics,
             "error": self.error,
+            **self.extra,
         }
 
 

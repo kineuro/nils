@@ -313,18 +313,27 @@ def files_to_read(files, file_geo, stack_geo, orientation, policy) -> list[str]:
         return []
 
 
-def build(files, file_geo, stack_geo, orientation: str | None, policy: str, decode=None) -> Built:
+def build(files, file_geo, stack_geo, orientation: str | None, policy: str, decode=None, memo: dict | None = None) -> Built:
     """The stack's six planes in a (64, 64, 64) volume that is zero
     elsewhere, and its geometry, as ``volume.build`` gives them for the
-    planes the encoder reads."""
+    planes the encoder reads.
+
+    ``memo`` carries what one stack's reads have found from one policy to
+    the next (the cascade's ``b24``, then ``touched``): the frames decoded,
+    each decoded file's own orientation and thickness, the files opened and
+    each file's identity (its SOP Instance UID, the sha256 of its bytes and
+    its study's UID). A frame decoded once is not decoded again, and the
+    planes are the ones a fresh build of the policy gives."""
     check_policy(policy)
     stats: dict = {"policy": policy}
     errors: dict = {}
     frames = stack_frames(files, file_geo, stack_geo, stats)
     from_headers = False
-    cache: dict[str, dict | Exception] = {}  # the frames decoded so far, by file
-    heads: dict[str, tuple] = {}  # each decoded file's own orientation and thickness
-    opened: set[str] = set()
+    memo = memo if memo is not None else {}
+    cache: dict[str, dict | Exception] = memo.setdefault("cache", {})  # the frames decoded so far, by file
+    heads: dict[str, tuple] = memo.setdefault("heads", {})  # each decoded file's own orientation and thickness
+    opened: set[str] = memo.setdefault("opened", set())
+    ident: dict[str, dict] = memo.setdefault("ident", {})
     bad: set[str] = set()
     while True:
         p = plan(frames, orientation, policy, bad)
@@ -332,7 +341,7 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
         todo = {path: [i for i in idx if not (isinstance(cache.get(path), dict) and i in cache[path])] for path, idx in need.items()}
         todo = {k: v for k, v in todo.items() if v}
         if todo:
-            got_now = decode(todo) if decode is not None else _decode_with_headers(todo, heads)
+            got_now = decode(todo) if decode is not None else _decode_with_headers(todo, heads, ident)
             if decode is not None:
                 # a card's decoder gives pixels only: each decoded file's
                 # own orientation and thickness come from its header, as
@@ -439,6 +448,8 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
     meta = _meta(p, meta0)
     b = Built(vol, meta, errors)
     b.stats = stats
+    # the files whose frames the planes were made of, for the slice cache
+    b.read_files = sorted(p.need())
     return b
 
 
@@ -474,16 +485,28 @@ def _meta(p: Plan, meta0: dict) -> dict:
     return {k: (v.item() if isinstance(v, np.generic) else v) for k, v in meta.items()}
 
 
-def _decode_with_headers(need: dict[str, list[int]], heads: dict) -> dict:
+def _decode_with_headers(need: dict[str, list[int]], heads: dict, ident: dict | None = None) -> dict:
     """``volume.decode_each``, reading each file once and keeping its own
     orientation and slice thickness (the first frame's, as the full reader
-    reads a header)."""
+    reads a header), and, in ``ident``, its identity: its SOP Instance UID,
+    the sha256 of its bytes (it is read whole) and its study's UID."""
+    import hashlib
+    import io
+
     import pydicom
 
     out: dict = {}
     for path, idx in need.items():
         try:
-            ds = pydicom.dcmread(path, force=True)
+            with open(path, "rb") as f:
+                data = f.read()
+            ds = pydicom.dcmread(io.BytesIO(data), force=True)
+            if ident is not None:
+                ident[path] = {
+                    "sop_instance_uid": str(getattr(ds, "SOPInstanceUID", "") or ""),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "study_instance_uid": str(getattr(ds, "StudyInstanceUID", "") or ""),
+                }
             iop = volume._floats(getattr(ds, "ImageOrientationPatient", None) or [], 6)
             thick = getattr(ds, "SliceThickness", None)
             nf = int(getattr(ds, "NumberOfFrames", 1) or 1)

@@ -63,7 +63,9 @@ class Stack:
     # (``ipp``, ``ps``, ``rows``, ``cols``, ``inum``, ``frames``), else
     # None; the reduced reader chooses frames from it without reading
     # headers. The stack's own is ``extra["geometry"]`` (``iop``,
-    # ``thick``, ``modality``).
+    # ``thick``, ``modality``, and since P1b ``study``, ``image_type``,
+    # ``sop_class``, ``n_instances`` and ``sealed`` where the engine gives
+    # them).
     file_geo: list[dict | None] = field(default_factory=list)
 
     @property
@@ -124,6 +126,16 @@ _FILE_GEOMETRY = {
 }
 
 
+# The stack's facts beside its geometry (P1b), and the reader's names.
+_STACK_FACTS = {
+    "study": "study",
+    "image_type": "image_type",
+    "sop_class_uid": "sop_class",
+    "n_instances": "n_instances",
+    "sealed": "sealed",
+}
+
+
 def file_geometry(g) -> dict | None:
     """A file's geometry in the reader's names: the engine's geometry
     object mapped, or one already in the reader's names (as the one-hour
@@ -138,13 +150,21 @@ def file_geometry(g) -> dict | None:
 def stack_geometry(s: dict) -> dict | None:
     """A stack's geometry in the reader's names (``iop``, ``thick``,
     ``modality``): the engine's (the stack's orientation and its
-    fingerprint's slice thickness, beside the entry's modality) mapped, or
-    one already in the reader's names as it is; None without one."""
+    fingerprint's slice thickness, beside the entry's modality, and the
+    stack's facts of P1b) mapped, or one already in the reader's names as it
+    is; None without one."""
     g = s.get("geometry")
     if not isinstance(g, dict):
         return None
     if "image_orientation_patient" in g:
-        return {"iop": g.get("image_orientation_patient"), "thick": g.get("slice_thickness"), "modality": s.get("modality")}
+        out = {"iop": g.get("image_orientation_patient"), "thick": g.get("slice_thickness"), "modality": s.get("modality")}
+        # the stack's facts the few-slice student reads beside its geometry
+        # (P1b): its session's id to group by, what its images are, how many,
+        # and whether it is sealed now
+        for name, short in _STACK_FACTS.items():
+            if name in g:
+                out[short] = g[name]
+        return out
     return g
 
 

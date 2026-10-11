@@ -41,12 +41,29 @@
 # their headers read as before. On a card the decoded files' headers are
 # read too, so the card's answers are the CPU's.
 #
+# Since 0.5.0 (record 55 E2, P1b) it runs body part's cascade where the run
+# is given one (ruling R1 (a): one model, bodypart-fusion@r7-fast, whose
+# file names its parts by digest): the inputs student, deferral and cascade
+# beside the three above. Each stack is answered by the first stage that
+# may: s1, the few-slice student over one native slice (the slot-0 rule,
+# 192 x 192 at 1.5 mm, chosen and described from the manifest alone, the
+# session's top over the run's stacks of each study), accepted where the
+# deferral model D3 is at least 0.99; then the planes of at most 24 frames,
+# accepted at a log-odds margin of 0.5 from both thresholds; then the
+# touched frames, reusing what the 24-frame stage read. Each table names
+# the stage, the files read, every part's digest and, where the stack has
+# no body region, the reason: sealed, not-mr, no-geometry, not-sure or
+# unreadable. Each body_part decision names the cascade. The weights are
+# registered model inputs, never part of the image. A run takes whole
+# sessions (the step over a dataset or a cohort does), since a stack's
+# height is read against its session's top.
+#
 # The image runs offline and never reaches the network; the runner runs it
 # with --network none. The image is pinned as bodypart-embed/nils.job.yml
 # says.
 name: bodypart-infer-fusion
 schema-version: "0.5"
-tool-version: "0.4.0"
+tool-version: "0.5.0"
 description: >-
   Propose body_part (fine) and body_region (coarse) per stack with the
   certified body-part model: an image encoder and a LightGBM head over its
@@ -123,7 +140,19 @@ x-nils:
     - id: coarse
       type: model
       optional: true
-      description: The coarse mode file (task axis:body_region), which names the head; without it only fine mode runs
+      description: The coarse mode file (task axis:body_region), which names the head or the cascade; without it only fine mode runs
+    - id: student
+      type: model
+      optional: true
+      description: The cascade's few-slice student (safetensors, three seeds), which the cascade names; only with a cascade
+    - id: deferral
+      type: model
+      optional: true
+      description: The cascade's deferral model D3 (LightGBM text, 62 features), which the cascade names; only with a cascade
+    - id: cascade
+      type: model
+      optional: true
+      description: The cascade (task axis:body_part), its file naming every part by digest, the stages and the thresholds; without it the certified reader alone answers
   outputs:
     - id: scores
       kind: table
@@ -150,6 +179,12 @@ x-nils:
         - {name: head_digest, type: text, description: The head that scored the stack}
         - {name: coarse_digest, type: text, description: The coarse mode file, when the run had one}
         - {name: encoder_digest, type: text, description: The image encoder}
+        - {name: stage, type: text, description: "The stage that answered: s1, b24 or touched with a cascade; the reader alone (reduced:touched, full) without one; null for a stack with a reason"}
+        - {name: files_read, type: integer, description: The files the stack's reads opened}
+        - {name: reason, type: text, description: "Why the stack carries no body region: sealed, not-mr, no-geometry, not-sure (scored, the coarse mode abstains) or unreadable; null where it carries one"}
+        - {name: cascade_digest, type: text, description: The cascade, when the run had one}
+        - {name: student_digest, type: text, description: The cascade's student}
+        - {name: deferral_digest, type: text, description: The cascade's deferral model}
   needs:
     gpu: none
     memory-gb: 8
@@ -157,6 +192,6 @@ x-nils:
     cores-input: threads
   proposals:
     - axis: body_part
-      description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest
+      description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest (by the cascade's, when the run had one)
     - axis: body_region
       description: Coarse mode, a value of the pack's body_region per stack with the four calibrated probabilities, by the coarse mode file's digest
