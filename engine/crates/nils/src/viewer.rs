@@ -99,23 +99,17 @@ impl Scope {
         })
     }
 
-    /// The scope whose picks the viewer reads: this dataset's or cohort's
-    /// when it has main-scan rules of its own, else none, the pack's
-    /// (record 55, decision 6).
-    pub(crate) fn pick_scope(
-        &self,
-        store: &mut Store,
-    ) -> Result<Option<nils_registry::pick_rules::Reading>, StoreError> {
-        use nils_registry::pick_rules::{Scope as Rules, ScopeKind};
-        let mine = Rules {
-            kind: match self {
-                Scope::Dataset { .. } => ScopeKind::Dataset,
-                Scope::Cohort(_) => ScopeKind::Cohort,
-            },
-            id: self.id(),
-            name: self.name().to_string(),
-        };
-        nils_registry::pick_rules::reading(store, &mine)
+    /// Whose picks the viewer reads, as the one resolver says
+    /// (`nils_registry::pick_truth`): this dataset's or cohort's own once
+    /// read, else the pack's (record 55, decision 6; 2026-10-11).
+    pub(crate) fn picks(&self) -> nils_registry::pick_truth::Of {
+        use nils_registry::pick_truth::Of;
+        match self {
+            Scope::Dataset { place, sources } => {
+                Of::dataset(place.id, &place.name, sources.clone())
+            }
+            Scope::Cohort(c) => Of::cohort(c.id, &c.name),
+        }
     }
 
     /// The cohort a door names, retired or not.
@@ -452,26 +446,25 @@ fn axes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Axes>, Stor
 
 /// The roles of the live picks naming each of these stacks: a pick no
 /// person withdrew or overruled, of the scope the viewer was opened from
-/// when it has main-scan rules of its own, else the pack's (record 55,
-/// decision 6).
+/// once it is read, else the pack's; opened from none, each subject's own
+/// dataset's (record 55, decision 6; one place of truth, 2026-10-11).
 fn picked(
     store: &mut Store,
     stacks: &[i64],
     scope: Option<&Scope>,
 ) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
-    let reading = match scope {
-        Some(s) => s.pick_scope(store)?,
-        None => None,
-    };
-    let filter = nils_registry::pick_rules::reading_filter("p", reading.as_ref());
+    let picks = match scope {
+        Some(s) => s.picks(),
+        None => nils_registry::pick_truth::Of::own(store)?,
+    }
+    .picks(store);
     let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
     for chunk in stacks.chunks(IN_CHUNKS) {
         for r in store.query(
             &format!(
-                "SELECT ps.stack_id, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-                 WHERE p.withdrawn_at IS NULL AND {filter} AND ps.stack_id IN ({})",
+                "SELECT ps.stack_id, p.role FROM {} ps JOIN {picks} p ON p.id = ps.pick_id \
+                 WHERE ps.stack_id IN ({})",
                 store.qualified("pick_stack"),
-                store.qualified("pick"),
                 list(chunk)
             ),
             &[],
@@ -780,13 +773,12 @@ pub(crate) fn subjects(
     if let Some(holds) = &holds {
         let from = stacks_from(store);
         let q = |t: &str| store.qualified(t);
-        let (subject, study, cached, axis, fp, pick, pick_stack) = (
+        let (subject, study, cached, axis, fp, pick_stack) = (
             q("subject"),
             q("study"),
             q("session_cache_study"),
             q("classification_axis"),
             q("stack_fingerprint"),
-            q("pick"),
             q("pick_stack"),
         );
         // the scans, by subject
@@ -870,15 +862,14 @@ pub(crate) fn subjects(
         }
         // the roles of the live picks among the scope's scans, the scope's
         // own where it has main-scan rules (record 55, decision 6)
-        let reading = scope.pick_scope(store).map_err(failed)?;
-        let filter = nils_registry::pick_rules::reading_filter("p", reading.as_ref());
+        let pick = scope.picks().picks(store);
         for r in store
             .query(
                 &format!(
                     "SELECT DISTINCT se.subject_id, p.role FROM {from} \
                      JOIN {pick_stack} ps ON ps.stack_id = st.id \
                      JOIN {pick} p ON p.id = ps.pick_id \
-                     WHERE {holds} AND p.withdrawn_at IS NULL AND {filter}"
+                     WHERE {holds}"
                 ),
                 &[],
             )

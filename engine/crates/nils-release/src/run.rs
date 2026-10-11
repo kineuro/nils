@@ -531,7 +531,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         &settings.pack.name,
         &settings.pack.version.to_string(),
     )?;
-    let reading = reading.as_ref();
+    let reading = &reading;
     let policies = Policies::resolve(registry.store(), settings, reading)?;
     let scheme = settings.scheme;
 
@@ -2097,7 +2097,7 @@ pub fn plan_picked(
     };
     let mut out = Vec::new();
     let (reading, _) = picks_read(registry.store(), &selection, "", "")?;
-    let reading = reading.as_ref();
+    let reading = &reading;
     for (subject, code) in selected_subjects(registry.store(), &selection, reading)? {
         let mine = select_subject(registry.store(), &selection, subject, reading)?;
         let labels = session_labels(&mine, &by_study, subject);
@@ -2687,7 +2687,7 @@ fn prune(root: &Path, from: Option<&Path>) {
 fn selection_where(
     store: &mut Store,
     selection: &Selection,
-    reading: Option<&nils_registry::pick_rules::Reading>,
+    reading: &nils_registry::pick_truth::Of,
 ) -> String {
     let mut wheres: Vec<String> = Vec::new();
     if !selection.subjects.is_empty() {
@@ -2777,15 +2777,15 @@ fn selection_where(
         ));
     }
     if selection.picked_only {
-        // Record 55, decision 6: a release of a cohort or a dataset whose
-        // picks are read from its own rules reads those; any other, the
-        // pack's.
+        // Record 55, decision 6, and one place of truth (2026-10-11): a
+        // release of a cohort or a dataset reads its own picks once read,
+        // else the pack's; any other, each subject's own dataset's by the
+        // same rule, as every reader of the main scans does.
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-             WHERE ps.stack_id = k.id AND p.withdrawn_at IS NULL AND {})",
+             WHERE ps.stack_id = k.id)",
             store.qualified("pick_stack"),
-            store.qualified("pick"),
-            nils_registry::pick_rules::reading_filter("p", reading),
+            reading.picks(store),
         ));
     }
     // Record 26 §13: only the files under the named datasets' pseudonymised
@@ -2811,31 +2811,26 @@ fn selection_where(
 }
 
 /// Record 55, decision 6: what a release of picked stacks reads of the
-/// picks (the scope and version, none for the pack's) and what it records
-/// of them, worked out once per release.
+/// picks (`nils_registry::pick_truth`, pinned to the versions read now) and
+/// what it records of them, worked out once per release. A release of all
+/// stacks reads no picks.
 fn picks_read(
     store: &mut Store,
     selection: &Selection,
     pack: &str,
     pack_version: &str,
-) -> Result<
-    (
-        Option<nils_registry::pick_rules::Reading>,
-        Option<serde_json::Value>,
-    ),
-    Error,
-> {
+) -> Result<(nils_registry::pick_truth::Of, Option<serde_json::Value>), Error> {
     if !selection.picked_only {
-        return Ok((None, None));
+        return Ok((nils_registry::pick_truth::Of::Pack, None));
     }
-    let (reading, doc) = nils_registry::pick_rules::for_release(
+    let (of, doc) = nils_registry::pick_truth::for_release(
         store,
         &selection.cohorts,
         &selection.datasets,
         pack,
         pack_version,
     )?;
-    Ok((reading, Some(doc)))
+    Ok((of, Some(doc)))
 }
 
 /// The sources whose root lies under one of the named datasets'
@@ -2878,7 +2873,7 @@ impl Policies {
     fn resolve(
         store: &mut Store,
         settings: &Settings,
-        reading: Option<&nils_registry::pick_rules::Reading>,
+        reading: &nils_registry::pick_truth::Of,
     ) -> Result<Policies, Error> {
         let mut out = Policies {
             all: vec![settings.policy.clone()],
@@ -2990,7 +2985,7 @@ fn selection_from(store: &mut Store) -> String {
 fn selected_subjects(
     store: &mut Store,
     selection: &Selection,
-    reading: Option<&nils_registry::pick_rules::Reading>,
+    reading: &nils_registry::pick_truth::Of,
 ) -> Result<Vec<(i64, String)>, Error> {
     let from = selection_from(store);
     let filter = selection_where(store, selection, reading);
@@ -3008,7 +3003,7 @@ fn selected_subjects(
 fn selection_bytes(
     store: &mut Store,
     selection: &Selection,
-    reading: Option<&nils_registry::pick_rules::Reading>,
+    reading: &nils_registry::pick_truth::Of,
 ) -> Result<i64, Error> {
     let from = selection_from(store);
     let filter = selection_where(store, selection, reading);
@@ -3039,7 +3034,7 @@ pub struct Preview {
 pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Error> {
     let (reading, _) = picks_read(store, selection, "", "")?;
     let from = selection_from(store);
-    let filter = selection_where(store, selection, reading.as_ref());
+    let filter = selection_where(store, selection, &reading);
     let sql = format!(
         "SELECT COUNT(DISTINCT su.id), COUNT(DISTINCT se.study_id), COUNT(DISTINCT k.id),                 COUNT(*), CAST(COALESCE(SUM(sf.size), 0) AS BIGINT)          {from} WHERE 1 = 1{filter}"
     );
@@ -3064,7 +3059,7 @@ fn select_subject(
     store: &mut Store,
     selection: &Selection,
     subject: i64,
-    reading: Option<&nils_registry::pick_rules::Reading>,
+    reading: &nils_registry::pick_truth::Of,
 ) -> Result<Vec<Instance>, Error> {
     let from = selection_from(store);
     let filter = selection_where(store, selection, reading);

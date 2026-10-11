@@ -11,7 +11,8 @@
 //! version it was based on, so that two people saving at once do not
 //! overwrite each other.
 //!
-//! What the rules say is `nils_pack::pick_rules`'s; this keeps them.
+//! What the rules say is `nils_pack::pick_rules`'s; this keeps them. Which
+//! picks a reader reads is `crate::pick_truth`'s.
 
 use serde_json::{Value, json};
 
@@ -507,7 +508,8 @@ pub fn carry_person_picks(store: &mut Store, scope: &Scope) -> Result<i64, Store
 
 /// The run picks of a scope among `pick` rows under `alias`, any version,
 /// as a condition: the pack's are those that name no scope. For a run,
-/// which writes and replaces its own scope's.
+/// which writes and replaces its own scope's; a reader reads the main
+/// scans through [`crate::pick_truth::Of`].
 pub fn pick_filter(alias: &str, scope: Option<&Scope>) -> String {
     let a = if alias.is_empty() {
         String::new()
@@ -522,75 +524,6 @@ pub fn pick_filter(alias: &str, scope: Option<&Scope>) -> String {
             s.id
         ),
     }
-}
-
-/// The picks a reader reads, as a condition on `pick` rows under `alias`:
-/// the pack's, or a scope's of the version read and its persons' picks.
-pub fn reading_filter(alias: &str, reading: Option<&Reading>) -> String {
-    let a = if alias.is_empty() {
-        String::new()
-    } else {
-        format!("{alias}.")
-    };
-    match reading {
-        None => pick_filter(alias, None),
-        Some(r) => format!(
-            "{} AND ({a}rules_version = {} OR {a}author_kind = 'person')",
-            pick_filter(alias, Some(&r.scope)),
-            r.version
-        ),
-    }
-}
-
-/// What a release records of the rules whose picks it read (the
-/// main-scans study, section 4), and what it reads. A release of one cohort
-/// reads that cohort's picks when they are read from its own rules; else a
-/// release of one dataset, that dataset's; else the pack's, with the pack's
-/// version. The version recorded is the one the picks read were made with.
-pub fn for_release(
-    store: &mut Store,
-    cohorts: &[String],
-    datasets: &[String],
-    pack: &str,
-    pack_version: &str,
-) -> Result<(Option<Reading>, Value), StoreError> {
-    let named = match (cohorts, datasets) {
-        ([one], _) => Scope::cohort(store, one)?,
-        ([], [one]) => Scope::dataset(store, one)?,
-        _ => None,
-    };
-    if let Some(scope) = named
-        && let Some(r) = reading(store, &scope)?
-    {
-        let digest = version(store, &scope, r.version)?.map(|s| s.digest);
-        let doc = json!({
-            "scope": scope.to_json(), "version": r.version, "digest": digest, "run": r.job,
-        });
-        return Ok((Some(r), doc));
-    }
-    Ok((
-        None,
-        json!({
-            "scope": null, "version": 1, "defaults": true,
-            "pack": pack, "pack_version": pack_version,
-        }),
-    ))
-}
-
-/// The reading a release recorded in its `pick_rules`, for a reader of the
-/// release's picks after it (a pipeline run's input): none for the pack's.
-pub fn of_release(doc: &Value) -> Option<Reading> {
-    let s = &doc["scope"];
-    Some(Reading {
-        scope: Scope {
-            kind: ScopeKind::parse(s["kind"].as_str()?)?,
-            id: s["id"].as_i64()?,
-            name: s["name"].as_str().unwrap_or_default().to_string(),
-        },
-        version: doc["version"].as_i64()?,
-        job: doc["run"].as_i64(),
-        at: String::new(),
-    })
 }
 
 #[cfg(test)]
@@ -648,9 +581,13 @@ mod tests {
         let r = reading(&mut s, &scope).unwrap().unwrap();
         assert_eq!((r.version, r.job), (2, Some(9)));
         assert_eq!(state(&mut s, &scope).unwrap()["pending"]["version"], 3);
-        assert_eq!(
-            reading_filter("p", Some(&r)),
-            "p.rules_scope_kind = 'cohort' AND p.rules_scope_id = 7 AND (p.rules_version = 2 OR p.author_kind = 'person')"
+        assert!(
+            crate::pick_truth::Of::read(&scope, Some(&r), Vec::new())
+                .filter(None, "p")
+                .ends_with(
+                    "AND (p.rules_scope_kind = 'cohort' AND p.rules_scope_id = 7 \
+                     AND (p.rules_version = 2 OR p.author_kind = 'person')))"
+                )
         );
         unsave(&mut s, &scope, 3).unwrap();
         assert_eq!(latest(&mut s, &scope).unwrap().unwrap().version, 2);

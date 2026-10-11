@@ -71,6 +71,8 @@ pub struct ColumnRef {
 pub struct Dataset {
     pub name: String,
     pub sources: Vec<i64>,
+    /// Its place's id, which a dataset's own picks name (`picked`).
+    pub id: i64,
 }
 
 /// The table a `dataset` field names in the catalog (Wave 7a): the name is
@@ -1827,6 +1829,50 @@ fn check_clause(
                         format!("change of {of}: neither course nor an event kind"),
                         "GET /api/ask/catalog for the kinds",
                     ));
+                }
+            }
+            // one place of truth (2026-10-11): `picked` reads a dataset's
+            // or a cohort's main scans by its name, or of no scope each
+            // subject's own dataset's
+            "picked" => {
+                let named = |k: &str| cl.opts.get(k);
+                match (named("dataset"), named("cohort")) {
+                    (Some(_), Some(_)) => issues.push(issue(
+                        Code::UnknownValue,
+                        path,
+                        "picked reads one scope: a dataset or a cohort, not both",
+                        "drop one of them",
+                    )),
+                    (Some(Value::String(d)), None)
+                        if !names
+                            .datasets()
+                            .iter()
+                            .any(|x| x.name == d.trim_start_matches('@')) =>
+                    {
+                        issues.push(issue(
+                            Code::UnknownValue,
+                            path,
+                            format!("picked reads no dataset named {d}"),
+                            "GET /api/ask/catalog for the datasets",
+                        ))
+                    }
+                    (None, Some(Value::String(c))) if !names.cohorts().iter().any(|x| x == c) => {
+                        issues.push(issue(
+                            Code::UnknownValue,
+                            path,
+                            format!("picked reads no cohort named {c}"),
+                            "GET /api/ask/catalog for the cohorts",
+                        ))
+                    }
+                    (Some(Value::String(_)), None)
+                    | (None, Some(Value::String(_)))
+                    | (None, None) => {}
+                    _ => issues.push(issue(
+                        Code::UnknownValue,
+                        path,
+                        "picked names its dataset or its cohort by name",
+                        "{dataset: NAME} or {cohort: NAME}",
+                    )),
                 }
             }
             "share" => match cl.opts.get("over").and_then(Value::as_str) {

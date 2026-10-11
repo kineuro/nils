@@ -228,6 +228,14 @@
 # leaves these doors: a visit is its session's id. POST /api/picks takes the
 # same scope, and its answer names the scope the pick belongs to and no
 # longer carries the session's day.
+# Amended in place on 2026-10-11 (one place of truth for the main scans): every
+# door that reads picks reads them as one resolver says. A door about a
+# dataset or a cohort reads its own picks once a run of its saved rules
+# finished over all its subjects, else the pack's, of its subjects alone; a
+# door about no scope reads each subject's own dataset's by the same rule,
+# else the pack's. The map doors' saved side is those picks. The ask's
+# `picked` takes `{dataset: NAME}` or `{cohort: NAME}`, and an ask that reads
+# picks is never answered from the cache. No door's shape changes.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -702,7 +710,7 @@ paths:
   /api/picks/map:
     post:
       summary: What the rules, saved or drafted, take for a role in a scope (added in place 2026-10-11; data:see or pipelines:see)
-      description: "Read from the stored axes; nothing is written. `kinds` are the kinds the scope holds for the role with the visits that have and take each; `metrics` the five numbers; `columns` the scanners (manufacturer and model with the field strength, the eight with the most visits and the rest as Other scanners) or the datasets (the dataset that holds each scan's source most closely, with the field strength); `matrix` the visits taken per kind and column, a kind of null being no pick; `series` the subjects' series of kinds over their visits; `by_visit` the kinds per visit number, the fifth and later folded into 5. With a draft `rules`, `effect` compares it with the saved current version. A person's pick counts on both sides. A stack of a sample sealed now is no part of the map for a caller who may not read it."
+      description: "Read from the stored axes; nothing is written. `kinds` are the kinds the scope holds for the role with the visits that have and take each; `metrics` the five numbers; `columns` the scanners (manufacturer and model with the field strength, the eight with the most visits and the rest as Other scanners) or the datasets (the dataset that holds each scan's source most closely, with the field strength); `matrix` the visits taken per kind and column, a kind of null being no pick; `series` the subjects' series of kinds over their visits; `by_visit` the kinds per visit number, the fifth and later folded into 5. With a draft `rules`, `effect` compares it with the saved current version. A person's pick counts on both sides. A stack of a sample sealed now is no part of the map for a caller who may not read it. Amended in place on 2026-10-11 (one place of truth for the main scans): the saved side is the picks stored as every reader of the scope reads them, the scope's own once a run of its saved rules finished, else the pack's, a visit with none taking nothing; a draft is what its rules take, beside them."
       requestBody: {content: {application/json: {schema: {type: object, required: [scope, role], properties: {scope: {type: object, properties: {cohort: {type: string}, dataset: {type: string}}, description: "The cohort or the dataset; also taken at the top of the body"}, role: {type: string}, rules: {type: object, description: "A draft of the rules, as GET /api/picks/rules answers them; the saved current version without it"}, pack: {type: string}, scheme: {type: string}, columns: {type: string, enum: [scanner, dataset], default: scanner}}}}}}
       responses:
         "200": {description: "{role, rules_version, kinds: [{key, visits_with, visits_taken, allowed, used, new}], metrics: {visits, visits_taken, subjects, subjects_taken, alike_data: {kind, visits}, alike_within: {subjects, of}, series_complete: {subjects, of}}, columns: [{key, visits}], matrix: [{kind, cells}], series: [{steps, subjects}], single_visit_subjects, by_visit: [{visit, visits, kinds}], effect?: {visits_changed, subjects_changed, before}}"}
