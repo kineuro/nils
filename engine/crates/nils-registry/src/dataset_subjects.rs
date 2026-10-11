@@ -1,36 +1,37 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! A dataset's subjects, from one place. Nima, 2026-10-11: the chat and the
-//! page tell the same story, so every reader that counts or lists the
-//! subjects of a dataset asks this module, as every reader of the main
-//! scans asks [`crate::pick_truth`].
+//! The subjects counted in a dataset, through its stacks, from one place.
+//! Nima, 2026-10-12: "subject only belong to cohorts. its the stack that
+//! belong to dataset", "dataset is like a 'folder' containing data. Cohort
+//! is membership. so when you say N number of subject are in that dataset it
+//! just means they have some of their stacks in that path."
 //!
-//! - **A subject with a scan** is of every dataset whose tree holds a file
-//!   of one of its scans, whoever read the scan first (record 55's
-//!   duplicate policy, [`crate::location`]): [`scanned`].
-//! - **A subject with no scan** is of the dataset it was pseudonymised
-//!   from, the one whose pseudonymise run gave it its subject code and
-//!   wrote its files (`pseudonym_file.subject_id`): the read set every copy
-//!   of them aside (record 56: none of them is a scan), so no scan places
-//!   the subject and its pseudonymised files do. A page says it is a
-//!   subject "with no scans": [`unscanned`].
-//! - **A subject with no scan that no pseudonymise run recorded** (one a
-//!   registry from before the run kept each file's subject made, or one a
-//!   map or an import made) is of no dataset. A reader says its dataset is
-//!   not known; it never guesses one.
+//! - **A dataset holds stacks and files, never subjects.** A subject is
+//!   counted in a dataset when the dataset's tree holds a file of one of its
+//!   stacks (record 55's duplicate policy, [`crate::location`]): [`scanned`].
+//!   A stack with files in two datasets is one stack with a path in each:
+//!   the registry keeps it once, each dataset with a path of it counts it
+//!   and its subject once, and nothing ties it or its subject to either
+//!   beyond its paths ([`holders`]).
+//! - **Only a cohort has members** ([`crate::cohort`]); nothing joins one on
+//!   its own because a dataset holds a file of the subject.
+//! - **A subject whose files in a dataset were all set aside** by the read
+//!   (record 56: none of them a scan) has no stack there and is not counted
+//!   in it. Where the dataset's pseudonymise run recorded whose those files
+//!   are, the set-aside files say how many subjects with no stack there they
+//!   are of ([`set_aside_without_stacks`]): a fact about the folder's
+//!   files, never a member.
 //!
-//! [`subjects`] is the two together, what a reader counts or lists. A
-//! reader of scans (the main scans, the scans a viewer shows) reads
-//! [`scanned`] alone, since a subject with no scan has none to read.
+//! Every reader that counts or lists a dataset's subjects reads [`scanned`]
+//! (the dataset summary, the sources door, the picks summary and a pick run
+//! for the dataset, the Grid and its visits, the main scans), and every
+//! reader of the datasets of a stack, a subject or a session reads
+//! [`holders`] (the ask's `dataset`).
 
 use std::collections::BTreeSet;
 
 use crate::dialect::qualified;
 use crate::store::{Error, Store};
-
-/// The states of a pseudonymised file whose copy stands in the tree the
-/// registry reads: written by a run, or the copy from before still there.
-const COPIED: &str = "'written', 'unchanged'";
 
 fn list(ids: &[i64]) -> String {
     ids.iter()
@@ -43,9 +44,21 @@ fn text(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// The subjects with a scan a dataset's tree holds a file of, as a relation
-/// of one column, `subject_id`, over the dataset's `source` rows
-/// ([`crate::place::dataset_sources`]); none where it has none.
+/// The join that reads the `source` rows holding a file of a stack: the
+/// stack aliased `stack`, the holder aliased `holder`, whose `source_id`
+/// is a source whose tree has a file of the stack. A stack is held by
+/// every such source, whoever read it first.
+pub fn holders(schema: Option<&str>, stack: &str, holder: &str) -> String {
+    format!(
+        "JOIN {} {holder} ON {holder}.stack_id = {stack}.id",
+        qualified(schema, "source_stack")
+    )
+}
+
+/// The subjects counted in a dataset, those with a stack its tree holds a
+/// file of, as a relation of one column, `subject_id`, over the dataset's
+/// `source` rows ([`crate::place::dataset_sources`]); none where it has
+/// none.
 pub fn scanned(schema: Option<&str>, sources: &[i64]) -> String {
     let filter = if sources.is_empty() {
         "1 = 0".to_string()
@@ -53,97 +66,11 @@ pub fn scanned(schema: Option<&str>, sources: &[i64]) -> String {
         format!("hss.source_id IN ({})", list(sources))
     };
     format!(
-        "SELECT hse.subject_id FROM {} hss JOIN {} hst ON hst.id = hss.stack_id \
-         JOIN {} hse ON hse.id = hst.series_id WHERE {filter}",
-        qualified(schema, "source_stack"),
+        "SELECT hse.subject_id FROM {} hst {} JOIN {} hse ON hse.id = hst.series_id WHERE {filter}",
         qualified(schema, "stack"),
+        holders(schema, "hst", "hss"),
         qualified(schema, "series"),
     )
-}
-
-/// The subjects with no scan at all that a dataset (its place's id) was
-/// pseudonymised for, as a relation of one column, `subject_id`, each
-/// once: the subjects its pseudonymised files carry whose copy stands in
-/// its tree, none of whom has a stack anywhere.
-pub fn unscanned(schema: Option<&str>, place_id: i64) -> String {
-    format!(
-        "SELECT nu.subject_id FROM (SELECT DISTINCT npf.subject_id FROM {} npf \
-         WHERE npf.place_id = {place_id} AND npf.state IN ({COPIED}) \
-         AND npf.subject_id IS NOT NULL) nu \
-         WHERE NOT EXISTS (SELECT 1 FROM {} nse JOIN {} nst ON nst.series_id = nse.id \
-         WHERE nse.subject_id = nu.subject_id)",
-        qualified(schema, "pseudonym_file"),
-        qualified(schema, "series"),
-        qualified(schema, "stack"),
-    )
-}
-
-/// A dataset's subjects, [`scanned`] and [`unscanned`] together, as a
-/// relation of one column, `subject_id`, each once.
-pub fn subjects(schema: Option<&str>, place_id: i64, sources: &[i64]) -> String {
-    format!(
-        "{} UNION {}",
-        scanned(schema, sources),
-        unscanned(schema, place_id)
-    )
-}
-
-/// The names of the datasets a subject with no scan is of, as one list
-/// joined by `, ` in the order `datasets` are given, or null where it is of
-/// none: for a reader of one subject at a time (the ask's `dataset` of a
-/// subject), `subject` the SQL of its id and `datasets` each `(place id,
-/// name)`. Every [`unscanned`] relation is read once by a statement, not
-/// once a subject.
-pub fn unscanned_names(schema: Option<&str>, subject: &str, datasets: &[(i64, String)]) -> String {
-    if datasets.is_empty() {
-        return "CAST(NULL AS TEXT)".to_string();
-    }
-    let each: Vec<String> = datasets
-        .iter()
-        .map(|(id, name)| {
-            format!(
-                "CASE WHEN {subject} IN ({}) THEN {} ELSE '' END",
-                unscanned(schema, *id),
-                text(&format!(", {name}"))
-            )
-        })
-        .collect();
-    format!("NULLIF(SUBSTR({}, 3), '')", each.join(" || "))
-}
-
-/// How many subjects a dataset has, and how many of them have no scan.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Count {
-    pub subjects: i64,
-    pub no_scans: i64,
-}
-
-/// How many subjects a dataset (its place's id and its `source` rows) has,
-/// those with no scan among them. A subject merged into another is not
-/// counted (record 26 §6): the merge moved its rows to the other.
-pub fn count(store: &mut Store, place_id: i64, sources: &[i64]) -> Result<Count, Error> {
-    let schema = store.schema().map(str::to_string);
-    let subject = store.qualified("subject");
-    let mut n = |relation: String| -> Result<i64, Error> {
-        store.query(
-            &format!(
-                "SELECT COUNT(DISTINCT m.subject_id) FROM ({relation}) m \
-                 JOIN {subject} su ON su.id = m.subject_id WHERE su.merged_into IS NULL"
-            ),
-            &[],
-        )?[0]
-            .int(0)
-    };
-    let with_scans = if sources.is_empty() {
-        0
-    } else {
-        n(scanned(schema.as_deref(), sources))?
-    };
-    let no_scans = n(unscanned(schema.as_deref(), place_id))?;
-    Ok(Count {
-        subjects: with_scans + no_scans,
-        no_scans,
-    })
 }
 
 fn ids(store: &mut Store, relation: &str) -> Result<BTreeSet<i64>, Error> {
@@ -155,17 +82,79 @@ fn ids(store: &mut Store, relation: &str) -> Result<BTreeSet<i64>, Error> {
     store.query(&sql, &[])?.iter().map(|r| r.int(0)).collect()
 }
 
-/// A dataset's subjects, by id: what a pick run for the dataset decides
-/// and what its main scans count.
-pub fn of(store: &mut Store, place_id: i64, sources: &[i64]) -> Result<BTreeSet<i64>, Error> {
-    let relation = subjects(store.schema(), place_id, sources);
+/// How many subjects are counted in a dataset (its `source` rows): the
+/// subjects with a stack its tree holds a file of, each once. A subject
+/// merged into another is not counted (record 26 §6): the merge moved its
+/// stacks to the other.
+pub fn count(store: &mut Store, sources: &[i64]) -> Result<i64, Error> {
+    if sources.is_empty() {
+        return Ok(0);
+    }
+    let sql = format!(
+        "SELECT COUNT(DISTINCT m.subject_id) FROM ({}) m JOIN {} su ON su.id = m.subject_id \
+         WHERE su.merged_into IS NULL",
+        scanned(store.schema(), sources),
+        store.qualified("subject")
+    );
+    store.query(&sql, &[])?[0].int(0)
+}
+
+/// The subjects counted in a dataset, by id: what a pick run for the
+/// dataset decides and what its main scans count.
+pub fn of(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, Error> {
+    if sources.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let relation = scanned(store.schema(), sources);
     ids(store, &relation)
 }
 
-/// A dataset's subjects with no scan, by id.
-pub fn with_no_scans(store: &mut Store, place_id: i64) -> Result<BTreeSet<i64>, Error> {
-    let relation = unscanned(store.schema(), place_id);
-    ids(store, &relation)
+/// What a dataset's set-aside files say of subjects with no stack in it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetAside {
+    /// The subjects the set-aside files are of that have no stack the
+    /// dataset's tree holds a file of.
+    pub subjects: i64,
+    /// How many of the set-aside files are theirs.
+    pub files: i64,
+}
+
+/// The subjects a dataset's set-aside files are of that have no stack in
+/// its tree, and how many of those files are theirs: a file the read set
+/// aside for one of `reasons` (the policy classes) is a subject's where the
+/// dataset's pseudonymise run wrote it under that subject. Its place's id
+/// and its `source` rows name the dataset. A file read in place, which no
+/// pseudonymise run wrote, names no subject, and none is counted for it.
+pub fn set_aside_without_stacks(
+    store: &mut Store,
+    place_id: i64,
+    sources: &[i64],
+    reasons: &[&str],
+) -> Result<SetAside, Error> {
+    if sources.is_empty() || reasons.is_empty() {
+        return Ok(SetAside::default());
+    }
+    let reasons = reasons
+        .iter()
+        .map(|r| text(r))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT COUNT(DISTINCT spf.subject_id), COUNT(DISTINCT ssf.id) FROM {} ssf \
+         JOIN {} spf ON spf.place_id = {place_id} AND spf.out_path = ssf.path \
+         WHERE ssf.source_id IN ({}) AND ssf.status = 'quarantined' AND ssf.reason IN ({reasons}) \
+         AND spf.state IN ('written', 'unchanged') AND spf.subject_id IS NOT NULL \
+         AND spf.subject_id NOT IN (SELECT ns.subject_id FROM ({}) ns WHERE ns.subject_id IS NOT NULL)",
+        store.qualified("source_file"),
+        store.qualified("pseudonym_file"),
+        list(sources),
+        scanned(store.schema(), sources),
+    );
+    let row = &store.query(&sql, &[])?[0];
+    Ok(SetAside {
+        subjects: row.int(0)?,
+        files: row.int(1)?,
+    })
 }
 
 #[cfg(test)]
@@ -173,34 +162,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_dataset_s_subjects_are_its_scans_and_those_it_was_pseudonymised_for() {
+    fn a_dataset_counts_the_subjects_of_the_stacks_its_tree_holds() {
+        assert_eq!(
+            holders(Some("s"), "x", "h"),
+            "JOIN s.source_stack h ON h.stack_id = x.id"
+        );
         assert_eq!(
             scanned(None, &[3, 4]),
-            "SELECT hse.subject_id FROM source_stack hss JOIN stack hst ON hst.id = hss.stack_id \
+            "SELECT hse.subject_id FROM stack hst JOIN source_stack hss ON hss.stack_id = hst.id \
              JOIN series hse ON hse.id = hst.series_id WHERE hss.source_id IN (3, 4)"
         );
-        // a dataset nothing has read holds no scan
+        // a dataset nothing has read holds no stack
         assert!(scanned(Some("s"), &[]).ends_with(
-            "FROM s.source_stack hss JOIN s.stack hst \
-             ON hst.id = hss.stack_id JOIN s.series hse ON hse.id = hst.series_id WHERE 1 = 0"
+            "FROM s.stack hst JOIN s.source_stack hss ON hss.stack_id = hst.id \
+             JOIN s.series hse ON hse.id = hst.series_id WHERE 1 = 0"
         ));
-        let none = unscanned(Some("s"), 7);
-        assert!(none.contains("FROM s.pseudonym_file npf WHERE npf.place_id = 7"));
-        assert!(none.contains("npf.state IN ('written', 'unchanged')"));
-        assert!(none.contains("NOT EXISTS (SELECT 1 FROM s.series nse JOIN s.stack nst"));
-        assert_eq!(
-            subjects(None, 7, &[3]),
-            format!("{} UNION {}", scanned(None, &[3]), unscanned(None, 7))
-        );
-    }
-
-    #[test]
-    fn a_subject_with_no_scan_names_the_datasets_it_was_pseudonymised_for() {
-        assert_eq!(unscanned_names(None, "su.id", &[]), "CAST(NULL AS TEXT)");
-        let names = unscanned_names(None, "su.id", &[(2, "a".into()), (5, "o'b".into())]);
-        assert!(names.starts_with("NULLIF(SUBSTR(CASE WHEN su.id IN (SELECT nu.subject_id"));
-        assert!(names.contains("THEN ', a' ELSE '' END || CASE WHEN su.id IN ("));
-        assert!(names.contains("npf.place_id = 5"));
-        assert!(names.ends_with("THEN ', o''b' ELSE '' END, 3), '')"));
     }
 }

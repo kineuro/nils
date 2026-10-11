@@ -52,17 +52,17 @@ pub(crate) fn parse_then(doc: &Value) -> Result<Vec<Vec<String>>, String> {
     Ok(out)
 }
 
-/// Record 55 H2: the subjects of a dataset, what a pick run for the dataset
-/// decides and its main scans count. Nima, 2026-10-11: as every reader
-/// counts a dataset's subjects (`nils_registry::dataset_subjects`), those
-/// with a scan its tree holds a file of and those it was pseudonymised for
-/// with no scan at all.
+/// Record 55 H2: the subjects counted in a dataset, what a pick run for the
+/// dataset decides and its main scans count. Nima, 2026-10-12: those with
+/// a stack its tree holds a file of, as every reader counts them
+/// (`nils_registry::dataset_subjects`); a dataset holds stacks, never
+/// subjects.
 pub(crate) fn dataset_subjects(
     store: &mut Store,
     place: &Place,
 ) -> Result<std::collections::BTreeSet<i64>, nils_registry::store::Error> {
     let sources = crate::sources::source_ids(store, place)?;
-    nils_registry::dataset_subjects::of(store, place.id, &sources)
+    nils_registry::dataset_subjects::of(store, &sources)
 }
 
 /// Whether the pack of that name, in that directory, declares picks.

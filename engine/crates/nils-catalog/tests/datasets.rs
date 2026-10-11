@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Wave 7a: the ask's `dataset` field. A stack is of the dataset whose
-//! digest first read it (an active source place that is a dataset, not a
-//! root); a subject or a session is of every dataset one of its stacks is
-//! of. Two datasets are planted on each backend's synthetic registry, a
-//! third of the subjects in each and a third in none, one subject with a
-//! stack of both, and every answer is held against the registry read
-//! directly: the T1w stacks of one dataset counted, the stacks grouped by
-//! dataset, the subject of both found in each and grouped under each, its
-//! session likewise, the field in the catalog, the value sampler, the
-//! preview, a handle read again by dataset, a misspelt name refused, and a
-//! root and a retired place never a dataset.
+//! Wave 7a: the ask's `dataset` field. Nima, 2026-10-12: a dataset is a
+//! folder that holds stacks (an active source place that is a dataset, not
+//! a root): a stack is in every dataset whose tree holds a file of it, one
+//! stack however many copies; a subject or a session is counted in every
+//! dataset holding one of its stacks, and only a cohort has members. Two
+//! datasets are planted on each backend's synthetic registry, a third of
+//! the subjects in each and a third in none, one subject with a stack of
+//! each, and one stack the first read and the second holds a copy of, and
+//! every answer is held against the registry read directly: the T1w stacks
+//! of one dataset counted, the stacks grouped by dataset, the copied stack
+//! in both and counted once, the subject of both found in each and grouped
+//! under each, its session likewise, the field in the catalog, the value
+//! sampler, the preview, a handle read again by dataset, a misspelt name
+//! refused, and a root and a retired place never a dataset.
 
 mod common;
 
@@ -51,8 +54,11 @@ const SMALL: &str = "study-small";
 struct Planted {
     _dir: TempDir,
     small_place: i64,
-    big_batch: i64,
-    small_batch: i64,
+    /// The `source` row of each dataset's tree.
+    big_source: i64,
+    small_source: i64,
+    /// A stack the first dataset read whose copy the second holds.
+    copied: i64,
     /// The subject with stacks of both datasets, and the session that holds
     /// a stack of each.
     shared: i64,
@@ -131,7 +137,7 @@ fn plant(l: &mut Lab) -> Planted {
     add_place(store, BIG, &dir.path().join(BIG), Value::Null);
     let small_place = add_place(store, SMALL, &dir.path().join(SMALL), Value::Null);
     let now = "2026-10-09T08:00:00Z";
-    let mut batch_of = |root: &Path| -> i64 {
+    let mut batch_of = |root: &Path| -> (i64, i64) {
         let root = root.display().to_string();
         let source = store
             .insert(
@@ -149,7 +155,7 @@ fn plant(l: &mut Lab) -> Planted {
             .unwrap()[0]
             .int(0)
             .unwrap();
-        store
+        let batch = store
             .insert(
                 &Insert::new(
                     table("ingest_batch"),
@@ -174,9 +180,11 @@ fn plant(l: &mut Lab) -> Planted {
             )
             .unwrap()[0]
             .int(0)
-            .unwrap()
+            .unwrap();
+        (source, batch)
     };
-    let (big_batch, small_batch) = (batch_of(&big_tree), batch_of(&small_tree));
+    let ((big_source, big_batch), (small_source, small_batch)) =
+        (batch_of(&big_tree), batch_of(&small_tree));
     let all = seen(store);
     let (mut big, mut small): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
     for (stack, subject, _, _, _) in &all {
@@ -221,6 +229,23 @@ fn plant(l: &mut Lab) -> Planted {
             )
             .unwrap();
     }
+    // each tree holds a file of its stacks, as a read records it (record
+    // 55); and the second holds a copy of a stack the first read, of a
+    // subject of the first alone, which stays one stack
+    let copied = *big
+        .iter()
+        .find(|s| {
+            all.iter()
+                .any(|(stack, subject, _, _, _)| stack == *s && *subject != shared)
+        })
+        .expect("a stack of the first dataset to copy");
+    for (source, ids) in [(big_source, big.clone()), (small_source, small.clone())] {
+        let mut held: BTreeSet<i64> = ids.into_iter().collect();
+        if source == small_source {
+            held.insert(copied);
+        }
+        nils_registry::location::record(store, source, &held, now).unwrap();
+    }
     // contrast given on every other T1w stack, which the synthetic
     // registry never says
     let given: Vec<Vec<Param>> = all
@@ -250,8 +275,9 @@ fn plant(l: &mut Lab) -> Planted {
     Planted {
         _dir: dir,
         small_place,
-        big_batch,
-        small_batch,
+        big_source,
+        small_source,
+        copied,
         shared,
         shared_session,
     }
@@ -302,8 +328,9 @@ fn grouped(a: &Answer, key: &str) -> BTreeMap<Option<String>, (i64, i64)> {
         .collect()
 }
 
-/// Where the planted stacks are: per dataset (none for no dataset's), the
-/// stacks seen, their subjects and their sessions.
+/// Where the planted stacks are: per dataset whose tree holds a file of
+/// them (none for a stack no dataset holds), the stacks seen, their
+/// subjects and their sessions; a copied stack is under each.
 struct Truth {
     stacks: BTreeMap<Option<&'static str>, BTreeSet<i64>>,
     t1w: BTreeMap<Option<&'static str>, (i64, BTreeSet<i64>)>,
@@ -318,26 +345,50 @@ fn truth(l: &mut Lab, p: &Planted) -> Truth {
         subjects: BTreeMap::new(),
         sessions: BTreeMap::new(),
     };
-    for (stack, subject, session, batch, t1w) in seen(l.registry.store()) {
-        let ds = if batch == p.big_batch {
-            Some(BIG)
-        } else if batch == p.small_batch {
-            Some(SMALL)
+    let held = holders(l, p);
+    for (stack, subject, session, _, t1w) in seen(l.registry.store()) {
+        let of = held.get(&stack).cloned().unwrap_or_default();
+        let dss: Vec<Option<&'static str>> = if of.is_empty() {
+            vec![None]
         } else {
-            None
+            of.into_iter().map(Some).collect()
         };
-        t.stacks.entry(ds).or_default().insert(stack);
-        t.subjects.entry(ds).or_default().insert(subject);
-        if let Some(s) = session {
-            t.sessions.entry(ds).or_default().insert(s);
-        }
-        if t1w {
-            let e = t.t1w.entry(ds).or_default();
-            e.0 += 1;
-            e.1.insert(subject);
+        for ds in dss {
+            t.stacks.entry(ds).or_default().insert(stack);
+            t.subjects.entry(ds).or_default().insert(subject);
+            if let Some(s) = session {
+                t.sessions.entry(ds).or_default().insert(s);
+            }
+            if t1w {
+                let e = t.t1w.entry(ds).or_default();
+                e.0 += 1;
+                e.1.insert(subject);
+            }
         }
     }
     t
+}
+
+/// The datasets whose tree holds a file of each stack, read from the
+/// registry directly, in the order of their names.
+fn holders(l: &mut Lab, p: &Planted) -> BTreeMap<i64, BTreeSet<&'static str>> {
+    let sql = format!(
+        "SELECT stack_id, source_id FROM {}",
+        l.registry.store().qualified("source_stack")
+    );
+    let mut out: BTreeMap<i64, BTreeSet<&'static str>> = BTreeMap::new();
+    for r in l.registry.store().query(&sql, &[]).unwrap() {
+        let source = r.int(1).unwrap();
+        let ds = if source == p.big_source {
+            BIG
+        } else if source == p.small_source {
+            SMALL
+        } else {
+            continue;
+        };
+        out.entry(r.int(0).unwrap()).or_default().insert(ds);
+    }
+    out
 }
 
 fn all_subjects(l: &mut Lab) -> BTreeSet<i64> {
@@ -407,14 +458,15 @@ fn the_t1w_stacks_of_one_dataset_among_two_are_counted_and_grouped_by_dataset() 
         let store = l.registry.store();
         let sql = format!(
             "SELECT COUNT(*) FROM {stack} st JOIN {fp} f ON f.stack_id = st.id \
-             WHERE st.first_batch_id = {big} \
+             WHERE EXISTS (SELECT 1 FROM {ss} h WHERE h.stack_id = st.id AND h.source_id = {big}) \
              AND EXISTS (SELECT 1 FROM {ax} b WHERE b.stack_id = st.id AND b.axis = 'base' AND b.value = 'T1w') \
              AND EXISTS (SELECT 1 FROM {ax} c WHERE c.stack_id = st.id AND c.axis = 'post_contrast' AND c.value = 'given') \
              AND NOT EXISTS (SELECT 1 FROM {ax} x WHERE x.stack_id = st.id AND x.axis = 'disposition' AND x.value = 'excluded')",
             stack = store.qualified("stack"),
             fp = store.qualified("stack_fingerprint"),
             ax = store.qualified("classification_axis"),
-            big = p.big_batch,
+            ss = store.qualified("source_stack"),
+            big = p.big_source,
         );
         let want = store.query(&sql, &[]).unwrap()[0].int(0).unwrap();
         assert!(want > 0, "{}: nothing planted for the example", l.name);
@@ -458,10 +510,14 @@ fn the_t1w_stacks_of_one_dataset_among_two_are_counted_and_grouped_by_dataset() 
                         "order": [[["field", {}, "id"], "asc"]]}
             }),
         );
-        let mut want: Vec<(i64, String)> = Vec::new();
-        for ds in [BIG, SMALL] {
-            want.extend(t.stacks[&Some(ds)].iter().map(|s| (*s, ds.to_string())));
-        }
+        // the copied stack is in both, one stack
+        let held = holders(&mut l, &p);
+        assert_eq!(held[&p.copied], BTreeSet::from([BIG, SMALL]), "{}", l.name);
+        let mut want: Vec<(i64, String)> = held
+            .iter()
+            .map(|(s, ds)| (*s, ds.iter().copied().collect::<Vec<_>>().join(", ")))
+            .filter(|(s, _)| t.stacks.values().any(|x| x.contains(s)))
+            .collect();
         want.sort();
         let got: Vec<(i64, String)> = column(&a, "id")
             .iter()
@@ -477,10 +533,11 @@ fn the_t1w_stacks_of_one_dataset_among_two_are_counted_and_grouped_by_dataset() 
                 "out": {"set": "t", "level": "count"}
             }),
         );
+        let everything: BTreeSet<i64> = t.stacks.values().flatten().copied().collect();
         assert_eq!(
             counted(&a).0,
-            t.stacks[&Some(SMALL)].len() as i64,
-            "{}: <> leaves out a stack of no dataset, as any null",
+            everything.difference(&t.stacks[&Some(BIG)]).count() as i64,
+            "{}: <> asks whether the name is not among the stack's datasets, a stack of none among them",
             l.name
         );
     }
@@ -747,7 +804,7 @@ fn the_catalog_serves_the_field_and_its_values_and_refuses_a_name_it_does_not_ho
             described
                 .conventions
                 .iter()
-                .any(|c| c.contains("dataset whose digest first read it")),
+                .any(|c| c.contains("datasets are folders that hold stacks")),
             "{}: {:?}",
             l.name,
             described.conventions
@@ -846,9 +903,10 @@ fn the_catalog_serves_the_field_and_its_values_and_refuses_a_name_it_does_not_ho
         )
         .unwrap_or_else(|e| panic!("{}: {e}", l.name));
         let h = out.handle.id;
+        // the copied stack once
         assert_eq!(
             out.handle.row_count as usize,
-            t.stacks[&Some(BIG)].len() + t.stacks[&Some(SMALL)].len(),
+            t.stacks[&Some(BIG)].union(&t.stacks[&Some(SMALL)]).count(),
             "{}",
             l.name
         );
@@ -908,7 +966,13 @@ fn the_catalog_serves_the_field_and_its_values_and_refuses_a_name_it_does_not_ho
             BTreeMap::from([
                 (
                     None,
-                    (t.stacks[&None].len() + t.stacks[&Some(SMALL)].len()) as i64
+                    t.stacks
+                        .values()
+                        .flatten()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .filter(|s| !t.stacks[&Some(BIG)].contains(s))
+                        .count() as i64
                 ),
                 (Some(BIG.to_string()), t.stacks[&Some(BIG)].len() as i64),
             ]),

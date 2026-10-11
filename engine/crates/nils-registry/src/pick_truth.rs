@@ -17,9 +17,8 @@
 //!   ([`crate::pick_rules::reading`]), the latest such version and the
 //!   persons' picks of the scope; else the pack's. Either way, of the
 //!   scope's subjects alone: a cohort's open members, a dataset's subjects
-//!   with a stack its tree holds a file of
-//!   ([`crate::dataset_subjects::scanned`]; a subject with no scan has no
-//!   pick).
+//!   with a stack its tree holds a file of, as every reader counts a
+//!   dataset's subjects ([`crate::dataset_subjects::scanned`]).
 //! - **A reader about no scope**: each subject's own dataset's picks by the
 //!   same rule, else the pack's. A subject's dataset is one whose tree holds
 //!   a file of one of its stacks (record 55's duplicate policy: a dataset
@@ -260,8 +259,7 @@ impl Of {
                 };
                 // the scope's subjects: a cohort's open members, a
                 // dataset's subjects with a stack its tree holds a file of
-                // (a subject with no scan has no pick to read,
-                // `dataset_subjects`)
+                // (`dataset_subjects`)
                 let members = match kind {
                     ScopeKind::Cohort => format!(
                         "{a}.subject_id IN (SELECT cm.subject_id FROM {} cm \
@@ -321,11 +319,11 @@ impl Of {
                 // read one whose tree holds a file of one of its stacks;
                 // none, the pack's
                 let own = format!(
-                    "(SELECT MIN(CASE{whens} END) FROM {} gss JOIN {} gs ON gs.id = gss.stack_id \
+                    "(SELECT MIN(CASE{whens} END) FROM {} gs {} \
                      JOIN {} ge ON ge.id = gs.series_id \
                      WHERE ge.subject_id = {a}.subject_id AND gss.source_id IN ({}))",
-                    qualified(schema, "source_stack"),
                     qualified(schema, "stack"),
+                    crate::dataset_subjects::holders(schema, "gs", "gss"),
                     qualified(schema, "series"),
                     list(&sources)
                 );
@@ -571,7 +569,7 @@ mod tests {
         let scope = Of::dataset(7, "ds", vec![3]);
         let f = scope.filter(None, "p");
         assert!(f.starts_with(
-            "(p.subject_id IN (SELECT hse.subject_id FROM source_stack hss JOIN stack hst"
+            "(p.subject_id IN (SELECT hse.subject_id FROM stack hst JOIN source_stack hss"
         ));
         assert!(f.contains("WHERE hss.source_id IN (3)) AND (CASE WHEN (SELECT MAX(rr.version)"));
         assert!(f.contains("THEN p.rules_scope_kind IS NULL ELSE (p.rules_scope_kind = 'dataset'"));

@@ -342,7 +342,8 @@ struct Term {
     /// second use binds it again instead of naming a placeholder twice.
     param: Option<(Param, Type)>,
     /// Wave 7a: the value is a list of names joined by `, ` (the datasets
-    /// a subject's or a session's stacks are of), so `=`, `<>`, `in`,
+    /// holding a file of a stack, or of a subject's or a session's
+    /// stacks), so `=`, `<>`, `in`,
     /// `not_in` and `has` ask whether a name is among them, and a group
     /// keyed by it counts a row once under each name.
     members: bool,
@@ -896,16 +897,17 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Wave 7a: a stack's `dataset`, the name of the dataset whose digest
-    /// first read it, and a session's or a subject's, the names of the
-    /// datasets its stacks are of as one sorted list, read beside the base
-    /// relation through each stack's first batch and that batch's source.
-    /// The stacks rolled up are the ones a stack set sees: none the pack
+    /// Wave 7a: the `dataset` of a stack, a session or a subject, the names
+    /// of the datasets whose tree holds a file of the stack, or of one of
+    /// the session's or the subject's stacks, as one sorted list, read
+    /// beside the base relation through the stacks' holders. Nima,
+    /// 2026-10-12: a dataset is a folder that holds stacks, so a subject is
+    /// counted in a dataset when some of its stacks are there, and only a
+    /// cohort has members; a stack with a path in two datasets is one stack
+    /// in both (record 55), and one with no path in any, or a subject or a
+    /// session with no such stack, reads null. The stacks rolled up for a
+    /// session or a subject are the ones a stack set sees: none the pack
     /// ruled out, and none of a sample sealed now where those are withheld.
-    /// Nima, 2026-10-11: a subject with no scan at all is of the datasets it
-    /// was pseudonymised for (`nils_registry::dataset_subjects`), and of none
-    /// where no pseudonymise run recorded it, so its dataset reads null: not
-    /// known, never a guess.
     fn dataset_column(&self, level: &str) -> Option<Term> {
         if !matches!(level, "stack" | "session" | "subject") {
             return None;
@@ -920,85 +922,65 @@ impl<'a> Builder<'a> {
             }
         }
         let mut term = if sources.is_empty() {
-            // no dataset holds a source, so no stack is of one
+            // no dataset holds a source, so no stack is in one
             Term::plain("CAST(NULL AS TEXT)".into())
         } else {
             let name = format!("CASE dsb.source_id{whens} END");
-            let (batch, stack) = (self.q("ingest_batch"), self.q("stack"));
-            if level == "stack" {
-                let first = match self.current {
-                    Some(Grain::Instance) => format!(
-                        "(SELECT dst.first_batch_id FROM {stack} dst WHERE dst.id = i.stack_id)"
-                    ),
-                    _ => "st.first_batch_id".to_string(),
-                };
-                return Some(Term::plain(format!(
-                    "(SELECT {name} FROM {batch} dsb WHERE dsb.id = {first})"
-                )));
-            }
-            let series = self.q("series");
+            let (stack, series) = (self.q("stack"), self.q("series"));
+            // the sources whose tree holds a file of the stack, as every
+            // reader of a dataset's stacks reads them
+            let holders =
+                nils_registry::dataset_subjects::holders(self.ctx.schema.as_deref(), "dst", "dsb");
+            let standing = || {
+                let mut standing = format!(
+                    " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
+                     AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
+                    self.q("classification_axis")
+                );
+                if let Some(sealed) = self.not_sealed("dst.id") {
+                    standing.push_str(&format!(" AND {sealed}"));
+                }
+                standing
+            };
             // whose stack it is comes off its series (record 35 finding 1),
-            // and a session's stacks are its studies' of its own subject
-            let (from, unit) = if level == "subject" {
-                (
+            // and a session's stacks are its studies' of its own subject;
+            // a stack is the row itself, which its set already sees
+            let (from, unit, standing) = match level {
+                "stack" => {
+                    let id = match self.current {
+                        Some(Grain::Instance) => "i.stack_id",
+                        _ => "st.id",
+                    };
+                    (
+                        format!("{stack} dst"),
+                        format!("dst.id = {id}"),
+                        String::new(),
+                    )
+                }
+                "subject" => (
                     format!("{stack} dst JOIN {series} dse ON dse.id = dst.series_id"),
-                    "dse.subject_id = su.id",
-                )
-            } else {
-                (
+                    "dse.subject_id = su.id".to_string(),
+                    standing(),
+                ),
+                _ => (
                     format!(
                         "{} dscs JOIN {series} dse ON dse.study_id = dscs.study_id \
                          JOIN {stack} dst ON dst.series_id = dse.id",
                         self.q("session_cache_study")
                     ),
-                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id",
-                )
+                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id".to_string(),
+                    standing(),
+                ),
             };
-            let mut standing = format!(
-                " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
-                 AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
-                self.q("classification_axis")
-            );
-            if let Some(sealed) = self.not_sealed("dst.id") {
-                standing.push_str(&format!(" AND {sealed}"));
-            }
             Term::plain(format!(
-                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} \
-                 JOIN {batch} dsb ON dsb.id = dst.first_batch_id \
+                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} {holders} \
                  WHERE {unit} AND dsb.source_id IN ({}){standing}) dsn)",
                 self.sql.name_list("dsn.n"),
                 sources.join(", ")
             ))
         };
-        if level == "subject" {
-            term = self.or_pseudonymised_for(term);
-        }
-        term.members = level != "stack";
+        term.members = true;
         Some(term)
-    }
-
-    /// A subject's datasets, or where its stacks name none and it has no
-    /// stack at all, the datasets it was pseudonymised for, in the order
-    /// [`Sql::name_list`] sorts names (byte by byte), so a subject's
-    /// list reads the same whichever way it was found.
-    fn or_pseudonymised_for(&self, scans: Term) -> Term {
-        let mut named: Vec<(i64, String)> = self
-            .ctx
-            .names
-            .datasets()
-            .into_iter()
-            .map(|d| (d.id, d.name))
-            .collect();
-        if named.is_empty() {
-            return scans;
-        }
-        named.sort_by(|a, b| a.1.cmp(&b.1));
-        let pseudonymised = nils_registry::dataset_subjects::unscanned_names(
-            self.ctx.schema.as_deref(),
-            "su.id",
-            &named,
-        );
-        Term::plain(format!("COALESCE({}, {pseudonymised})", scans.sql))
     }
 
     /// A run's measure of a unit (record 49 A3), `<number|text|run>:
@@ -2075,9 +2057,10 @@ impl<'a> Builder<'a> {
                     by_sql.push(key.sql);
                     continue;
                 }
-                // Wave 7a: a subject or a session counts once under each
-                // dataset its stacks are of, as an axis read with `each`
-                // counts a stack, and under null where it has none
+                // Wave 7a: a stack, a subject or a session counts once under
+                // each dataset holding a file of it or of one of its stacks,
+                // as an axis read with `each` counts a stack, and under null
+                // where none holds one
                 let col = format!("names_g{i}");
                 let mut names: Vec<String> = self
                     .ctx
@@ -3001,9 +2984,9 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                // Wave 7a: a subject or a session is of a dataset when one of
-                // its stacks is, so = and <> ask whether the name is among
-                // its datasets
+                // Wave 7a: a stack, a subject or a session is in a dataset
+                // when the dataset holds a file of it or of one of its
+                // stacks, so = and <> ask whether the name is among them
                 if matches!(op, "=" | "<>") && a.members != b.members {
                     let (list, name) = if a.members { (&a, &b) } else { (&b, &a) };
                     let among = self.sql.member(&list.sql, &name.sql);
@@ -3101,8 +3084,8 @@ impl<'a> Builder<'a> {
                 )?;
                 let listed = c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?;
                 if a.members {
-                    // Wave 7a: one of the names among a subject's or a
-                    // session's datasets
+                    // Wave 7a: one of the names among a stack's, a
+                    // subject's or a session's datasets
                     let items = self.list_params(listed, at)?;
                     if items.len() > LIST_BIND_MAX {
                         return Err(err(
@@ -3140,13 +3123,14 @@ impl<'a> Builder<'a> {
                     return Err(err(at, "has takes an axis and a value"));
                 };
                 if l.op != "axis" {
-                    // Wave 7a: the datasets of a subject or a session are
-                    // many names, read as an axis of many values is
+                    // Wave 7a: the datasets of a stack, a subject or a
+                    // session are many names, read as an axis of many values
+                    // is
                     let list = self.expr(l, terms, alias, at)?;
                     if !list.members {
                         return Err(err(
                             at,
-                            "has takes an axis, or a field of several names: a subject's or a session's dataset",
+                            "has takes an axis, or a field of several names: a stack's, a subject's or a session's dataset",
                         ));
                     }
                     let v = self.arg(

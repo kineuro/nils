@@ -2490,19 +2490,24 @@ fn original_file(dir: &TempDir, patient: &str, study: &str, sop: &str, class: Op
     dir.file(&format!("{patient}/{sop}"), &synth::part10(&meta, &e, true));
 }
 
-/// Nima's ruling of 2026-10-11 ("agreed"): a subject whose every file the
-/// read set aside, none of them a scan, is of the dataset it was
-/// pseudonymised from, so the chat and the page tell the same story. An
-/// identified dataset of two subjects is pseudonymised and read: one with
-/// a scan, one with a presentation state and a screen capture alone. The
-/// summary, the card's sources door, the main scans summary, the Grid and
-/// the ask count two subjects, one of them with no scans, and the ask
-/// names the second's dataset. Where no pseudonymise run recorded the
-/// subject (a registry from before the run kept each file's subject), its
-/// dataset is not known: no reader counts it, and the ask answers null.
-fn no_scans(pg: Option<(String, String)>) {
+/// Nima's model of 2026-10-12: a dataset is a folder that holds stacks and
+/// files, never subjects, and only a cohort has members. "N subjects in a
+/// dataset" are the subjects with a stack whose file is in it, a stack with
+/// files in two datasets is one stack in both, and a subject whose files in
+/// a dataset were all set aside is no subject of it, only a fact about its
+/// set-aside files. Two identified datasets are pseudonymised and read: in
+/// the first a subject with a scan and a presentation state, and a subject
+/// with a presentation state and a screen capture alone, whose scan is in
+/// the second; and two datasets read in place hold one file each of one
+/// scan. The summary, the card's sources door, the main scans summary, the
+/// Grid and its visits, and the ask count and list the subjects through
+/// their stacks, the ask names every dataset holding a stack, and says so
+/// when it describes an answer.
+fn folders(pg: Option<(String, String)>) {
+    const PRESENTATION: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+    const CAPTURE: &str = "1.2.840.10008.5.1.4.1.1.7";
     let home = Home {
-        dir: TempDir::new("data-page-no-scans"),
+        dir: TempDir::new("data-page-folders"),
         pg,
     };
     let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
@@ -2525,42 +2530,81 @@ fn no_scans(pg: Option<(String, String)>) {
             home.ok(&["init", "--key", "k"]);
         }
     }
-    let dir = TempDir::new("data-page-no-scans-ds");
-    original_file(&dir, "PAT-A1", "1.2.9.A", "1.2.9.A.1.1", None);
-    original_file(&dir, "PAT-A1", "1.2.9.A", "1.2.9.A.1.2", None);
-    original_file(
-        &dir,
-        "PAT-B2",
-        "1.2.9.B",
-        "1.2.9.B.9.1",
-        Some("1.2.840.10008.5.1.4.1.1.11.1"),
+    let ids = TempDir::new("data-page-folders-ids");
+    original_file(&ids, "PAT-P1", "1.2.9.P", "1.2.9.P.1.1", None);
+    original_file(&ids, "PAT-P1", "1.2.9.P", "1.2.9.P.9.1", Some(PRESENTATION));
+    original_file(&ids, "PAT-Q2", "1.2.9.Q", "1.2.9.Q.9.1", Some(PRESENTATION));
+    original_file(&ids, "PAT-Q2", "1.2.9.Q", "1.2.9.Q.9.2", Some(CAPTURE));
+    let other = TempDir::new("data-page-folders-other");
+    original_file(&other, "PAT-Q2", "1.2.9.R", "1.2.9.R.1.1", None);
+    for (name, dir) in [("ids", &ids), ("other", &other)] {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--move-into",
+            "originals",
+            "--confirm-move",
+            "--unmapped",
+            "code",
+        ]);
+        home.ok(&["pseudonymize", &format!("@{name}")]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    }
+    let first = TempDir::new("data-page-folders-first");
+    scan_file(
+        &first,
+        "PAT-S3",
+        "1.2.9.S",
+        "1.2.9.S.1",
+        "20260102",
+        "t1 mprage",
     );
-    original_file(
-        &dir,
-        "PAT-B2",
-        "1.2.9.B",
-        "1.2.9.B.9.2",
-        Some("1.2.840.10008.5.1.4.1.1.7"),
+    let second = TempDir::new("data-page-folders-second");
+    second.file(
+        "derivatives/dcm-anon/s/copy.dcm",
+        &std::fs::read(
+            first
+                .path()
+                .join("derivatives/dcm-anon/1.2.9.S/1.2.9.S.1.1"),
+        )
+        .unwrap(),
     );
-    home.ok(&[
-        "place",
-        "add",
-        "ds",
-        dir.path().to_str().unwrap(),
-        "--role",
-        "source",
-        "--move-into",
-        "originals",
-        "--confirm-move",
-        "--unmapped",
-        "code",
-    ]);
-    home.ok(&["pseudonymize", "@ds"]);
-    home.ok(&["digest", "--name", "ds", "--no-private", "@ds"]);
+    for (name, dir) in [("first", &first), ("second", &second)] {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+        ]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    }
+
+    // a stack set sees the stacks a fingerprint describes
+    home.ok(&["fingerprint"]);
 
     let server = Worked::serve(&home, false);
-    // what the chat is asked: the subjects of the dataset, each with its
-    // dataset, and the subjects by dataset
     let ask = |doc: Value| -> Value {
         let (status, ran) = server.call(
             "POST",
@@ -2585,158 +2629,181 @@ fn no_scans(pg: Option<(String, String)>) {
             .map(|r| r[i].clone())
             .collect()
     };
-    let everyone = || {
+    let ids_of = |ran: &Value| -> Vec<i64> {
+        column(ran, "id")
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect()
+    };
+    let at = |level: &str, clause: Option<Value>| {
+        let set = match clause {
+            Some(c) => json!({"grain": level, "where": [c]}),
+            None => json!({"grain": level}),
+        };
         ask(json!({
             "ast_version": 1,
-            "sets": {"people": {"grain": "subject"}},
-            "out": {"set": "people", "level": "record",
+            "sets": {"s": set},
+            "out": {"set": "s", "level": "record",
                     "columns": [["field", {}, "id"], ["field", {}, "dataset"]],
                     "order": [[["field", {}, "id"], "asc"]]}
         }))
     };
-    let of_ds = || {
-        let ran = ask(json!({
-            "ast_version": 1,
-            "sets": {"people": {"grain": "subject", "where": [["=", {}, ["field", {}, "dataset"], "ds"]]}},
-            "out": {"set": "people", "level": "record", "columns": [["field", {}, "id"]],
-                    "order": [[["field", {}, "id"], "asc"]]}
-        }));
-        column(&ran, "id")
+    let in_dataset = |level: &str, name: &str| {
+        ids_of(&at(
+            level,
+            Some(json!(["=", {}, ["field", {}, "dataset"], name])),
+        ))
+    };
+
+    // every subject by the datasets holding its stacks: P of the first
+    // identified dataset, Q of the second alone, S of both datasets read in
+    // place, its scan one stack in both
+    let people = at("subject", None);
+    let subjects = ids_of(&people);
+    assert_eq!(subjects.len(), 3, "{people}");
+    let named: Vec<Value> = column(&people, "dataset");
+    let of = |name: &str| -> i64 {
+        subjects[named
             .iter()
-            .map(|v| v.as_i64().unwrap())
-            .collect::<Vec<i64>>()
+            .position(|d| d == name)
+            .unwrap_or_else(|| panic!("no {name}: {people}"))]
     };
-    let by_dataset = || {
-        let ran = ask(json!({
+    let (p, q, s) = (of("ids"), of("other"), of("first, second"));
+    assert_eq!(in_dataset("subject", "ids"), [p]);
+    assert_eq!(in_dataset("subject", "other"), [q]);
+    assert_eq!(in_dataset("subject", "first"), [s]);
+    assert_eq!(in_dataset("subject", "second"), [s]);
+    let scans = at("stack", None);
+    assert_eq!(
+        ids_of(&scans).len(),
+        3,
+        "the copied scan is one stack: {scans}"
+    );
+    assert_eq!(
+        column(&scans, "dataset")
+            .iter()
+            .filter(|d| *d == "first, second")
+            .count(),
+        1,
+        "{scans}"
+    );
+    assert_eq!(in_dataset("stack", "second").len(), 1);
+    let grouped = ask(json!({
+        "ast_version": 1,
+        "sets": {
+            "people": {"grain": "subject"},
+            "g": {"grain": "group", "group": {"of": "people", "by": [["field", {}, "dataset"]]}}
+        },
+        "out": {"set": "g", "level": "aggregate",
+                "columns": [["field", {}, "dataset"], ["field", {}, "_rows"]]}
+    }));
+    let mut groups: Vec<(Value, Value)> = column(&grouped, "dataset")
+        .into_iter()
+        .zip(column(&grouped, "_rows"))
+        .collect();
+    groups.sort_by_key(|(name, _)| name.as_str().map(str::to_string));
+    assert_eq!(
+        groups,
+        ["first", "ids", "other", "second"]
+            .map(|n| (json!(n), json!(1)))
+            .to_vec(),
+        "{grouped}"
+    );
+    let (status, described) = server.call(
+        "POST",
+        "/api/ask/describe",
+        Some(json!({"document": {
             "ast_version": 1,
-            "sets": {
-                "people": {"grain": "subject"},
-                "g": {"grain": "group", "group": {"of": "people", "by": [["field", {}, "dataset"]]}}
-            },
-            "out": {"set": "g", "level": "aggregate",
-                    "columns": [["field", {}, "dataset"], ["field", {}, "_rows"]]}
-        }));
-        column(&ran, "dataset")
-            .into_iter()
-            .zip(column(&ran, "_rows"))
-            .collect::<Vec<(Value, Value)>>()
-    };
-    let grid_ids = |grid: &Value| -> Vec<i64> {
-        grid["subjects"]
+            "sets": {"people": {"grain": "subject", "where": [["=", {}, ["field", {}, "dataset"], "ids"]]}},
+            "out": {"set": "people", "level": "count"}
+        }})),
+        READS,
+    );
+    assert_eq!(status, 200, "{described}");
+    assert!(
+        described
+            .to_string()
+            .contains("datasets are folders that hold stacks")
+            && described.to_string().contains("only cohorts have members"),
+        "{described}"
+    );
+
+    // the first identified dataset counts P alone; its set-aside files are
+    // three, two of them of one subject with no stack in it
+    let summary = |name: &str| server.get(&format!("/api/datasets/{name}/summary"), READS);
+    let sm = summary("ids");
+    assert_eq!(sm["subjects"], 1, "{sm}");
+    assert_eq!(sm["scans"], 1, "{sm}");
+    assert!(sm.get("no_scans").is_none(), "{sm}");
+    assert_eq!(sm["files"]["set_aside"], 3, "{sm}");
+    assert_eq!(
+        sm["files"]["set_aside_no_scans"],
+        json!({"subjects": 1, "files": 2}),
+        "{sm}"
+    );
+    // the second counts Q, whose scan it holds, and sets nothing aside
+    let sm = summary("other");
+    assert_eq!(sm["subjects"], 1, "{sm}");
+    assert_eq!(
+        sm["files"]["set_aside_no_scans"],
+        json!({"subjects": 0, "files": 0}),
+        "{sm}"
+    );
+    // each dataset read in place counts the one scan and its subject once
+    for name in ["first", "second"] {
+        let sm = summary(name);
+        assert_eq!(
+            (sm["subjects"].clone(), sm["scans"].clone()),
+            (json!(1), json!(1)),
+            "{name}: {sm}"
+        );
+    }
+    let sources = server.get("/api/sources", READS);
+    let card = |name: &str| {
+        sources["sources"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| s["id"].as_i64().unwrap())
-            .collect()
+            .find(|x| x["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {sources}"))["totals"]
+            .clone()
     };
-
-    let people = everyone();
-    let ids: Vec<i64> = column(&people, "id")
-        .iter()
-        .map(|v| v.as_i64().unwrap())
-        .collect();
-    assert_eq!(ids.len(), 2, "{people}");
-    assert_eq!(
-        column(&people, "dataset"),
-        [json!("ds"), json!("ds")],
-        "{people}"
-    );
-    assert_eq!(of_ds(), ids);
-    assert_eq!(by_dataset(), [(json!("ds"), json!(2))]);
-
-    let s = server.get("/api/datasets/ds/summary", READS);
-    assert_eq!(s["scans"], 1, "{s}");
-    assert_eq!(s["subjects"], 2, "{s}");
-    assert_eq!(s["no_scans"], 1, "{s}");
-    assert_eq!(s["files"]["set_aside"], 2, "{s}");
-    let sources = server.get("/api/sources", READS);
-    let card = sources["sources"]
+    for (name, n) in [("ids", 1), ("other", 1), ("first", 1), ("second", 1)] {
+        let totals = card(name);
+        assert_eq!(totals["subjects"], n, "{name}: {totals}");
+        assert!(totals.get("no_scans").is_none(), "{name}: {totals}");
+    }
+    let picks = server.get("/api/picks/summary?dataset=ids", READS);
+    assert_eq!(picks["subjects"], 1, "{picks}");
+    // the Grid lists P alone, and Q's visits are no visits of the dataset;
+    // the second identified dataset lists Q with its scan
+    let grid = server.get("/api/datasets/ids/subjects", READS);
+    assert_eq!(grid["totals"]["subjects"], 1, "{grid}");
+    let listed: Vec<i64> = grid["subjects"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|x| x["name"] == "ds")
-        .unwrap_or_else(|| panic!("{sources}"))
-        .clone();
-    assert_eq!(card["totals"]["subjects"], 2, "{card}");
-    assert_eq!(card["totals"]["no_scans"], 1, "{card}");
-    assert_eq!(card["totals"]["stacks"], 1, "{card}");
-    let picks = server.get("/api/picks/summary?dataset=ds", READS);
-    assert_eq!(picks["subjects"], 2, "{picks}");
-    // the Grid lists the subject with nothing counted, and its visits are
-    // none; the other keeps its scan
-    let grid = server.get("/api/datasets/ds/subjects", READS);
-    assert_eq!(grid["totals"]["subjects"], 2, "{grid}");
-    assert_eq!(grid["totals"]["scans"], 1, "{grid}");
-    let unscanned: Vec<i64> = grid["subjects"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|x| x["scans"] == 0 && x["visits"] == 0)
         .map(|x| x["id"].as_i64().unwrap())
         .collect();
-    assert_eq!(unscanned.len(), 1, "{grid}");
-    let none = unscanned[0];
-    let scanned = *ids.iter().find(|i| **i != none).unwrap();
-    let visits = server.get(&format!("/api/datasets/ds/subjects/{none}/visits"), READS);
-    assert_eq!(visits["visits"], json!([]), "{visits}");
-    let visits = server.get(
-        &format!("/api/datasets/ds/subjects/{scanned}/visits"),
-        READS,
-    );
-    assert_eq!(visits["visits"].as_array().unwrap().len(), 1, "{visits}");
-
-    // a registry from before the run kept each file's subject: the
-    // subject's dataset is not known, so no reader counts it and the ask
-    // says null rather than a guess
-    {
-        let mut store = home.store();
-        store
-            .execute(
-                &format!(
-                    "UPDATE {} SET subject_id = NULL WHERE subject_id = {none}",
-                    store.qualified("pseudonym_file")
-                ),
-                &[],
-            )
-            .unwrap();
-    }
-    let people = everyone();
-    let known: Vec<Value> = ids
-        .iter()
-        .map(|i| {
-            if *i == scanned {
-                json!("ds")
-            } else {
-                Value::Null
-            }
-        })
-        .collect();
-    assert_eq!(column(&people, "dataset"), known, "{people}");
-    assert_eq!(of_ds(), [scanned]);
-    let mut groups = by_dataset();
-    groups.sort_by_key(|(name, _)| name.as_str().map(str::to_string));
-    assert_eq!(groups, [(Value::Null, json!(1)), (json!("ds"), json!(1))]);
-    let s = server.get("/api/datasets/ds/summary", READS);
-    assert_eq!(s["subjects"], 1, "{s}");
-    assert_eq!(s["no_scans"], 0, "{s}");
-    let grid = server.get("/api/datasets/ds/subjects", READS);
-    assert_eq!(grid_ids(&grid), [scanned], "{grid}");
-    let (status, gone) = server.call(
+    assert_eq!(listed, [p], "{grid}");
+    let (status, none) = server.call(
         "GET",
-        &format!("/api/datasets/ds/subjects/{none}/visits"),
+        &format!("/api/datasets/ids/subjects/{q}/visits"),
         None,
         READS,
     );
-    assert_eq!(status, 404, "{gone}");
+    assert_eq!(status, 404, "{none}");
+    let visits = server.get(&format!("/api/datasets/other/subjects/{q}/visits"), READS);
+    assert_eq!(visits["visits"].as_array().unwrap().len(), 1, "{visits}");
 }
 
 #[test]
-fn a_subject_whose_every_file_was_set_aside_is_of_the_dataset_it_was_pseudonymised_from() {
-    no_scans(None);
+fn a_dataset_is_a_folder_of_stacks_and_counts_subjects_through_them() {
+    folders(None);
 }
 
 #[test]
-fn a_subject_whose_every_file_was_set_aside_is_of_its_dataset_on_postgres_too() {
+fn a_dataset_is_a_folder_of_stacks_on_postgres_too() {
     let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
         .ok()
         .filter(|d| !d.is_empty())
@@ -2744,7 +2811,7 @@ fn a_subject_whose_every_file_was_set_aside_is_of_its_dataset_on_postgres_too() 
         eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
         return;
     };
-    let schema = "nils_data_page_no_scans";
+    let schema = "nils_data_page_folders";
     let drop = || {
         let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
         store
@@ -2754,6 +2821,6 @@ fn a_subject_whose_every_file_was_set_aside_is_of_its_dataset_on_postgres_too() 
             .expect("drop");
     };
     drop();
-    no_scans(Some((dsn.clone(), schema.to_string())));
+    folders(Some((dsn.clone(), schema.to_string())));
     drop();
 }

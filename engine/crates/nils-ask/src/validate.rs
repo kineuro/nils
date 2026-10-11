@@ -63,10 +63,11 @@ pub struct ColumnRef {
     pub ci: Option<String>,
 }
 
-/// A dataset a stack can be of (Wave 7a): its name, and the `source` rows
-/// (the roots its digests read) that are its own. A stack is of the
-/// dataset whose source its first digest read; a subject or a session is
-/// of every dataset one of its stacks is of.
+/// A dataset a stack can be in (Wave 7a): its name, and the `source` rows
+/// (the roots its digests read) that are its own. Nima, 2026-10-12: a
+/// dataset is a folder that holds stacks; a stack is in every dataset
+/// whose source holds a file of it, and a subject or a session is counted
+/// in every dataset holding one of its stacks. Only a cohort has members.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dataset {
     pub name: String,
@@ -76,7 +77,7 @@ pub struct Dataset {
 }
 
 /// The table a `dataset` field names in the catalog (Wave 7a): the name is
-/// the place's, read through the stack's first digest and its source.
+/// the place's, read through the sources holding a file of the stack.
 pub const DATASET_TABLE: &str = "place";
 
 /// Whether a path reads a `dataset` field: its own (`dataset`) or a carried

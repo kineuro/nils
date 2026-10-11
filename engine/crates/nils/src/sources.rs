@@ -139,7 +139,7 @@ fn source(
     if ids.is_empty() {
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
         doc["totals"] = json!({
-            "subjects": 0, "no_scans": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
+            "subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
             "same_instance_files": 0,
             "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {}, "noted": {},
         });
@@ -287,10 +287,10 @@ fn source(
     // digests meet them, so counting what a digest created answers nothing
     // for exactly the dataset that has a map. Record 55 (2026-10-10): and
     // so are its studies, scans and visits, whoever read them first. Nima,
-    // 2026-10-11: and the subjects it was pseudonymised for with no scan
-    // at all, as every reader counts a dataset's subjects
-    // (`nils_registry::dataset_subjects`)
-    let members = nils_registry::dataset_subjects::count(store, p.id, ids)?;
+    // 2026-10-12: a dataset holds stacks, never subjects; the subjects
+    // counted in it are those with a stack its tree holds a file of, as
+    // every reader counts them (`nils_registry::dataset_subjects`)
+    let subjects = nils_registry::dataset_subjects::count(store, ids)?;
     let studies = count(
         store,
         &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
@@ -334,8 +334,7 @@ fn source(
         "recent": shown.into_iter().map(|(_, d)| d).collect::<Vec<_>>(),
     });
     doc["totals"] = json!({
-        "subjects": members.subjects,
-        "no_scans": members.no_scans,
+        "subjects": subjects,
         "studies": studies,
         "sessions": sessions,
         "stacks": stacks,
