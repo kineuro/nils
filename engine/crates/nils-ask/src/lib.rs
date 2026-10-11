@@ -78,17 +78,32 @@ pub fn read(text: &str) -> Result<Value, Error> {
         .map_err(|e| Error::Parse(e.to_string()))
 }
 
+/// What a refusal of a key inside `pick` adds: a pick only orders a set's
+/// rows, and the main scans NILS picked are a condition on a stack. A
+/// small model once wrote `pick: {model: main}` eight times (2026-10-11).
+pub const PICK_IS_NOT_THE_MAIN_SCANS: &str = "pick keeps the first rows of a set by an order (per, by, n, ties); \
+the main scans NILS picked are a stack set's where: [[\"picked\", {role: t1w}]], one role per clause";
+
+/// A document's parse error, with the next step where the mistake is known.
+fn parse_error(e: serde_json::Error) -> Error {
+    let m = e.to_string();
+    if m.contains("expected one of `per`, `by`, `n`, `ties`") {
+        return Error::Parse(format!("{m}; {PICK_IS_NOT_THE_MAIN_SCANS}"));
+    }
+    Error::Parse(m)
+}
+
 /// A document parsed strictly: no repair, unknown keys refused.
 pub fn parse(text: &str) -> Result<Ask, Error> {
     let v = read(text)?;
-    serde_json::from_value(v).map_err(|e| Error::Parse(e.to_string()))
+    serde_json::from_value(v).map_err(parse_error)
 }
 
 /// A document parsed after structural repair, with what was repaired.
 pub fn parse_repaired(text: &str) -> Result<(Ask, Vec<Repair>), Error> {
     let mut v = read(text)?;
     let repairs = repair::repair(&mut v);
-    let ask = serde_json::from_value(v).map_err(|e| Error::Parse(e.to_string()))?;
+    let ask = serde_json::from_value(v).map_err(parse_error)?;
     Ok((ask, repairs))
 }
 

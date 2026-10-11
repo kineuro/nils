@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Record 51 slice D: v0's nine reasons for a look at a pick, each raised by
-//! `nils pick run` on a session planted for it, and the new role `t2w`
-//! picked on its own tables. A synthetic registry, its stacks rewritten to
+//! Record 51 slice D: v0's nine reasons for a look at a pick, each planted
+//! on a session of its own, and the new role `t2w` picked on its own
+//! tables. Since record 55, decision 6 (with record 56) a run picks with the
+//! rules and asks a person nothing: none of the nine raises a border, a
+//! real repeat is settled by the later full take, and a near tie by the
+//! rules' tie order. A synthetic registry, its stacks rewritten to
 //! invented values: no stack here was ever a person's. On SQLite always, and
 //! on Postgres where a test DSN is set.
 
@@ -374,109 +377,46 @@ fn nine(home: &Home) {
     }
 
     let report = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
-    let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
-    let open: Vec<&serde_json::Value> = items["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|i| i["status"] == "open")
-        .collect();
-    let mut seen: BTreeMap<&str, i64> = BTreeMap::new();
-    for item in &open {
-        let subject = item["ref"]["subject_id"].as_i64().unwrap();
-        let got: Vec<&str> = item["evidence"]["borders"]
+    // Under the rules no session asks anything: no border is raised, and
+    // a pick row carries none, beside the rules it was made with.
+    let open = |home: &Home| -> usize {
+        let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
+        items["items"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|b| b.as_str().unwrap())
-            .collect();
-        let Some((reason, want)) = by_subject.get(&subject) else {
-            panic!("a session of the population raised {got:?}: {item}");
-        };
-        assert_eq!(&got, want, "the session planted for {reason}: {item}");
-        *seen.entry(reason).or_insert(0) += 1;
-        match *reason {
-            "retake" => assert!(
-                item["evidence"]["notes"]["retake"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("plain: 2"),
-                "{item}"
-            ),
-            "pre_post_twin" | "dixon_vs_plain" => assert!(
-                item["evidence"]["notes"][*reason].is_string(),
-                "the other candidate is named: {item}"
-            ),
-            "slice_count_outlier" => assert!(
-                item["evidence"]["notes"]["slice_count_outlier"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("40 outside"),
-                "{item}"
-            ),
-            _ => {}
-        }
-    }
-    // Each of the nine, raised once, on its own session, and counted.
-    for (reason, _, _) in &planted {
-        if !seen.contains_key(reason) {
-            let subject = by_subject.iter().find(|(_, (r, _))| r == reason).unwrap().0;
-            let rows = store
-                .query(
-                    &format!(
-                        "SELECT id FROM {} WHERE subject_id = {subject} AND author_kind = 'agent'",
-                        store.qualified("pick")
-                    ),
-                    &[],
-                )
-                .unwrap();
-            for r in rows {
-                eprintln!(
-                    "{}",
-                    home.ok(&["pick", "explain", &r.int(0).unwrap().to_string()])
-                );
-            }
-        }
-        assert_eq!(seen.get(reason), Some(&1), "{reason}: {seen:?}");
-        assert_eq!(report["borders"][reason], 1, "{reason}: {report}");
-    }
-    assert_eq!(report["raised"], planted.len(), "{report}");
-    assert_eq!(report["standing"], 0, "{report}");
-
-    // The pick row carries what the borders found, beside the scores.
-    let row = store
+            .filter(|i| i["status"] == "open")
+            .count()
+    };
+    assert_eq!(open(home), 0, "{report}");
+    assert_eq!(report["raised"], 0, "{report}");
+    assert_eq!(report["borders"], serde_json::json!({}), "{report}");
+    assert_eq!(report["rules"][0]["version"], 1, "{report}");
+    let rows = store
         .query(
             &format!(
-                "SELECT parts FROM {} WHERE borders = 'retake' AND author_kind = 'agent'",
+                "SELECT borders, parts, subject_id FROM {} WHERE author_kind = 'agent'",
                 store.qualified("pick")
             ),
             &[],
         )
         .unwrap();
-    let parts: serde_json::Value = serde_json::from_str(row[0].text(0).unwrap()).unwrap();
-    assert!(
-        parts["notes"]["retake"]
-            .as_str()
-            .unwrap()
-            .starts_with("plain"),
-        "{parts}"
-    );
-
-    // And a second run of the same registry raises the same, and no more.
+    assert!(rows.len() > by_subject.len() / 2, "{}", rows.len());
+    for r in &rows {
+        assert_eq!(r.opt_text(0).unwrap(), None);
+        let parts: serde_json::Value = serde_json::from_str(r.text(1).unwrap()).unwrap();
+        assert_eq!(parts["rules"]["version"], 1, "{parts}");
+        assert!(parts["rules"]["scope"].is_null(), "{parts}");
+        assert!(parts["kind"].is_string(), "{parts}");
+    }
+    // And a second run of the same registry picks the same, asking nothing.
     let again = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
-    assert_eq!(again["borders"], report["borders"], "{again}");
-    let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
-    let still = items["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|i| i["status"] == "open")
-        .count();
-    assert_eq!(still, open.len());
+    assert_eq!(again["written"], report["written"], "{again}");
+    assert_eq!(open(home), 0);
 }
 
 #[test]
-fn each_of_v0_s_nine_reasons_raises_its_border() {
+fn the_sessions_of_v0_s_nine_reasons_ask_nothing_under_the_rules() {
     nine(&registry(None));
 }
 
@@ -501,7 +441,7 @@ fn postgres(schema: &str, test: impl FnOnce(&Home)) {
 }
 
 #[test]
-fn each_of_v0_s_nine_reasons_raises_its_border_on_postgres_too() {
+fn the_sessions_of_v0_s_nine_reasons_ask_nothing_on_postgres_too() {
     postgres("nils_borders_nine", nine);
 }
 
@@ -571,25 +511,13 @@ fn mp2rage(home: &Home) {
     assert!(!borders.contains("retake"), "{borders}");
     let (stacks, borders) = of_subject(*three);
     assert_eq!(stacks.len(), 3, "{stacks:?}");
-    assert!(borders.contains("retake"), "{borders}");
-    // And `nils pick explain` says which retake it is.
-    let id = store
-        .query(
-            &format!(
-                "SELECT id FROM {} WHERE subject_id = {three} AND role = 't1w' AND author_kind = 'agent'",
-                store.qualified("pick")
-            ),
-            &[],
-        )
-        .unwrap()[0]
-        .int(0)
-        .unwrap();
-    let text = home.ok(&["pick", "explain", &id.to_string()]);
-    assert!(text.contains("retake: mp2rage: 3 stacks"), "{text}");
+    // stacks with no moment of acquisition cannot be told apart as takes,
+    // and under the rules nothing is asked of them
+    assert_eq!(borders, "", "{borders}");
 }
 
 #[test]
-fn an_mp2rage_keeps_its_denoised_uniform_image_and_a_true_retake_borders() {
+fn an_mp2rage_keeps_its_denoised_uniform_image_and_asks_nothing() {
     mp2rage(&registry(None));
 }
 
@@ -824,8 +752,8 @@ fn one_moment(home: &Home) {
     assert_eq!(stacks, [first_written], "the series written first");
     assert_eq!(borders, "", "one acquisition stored twice is no retake");
     let (stacks, borders, _) = t1w_pick(&mut store, *again);
-    assert_eq!(stacks, ids2[..2]);
-    assert_eq!(borders, "retake");
+    assert_eq!(stacks, [ids2[1]], "a real repeat: the later full take (R7)");
+    assert_eq!(borders, "");
     let (stacks, borders, _) = t1w_pick(&mut store, *fragments);
     assert_eq!(stacks, [ids3[0]], "the fragments are no part of the take");
     assert_eq!(borders, "");
@@ -842,37 +770,15 @@ fn one_moment(home: &Home) {
         .unwrap();
     assert_eq!(none, 0, "fragments alone are nothing to pick");
     assert_eq!(report["empty"], 1, "{report}");
-    // What the planted sessions raised: the population's own are its own.
-    let planted = [*twice, *again, *fragments, *only_fragments];
+    // Under the rules the planted sessions ask nothing.
     let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
-    let raised: Vec<String> = items["items"]
+    let open = items["items"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|i| i["status"] == "open")
-        .filter(|i| {
-            i["ref"]["subject_id"]
-                .as_i64()
-                .is_some_and(|s| planted.contains(&s))
-        })
-        .map(|i| {
-            format!(
-                "{}:{}",
-                i["ref"]["subject_id"],
-                i["evidence"]["borders"][0].as_str().unwrap_or_default()
-            )
-        })
-        .collect();
-    assert_eq!(
-        raised.len(),
-        2,
-        "the retake and the fragments alone: {raised:?}"
-    );
-    assert!(raised.contains(&format!("{again}:retake")), "{raised:?}");
-    assert!(
-        raised.contains(&format!("{only_fragments}:nothing_eligible")),
-        "{raised:?}"
-    );
+        .count();
+    assert_eq!(open, 0, "{items}");
 }
 
 #[test]
@@ -989,10 +895,14 @@ fn contract_9(home: &Home) {
         )
         .unwrap();
     let parts: serde_json::Value = serde_json::from_str(row[0].text(0).unwrap()).unwrap();
-    assert_eq!(
-        parts["notes"]["near_tie"], "orientation: Axial over Sagittal",
+    // the rules' score weighs the plane's own parts; where it leaves the
+    // two within the near tie, the rules' tie order puts the axial first
+    assert!(
+        parts["decided"].is_null() || parts["decided"] == "axial_coronal_sagittal",
         "{parts}"
     );
+    assert_eq!(parts["kind"], "3D MPRAGE", "{parts}");
+    assert_eq!(parts["rules"]["version"], 1, "{parts}");
 }
 
 #[test]

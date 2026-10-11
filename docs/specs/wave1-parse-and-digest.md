@@ -478,6 +478,20 @@ members), with the count as evidence and no path in the item body; a human or an
 agent decides "accepted" (these are sidecars, this is not our data) or "retry" and
 the decision is a row, not a deletion.
 
+Amended on 2026-10-11 by record 56 (the rules decide; Review asks only what
+matters): the policy refusals, `unsupported_sop_class` and
+`unsupported_modality`, are counted, not queued. A file the batch's knobs set
+aside (a screen capture, a presentation state, a report, a PDF, another
+modality) stays a quarantined row with its class and detail and is counted on
+the batch's report, and no review item is filed for its class; the dataset's
+summary (`GET /api/datasets/{name}/summary`) counts these files by kind in
+plain words (`files.set_aside`, `files.set_aside_kinds`), from the one map of
+SOP class to words in `nils-dicom`'s `set_aside_words`. Only the classes a
+person may act on file an item: the reader's four (a damaged, unreadable or
+non-DICOM file) and `missing_modality`. Migration 89 supersedes the open
+`ingest.quarantine` items of the two policy classes an older digest filed,
+with `nils` as the actor, so an existing queue shows none of them.
+
 Settled while saying what was set aside (record 37, S9): the kinds are
 reported in three places, because three readers ask the question. The digest's
 report gains a `set aside` block, one line per kind with its count and the
@@ -1459,7 +1473,8 @@ created, instances ingested and duplicate, the rate, the elapsed time and the
 peak RSS. Without an agent, that is where the digest stops, which is v0 today made
 legible; with one, in Wave 4, the report is what the agent reads.
 
-Review items in Wave 1: `ingest.quarantine` (one per batch and class, §5.3) and
+Review items in Wave 1: `ingest.quarantine` (one per batch and class, §5.3; since
+record 56, never for a policy class) and
 `identity.collision` (§7.1). Everything else is a diagnostic, because D7's rule is
 that no-evidence is a column, not an item, and a queue of thirty thousand parse
 failures is a list, not thirty thousand decisions.

@@ -30,6 +30,7 @@ pub mod pack;
 pub mod pass;
 pub mod patch;
 pub mod pick;
+pub mod pick_rules;
 pub mod private;
 pub mod reads;
 pub mod replay;

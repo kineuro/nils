@@ -1,0 +1,183 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pick borders study of 2026-10-10 (record 55, R2; the design
+# repository's `studies/2026-10-10-pick-borders/`): scans that are never a
+# session's main scan. R2a makes a planning scan the provenance missed a
+# `scout` (rules/disposition.yml). Every stack here is invented from the
+# pattern the study names; none is a real header.
+
+cases:
+
+  # --- R2a: a series named for planning, at most 12 slices
+
+  - name: a 6-slice T1 spin echo named loc is a planning scan, no T1w candidate
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*se2d1'
+      text_series_description: 'loc sag t1 se'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 12
+      repetition_time: 450
+      flip_angle: 90
+      n_instances: 6
+      n_slices: 6
+      fov_x: 230
+      fov_y: 230
+      image_role: original_primary
+    axes:
+      # what it is stays as the rules read it: more than 5 slices named for
+      # planning is no Localizer (pack 0.21.0)
+      provenance: RawRecon
+      base: T1w
+      directory_type: anat
+      disposition: scout
+      convertible: 'yes'
+      role: ''
+
+  - name: a 9-slice Philips T2 turbo spin echo named survey is a planning scan
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      sequence_variant: SK
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2W_TSE survey'
+      text_protocol_name: 'T2W_TSE survey'
+      echo_time: 100
+      repetition_time: 3000
+      flip_angle: 90
+      echo_train_length: 15
+      n_instances: 9
+      n_slices: 9
+      fov_x: 230
+      fov_y: 230
+      image_role: original_primary
+    axes:
+      base: T2w
+      disposition: scout
+      role: ''
+
+  - name: a 12-slice series named sikt is one too, the 12 included
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*tse2d1_5'
+      text_series_description: 't2 sikt cor'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 90
+      repetition_time: 3000
+      flip_angle: 150
+      n_instances: 12
+      n_slices: 12
+      image_role: original_primary
+    axes:
+      disposition: scout
+      role: ''
+
+  - name: guard, a 13-slice series named loc is read as the acquisition it is
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*se2d1'
+      text_series_description: 'loc sag t1 se'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 12
+      repetition_time: 450
+      flip_angle: 90
+      n_instances: 13
+      n_slices: 13
+      image_role: original_primary
+    axes:
+      disposition: acquisition
+      role: t1w
+
+  # --- R2a: a tri-plane split of at most 5 images a plane
+
+  - name: a tri-plane scout split into single images with no slice positions is a planning scan
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      text_sequence_name: '*fl2d1'
+      text_series_description: 't1 fl2d tripilot'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 5
+      repetition_time: 20
+      flip_angle: 40
+      n_instances: 1
+      stacks_in_series: 3
+      split_reason: multi_orientation
+      fov_x: 250
+      fov_y: 250
+      image_role: original_primary
+    axes:
+      # not a Localizer: the tri-plane shape reads the positions counted
+      provenance: RawRecon
+      base: T1w
+      disposition: scout
+      role: ''
+
+  - name: guard, one file split by orientation whose planes hold 20 positions each is no planning scan
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*tse2d1_15'
+      text_series_description: 't2 tse cor sag tra'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 98
+      repetition_time: 5000
+      flip_angle: 150
+      n_instances: 1
+      n_slices: 20
+      stacks_in_series: 3
+      split_reason: multi_orientation
+      image_role: original_primary
+    axes:
+      disposition: acquisition
+
+  - name: guard, a cholangiography's radial slabs are no planning scan
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*haste2d1'
+      text_series_description: 'mrcp radial thick slab'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      echo_time: 700
+      repetition_time: 4500
+      flip_angle: 180
+      n_instances: 1
+      n_slices: 1
+      stacks_in_series: 6
+      split_reason: multi_orientation
+      image_role: original_primary
+    axes:
+      disposition: acquisition
+
+  - name: guard, a projection split by orientation stays a reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\MIP\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      text_sequence_name: '*fl3d1r_t70'
+      text_series_description: 'tof_3d_multi-slab_MIP_SAG'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      n_instances: 1
+      stacks_in_series: 18
+      split_reason: multi_orientation
+      image_role: derived
+    axes:
+      disposition: reformat
+      role: ''

@@ -110,7 +110,21 @@ pub fn clause_text(c: &Clause) -> String {
         "in" => format!("{} among {}", arg(0), arg(1)),
         "not_in" => format!("{} not among {}", arg(0), arg(1)),
         "has" => format!("{} has {}", arg(0), arg(1)),
-        "picked" => format!("picked as {}", opt("role").unwrap_or_default()),
+        // one place of truth (2026-10-11): which scope's main scans it read
+        "picked" => {
+            let role = opt("role").unwrap_or_default();
+            match (opt("dataset"), opt("cohort")) {
+                (Some(d), _) => format!(
+                    "picked as {role} among dataset {d}'s main scans (its own rules once their run finished, else the pack's)"
+                ),
+                (None, Some(c)) => format!(
+                    "picked as {role} among cohort {c}'s main scans (its own rules once their run finished, else the pack's)"
+                ),
+                (None, None) => format!(
+                    "picked as {role} among the main scans (each subject's own dataset's rules once their run finished, else the pack's)"
+                ),
+            }
+        }
         "not_null" => format!("{} is known", arg(0)),
         "is_null" => format!("{} is unknown", arg(0)),
         "contains" => format!("{} contains {}", arg(0), arg(1)),

@@ -114,23 +114,129 @@ pub(crate) fn choice(registry: &mut Registry) -> Choice {
         .unwrap_or(Choice::Auto)
 }
 
-/// What the look for a runtime found, kept half a minute, since the
-/// capabilities are read often and asking podman is not free.
-pub(crate) fn detect_cached(registry: &mut Registry) -> Detected {
-    static CACHE: Mutex<Option<(Instant, Choice, Detected)>> = Mutex::new(None);
+/// How long a runtime found is kept before it is looked for again. Asking
+/// podman is not free: `podman info` took 5 s of a busy laptop's time.
+const LOOK_KEPT: Duration = Duration::from_secs(120);
+
+/// How long a door waits for the first look at the choice in force, where
+/// nothing is known of it yet: a stand-in answers well within it, a real
+/// podman on a busy host does not, and the door answers without it.
+const FIRST_LOOK_WAIT: Duration = Duration::from_secs(1);
+
+/// What the looks for a runtime found, and the look in flight.
+struct Looks {
+    found: Option<(Instant, Choice, Detected)>,
+    looking: Option<Choice>,
+}
+
+static LOOKS: Mutex<Looks> = Mutex::new(Looks {
+    found: None,
+    looking: None,
+});
+static LOOKED: std::sync::Condvar = std::sync::Condvar::new();
+/// Whether this process serves doors, so a look runs behind them.
+static LOOK_BEHIND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `nils serve` (2026-10-11): from here on the look for a runtime runs on a
+/// thread of its own and never on a door's, and the first starts now. The
+/// capabilities door ran `podman info` itself whenever its finding was half
+/// a minute old; that took 5 s on a busy laptop, up to the probe's 30 s cap
+/// on a busy host, and the desk, which gives the engine 5 s, said every
+/// half minute that the engine did not answer.
+pub(crate) fn look_behind(registry: &mut Registry) {
+    LOOK_BEHIND.store(true, std::sync::atomic::Ordering::SeqCst);
     let chosen = choice(registry);
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, c, d)) = cache.as_ref()
-        && *c == chosen
-        && at.elapsed() < Duration::from_secs(30)
-    {
-        return d.clone();
+    let mut looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    if looks.looking.is_none() {
+        start_look(&mut looks, chosen);
     }
-    let d = runtime::detect(chosen, std::env::var_os("PATH").as_deref());
-    // a runtime that did not answer in time is not a finding to keep: the
-    // next read looks again (wave 43's proof)
-    *cache = (!d.unknown).then(|| (Instant::now(), chosen, d.clone()));
-    d
+}
+
+/// A look at `chosen` on a thread of its own; what it finds is kept and
+/// whoever waits for it is woken.
+fn start_look(looks: &mut Looks, chosen: Choice) {
+    looks.looking = Some(chosen);
+    let path = std::env::var_os("PATH");
+    let started = std::thread::Builder::new()
+        .name("nils-runtime-look".to_string())
+        .spawn(move || {
+            let d = runtime::detect(chosen, path.as_deref());
+            let mut looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+            looks.found = Some((Instant::now(), chosen, d));
+            looks.looking = None;
+            drop(looks);
+            LOOKED.notify_all();
+        });
+    if started.is_err() {
+        looks.looking = None;
+    }
+}
+
+/// What a door says while the first look has not come back.
+fn still_looking(chosen: Choice) -> Detected {
+    Detected {
+        choice: chosen,
+        runtime: None,
+        reason: Some(
+            "pipelines are off for a moment: the engine is still looking for a container runtime; ask again shortly"
+                .to_string(),
+        ),
+        looked: Vec::new(),
+        unknown: true,
+    }
+}
+
+/// What the look for a runtime found. In `nils serve` this never waits on
+/// a runtime: the last finding is answered and an old or unknown one is
+/// looked at again behind the door, so a capabilities read costs no
+/// subprocess (see [`look_behind`]). At the command line it looks, once.
+pub(crate) fn detect_cached(registry: &mut Registry) -> Detected {
+    let chosen = choice(registry);
+    if !LOOK_BEHIND.load(std::sync::atomic::Ordering::SeqCst) {
+        {
+            let looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, c, d)) = looks.found.as_ref()
+                && *c == chosen
+                && !d.unknown
+                && at.elapsed() < LOOK_KEPT
+            {
+                return d.clone();
+            }
+        }
+        let d = runtime::detect(chosen, std::env::var_os("PATH").as_deref());
+        // a runtime that did not answer in time is not a finding to keep:
+        // the next read looks again (wave 43's proof)
+        if !d.unknown {
+            LOOKS.lock().unwrap_or_else(|e| e.into_inner()).found =
+                Some((Instant::now(), chosen, d.clone()));
+        }
+        return d;
+    }
+    let until = Instant::now() + FIRST_LOOK_WAIT;
+    let mut looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some((at, c, d)) = looks.found.as_ref()
+            && *c == chosen
+        {
+            let d = d.clone();
+            // an unknown finding, or an old one, is looked at again behind the door
+            if (d.unknown || at.elapsed() >= LOOK_KEPT) && looks.looking.is_none() {
+                start_look(&mut looks, chosen);
+            }
+            return d;
+        }
+        if looks.looking.is_none() {
+            start_look(&mut looks, chosen);
+        }
+        let now = Instant::now();
+        if now >= until {
+            return still_looking(chosen);
+        }
+        looks = LOOKED
+            .wait_timeout(looks, until - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
 }
 
 /// What `GET /api/capabilities` says of pipelines: on when a runtime and a
@@ -2133,7 +2239,25 @@ fn units_missing(
         .iter()
         .flat_map(|u| u.stacks.iter().copied())
         .collect();
-    let picks = crate::preflight::pick_roles(store, &all)?;
+    // record 55, decision 6: the picks the release read, as it recorded them
+    let recorded = store
+        .query_opt(
+            &format!(
+                "SELECT {} FROM {} WHERE id = {}",
+                crate::text_of(store, "release", "pick_rules"),
+                store.qualified("release"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(release_id)],
+        )
+        .map_err(err)?
+        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let of = recorded.as_ref().map_or(
+        nils_registry::pick_truth::Of::Pack,
+        nils_registry::pick_truth::Of::of_record,
+    );
+    let picks = crate::preflight::pick_roles(store, &all, &of)?;
     let mut out = BTreeMap::new();
     for u in units {
         let mut held: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();

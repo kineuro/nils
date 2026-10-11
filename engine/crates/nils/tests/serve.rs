@@ -633,6 +633,86 @@ fn the_event_stream_is_display_plumbing() {
     server.finish();
 }
 
+/// 2026-10-11: the capabilities answer while the host's container runtime
+/// is slow to say what it is. The door ran `podman info` itself whenever
+/// its finding was half a minute old, which took 5 s on a busy laptop, and
+/// the desk, which gives the engine 5 s, said every half minute that the
+/// engine did not answer. The look now runs behind the doors.
+///
+/// The stand-in podman answers `info` only once the test lets it, so the
+/// test holds the look out as long as it likes: every read meanwhile must
+/// answer that pipelines wait for the look, which a door that asked podman
+/// itself could not. No read is held to a time: the first read of a cold
+/// debug engine on a busy machine took up to 9 s with an instant podman.
+#[test]
+fn the_capabilities_answer_while_a_slow_runtime_is_looked_at() {
+    let home = registry();
+    let bin = TempDir::new("serve-slow-runtime-bin");
+    let release = bin.path().join("release");
+    // a podman that says it is rootless only once released (or after 25 s), and no GPU
+    let podman = bin.file(
+        "podman",
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = info ]; then\n  i=0\n  while [ ! -e '{}' ] && [ $i -lt 250 ]; do sleep 0.1; i=$((i+1)); done\n  echo true; exit 0\nfi\necho 'podman version 9.9.9-test'\n",
+            release.display()
+        )
+        .as_bytes(),
+    );
+    let smi = bin.file("nvidia-smi", b"#!/bin/sh\nexit 1\n");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&podman, &smi] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let server = Server::start(&home, 1000, &[], &[("PATH", &path)]);
+    let read = |server: &Server| {
+        let (status, doc) = server.request("GET", "/api/capabilities", None, None);
+        assert_eq!(status, 200, "{doc}");
+        doc["pipelines"].clone()
+    };
+    let waits = |p: &serde_json::Value| {
+        assert_eq!(p["enabled"], false, "{p}");
+        assert_eq!(p["runtime"], serde_json::Value::Null, "{p}");
+        assert!(
+            p["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("still looking for a container runtime")),
+            "a read waited for podman instead of answering that the look is out: {p}"
+        );
+    };
+    // while the look is out, the door answers, and says pipelines wait
+    for _ in 0..3 {
+        waits(&read(&server));
+    }
+    // and several callers at once are none of them held behind podman
+    std::thread::scope(|s| {
+        let calls: Vec<_> = (0..3).map(|_| s.spawn(|| read(&server))).collect();
+        for c in calls {
+            waits(&c.join().unwrap());
+        }
+    });
+    // podman answers: the look comes back behind the door, and a read has its finding
+    std::fs::write(&release, b"").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let p = read(&server);
+        if p["runtime"]["name"] == "podman" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the look behind the door never came back: {p}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Wave 4a §11.2: the `oidc` mode. The engine validates the token against
 /// the issuer's keys and audience, maps groups to grants, makes the subject
 /// the audit principal, and keeps no user table beyond a cache of claims.
@@ -5906,7 +5986,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@1.0.2", "{classified}");
+    assert_eq!(classified["pack"], "mri@1.0.3", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the

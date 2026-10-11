@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 87;
+pub const SCHEMA_VERSION: i64 = 89;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,7 +402,89 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 87,
         apply: a_scan_is_held_wherever_its_files_are,
     },
+    Migration {
+        version: 88,
+        apply: a_scope_keeps_its_own_main_scan_rules,
+    },
+    Migration {
+        version: 89,
+        apply: a_file_set_aside_by_policy_asks_nobody,
+    },
 ];
+
+/// Record 56 (the rules decide; Review asks only what matters), 2026-10-11:
+/// a file the read set aside by policy, a SOP class or a modality outside
+/// the batch's knobs, files no review item any more. The open
+/// `ingest.quarantine` items an older digest filed for those classes are
+/// superseded, by `nils` and with the record as the decision, so the queue
+/// shows none of them; the files stay quarantined rows as they were, and an
+/// item of a class the reader decides stays open.
+fn a_file_set_aside_by_policy_asks_nobody(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "review_item")? {
+        return Ok(());
+    }
+    let rows = store.query(
+        &format!(
+            "SELECT id, CAST(ref AS TEXT) FROM {} WHERE kind = 'ingest.quarantine' AND status = 'open'",
+            store.qualified("review_item")
+        ),
+        &[],
+    )?;
+    let mut ids = Vec::new();
+    for r in &rows {
+        let reference: serde_json::Value =
+            serde_json::from_str(r.opt_text(1)?.unwrap_or("null")).unwrap_or_default();
+        let policy = reference["class"]
+            .as_str()
+            .and_then(nils_dicom::QuarantineClass::from_name)
+            .is_some_and(|c| c.is_policy_class());
+        if policy {
+            ids.push(r.int(0)?.to_string());
+        }
+    }
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let d = store.dialect();
+    let decision = serde_json::json!({
+        "decision": "set_aside",
+        "why": "record 56: a file set aside by policy is counted, not asked about",
+    });
+    store.execute(
+        &format!(
+            "UPDATE {} SET status = 'superseded', decided_at = {}, actor = 'nils', decision = {} \
+             WHERE status = 'open' AND id IN ({})",
+            store.qualified("review_item"),
+            d.param(1, schema::Type::Timestamp),
+            d.param(2, schema::Type::Json),
+            ids.join(", ")
+        ),
+        &[
+            Param::from(crate::time::now_iso()),
+            Param::from(decision.to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record 55, decision 6 (the main-scans study, section 4): a dataset or a
+/// cohort may keep main-scan rules of its own, versioned in `pick_rules`; a
+/// pick names the scope it belongs to and the version of the rules it was
+/// made with; and a release names the rules whose picks it read. A registry
+/// from before gains the table empty and the columns null: every pick it
+/// holds is the pack's.
+fn a_scope_keeps_its_own_main_scan_rules(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["pick_rules", "pick_rules_run"])?;
+    add_columns(
+        store,
+        "pick",
+        &["rules_scope_kind", "rules_scope_id", "rules_version"],
+    )?;
+    add_columns(store, "release", &["pick_rules"])
+}
 
 /// Wave 7a (2026-10-10, found trying the desk): a dataset whose PatientID
 /// held an identifying ID that is the same everywhere failed at its first
@@ -2875,6 +2957,77 @@ mod tests {
 #[cfg(test)]
 mod column_migration {
     use super::*;
+
+    /// Record 56 (2026-10-11): the open quarantine items of a policy class an
+    /// older digest filed are superseded; a reader's class stays open, and an
+    /// item a person decided keeps its decision.
+    #[test]
+    fn an_open_item_about_files_set_aside_by_policy_is_superseded() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 88) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        for (id, class, status) in [
+            (1, "unsupported_sop_class", "open"),
+            (2, "unsupported_modality", "open"),
+            (3, "not_dicom", "open"),
+            (4, "missing_modality", "open"),
+            (5, "unsupported_sop_class", "accepted"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO review_item (id, kind, scope, ref, evidence, status, created_at) \
+                         VALUES ({id}, 'ingest.quarantine', 'batch', '{{\"batch_id\": 2, \"class\": \"{class}\"}}', \
+                         '{{\"count\": 3}}', '{status}', '2026-10-10T00:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // another kind with a class of the same name is not the digest's
+        store
+            .execute(
+                "INSERT INTO review_item (id, kind, scope, ref, status, created_at) \
+                 VALUES (6, 'identity.unmapped', 'batch', '{\"class\": \"unsupported_sop_class\"}', 'open', 't')",
+                &[],
+            )
+            .unwrap();
+        a_file_set_aside_by_policy_asks_nobody(&mut store, Kind::Registry).unwrap();
+        // and again, because a migration that has run must be safe to run
+        a_file_set_aside_by_policy_asks_nobody(&mut store, Kind::Registry).unwrap();
+        let rows = store
+            .query(
+                "SELECT id, status, actor, decided_at IS NOT NULL FROM review_item ORDER BY id",
+                &[],
+            )
+            .unwrap();
+        let got: Vec<(i64, String, Option<String>, i64)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.int(0).unwrap(),
+                    r.text(1).unwrap().to_string(),
+                    r.opt_text(2).unwrap().map(str::to_string),
+                    r.int(3).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (1, "superseded".to_string(), Some("nils".to_string()), 1),
+                (2, "superseded".to_string(), Some("nils".to_string()), 1),
+                (3, "open".to_string(), None, 0),
+                (4, "open".to_string(), None, 0),
+                (5, "accepted".to_string(), None, 0),
+                (6, "open".to_string(), None, 0),
+            ]
+        );
+        // a linkage store has no review items
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        a_file_set_aside_by_policy_asks_nobody(&mut linkage, Kind::Linkage).unwrap();
+    }
 
     /// A registry written before Wave 2's passes opens under this binary with
     /// the two columns added rather than being rebuilt.

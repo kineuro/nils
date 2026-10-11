@@ -290,6 +290,11 @@ pub fn cached(
     let hash = prepared.hash.clone();
     let mut ask = prepared.ask;
     inline_selections(registry, &mut ask)?;
+    // one place of truth for the main scans (2026-10-11): a pick run moves
+    // no epoch, so an answer that reads picks is never the cache's
+    if reads_picks(&ask) {
+        return Ok(None);
+    }
     let epoch_now = registry.meta().epoch;
     for s in ask.sets.values() {
         if let Some(Src::Handle { id, .. }) = &s.from {
@@ -318,6 +323,23 @@ pub fn cached(
         &suppression,
     )?
     .map(|h| (h, hash)))
+}
+
+/// Whether an ask reads the main scans: a `picked` clause, or a set from a
+/// role (`from: role:t1w`), anywhere in it.
+fn reads_picks(ask: &Ask) -> bool {
+    fn walk(v: &Value) -> bool {
+        match v {
+            Value::Array(items) => {
+                items.first().and_then(Value::as_str) == Some("picked") || items.iter().any(walk)
+            }
+            Value::Object(m) => m.iter().any(|(k, v)| {
+                (k == "from" && v.as_str().is_some_and(|f| f.starts_with("role:"))) || walk(v)
+            }),
+            _ => false,
+        }
+    }
+    serde_json::to_value(ask).is_ok_and(|v| walk(&v))
 }
 
 fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Outcome, RunError> {

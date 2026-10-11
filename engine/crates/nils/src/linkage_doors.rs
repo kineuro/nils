@@ -762,21 +762,48 @@ fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Re
         })
         .collect();
     // the subjects its pseudonymised files carry, and how many of them were
-    // coded without a map
+    // coded without a map: since 2026-10-10 a subject code made from the ID
+    // is final and marks nothing, so a subject is of a map when the map
+    // filed an identity of it (`csv`), and generated otherwise or where an
+    // older engine marked it provisional
     let store = registry.store();
     let sql = format!(
-        "SELECT COUNT(DISTINCT f.subject_id), COUNT(DISTINCT CASE WHEN s.provisional = 1 THEN f.subject_id END) \
+        "SELECT DISTINCT f.subject_id, s.provisional \
          FROM {} f JOIN {} s ON s.id = f.subject_id \
          WHERE f.place_id = {} AND f.state IN ('written', 'unchanged')",
         store.qualified(HELD_TABLE),
         store.qualified("subject"),
         store.dialect().param(1, Type::Int)
     );
-    let row = &store.query(&sql, &[Param::Int(p.id)])?[0];
+    let mut coded: Vec<(i64, bool)> = Vec::new();
+    for r in store.query(&sql, &[Param::Int(p.id)])? {
+        coded.push((r.int(0)?, r.opt_int(1)?.unwrap_or(0) == 1));
+    }
+    coded.sort_unstable();
+    coded.dedup_by_key(|(s, _)| *s);
+    let mut of_a_map: BTreeSet<i64> = BTreeSet::new();
+    for chunk in coded.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT subject_id FROM {} WHERE source = 'csv' AND subject_id IN ({})",
+            linkage.qualified("identity"),
+            chunk
+                .iter()
+                .map(|(s, _)| s.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in linkage.query(&sql, &[])? {
+            of_a_map.insert(r.int(0)?);
+        }
+    }
+    let generated = coded
+        .iter()
+        .filter(|(s, provisional)| *provisional || !of_a_map.contains(s))
+        .count();
     doc["files"] = serde_json::json!(files);
     doc["identifiers"] = serde_json::json!(held.len());
     doc["ids"] = serde_json::Value::from(ids);
-    doc["subjects"] = serde_json::json!({"coded": row.int(0)?, "generated": row.int(1)?});
+    doc["subjects"] = serde_json::json!({"coded": coded.len(), "generated": generated});
     Ok(Reply::ok(doc))
 }
 
@@ -1870,6 +1897,9 @@ mod tests {
         file(&mut registry, ward_b, None, "written", Some(1), None);
         file(&mut registry, ward_b, None, "written", Some(2), None);
         file(&mut registry, ward_a, None, "written", Some(1), None);
+        // sub-seven's code was made from its ID (final since 2026-10-10, no
+        // provisional mark) and one of its files is written
+        file(&mut registry, ward_b, None, "written", Some(7), None);
 
         // a map names CD789 as sub-one, filed: its files are released
         let Ok((key, subkeys)) = keys_of(&registry) else {
@@ -2014,9 +2044,11 @@ mod tests {
         assert_eq!(r.body["ids"][0]["code"], serde_json::Value::Null);
         assert_eq!(r.body["ids"][0]["first_seen"], "2026-10-01T00:00:00Z");
         assert_eq!(r.body["ids"][0]["batch"], 5);
+        // coded without a map: sub-two, marked provisional by an older
+        // engine, and sub-seven, of no map; sub-one is the map's
         assert_eq!(
             r.body["subjects"],
-            serde_json::json!({"coded": 2, "generated": 1})
+            serde_json::json!({"coded": 3, "generated": 2})
         );
         // below detail quasi a code is its shape
         let r = call(
@@ -2452,8 +2484,9 @@ mod tests {
         values.sort_unstable();
         assert_eq!(values, ["P1", "P2"]);
 
-        // coded anyway: the next digest of the dataset codes them, marks the
-        // subjects provisional, and the door empties
+        // coded anyway: the next digest of the dataset codes them, and the
+        // door empties; since 2026-10-10 a subject code made from the ID is
+        // final, so no subject is marked provisional
         let r = call(
             &home,
             &mut registry,
@@ -2480,12 +2513,16 @@ mod tests {
             sources["sources"][0]["held"],
             serde_json::json!({"files": 0, "identifiers": 0})
         );
-        let provisional = registry
-            .store()
-            .query("SELECT COUNT(*) FROM subject WHERE provisional = 1", &[])
-            .unwrap()[0]
-            .int(0)
-            .unwrap();
-        assert_eq!(provisional, 2);
+        let count = |registry: &mut Registry, sql: &str| -> i64 {
+            registry.store().query(sql, &[]).unwrap()[0].int(0).unwrap()
+        };
+        assert_eq!(
+            count(
+                &mut registry,
+                "SELECT COUNT(*) FROM subject WHERE provisional = 1"
+            ),
+            0
+        );
+        assert!(count(&mut registry, "SELECT COUNT(*) FROM subject") >= 2);
     }
 }

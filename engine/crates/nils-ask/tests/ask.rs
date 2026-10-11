@@ -1167,3 +1167,53 @@ fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
     assert_eq!(id_of(&fixture, "T1w").as_deref(), Some("T1w"));
     assert!(fixture.synonyms().is_empty());
 }
+
+/// 2026-10-11: the chat took the main scans for the pick clause and drafted
+/// `pick: {model: main}` and a role written as an op eight times. Each
+/// refusal now says that the main scans are `picked` in a where, and the
+/// operator itself is accepted on a stack.
+#[test]
+fn the_main_scans_are_picked_in_a_where_never_the_pick_clause() {
+    let text = r#"
+ast_version: 1
+scheme: default
+sets:
+  t1: {grain: stack, pick: {per: session, model: main, by: [[["field", {}, "id"], asc]]}}
+out: {set: t1, level: count}
+"#;
+    for e in [
+        parse(text).expect_err("model is no key of pick"),
+        parse_repaired(text).expect_err("repair adds no key"),
+    ] {
+        let m = e.to_string();
+        assert!(m.contains("unknown field `model`"), "{m}");
+        assert!(m.contains(r#"[["picked", {role: t1w}]]"#), "{m}");
+    }
+    // a role written as an op names the operator, with that role
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["t1w", {}]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+    let i = issues
+        .iter()
+        .find(|i| i.message == "t1w is not an op of the language")
+        .unwrap_or_else(|| panic!("{issues:?}"));
+    assert!(i.next.contains(r#"["picked", {role: t1w}]"#), "{}", i.next);
+    // an op that is no role keeps the catalog's next step
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["frobnicate", {}]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+    assert!(
+        issues.iter().any(|i| i.next.contains("function table")),
+        "{issues:?}"
+    );
+    // the operator is the language's
+    accepted(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["picked", {"role": "t1w"}]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+}

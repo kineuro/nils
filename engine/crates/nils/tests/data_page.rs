@@ -274,7 +274,9 @@ fn round(pg: Option<(String, String)>) {
                     VR::DS,
                     "1\\0\\0\\0\\1\\0",
                 ));
-                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"));
+                // 16 pixels of 16 mm: a brain's 256 mm across, since the
+                // MRI pack gives no role to a slab under 175 mm both ways
+                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "16\\16"));
                 e.push(synth::text(tags::SLICE_THICKNESS, VR::DS, "2"));
                 e.push(synth::us(tags::SAMPLES_PER_PIXEL, 1));
                 e.push(synth::text(
@@ -2245,5 +2247,226 @@ fn a_dataset_holds_the_scans_its_tree_has_a_file_of_on_postgres_too() {
     };
     drop();
     copies(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+/// A part 10 file of a SOP class the read does not take, in a dataset's
+/// tree: a screen capture, a presentation state or a PDF.
+fn object_file(tree: &TempDir, patient: &str, study: &str, sop: &str, class: &str) {
+    let mut e = synth::minimal_mr(study, &format!("{study}.9"), sop);
+    e.retain(|x| x.tag != tags::SOP_CLASS_UID);
+    e.push(synth::text(tags::SOP_CLASS_UID, VR::UI, class));
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+    tree.file(
+        &format!("derivatives/dcm-anon/{study}/{sop}"),
+        &synth::part10(
+            &MetaFields::with("1.2.840.10008.1.2.1", class, sop),
+            &e,
+            true,
+        ),
+    );
+}
+
+/// Record 56 (2026-10-11): what a read set aside by policy is counted, not
+/// asked about. A dataset's screen capture, presentation states and PDF
+/// file no review item, and its summary counts them by kind in plain
+/// words; a file that is not DICOM still asks. A registry an older digest
+/// left an open item of a policy class in has it superseded when it opens
+/// under this binary.
+fn set_aside(pg: Option<(String, String)>) {
+    let home = Home {
+        dir: TempDir::new("data-page-set-aside"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let tree = TempDir::new("data-page-set-aside-ds");
+    scan_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.1",
+        "20260102",
+        "t1 mprage",
+    );
+    scan_file(&tree, "S-0001", "1.2.9.A", "1.2.9.A.2", "20260102", "flair");
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.1",
+        "1.2.840.10008.5.1.4.1.1.7",
+    );
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.2",
+        "1.2.840.10008.5.1.4.1.1.11.1",
+    );
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.3",
+        "1.2.840.10008.5.1.4.1.1.11.1",
+    );
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.4",
+        "1.2.840.10008.5.1.4.1.1.104.1",
+    );
+    tree.file("derivatives/dcm-anon/notes.txt", b"not a scan at all");
+    home.ok(&[
+        "place",
+        "add",
+        "ds",
+        tree.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "generated",
+    ]);
+    home.ok(&["digest", "--name", "ds", "--no-private", "@ds"]);
+
+    // only the file the reader could not take asks a person
+    let open_items = |home: &Home| -> Vec<String> {
+        let mut store = home.store();
+        let sql = format!(
+            "SELECT CAST(ref AS TEXT) FROM {} WHERE kind = 'ingest.quarantine' AND status = 'open' ORDER BY id",
+            store.qualified("review_item")
+        );
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let v: Value = serde_json::from_str(r.text(0).unwrap()).unwrap();
+                v["class"].as_str().unwrap().to_string()
+            })
+            .collect()
+    };
+    assert_eq!(open_items(&home), ["not_dicom"]);
+
+    let server = Worked::serve(&home, false);
+    let s = server.get("/api/datasets/ds/summary", READS);
+    assert_eq!(s["scans"], 2, "{s}");
+    assert_eq!(s["files"]["read"], 2, "{s}");
+    assert_eq!(s["files"]["refused"], 5, "{s}");
+    assert_eq!(s["files"]["set_aside"], 4, "{s}");
+    assert_eq!(
+        s["files"]["set_aside_kinds"],
+        json!([
+            {"kind": "presentation_state", "words": "presentation states", "count": 2},
+            {"kind": "pdf", "words": "PDFs", "count": 1},
+            {"kind": "screen_capture", "words": "screen captures", "count": 1},
+        ]),
+        "{s}"
+    );
+    // the link to what was refused goes to the batch of the file that asks
+    assert!(s["files"]["refused_batch"].as_i64().is_some(), "{s}");
+    let read = step(&s, "read");
+    assert_eq!(read["refused"], 5, "{s}");
+    assert_eq!(read["set_aside"], 4, "{s}");
+    drop(server);
+
+    // a registry an older digest left an item of a policy class in
+    {
+        let mut store = home.store();
+        let item = store.qualified("review_item");
+        let meta = store.qualified("registry_meta");
+        let json_text = |t: &str| match home.pg {
+            Some(_) => format!("CAST('{t}' AS JSONB)"),
+            None => format!("'{t}'"),
+        };
+        let at = match home.pg {
+            Some(_) => "CAST('2026-10-10T00:00:00Z' AS TIMESTAMPTZ)",
+            None => "'2026-10-10T00:00:00Z'",
+        };
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {item} (kind, scope, ref, evidence, status, created_at) VALUES \
+                     ('ingest.quarantine', 'batch', {}, {}, 'open', {at})",
+                    json_text(r#"{"batch_id": 1, "class": "unsupported_sop_class"}"#),
+                    json_text(r#"{"count": 4}"#),
+                ),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!("UPDATE {meta} SET value = '88' WHERE key = 'schema_version'"),
+                &[],
+            )
+            .unwrap();
+    }
+    assert_eq!(open_items(&home), ["not_dicom", "unsupported_sop_class"]);
+    // opening it under this binary supersedes the policy item, and the
+    // reader's stays open
+    home.ok(&["review", "list"]);
+    assert_eq!(open_items(&home), ["not_dicom"]);
+    let mut store = home.store();
+    let sql = format!(
+        "SELECT actor FROM {} WHERE status = 'superseded'",
+        store.qualified("review_item")
+    );
+    let actors: Vec<String> = store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert_eq!(actors, ["nils"]);
+}
+
+#[test]
+fn a_file_set_aside_by_policy_is_counted_and_asks_nobody() {
+    set_aside(None);
+}
+
+#[test]
+fn a_file_set_aside_by_policy_is_counted_and_asks_nobody_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_set_aside";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    set_aside(Some((dsn.clone(), schema.to_string())));
     drop();
 }

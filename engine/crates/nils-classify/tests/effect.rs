@@ -98,6 +98,19 @@ fn mri() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
 }
 
+/// The version a rules release of the shipped MRI pack ships as: its own
+/// with the patch number one up.
+fn next_patch() -> String {
+    let text = std::fs::read_to_string(mri().join("pack.yml")).unwrap();
+    let version = text
+        .lines()
+        .find_map(|l| l.strip_prefix("version: "))
+        .expect("pack.yml states its version")
+        .trim();
+    let (head, patch) = version.rsplit_once('.').unwrap();
+    format!("{head}.{}", patch.parse::<u64>().unwrap() + 1)
+}
+
 fn text(tag: dicom_core::Tag, vr: VR, v: &str) -> synth::Elem {
     synth::text(tag, vr, v)
 }
@@ -556,7 +569,7 @@ fn the_report_s_moves_and_questions_equal_a_full_re_sort_and_a_sealed_stack_is_n
         assert_eq!(answers["breaks"], 1, "{name}");
         // what it ships as, and what was replayed
         assert_eq!(doc["ships"]["as"], "rules release", "{name}");
-        assert_eq!(doc["ships"]["version"], "1.0.3", "{name}");
+        assert_eq!(doc["ships"]["version"], next_patch(), "{name}");
         assert_eq!(doc["scope"]["replayed"], "pack", "{name}");
     }
 }
@@ -800,8 +813,10 @@ fn a_change_to_the_pick_file_is_scored_by_the_patched_pick_and_equals_two_pick_r
         // has no pick
         assert_eq!(want.get("changed"), Some(&1), "{name}: {want:?}");
         assert_eq!(want.get("removed"), Some(&1), "{name}: {want:?}");
-        // and the Siemens one written twice is a retake both ways
-        assert_eq!(want.get("still"), Some(&1), "{name}: {want:?}");
+        // and the Siemens one written twice asks nothing either way: under
+        // the rules (record 55, decision 6) the later full repeat settles it
+        assert_eq!(want.get("still"), None, "{name}: {want:?}");
+        assert_eq!(want.get("raised"), None, "{name}: {want:?}");
         assert_eq!(
             picks["moved"].as_i64().unwrap(),
             picks["changed"].as_i64().unwrap()

@@ -206,14 +206,19 @@ type LeftOut = Vec<(i64, String)>;
 pub(crate) fn pick_roles(
     store: &mut Store,
     stacks: &[i64],
+    of: &nils_registry::pick_truth::Of,
 ) -> Result<BTreeMap<i64, Picked>, String> {
+    // record 55, decision 6, and one place of truth (2026-10-11): the picks
+    // a release read (its pick_rules), or the main scans as every reader
+    // reads them
+    let picks = of.picks(store);
     let err = |e: nils_registry::Error| e.to_string();
     let mut out: BTreeMap<i64, Picked> = BTreeMap::new();
     let d_ = store.dialect();
     for chunk in stacks.chunks(500) {
         let sql = format!(
-            "SELECT ps.stack_id, p.subject_id, {}, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-             WHERE p.withdrawn_at IS NULL AND ps.stack_id IN ({}) ORDER BY ps.stack_id",
+            "SELECT ps.stack_id, p.subject_id, {}, p.role FROM {} ps JOIN {picks} p ON p.id = ps.pick_id \
+             WHERE ps.stack_id IN ({}) ORDER BY ps.stack_id",
             d_.text_of_qualified(
                 Some("p"),
                 nils_registry::schema::table("pick")
@@ -221,7 +226,6 @@ pub(crate) fn pick_roles(
                     .expect("pick.session_day")
             ),
             store.qualified("pick_stack"),
-            store.qualified("pick"),
             list(chunk)
         );
         for r in store.query(&sql, &[]).map_err(err)? {
@@ -324,7 +328,11 @@ fn bids_units(
     stacks: &[i64],
     pack: Option<&nils_pack::Pack>,
 ) -> Result<(Vec<Unit>, LeftOut), String> {
-    let picks = pick_roles(registry.store(), stacks)?;
+    // a run's input is a selection, released under the main scans as the
+    // release of one reads them: each subject's own dataset's once read,
+    // else the pack's (one place of truth, 2026-10-11)
+    let of = nils_registry::pick_truth::Of::own(registry.store()).map_err(|e| e.to_string())?;
+    let picks = pick_roles(registry.store(), stacks, &of)?;
     let unpicked = "no live pick takes it, so the release of the input leaves it out".to_string();
     let mut left: LeftOut = stacks
         .iter()
@@ -418,7 +426,7 @@ fn bids_units(
         if let (Some(subject), Some(day)) = (u.subject_id, u.session_day.as_deref())
             && !u.missing.is_empty()
         {
-            let said = picked_nothing(registry.store(), subject, day)?;
+            let said = picked_nothing(registry.store(), &of, subject, day)?;
             for (role, pick) in said {
                 let not_picked = format!("no {role} is picked");
                 for why in u.missing.iter_mut().filter(|w| w.starts_with(&not_picked)) {
@@ -437,16 +445,17 @@ fn bids_units(
 /// where the run picked nothing), each with that pick's id.
 fn picked_nothing(
     store: &mut Store,
+    of: &nils_registry::pick_truth::Of,
     subject: i64,
     day: &str,
 ) -> Result<BTreeMap<String, i64>, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let d = store.dialect();
     let sql = format!(
-        "SELECT p.id, p.role FROM {} p WHERE p.author_kind = 'person' AND p.withdrawn_at IS NULL \
+        "SELECT p.id, p.role FROM {} p WHERE p.author_kind = 'person' \
          AND p.subject_id = {} AND p.session_day = {} \
          AND NOT EXISTS (SELECT 1 FROM {} ps WHERE ps.pick_id = p.id) ORDER BY p.id",
-        store.qualified("pick"),
+        of.picks(store),
         d.param(1, nils_registry::schema::Type::Int),
         d.param(2, nils_registry::schema::Type::Date),
         store.qualified("pick_stack"),

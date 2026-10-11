@@ -473,6 +473,53 @@ fn step(name: &str, state: &str, job: Option<&Light>, counts: Value) -> Value {
     doc
 }
 
+/// One kind of file a read set aside by policy, in the words of
+/// `nils_dicom::set_aside_words`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetAside {
+    pub(crate) kind: &'static str,
+    pub(crate) words: &'static str,
+    pub(crate) count: i64,
+}
+
+/// The policy classes as a SQL list of their names.
+fn policy_reasons() -> String {
+    nils_dicom::QuarantineClass::ALL
+        .into_iter()
+        .filter(|c| c.is_policy_class())
+        .map(|c| format!("'{}'", c.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Record 56 (2026-10-11): the files of the sources the read set aside by
+/// policy (a SOP class or a modality outside the batch's knobs), by kind in
+/// plain words, most first. They ask nobody anything; the files the reader
+/// could not take keep their review item and are not counted here.
+pub(crate) fn set_aside_of(store: &mut Store, sources: &str) -> Result<Vec<SetAside>, StoreError> {
+    let sql = format!(
+        "SELECT reason, detail, COUNT(*) FROM {} WHERE source_id IN ({sources}) \
+         AND status = 'quarantined' AND reason IN ({}) GROUP BY reason, detail",
+        store.qualified("source_file"),
+        policy_reasons()
+    );
+    let mut by: std::collections::BTreeMap<&'static str, (&'static str, i64)> =
+        std::collections::BTreeMap::new();
+    for r in store.query(&sql, &[])? {
+        let Some(class) = nils_dicom::QuarantineClass::from_name(r.text(0)?) else {
+            continue;
+        };
+        let (kind, words) = nils_dicom::set_aside_words(class, r.opt_text(1)?);
+        by.entry(kind).or_insert((words, 0)).1 += r.int(2)?;
+    }
+    let mut out: Vec<SetAside> = by
+        .into_iter()
+        .map(|(kind, (words, count))| SetAside { kind, words, count })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(b.kind)));
+    Ok(out)
+}
+
 /// The summary of one dataset, as `GET /api/datasets/{name}/summary`
 /// answers it.
 pub(crate) fn document(
@@ -525,6 +572,9 @@ pub(crate) fn document(
     // files (the duplicate policy's defaults, 2026-10-10)
     let (mut left_out, mut gone, mut identity_questions) = (0, 0, 0);
     let mut refused_batch: Option<i64> = None;
+    // record 56 (2026-10-11): the files the read set aside by policy, which
+    // ask nobody anything, by kind in plain words
+    let mut set_aside: Vec<SetAside> = Vec::new();
     let mut certainty = crate::certainty::Certainty::default();
     let mut passes = 0;
     let (mut kinds, mut regions) = (Vec::new(), Vec::new());
@@ -660,10 +710,15 @@ pub(crate) fn document(
         )
         .map_err(failed)?;
         twice = (copies - known).max(0);
+        set_aside = set_aside_of(store, &sources).map_err(failed)?;
+        // the newest batch that refused a file a person may look at: none
+        // set aside by policy, none held for its instance
         refused_batch = store
             .query(
                 &format!(
-                    "SELECT MAX(batch_id) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
+                    "SELECT MAX(batch_id) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                     AND (reason IS NULL OR (reason NOT LIKE '{same}%' AND reason NOT IN ({})))",
+                    policy_reasons()
                 ),
                 &[],
             )
@@ -782,6 +837,7 @@ pub(crate) fn document(
             json!({"files": copied, "waiting": waiting, "held": held}),
         ));
     }
+    let set_aside_total: i64 = set_aside.iter().map(|k| k.count).sum();
     let open = open_of(&["digest", "ingest"]);
     let mut read_step = step(
         "read",
@@ -790,7 +846,7 @@ pub(crate) fn document(
         json!({
             "files": read, "new": new, "known": known, "twice": twice,
             "same_instance": same_instance, "left_out": left_out, "gone": gone,
-            "refused": refused, "reads": reads,
+            "refused": refused, "set_aside": set_aside_total, "reads": reads,
         }),
     );
     if read_step["job"].is_null()
@@ -945,6 +1001,11 @@ pub(crate) fn document(
             "gone": gone,
             "refused": refused,
             "refused_batch": refused_batch,
+            "set_aside": set_aside_total,
+            "set_aside_kinds": set_aside
+                .iter()
+                .map(|k| json!({"kind": k.kind, "words": k.words, "count": k.count}))
+                .collect::<Vec<_>>(),
             "held": held,
         },
         "pictures_place": working.map(|w| w.name),

@@ -99,6 +99,19 @@ impl Scope {
         })
     }
 
+    /// Whose picks the viewer reads, as the one resolver says
+    /// (`nils_registry::pick_truth`): this dataset's or cohort's own once
+    /// read, else the pack's (record 55, decision 6; 2026-10-11).
+    pub(crate) fn picks(&self) -> nils_registry::pick_truth::Of {
+        use nils_registry::pick_truth::Of;
+        match self {
+            Scope::Dataset { place, sources } => {
+                Of::dataset(place.id, &place.name, sources.clone())
+            }
+            Scope::Cohort(c) => Of::cohort(c.id, &c.name),
+        }
+    }
+
     /// The cohort a door names, retired or not.
     pub(crate) fn cohort(registry: &mut Registry, name: &str) -> Result<Scope, Reply> {
         match nils_registry::cohort::by_name(registry.store(), name).map_err(failed)? {
@@ -432,16 +445,26 @@ fn axes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Axes>, Stor
 }
 
 /// The roles of the live picks naming each of these stacks: a pick no
-/// person withdrew or overruled.
-fn picked(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+/// person withdrew or overruled, of the scope the viewer was opened from
+/// once it is read, else the pack's; opened from none, each subject's own
+/// dataset's (record 55, decision 6; one place of truth, 2026-10-11).
+fn picked(
+    store: &mut Store,
+    stacks: &[i64],
+    scope: Option<&Scope>,
+) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+    let picks = match scope {
+        Some(s) => s.picks(),
+        None => nils_registry::pick_truth::Of::own(store)?,
+    }
+    .picks(store);
     let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
     for chunk in stacks.chunks(IN_CHUNKS) {
         for r in store.query(
             &format!(
-                "SELECT ps.stack_id, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-                 WHERE p.withdrawn_at IS NULL AND ps.stack_id IN ({})",
+                "SELECT ps.stack_id, p.role FROM {} ps JOIN {picks} p ON p.id = ps.pick_id \
+                 WHERE ps.stack_id IN ({})",
                 store.qualified("pick_stack"),
-                store.qualified("pick"),
                 list(chunk)
             ),
             &[],
@@ -750,13 +773,12 @@ pub(crate) fn subjects(
     if let Some(holds) = &holds {
         let from = stacks_from(store);
         let q = |t: &str| store.qualified(t);
-        let (subject, study, cached, axis, fp, pick, pick_stack) = (
+        let (subject, study, cached, axis, fp, pick_stack) = (
             q("subject"),
             q("study"),
             q("session_cache_study"),
             q("classification_axis"),
             q("stack_fingerprint"),
-            q("pick"),
             q("pick_stack"),
         );
         // the scans, by subject
@@ -838,14 +860,16 @@ pub(crate) fn subjects(
                 f.makers.insert(m);
             }
         }
-        // the roles of the live picks among the scope's scans
+        // the roles of the live picks among the scope's scans, the scope's
+        // own where it has main-scan rules (record 55, decision 6)
+        let pick = scope.picks().picks(store);
         for r in store
             .query(
                 &format!(
                     "SELECT DISTINCT se.subject_id, p.role FROM {from} \
                      JOIN {pick_stack} ps ON ps.stack_id = st.id \
                      JOIN {pick} p ON p.id = ps.pick_id \
-                     WHERE {holds} AND p.withdrawn_at IS NULL"
+                     WHERE {holds}"
                 ),
                 &[],
             )
@@ -1132,7 +1156,7 @@ pub(crate) fn visits(
             .collect(),
         None => HashSet::new(),
     };
-    let picks = picked(store, &ids).map_err(failed)?;
+    let picks = picked(store, &ids, Some(scope)).map_err(failed)?;
     let mains: Vec<i64> = {
         let mut m: Vec<i64> = picks.keys().copied().collect();
         m.sort_unstable();
@@ -1290,7 +1314,11 @@ pub(crate) fn visits(
 /// the echo, repetition and inversion times (milliseconds) and the flip
 /// angle (degrees) from its fingerprint, or null; and `main`, the roles of
 /// the live picks naming it. None of it is quasi-identifying.
-pub(crate) fn with_facts(registry: &mut Registry, doc: &mut Value) -> Result<(), Reply> {
+pub(crate) fn with_facts(
+    registry: &mut Registry,
+    doc: &mut Value,
+    scope: &Scope,
+) -> Result<(), Reply> {
     let stacks: Vec<i64> = doc["scans"]
         .as_array()
         .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
@@ -1321,7 +1349,7 @@ pub(crate) fn with_facts(registry: &mut Registry, doc: &mut Value) -> Result<(),
             );
         }
     }
-    let picks = picked(store, &stacks).map_err(failed)?;
+    let picks = picked(store, &stacks, Some(scope)).map_err(failed)?;
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();
