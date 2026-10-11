@@ -5207,6 +5207,7 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
         unread.is_some(),
         picks,
     );
+    let then = chain::picks_named(then, packs.as_deref());
     let name = first
         .iter()
         .position(|w| w == "--name")

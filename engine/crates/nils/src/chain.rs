@@ -97,6 +97,24 @@ pub(crate) fn pick_step(place: &Place, pack: Option<&str>) -> Vec<String> {
     pick
 }
 
+/// The steps of a chain the keyboard queues, each pick run naming the pack
+/// directory the keyboard's nils found, as the jobs door names the
+/// deployment's on every pick run it queues: the worker knows none of its
+/// own, and a chain queued from the keyboard passes no door.
+pub(crate) fn picks_named(
+    mut steps: Vec<Vec<String>>,
+    pack_dir: Option<&std::path::Path>,
+) -> Vec<Vec<String>> {
+    if let Some(dir) = pack_dir {
+        for step in steps.iter_mut().filter(|s| {
+            s.len() >= 2 && s[0] == "pick" && s[1] == "run" && !s.iter().any(|w| w == "--pack-dir")
+        }) {
+            step.extend(["--pack-dir".to_string(), dir.display().to_string()]);
+        }
+    }
+    steps
+}
+
 /// What `bring-in @dataset [--name N] [--pack P]` stands for: the first
 /// command and the ones after it. An identified dataset is pseudonymised
 /// first; any other has no first step and starts with the digest. The
@@ -532,6 +550,25 @@ mod tests {
         );
         let (_, then) = bring_in(&place("deidentified"), None, None, Some(dir), false, true);
         assert_eq!(then[1], ["classify", "--pack-dir", "/srv/packs"]);
+        // queued from the keyboard, the pick run names them too, and the
+        // sort names them once
+        let (_, then) = bring_in(&fed, Some("b"), Some("mri"), Some(dir), false, true);
+        let named = picks_named(then.clone(), Some(dir));
+        assert_eq!(
+            named[3],
+            [
+                "pick",
+                "run",
+                "--dataset",
+                "scans",
+                "--pack",
+                "mri",
+                "--pack-dir",
+                "/srv/packs"
+            ]
+        );
+        assert_eq!(named[2], then[2]);
+        assert_eq!(picks_named(then.clone(), None), then);
     }
 
     #[test]

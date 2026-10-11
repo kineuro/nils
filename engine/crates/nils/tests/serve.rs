@@ -5438,7 +5438,12 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         "the digest's tree located: {queued}"
     );
     assert_eq!(then[1], serde_json::json!(["fingerprint"]), "{queued}");
-    assert_eq!(then[2], serde_json::json!(["classify"]), "{queued}");
+    // the sort names the packs the engine serves (the T33 pipe test)
+    assert_eq!(
+        then[2],
+        serde_json::json!(["classify", "--pack-dir", packs()]),
+        "{queued}"
+    );
     let first = queued["job"].as_i64().unwrap();
     let mut ids = vec![first];
     let mut job = wait(first);
@@ -5478,8 +5483,15 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(picked["kind"], "pick", "{picked}");
     assert_eq!(
         picked["args"]["queued"],
-        serde_json::json!(["pick", "run", "--after-sort", sort.to_string()]),
-        "{picked}"
+        serde_json::json!([
+            "pick",
+            "run",
+            "--after-sort",
+            sort.to_string(),
+            "--pack-dir",
+            packs()
+        ]),
+        "{picked}: the sort's packs"
     );
     assert_eq!(picked["chain"]["before"], sort, "{picked}");
     assert_eq!(picked["args"]["principal"], "ops@lab", "{picked}");
@@ -5701,7 +5713,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let ended = marked(second, |j| j["result"]["chain_ended"].clone());
     assert_eq!(
         ended["skipped"],
-        serde_json::json!([["fingerprint"], ["classify"]]),
+        serde_json::json!([["fingerprint"], ["classify", "--pack-dir", packs()]]),
         "{ended}"
     );
     assert!(
