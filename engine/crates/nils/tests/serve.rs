@@ -633,6 +633,73 @@ fn the_event_stream_is_display_plumbing() {
     server.finish();
 }
 
+/// 2026-10-11: the capabilities answer while the host's container runtime
+/// is slow to say what it is. The door ran `podman info` itself whenever
+/// its finding was half a minute old, which took 5 s on a busy laptop, and
+/// the desk, which gives the engine 5 s, said every half minute that the
+/// engine did not answer. The look now runs behind the doors.
+#[test]
+fn the_capabilities_answer_while_a_slow_runtime_is_looked_at() {
+    let home = registry();
+    let bin = TempDir::new("serve-slow-runtime-bin");
+    // a podman that takes 6 s to say it is rootless, and no GPU
+    let podman = bin.file(
+        "podman",
+        b"#!/bin/sh\nif [ \"$1\" = info ]; then sleep 6; echo true; exit 0; fi\necho 'podman version 9.9.9-test'\n",
+    );
+    let smi = bin.file("nvidia-smi", b"#!/bin/sh\nexit 1\n");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&podman, &smi] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let server = Server::start(&home, 1000, &[], &[("PATH", &path)]);
+    let within = std::time::Duration::from_secs(3);
+    let timed = |server: &Server| {
+        let at = std::time::Instant::now();
+        let (status, doc) = server.request("GET", "/api/capabilities", None, None);
+        (status, doc, at.elapsed())
+    };
+    // while the first look is out, the door answers, and says pipelines wait
+    for _ in 0..3 {
+        let (status, doc, took) = timed(&server);
+        assert_eq!(status, 200, "{doc}");
+        assert!(took < within, "the capabilities took {took:?} while podman was asked");
+        assert_eq!(doc["pipelines"]["enabled"], false, "{doc}");
+    }
+    // and several callers at once are not held behind one another
+    std::thread::scope(|s| {
+        let calls: Vec<_> = (0..3).map(|_| s.spawn(|| timed(&server))).collect();
+        for c in calls {
+            let (status, _, took) = c.join().unwrap();
+            assert_eq!(status, 200);
+            assert!(took < within, "a capabilities read took {took:?}");
+        }
+    });
+    // the look comes back behind the door and the next read has its finding
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (status, doc, took) = timed(&server);
+        assert_eq!(status, 200, "{doc}");
+        assert!(took < within, "the capabilities took {took:?}");
+        if doc["pipelines"]["runtime"]["name"] == "podman" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the look behind the door never came back: {}",
+            doc["pipelines"]
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Wave 4a §11.2: the `oidc` mode. The engine validates the token against
 /// the issuer's keys and audience, maps groups to grants, makes the subject
 /// the audit principal, and keeps no user table beyond a cache of claims.

@@ -1118,6 +1118,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     if let Ok(mut registry) = home.open() {
         let line = crate::starter::at_start(&mut registry);
         let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes());
+        // 2026-10-11: the look for a container runtime runs behind the
+        // doors from here on, never on a door's thread
+        crate::pipelines::look_behind(&mut registry);
     }
     let ask_caps = match &args.ask_caps {
         Some(text) => {
