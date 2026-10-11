@@ -4412,8 +4412,9 @@ fn derivative_answers(store: &mut Store, item_id: i64, id: i64, kind: &str) -> R
     })?;
     if d.kind != kind {
         return Err(invalid(format!(
-            "derivative {id} is a {}, and the question asks for a {kind}",
-            d.kind
+            "derivative {id} is {}, and the question asks for {}",
+            crate::a_or_an(&d.kind),
+            crate::a_or_an(kind)
         )));
     }
     if d.withdrawn_at.is_some() {
@@ -4557,7 +4558,8 @@ pub fn answer_with(
         }
         (kind, Some(_)) => {
             return Err(invalid(format!(
-                "a {kind} is not a model; only a model's answer names a model"
+                "{} is not a model; only a model's answer names a model",
+                crate::a_or_an(kind)
             )));
         }
         _ => {}
@@ -6715,10 +6717,10 @@ fn close_items(
                     out.refused.push((
                         it.id,
                         format!(
-                            "a check is a person's decision and is written in force; a model or an agent answered item {}, or {} closes as a {}: a person adjudicates it or closes the campaign",
+                            "a check is a person's decision and is written in force; a model or an agent answered item {}, or {} closes as {}: a person adjudicates it or closes the campaign",
                             it.position + 1,
                             cl.who,
-                            cl.author_kind
+                            crate::a_or_an(cl.author_kind)
                         ),
                     ));
                     out.unresolved += 1;
@@ -6783,7 +6785,10 @@ fn close_items(
                 if kind != "person" {
                     out.refused.push((
                         it.id,
-                        format!("a pick is a person's; {who} answered as a {kind}"),
+                        format!(
+                            "a pick is a person's; {who} answered as {}",
+                            crate::a_or_an(&kind)
+                        ),
                     ));
                     out.unresolved += 1;
                     continue;
@@ -6792,8 +6797,8 @@ fn close_items(
                     out.refused.push((
                         it.id,
                         format!(
-                            "a pick is a person's and is written in force; a model answered item {}, or {} closes as a {}: a person adjudicates it or closes the campaign",
-                            it.position, cl.who, cl.author_kind
+                            "a pick is a person's and is written in force; a model answered item {}, or {} closes as {}: a person adjudicates it or closes the campaign",
+                            it.position, cl.who, crate::a_or_an(cl.author_kind)
                         ),
                     ));
                     out.unresolved += 1;

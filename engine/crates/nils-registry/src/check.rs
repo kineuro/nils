@@ -1395,7 +1395,8 @@ impl Checked {
 fn a_persons(kind: &str) -> Result<(), Error> {
     if kind != "person" {
         return Err(Error::Forbidden(format!(
-            "a check is a person's decision; this caller acts as a {kind}"
+            "a check is a person's decision; this caller acts as {}",
+            crate::a_or_an(kind)
         )));
     }
     Ok(())
@@ -1408,8 +1409,8 @@ fn checkable(store: &mut Store, id: i64) -> Result<derivative::Derivative, Error
         .ok_or_else(|| Error::NotFound(format!("no derivative {id}")))?;
     if d.kind != "mask" {
         return Err(invalid(format!(
-            "derivative {id} is a {}; a check is of a mask",
-            d.kind
+            "derivative {id} is {}; a check is of a mask",
+            crate::a_or_an(&d.kind)
         )));
     }
     if d.withdrawn_at.is_some() {

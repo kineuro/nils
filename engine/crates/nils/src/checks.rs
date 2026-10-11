@@ -208,8 +208,8 @@ fn of_run_output(store: &mut Store, run: i64, output: &str) -> Result<Vec<Deriva
     };
     if o.kind != "mask" {
         return Err(bad(format!(
-            "source.output: {output} is a {}; a check is of a mask",
-            o.kind
+            "source.output: {output} is {}; a check is of a mask",
+            nils_registry::a_or_an(&o.kind)
         )));
     }
     let mut rows = derivative::list(
@@ -550,8 +550,8 @@ fn plan(
                 .ok_or_else(|| bad(format!("source.derivatives: no derivative {id}")))?;
             if d.kind != "mask" {
                 return Err(bad(format!(
-                    "source.derivatives: derivative {id} is a {}; a check is of a mask",
-                    d.kind
+                    "source.derivatives: derivative {id} is {}; a check is of a mask",
+                    nils_registry::a_or_an(&d.kind)
                 )));
             }
             if d.withdrawn_at.is_some() {

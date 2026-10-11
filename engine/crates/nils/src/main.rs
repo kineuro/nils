@@ -3153,8 +3153,8 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             let asked = dataset.asked()?;
             if dataset::fields_given(&asked) && role != Role::Source {
                 return Err(usage(format!(
-                    "the dataset flags belong to a source place, not a {} place",
-                    role.name()
+                    "the dataset flags belong to a source place, not {} place",
+                    nils_registry::a_or_an(role.name())
                 )));
             }
             let mut found = Vec::new();
@@ -3484,9 +3484,9 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             let dataset_given = dataset::fields_given(&asked);
             if dataset_given && current.role != Role::Source {
                 return Err(usage(format!(
-                    "the dataset flags belong to a source place; {} is a {} place",
+                    "the dataset flags belong to a source place; {} is {} place",
                     current.name,
-                    current.role.name()
+                    nils_registry::a_or_an(current.role.name())
                 )));
             }
             let mut found = Vec::new();
@@ -7146,7 +7146,8 @@ pub(crate) fn review_accept_as(
     let pick = if kind == nils_registry::review::PICK_BORDER_KIND {
         if author_kind != "person" {
             return Err(AcceptError::Forbidden(format!(
-                "keeping the run's pick on review item {id} writes a person's pick, and a {author_kind} acting for {who} does not write one"
+                "keeping the run's pick on review item {id} writes a person's pick, and {} acting for {who} does not write one",
+                nils_registry::a_or_an(author_kind)
             )));
         }
         Some(

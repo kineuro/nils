@@ -1653,7 +1653,8 @@ pub fn record_certificate(
 ) -> Result<Certificate, Error> {
     if author_kind != "person" {
         return Err(Error::Refused(format!(
-            "a certificate is a person's act, and {who} acts as a {author_kind}"
+            "a certificate is a person's act, and {who} acts as {}",
+            crate::a_or_an(author_kind)
         )));
     }
     let sample = sample.trim();
@@ -1830,7 +1831,8 @@ pub fn unseal(
 ) -> Result<Unsealed, Error> {
     if author_kind != "person" {
         return Err(Error::Refused(format!(
-            "unsealing a certified sample is a person's act, and {who} acts as a {author_kind}"
+            "unsealing a certified sample is a person's act, and {who} acts as {}",
+            crate::a_or_an(author_kind)
         )));
     }
     let store = registry.store();

@@ -1118,9 +1118,9 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             }
             for o in doc["outputs"].as_array().into_iter().flatten() {
                 println!(
-                    "  output           {}: a {} at {}",
+                    "  output           {}: {} at {}",
                     o["id"].as_str().unwrap_or_default(),
-                    o["kind"].as_str().unwrap_or_default(),
+                    nils_registry::a_or_an(o["kind"].as_str().unwrap_or_default()),
                     o["path-template"].as_str().unwrap_or_default()
                 );
             }

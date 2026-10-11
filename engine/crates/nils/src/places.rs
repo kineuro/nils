@@ -131,11 +131,11 @@ pub fn require(store: &mut Store, role: Role, path: &Path) -> Result<Option<Plac
     Err(Refusal {
         message: match elsewhere {
             Some(other) => format!(
-                "{} is under {}, a {} place; this verb writes only to a {} place ({}) (Wave 5 section 10.2)",
+                "{} is under {}, {} place; this verb writes only to {} place ({}) (Wave 5 section 10.2)",
                 path.display(),
                 other.name,
-                other.role.name(),
-                role.name(),
+                nils_registry::a_or_an(other.role.name()),
+                nils_registry::a_or_an(role.name()),
                 if places.is_empty() {
                     "none is declared".to_string()
                 } else {
@@ -143,9 +143,9 @@ pub fn require(store: &mut Store, role: Role, path: &Path) -> Result<Option<Plac
                 }
             ),
             None => format!(
-                "{} is under no declared place; this verb writes only to a {} place ({}) (Wave 5 section 10.2)",
+                "{} is under no declared place; this verb writes only to {} place ({}) (Wave 5 section 10.2)",
                 path.display(),
-                role.name(),
+                nils_registry::a_or_an(role.name()),
                 if places.is_empty() {
                     "none is declared; add one with nils place add".to_string()
                 } else {

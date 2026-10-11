@@ -350,8 +350,8 @@ pub fn check_registry_rule(store: &mut Store, role: Role, guarantees: &Value) ->
     match by_name(store, backup)? {
         Some(p) if p.role == Role::Backup && p.retired_at.is_none() => Ok(()),
         Some(p) => Err(Error::Message(format!(
-            "the registry role is refused: {backup} is a {} place, not a backup place (Wave 5 section 10.2)",
-            p.role.name()
+            "the registry role is refused: {backup} is {} place, not a backup place (Wave 5 section 10.2)",
+            crate::a_or_an(p.role.name())
         ))),
         None => Err(Error::Message(format!(
             "the registry role is refused: no place is named {backup}; add the backup place first (Wave 5 section 10.2)"
@@ -400,9 +400,9 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
         }
     } else if p.role != Role::Source {
         return Err(Error::Message(format!(
-            "a dataset is a source place; {} is a {} place",
+            "a dataset is a source place; {} is {} place",
             p.name,
-            p.role.name()
+            crate::a_or_an(p.role.name())
         )));
     } else {
         dataset_of(&p.dataset, None).map_err(Error::Message)?
@@ -1146,9 +1146,9 @@ pub fn set_dataset(store: &mut Store, id: i64, dataset: &Value) -> Result<Place,
     let current = show(store, id)?.ok_or_else(|| Error::Message(format!("no place {id}")))?;
     if current.role != Role::Source {
         return Err(Error::Message(format!(
-            "a dataset is a source place; {} is a {} place",
+            "a dataset is a source place; {} is {} place",
             current.name,
-            current.role.name()
+            crate::a_or_an(current.role.name())
         )));
     }
     let checked = dataset_of(dataset, None).map_err(Error::Message)?;
@@ -1185,9 +1185,9 @@ pub fn set_originals(
     let current = show(store, id)?.ok_or_else(|| Error::Message(format!("no place {id}")))?;
     if current.role != Role::Source {
         return Err(Error::Message(format!(
-            "a dataset is a source place; {} is a {} place",
+            "a dataset is a source place; {} is {} place",
             current.name,
-            current.role.name()
+            crate::a_or_an(current.role.name())
         )));
     }
     let asked = json!({

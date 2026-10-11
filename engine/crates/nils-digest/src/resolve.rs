@@ -633,7 +633,8 @@ fn id_type_of(linkage: &mut Store, name: &str) -> Result<IdType, HomeError> {
 
 pub(crate) fn missing_row(what: &str) -> HomeError {
     HomeError::Message(format!(
-        "a {what} row was neither inserted nor found; the store changed under the writer"
+        "{} row was neither inserted nor found; the store changed under the writer",
+        nils_registry::a_or_an(what)
     ))
 }
 

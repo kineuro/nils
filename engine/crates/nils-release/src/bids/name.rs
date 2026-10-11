@@ -144,7 +144,8 @@ impl std::fmt::Display for Why {
             Why::NoSuffix => f.write_str("nothing it says names a BIDS suffix"),
             Why::NotInSchema(d, s) => write!(
                 f,
-                "{s} is not a {d} suffix in BIDS {}",
+                "{s} is not {} suffix in BIDS {}",
+                nils_registry::a_or_an(d),
                 schema::BIDS_VERSION
             ),
             Why::Missing(e, s) => write!(f, "{s} requires {e} and the stack does not say"),

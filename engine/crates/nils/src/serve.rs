@@ -3046,8 +3046,8 @@ fn routed(
                     return Err(Reply::error(
                         400,
                         format!(
-                            "a dataset is a source place; {name} is declared as a {} place",
-                            role.name()
+                            "a dataset is a source place; {name} is declared as {} place",
+                            nils_registry::a_or_an(role.name())
                         ),
                     ));
                 }
@@ -3181,9 +3181,9 @@ fn routed(
                     return Err(Reply::error(
                         400,
                         format!(
-                            "a dataset is a source place; {} is a {} place",
+                            "a dataset is a source place; {} is {} place",
                             current.name,
-                            current.role.name()
+                            nils_registry::a_or_an(current.role.name())
                         ),
                     ));
                 }
@@ -3350,8 +3350,9 @@ fn routed(
                 return Err(Reply::error(
                     409,
                     format!(
-                        "overlay {id} was proposed by a {}, and a {kind} does not adopt over them",
-                        o.author_kind
+                        "overlay {id} was proposed by {}, and {} does not adopt over them",
+                        nils_registry::a_or_an(&o.author_kind),
+                        nils_registry::a_or_an(kind)
                     ),
                 ));
             }
@@ -4367,7 +4368,8 @@ fn routed(
                 return Err(Reply::error(
                     403,
                     format!(
-                        "a pick is written by a person; X-Nils-Actor names a {kind} acting for {principal}"
+                        "a pick is written by a person; X-Nils-Actor names {} acting for {principal}",
+                        nils_registry::a_or_an(kind)
                     ),
                 ));
             }
@@ -4622,7 +4624,8 @@ fn routed(
                 return Err(Reply::error(
                     403,
                     format!(
-                        "a pick is withdrawn by a person; X-Nils-Actor names a {kind} acting for {principal}"
+                        "a pick is withdrawn by a person; X-Nils-Actor names {} acting for {principal}",
+                        nils_registry::a_or_an(kind)
                     ),
                 ));
             }
