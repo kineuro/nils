@@ -629,8 +629,9 @@ pub(crate) struct SetupArgs {
     #[arg(long, value_name = "FILE", requires = "model_server")]
     model_key_file: Option<PathBuf>,
     /// With --model-server: the model the stations use; asked where there
-    /// is a terminal, and else the server's default or only model. Every
-    /// model the server offers is added beside it, up to eight
+    /// is a terminal, and else the server's default or only model. On the
+    /// first add, every model the server offers is added beside it, up to
+    /// eight
     #[arg(long, value_name = "ID", requires = "model_server")]
     model_server_model: Option<String>,
 }
@@ -13547,10 +13548,11 @@ fn offered_default(offered: &[serde_json::Value]) -> Option<String> {
 }
 
 /// A model server the stations use, held by Kvasir as one backend (record
-/// 47): its key sealed under the backend's name, every model the server
-/// offers admitted from its list with the stations' model asked last (Wave
-/// 7a; only the stations' model where it offers more than
-/// `SERVER_MODELS_AT_ONCE`), and each of the stations' purposes mapped to
+/// 47): its key sealed under the backend's name, on the first add every
+/// model the server offers admitted from its list with the stations' model
+/// asked last (Wave 7a; only the stations' model where Kvasir holds the
+/// server already or it offers more than `SERVER_MODELS_AT_ONCE`), and each
+/// of the stations' purposes mapped to
 /// that model. The stations' model is the one named, else the server's
 /// default, else its only one. The key is read from its file here and goes
 /// to Kvasir's credential door alone; it is never said or written. A key
@@ -13693,12 +13695,17 @@ fn use_model_server(
             }
         },
     };
-    // Every model the server offers is admitted beside the stations' one, so
-    // a person may pick any of them later (Wave 7a); the stations' one is
-    // asked last, so that it is the one left loaded on a server with one
-    // card. A server offering more than a handful, as a big provider does,
-    // gives the stations' one alone, and the rest are added from the desk.
-    let admitting: Vec<String> = if ids.len() > SERVER_MODELS_AT_ONCE {
+    // On the first add, every model the server offers is admitted beside the
+    // stations' one, so a person may pick any of them later (Wave 7a); the
+    // stations' one is asked last, so that it is the one left loaded on a
+    // server with one card. A server Kvasir holds already (an update, a
+    // rerun) is sent the stations' one alone, so a model a person removed in
+    // the desk stays removed. A server offering more than a handful, as a big
+    // provider does, gives the stations' one alone, and the rest are added
+    // from the desk.
+    let admitting: Vec<String> = if held.is_some() {
+        vec![model.clone()]
+    } else if ids.len() > SERVER_MODELS_AT_ONCE {
         console.say(&format!(
             "it offers {} models; add more from Settings > Kvasir",
             ids.len()
@@ -20541,7 +20548,8 @@ mod tests {
 
         // a model named goes the same way, on the backend Kvasir holds for
         // that server already, whose key is replaced under its own name, as
-        // an update with a new key file does
+        // an update with a new key file does; a server held already is sent
+        // the stations' model alone
         calls.lock().unwrap().clear();
         const NEWER: &str = "kvs_card0.the-servers-newer-secret";
         std::fs::write(&key_file, NEWER).unwrap();
@@ -20555,7 +20563,7 @@ mod tests {
         );
         assert!(
             seen.iter().any(|c| c.starts_with("POST /v1/servers ")
-                && c.contains(r#""models":["qwen38-27b","flash-next"]"#)
+                && c.contains(r#""models":["flash-next"]"#)
                 && c.contains(r#""id":"models-example-org""#)
                 && c.contains(r#""key_ref":"models-example-org""#)),
             "{seen:?}"
@@ -20695,9 +20703,16 @@ mod tests {
                 })
                 .count()
         };
+        // Kvasir holds the server no more, as before its first add
+        let forget = |held: &std::sync::Arc<std::sync::Mutex<Held>>| {
+            let mut held = held.lock().unwrap();
+            held.backends.clear();
+            held.sealed.clear();
+        };
 
-        // none named: the stations use the server's default, asked last,
-        // and the other model it offers is admitted before it
+        // none named, on the first add: the stations use the server's
+        // default, asked last, and the other model it offers is admitted
+        // before it
         assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
         assert_eq!(asked(&calls), vec![json!(["qwen38-27b", "flash-next"])]);
         assert_eq!(
@@ -20711,7 +20726,21 @@ mod tests {
             json!(["qwen38-27b", "flash-next"])
         );
 
+        // a server Kvasir holds already, as on an update or a rerun, is sent
+        // the stations' model alone: a model a person removed in the desk
+        // stays removed
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().backends[0]["models"] = json!(["flash-next"]);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(asked(&calls), vec![json!(["flash-next"])]);
+        assert_eq!(
+            held.lock().unwrap().backends[0]["models"],
+            json!(["flash-next"])
+        );
+        assert_eq!(mapped_to(&calls, "flash-next"), 2);
+
         // none named and no default: a server's only model is the stations'
+        forget(&held);
         calls.lock().unwrap().clear();
         held.lock().unwrap().offered = vec![json!({"id": "qwen38-27b", "status": "cold"})];
         assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
@@ -20725,6 +20754,7 @@ mod tests {
 
         // another model that does not answer, and one admission refuses,
         // are said and setup goes on with the stations' model
+        forget(&held);
         calls.lock().unwrap().clear();
         held.lock().unwrap().offered = vec![
             json!({"id": "silent"}),
@@ -20746,6 +20776,7 @@ mod tests {
 
         // the stations' model failing still stops an install, whatever the
         // others did
+        forget(&held);
         held.lock().unwrap().offered = vec![json!({"id": "qwen38-27b"}), json!({"id": "silent"})];
         plan.model_server.as_mut().unwrap().model = Some("silent".to_string());
         let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
@@ -20759,6 +20790,7 @@ mod tests {
 
         // a server offering more than eight, as a big provider does: the
         // stations' model alone, and the rest are left to the desk
+        forget(&held);
         calls.lock().unwrap().clear();
         held.lock().unwrap().offered = (0..9)
             .map(|n| json!({"id": format!("provider-model-{n}")}))
@@ -20768,6 +20800,7 @@ mod tests {
         assert_eq!(asked(&calls), vec![json!(["provider-model-4"])]);
         assert_eq!(mapped_to(&calls, "provider-model-4"), 2);
         // and with none named there, its default still goes alone
+        forget(&held);
         calls.lock().unwrap().clear();
         held.lock().unwrap().offered[7]["default"] = json!(true);
         plan.model_server.as_mut().unwrap().model = None;
