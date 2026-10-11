@@ -6322,7 +6322,8 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                         // a single frame: where it sits is its number
                         assert_eq!(geo["number_of_frames"], Value::Null, "{geo}");
                         assert_eq!((&geo["rows"], &geo["columns"]), (&json!(32), &json!(32)));
-                        assert_eq!(geo["pixel_spacing"], json!([1.0, 1.0]), "{geo}");
+                        // the tree's files are 32 pixels of 8 mm
+                        assert_eq!(geo["pixel_spacing"], json!([8.0, 8.0]), "{geo}");
                         let n = geo["instance_number"].as_f64().unwrap();
                         assert_eq!(geo["image_position_patient"], json!([n, 0.0, 0.0]), "{geo}");
                     }
