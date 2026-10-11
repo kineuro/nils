@@ -3669,6 +3669,7 @@ fn routed(
                     &place,
                     asked.name.as_deref(),
                     asked.pack.as_deref(),
+                    doors.pack_dir.as_deref(),
                     unread.is_some(),
                     picks,
                 );
@@ -5921,6 +5922,12 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         }
         _ => {}
     }
+    // the T33 pipe test: a sort reads the deployment's packs too, the
+    // worker knowing no pack directory of its own; a bring-in's chain names
+    // them already, a chain or a job the desk queues does not
+    let sorts = verb == "classify"
+        && command.get(1).is_none_or(|w| w.starts_with('-'))
+        && !command.iter().any(|w| w == "--pack-dir");
     let takes_a_tree =
         verb == "digest" || (verb == "linkage" && command.get(1).is_some_and(|c| c == "import"));
     // record 26: `@name` is the dataset's pseudonymised tree, and its
@@ -5994,6 +6001,9 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         } else {
             out.push(arg);
         }
+    }
+    if sorts && let Some(dir) = &doors.pack_dir {
+        out.extend(["--pack-dir".to_string(), dir.display().to_string()]);
     }
     Ok(out)
 }

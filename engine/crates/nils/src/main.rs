@@ -5195,13 +5195,15 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     let unread = chain::unread_in_tree(registry.store(), &dataset);
     // record 55 H2: a pick run ends the thread where the dataset feeds a
     // cohort and the pack declares picks
-    let picks = pack_dir(home, None)
-        .ok()
-        .is_some_and(|d| chain::pack_has_picks(Some(&d), args.pack.as_deref().unwrap_or("mri")));
+    let packs = pack_dir(home, None).ok();
+    let picks = packs
+        .as_deref()
+        .is_some_and(|d| chain::pack_has_picks(Some(d), args.pack.as_deref().unwrap_or("mri")));
     let (first, then) = chain::bring_in(
         &dataset,
         args.name.as_deref(),
         args.pack.as_deref(),
+        packs.as_deref(),
         unread.is_some(),
         picks,
     );

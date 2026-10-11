@@ -1457,13 +1457,21 @@ const READS: &str = "a-reader-token-of-its-length";
 
 impl Worked {
     fn start(home: &Home, ingest: &std::path::Path) -> Worked {
+        Worked::start_with(home, ingest, true)
+    }
+
+    /// With `packs_in_env` false, the engine and its worker know the packs
+    /// only from `--pack-dir`: an install whose packs are not where the
+    /// engine looks by itself, as the T33 pipe test's was.
+    fn start_with(home: &Home, ingest: &std::path::Path, packs_in_env: bool) -> Worked {
         use std::io::BufRead as _;
         let tokens = [
             format!("{OPS}=ops@lab:operator"),
             format!("{READS}=lou@lab:reader"),
         ]
         .join(",");
-        let child = nils()
+        let mut command = nils();
+        command
             .arg("--registry")
             .arg(home.dir.path())
             .args([
@@ -1476,9 +1484,14 @@ impl Worked {
             ])
             .args(["--auth", "token", "--pack-dir", &packs()])
             .arg("--ingest-root")
-            .arg(format!("ds={}", ingest.display()))
+            .arg(format!("ds={}", ingest.display()));
+        if packs_in_env {
+            command.env("NILS_PACK_DIR", packs());
+        } else {
+            command.env_remove("NILS_PACK_DIR");
+        }
+        let child = command
             .env("NILS_TOKENS", tokens)
-            .env("NILS_PACK_DIR", packs())
             .env("USER", "anna")
             .env("HOSTNAME", "ward-3")
             .env_remove("NILS_JOB_ID")
@@ -1798,7 +1811,9 @@ fn after_sort_round(pg: Option<(String, String)>) {
         "--subjects",
         "generated",
     ]);
-    let server = Worked::start(&home, dir.path());
+    // the packs only where the engine is told: the bring-in's sort and the
+    // pick run after it read them all the same (the T33 pipe test)
+    let server = Worked::start_with(&home, dir.path(), false);
     let (status, queued) = server.call(
         "POST",
         "/api/jobs",
@@ -1808,6 +1823,11 @@ fn after_sort_round(pg: Option<(String, String)>) {
     assert_eq!(status, 202, "{queued}");
     // no cohort: the bring-in names no pick run of its own
     assert_eq!(queued["then"].as_array().unwrap().len(), 2, "{queued}");
+    assert_eq!(
+        queued["then"][1],
+        serde_json::json!(["classify", "--pack-dir", packs()]),
+        "the deployment's packs: {queued}"
+    );
     let mut job = server.over(queued["job"].as_i64().unwrap());
     let mut sort = 0;
     for expected in ["fingerprint", "classify", "pick"] {
@@ -1995,4 +2015,79 @@ fn a_sort_ends_with_picking_and_the_card_says_how_sure_on_postgres_too() {
     drop();
     after_sort_round(Some((dsn.clone(), schema.to_string())));
     drop();
+}
+
+/// The T33 pipe test: on an install whose packs are not where the engine
+/// looks by itself, a sort the jobs door queues, alone or as a step of a
+/// chain the desk composes, reads the packs the engine serves, as the
+/// bring-in's does; one that names its own pack directory keeps it.
+#[test]
+fn a_sort_the_doors_queue_reads_the_served_packs() {
+    let home = Home {
+        dir: TempDir::new("picks-served-packs-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a served packs test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let ingest = TempDir::new("picks-served-packs-ds");
+    let server = Worked::start_with(&home, ingest.path(), false);
+    let served = packs();
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["classify", "--pack", "mri"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(
+        queued["command"],
+        serde_json::json!(["classify", "--pack", "mri", "--pack-dir", served]),
+        "{queued}"
+    );
+    let done = server.over(queued["job"].as_i64().unwrap());
+    assert_eq!(done["state"], "done", "{done}");
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["fingerprint"], "then": [["classify", "--pack", "mri"]]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(
+        queued["then"][0],
+        serde_json::json!(["classify", "--pack", "mri", "--pack-dir", served]),
+        "{queued}"
+    );
+    let first = server.over(queued["job"].as_i64().unwrap());
+    assert_eq!(first["state"], "done", "{first}");
+    let mut next = first["chain"]["after"].as_i64();
+    for _ in 0..600 {
+        if next.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (_, j) = server.call("GET", &format!("/api/jobs/{}", first["id"]), None, OPS);
+        next = j["chain"]["after"].as_i64();
+    }
+    let sort = server.over(next.expect("the chain's sort"));
+    assert_eq!(sort["kind"], "classify", "{sort}");
+    assert_eq!(sort["state"], "done", "{sort}");
+    // a sort that names a pack directory keeps the one it names
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["classify", "--pack-dir", served]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(
+        queued["command"],
+        serde_json::json!(["classify", "--pack-dir", served]),
+        "{queued}"
+    );
+    assert_eq!(
+        server.over(queued["job"].as_i64().unwrap())["state"],
+        "done"
+    );
 }
