@@ -307,6 +307,28 @@ def test_without_the_engines_study_the_student_reads_nothing(world, tmp_path):
     assert {o.result.stage for o in outs if o.result is not None} <= {"b24", "touched"}
 
 
+def test_the_cascade_passes_gpu_workers_on(world, tmp_path, stand_in, monkeypatch):
+    """--gpu-workers reaches the planes stages' pool. With a card and 0, the
+    student alone takes the card and every frame is decoded on the CPU, where
+    the cascade used to leave the pool at scoring's default of 2."""
+    from nils_bodypart import gpu, scoring
+
+    seen = []
+    real = scoring.score
+
+    def spy(*args, **kw):
+        seen.append((kw.get("device"), kw.get("gpu_workers")))
+        return real(*args, **{**kw, "device": "cpu"})  # no card in a test
+
+    monkeypatch.setattr(gpu, "cuda_available", lambda: True)
+    monkeypatch.setattr(scoring, "score", spy)
+    inp = inputs(world, tmp_path, deferral="all")
+    code, r = run(world, inp, tmp_path / "out", "--device", "cuda", "--gpu-workers", "0")
+    assert code == 0, r.get("error")
+    assert seen and set(seen) == {("cuda", 0)}
+    assert (r["params"]["gpu_workers"], r["params"]["cascade"]["student_device"]) == (0, "cuda")
+
+
 def test_d3_decides_at_its_threshold(world, tmp_path):
     inp = inputs(world, tmp_path, deferral="mixed")
     model = fusion.load(inp["inputs"])

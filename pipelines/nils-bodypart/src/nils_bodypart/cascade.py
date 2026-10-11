@@ -225,7 +225,7 @@ class Outcome:
 
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
-          stats: dict | None = None) -> list[Outcome]:
+          stats: dict | None = None, gpu_workers: int = 2) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
@@ -313,7 +313,8 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     order = {st.stack_id: i for i, st in enumerate(stacks)}
     rest.sort(key=lambda st: order[st.stack_id])
     ladder = {"stages": [(cas.b24, cas.m3), ("touched", None)], "thresholds": cas.thresholds, "fill": fill, "planes": keep_inputs or fill}
-    for st, r, why in scoring.score(model, inputs, rest, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, stats=stats):
+    for st, r, why in scoring.score(model, inputs, rest, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, stats=stats,
+                                    gpu_workers=gpu_workers):
         o = out.get(st.stack_id) or Outcome(st)
         if r is None:
             o.why = why
@@ -330,7 +331,8 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         accepted = [o.stack for o in out.values() if o.result is not None and o.result.stage == "s1"]
         accepted.sort(key=lambda st: order[st.stack_id])
         fill_ladder = {"stages": [("touched", None)], "thresholds": cas.thresholds, "planes": True}
-        for st, r, _why in scoring.score(model, inputs, accepted, workers=workers, device=device, chunk=chunk, depth=depth, ladder=fill_ladder):
+        for st, r, _why in scoring.score(model, inputs, accepted, workers=workers, device=device, chunk=chunk, depth=depth, ladder=fill_ladder,
+                                         gpu_workers=gpu_workers):
             if r is not None:
                 out[st.stack_id].result.filled = r
     return [out[st.stack_id] for st in stacks]

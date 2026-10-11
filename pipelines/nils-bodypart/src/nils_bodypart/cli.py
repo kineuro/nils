@@ -767,6 +767,9 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
                           "chunk": a.chunk}}
     if a.cache_fill != "none":
         params["cascade"]["cache_fill"] = a.cache_fill
+    if device != "cpu":
+        # of the planes stages' workers, how many decode on the card
+        params.update({"decode_device": device, "gpu_workers": min(a.gpu_workers, a.threads)})
     run = Run("bodypart-infer-fusion", a.output, params, device)
     stacks = manifest.load(a.stacks, source_root=a.source_root)
     writer = None
@@ -774,7 +777,8 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         writer = slicecache.Writer(a.cache, {"image": "nils-bodypart", "version": __version__, **{k: v["digest"] for k, v in params["models"].items()}})
     stats: dict = {}
     outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, device=device, chunk=a.chunk, depth=a.readahead,
-                                 student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats)
+                                 student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats,
+                                 gpu_workers=a.gpu_workers)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}
