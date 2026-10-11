@@ -1925,11 +1925,20 @@ fn check_clause(
                 }
             }
             other => {
+                // a role written as an op: the main scans are asked with
+                // picked, never the pick clause (2026-10-11)
+                let next = if names.role(other).is_some() {
+                    format!(
+                        "{other} is a role: a stack picked as a visit's main {other} is [\"picked\", {{role: {other}}}] in a where"
+                    )
+                } else {
+                    "GET /api/ask/catalog for the function table".to_string()
+                };
                 issues.push(issue(
                     Code::UnknownField,
                     path,
                     format!("{other} is not an op of the language"),
-                    "GET /api/ask/catalog for the function table",
+                    next,
                 ));
             }
         }

@@ -1958,7 +1958,7 @@ pub fn functions() -> Value {
     json!({
         "refs": ["field", "axis", "derived", "param"],
         "arithmetic": ["+", "-", "*", "/", "abs", "round", "coalesce", "case", "concat"],
-        "comparison": ["=", "<>", ">", ">=", "<", "<=", "~=", "in", "not_in", "has", "not_null", "is_null", "contains", "starts_with", "and", "or", "not"],
+        "comparison": ["=", "<>", ">", ">=", "<", "<=", "~=", "in", "not_in", "has", "not_null", "is_null", "contains", "starts_with", "and", "or", "not", "picked"],
         "time": ["days_between", "shift", "age_at", "bucket", "part"],
         "sequence": ["ordinal", "prev", "next", "change"],
         "aggregate": ["count", "distinct", "min", "max", "sum", "avg", "list", "share"],

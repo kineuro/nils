@@ -376,3 +376,17 @@ fn curation_is_keyed_by_path_and_survives_a_rebuild() {
     };
     assert_eq!(rows, 1);
 }
+
+/// 2026-10-11: the function table lists every op the validator accepts, so
+/// an author who reads it finds `picked`, the main scans of a stack.
+#[test]
+fn the_function_table_lists_picked() {
+    let table = nils_catalog::functions();
+    let comparison: Vec<&str> = table["comparison"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(comparison.contains(&"picked"), "{table}");
+}
